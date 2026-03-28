@@ -647,17 +647,15 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
     let bytes_pushed = pack_data.len() as u64;
     data.extend_from_slice(&pack_data);
 
-    // Send pack via the appropriate transport (with timeout)
+    // Send pack via the appropriate transport.
+    // Idle timeouts (10s) are enforced at the transport layer: SSH wraps each
+    // read/write/wait call, HTTPS uses reqwest connect_timeout + read_timeout.
     match &remote_client {
         RemoteClient::Ssh(ssh_client) => {
-            let response_bytes =
-                tokio::time::timeout(PUSH_TIMEOUT, ssh_client.send_pack(data.freeze()))
-                    .await
-                    .map_err(|_| PushError::Timeout {
-                        phase: "send-pack".to_string(),
-                        seconds: PUSH_TIMEOUT.as_secs(),
-                    })?
-                    .map_err(|e| PushError::Network(format!("SSH send_pack failed: {e}")))?;
+            let response_bytes = ssh_client
+                .send_pack(data.freeze())
+                .await
+                .map_err(|e| classify_transport_error("send-pack", e))?;
             let mut response_data = response_bytes;
             let (_, pkt_line) = read_pkt_line(&mut response_data);
             if pkt_line != "unpack ok\n" {
@@ -673,26 +671,18 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
             }
         }
         RemoteClient::Http(http_client) => {
-            let res = tokio::time::timeout(PUSH_TIMEOUT, http_client.send_pack(data.freeze()))
-                .await
-                .map_err(|_| PushError::Timeout {
-                    phase: "send-pack".to_string(),
-                    seconds: PUSH_TIMEOUT.as_secs(),
-                })?
-                .map_err(|e| PushError::Network(format!("failed to send pack data: {e}")))?;
+            let res = http_client.send_pack(data.freeze()).await.map_err(|e| {
+                classify_transport_error("send-pack", std::io::Error::other(e.to_string()))
+            })?;
             if res.status() != 200 {
                 return Err(PushError::Network(format!(
                     "unexpected server response (status {})",
                     res.status()
                 )));
             }
-            let mut data = tokio::time::timeout(PUSH_TIMEOUT, res.bytes())
-                .await
-                .map_err(|_| PushError::Timeout {
-                    phase: "receive-pack".to_string(),
-                    seconds: PUSH_TIMEOUT.as_secs(),
-                })?
-                .map_err(|e| PushError::Network(format!("failed to read server response: {e}")))?;
+            let mut data = res.bytes().await.map_err(|e| {
+                classify_transport_error("receive-pack", std::io::Error::other(e.to_string()))
+            })?;
             let (_, pkt_line) = read_pkt_line(&mut data);
             if pkt_line != "unpack ok\n" {
                 return Err(PushError::RemoteUnpackFailed);
@@ -885,6 +875,24 @@ fn render_push_output(result: &PushOutput, output: &OutputConfig) -> CliResult<(
     }
 
     Ok(())
+}
+
+/// Classify a transport-layer I/O error into a typed `PushError`.
+///
+/// Transport errors that mention "timed out" (from SSH idle timeout or reqwest
+/// read_timeout) are mapped to `PushError::Timeout` with the originating phase.
+/// All other errors become `PushError::Network`.
+fn classify_transport_error(phase: &str, e: std::io::Error) -> PushError {
+    let detail = e.to_string();
+    let lower = detail.to_lowercase();
+    if lower.contains("timed out") || lower.contains("timeout") {
+        PushError::Timeout {
+            phase: phase.to_string(),
+            seconds: PUSH_TIMEOUT.as_secs(),
+        }
+    } else {
+        PushError::Network(format!("{phase} failed: {detail}"))
+    }
 }
 
 fn format_bytes(bytes: u64) -> String {

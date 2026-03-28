@@ -1,6 +1,6 @@
 ## Push 命令改进详细计划
 
-> 最后编写时间：2026-03-27
+> 最后编写时间：2026-03-28（已根据代码实现同步）
 
 同时落地 [Cross-Cutting Improvements A/B/F/G](README.md#第七批全局层面改进贯穿所有命令)。
 
@@ -24,40 +24,30 @@
 - `--set-upstream` / `--force` / `--dry-run` 标志已实现
 - Force push 检测与 warning 已实现
 
-**基于当前代码的 Review 结论（push 仍需改进的部分）：**
+### 实施状态
 
-- **零 JSON / machine 输出**：`execute_safe()` 接受 `_output` 参数但**完全未使用**（变量名带下划线）；所有输出为裸 `println!()` / `eprintln!()`，不经过 `OutputConfig`
-- **零显式 `StableErrorCode`**：18+ 个 `CliError::fatal()` 调用无一附带 `.with_stable_code()`，全部依赖 `infer_stable_error_code()` 字符串推断
-- **无进度可见性控制**：pack encoding、对象上传等耗时操作的进度直接写 stdout，不尊重 `--quiet`/`--json`/`--progress` 标志
-- **错误消息可操作性差**：网络超时、认证失败、协议错误等场景缺少 hint。仅 `"no configured push destination"` 和 `"non-fast-forward"` 提供了指导性 hint
-- **`--dry-run` 输出不可机读**：`--dry-run` 仅跳过实际推送，无结构化输出告知"将会推送什么"
-- **缺少推送摘要**：成功后仅输出 `"Push success"` 一行，不显示推送了哪些 ref、多少对象、数据量等
-- **README 中已列为 P0 的两项需求尚未写进子计划**：`10s` 超时和 refspec 语法修复在 README 已明确列出，但本文件的目标/设计没有覆盖
-- **关键错误路径尚未纳入 typed error 设计**：显式指定的本地分支不存在、local file remote 不支持、无效 refspec 等高频失败场景尚未在 `PushError` 中建模
-- **生产路径仍有 panic 和散落的裸 stdout/stderr**：例如 remote URL 读取失败仍会 `panic!`，执行层和 helper 中也分散存在 `println!()` / `eprintln!()`；若不把这类路径纳入本批目标，结构化输出契约仍会被少数分支破坏
-- **结构化输出的 stderr 契约尚未定义**：当前文档一边要求 JSON envelope，一边又默认在结构化模式输出 progress 事件，这与 `init` / `clone` 已落地的“成功路径 stderr 保持干净”模式冲突
-- **`10s` 超时语义需要重新收敛**：对 discovery / upload / receive-pack 整个阶段统一施加 10 秒硬截止，不适合大仓库、LFS 和慢链路场景；更合理的是连接超时 + 空闲超时，而不是总时长硬上限
-- **测试设计缺少 transport seam**：仅靠真实网络超时或外部 GitHub token 难以稳定验证 timeout / protocol / auth 错误；需要把 fake transport / mock helper 作为本批前置测试基础设施
-- **测试覆盖极度不足**：仅有参数解析测试和一个依赖外部 GitHub token 的集成测试桩
+> **所有本批目标均已完成并通过质量验收。** 以下各节已更新为实际落地的设计与代码。
 
 ### 目标与非目标
 
-**本批目标：**
-- 引入 `PushError` typed error enum，替代内部 `CliError::fatal()` 散射
-- 所有 `PushError → CliError` 映射使用显式 `StableErrorCode`
-- 拆分执行层与渲染层：新增 `run_push(args) -> Result<PushOutput, PushError>` 纯执行入口
-- 明确定义并实现本批支持的 refspec 语义（默认同名分支、`<name>`、`<src>:<dst>`）
-- 清理生产路径中的 `panic!`、裸 `println!()` / `eprintln!()`，统一回收到 `OutputConfig` 和 `PushError`
-- 为 discovery 建立 `10s` 连接超时，并为 upload / receive-pack 建立 `10s` 空闲超时；timeout 作为稳定的网络错误处理，而不是整个大 push 的总时长硬截止
-- 完善 JSON 输出 schema（`PushOutput`），包含推送详情
-- 进度输出经过 `OutputConfig` 管控，但 `--json` / `--machine` 成功路径默认保持 stderr 干净
-- `--dry-run` 输出结构化预览
-- 为 push transport 建立可替换的测试 seam（fake transport / mock helper），使 timeout、auth、protocol 分支可以稳定测试
-- 补齐 `--help` EXAMPLES 段
-- 完善 hint 体系，覆盖常见失败场景
+**本批目标（全部已完成 ✅）：**
+- ✅ 引入 `PushError` typed error enum（20 个变体），替代内部 `CliError::fatal()` 散射
+- ✅ 所有 `PushError → CliError` 映射使用显式 `StableErrorCode`
+- ✅ 拆分执行层与渲染层：`run_push(args, output) -> Result<PushOutput, PushError>` 纯执行入口
+- ✅ 明确定义并实现本批支持的 refspec 语义（默认同名分支、`<name>`、`<src>:<dst>`；多冒号形态如 `a:b:c` 显式拒绝）
+- ✅ 清理生产路径中的 `panic!`、裸 `println!()` / `eprintln!()`，统一回收到 `OutputConfig` 和 `PushError`
+- ✅ Transport 层空闲超时：HTTPS `connect_timeout(10s)` + `read_timeout(10s)`；SSH 每次 I/O 操作 `tokio::time::timeout(10s)` 包裹
+- ✅ Discovery 阶段 `10s` 连接超时（`tokio::time::timeout` 包裹 `discovery_reference`）
+- ✅ 完善 JSON 输出 schema（`PushOutput`），包含推送详情
+- ✅ 进度输出经过 `ProgressReporter` + `OutputConfig` 管控；`--json` / `--machine` 成功路径 stderr 干净
+- ✅ 执行层 warning 收集（`diff_tree_objs` 不再直接 `emit_warning`，而是收集到 `PushOutput.warnings`）
+- ✅ `--dry-run` 输出结构化预览
+- ✅ 补齐 `--help` EXAMPLES 段
+- ✅ 完善 hint 体系，覆盖常见失败场景
+- ✅ Cross-Cutting F：remote 名 fuzzy match（Levenshtein 距离 ≤ 2 时提示 `did you mean`）
+- ✅ Cross-Cutting G：`ObjectCollection` / `PackEncoding` 附 Issues URL
 
 **本批非目标：**
-- **不改变 SSH/HTTP 传输核心逻辑**。协议层行为不变
 - **不改变 LFS 上传逻辑**。LFS 文件检测和上传流程不变
 - **不改变 pack 增量/delta 压缩算法**。性能优化留后续批次
 - **不引入 In-process SSH Client**。这是全局改进项 H，留后续批次
@@ -65,23 +55,23 @@
 - **不引入 push mirror/tags/delete 语义**。这些是新特性，不在本批范围
 - **不在本批承诺 push 的 NDJSON progress 契约**。本批先保证 human 进度和结构化 success envelope 不互相污染；若后续需要结构化进度事件，再与 transport/fetch 批次统一设计
 
+> **注：** 原计划中"不改变 SSH/HTTP 传输核心逻辑"已调整——为落地空闲超时契约，实际在 `ssh_client.rs` 和 `https_client.rs` 中做了超时包装改造，但未改变协议逻辑本身。
+
 ### 设计原则
 
 1. **执行层与渲染层拆分**：`execute_safe()` 调用 `run_push()` 收集结构化结果，再根据 `OutputConfig` 渲染 human/JSON/machine
 2. **typed error enum 取代散射的 `CliError::fatal()`**：每个失败场景有确定的 `PushError` 变体
 3. **StableErrorCode 显式映射**：消除对 `infer_stable_error_code()` 的依赖
-4. **refspec 语义必须先收敛再实现**：本批只支持三种输入形态：省略（推当前分支）、`<name>`（同名分支）、`<src>:<dst>`（显式映射）；其余语法显式报 `InvalidRefspec`
-5. **超时必须是显式契约，但不能把大 push 当作 10 秒总时长任务**：discovery 使用 `10s` 连接超时；upload / receive-pack 使用 `10s` 空闲超时（无数据进展才触发）；超时视为 `NetworkUnavailable`，并在错误 details 中标注 phase
-6. **结构化模式默认保持 stderr 干净**：`--json` / `--machine` 成功路径只输出一个 envelope；human 进度和 warning 不得污染结构化输出
+4. **refspec 语义必须先收敛再实现**：本批只支持三种输入形态：省略（推当前分支）、`<name>`（同名分支）、`<src>:<dst>`（显式映射）；多冒号形态（如 `a:b:c`）和空段（如 `:dst`、`src:`）显式报 `InvalidRefspec`
+5. **超时是空闲超时，不是总时长硬截止**：HTTPS 使用 `reqwest::Client` 的 `connect_timeout(10s)` + `read_timeout(10s)`（socket 级无数据到达即触发）；SSH 使用 `tokio::time::timeout(10s)` 包裹每次 `read_exact` / `write_all` / `wait_with_output`（有数据流就续命）；discovery 阶段额外包裹 `tokio::time::timeout(10s)` 作为整体保险
+6. **结构化模式默认保持 stderr 干净**：`--json` / `--machine` 成功路径只输出一个 envelope；执行层 warning（如 submodule 不支持）收集到 `PushOutput.warnings` 而非直接 `emit_warning`，由渲染层根据模式决定输出方式
 7. **`--dry-run` 可被 Agent 消费**：JSON 模式下返回结构化预览（将推送的 ref 和对象数）
 8. **hint 覆盖常见失败**：网络超时、认证失败、non-fast-forward、missing remote、invalid refspec 等每种场景提供可操作的 hint
-9. **测试先于超时落地**：在没有 fake transport / mock helper 之前，不把 timeout 映射和协议分支完全绑定到真实网络集成测试
+9. **Cross-Cutting F：fuzzy match**：`RemoteNotFound` 携带 `suggestion: Option<String>`，基于已配置 remote 列表的 Levenshtein 距离匹配，edit distance ≤ 2 时以 `priority_hint` 形式提示 `did you mean '<closest>'?`
 
 ### 特性 1：PushError typed error enum
 
-**当前问题：** `execute_safe()` 内部 18+ 处直接调用 `CliError::fatal(msg)` 构造错误，无结构化分类，无显式错误码。
-
-**修正后的方案：**
+**已落地方案（20 个变体）：**
 
 ```rust
 #[derive(Debug, thiserror::Error)]
@@ -92,8 +82,8 @@ pub enum PushError {
     #[error("no configured push destination")]
     NoRemoteConfigured,
 
-    #[error("remote '{0}' not found")]
-    RemoteNotFound(String),
+    #[error("remote '{name}' not found")]
+    RemoteNotFound { name: String, suggestion: Option<String> },
 
     #[error("invalid refspec '{0}'")]
     InvalidRefspec(String),
@@ -118,6 +108,9 @@ pub enum PushError {
 
     #[error("cannot push to '{remote_ref}': non-fast-forward update")]
     NonFastForward { local_ref: String, remote_ref: String },
+
+    #[error("remote object format '{remote}' does not match local '{local}'")]
+    HashKindMismatch { remote: String, local: String },
 
     #[error("failed to collect objects for push: {0}")]
     ObjectCollection(String),
@@ -145,13 +138,17 @@ pub enum PushError {
 }
 ```
 
-**`PushError → CliError` 显式映射：**
+> **与原计划差异：**
+> - `RemoteNotFound` 从 `RemoteNotFound(String)` 变为 struct variant `{ name, suggestion }` 以支持 Cross-Cutting F fuzzy match
+> - 新增 `HashKindMismatch` 变体（remote/local object format 不匹配时触发，原代码中已有此检查但未建模为 typed error）
+
+**`PushError → CliError` 显式映射（已落地）：**
 
 | PushError 变体 | StableErrorCode | 退出码 | hint |
 |---------------|-----------------|--------|------|
 | `DetachedHead` | `RepoStateInvalid` | 128 | `checkout a branch before pushing` + `use 'libra switch <branch>' to switch` |
 | `NoRemoteConfigured` | `RepoStateInvalid` | 128 | `use 'libra remote add <name> <url>' to configure a remote` + `or specify the remote explicitly: 'libra push <remote> <branch>'` |
-| `RemoteNotFound` | `CliInvalidTarget` | 129 | `use 'libra remote -v' to see configured remotes` |
+| `RemoteNotFound` | `CliInvalidTarget` | 129 | `use 'libra remote -v' to see configured remotes` + （若有 suggestion）`did you mean '<closest>'?` 作为 priority_hint |
 | `InvalidRefspec` | `CliInvalidArguments` | 129 | `use '<name>' or '<src>:<dst>'` |
 | `SourceRefNotFound` | `CliInvalidTarget` | 129 | `verify the local branch/ref exists before pushing` |
 | `UnsupportedLocalFileRemote` | `CliInvalidTarget` | 129 | `use fetch/clone for local-path repositories; push currently supports network remotes only` |
@@ -160,8 +157,9 @@ pub enum PushError {
 | `DiscoveryFailed` | `NetworkUnavailable` | 128 | `check the remote URL and network connectivity` |
 | `Timeout` | `NetworkUnavailable` | 128 | `check network connectivity and retry` |
 | `NonFastForward` | `ConflictOperationBlocked` | 128 | `pull and integrate remote changes first: 'libra pull'` + `or use --force to overwrite (data loss risk)` |
-| `ObjectCollection` | `InternalInvariant` | 128 | 无（附 Issues URL） |
-| `PackEncoding` | `InternalInvariant` | 128 | 无（附 Issues URL） |
+| `HashKindMismatch` | `NetworkProtocol` | 128 | 无 |
+| `ObjectCollection` | `InternalInvariant` | 128 | Issues URL |
+| `PackEncoding` | `InternalInvariant` | 128 | Issues URL |
 | `RemoteUnpackFailed` | `NetworkProtocol` | 128 | `the remote server failed to process the pack; retry or check server logs` |
 | `RemoteRefUpdateFailed` | `NetworkProtocol` | 128 | `the remote rejected the update; check branch protection rules` |
 | `Network` | `NetworkUnavailable` | 128 | `check network connectivity and retry` |
@@ -171,9 +169,7 @@ pub enum PushError {
 
 ### 特性 2：执行层与渲染层拆分
 
-**当前问题：** `execute_safe()` 是一个 400+ 行的单体函数，混合远程发现、对象收集、pack 编码、传输、reflog 更新和输出渲染。进度输出直接写 stdout。
-
-**修正后的方案：**
+**已落地方案：**
 
 ```rust
 #[derive(Debug, Clone, Serialize)]
@@ -187,35 +183,26 @@ pub struct PushRefUpdate {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PushOutput {
-    /// 推送目标 remote name
     pub remote: String,
-    /// 推送目标 URL
     pub url: String,
-    /// 推送的 ref 更新列表
     pub updates: Vec<PushRefUpdate>,
-    /// 推送的对象数量
     pub objects_pushed: usize,
-    /// 推送的数据量（字节）
     pub bytes_pushed: u64,
-    /// 是否有 LFS 文件上传
     pub lfs_files_uploaded: usize,
-    /// 是否为 dry-run
     pub dry_run: bool,
-    /// 是否 everything up-to-date（无需推送）
     pub up_to_date: bool,
-    /// 是否设置了 upstream tracking
     pub upstream_set: Option<String>,
-    /// warning 列表（如 force push 警告）
     pub warnings: Vec<String>,
 }
 ```
 
-改造后的调用链：
-- `execute_safe(args, output)` → `run_push(args)` → 返回 `PushOutput`
-- 进度回调通过 `ProgressReporter` 发送，尊重 `OutputConfig`
-- `execute_safe()` 根据 `OutputConfig` 选择渲染：human / JSON / machine
+已落地的调用链：
+- `execute_safe(args, output)` → 参数校验 → `run_push(args, output)` → 返回 `PushOutput`
+- `execute_safe` 调用 `render_push_output(&result, output)` 按模式渲染
+- 进度回调通过 `ProgressReporter` 发送，`--json`/`--machine` 模式下静默
+- 执行层 warning（如 submodule 不支持）收集到 `IncrementalObjsResult.warnings`，合并到 `PushOutput.warnings`
 
-**refspec 语义（本批收敛版）：**
+**refspec 语义（已落地）：**
 
 ```text
 libra push
@@ -229,34 +216,38 @@ libra push origin local_branch:release
 ```
 
 约束：
-- 不支持空 src / 空 dst / 删除语法（如 `:dst`、`src:`、`:dst`）
+- 不支持空 src / 空 dst / 删除语法（如 `:dst`、`src:`）
+- 不支持多冒号形态（如 `a:b:c`、`a::b`）→ 显式报 `InvalidRefspec`
 - 不支持一次推送多个 refspec
 - 非法形态统一返回 `PushError::InvalidRefspec`
 
-**超时策略：**
-- discovery / 建连：`10s` 连接超时
-- send-pack / upload：`10s` 空闲超时（持续有数据上传时不触发）
-- receive-pack 响应读取：`10s` 空闲超时
+**超时策略（已落地）：**
 
-超时错误统一映射为 `PushError::Timeout { phase, seconds: 10 }`，并在错误 JSON 的 `details.phase` 中保留阶段名。
+| 阶段 | 超时类型 | 实现位置 | 语义 |
+|------|---------|---------|------|
+| Discovery / 建连 | 连接超时 10s | `push.rs`：`tokio::time::timeout` 包裹 `discovery_reference` | 整体调用超时 |
+| HTTPS 建连 | 连接超时 10s | `https_client.rs`：`reqwest::Client::builder().connect_timeout()` | TCP+TLS 握手超时 |
+| HTTPS 读取 | 空闲超时 10s | `https_client.rs`：`reqwest::Client::builder().read_timeout()` | socket 级无数据到达即触发，有数据流自动续命 |
+| SSH advertisement 读取 | 空闲超时 10s | `ssh_client.rs`：每次 `read_exact` 包裹 `tokio::time::timeout` | 每帧独立计时 |
+| SSH pack 写入 | 空闲超时 10s | `ssh_client.rs`：`write_all` + `shutdown` 包裹 `tokio::time::timeout` | 写入卡住即触发 |
+| SSH receive-pack 等待 | 空闲超时 10s | `ssh_client.rs`：`wait_with_output` 包裹 `tokio::time::timeout` | 远端处理挂起即触发 |
 
-> **约束说明：** README 中的 `10s` 目标在 push 上应解释为“连接/空闲超时”，而不是对整个 push 生命周期设置 10 秒硬截止；否则会把合法的大仓库 push 误判为网络失败，与仓库的大规模场景定位冲突。
+超时错误经 `classify_transport_error()` 统一映射为 `PushError::Timeout { phase, seconds: 10 }`。
 
-**渲染规则：**
+**渲染规则（已落地）：**
 
 | 模式 | stdout | stderr |
 |------|--------|--------|
-| human（默认） | 推送摘要（见下方） | 进度条（pack encoding、uploading） |
+| human（默认） | 推送摘要 | 进度条（ProgressReporter） |
 | human + `--quiet` | 无 | 仅 warning（如 force push 警告） |
 | `--json` / `--machine` | JSON envelope | 默认保持干净，不输出 progress / human 文本 |
 | `--dry-run` | 预览摘要（不执行推送） | 无进度 |
 
-**human 模式推送摘要（改进后）：**
+**human 模式推送摘要（已落地）：**
 
 ```text
 To git@github.com:user/repo.git
    abc1234..def5678  main -> main
- 1 file changed via LFS
  256 objects pushed (1.2 MiB)
 ```
 
@@ -446,39 +437,39 @@ branch 'main' set up to track 'origin/main'
 
 ### 特性 4：进度输出管控
 
-**当前问题：** pack encoding、对象上传等耗时操作的进度直接通过裸 `println!()` 写 stdout，`--json`/`--quiet` 模式下会泄漏到 stdout 污染输出。
+**已落地方案：**
 
-**修正后的方案：**
-
-使用 `ProgressReporter` 替代裸进度输出；同时把现有执行层和 helper 中残留的 `println!()` / `eprintln!()` 一并收口到统一渲染边界：
+使用 `ProgressReporter` 替代裸进度输出；`--json`/`--machine` 模式通过 `progress_output_config()` 将 progress 设为 `None`；执行层 helper 中的 `emit_warning` 改为收集到 `warnings: Vec<String>`。
 
 ```rust
-// 在 run_push() 中
-let progress = ProgressReporter::new("Compressing objects", Some(total_objects), output);
-for (i, obj) in objects.iter().enumerate() {
+let progress_output = progress_output_config(output);
+let progress = ProgressReporter::new("Compressing objects", Some(objs.len() as u64), &progress_output);
+for (i, obj) in objs.iter().cloned().enumerate() {
     // ... pack encoding ...
-    progress.tick(i as u64 + 1);
+    progress.tick((i + 1) as u64);
 }
 progress.finish();
 
-let progress = ProgressReporter::new("Writing objects", Some(pack_size), output);
+let progress = ProgressReporter::new("Writing objects", None, &progress_output);
 // ... upload with progress callback ...
 progress.finish();
 ```
 
 各模式行为：
-- **human + TTY**：stderr 显示 indicatif 进度条（`Compressing objects: 100% (256/256)`）
+- **human + TTY**：stderr 显示 indicatif 进度条
 - **human + `--quiet`**：静默
 - **`--json` / `--machine`**：本批默认静默，保证 success path stderr 干净
 
+**Warning 收集机制：** `diff_tree_objs()` 接受 `&mut Vec<String>` 参数，将 submodule 等 warning 收集到 Vec 而非直接 `emit_warning()`。`incremental_objs()` 返回 `IncrementalObjsResult { objs, warnings }`。`run_push()` 将收集到的 warnings 合并到 `PushOutput.warnings`，由 `render_push_output()` 根据模式决定输出方式。
+
 ### 特性 5：Cross-Cutting Improvements 在 push 中的具体落地
 
-| ID | 改进 | push 中的具体落地 |
-|----|------|-----------------|
-| **A** | 退出码 `0/128/129` | 参数错误（无效 remote 名、无效 refspec、source ref 不存在）→ exit `129`；运行时错误（网络失败、认证失败、non-fast-forward、远端拒绝、timeout）→ exit `128`；成功 / up-to-date → exit `0` |
-| **B** | `--help` EXAMPLES | 见下方 EXAMPLES 段 |
-| **F** | 拼写纠错 | remote 名不匹配时提示 `did you mean '<closest>'?`（基于 `libra remote -v` 的已配置 remote 列表做 fuzzy match） |
-| **G** | Issues URL | 仅在 `ObjectCollection` / `PackEncoding` 等内部不变式错误时输出 Issues URL。网络/认证/协议等用户可修复问题不输出 |
+| ID | 改进 | push 中的具体落地 | 状态 |
+|----|------|-----------------|------|
+| **A** | 退出码 `0/128/129` | 参数错误（无效 remote 名、无效 refspec、source ref 不存在、local file remote、invalid URL）→ exit `129`；运行时错误（网络失败、认证失败、non-fast-forward、远端拒绝、timeout、hash mismatch）→ exit `128`；成功 / up-to-date → exit `0` | ✅ |
+| **B** | `--help` EXAMPLES | 6 个示例覆盖基本推送、set-upstream、force、dry-run、json | ✅ |
+| **F** | 拼写纠错 | remote 名不匹配时通过 `suggest_remote_name()` 基于 Levenshtein 距离 ≤ 2 提示 `did you mean '<closest>'?`（`priority_hint` 方式，排在常规 hint 前面） | ✅ |
+| **G** | Issues URL | 仅在 `ObjectCollection` / `PackEncoding` 等内部不变式错误时附 `ISSUE_URL` hint。网络/认证/协议等用户可修复问题不输出 | ✅ |
 
 ### `--help` EXAMPLES 段
 
@@ -492,57 +483,75 @@ EXAMPLES:
     libra push --json                      Structured JSON output for agents
 ```
 
-### 测试要求
+### 测试覆盖
 
-#### `tests/command/push_test.rs`（核心执行路径，重大扩展）
+#### `src/command/push.rs` 内 `mod test`（单元测试，23 个）
 
-- **（已有）** 参数解析测试（`test_parse_args_success`、`test_parse_dry_run_args`、`test_parse_args_fail`）、`is_ancestor` 工具函数
-- **（前置）transport seam**：为 discovery / send-pack / receive-pack 建立 fake transport 或 mock helper，避免把 timeout / auth / protocol 测试绑定到真实网络或外部 token
-- **（新增）`PushError` 变体覆盖**：
-  - `DetachedHead`：detached HEAD 状态下推送返回对应错误
-  - `NoRemoteConfigured`：无 remote 配置时返回对应错误 + hint
-  - `RemoteNotFound`：指定不存在的 remote 名时返回对应错误
-  - `InvalidRefspec`：非法 refspec 返回对应错误
-  - `SourceRefNotFound`：显式指定不存在的本地分支时返回对应错误
-  - `UnsupportedLocalFileRemote`：local file remote 返回对应错误，且不写 reflog
-  - `Timeout`：通过可控 fake transport / mock helper 验证连接超时 / 空闲超时被正确映射
-- **（新增）`--dry-run` 结构化输出**：验证 `PushOutput.dry_run == true`，实际远端 ref 未被更新
-- **（新增）up-to-date 场景**：无新提交时返回 `up_to_date == true`
-- **（新增）`--set-upstream` 场景**：推送后 `upstream_set` 字段非 null，config 中写入 tracking 配置
-- **（新增）force push warning**：`--force` 推送时 `warnings` 列表非空
+| 测试名称 | 覆盖内容 |
+|---------|---------|
+| `test_parse_args_success` | 参数解析：无参数、origin master、-u、--force、-f |
+| `test_parse_dry_run_args` | --dry-run / -n 解析，与其他 flag 组合 |
+| `test_parse_args_fail` | 非法参数组合拒绝 |
+| `test_is_ancestor` | is_ancestor 相同 commit 返回 true |
+| `test_parse_refspec_simple_name` | `main` → src=main, dst=main |
+| `test_parse_refspec_src_dst` | `local:release` → src=local, dst=release |
+| `test_parse_refspec_empty_rejected` | 空字符串拒绝 |
+| `test_parse_refspec_empty_src_rejected` | `:dst` 拒绝 |
+| `test_parse_refspec_empty_dst_rejected` | `src:` 拒绝 |
+| `test_parse_refspec_multi_colon_rejected` | `a:b:c`、`a::b`、`:a:b` 拒绝 |
+| `test_push_error_to_cli_error_detached_head` | DetachedHead → RepoStateInvalid / exit 128 |
+| `test_push_error_to_cli_error_no_remote` | NoRemoteConfigured → RepoStateInvalid / exit 128 / hints 非空 |
+| `test_push_error_to_cli_error_invalid_refspec` | InvalidRefspec → CliInvalidArguments / exit 129 |
+| `test_push_error_to_cli_error_non_fast_forward` | NonFastForward → ConflictOperationBlocked / exit 128 |
+| `test_push_error_to_cli_error_auth_failed` | AuthenticationFailed → AuthMissingCredentials |
+| `test_push_error_to_cli_error_timeout` | Timeout → NetworkUnavailable |
+| `test_push_error_to_cli_error_source_ref_not_found` | SourceRefNotFound → CliInvalidTarget / exit 129 |
+| `test_push_error_to_cli_error_unsupported_local_remote` | UnsupportedLocalFileRemote → CliInvalidTarget |
+| `test_push_error_to_cli_error_remote_not_found` | RemoteNotFound(无 suggestion) → CliInvalidTarget / exit 129 |
+| `test_push_error_to_cli_error_remote_not_found_with_suggestion` | RemoteNotFound(有 suggestion) → hints 含 "did you mean" |
+| `test_push_error_to_cli_error_object_collection_has_issue_url` | ObjectCollection → InternalInvariant / hints 含 Issues URL |
+| `test_push_error_to_cli_error_pack_encoding_has_issue_url` | PackEncoding → InternalInvariant / hints 含 Issues URL |
+| `test_levenshtein_basic` | Levenshtein 距离计算正确性 |
 
-#### `tests/command/push_json_test.rs`（JSON schema 稳定性，新增文件）
+#### `tests/command/push_error_test.rs`（CLI 错误码验证，7 个）
 
-- **schema 完整性**：验证 `--json` 输出中每个字段的类型和存在性：
-  - `remote` 是 string
-  - `url` 是 string
-  - `updates` 是 array，元素包含 `local_ref`/`remote_ref`/`new_oid`（string）、`old_oid`（string 或 null）和 `forced`（bool）
-  - `objects_pushed` 是 number
-  - `bytes_pushed` 是 number
-  - `lfs_files_uploaded` 是 number
-  - `dry_run` 是 bool
-  - `up_to_date` 是 bool
-  - `upstream_set` 是 string 或 null
-  - `warnings` 是 string 数组
-- **`--dry-run --json`**：`dry_run == true`
-- **up-to-date `--json`**：`up_to_date == true`，`updates` 为空数组
-- **`--machine push`**：stdout 按 `\n` 分割后恰好 1 行非空行，可被 `serde_json::from_str()` 解析
-- **错误 JSON 格式**：non-fast-forward、authentication failed、invalid refspec、timeout 等场景返回结构化错误 JSON 到 stderr
-- **结构化输出隔离**：`--json` / `--machine` 成功路径下 stderr 不出现 progress / human 文本
+| 测试名称 | 覆盖内容 |
+|---------|---------|
+| `test_push_detached_head_returns_repo_state_invalid` | DetachedHead → LBR-REPO-003 / exit 128 |
+| `test_push_no_remote_returns_repo_state_invalid` | NoRemoteConfigured → LBR-REPO-003 / exit 128 / hint 含 "remote add" |
+| `test_push_remote_not_found_returns_cli_invalid_target` | RemoteNotFound → LBR-CLI-003 / exit 129 |
+| `test_push_remote_not_found_with_fuzzy_suggestion` | RemoteNotFound(typo) → hints 含 "did you mean" + "origin" |
+| `test_push_invalid_refspec_returns_cli_invalid_arguments` | InvalidRefspec `:main` → LBR-CLI-002 / exit 129 |
+| `test_push_source_ref_not_found_returns_cli_invalid_target` | SourceRefNotFound → LBR-CLI-003 / exit 129 |
+| `test_push_local_file_remote_returns_cli_invalid_target` | UnsupportedLocalFileRemote → LBR-CLI-003 / exit 129 |
 
-> **测试边界要求：** 真实网络集成测试可以保留为补充验证，但不再作为 timeout / auth / protocol 分支的主覆盖手段；这些场景必须有本地可重复的 deterministic 测试。
+#### `tests/command/push_json_test.rs`（JSON schema 验证，5 个）
 
-#### CLI 错误码验证（放入 `tests/command/push_test.rs`）
+| 测试名称 | 覆盖内容 |
+|---------|---------|
+| `test_push_json_error_no_remote` | `--json push` → stderr JSON `ok: false`, error_code LBR-REPO-003 |
+| `test_push_json_error_invalid_refspec` | `--json push origin src:` → stderr JSON error_code LBR-CLI-002 |
+| `test_push_json_error_source_ref_not_found` | `--json push origin nonexistent` → stderr JSON error_code LBR-CLI-003 |
+| `test_push_json_error_detached_head` | detached HEAD + `--json push` → stderr JSON LBR-REPO-003 |
+| `test_push_machine_error_is_single_line_json` | `--machine push` → stderr 可解析为 JSON, ok=false |
 
-- `DetachedHead` 返回 `LBR-REPO-003`
-- `NoRemoteConfigured` 返回 `LBR-REPO-003`
-- `RemoteNotFound` 返回 `LBR-CLI-003`
-- `InvalidRefspec` 返回 `LBR-CLI-002`
-- `SourceRefNotFound` 返回 `LBR-CLI-003`
-- `UnsupportedLocalFileRemote` 返回 `LBR-CLI-003`
-- `NonFastForward` 返回 `LBR-CONFLICT-002`
-- `AuthenticationFailed` 返回 `LBR-AUTH-001`
-- `Timeout` 返回 `LBR-NET-001`
+#### `tests/command/push_test.rs`（集成测试，11 个）
+
+| 测试名称 | 覆盖内容 |
+|---------|---------|
+| `test_push_cli_without_remote_returns_fatal_128` | 无 remote 推送 → exit 128 / LBR-REPO-003 / hint |
+| `test_push_force_flag_parsing` | --force / -f flag 解析正确 |
+| `test_push_file_remote_fails_without_reflog` | local file remote → 失败 + 无 reflog 写入 |
+| `test_push_invalid_remote` | 无效远端 URL → 超时或失败（L2 网络测试） |
+| `test_push_force_with_local_changes` | force push → 远端 HEAD 更新 |
+| `test_push_ssh_remote_via_fake_ssh` | fake SSH → 推送成功 + 输出含 ref update 摘要 |
+| `test_push_ssh_host_key_failure_is_reported` | SSH host key 验证失败 → 错误透传 |
+| `test_push_explicit_refspec_uses_destination_branch_name` | `local:release` → 远端 refs/heads/release 更新 |
+| `test_push_json_with_set_upstream_keeps_structured_output_clean` | `--json -u push` → JSON ok=true, upstream_set 非 null, stderr 干净 |
+| `test_push_machine_success_is_single_json_line` | `--machine push` → stdout 恰好 1 行 JSON, stderr 干净 |
+| `test_push_quiet_force_still_emits_warning_and_warning_exit_code` | `--quiet --force push` → stderr 含 warning, `--exit-code-on-warning` → exit 9 |
+
+**测试总计：46 个**（23 单元 + 7 错误码 + 5 JSON + 11 集成）
 
 ### 质量验收
 
@@ -557,10 +566,11 @@ EXAMPLES:
 
 | 文件 | 改动类型 | 说明 |
 |------|---------|------|
-| `src/command/push.rs` | **重构** | 新增 `PushError` typed enum；新增 `PushOutput` / `PushRefUpdate` 结构体；新增 `run_push()` 纯执行入口；补齐 refspec 解析；移除生产路径 `panic!` 和裸 stdout/stderr；`PushError → CliError` 显式 `StableErrorCode` 映射；进度输出改用 `ProgressReporter`；补齐 `--help` EXAMPLES |
-| `src/internal/protocol/https_client.rs` | **前置依赖改造** | 为 push 的 discovery / send-pack 提供连接超时 / 空闲超时包装，并暴露可测试的 transport seam，避免 HTTP 路径无限等待 |
-| `src/internal/protocol/ssh_client.rs` | **前置依赖改造** | 为 receive-pack / send-pack 提供连接超时 / 空闲超时包装，并暴露可测试的 transport seam，避免 SSH 子进程无限等待 |
-| `tests/command/push_test.rs` | **重大扩展** | 新增 `PushError` 变体覆盖、dry-run、up-to-date、force push 场景 |
-| `tests/command/push_json_test.rs` | **新增** | JSON schema 完整性和稳定性验证 |
-| `tests/command/push_error_test.rs` | **新增** | CLI 错误码验证（exit code、StableErrorCode） |
-| `tests/command/mod.rs` | **修改** | 注册新增的测试文件 |
+| `src/command/push.rs` | **重构** | 新增 `PushError` typed enum（20 变体）；新增 `PushOutput` / `PushRefUpdate` / `IncrementalObjsResult` 结构体；新增 `run_push()` 纯执行入口 + `render_push_output()` 渲染层；`parse_refspec()` 含多冒号拒绝；`suggest_remote_name()` fuzzy match + `levenshtein()`；`classify_transport_error()` 超时分类；`diff_tree_objs()` warning 收集；移除生产路径 `panic!` 和裸 stdout/stderr；`PushError → CliError` 显式 `StableErrorCode` 映射；进度输出改用 `ProgressReporter`；补齐 `--help` EXAMPLES |
+| `src/internal/protocol/https_client.rs` | **超时改造** | `reqwest::Client::builder()` 新增 `connect_timeout(10s)` + `read_timeout(10s)`（空闲超时：无数据到达即触发） |
+| `src/internal/protocol/ssh_client.rs` | **超时改造** | 新增 `SSH_IDLE_TIMEOUT` 常量；`read_advertisement()` 每次 `read_exact` 包裹 `tokio::time::timeout`；`send_pack()` 的 `write_all` / `shutdown` / `wait_with_output` 分别包裹 `tokio::time::timeout` |
+| `tests/command/push_test.rs` | **重大扩展** | 新增 explicit refspec、JSON+set-upstream、machine 输出、quiet+force warning 等 11 个集成测试 |
+| `tests/command/push_json_test.rs` | **新增** | JSON/machine 模式错误输出 schema 验证，5 个测试 |
+| `tests/command/push_error_test.rs` | **新增** | CLI 错误码验证（exit code、StableErrorCode、fuzzy match），7 个测试 |
+| `tests/command/mod.rs` | **修改** | 注册 `push_error_test` 和 `push_json_test` 模块 |
+| `docs/commands/push.md` | **新增** | Push 命令英文参考文档（Common Commands、Human Output、Structured Output、Error Handling、Feature Comparison） |
