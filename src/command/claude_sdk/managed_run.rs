@@ -23,9 +23,7 @@ use ratatui::{
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, BufReader},
-    sync::mpsc::{
-        UnboundedReceiver, UnboundedSender, error::TryRecvError, unbounded_channel,
-    },
+    sync::mpsc::{UnboundedReceiver, UnboundedSender, error::TryRecvError, unbounded_channel},
     task::JoinHandle,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -410,7 +408,7 @@ enum ChatTurnUiEvent {
     AssistantMessage(String),
     ToolCall(String),
     ToolResult(String),
-    Completed(Result<ManagedStreamingTurnOutcome, String>),
+    Completed(Box<Result<ManagedStreamingTurnOutcome, String>>),
 }
 
 #[derive(Debug, Clone)]
@@ -876,7 +874,10 @@ fn build_run_streaming_helper_request(args: ManagedStreamingTurnArgs) -> Managed
         include_partial_messages: true,
         prompt_suggestions: args.prompt_suggestions,
         agent_progress_summaries: args.agent_progress_summaries,
-        interactive_approvals: args.interactive_approvals || permission_mode == "default",
+        interactive_approvals: interactive_approvals_enabled(
+            &permission_mode,
+            args.interactive_approvals,
+        ),
         enable_file_checkpointing: args.enable_file_checkpointing,
         continue_session: args.continue_session,
         resume: args.resume,
@@ -904,7 +905,10 @@ fn build_chat_streaming_helper_request(args: ManagedStreamingTurnArgs) -> Manage
         include_partial_messages: true,
         prompt_suggestions: args.prompt_suggestions,
         agent_progress_summaries: args.agent_progress_summaries,
-        interactive_approvals: args.interactive_approvals || permission_mode == "default",
+        interactive_approvals: interactive_approvals_enabled(
+            &permission_mode,
+            args.interactive_approvals,
+        ),
         enable_file_checkpointing: args.enable_file_checkpointing,
         continue_session: args.continue_session,
         resume: args.resume,
@@ -914,6 +918,18 @@ fn build_chat_streaming_helper_request(args: ManagedStreamingTurnArgs) -> Manage
         system_prompt: None,
         output_schema: None,
     }
+}
+
+fn interactive_approvals_enabled(
+    permission_mode: &str,
+    explicit_interactive_approvals: bool,
+) -> bool {
+    explicit_interactive_approvals || permission_mode == "default"
+}
+
+fn should_use_fullscreen_chat_tui(args: &ChatManagedArgs, stdout_is_terminal: bool) -> bool {
+    stdout_is_terminal
+        && !interactive_approvals_enabled(&args.permission_mode, args.interactive_approvals)
 }
 
 fn streaming_render_mode(output: &OutputConfig) -> StreamingRenderMode {
@@ -1027,8 +1043,8 @@ pub(super) async fn chat_managed(args: ChatManagedArgs, output: &OutputConfig) -
     let cwd = resolve_managed_cwd(args.cwd.as_ref())?;
     let (_temp_helper_dir, helper_path) = materialize_helper(args.helper_path.as_deref()).await?;
     let custom_helper = args.helper_path.is_some();
-    let show_prompt = io::stdout().is_terminal();
-    if show_prompt {
+    let stdout_is_terminal = io::stdout().is_terminal();
+    if should_use_fullscreen_chat_tui(&args, stdout_is_terminal) {
         return chat_managed_fullscreen_tui(
             &args,
             &storage_path,
@@ -1037,6 +1053,14 @@ pub(super) async fn chat_managed(args: ChatManagedArgs, output: &OutputConfig) -
             custom_helper,
         )
         .await;
+    }
+
+    if stdout_is_terminal
+        && interactive_approvals_enabled(&args.permission_mode, args.interactive_approvals)
+    {
+        eprintln!(
+            "interactive approvals are enabled; falling back to stdio chat so tool approval prompts can read from the terminal"
+        );
     }
 
     chat_managed_stdio(&args, &storage_path, &cwd, &helper_path, custom_helper).await
@@ -1343,9 +1367,9 @@ impl ChatTuiState {
                 let status_text = if self.is_ready() {
                     "[Enter: Send] [Ctrl+J: Newline] [Up/Down: Scroll] [Ctrl+C: Exit]"
                 } else {
-                    self.processing_note.as_deref().unwrap_or(
-                        "Claude is processing this turn... [Up/Down/PgUp/PgDn: Scroll]",
-                    )
+                    self.processing_note
+                        .as_deref()
+                        .unwrap_or("Claude is processing this turn... [Up/Down/PgUp/PgDn: Scroll]")
                 };
                 frame.render_widget(
                     Paragraph::new(Line::styled(
@@ -1384,9 +1408,7 @@ fn apply_chat_turn_ui_event(
             false
         }
         ChatTurnUiEvent::ToolCall(tool_name) => {
-            state.set_processing_note(format!(
-                "Tool: {tool_name} [Up/Down/PgUp/PgDn: Scroll]"
-            ));
+            state.set_processing_note(format!("Tool: {tool_name} [Up/Down/PgUp/PgDn: Scroll]"));
             false
         }
         ChatTurnUiEvent::ToolResult(tool_name) => {
@@ -1396,7 +1418,7 @@ fn apply_chat_turn_ui_event(
             false
         }
         ChatTurnUiEvent::Completed(result) => {
-            match result {
+            match *result {
                 Ok(result) => {
                     *session_control =
                         ManagedSessionControl::followup(result.outcome.provider_session_id);
@@ -1584,6 +1606,7 @@ fn visible_input_and_cursor(
     (visible_lines, cursor_x, cursor_y)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_chat_turn(
     args: &ChatManagedArgs,
     storage_path: &Path,
@@ -1726,9 +1749,9 @@ async fn chat_managed_fullscreen_tui(
             Event::Key(KeyEvent {
                 code,
                 modifiers,
-                kind,
+                kind: KeyEventKind::Press,
                 ..
-            }) if kind == KeyEventKind::Press => {
+            }) => {
                 if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
                     if let Some(turn) = pending_turn.take() {
                         turn.task.abort();
@@ -1814,7 +1837,7 @@ async fn chat_managed_fullscreen_tui(
                             )
                             .await
                             .map_err(|error| error.to_string());
-                            let _ = tx.send(ChatTurnUiEvent::Completed(result));
+                            let _ = tx.send(ChatTurnUiEvent::Completed(Box::new(result)));
                         });
                         pending_turn = Some(PendingChatTurn { rx, task });
                     }
@@ -1842,6 +1865,7 @@ async fn chat_managed_fullscreen_tui(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_managed_streaming_turn(
     storage_path: &Path,
     turn_kind: ManagedStreamingTurnKind,
@@ -2178,9 +2202,9 @@ fn read_chat_turn(stdin: &io::Stdin, show_prompt: bool) -> Result<Option<String>
             Event::Key(KeyEvent {
                 code,
                 modifiers,
-                kind,
+                kind: KeyEventKind::Press,
                 ..
-            }) if kind == KeyEventKind::Press => match code {
+            }) => match code {
                 KeyCode::Enter => {
                     let trimmed = buffer.trim();
                     if trimmed.is_empty() {
@@ -2508,10 +2532,7 @@ fn render_stream_event_human(event: &Value, assistant_line_open: &mut bool) -> R
     Ok(())
 }
 
-fn maybe_emit_chat_turn_ui_event(
-    event: &Value,
-    tx: Option<&UnboundedSender<ChatTurnUiEvent>>,
-) {
+fn maybe_emit_chat_turn_ui_event(event: &Value, tx: Option<&UnboundedSender<ChatTurnUiEvent>>) {
     let Some(tx) = tx else {
         return;
     };
@@ -2524,8 +2545,9 @@ fn maybe_emit_chat_turn_ui_event(
             .get("delta")
             .and_then(Value::as_str)
             .map(|delta| ChatTurnUiEvent::AssistantDelta(delta.to_string())),
-        "assistant_message" => extract_assistant_text(event.get("message"))
-            .map(ChatTurnUiEvent::AssistantMessage),
+        "assistant_message" => {
+            extract_assistant_text(event.get("message")).map(ChatTurnUiEvent::AssistantMessage)
+        }
         "tool_call" => event
             .get("input")
             .and_then(|value| value.get("tool_name"))
@@ -2943,6 +2965,29 @@ mod tests {
         assert!(request.system_prompt.is_none());
         assert!(request.output_schema.is_none());
         assert!(request.include_partial_messages);
+    }
+
+    #[test]
+    fn default_permission_mode_enables_interactive_approvals() {
+        assert!(interactive_approvals_enabled("default", false));
+        assert!(interactive_approvals_enabled("acceptEdits", true));
+        assert!(!interactive_approvals_enabled("acceptEdits", false));
+    }
+
+    #[test]
+    fn fullscreen_chat_disables_when_interactive_approvals_are_needed() {
+        let mut args = base_chat_args();
+        args.permission_mode = "acceptEdits".to_string();
+
+        assert!(should_use_fullscreen_chat_tui(&args, true));
+
+        args.permission_mode = "default".to_string();
+        assert!(!should_use_fullscreen_chat_tui(&args, true));
+
+        args.permission_mode = "acceptEdits".to_string();
+        args.interactive_approvals = true;
+        assert!(!should_use_fullscreen_chat_tui(&args, true));
+        assert!(!should_use_fullscreen_chat_tui(&args, false));
     }
 
     #[test]

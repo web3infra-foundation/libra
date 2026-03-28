@@ -7,7 +7,8 @@
 use git_internal::{
     hash::ObjectHash,
     internal::object::{
-        intent::Intent, patchset::PatchSet, plan::Plan, provenance::Provenance, run::Run,
+        intent::Intent, patchset::PatchSet, plan::Plan, plan_step_event::PlanStepEvent,
+        provenance::Provenance, run::Run,
     },
 };
 
@@ -20,8 +21,10 @@ use crate::{
         },
         types::{FileChange, PatchStatus},
     },
-    utils::storage::Storage,
+    utils::{storage::Storage, storage_ext::StorageExt},
 };
+
+const DERIVED_PLAN_STEP_EVENT_REASON: &str = "derived from formal Claude plan snapshot family";
 
 pub(super) async fn ensure_full_family_intent_created(
     storage_path: &Path,
@@ -186,30 +189,66 @@ pub(super) async fn ensure_full_family_plan_objects(
         )
         .await?;
 
-        let _ = mcp_server
-            .create_plan_step_event_impl(
-                CreatePlanStepEventParams {
-                    plan_id: plan_uuid.to_string(),
-                    step_id: step_uuid.to_string(),
-                    run_id: run_uuid.to_string(),
-                    status: "pending".to_string(),
-                    reason: Some("derived from formal Claude plan snapshot family".to_string()),
-                    consumed_frames: None,
-                    produced_frames: None,
-                    spawned_task_id: None,
-                    outputs: None,
-                    actor_kind: Some("system".to_string()),
-                    actor_id: Some("claude-sdk-snapshot".to_string()),
-                },
-                actor.clone(),
-            )
-            .await
-            .map_err(|error| {
-                anyhow!("failed to create derived formal plan_step_event: {error:?}")
-            })?;
+        if !derived_plan_step_event_exists(storage_path, plan_uuid, step_uuid, run_uuid).await? {
+            let _ = mcp_server
+                .create_plan_step_event_impl(
+                    CreatePlanStepEventParams {
+                        plan_id: plan_uuid.to_string(),
+                        step_id: step_uuid.to_string(),
+                        run_id: run_uuid.to_string(),
+                        status: "pending".to_string(),
+                        reason: Some(DERIVED_PLAN_STEP_EVENT_REASON.to_string()),
+                        consumed_frames: None,
+                        produced_frames: None,
+                        spawned_task_id: None,
+                        outputs: None,
+                        actor_kind: Some("system".to_string()),
+                        actor_id: Some("claude-sdk-snapshot".to_string()),
+                    },
+                    actor.clone(),
+                )
+                .await
+                .map_err(|error| {
+                    anyhow!("failed to create derived formal plan_step_event: {error:?}")
+                })?;
+        }
     }
 
     Ok(())
+}
+
+async fn derived_plan_step_event_exists(
+    storage_path: &Path,
+    plan_id: Uuid,
+    step_id: Uuid,
+    run_id: Uuid,
+) -> Result<bool> {
+    let mcp_server = init_local_mcp_server(storage_path).await?;
+    let history = mcp_server
+        .intent_history_manager
+        .as_ref()
+        .ok_or_else(|| anyhow!("local MCP history manager is unavailable"))?;
+    let storage = LocalStorage::new(storage_path.join("objects"));
+
+    for (object_id, object_hash) in history
+        .list_objects("plan_step_event")
+        .await
+        .context("failed to list plan_step_event objects")?
+    {
+        let event = storage
+            .get_json::<PlanStepEvent>(&object_hash)
+            .await
+            .with_context(|| format!("failed to read plan_step_event '{object_id}'"))?;
+        if event.plan_id() == plan_id
+            && event.step_id() == step_id
+            && event.run_id() == run_id
+            && event.reason() == Some(DERIVED_PLAN_STEP_EVENT_REASON)
+        {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 fn stable_uuid_from_seed(seed: &str) -> Result<Uuid> {

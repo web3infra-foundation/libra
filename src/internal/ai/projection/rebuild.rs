@@ -273,7 +273,7 @@ impl<'a> ProjectionRebuilder<'a> {
             &selected_tasks,
             &selected_runs,
             &selected_plans,
-        );
+        )?;
 
         let plan_heads = build_plan_heads(&selected_plans, current_intent_id);
         let live_context_window = build_live_context_window(&selected_context_frames);
@@ -857,12 +857,12 @@ fn build_thread_projection(
     tasks: &[&Task],
     runs: &[&Run],
     plans: &[&Plan],
-) -> ThreadProjection {
+) -> Result<ThreadProjection> {
     let mut intents_sorted = intents.to_vec();
     intents_sorted
         .sort_by_key(|intent| sort_key(intent.header().created_at(), intent.header().object_id()));
     let head_ids = compute_intent_heads(&intents_sorted);
-    let owner = thread_owner(&intents_sorted, tasks, runs, plans);
+    let owner = thread_owner(&intents_sorted, tasks, runs, plans)?;
     let participants = thread_participants(&owner, &intents_sorted, tasks, runs, plans);
 
     let title = current_intent_id
@@ -903,7 +903,7 @@ fn build_thread_projection(
         })
         .collect::<Vec<_>>();
 
-    ThreadProjection {
+    Ok(ThreadProjection {
         thread_id: selection.thread_id,
         title,
         owner,
@@ -932,7 +932,7 @@ fn build_thread_projection(
             &[],
         ),
         version: 1,
-    }
+    })
 }
 
 fn compute_intent_heads(intents: &[&Intent]) -> HashSet<Uuid> {
@@ -977,7 +977,12 @@ fn current_intent_id(intents: &[&Intent], intent_events: &[&IntentEvent]) -> Opt
         })
 }
 
-fn thread_owner(intents: &[&Intent], tasks: &[&Task], runs: &[&Run], plans: &[&Plan]) -> ActorRef {
+fn thread_owner(
+    intents: &[&Intent],
+    tasks: &[&Task],
+    runs: &[&Run],
+    plans: &[&Plan],
+) -> Result<ActorRef> {
     intents
         .iter()
         .map(|intent| {
@@ -1004,7 +1009,12 @@ fn thread_owner(intents: &[&Intent], tasks: &[&Task], runs: &[&Run], plans: &[&P
         }))
         .min_by_key(|(at, actor)| sort_key(*at, actor.id().parse().unwrap_or(Uuid::nil())))
         .map(|(_, actor)| actor)
-        .unwrap_or_else(|| ActorRef::agent("libra").expect("fallback actor should be valid"))
+        .map(Ok)
+        .unwrap_or_else(|| {
+            ActorRef::agent("libra").map_err(|error| {
+                anyhow::anyhow!("failed to construct fallback projection owner: {error}")
+            })
+        })
 }
 
 fn thread_participants(

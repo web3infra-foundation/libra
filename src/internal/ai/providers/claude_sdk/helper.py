@@ -182,15 +182,34 @@ def load_scripted_responses() -> list[dict[str, Any]]:
     return list(parsed)
 
 
+def interactive_terminal_hint() -> str:
+    if os.name == "posix":
+        return "rerun in a terminal session (with /dev/tty available) or unset --interactive-approvals"
+    return "rerun in a terminal session or unset --interactive-approvals"
+
+
+def get_interactive_streams() -> tuple[Any, Any, bool] | None:
+    if os.name == "posix":
+        try:
+            reader = open("/dev/tty", "r", encoding="utf-8")
+            writer = open("/dev/tty", "w", encoding="utf-8")
+            return reader, writer, True
+        except OSError:
+            pass
+
+    stdin_isatty = getattr(sys.stdin, "isatty", lambda: False)()
+    stdout_isatty = getattr(sys.stdout, "isatty", lambda: False)()
+    stderr_isatty = getattr(sys.stderr, "isatty", lambda: False)()
+
+    if stdin_isatty and stdout_isatty:
+        return sys.stdin, sys.stdout, False
+    if stdin_isatty and stderr_isatty:
+        return sys.stdin, sys.stderr, False
+    return None
+
+
 def has_interactive_tty() -> bool:
-    try:
-        with open("/dev/tty", "r", encoding="utf-8"):
-            pass
-        with open("/dev/tty", "w", encoding="utf-8"):
-            pass
-        return True
-    except OSError:
-        return False
+    return get_interactive_streams() is not None
 
 
 def assert_interactive_input_available(state: dict[str, Any]) -> None:
@@ -198,24 +217,35 @@ def assert_interactive_input_available(state: dict[str, Any]) -> None:
         return
     if not has_interactive_tty():
         raise RuntimeError(
-            "interactive approvals require an interactive terminal (/dev/tty); rerun in a terminal session or unset --interactive-approvals"
+            f"interactive approvals require an interactive terminal; {interactive_terminal_hint()}"
         )
 
 
 def prompt_via_tty(lines: list[str], question: str) -> str:
-    try:
-        with open("/dev/tty", "r", encoding="utf-8") as reader, open(
-            "/dev/tty", "w", encoding="utf-8"
-        ) as writer:
-            for line in lines:
-                writer.write(f"{line}\n")
-            writer.write(question)
-            writer.flush()
-            return reader.readline().strip()
-    except OSError as exc:
+    streams = get_interactive_streams()
+    if streams is None:
         raise RuntimeError(
-            "interactive approvals require an interactive terminal (/dev/tty); rerun in a terminal session or unset --interactive-approvals"
-        ) from exc
+            f"interactive approvals require an interactive terminal; {interactive_terminal_hint()}"
+        )
+
+    reader, writer, should_close = streams
+    try:
+        for line in lines:
+            writer.write(f"{line}\n")
+        writer.write(question)
+        writer.flush()
+        answer = reader.readline()
+        return answer.strip() if isinstance(answer, str) else ""
+    finally:
+        if should_close:
+            try:
+                reader.close()
+            except Exception:
+                pass
+            try:
+                writer.close()
+            except Exception:
+                pass
 
 
 async def prompt_via_tty_async(lines: list[str], question: str) -> str:
@@ -289,11 +319,19 @@ def build_hook_input(
     tool_name: str,
     tool_input: dict[str, Any],
     suggestions: list[Any],
+    context: Any | None = None,
     extras: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload = {
         "tool_name": tool_name,
         "tool_input": tool_input,
+        "tool_use_id": getattr(context, "toolUseID", None),
+        "agent_id": getattr(context, "agentID", None),
+        "title": getattr(context, "title", None),
+        "display_name": getattr(context, "displayName", None),
+        "description": getattr(context, "description", None),
+        "blocked_path": getattr(context, "blockedPath", None),
+        "decision_reason": getattr(context, "decisionReason", None),
         "suggestions": convert_jsonable(suggestions),
     }
     if extras:
@@ -438,26 +476,26 @@ def convert_jsonable(value: Any) -> Any:
 
 def convert_session_info(session: Any) -> dict[str, Any]:
     return {
-        "sessionId": session.session_id,
-        "summary": session.summary,
-        "lastModified": session.last_modified,
-        "fileSize": session.file_size,
-        "customTitle": session.custom_title,
-        "firstPrompt": session.first_prompt,
-        "gitBranch": session.git_branch,
-        "cwd": session.cwd,
-        "tag": session.tag,
-        "createdAt": session.created_at,
+        "sessionId": getattr(session, "session_id", ""),
+        "summary": getattr(session, "summary", ""),
+        "lastModified": getattr(session, "last_modified", 0),
+        "fileSize": getattr(session, "file_size", None),
+        "customTitle": getattr(session, "custom_title", None),
+        "firstPrompt": getattr(session, "first_prompt", None),
+        "gitBranch": getattr(session, "git_branch", None),
+        "cwd": getattr(session, "cwd", None),
+        "tag": getattr(session, "tag", None),
+        "createdAt": getattr(session, "created_at", None),
     }
 
 
 def convert_session_message(message: Any) -> dict[str, Any]:
     return {
-        "type": message.type,
-        "uuid": message.uuid,
-        "sessionId": message.session_id,
-        "message": convert_jsonable(message.message),
-        "parentToolUseId": message.parent_tool_use_id,
+        "type": getattr(message, "type", ""),
+        "uuid": getattr(message, "uuid", ""),
+        "session_id": getattr(message, "session_id", ""),
+        "message": convert_jsonable(getattr(message, "message", None)),
+        "parent_tool_use_id": getattr(message, "parent_tool_use_id", None),
     }
 
 
@@ -493,17 +531,27 @@ def convert_sdk_message(message: Any, state: dict[str, Any]) -> dict[str, Any]:
         state["session_id"] = message.session_id
         return {
             "type": "result",
-            "subtype": message.subtype,
-            "duration_ms": message.duration_ms,
-            "duration_api_ms": message.duration_api_ms,
-            "is_error": message.is_error,
-            "num_turns": message.num_turns,
-            "session_id": message.session_id,
-            "stop_reason": message.stop_reason,
-            "total_cost_usd": message.total_cost_usd,
-            "usage": convert_jsonable(message.usage),
-            "result": message.result,
-            "structured_output": convert_jsonable(message.structured_output),
+            "subtype": getattr(message, "subtype", None),
+            "duration_ms": getattr(message, "duration_ms", None),
+            "duration_api_ms": getattr(message, "duration_api_ms", None),
+            "is_error": getattr(message, "is_error", None),
+            "num_turns": getattr(message, "num_turns", None),
+            "session_id": getattr(message, "session_id", None),
+            "stop_reason": getattr(message, "stop_reason", None),
+            "total_cost_usd": getattr(message, "total_cost_usd", None),
+            "usage": convert_jsonable(getattr(message, "usage", None)),
+            "modelUsage": convert_jsonable(getattr(message, "model_usage", None)),
+            "permission_denials": convert_jsonable(
+                getattr(message, "permission_denials", None)
+            ),
+            "result": getattr(message, "result", None),
+            "structured_output": convert_jsonable(
+                getattr(message, "structured_output", None)
+            ),
+            "fast_mode_state": convert_jsonable(
+                getattr(message, "fast_mode_state", None)
+            ),
+            "uuid": getattr(message, "uuid", None),
         }
 
     if isinstance(message, StreamEvent):
@@ -524,31 +572,6 @@ def convert_sdk_message(message: Any, state: dict[str, Any]) -> dict[str, Any]:
             state["session_id"] = converted["session_id"]
         return converted
     return {"type": "unknown", "value": converted}
-
-
-def convert_session_info(session: Any) -> dict[str, Any]:
-    return {
-        "sessionId": getattr(session, "session_id", ""),
-        "summary": getattr(session, "summary", ""),
-        "lastModified": getattr(session, "last_modified", 0),
-        "fileSize": getattr(session, "file_size", None),
-        "customTitle": getattr(session, "custom_title", None),
-        "firstPrompt": getattr(session, "first_prompt", None),
-        "gitBranch": getattr(session, "git_branch", None),
-        "cwd": getattr(session, "cwd", None),
-        "tag": getattr(session, "tag", None),
-        "createdAt": getattr(session, "created_at", None),
-    }
-
-
-def convert_session_message(message: Any) -> dict[str, Any]:
-    return {
-        "type": getattr(message, "type", ""),
-        "uuid": getattr(message, "uuid", ""),
-        "session_id": getattr(message, "session_id", ""),
-        "message": convert_jsonable(getattr(message, "message", None)),
-        "parent_tool_use_id": getattr(message, "parent_tool_use_id", None),
-    }
 
 
 def build_hooks(
@@ -732,6 +755,7 @@ async def execute_query(request: dict[str, Any]) -> None:
                             tool_name,
                             tool_input,
                             suggestions,
+                            context,
                             {
                                 "interaction_kind": "ask_user_question",
                                 "prompt_source": response["prompt_source"],
@@ -758,6 +782,7 @@ async def execute_query(request: dict[str, Any]) -> None:
                             tool_name,
                             tool_input,
                             suggestions,
+                            context,
                             {
                                 "interaction_kind": "tool_approval",
                                 "approval_decision": "allow",
@@ -809,6 +834,7 @@ async def execute_query(request: dict[str, Any]) -> None:
                             tool_name,
                             tool_input,
                             suggestions,
+                            context,
                             {
                                 "interaction_kind": "tool_approval",
                                 "approval_decision": "allow",
@@ -841,6 +867,7 @@ async def execute_query(request: dict[str, Any]) -> None:
                             tool_name,
                             tool_input,
                             suggestions,
+                            context,
                             {
                                 "interaction_kind": "tool_approval",
                                 "approval_decision": "allow",
@@ -862,6 +889,7 @@ async def execute_query(request: dict[str, Any]) -> None:
                             tool_name,
                             tool_input,
                             suggestions,
+                            context,
                             {
                                 "interaction_kind": "tool_approval",
                                 "approval_decision": "allow",
@@ -883,6 +911,7 @@ async def execute_query(request: dict[str, Any]) -> None:
                             tool_name,
                             tool_input,
                             suggestions,
+                            context,
                             {
                                 "interaction_kind": "tool_approval",
                                 "approval_decision": "abort",
@@ -905,6 +934,7 @@ async def execute_query(request: dict[str, Any]) -> None:
                         tool_name,
                         tool_input,
                         suggestions,
+                        context,
                         {
                             "interaction_kind": "tool_approval",
                             "approval_decision": "deny",
@@ -930,6 +960,7 @@ async def execute_query(request: dict[str, Any]) -> None:
                         tool_name,
                         tool_input,
                         suggestions,
+                        context,
                         {
                             "interaction_kind": "tool_approval",
                             "approval_decision": "allow",

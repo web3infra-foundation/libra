@@ -5,10 +5,9 @@
 use std::{
     collections::BTreeSet,
     fs,
-    io::Write,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
+    process::{Command, Output},
     sync::Arc,
 };
 
@@ -224,186 +223,442 @@ fn write_json_response_capture_python_helper(
     });
 }
 
-fn embedded_claude_sdk_helper_path() -> PathBuf {
+fn embedded_claude_sdk_python_helper_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("src")
         .join("internal")
         .join("ai")
         .join("providers")
         .join("claude_sdk")
-        .join("helper.cjs")
+        .join("helper.py")
 }
 
-fn write_fake_claude_agent_sdk_module(path: &Path) {
-    let module = r#"
-const fs = require('fs');
-
-function loadScenario() {
-  const scenarioPath = process.env.LIBRA_FAKE_CLAUDE_SDK_SCENARIO_PATH;
-  if (!scenarioPath) {
-    throw new Error('LIBRA_FAKE_CLAUDE_SDK_SCENARIO_PATH is not set');
-  }
-  return JSON.parse(fs.readFileSync(scenarioPath, 'utf8'));
+fn python3_executable_path() -> String {
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg("import sys; print(sys.executable)")
+        .output()
+        .expect("failed to resolve python3 executable");
+    assert!(
+        output.status.success(),
+        "python3 executable probe failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("python3 executable probe should be UTF-8")
+        .trim()
+        .to_string()
 }
 
-function defaultStructuredOutput() {
-  return {
-    summary: 'Fake Claude managed run',
-    problemStatement: 'Exercise the managed Claude SDK helper flow.',
-    changeType: 'refactor',
-    objectives: ['Exercise managed Claude SDK helper flow'],
-    successCriteria: ['Managed helper returns a structured result'],
-    riskRationale: 'Fake SDK test fixture',
-  };
-}
-
-async function runHookGroup(registry, hookName, payload) {
-  if (!registry) return;
-  const matchers = registry[hookName];
-  if (!Array.isArray(matchers)) return;
-  for (const matcher of matchers) {
-    if (!matcher || !Array.isArray(matcher.hooks)) continue;
-    for (const hook of matcher.hooks) {
-      await hook(payload);
-    }
-  }
-}
-
-exports.query = function query({ prompt, options }) {
-  const scenario = loadScenario();
-  const sessionId = scenario.sessionId || 'fake-sdk-session';
-  const transcriptPath = scenario.transcriptPath || `/tmp/${sessionId}.jsonl`;
-  const resultMessage = scenario.resultMessage || {
-    type: 'result',
-    subtype: 'success',
-    is_error: false,
-    session_id: sessionId,
-    stop_reason: 'end_turn',
-    result: 'ok',
-    structured_output: defaultStructuredOutput(),
-  };
-
-  return {
-    async *[Symbol.asyncIterator]() {
-      yield {
-        type: 'system',
-        subtype: 'init',
-        cwd: options.cwd,
-        session_id: sessionId,
-        tools: scenario.tools || ['Read', 'Edit', 'AskUserQuestion'],
-        model: options.model || 'claude-haiku-4-5-20251001',
-        permissionMode: options.permissionMode || 'default',
-      };
-
-      let interrupted = false;
-      if (Array.isArray(scenario.steps)) {
-        for (const step of scenario.steps) {
-          if (step.type !== 'tool') {
-            continue;
-          }
-          const permissionOptions = {
-            toolUseID: step.toolUseId || null,
-            agentID: step.agentId || null,
-            blockedPath: step.blockedPath || null,
-            decisionReason: step.decisionReason || null,
-            suggestions: Array.isArray(step.suggestions) ? step.suggestions : [],
-            title: step.title || null,
-            displayName: step.displayName || null,
-            description: step.description || null,
-          };
-          const hookPayload = {
-            session_id: sessionId,
-            cwd: options.cwd,
-            transcript_path: transcriptPath,
-            tool_name: step.toolName,
-            tool_input: step.input || {},
-            tool_use_id: step.toolUseId || null,
-          };
-          if (step.emitPermissionRequest !== false) {
-            await runHookGroup(options.hooks, 'PermissionRequest', {
-              ...hookPayload,
-              hook_event_name: 'PermissionRequest',
-              permission_suggestions: permissionOptions.suggestions,
-            });
-          }
-          await runHookGroup(options.hooks, 'PreToolUse', {
-            ...hookPayload,
-            hook_event_name: 'PreToolUse',
-          });
-          const decision = options.canUseTool
-            ? await options.canUseTool(step.toolName, step.input || {}, permissionOptions)
-            : { behavior: 'allow', updatedInput: step.input || {} };
-          if (step.emitPostHook !== false) {
-            const postHookName = step.postHook || 'PostToolUse';
-            await runHookGroup(options.hooks, postHookName, {
-              ...hookPayload,
-              hook_event_name: postHookName,
-              tool_response: step.toolResponse || { ok: true },
-            });
-          }
-          yield {
-            type: 'assistant',
-            session_id: sessionId,
-            message: {
-              content:
-                step.assistantContent || [
-                  {
-                    type: 'text',
-                    text:
-                      step.assistantText ||
-                      `${step.toolName} => ${decision.behavior}${decision.interrupt ? ' (interrupt)' : ''}`,
-                  },
-                ],
-            },
-          };
-          if (decision && decision.interrupt) {
-            interrupted = true;
-            break;
-          }
-        }
-      }
-
-      if (interrupted) {
-        yield {
-          type: 'result',
-          subtype: 'error',
-          is_error: true,
-          session_id: sessionId,
-          stop_reason: 'interrupted',
-          result: 'aborted',
-        };
-        return;
-      }
-
-      yield resultMessage;
-    },
-    async rewindFiles() {
-      return undefined;
-    },
-    async supportedModels() {
-      return ['haiku'];
-    },
-  };
-};
-"#;
-    fs::write(path, module).unwrap_or_else(|err| {
+fn write_fake_claude_agent_sdk_python_package(root: &Path) {
+    let package_dir = root.join("claude_agent_sdk");
+    fs::create_dir_all(&package_dir).unwrap_or_else(|err| {
         panic!(
-            "failed to write fake sdk module '{}': {err}",
-            path.display()
+            "failed to create fake python sdk package '{}': {err}",
+            package_dir.display()
+        )
+    });
+
+    let module = r#"
+import json
+import os
+from types import SimpleNamespace
+
+from .types import (
+    AssistantMessage,
+    ClaudeAgentOptions,
+    PermissionResultAllow,
+    PermissionResultDeny,
+    ResultMessage,
+    SystemMessage,
+)
+
+
+def _load_scenario():
+    scenario_path = os.environ.get("LIBRA_FAKE_CLAUDE_SDK_SCENARIO_PATH")
+    if not scenario_path:
+        raise RuntimeError("LIBRA_FAKE_CLAUDE_SDK_SCENARIO_PATH is not set")
+    with open(scenario_path, "r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def _default_structured_output():
+    return {
+        "summary": "Fake Claude managed run",
+        "problemStatement": "Exercise the managed Claude SDK helper flow.",
+        "changeType": "refactor",
+        "objectives": ["Exercise managed Claude SDK helper flow"],
+        "successCriteria": ["Managed helper returns a structured result"],
+        "riskRationale": "Fake SDK test fixture",
+    }
+
+
+def _default_result_message(session_id):
+    return {
+        "subtype": "success",
+        "is_error": False,
+        "session_id": session_id,
+        "stop_reason": "end_turn",
+        "result": "ok",
+        "structured_output": _default_structured_output(),
+    }
+
+
+async def _run_hook_group(registry, hook_name, payload):
+    if not registry:
+        return
+    for matcher in registry.get(hook_name, []):
+        hooks = getattr(matcher, "hooks", [])
+        if not isinstance(hooks, list):
+            continue
+        for hook in hooks:
+            await hook(payload, payload.get("tool_use_id"), None)
+
+
+def _assistant_content(step, decision):
+    if isinstance(step.get("assistantContent"), list):
+        return step["assistantContent"]
+    text = step.get("assistantText")
+    if not isinstance(text, str):
+        suffix = " (interrupt)" if decision.get("interrupt") else ""
+        text = f"{step.get('toolName')} => {decision['behavior']}{suffix}"
+    return [{"type": "text", "text": text}]
+
+
+def list_sessions(directory=None, include_worktrees=False):
+    scenario = _load_scenario()
+    sessions = scenario.get("sessions")
+    if not isinstance(sessions, list):
+        return []
+    return [
+        SimpleNamespace(
+            session_id=item.get("sessionId", ""),
+            summary=item.get("summary", ""),
+            last_modified=item.get("lastModified", 0),
+            file_size=item.get("fileSize"),
+            custom_title=item.get("customTitle"),
+            first_prompt=item.get("firstPrompt"),
+            git_branch=item.get("gitBranch"),
+            cwd=item.get("cwd", directory),
+            tag=item.get("tag"),
+            created_at=item.get("createdAt"),
+        )
+        for item in sessions
+        if isinstance(item, dict)
+    ]
+
+
+def get_session_messages(provider_session_id, directory=None, limit=None, offset=0):
+    scenario = _load_scenario()
+    messages = scenario.get("sessionMessages")
+    if not isinstance(messages, list):
+        return []
+    return [
+        SimpleNamespace(
+            type=item.get("type", ""),
+            uuid=item.get("uuid", ""),
+            session_id=item.get("session_id", provider_session_id),
+            message=item.get("message"),
+            parent_tool_use_id=item.get("parent_tool_use_id"),
+        )
+        for item in messages
+        if isinstance(item, dict)
+    ]
+
+
+async def query(*args, **kwargs):
+    if False:
+        yield None
+
+
+class ClaudeSDKClient:
+    def __init__(self, options: ClaudeAgentOptions):
+        self.options = options
+        self.scenario = _load_scenario()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def query(self, prompt):
+        self.prompt = prompt
+
+    async def receive_response(self):
+        session_id = self.scenario.get("sessionId") or "fake-sdk-session"
+        transcript_path = self.scenario.get("transcriptPath") or f"/tmp/{session_id}.jsonl"
+        yield SystemMessage(
+            subtype="init",
+            data={
+                "cwd": getattr(self.options, "cwd", None),
+                "session_id": session_id,
+                "tools": self.scenario.get("tools") or ["Read", "Edit", "AskUserQuestion"],
+                "model": getattr(self.options, "model", None) or "claude-haiku-4-5-20251001",
+                "permissionMode": getattr(self.options, "permission_mode", None) or "default",
+            },
+        )
+
+        interrupted = False
+        steps = self.scenario.get("steps")
+        if isinstance(steps, list):
+            for step in steps:
+                if not isinstance(step, dict) or step.get("type") != "tool":
+                    continue
+
+                tool_input = step.get("input")
+                if not isinstance(tool_input, dict):
+                    tool_input = {}
+                suggestions = step.get("suggestions")
+                if not isinstance(suggestions, list):
+                    suggestions = []
+
+                hook_payload = {
+                    "session_id": session_id,
+                    "cwd": getattr(self.options, "cwd", None),
+                    "transcript_path": transcript_path,
+                    "tool_name": step.get("toolName"),
+                    "tool_input": tool_input,
+                    "tool_use_id": step.get("toolUseId"),
+                    "title": step.get("title"),
+                    "display_name": step.get("displayName"),
+                    "description": step.get("description"),
+                    "blocked_path": step.get("blockedPath"),
+                    "decision_reason": step.get("decisionReason"),
+                }
+
+                if step.get("emitPermissionRequest", True):
+                    await _run_hook_group(
+                        getattr(self.options, "hooks", None),
+                        "PermissionRequest",
+                        {
+                            **hook_payload,
+                            "hook_event_name": "PermissionRequest",
+                            "permission_suggestions": suggestions,
+                        },
+                    )
+
+                await _run_hook_group(
+                    getattr(self.options, "hooks", None),
+                    "PreToolUse",
+                    {
+                        **hook_payload,
+                        "hook_event_name": "PreToolUse",
+                    },
+                )
+
+                decision = {"behavior": "allow", "interrupt": False}
+                updated_input = tool_input
+                can_use_tool = getattr(self.options, "can_use_tool", None)
+                if can_use_tool is not None:
+                    context = SimpleNamespace(
+                        toolUseID=step.get("toolUseId"),
+                        agentID=step.get("agentId"),
+                        blockedPath=step.get("blockedPath"),
+                        decisionReason=step.get("decisionReason"),
+                        suggestions=suggestions,
+                        title=step.get("title"),
+                        displayName=step.get("displayName"),
+                        description=step.get("description"),
+                    )
+                    result = await can_use_tool(step.get("toolName"), tool_input, context)
+                    if isinstance(result, PermissionResultDeny):
+                        decision = {
+                            "behavior": "deny",
+                            "interrupt": bool(getattr(result, "interrupt", False)),
+                        }
+                    else:
+                        decision = {
+                            "behavior": "allow",
+                            "interrupt": bool(getattr(result, "interrupt", False)),
+                        }
+                        candidate = getattr(result, "updated_input", None)
+                        if isinstance(candidate, dict):
+                            updated_input = candidate
+
+                if step.get("emitPostHook", True):
+                    post_hook_name = step.get("postHook") or "PostToolUse"
+                    await _run_hook_group(
+                        getattr(self.options, "hooks", None),
+                        post_hook_name,
+                        {
+                            **hook_payload,
+                            "hook_event_name": post_hook_name,
+                            "tool_input": updated_input,
+                            "tool_response": step.get("toolResponse") or {"ok": True},
+                        },
+                    )
+
+                yield AssistantMessage(
+                    content=_assistant_content(step, decision),
+                    model=getattr(self.options, "model", None),
+                    parent_tool_use_id=step.get("toolUseId"),
+                )
+
+                if decision["interrupt"]:
+                    interrupted = True
+                    break
+
+        if interrupted:
+            yield ResultMessage(
+                subtype="error",
+                is_error=True,
+                session_id=session_id,
+                stop_reason="interrupted",
+                result="aborted",
+            )
+            return
+
+        result_message = self.scenario.get("resultMessage") or _default_result_message(session_id)
+        yield ResultMessage(
+            subtype=result_message.get("subtype"),
+            duration_ms=result_message.get("duration_ms"),
+            duration_api_ms=result_message.get("duration_api_ms"),
+            is_error=result_message.get("is_error", False),
+            num_turns=result_message.get("num_turns"),
+            session_id=result_message.get("session_id", session_id),
+            stop_reason=result_message.get("stop_reason"),
+            total_cost_usd=result_message.get("total_cost_usd"),
+            usage=result_message.get("usage"),
+            model_usage=result_message.get("model_usage") or result_message.get("modelUsage"),
+            permission_denials=result_message.get("permission_denials"),
+            result=result_message.get("result"),
+            structured_output=result_message.get("structured_output"),
+            fast_mode_state=result_message.get("fast_mode_state"),
+            uuid=result_message.get("uuid"),
+        )
+"#;
+    fs::write(package_dir.join("__init__.py"), module).unwrap_or_else(|err| {
+        panic!(
+            "failed to write fake python sdk module '{}': {err}",
+            package_dir.join("__init__.py").display()
+        )
+    });
+
+    let types_module = r#"
+from dataclasses import dataclass
+from typing import Any
+
+
+@dataclass
+class HookMatcher:
+    hooks: list[Any]
+
+
+@dataclass
+class PermissionUpdate:
+    type: str
+    destination: str
+    mode: str
+
+
+@dataclass
+class PermissionResultAllow:
+    updated_input: dict[str, Any] | None = None
+    updated_permissions: list[PermissionUpdate] | None = None
+    behavior: str = "allow"
+    interrupt: bool = False
+
+
+@dataclass
+class PermissionResultDeny:
+    message: str | None = None
+    interrupt: bool = False
+    behavior: str = "deny"
+
+
+@dataclass
+class ResultMessage:
+    subtype: str | None = None
+    duration_ms: int | None = None
+    duration_api_ms: int | None = None
+    is_error: bool | None = None
+    num_turns: int | None = None
+    session_id: str | None = None
+    stop_reason: str | None = None
+    total_cost_usd: float | None = None
+    usage: Any = None
+    model_usage: Any = None
+    permission_denials: Any = None
+    result: Any = None
+    structured_output: Any = None
+    fast_mode_state: Any = None
+    uuid: str | None = None
+
+
+@dataclass
+class StreamEvent:
+    uuid: str | None = None
+    session_id: str | None = None
+    event: Any = None
+    parent_tool_use_id: str | None = None
+
+
+@dataclass
+class SystemMessage:
+    subtype: str
+    data: dict[str, Any]
+
+
+@dataclass
+class AssistantMessage:
+    content: list[Any]
+    model: str | None = None
+    parent_tool_use_id: str | None = None
+    error: Any = None
+    usage: Any = None
+
+
+@dataclass
+class TextBlock:
+    text: str
+
+
+@dataclass
+class ThinkingBlock:
+    thinking: str
+    signature: str | None = None
+
+
+@dataclass
+class ToolResultBlock:
+    tool_use_id: str
+    content: Any
+    is_error: bool = False
+
+
+@dataclass
+class ToolUseBlock:
+    id: str | None = None
+    name: str | None = None
+    input: Any = None
+
+
+class ClaudeAgentOptions:
+    def __init__(self, **kwargs):
+        self.can_use_tool = None
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+"#;
+    fs::write(package_dir.join("types.py"), types_module).unwrap_or_else(|err| {
+        panic!(
+            "failed to write fake python sdk types '{}': {err}",
+            package_dir.join("types.py").display()
         )
     });
 }
 
 fn write_real_helper_wrapper(
     path: &Path,
-    sdk_module_path: &Path,
+    sdk_root: &Path,
     scenario_path: &Path,
     scripted_responses: Option<&str>,
 ) {
-    let helper_rendered = embedded_claude_sdk_helper_path()
+    let python_rendered = python3_executable_path().replace('\'', r#"'\''"#);
+    let helper_rendered = embedded_claude_sdk_python_helper_path()
         .to_string_lossy()
         .replace('\'', r#"'\''"#);
-    let sdk_rendered = sdk_module_path.to_string_lossy().replace('\'', r#"'\''"#);
+    let sdk_rendered = sdk_root.to_string_lossy().replace('\'', r#"'\''"#);
     let scenario_rendered = scenario_path.to_string_lossy().replace('\'', r#"'\''"#);
     let scripted_export = scripted_responses.map_or_else(String::new, |responses| {
         format!(
@@ -412,7 +667,7 @@ fn write_real_helper_wrapper(
         )
     });
     let script = format!(
-        "#!/bin/sh\nexport LIBRA_CLAUDE_AGENT_SDK_MODULE='{sdk_rendered}'\nexport LIBRA_FAKE_CLAUDE_SDK_SCENARIO_PATH='{scenario_rendered}'\n{scripted_export}exec '/opt/homebrew/bin/node' '{helper_rendered}'\n"
+        "#!/bin/sh\nexport PYTHONPATH='{sdk_rendered}'${{PYTHONPATH:+\":$PYTHONPATH\"}}\nexport LIBRA_FAKE_CLAUDE_SDK_SCENARIO_PATH='{scenario_rendered}'\nexport ANTHROPIC_AUTH_TOKEN='test-token'\n{scripted_export}exec '{python_rendered}' '{helper_rendered}'\n"
     );
     fs::write(path, script)
         .unwrap_or_else(|err| panic!("failed to write helper wrapper '{}': {err}", path.display()));
@@ -433,8 +688,8 @@ fn write_fake_interactive_helper(
     scenario: &Value,
     scripted_responses: Option<&Value>,
 ) -> PathBuf {
-    let sdk_module_path = repo.join("fake-claude-agent-sdk.js");
-    write_fake_claude_agent_sdk_module(&sdk_module_path);
+    let sdk_root = repo.join("fake-claude-agent-sdk-python");
+    write_fake_claude_agent_sdk_python_package(&sdk_root);
 
     let scenario_path = repo.join("fake-claude-scenario.json");
     fs::write(
@@ -448,7 +703,7 @@ fn write_fake_interactive_helper(
         .map(|value| serde_json::to_string(value).expect("serialize scripted helper responses"));
     write_real_helper_wrapper(
         &helper_path,
-        &sdk_module_path,
+        &sdk_root,
         &scenario_path,
         scripted_responses.as_deref(),
     );
@@ -3204,63 +3459,6 @@ async fn test_claude_sdk_sync_sessions_keeps_history_in_current_repo_when_cwd_is
         !external_project.path().join(".libra/libra.db").exists(),
         "sync-sessions should not create a shadow Libra repo under the overridden cwd"
     );
-}
-
-#[test]
-fn test_claude_sdk_helper_resolves_project_local_sdk_from_relative_cwd() {
-    let repo = tempdir().expect("failed to create repo root");
-    let module_dir = repo
-        .path()
-        .join("node_modules")
-        .join("@anthropic-ai")
-        .join("claude-agent-sdk");
-    fs::create_dir_all(&module_dir).expect("failed to create fake sdk module directory");
-    fs::write(
-        module_dir.join("index.js"),
-        r#"exports.query = async function* () {};
-exports.listSessions = async () => ([{
-  sessionId: "session-relative",
-  summary: "Relative cwd session",
-  lastModified: 1742025600000,
-  cwd: process.cwd()
-}]);"#,
-    )
-    .expect("failed to write fake sdk module");
-
-    let helper_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join("internal")
-        .join("ai")
-        .join("providers")
-        .join("claude_sdk")
-        .join("helper.cjs");
-    let mut child = std::process::Command::new("node")
-        .arg(&helper_path)
-        .current_dir(repo.path())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("failed to spawn helper with node");
-
-    let request = br#"{"mode":"listSessions","cwd":".","offset":0,"includeWorktrees":true}"#;
-    child
-        .stdin
-        .as_mut()
-        .expect("child stdin should exist")
-        .write_all(request)
-        .expect("failed to send request to helper");
-    let output = child.wait_with_output().expect("failed to wait on helper");
-    assert!(
-        output.status.success(),
-        "helper should resolve project-local sdk from relative cwd: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let sync_json: Value =
-        serde_json::from_slice(&output.stdout).expect("helper stdout should be valid JSON");
-    assert_eq!(sync_json.as_array().map(Vec::len), Some(1));
-    assert_eq!(sync_json[0]["sessionId"], json!("session-relative"));
 }
 
 #[tokio::test]
@@ -6818,6 +7016,26 @@ async fn test_claude_sdk_full_family_plan_aware_snapshot_event_framework() {
     assert_eq!(plan_step_events.len(), real_plan_step_descriptions().len());
     assert_eq!(run_snapshots.len(), 1);
     assert_eq!(provenance_snapshots.len(), 1);
+
+    let rebridge = run_libra_command(
+        &[
+            "claude-sdk",
+            "bridge-run",
+            "--ai-session-id",
+            ai_session_id.as_str(),
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &rebridge,
+        "re-running bridge-run should remain idempotent for plan-step events",
+    );
+    let rebridge_plan_step_events = list_history_object_ids(repo.path(), "plan_step_event").await;
+    assert_eq!(
+        rebridge_plan_step_events.len(),
+        real_plan_step_descriptions().len(),
+        "bridge-run reruns should not duplicate derived plan_step_event objects"
+    );
 
     let intent_event_values = futures::future::join_all(
         intent_events
