@@ -5,11 +5,13 @@ use std::{
     io::Write,
     path::Path,
     str::FromStr,
+    time::Duration,
 };
 
 use bytes::BytesMut;
 use clap::Parser;
 use git_internal::{
+    errors::GitError,
     hash::{HashKind, ObjectHash, get_hash_kind},
     internal::{
         metadata::{EntryMeta, MetaAttached},
@@ -48,6 +50,9 @@ use crate::{
 };
 
 const ISSUE_URL: &str = "https://github.com/web3infra-foundation/libra/issues";
+
+/// Connection/idle timeout for push network operations (discovery, send-pack, receive-pack).
+const PUSH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Push local refs and objects to a remote repository.
 ///
@@ -224,10 +229,18 @@ impl From<PushError> for CliError {
             PushError::Network(..) => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::NetworkUnavailable)
                 .with_hint("check network connectivity and retry"),
-            PushError::LfsUploadFailed { oid, .. } => CliError::fatal(error.to_string())
-                .with_stable_code(StableErrorCode::NetworkUnavailable)
-                .with_hint("check LFS endpoint configuration")
-                .with_detail("oid", oid.clone()),
+            PushError::LfsUploadFailed { path, oid, .. } => {
+                let mut err = CliError::fatal(error.to_string())
+                    .with_stable_code(StableErrorCode::NetworkUnavailable)
+                    .with_hint("check LFS endpoint configuration");
+                if oid != "(unknown)" {
+                    err = err.with_detail("oid", oid.clone());
+                }
+                if path != "(unknown)" {
+                    err = err.with_detail("path", path.clone());
+                }
+                err
+            }
             PushError::TrackingRefUpdate(..) => {
                 CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
             }
@@ -296,6 +309,11 @@ struct ParsedRefspec {
 /// Empty src or dst (e.g. `:dst`, `src:`) is not supported.
 fn parse_refspec(refspec: &str) -> Result<ParsedRefspec, PushError> {
     if refspec.is_empty() {
+        return Err(PushError::InvalidRefspec(refspec.to_string()));
+    }
+
+    // Only 0 or 1 colon is valid; reject multi-colon forms like "a:b:c"
+    if refspec.matches(':').count() > 1 {
         return Err(PushError::InvalidRefspec(refspec.to_string()));
     }
 
@@ -410,32 +428,36 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
             }
         })?;
 
-    let discovery = remote_client
-        .discovery_reference(ReceivePack)
-        .await
-        .map_err(|e| {
-            let detail = e.to_string();
-            let lower = detail.to_lowercase();
-            if lower.contains("timeout") || lower.contains("timed out") {
-                PushError::Timeout {
-                    phase: "discovery".to_string(),
-                    seconds: 10,
-                }
-            } else if lower.contains("401")
-                || lower.contains("403")
-                || lower.contains("authentication")
-                || lower.contains("unauthorized")
-            {
-                PushError::AuthenticationFailed {
+    let discovery =
+        tokio::time::timeout(PUSH_TIMEOUT, remote_client.discovery_reference(ReceivePack))
+            .await
+            .map_err(|_| PushError::Timeout {
+                phase: "discovery".to_string(),
+                seconds: PUSH_TIMEOUT.as_secs(),
+            })?
+            .map_err(|e| match e {
+                GitError::UnAuthorized(_) => PushError::AuthenticationFailed {
                     url: repo_url.clone(),
+                },
+                GitError::NetworkError(detail) => {
+                    let lower = detail.to_lowercase();
+                    if lower.contains("timeout") || lower.contains("timed out") {
+                        PushError::Timeout {
+                            phase: "discovery".to_string(),
+                            seconds: PUSH_TIMEOUT.as_secs(),
+                        }
+                    } else {
+                        PushError::DiscoveryFailed {
+                            url: repo_url.clone(),
+                            detail,
+                        }
+                    }
                 }
-            } else {
-                PushError::DiscoveryFailed {
+                other => PushError::DiscoveryFailed {
                     url: repo_url.clone(),
-                    detail,
-                }
-            }
-        })?;
+                    detail: other.to_string(),
+                },
+            })?;
 
     let local_kind = get_hash_kind();
     if discovery.hash_kind != local_kind {
@@ -511,7 +533,7 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
 
     // Dry-run: compute what would be pushed but do not send
     if args.dry_run {
-        let objs = incremental_objs(
+        let result = incremental_objs(
             ObjectHash::from_str(&commit_hash).map_err(|_| {
                 PushError::ObjectCollection(format!("invalid commit hash: {commit_hash}"))
             })?,
@@ -519,6 +541,7 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
                 PushError::ObjectCollection(format!("invalid remote hash: {remote_hash}"))
             })?,
         );
+        warnings.extend(result.warnings);
         return Ok(PushOutput {
             remote: repository.clone(),
             url: repo_url,
@@ -529,7 +552,7 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
                 new_oid: commit_hash,
                 forced: is_forced,
             }],
-            objects_pushed: objs.len(),
+            objects_pushed: result.objs.len(),
             bytes_pushed: 0,
             lfs_files_uploaded: 0,
             dry_run: true,
@@ -552,7 +575,7 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
     data.extend_from_slice(b"0000");
     tracing::debug!("{:?}", data);
 
-    let objs = incremental_objs(
+    let obj_result = incremental_objs(
         ObjectHash::from_str(&commit_hash).map_err(|_| {
             PushError::ObjectCollection(format!("invalid commit hash: {commit_hash}"))
         })?,
@@ -560,24 +583,26 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
             PushError::ObjectCollection(format!("invalid remote hash: {remote_hash}"))
         })?,
     );
+    let objs = obj_result.objs;
+    warnings.extend(obj_result.warnings);
 
     // Upload LFS files (only for HTTP remotes)
-    let lfs_files_uploaded = 0;
+    let mut lfs_files_uploaded = 0;
     if !is_ssh {
         let url = Url::parse(&repo_url).map_err(|e| PushError::InvalidRemoteUrl {
             url: repo_url.clone(),
             detail: e.to_string(),
         })?;
         let lfs_client = crate::internal::protocol::lfs_client::LFSClient::from_url(&url);
-        lfs_client
-            .push_objects(&objs)
-            .await
-            .map_err(|()| PushError::LfsUploadFailed {
-                path: String::new(),
-                oid: String::new(),
-                detail: "LFS upload failed".to_string(),
-            })?;
-        // TODO: track actual LFS file count from push_objects
+        lfs_files_uploaded =
+            lfs_client
+                .push_objects(&objs)
+                .await
+                .map_err(|error| PushError::LfsUploadFailed {
+                    path: error.path.unwrap_or_else(|| "(unknown)".to_string()),
+                    oid: error.oid.unwrap_or_else(|| "(unknown)".to_string()),
+                    detail: error.detail,
+                })?;
     }
 
     let obj_count = objs.len();
@@ -622,13 +647,17 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
     let bytes_pushed = pack_data.len() as u64;
     data.extend_from_slice(&pack_data);
 
-    // Send pack via the appropriate transport
+    // Send pack via the appropriate transport (with timeout)
     match &remote_client {
         RemoteClient::Ssh(ssh_client) => {
-            let response_bytes = ssh_client
-                .send_pack(data.freeze())
-                .await
-                .map_err(|e| PushError::Network(format!("SSH send_pack failed: {e}")))?;
+            let response_bytes =
+                tokio::time::timeout(PUSH_TIMEOUT, ssh_client.send_pack(data.freeze()))
+                    .await
+                    .map_err(|_| PushError::Timeout {
+                        phase: "send-pack".to_string(),
+                        seconds: PUSH_TIMEOUT.as_secs(),
+                    })?
+                    .map_err(|e| PushError::Network(format!("SSH send_pack failed: {e}")))?;
             let mut response_data = response_bytes;
             let (_, pkt_line) = read_pkt_line(&mut response_data);
             if pkt_line != "unpack ok\n" {
@@ -644,9 +673,12 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
             }
         }
         RemoteClient::Http(http_client) => {
-            let res = http_client
-                .send_pack(data.freeze())
+            let res = tokio::time::timeout(PUSH_TIMEOUT, http_client.send_pack(data.freeze()))
                 .await
+                .map_err(|_| PushError::Timeout {
+                    phase: "send-pack".to_string(),
+                    seconds: PUSH_TIMEOUT.as_secs(),
+                })?
                 .map_err(|e| PushError::Network(format!("failed to send pack data: {e}")))?;
             if res.status() != 200 {
                 return Err(PushError::Network(format!(
@@ -654,9 +686,12 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
                     res.status()
                 )));
             }
-            let mut data = res
-                .bytes()
+            let mut data = tokio::time::timeout(PUSH_TIMEOUT, res.bytes())
                 .await
+                .map_err(|_| PushError::Timeout {
+                    phase: "receive-pack".to_string(),
+                    seconds: PUSH_TIMEOUT.as_secs(),
+                })?
                 .map_err(|e| PushError::Network(format!("failed to read server response: {e}")))?;
             let (_, pkt_line) = read_pkt_line(&mut data);
             if pkt_line != "unpack ok\n" {
@@ -1019,14 +1054,26 @@ fn collect_history_commits(commit_id: &ObjectHash) -> HashSet<ObjectHash> {
     commits
 }
 
-fn incremental_objs(local_ref: ObjectHash, remote_ref: ObjectHash) -> HashSet<Entry> {
+/// Collected objects and any warnings emitted during object traversal.
+struct IncrementalObjsResult {
+    objs: HashSet<Entry>,
+    warnings: Vec<String>,
+}
+
+fn incremental_objs(local_ref: ObjectHash, remote_ref: ObjectHash) -> IncrementalObjsResult {
     tracing::debug!("local_ref: {}, remote_ref: {}", local_ref, remote_ref);
+
+    let empty = IncrementalObjsResult {
+        objs: HashSet::new(),
+        warnings: vec![],
+    };
+    let mut warnings = Vec::new();
 
     let zero_oid = zero_object_hash();
     if remote_ref != zero_oid {
         let mut commit = match Commit::try_load(&local_ref) {
             Some(c) => c,
-            None => return HashSet::new(),
+            None => return empty,
         };
         let mut commits = Vec::new();
         let mut ok = true;
@@ -1058,7 +1105,7 @@ fn incremental_objs(local_ref: ObjectHash, remote_ref: ObjectHash) -> HashSet<En
                             "Commit {} became inaccessible during push (fast-forward object collection)",
                             commits[i]
                         );
-                        return HashSet::new();
+                        return empty;
                     }
                 };
                 let old_tree = old_commit.tree_id;
@@ -1069,13 +1116,17 @@ fn incremental_objs(local_ref: ObjectHash, remote_ref: ObjectHash) -> HashSet<En
                             "Commit {} became inaccessible during push (fast-forward object collection)",
                             commits[i + 1]
                         );
-                        return HashSet::new();
+                        return empty;
                     }
                 };
-                objs.extend(diff_tree_objs(Some(&old_tree), &new_commit.tree_id));
+                objs.extend(diff_tree_objs(
+                    Some(&old_tree),
+                    &new_commit.tree_id,
+                    &mut warnings,
+                ));
                 objs.insert(new_commit.into());
             }
-            return objs;
+            return IncrementalObjsResult { objs, warnings };
         }
     }
 
@@ -1108,7 +1159,11 @@ fn incremental_objs(local_ref: ObjectHash, remote_ref: ObjectHash) -> HashSet<En
                 None => continue,
             };
             let parent_tree = parent_commit.tree_id;
-            objs.extend(diff_tree_objs(Some(&parent_tree), &commit.tree_id));
+            objs.extend(diff_tree_objs(
+                Some(&parent_tree),
+                &commit.tree_id,
+                &mut warnings,
+            ));
             if !exist_commits.contains(parent) && !visit.contains(parent) {
                 queue.push_back(*parent);
                 visit.insert(*parent);
@@ -1122,11 +1177,11 @@ fn incremental_objs(local_ref: ObjectHash, remote_ref: ObjectHash) -> HashSet<En
     // root commit has no parent
     if let Some(root_commit) = root_commit {
         let root_tree = Commit::load(&root_commit).tree_id;
-        objs.extend(diff_tree_objs(None, &root_tree));
+        objs.extend(diff_tree_objs(None, &root_tree, &mut warnings));
     }
 
     tracing::debug!("counting objects: {} done", objs.len());
-    objs
+    IncrementalObjsResult { objs, warnings }
 }
 
 fn zero_object_hash() -> ObjectHash {
@@ -1174,7 +1229,15 @@ fn is_ancestor(ancestor: &ObjectHash, descendant: &ObjectHash) -> bool {
 }
 
 /// calc objects that in `new_tree` but not in `old_tree`
-fn diff_tree_objs(old_tree: Option<&ObjectHash>, new_tree: &ObjectHash) -> HashSet<Entry> {
+///
+/// Warnings (e.g. unsupported submodule entries) are collected into `warnings`
+/// instead of being emitted directly, so callers can render them under
+/// `OutputConfig` control without polluting stderr in JSON/machine mode.
+fn diff_tree_objs(
+    old_tree: Option<&ObjectHash>,
+    new_tree: &ObjectHash,
+    warnings: &mut Vec<String>,
+) -> HashSet<Entry> {
     let mut objs = HashSet::new();
     if let Some(old_tree) = old_tree
         && old_tree == new_tree
@@ -1200,11 +1263,11 @@ fn diff_tree_objs(old_tree: Option<&ObjectHash>, new_tree: &ObjectHash) -> HashS
         if !old_items.contains(&item.id) {
             match item.mode {
                 TreeItemMode::Tree => {
-                    objs.extend(diff_tree_objs(None, &item.id));
+                    objs.extend(diff_tree_objs(None, &item.id, warnings));
                 }
                 _ => {
                     if item.mode == TreeItemMode::Commit {
-                        emit_warning("submodule is not supported yet");
+                        warnings.push("submodule is not supported yet".to_string());
                     }
                     let blob = Blob::load(&item.id);
                     objs.insert(blob.into());
@@ -1350,6 +1413,13 @@ mod test {
     #[test]
     fn test_parse_refspec_empty_dst_rejected() {
         assert!(parse_refspec("src:").is_err());
+    }
+
+    #[test]
+    fn test_parse_refspec_multi_colon_rejected() {
+        assert!(parse_refspec("a:b:c").is_err());
+        assert!(parse_refspec("a::b").is_err());
+        assert!(parse_refspec(":a:b").is_err());
     }
 
     #[test]
