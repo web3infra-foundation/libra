@@ -109,6 +109,7 @@ base64 = "0.22.1"
 
 [target.'cfg(unix)'.dependencies] # only on Unix
 pager = "0.16.1"
+libc = "0.2"
 
 [dev-dependencies]
 serial_test = { version = "3.4.0", default-features = false, features = ["async"] }

@@ -3234,6 +3234,7 @@ dependencies = [
  "indicatif",
  "infer",
  "lazy_static",
+ "libc",
  "libvault",
  "lru-mem",
  "mime_guess",

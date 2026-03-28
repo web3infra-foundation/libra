@@ -10,6 +10,7 @@ pub mod replan;
 pub mod run_state;
 pub mod types;
 pub mod verifier;
+mod workspace;
 
 use std::sync::Arc;
 
