@@ -1957,12 +1957,14 @@ async fn execute_managed_streaming_turn(
                     if let Err(error) =
                         sync_incremental_managed_inputs(storage_path, &outcome).await
                     {
-                        persistence_warnings.push(format!("incremental managed inputs: {error}"));
+                        let _ = error;
+                        persistence_warnings.push("incremental managed inputs failed".to_string());
                     }
                     latest_persisted_outcome = Some(outcome);
                 }
                 Err(error) => {
-                    persistence_warnings.push(format!("incremental artifact persist: {error}"))
+                    let _ = error;
+                    persistence_warnings.push("incremental artifact persist failed".to_string())
                 }
             }
             final_artifact = Some(artifact);
@@ -1976,13 +1978,15 @@ async fn execute_managed_streaming_turn(
                     if let Err(error) =
                         sync_incremental_managed_inputs(storage_path, &outcome).await
                     {
-                        persistence_warnings.push(format!("incremental managed inputs: {error}"));
+                        let _ = error;
+                        persistence_warnings.push("incremental managed inputs failed".to_string());
                     }
                     latest_persisted_outcome = Some(outcome);
                 }
                 Err(error) => {
                     if !ignore_incomplete_runtime_snapshot_error(&error) {
-                        persistence_warnings.push(format!("incremental artifact persist: {error}"));
+                        persistence_warnings
+                            .push("incremental artifact persist failed".to_string());
                     }
                 }
             }
@@ -2018,7 +2022,8 @@ async fn execute_managed_streaming_turn(
     } else {
         let outcome = persist_managed_artifact(storage_path, &artifact).await?;
         if let Err(error) = sync_incremental_managed_inputs(storage_path, &outcome).await {
-            persistence_warnings.push(format!("incremental managed inputs: {error}"));
+            let _ = error;
+            persistence_warnings.push("incremental managed inputs failed".to_string());
         }
         outcome
     };
@@ -2272,12 +2277,18 @@ async fn auto_finalize_streaming_turn(
                 Ok(intent_result) => {
                     summary.intent_id = Some(intent_result.intent_id);
                 }
-                Err(error) => summary.warnings.push(format!("persist-intent: {error}")),
+                Err(error) => {
+                    let _ = error;
+                    summary.warnings.push(
+                        "persist-intent failed; rerun persist-intent for details".to_string(),
+                    );
+                }
             }
         } else if let Err(error) = resolve_result {
-            summary
-                .warnings
-                .push(format!("resolve-extraction: {error}"));
+            let _ = error;
+            summary.warnings.push(
+                "resolve-extraction failed; rerun resolve-extraction for details".to_string(),
+            );
         }
     }
 
@@ -2305,7 +2316,10 @@ async fn auto_finalize_streaming_turn(
                 summary.run_id = Some(bridge_result.binding.run_id);
             }
             Err(error) => {
-                summary.warnings.push(format!("bridge-run: {error}"));
+                let _ = error;
+                summary
+                    .warnings
+                    .push("bridge-run failed; rerun bridge-run for details".to_string());
                 return summary;
             }
         }
@@ -2358,9 +2372,10 @@ async fn auto_finalize_streaming_turn(
                     )
                     .await
                     {
+                        let _ = error;
                         summary
                             .warnings
-                            .push(format!("build-managed-evidence-input: {error}"));
+                            .push("build-managed-evidence-input failed; rerun build-managed-evidence-input for details".to_string());
                     }
                 }
             }
@@ -2378,7 +2393,9 @@ async fn auto_finalize_streaming_turn(
         }
         Err(error) => {
             if !error.to_string().contains("contains no touched files") {
-                summary.warnings.push(format!("persist-patchset: {error}"));
+                summary.warnings.push(
+                    "persist-patchset failed; rerun persist-patchset for details".to_string(),
+                );
             }
         }
     }
@@ -2390,7 +2407,10 @@ async fn auto_finalize_streaming_turn(
     {
         Ok(_result) => {}
         Err(error) => {
-            summary.warnings.push(format!("persist-evidence: {error}"));
+            let _ = error;
+            summary
+                .warnings
+                .push("persist-evidence failed; rerun persist-evidence for details".to_string());
             return summary;
         }
     }
@@ -2423,9 +2443,11 @@ async fn auto_finalize_streaming_turn(
             )
             .await
             {
-                summary
-                    .warnings
-                    .push(format!("build-decision-input: {error}"));
+                let _ = error;
+                summary.warnings.push(
+                    "build-decision-input failed; rerun build-decision-input for details"
+                        .to_string(),
+                );
             }
         }
     }
