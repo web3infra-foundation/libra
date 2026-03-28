@@ -11,7 +11,13 @@ use crate::{command::calc_file_blob_hash, utils::util};
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct WorkspaceSnapshot {
-    pub(crate) files: BTreeMap<PathBuf, ObjectHash>,
+    pub(crate) entries: BTreeMap<PathBuf, WorkspaceEntry>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum WorkspaceEntry {
+    File(ObjectHash),
+    Symlink(PathBuf),
 }
 
 pub(crate) struct TaskWorktree {
@@ -58,8 +64,8 @@ pub(crate) fn sync_task_worktree_back(
     let changed_paths = changed_paths_since_baseline(baseline, &task_snapshot);
 
     for rel_path in &changed_paths {
-        let expected = baseline.files.get(rel_path).copied();
-        let actual = file_hash_if_exists(&main_working_dir.join(rel_path))?;
+        let expected = baseline.entries.get(rel_path).cloned();
+        let actual = workspace_entry_if_exists(&main_working_dir.join(rel_path))?;
         if actual != expected {
             return Err(io::Error::other(format!(
                 "main workspace changed concurrently at '{}'",
@@ -69,10 +75,10 @@ pub(crate) fn sync_task_worktree_back(
     }
 
     for rel_path in changed_paths {
-        if task_snapshot.files.contains_key(&rel_path) {
-            copy_workspace_file(task_worktree_dir, main_working_dir, &rel_path)?;
+        if task_snapshot.entries.contains_key(&rel_path) {
+            copy_workspace_entry(task_worktree_dir, main_working_dir, &rel_path)?;
         } else {
-            remove_workspace_file(main_working_dir, &rel_path)?;
+            remove_workspace_entry(main_working_dir, &rel_path)?;
         }
     }
 
@@ -83,7 +89,7 @@ fn snapshot_workspace(root: &Path) -> io::Result<WorkspaceSnapshot> {
     fn visit_dir(
         root: &Path,
         dir: &Path,
-        files: &mut BTreeMap<PathBuf, ObjectHash>,
+        entries: &mut BTreeMap<PathBuf, WorkspaceEntry>,
     ) -> io::Result<()> {
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
@@ -92,9 +98,9 @@ fn snapshot_workspace(root: &Path) -> io::Result<WorkspaceSnapshot> {
             }
 
             let path = entry.path();
-            let metadata = fs::metadata(&path)?;
-            if metadata.is_dir() {
-                visit_dir(root, &path, files)?;
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                visit_dir(root, &path, entries)?;
                 continue;
             }
 
@@ -102,14 +108,14 @@ fn snapshot_workspace(root: &Path) -> io::Result<WorkspaceSnapshot> {
                 .strip_prefix(root)
                 .map_err(|err| io::Error::other(err.to_string()))?
                 .to_path_buf();
-            files.insert(rel, calc_file_blob_hash(&path)?);
+            entries.insert(rel, snapshot_entry(&path, &file_type)?);
         }
         Ok(())
     }
 
-    let mut files = BTreeMap::new();
-    visit_dir(root, root, &mut files)?;
-    Ok(WorkspaceSnapshot { files })
+    let mut entries = BTreeMap::new();
+    visit_dir(root, root, &mut entries)?;
+    Ok(WorkspaceSnapshot { entries })
 }
 
 fn materialize_workspace(
@@ -117,8 +123,8 @@ fn materialize_workspace(
     target_root: &Path,
     snapshot: &WorkspaceSnapshot,
 ) -> io::Result<()> {
-    for rel_path in snapshot.files.keys() {
-        copy_workspace_file(source_root, target_root, rel_path)?;
+    for rel_path in snapshot.entries.keys() {
+        copy_workspace_entry(source_root, target_root, rel_path)?;
     }
     Ok(())
 }
@@ -128,52 +134,69 @@ fn changed_paths_since_baseline(
     current: &WorkspaceSnapshot,
 ) -> Vec<PathBuf> {
     let paths = baseline
-        .files
+        .entries
         .keys()
-        .chain(current.files.keys())
+        .chain(current.entries.keys())
         .cloned()
         .collect::<BTreeSet<_>>();
 
     paths
         .into_iter()
-        .filter(|path| baseline.files.get(path) != current.files.get(path))
+        .filter(|path| baseline.entries.get(path) != current.entries.get(path))
         .collect()
 }
 
-fn file_hash_if_exists(path: &Path) -> io::Result<Option<ObjectHash>> {
-    if !path.exists() {
-        return Ok(None);
+fn snapshot_entry(path: &Path, file_type: &fs::FileType) -> io::Result<WorkspaceEntry> {
+    if file_type.is_symlink() {
+        return Ok(WorkspaceEntry::Symlink(fs::read_link(path)?));
     }
-    Ok(Some(calc_file_blob_hash(path)?))
+
+    Ok(WorkspaceEntry::File(calc_file_blob_hash(path)?))
 }
 
-fn copy_workspace_file(source_root: &Path, target_root: &Path, rel_path: &Path) -> io::Result<()> {
+fn workspace_entry_if_exists(path: &Path) -> io::Result<Option<WorkspaceEntry>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => snapshot_entry(path, &metadata.file_type()).map(Some),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+fn copy_workspace_entry(source_root: &Path, target_root: &Path, rel_path: &Path) -> io::Result<()> {
     let source = source_root.join(rel_path);
     let target = target_root.join(rel_path);
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)?;
     }
+
+    let source_metadata = fs::symlink_metadata(&source)?;
+    if source_metadata.file_type().is_symlink() {
+        copy_symlink(&source, &target)?;
+        return Ok(());
+    }
+
     clone_or_copy_file(&source, &target)?;
-    let permissions = fs::metadata(&source)?.permissions();
-    fs::set_permissions(&target, permissions)?;
+    fs::set_permissions(&target, source_metadata.permissions())?;
     Ok(())
 }
 
 fn clone_or_copy_file(source: &Path, target: &Path) -> io::Result<()> {
-    if target.exists() {
-        fs::remove_file(target)?;
-    }
+    remove_existing_target(target)?;
 
     match try_clone_file_cow(source, target) {
         Ok(()) => Ok(()),
         Err(_) => {
-            if target.exists() {
-                let _ = fs::remove_file(target);
-            }
+            let _ = remove_existing_target(target);
             fs::copy(source, target)?;
             Ok(())
         }
     }
+}
+
+fn copy_symlink(source: &Path, target: &Path) -> io::Result<()> {
+    remove_existing_target(target)?;
+    let link_target = fs::read_link(source)?;
+    create_symlink(&link_target, source, target)
 }
 
 #[cfg(target_os = "macos")]
@@ -243,13 +266,28 @@ fn try_clone_file_cow(_source: &Path, _target: &Path) -> io::Result<()> {
     ))
 }
 
-fn remove_workspace_file(root: &Path, rel_path: &Path) -> io::Result<()> {
+fn remove_workspace_entry(root: &Path, rel_path: &Path) -> io::Result<()> {
     let target = root.join(rel_path);
-    if target.exists() {
-        fs::remove_file(&target)?;
-        remove_empty_parents(root, target.parent());
+    match fs::symlink_metadata(&target) {
+        Ok(_) => {
+            remove_existing_target(&target)?;
+            remove_empty_parents(root, target.parent());
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
     }
     Ok(())
+}
+
+fn remove_existing_target(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {
+            fs::remove_dir_all(path)
+        }
+        Ok(_) => fs::remove_file(path),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
 }
 
 fn remove_empty_parents(root: &Path, mut current: Option<&Path>) {
@@ -277,16 +315,49 @@ fn create_storage_link(storage: &Path, link_path: &Path) -> io::Result<()> {
     std::os::unix::fs::symlink(storage, link_path)
 }
 
+#[cfg(unix)]
+fn create_symlink(link_target: &Path, _source: &Path, link_path: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(link_target, link_path)
+}
+
 #[cfg(windows)]
 fn create_storage_link(storage: &Path, link_path: &Path) -> io::Result<()> {
     std::os::windows::fs::symlink_dir(storage, link_path)
 }
 
+#[cfg(windows)]
+fn create_symlink(link_target: &Path, source: &Path, link_path: &Path) -> io::Result<()> {
+    match fs::metadata(source) {
+        Ok(metadata) if metadata.is_dir() => {
+            std::os::windows::fs::symlink_dir(link_target, link_path)
+        }
+        _ => std::os::windows::fs::symlink_file(link_target, link_path),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::{io, path::PathBuf};
+
     use tempfile::tempdir;
 
-    use super::clone_or_copy_file;
+    use super::{
+        WorkspaceEntry, clone_or_copy_file, materialize_workspace, snapshot_workspace,
+        sync_task_worktree_back,
+    };
+
+    #[cfg(unix)]
+    fn symlink_path(target: &std::path::Path, link: &std::path::Path) -> io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    #[cfg(windows)]
+    fn symlink_path(target: &std::path::Path, link: &std::path::Path) -> io::Result<()> {
+        match std::fs::metadata(target) {
+            Ok(metadata) if metadata.is_dir() => std::os::windows::fs::symlink_dir(target, link),
+            _ => std::os::windows::fs::symlink_file(target, link),
+        }
+    }
 
     #[test]
     fn clone_or_copy_file_preserves_contents() {
@@ -298,5 +369,66 @@ mod tests {
         clone_or_copy_file(&source, &target).unwrap();
 
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "cow me maybe\n");
+    }
+
+    #[test]
+    fn snapshot_records_directory_symlink_without_recursing() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("root");
+        let external = temp.path().join("external");
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("secret.txt"), "outside\n").unwrap();
+        symlink_path(&external, &root.join("nested").join("external-link")).unwrap();
+
+        let snapshot = snapshot_workspace(&root).unwrap();
+
+        assert_eq!(
+            snapshot
+                .entries
+                .get(std::path::Path::new("nested/external-link")),
+            Some(&WorkspaceEntry::Symlink(external))
+        );
+        assert!(
+            !snapshot
+                .entries
+                .contains_key(std::path::Path::new("nested/external-link/secret.txt"))
+        );
+    }
+
+    #[test]
+    fn materialize_and_sync_preserve_symlink_entries() {
+        let temp = tempdir().unwrap();
+        let main = temp.path().join("main");
+        let task = temp.path().join("task");
+        std::fs::create_dir_all(&main).unwrap();
+        std::fs::write(main.join("target.txt"), "base\n").unwrap();
+        symlink_path(std::path::Path::new("target.txt"), &main.join("link.txt")).unwrap();
+
+        let baseline = snapshot_workspace(&main).unwrap();
+        std::fs::create_dir_all(&task).unwrap();
+        materialize_workspace(&main, &task, &baseline).unwrap();
+        assert!(
+            std::fs::symlink_metadata(task.join("link.txt"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+
+        std::fs::remove_file(task.join("link.txt")).unwrap();
+        symlink_path(std::path::Path::new("updated.txt"), &task.join("link.txt")).unwrap();
+
+        sync_task_worktree_back(&main, &task, &baseline).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(main.join("link.txt"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_link(main.join("link.txt")).unwrap(),
+            PathBuf::from("updated.txt")
+        );
     }
 }
