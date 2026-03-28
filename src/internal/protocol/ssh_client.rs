@@ -3,7 +3,7 @@
 //! Supports both `ssh://[user@]host[:port]/path` and `user@host:path` URL formats.
 //! Uses the vault-generated SSH private key for authentication when available.
 
-use std::io::Error as IoError;
+use std::{io::Error as IoError, time::Duration};
 
 use bytes::{Bytes, BytesMut};
 use futures_util::stream::StreamExt;
@@ -18,6 +18,11 @@ use super::{
 use crate::git_protocol::ServiceType;
 
 const DEFAULT_SSH_PORT: u16 = 22;
+
+/// Idle timeout for SSH I/O operations. Triggers when a single read/write or
+/// process-wait call makes no progress for this duration. As long as data keeps
+/// flowing the timer resets — large transfers are not penalized.
+const SSH_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct SshClient {
     user: String,
@@ -148,13 +153,24 @@ impl SshClient {
     }
 
     /// Read pkt-line advertisement from the SSH child's stdout.
+    ///
+    /// Each individual `read_exact` call is wrapped with [`SSH_IDLE_TIMEOUT`] so
+    /// a stalled remote triggers a timely error instead of blocking forever.
     async fn read_advertisement(
         stdout: &mut tokio::process::ChildStdout,
     ) -> Result<Bytes, IoError> {
         let mut buf = BytesMut::new();
         loop {
             let mut len_buf = [0u8; 4];
-            stdout.read_exact(&mut len_buf).await?;
+            tokio::time::timeout(SSH_IDLE_TIMEOUT, stdout.read_exact(&mut len_buf))
+                .await
+                .map_err(|_| {
+                    IoError::other(format!(
+                        "SSH read timed out after {}s (idle)",
+                        SSH_IDLE_TIMEOUT.as_secs()
+                    ))
+                })?
+                .map_err(|e| IoError::other(format!("SSH read failed: {e}")))?;
             let len_str = std::str::from_utf8(&len_buf)
                 .map_err(|e| IoError::other(format!("invalid pkt-line length: {e}")))?;
             let len = usize::from_str_radix(len_str, 16)
@@ -164,7 +180,15 @@ impl SshClient {
                 break;
             }
             let mut data = vec![0u8; len - 4];
-            stdout.read_exact(&mut data).await?;
+            tokio::time::timeout(SSH_IDLE_TIMEOUT, stdout.read_exact(&mut data))
+                .await
+                .map_err(|_| {
+                    IoError::other(format!(
+                        "SSH read timed out after {}s (idle)",
+                        SSH_IDLE_TIMEOUT.as_secs()
+                    ))
+                })?
+                .map_err(|e| IoError::other(format!("SSH read failed: {e}")))?;
             buf.extend_from_slice(&data);
         }
         Ok(buf.freeze())
@@ -345,15 +369,40 @@ impl SshClient {
             )));
         }
 
-        // Send the pack data
+        // Send the pack data (with idle timeout on write)
         let stdin = child
             .stdin
             .as_mut()
             .ok_or_else(|| IoError::other("SSH child stdin not captured"))?;
-        stdin.write_all(&data).await?;
-        stdin.shutdown().await?;
+        tokio::time::timeout(SSH_IDLE_TIMEOUT, stdin.write_all(&data))
+            .await
+            .map_err(|_| {
+                IoError::other(format!(
+                    "SSH write timed out after {}s (idle)",
+                    SSH_IDLE_TIMEOUT.as_secs()
+                ))
+            })?
+            .map_err(|e| IoError::other(format!("SSH write failed: {e}")))?;
+        tokio::time::timeout(SSH_IDLE_TIMEOUT, stdin.shutdown())
+            .await
+            .map_err(|_| {
+                IoError::other(format!(
+                    "SSH shutdown timed out after {}s (idle)",
+                    SSH_IDLE_TIMEOUT.as_secs()
+                ))
+            })?
+            .map_err(|e| IoError::other(format!("SSH shutdown failed: {e}")))?;
 
-        let output = child.wait_with_output().await?;
+        // Wait for remote to process the pack (with idle timeout)
+        let output = tokio::time::timeout(SSH_IDLE_TIMEOUT, child.wait_with_output())
+            .await
+            .map_err(|_| {
+                IoError::other(format!(
+                    "SSH receive-pack timed out after {}s (idle)",
+                    SSH_IDLE_TIMEOUT.as_secs()
+                ))
+            })?
+            .map_err(|e| IoError::other(format!("SSH wait failed: {e}")))?;
         if !output.status.success() {
             return Err(IoError::other(format!(
                 "SSH receive-pack failed: {}",

@@ -13,6 +13,7 @@ use libra::{
     internal::{db::get_db_conn_instance, reflog::Reflog},
     utils::test::ChangeDirGuard,
 };
+use serde_json::Value;
 use serial_test::serial;
 use tempfile::TempDir;
 use tokio::{process::Command as TokioCommand, time::timeout};
@@ -92,6 +93,69 @@ fn configure_local_identity(repo: &Path) {
         email_out.status.success(),
         "failed to configure user.email: {}",
         String::from_utf8_lossy(&email_out.stderr)
+    );
+}
+
+#[cfg(unix)]
+fn init_local_repo_with_commit(local_dir: &Path, file_name: &str, content: &str, message: &str) {
+    fs::create_dir_all(local_dir).expect("failed to create local dir");
+    let init_out = libra_command(local_dir)
+        .args(["init"])
+        .output()
+        .expect("failed to init local libra repo");
+    assert!(
+        init_out.status.success(),
+        "local init failed: {}",
+        String::from_utf8_lossy(&init_out.stderr)
+    );
+    configure_local_identity(local_dir);
+
+    fs::write(local_dir.join(file_name), content).expect("failed to write file");
+    let add_out = libra_command(local_dir)
+        .args(["add", file_name])
+        .output()
+        .expect("failed to add file");
+    assert!(
+        add_out.status.success(),
+        "add failed: {}",
+        String::from_utf8_lossy(&add_out.stderr)
+    );
+    let commit_out = libra_command(local_dir)
+        .args(["commit", "-m", message])
+        .output()
+        .expect("failed to commit");
+    assert!(
+        commit_out.status.success(),
+        "commit failed: {}",
+        String::from_utf8_lossy(&commit_out.stderr)
+    );
+}
+
+#[cfg(unix)]
+fn current_branch_name(repo: &Path) -> String {
+    String::from_utf8(
+        libra_command(repo)
+            .args(["branch", "--show-current"])
+            .output()
+            .expect("failed to read current branch")
+            .stdout,
+    )
+    .expect("branch name not utf8")
+    .trim()
+    .to_string()
+}
+
+#[cfg(unix)]
+fn add_fake_ssh_remote(repo: &Path, remote_dir: &Path) {
+    let ssh_remote = format!("git@fakehost:{}", remote_dir.to_string_lossy());
+    let remote_add_out = libra_command(repo)
+        .args(["remote", "add", "origin", &ssh_remote])
+        .output()
+        .expect("failed to add ssh remote");
+    assert!(
+        remote_add_out.status.success(),
+        "remote add failed: {}",
+        String::from_utf8_lossy(&remote_add_out.stderr)
     );
 }
 
@@ -243,7 +307,7 @@ async fn test_push_file_remote_fails_without_reflog() {
         .expect("push");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("pushing to local file repositories is not yet supported"),
+        stderr.contains("pushing to local file repositories is not supported"),
         "stderr should mention unsupported file:// push, got: {stderr}"
     );
 
@@ -479,6 +543,428 @@ async fn test_push_force_with_local_changes() {
 }
 
 #[cfg(unix)]
+#[test]
+#[serial]
+fn test_push_explicit_refspec_uses_destination_branch_name() {
+    let temp_root = tempfile::tempdir().expect("failed to create temp root");
+    let remote_dir = temp_root.path().join("remote.git");
+    let local_dir = temp_root.path().join("local");
+    let ssh_script = create_fake_ssh_script(temp_root.path());
+
+    assert!(
+        Command::new("git")
+            .args(["init", "--bare", remote_dir.to_str().unwrap()])
+            .status()
+            .expect("failed to init bare remote")
+            .success()
+    );
+
+    init_local_repo_with_commit(
+        &local_dir,
+        "tracked.txt",
+        "initial content",
+        "initial commit",
+    );
+    add_fake_ssh_remote(&local_dir, &remote_dir);
+
+    let feature_out = libra_command(&local_dir)
+        .args(["branch", "feature"])
+        .output()
+        .expect("failed to create feature branch");
+    assert!(
+        feature_out.status.success(),
+        "feature branch creation failed: {}",
+        String::from_utf8_lossy(&feature_out.stderr)
+    );
+    let release_out = libra_command(&local_dir)
+        .args(["branch", "release"])
+        .output()
+        .expect("failed to create release branch");
+    assert!(
+        release_out.status.success(),
+        "release branch creation failed: {}",
+        String::from_utf8_lossy(&release_out.stderr)
+    );
+
+    let set_remote_out = libra_command(&local_dir)
+        .args(["config", "branch.release.remote", "origin"])
+        .output()
+        .expect("failed to configure branch.release.remote");
+    assert!(
+        set_remote_out.status.success(),
+        "config branch.release.remote failed: {}",
+        String::from_utf8_lossy(&set_remote_out.stderr)
+    );
+    let set_merge_out = libra_command(&local_dir)
+        .args(["config", "branch.release.merge", "refs/heads/stable"])
+        .output()
+        .expect("failed to configure branch.release.merge");
+    assert!(
+        set_merge_out.status.success(),
+        "config branch.release.merge failed: {}",
+        String::from_utf8_lossy(&set_merge_out.stderr)
+    );
+
+    let push_out = libra_command(&local_dir)
+        .env("LIBRA_SSH_COMMAND", &ssh_script)
+        .args(["push", "origin", "feature:release"])
+        .output()
+        .expect("failed to push explicit refspec");
+    assert!(
+        push_out.status.success(),
+        "explicit refspec push failed: {}",
+        String::from_utf8_lossy(&push_out.stderr)
+    );
+
+    let release_ref_out = Command::new("git")
+        .args([
+            "--git-dir",
+            remote_dir.to_str().unwrap(),
+            "rev-parse",
+            "refs/heads/release",
+        ])
+        .output()
+        .expect("failed to read remote release ref");
+    assert!(
+        release_ref_out.status.success(),
+        "remote release ref should exist, stderr: {}",
+        String::from_utf8_lossy(&release_ref_out.stderr)
+    );
+
+    let stable_ref_out = Command::new("git")
+        .args([
+            "--git-dir",
+            remote_dir.to_str().unwrap(),
+            "rev-parse",
+            "refs/heads/stable",
+        ])
+        .output()
+        .expect("failed to read remote stable ref");
+    assert!(
+        !stable_ref_out.status.success(),
+        "explicit feature:release push should not create refs/heads/stable"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn test_push_json_with_set_upstream_keeps_structured_output_clean() {
+    let temp_root = tempfile::tempdir().expect("failed to create temp root");
+    let remote_dir = temp_root.path().join("remote.git");
+    let local_dir = temp_root.path().join("local");
+    let ssh_script = create_fake_ssh_script(temp_root.path());
+
+    assert!(
+        Command::new("git")
+            .args(["init", "--bare", remote_dir.to_str().unwrap()])
+            .status()
+            .expect("failed to init bare remote")
+            .success()
+    );
+
+    init_local_repo_with_commit(
+        &local_dir,
+        "tracked.txt",
+        "initial content",
+        "initial commit",
+    );
+    add_fake_ssh_remote(&local_dir, &remote_dir);
+    let current_branch = current_branch_name(&local_dir);
+
+    let push_out = libra_command(&local_dir)
+        .env("LIBRA_SSH_COMMAND", &ssh_script)
+        .args(["--json", "push", "-u", "origin", &current_branch])
+        .output()
+        .expect("failed to run json push");
+    assert!(
+        push_out.status.success(),
+        "json push failed: {}",
+        String::from_utf8_lossy(&push_out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&push_out.stdout);
+    let parsed: Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("json push should emit valid JSON, got: {stdout}\nerror: {e}"));
+    assert_eq!(parsed["ok"], Value::Bool(true));
+    assert_eq!(parsed["command"], Value::String("push".to_string()));
+    assert_eq!(
+        parsed["data"]["upstream_set"],
+        Value::String(format!("origin/{current_branch}"))
+    );
+    assert_eq!(
+        parsed["data"]["updates"][0]["remote_ref"],
+        Value::String(format!("refs/heads/{current_branch}"))
+    );
+
+    let stderr = String::from_utf8_lossy(&push_out.stderr);
+    assert!(
+        stderr.trim().is_empty(),
+        "json push success should keep stderr clean, got: {stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn test_push_machine_success_is_single_json_line() {
+    let temp_root = tempfile::tempdir().expect("failed to create temp root");
+    let remote_dir = temp_root.path().join("remote.git");
+    let local_dir = temp_root.path().join("local");
+    let ssh_script = create_fake_ssh_script(temp_root.path());
+
+    assert!(
+        Command::new("git")
+            .args(["init", "--bare", remote_dir.to_str().unwrap()])
+            .status()
+            .expect("failed to init bare remote")
+            .success()
+    );
+
+    init_local_repo_with_commit(
+        &local_dir,
+        "tracked.txt",
+        "initial content",
+        "initial commit",
+    );
+    add_fake_ssh_remote(&local_dir, &remote_dir);
+    let current_branch = current_branch_name(&local_dir);
+
+    let push_out = libra_command(&local_dir)
+        .env("LIBRA_SSH_COMMAND", &ssh_script)
+        .args(["--machine", "push", "origin", &current_branch])
+        .output()
+        .expect("failed to run machine push");
+    assert!(
+        push_out.status.success(),
+        "machine push failed: {}",
+        String::from_utf8_lossy(&push_out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&push_out.stdout);
+    let non_empty_lines: Vec<_> = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    assert_eq!(
+        non_empty_lines.len(),
+        1,
+        "machine push should emit exactly one JSON line, got: {non_empty_lines:?}"
+    );
+    let parsed: Value = serde_json::from_str(non_empty_lines[0]).unwrap_or_else(|e| {
+        panic!(
+            "machine push should emit valid JSON, got: {}\nerror: {e}",
+            non_empty_lines[0]
+        )
+    });
+    assert_eq!(parsed["ok"], Value::Bool(true));
+
+    let stderr = String::from_utf8_lossy(&push_out.stderr);
+    assert!(
+        stderr.trim().is_empty(),
+        "machine push success should keep stderr clean, got: {stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn test_push_quiet_force_still_emits_warning_and_warning_exit_code() {
+    let temp_root = tempfile::tempdir().expect("failed to create temp root");
+    let remote_dir = temp_root.path().join("remote.git");
+    let local_dir = temp_root.path().join("local");
+    let other_dir = temp_root.path().join("other");
+    let ssh_script = create_fake_ssh_script(temp_root.path());
+
+    assert!(
+        Command::new("git")
+            .args(["init", "--bare", remote_dir.to_str().unwrap()])
+            .status()
+            .expect("failed to init bare remote")
+            .success()
+    );
+
+    init_local_repo_with_commit(
+        &local_dir,
+        "tracked.txt",
+        "initial content",
+        "initial commit",
+    );
+    add_fake_ssh_remote(&local_dir, &remote_dir);
+    let current_branch = current_branch_name(&local_dir);
+
+    let initial_push_out = libra_command(&local_dir)
+        .env("LIBRA_SSH_COMMAND", &ssh_script)
+        .args(["push", "origin", &current_branch])
+        .output()
+        .expect("failed initial push");
+    assert!(
+        initial_push_out.status.success(),
+        "initial push failed: {}",
+        String::from_utf8_lossy(&initial_push_out.stderr)
+    );
+
+    assert!(
+        Command::new("git")
+            .args([
+                "clone",
+                "--branch",
+                &current_branch,
+                remote_dir.to_str().unwrap(),
+                other_dir.to_str().unwrap(),
+            ])
+            .status()
+            .expect("failed to clone remote")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args([
+                "-C",
+                other_dir.to_str().unwrap(),
+                "config",
+                "user.name",
+                "Git User"
+            ])
+            .status()
+            .expect("failed to configure git user.name")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args([
+                "-C",
+                other_dir.to_str().unwrap(),
+                "config",
+                "user.email",
+                "git-user@example.com",
+            ])
+            .status()
+            .expect("failed to configure git user.email")
+            .success()
+    );
+    fs::write(other_dir.join("remote.txt"), "remote change").expect("failed to write remote file");
+    assert!(
+        Command::new("git")
+            .args(["-C", other_dir.to_str().unwrap(), "add", "remote.txt"])
+            .status()
+            .expect("failed to add remote file")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args([
+                "-C",
+                other_dir.to_str().unwrap(),
+                "commit",
+                "-m",
+                "remote change"
+            ])
+            .status()
+            .expect("failed to commit remote change")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args([
+                "-C",
+                other_dir.to_str().unwrap(),
+                "push",
+                "origin",
+                &current_branch
+            ])
+            .status()
+            .expect("failed to push remote change")
+            .success()
+    );
+    let remote_diverged_head = String::from_utf8(
+        Command::new("git")
+            .args([
+                "--git-dir",
+                remote_dir.to_str().unwrap(),
+                "rev-parse",
+                &format!("refs/heads/{current_branch}"),
+            ])
+            .output()
+            .expect("failed to read diverged remote head")
+            .stdout,
+    )
+    .expect("remote head not utf8")
+    .trim()
+    .to_string();
+
+    fs::write(local_dir.join("tracked.txt"), "local divergent change")
+        .expect("failed to write local divergent file");
+    let add_out = libra_command(&local_dir)
+        .args(["add", "tracked.txt"])
+        .output()
+        .expect("failed to add local divergent change");
+    assert!(
+        add_out.status.success(),
+        "failed to add local divergent change: {}",
+        String::from_utf8_lossy(&add_out.stderr)
+    );
+    let commit_out = libra_command(&local_dir)
+        .args(["commit", "-m", "local divergent change"])
+        .output()
+        .expect("failed to commit local divergent change");
+    assert!(
+        commit_out.status.success(),
+        "failed to commit local divergent change: {}",
+        String::from_utf8_lossy(&commit_out.stderr)
+    );
+
+    let force_push_out = libra_command(&local_dir)
+        .env("LIBRA_SSH_COMMAND", &ssh_script)
+        .args([
+            "--quiet",
+            "--exit-code-on-warning",
+            "push",
+            "--force",
+            "origin",
+            &current_branch,
+        ])
+        .output()
+        .expect("failed to force push quietly");
+    assert_eq!(
+        force_push_out.status.code(),
+        Some(9),
+        "force push with warning exit code should return 9, stderr: {}",
+        String::from_utf8_lossy(&force_push_out.stderr)
+    );
+    assert!(
+        force_push_out.stdout.is_empty(),
+        "quiet force push should suppress stdout, got: {}",
+        String::from_utf8_lossy(&force_push_out.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&force_push_out.stderr);
+    assert!(
+        stderr.contains("warning: force push overwrites remote history"),
+        "quiet force push should preserve warning output, got: {stderr}"
+    );
+
+    let final_remote_head = String::from_utf8(
+        Command::new("git")
+            .args([
+                "--git-dir",
+                remote_dir.to_str().unwrap(),
+                "rev-parse",
+                &format!("refs/heads/{current_branch}"),
+            ])
+            .output()
+            .expect("failed to read final remote head")
+            .stdout,
+    )
+    .expect("final remote head not utf8")
+    .trim()
+    .to_string();
+    assert_ne!(
+        remote_diverged_head, final_remote_head,
+        "force push should still update the remote ref"
+    );
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn test_push_ssh_remote_via_fake_ssh() {
     let temp_root = tempfile::tempdir().expect("failed to create temp root");
@@ -565,8 +1051,8 @@ async fn test_push_ssh_remote_via_fake_ssh() {
     );
     let stdout = String::from_utf8_lossy(&push_out.stdout);
     assert!(
-        stdout.contains("Push success"),
-        "push should report success, stdout: {stdout}"
+        stdout.contains("To ") && stdout.contains("->"),
+        "push should report success with ref update summary, stdout: {stdout}"
     );
 
     let remote_head_out = Command::new("git")

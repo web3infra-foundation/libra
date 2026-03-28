@@ -28,6 +28,13 @@ use crate::{
     utils::{lfs, util},
 };
 
+#[derive(Debug, Clone)]
+pub struct LfsPushError {
+    pub path: Option<String>,
+    pub oid: Option<String>,
+    pub detail: String,
+}
+
 #[derive(Debug)]
 pub struct LFSClient {
     pub batch_url: Url,
@@ -86,7 +93,7 @@ impl LFSClient {
     }
 
     /// push LFS objects to remote server
-    pub async fn push_objects<'a, I>(&self, objs: I) -> Result<(), ()>
+    pub async fn push_objects<'a, I>(&self, objs: I) -> Result<usize, LfsPushError>
     where
         I: IntoIterator<Item = &'a Entry>,
     {
@@ -103,10 +110,18 @@ impl LFSClient {
         for (oid, _) in &lfs_oids {
             let path = lfs::lfs_object_path(oid);
             if !path.exists() {
-                eprintln!("fatal: LFS object not found: {oid}");
-                continue;
+                return Err(LfsPushError {
+                    path: Some(path.display().to_string()),
+                    oid: Some(oid.clone()),
+                    detail: "local LFS object not found".to_string(),
+                });
             }
-            let size = path.metadata().unwrap().len() as i64;
+            let size = path.metadata().map_err(|e| LfsPushError {
+                path: Some(path.display().to_string()),
+                oid: Some(oid.clone()),
+                detail: format!("failed to read local LFS object metadata: {e}"),
+            })?;
+            let size = size.len() as i64;
             lfs_objs.push(RequestObject {
                 oid: oid.to_owned(),
                 size,
@@ -116,7 +131,7 @@ impl LFSClient {
 
         if lfs_objs.is_empty() {
             tracing::info!("No LFS objects to push.");
-            return Ok(());
+            return Ok(0);
         }
 
         {
@@ -131,14 +146,20 @@ impl LFSClient {
                 .await;
 
             if code == StatusCode::FORBIDDEN {
-                eprintln!("fatal: Forbidden: You must have push access to verify locks");
-                return Err(());
+                return Err(LfsPushError {
+                    path: None,
+                    oid: None,
+                    detail: "forbidden: you must have push access to verify locks".to_string(),
+                });
             } else if code == StatusCode::NOT_FOUND {
                 // By default, an LFS server that doesn't implement any locking endpoints should return 404.
                 // This response will not halt any Git pushes.
             } else if !code.is_success() {
-                eprintln!("fatal: LFS verify locks failed. Status: {code}");
-                return Err(());
+                return Err(LfsPushError {
+                    path: None,
+                    oid: None,
+                    detail: format!("LFS verify locks failed with status {code}"),
+                });
             } else {
                 // success
                 tracing::debug!("LFS verify locks response:\n {:?}", locks);
@@ -166,11 +187,18 @@ impl LFSClient {
                     })
                     .collect::<Vec<_>>();
                 if !theirs.is_empty() {
-                    eprintln!("error: the following files are locked by another user:");
-                    for lock in theirs {
-                        eprintln!("  - {}", lock.path);
-                    }
-                    return Err(());
+                    let locked_paths = theirs
+                        .iter()
+                        .map(|lock| lock.path.clone())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(LfsPushError {
+                        path: None,
+                        oid: None,
+                        detail: format!(
+                            "the following files are locked by another user: {locked_paths}"
+                        ),
+                    });
                 }
             }
         }
@@ -189,31 +217,52 @@ impl LFSClient {
                 .headers(lfs::LFS_HEADERS.clone())
         })
         .await
-        .unwrap();
+        .map_err(|e| LfsPushError {
+            path: None,
+            oid: None,
+            detail: format!("failed to request LFS batch upload: {e}"),
+        })?;
 
-        let resp = response.json::<LfsBatchResponse>().await.unwrap();
+        let resp = response
+            .json::<LfsBatchResponse>()
+            .await
+            .map_err(|e| LfsPushError {
+                path: None,
+                oid: None,
+                detail: format!("failed to decode LFS batch upload response: {e}"),
+            })?;
         tracing::debug!(
             "LFS push response:\n {:#?}",
             serde_json::to_value(&resp).unwrap()
         );
 
         // TODO: parallel upload
+        let mut uploaded = 0;
         for obj in resp.objects {
             let file_path = lfs::lfs_object_path(&obj.oid);
-            self.upload_object(obj, &file_path).await?;
+            if self.upload_object(obj, &file_path).await? {
+                uploaded += 1;
+            }
         }
         println!("LFS objects push completed.");
-        Ok(())
+        Ok(uploaded)
     }
 
     /// push LFS object to remote server, didn't need local lfs storage
-    pub async fn push_object(&self, oid: &str, file: &Path) -> Result<(), ()> {
+    pub async fn push_object(&self, oid: &str, file: &Path) -> Result<bool, LfsPushError> {
         let batch_request = BatchRequest {
             operation: Operation::Upload,
             transfers: vec![lfs::LFS_TRANSFER_API.to_string()],
             objects: vec![RequestObject {
                 oid: oid.to_owned(),
-                size: file.metadata().unwrap().len() as i64,
+                size: file
+                    .metadata()
+                    .map_err(|e| LfsPushError {
+                        path: Some(file.display().to_string()),
+                        oid: Some(oid.to_string()),
+                        detail: format!("failed to read local LFS object metadata: {e}"),
+                    })?
+                    .len() as i64,
                 ..Default::default()
             }],
             hash_algo: lfs::LFS_HASH_ALGO.to_string(),
@@ -226,9 +275,20 @@ impl LFSClient {
                 .headers(lfs::LFS_HEADERS.clone())
         })
         .await
-        .unwrap();
+        .map_err(|e| LfsPushError {
+            path: Some(file.display().to_string()),
+            oid: Some(oid.to_string()),
+            detail: format!("failed to request LFS batch upload: {e}"),
+        })?;
 
-        let resp = response.json::<LfsBatchResponse>().await.unwrap();
+        let resp = response
+            .json::<LfsBatchResponse>()
+            .await
+            .map_err(|e| LfsPushError {
+                path: Some(file.display().to_string()),
+                oid: Some(oid.to_string()),
+                detail: format!("failed to decode LFS batch upload response: {e}"),
+            })?;
         tracing::debug!(
             "LFS push response:\n {:#?}",
             serde_json::to_value(&resp).unwrap()
@@ -241,30 +301,46 @@ impl LFSClient {
 
         // self.upload_object(resp.objects).await?;
         let obj = resp.objects.into_iter().next().unwrap();
-        self.upload_object(obj, file).await?;
+        let uploaded = self.upload_object(obj, file).await?;
         println!("LFS objects push completed.");
-        Ok(())
+        Ok(uploaded)
     }
 
     /// upload (PUT) one LFS file to remote server
-    pub async fn upload_object(&self, object: ResponseObject, file: &Path) -> Result<(), ()> {
+    pub async fn upload_object(
+        &self,
+        object: ResponseObject,
+        file: &Path,
+    ) -> Result<bool, LfsPushError> {
+        let oid = object.oid.clone();
         if let Some(err) = object.error {
-            eprintln!(
-                "fatal: LFS upload failed. Code: {}, Message: {}",
-                err.code, err.message
-            );
-            return Err(());
+            return Err(LfsPushError {
+                path: Some(file.display().to_string()),
+                oid: Some(oid),
+                detail: format!("remote reported error {}: {}", err.code, err.message),
+            });
         }
 
         if let Some(actions) = object.actions {
             let upload_link = actions.get(&Action::Upload);
             if upload_link.is_none() {
-                eprintln!("fatal: LFS upload failed. No upload action found");
-                return Err(());
+                return Err(LfsPushError {
+                    path: Some(file.display().to_string()),
+                    oid: Some(oid),
+                    detail: "remote did not provide an upload action".to_string(),
+                });
             }
 
             println!("Uploading LFS file: {}", object.oid);
             let link = upload_link.unwrap();
+            let content_len = tokio::fs::metadata(file)
+                .await
+                .map_err(|e| LfsPushError {
+                    path: Some(file.display().to_string()),
+                    oid: Some(object.oid.clone()),
+                    detail: format!("failed to read local LFS object metadata: {e}"),
+                })?
+                .len();
 
             let resp = BasicAuth::send(|| async {
                 let mut request = self.client.put(&link.href);
@@ -272,9 +348,9 @@ impl LFSClient {
                     request = request.header(k, v);
                 }
 
+                // INVARIANT: metadata was validated before entering the retry loop.
                 let content = tokio::fs::File::open(file).await.unwrap();
-                let progress_bar =
-                    util::default_progress_bar(content.metadata().await.unwrap().len());
+                let progress_bar = util::default_progress_bar(content_len);
 
                 let stream = tokio_util::io::ReaderStream::new(content);
                 let progress_stream = stream.map(move |chunk| {
@@ -286,21 +362,30 @@ impl LFSClient {
                 request.body(reqwest::Body::wrap_stream(progress_stream))
             })
             .await
-            .unwrap();
+            .map_err(|e| LfsPushError {
+                path: Some(file.display().to_string()),
+                oid: Some(object.oid.clone()),
+                detail: format!("failed to send LFS upload request: {e}"),
+            })?;
 
             if !resp.status().is_success() {
-                eprintln!(
-                    "fatal: LFS upload failed. Status: {}, Message: {}",
-                    resp.status(),
-                    resp.text().await.unwrap()
-                );
-                return Err(());
+                let status = resp.status();
+                let message = resp
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "<unavailable>".to_string());
+                return Err(LfsPushError {
+                    path: Some(file.display().to_string()),
+                    oid: Some(object.oid.clone()),
+                    detail: format!("upload request failed with status {status}: {message}"),
+                });
             }
             println!("Uploaded.");
+            Ok(true)
         } else {
             tracing::debug!("LFS file {} already exists on remote server", object.oid);
+            Ok(false)
         }
-        Ok(())
     }
 
     /// Just for resume download
