@@ -146,18 +146,49 @@ async fn create_tag(tag_name: &str, message: Option<String>, force: bool) {
 }
 
 async fn create_tag_safe(tag_name: &str, message: Option<String>, force: bool) -> CliResult<()> {
-    tag::create(tag_name, message, force).await.map_err(|e| {
-        let message = e.to_string();
-        let message = message
-            .strip_prefix("Tag ")
-            .map(|rest| format!("tag {rest}"))
-            .unwrap_or(message);
-        CliError::fatal(message)
-            .with_stable_code(StableErrorCode::ConflictOperationBlocked)
-            .with_hint(format!("delete it first with 'libra tag -d {}'.", tag_name))
-            .with_hint("or choose a different tag name.")
-    })?;
+    tag::create(tag_name, message, force)
+        .await
+        .map_err(|error| map_create_tag_error(tag_name, error))?;
     Ok(())
+}
+
+fn map_create_tag_error(tag_name: &str, error: tag::CreateTagError) -> CliError {
+    match error {
+        tag::CreateTagError::AlreadyExists(existing_tag_name) => {
+            CliError::fatal(format!("tag '{existing_tag_name}' already exists"))
+                .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+                .with_hint(format!("delete it first with 'libra tag -d {}'.", tag_name))
+                .with_hint("or choose a different tag name.")
+        }
+        tag::CreateTagError::HeadUnborn => {
+            CliError::fatal("Cannot create tag: HEAD does not point to a commit")
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_hint("create a commit first before tagging HEAD.")
+        }
+        tag::CreateTagError::CheckExisting(source) => CliError::fatal(format!(
+            "failed to read existing tags before creating '{}': {source}",
+            tag_name
+        ))
+        .with_stable_code(StableErrorCode::RepoCorrupt),
+        tag::CreateTagError::DeleteExisting(source) => CliError::fatal(format!(
+            "failed to replace existing tag '{}': {source}",
+            tag_name
+        ))
+        .with_stable_code(StableErrorCode::IoWriteFailed),
+        tag::CreateTagError::SerializeTag(source) => CliError::fatal(format!(
+            "failed to serialize annotated tag object: {source}"
+        ))
+        .with_stable_code(StableErrorCode::InternalInvariant),
+        tag::CreateTagError::StoreObject(source) => {
+            CliError::fatal(format!("failed to store annotated tag object: {source}"))
+                .with_stable_code(StableErrorCode::IoWriteFailed)
+        }
+        tag::CreateTagError::InsertReference(source) => CliError::fatal(format!(
+            "failed to persist tag reference '{}': {source}",
+            tag_name
+        ))
+        .with_stable_code(StableErrorCode::IoWriteFailed),
+    }
 }
 
 pub async fn render_tags(show_lines: usize) -> Result<String, anyhow::Error> {

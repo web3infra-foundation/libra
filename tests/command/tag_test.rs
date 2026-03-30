@@ -263,6 +263,56 @@ fn test_tag_cli_duplicate_tag_returns_conflict_exit_code_without_stdout() {
     assert!(stderr.contains("Error-Code: LBR-CONFLICT-002"));
 }
 
+#[test]
+fn test_tag_cli_unborn_head_returns_repo_state_error() {
+    let repo = tempdir().expect("failed to create repository root");
+    init_repo_via_cli(repo.path());
+
+    let output = run_libra_command(&["tag", "v1"], repo.path());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert!(stdout.trim().is_empty(), "unexpected stdout: {stdout}");
+    assert_eq!(report.error_code, "LBR-REPO-003");
+    assert_eq!(report.category, "repo");
+    assert!(
+        stderr.contains("fatal: Cannot create tag: HEAD does not point to a commit"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        report
+            .hints
+            .iter()
+            .any(|hint| hint == "create a commit first before tagging HEAD."),
+        "expected repo-state hint, got: {:?}",
+        report.hints
+    );
+}
+
+#[test]
+fn test_tag_json_unborn_head_returns_repo_state_error() {
+    let repo = tempdir().expect("failed to create repository root");
+    init_repo_via_cli(repo.path());
+
+    let output = run_libra_command(&["--json", "tag", "v1"], repo.path());
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stderr).expect("expected stderr JSON in --json mode");
+
+    assert_eq!(output.status.code(), Some(128));
+    assert!(
+        output.stdout.is_empty(),
+        "json error should keep stdout empty, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(report["error_code"], "LBR-REPO-003");
+    assert_eq!(report["category"], "repo");
+    assert_eq!(
+        report["message"],
+        "Cannot create tag: HEAD does not point to a commit"
+    );
+}
+
 // Test cases
 
 #[tokio::test]

@@ -31,5 +31,6 @@
 ## Errors
 
 - 重复创建：`LBR-CONFLICT-002`
+- HEAD 没有提交可打 tag：`LBR-REPO-003`
 - tag 不存在：`LBR-CLI-003`
-- 删除写入失败：`LBR-IO-002`
+- 创建或删除写入失败：`LBR-IO-002`
