@@ -5,7 +5,12 @@
 
 use std::process::Command;
 
-use libra::utils::output::OutputConfig;
+use git_internal::internal::object::commit::Commit;
+use libra::{
+    command::load_object,
+    internal::head::Head,
+    utils::{output::OutputConfig, test::ChangeDirGuard},
+};
 use serial_test::serial;
 
 use super::{create_committed_repo_via_cli, parse_json_stdout, run_libra_command};
@@ -157,6 +162,46 @@ fn test_show_json_commit_output_includes_type_and_files() {
     assert_eq!(json["data"]["type"], "commit");
     assert_eq!(json["data"]["subject"], "base");
     assert!(json["data"]["files"].as_array().is_some());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_show_tree_output_uses_git_modes_and_types() {
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+    let head = Head::current_commit().await.unwrap();
+    let commit: Commit = load_object(&head).unwrap();
+    let tree_hash = commit.tree_id.to_string();
+
+    let human = run_libra_command(&["show", &tree_hash], repo.path());
+    assert!(
+        human.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    let human_stdout = String::from_utf8_lossy(&human.stdout);
+    assert!(
+        human_stdout.contains("100644 blob"),
+        "expected git tree mode/type in human output, got: {human_stdout}"
+    );
+    assert!(
+        human_stdout.contains("\ttracked.txt"),
+        "expected tracked entry in human output, got: {human_stdout}"
+    );
+
+    let output = run_libra_command(&["--json", "show", &tree_hash], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "show");
+    assert_eq!(json["data"]["type"], "tree");
+    assert_eq!(json["data"]["entries"][0]["mode"], "100644");
+    assert_eq!(json["data"]["entries"][0]["object_type"], "blob");
+    assert_eq!(json["data"]["entries"][0]["name"], "tracked.txt");
 }
 
 /// Test that show can display a lightweight tag.

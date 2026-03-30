@@ -6,7 +6,12 @@ use clap::Parser;
 use colored::Colorize;
 use git_internal::{
     hash::ObjectHash,
-    internal::object::{blob::Blob, commit::Commit, tree::Tree, types::ObjectType},
+    internal::object::{
+        blob::Blob,
+        commit::Commit,
+        tree::{Tree, TreeItemMode},
+        types::ObjectType,
+    },
 };
 use serde::Serialize;
 
@@ -288,8 +293,11 @@ async fn show_tree(hash: &ObjectHash) -> CliResult<()> {
 
     for item in &tree.tree_items {
         println!(
-            "{:06o} {:?} {}\t{}",
-            item.mode as u32, item.mode, item.id, item.name
+            "{:06o} {} {}\t{}",
+            tree_item_mode_to_u32(item.mode),
+            tree_item_mode_to_object_type(item.mode),
+            item.id,
+            item.name
         );
     }
     Ok(())
@@ -543,8 +551,8 @@ async fn collect_tree_output(hash: &ObjectHash) -> CliResult<ShowOutput> {
             .tree_items
             .iter()
             .map(|item| ShowTreeEntry {
-                mode: format!("{:06o}", item.mode as u32),
-                object_type: format!("{:?}", item.mode).to_lowercase(),
+                mode: format!("{:06o}", tree_item_mode_to_u32(item.mode)),
+                object_type: tree_item_mode_to_object_type(item.mode).to_string(),
                 hash: item.id.to_string(),
                 name: item.name.clone(),
             })
@@ -614,6 +622,25 @@ fn change_type_name(change: ChangeType) -> &'static str {
         ChangeType::Added => "added",
         ChangeType::Modified => "modified",
         ChangeType::Deleted => "deleted",
+    }
+}
+
+fn tree_item_mode_to_u32(mode: TreeItemMode) -> u32 {
+    match mode {
+        TreeItemMode::Blob => 0o100644,
+        TreeItemMode::BlobExecutable => 0o100755,
+        TreeItemMode::Link => 0o120000,
+        TreeItemMode::Tree => 0o040000,
+        TreeItemMode::Commit => 0o160000,
+    }
+}
+
+fn tree_item_mode_to_object_type(mode: TreeItemMode) -> &'static str {
+    match mode {
+        TreeItemMode::Blob | TreeItemMode::BlobExecutable => "blob",
+        TreeItemMode::Link => "link",
+        TreeItemMode::Tree => "tree",
+        TreeItemMode::Commit => "commit",
     }
 }
 
@@ -691,5 +718,29 @@ mod tests {
         // `<revision>:<path>` syntax.
         let args = ShowArgs::try_parse_from(["show", "HEAD:test.txt"]).unwrap();
         assert_eq!(args.object, Some("HEAD:test.txt".to_string()));
+    }
+
+    #[test]
+    fn test_tree_item_mode_helpers_use_git_modes_and_types() {
+        assert_eq!(tree_item_mode_to_u32(TreeItemMode::Blob), 0o100644);
+        assert_eq!(
+            tree_item_mode_to_u32(TreeItemMode::BlobExecutable),
+            0o100755
+        );
+        assert_eq!(tree_item_mode_to_u32(TreeItemMode::Link), 0o120000);
+        assert_eq!(tree_item_mode_to_u32(TreeItemMode::Tree), 0o040000);
+        assert_eq!(tree_item_mode_to_u32(TreeItemMode::Commit), 0o160000);
+
+        assert_eq!(tree_item_mode_to_object_type(TreeItemMode::Blob), "blob");
+        assert_eq!(
+            tree_item_mode_to_object_type(TreeItemMode::BlobExecutable),
+            "blob"
+        );
+        assert_eq!(tree_item_mode_to_object_type(TreeItemMode::Link), "link");
+        assert_eq!(tree_item_mode_to_object_type(TreeItemMode::Tree), "tree");
+        assert_eq!(
+            tree_item_mode_to_object_type(TreeItemMode::Commit),
+            "commit"
+        );
     }
 }

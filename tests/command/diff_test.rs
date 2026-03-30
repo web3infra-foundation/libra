@@ -40,6 +40,51 @@ fn test_diff_json_output_includes_file_stats() {
     assert!(json["data"]["files"][0]["hunks"].as_array().is_some());
 }
 
+#[test]
+fn test_diff_name_only_and_name_status_flags_render_cli_output() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nupdated\n").unwrap();
+
+    let name_only = run_libra_command(&["diff", "--name-only"], repo.path());
+    assert_cli_success(&name_only, "diff --name-only");
+    assert_eq!(
+        String::from_utf8_lossy(&name_only.stdout).trim(),
+        "tracked.txt"
+    );
+
+    let name_status = run_libra_command(&["diff", "--name-status"], repo.path());
+    assert_cli_success(&name_status, "diff --name-status");
+    assert_eq!(
+        String::from_utf8_lossy(&name_status.stdout).trim(),
+        "M\ttracked.txt"
+    );
+}
+
+#[test]
+fn test_diff_numstat_and_stat_flags_render_cli_output() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nupdated\n").unwrap();
+
+    let numstat = run_libra_command(&["diff", "--numstat"], repo.path());
+    assert_cli_success(&numstat, "diff --numstat");
+    assert_eq!(
+        String::from_utf8_lossy(&numstat.stdout).trim(),
+        "1\t0\ttracked.txt"
+    );
+
+    let stat = run_libra_command(&["diff", "--stat"], repo.path());
+    assert_cli_success(&stat, "diff --stat");
+    let stat_stdout = String::from_utf8_lossy(&stat.stdout);
+    assert!(
+        stat_stdout.contains("tracked.txt | 1 +"),
+        "expected per-file stat line, got: {stat_stdout}"
+    );
+    assert!(
+        stat_stdout.contains("1 file changed, 1 insertion(+), 0 deletions(-)"),
+        "expected stat summary, got: {stat_stdout}"
+    );
+}
+
 /// Helper function to create a file with content.
 fn create_file(path: &str, content: &str) {
     let mut file = fs::File::create(path).unwrap();

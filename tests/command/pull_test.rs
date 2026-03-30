@@ -280,7 +280,7 @@ fn test_pull_human_output_reports_update_range_after_follow_up_fast_forward() {
         "pull should report the fast-forward range, stdout: {stdout}"
     );
     assert!(
-        stdout.contains("Fast-forward"),
+        stdout.lines().any(|line| line == "Fast-forward"),
         "pull should report the merge strategy, stdout: {stdout}"
     );
     assert!(
