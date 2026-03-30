@@ -164,6 +164,58 @@ fn test_show_json_commit_output_includes_type_and_files() {
     assert!(json["data"]["files"].as_array().is_some());
 }
 
+#[test]
+fn test_show_json_commit_output_respects_pathspec_filters() {
+    let repo = create_committed_repo_via_cli();
+    std::fs::write(repo.path().join("tracked.txt"), "tracked\nupdated\n")
+        .expect("failed to update tracked file");
+    std::fs::write(repo.path().join("other.txt"), "other\n").expect("failed to create other file");
+
+    let add_output = run_libra_command(&["add", "tracked.txt", "other.txt"], repo.path());
+    assert!(
+        add_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&add_output.stderr)
+    );
+
+    let commit_output = run_libra_command(&["commit", "-m", "update", "--no-verify"], repo.path());
+    assert!(
+        commit_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&commit_output.stderr)
+    );
+
+    let unfiltered = run_libra_command(&["--json", "show", "HEAD"], repo.path());
+    assert!(
+        unfiltered.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&unfiltered.stderr)
+    );
+    let unfiltered_json = parse_json_stdout(&unfiltered);
+    assert_eq!(
+        unfiltered_json["data"]["files"]
+            .as_array()
+            .expect("files should be an array")
+            .len(),
+        2
+    );
+
+    let filtered = run_libra_command(&["--json", "show", "HEAD", "tracked.txt"], repo.path());
+    assert!(
+        filtered.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&filtered.stderr)
+    );
+
+    let filtered_json = parse_json_stdout(&filtered);
+    let files = filtered_json["data"]["files"]
+        .as_array()
+        .expect("files should be an array");
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0]["path"], "tracked.txt");
+    assert_eq!(files[0]["status"], "modified");
+}
+
 #[tokio::test]
 #[serial]
 async fn test_show_tree_output_uses_git_modes_and_types() {

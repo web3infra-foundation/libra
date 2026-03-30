@@ -437,6 +437,7 @@ fn show_bad_revision_error(object_ref: &str) -> CliError {
 
 async fn run_show(args: &ShowArgs) -> CliResult<ShowOutput> {
     let object_ref = args.object.as_deref().unwrap_or("HEAD");
+    let paths: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
 
     if let Some((rev, path)) = object_ref.split_once(':') {
         return collect_commit_file_output(rev, path).await;
@@ -450,22 +451,22 @@ async fn run_show(args: &ShowArgs) -> CliResult<ShowOutput> {
                 } else {
                     commit_hash
                 };
-                return collect_tag_output(&tag_hash).await;
+                return collect_tag_output(&tag_hash, &paths).await;
             }
             _ => {
-                return collect_commit_output(&commit_hash).await;
+                return collect_commit_output(&commit_hash, &paths).await;
             }
         }
     }
 
     if let Ok(hash) = ObjectHash::from_str(object_ref) {
-        return collect_object_output(&hash).await;
+        return collect_object_output(&hash, &paths).await;
     }
 
     Err(show_bad_revision_error(object_ref))
 }
 
-async fn collect_object_output(hash: &ObjectHash) -> CliResult<ShowOutput> {
+async fn collect_object_output(hash: &ObjectHash, paths: &[PathBuf]) -> CliResult<ShowOutput> {
     let storage = ClientStorage::init(path::objects());
     let obj_type = storage.get_object_type(hash).map_err(|e| {
         CliError::fatal(format!("could not read object {}: {}", hash, e))
@@ -473,8 +474,8 @@ async fn collect_object_output(hash: &ObjectHash) -> CliResult<ShowOutput> {
     })?;
 
     match obj_type {
-        ObjectType::Commit => collect_commit_output(hash).await,
-        ObjectType::Tag => collect_tag_output(hash).await,
+        ObjectType::Commit => collect_commit_output(hash, paths).await,
+        ObjectType::Tag => collect_tag_output(hash, paths).await,
         ObjectType::Tree => collect_tree_output(hash).await,
         ObjectType::Blob => collect_blob_output(hash).await,
         _ => Err(
@@ -484,13 +485,16 @@ async fn collect_object_output(hash: &ObjectHash) -> CliResult<ShowOutput> {
     }
 }
 
-async fn collect_commit_output(commit_hash: &ObjectHash) -> CliResult<ShowOutput> {
+async fn collect_commit_output(
+    commit_hash: &ObjectHash,
+    paths: &[PathBuf],
+) -> CliResult<ShowOutput> {
     let commit = load_object::<Commit>(commit_hash).map_err(|e| {
         CliError::fatal(format!("could not load commit {}: {}", commit_hash, e))
             .with_stable_code(StableErrorCode::RepoCorrupt)
     })?;
     let (subject, body) = split_subject_and_body(&commit.message);
-    let files = get_changed_files_for_commit(&commit, &[]).await?;
+    let files = get_changed_files_for_commit(&commit, paths).await?;
 
     Ok(ShowOutput::Commit(ShowCommitData {
         hash: commit.id.to_string(),
@@ -519,7 +523,7 @@ async fn collect_commit_output(commit_hash: &ObjectHash) -> CliResult<ShowOutput
     }))
 }
 
-async fn collect_tag_output(hash: &ObjectHash) -> CliResult<ShowOutput> {
+async fn collect_tag_output(hash: &ObjectHash, paths: &[PathBuf]) -> CliResult<ShowOutput> {
     match tag::load_object_trait(hash).await {
         Ok(tag::TagObject::Tag(tag_obj)) => Ok(ShowOutput::Tag(ShowTagData {
             tag_name: tag_obj.tag_name,
@@ -531,7 +535,7 @@ async fn collect_tag_output(hash: &ObjectHash) -> CliResult<ShowOutput> {
             target_hash: tag_obj.object_hash.to_string(),
             target_type: format!("{:?}", tag_obj.object_type).to_lowercase(),
         })),
-        Ok(tag::TagObject::Commit(commit)) => collect_commit_output(&commit.id).await,
+        Ok(tag::TagObject::Commit(commit)) => collect_commit_output(&commit.id, paths).await,
         Ok(_) => Err(CliError::fatal("tag points to unsupported object type")
             .with_stable_code(StableErrorCode::CliInvalidTarget)),
         Err(e) => {

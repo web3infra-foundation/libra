@@ -425,13 +425,7 @@ fn format_diff_stat_output(result: &DiffOutput) -> String {
 }
 
 fn parse_diff_item(item: &git_internal::diff::DiffItem) -> DiffFileStat {
-    let status = if item.data.contains("new file mode") {
-        "added"
-    } else if item.data.contains("deleted file mode") {
-        "deleted"
-    } else {
-        "modified"
-    };
+    let status = parse_diff_status(&item.data);
     let insertions = item
         .data
         .lines()
@@ -450,6 +444,22 @@ fn parse_diff_item(item: &git_internal::diff::DiffItem) -> DiffFileStat {
         deletions,
         hunks: parse_diff_hunks(&item.data),
     }
+}
+
+fn parse_diff_status(diff_text: &str) -> &'static str {
+    for line in diff_text.lines() {
+        if line.starts_with("@@ ") || line == "Binary files differ" {
+            break;
+        }
+        if line.starts_with("new file mode ") || line == "--- /dev/null" {
+            return "added";
+        }
+        if line.starts_with("deleted file mode ") || line == "+++ /dev/null" {
+            return "deleted";
+        }
+    }
+
+    "modified"
 }
 
 fn parse_diff_hunks(diff_text: &str) -> Vec<DiffHunk> {

@@ -85,6 +85,29 @@ fn test_diff_numstat_and_stat_flags_render_cli_output() {
     );
 }
 
+#[test]
+fn test_diff_status_detection_ignores_patch_body_text() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(
+        repo.path().join("tracked.txt"),
+        "tracked\nnew file mode 100644\ndeleted file mode 100644\n",
+    )
+    .unwrap();
+
+    let name_status = run_libra_command(&["diff", "--name-status"], repo.path());
+    assert_cli_success(&name_status, "diff --name-status");
+    assert_eq!(
+        String::from_utf8_lossy(&name_status.stdout).trim(),
+        "M\ttracked.txt"
+    );
+
+    let json = run_libra_command(&["--json", "diff"], repo.path());
+    assert_cli_success(&json, "diff --json");
+    let json = parse_json_stdout(&json);
+    assert_eq!(json["data"]["files"][0]["path"], "tracked.txt");
+    assert_eq!(json["data"]["files"][0]["status"], "modified");
+}
+
 /// Helper function to create a file with content.
 fn create_file(path: &str, content: &str) {
     let mut file = fs::File::create(path).unwrap();
