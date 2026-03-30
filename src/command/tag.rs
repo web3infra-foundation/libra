@@ -341,24 +341,37 @@ async fn collect_tags(show_lines: usize) -> CliResult<Vec<TagListEntry>> {
 }
 
 async fn lookup_tag(tag_name: &str, show_lines: usize) -> CliResult<TagListEntry> {
-    let tags = collect_tags(show_lines).await?;
-    tags.into_iter()
-        .find(|entry| entry.name == tag_name)
-        .ok_or_else(|| {
-            CliError::fatal(format!("tag '{}' not found", tag_name))
-                .with_stable_code(StableErrorCode::CliInvalidTarget)
-                .with_hint("use 'libra tag -l' to list available tags.")
-        })
+    match tag::find_tag_and_commit(tag_name).await {
+        Ok(Some((object, _commit))) => Ok(tag_object_to_list_entry(
+            tag_name.to_string(),
+            object,
+            show_lines,
+        )),
+        Ok(None) => Err(CliError::fatal(format!("tag '{}' not found", tag_name))
+            .with_stable_code(StableErrorCode::CliInvalidTarget)
+            .with_hint("use 'libra tag -l' to list available tags.")),
+        Err(e) => {
+            Err(CliError::fatal(e.to_string()).with_stable_code(StableErrorCode::RepoCorrupt))
+        }
+    }
 }
 
 fn tag_to_list_entry(tag: tag::Tag, show_lines: usize) -> TagListEntry {
-    let hash = match &tag.object {
+    tag_object_to_list_entry(tag.name, tag.object, show_lines)
+}
+
+fn tag_object_to_list_entry(
+    tag_name: String,
+    object: tag::TagObject,
+    show_lines: usize,
+) -> TagListEntry {
+    let hash = match &object {
         TagObject::Commit(commit) => commit.id.to_string(),
         TagObject::Tag(tag_object) => tag_object.id.to_string(),
         TagObject::Tree(tree) => tree.id.to_string(),
         TagObject::Blob(blob) => blob.id.to_string(),
     };
-    let (tag_type, message) = match &tag.object {
+    let (tag_type, message) = match &object {
         TagObject::Tag(tag_object) => (
             "annotated".to_string(),
             trim_tag_message(&tag_object.message, show_lines),
@@ -368,7 +381,7 @@ fn tag_to_list_entry(tag: tag::Tag, show_lines: usize) -> TagListEntry {
     };
 
     TagListEntry {
-        name: tag.name,
+        name: tag_name,
         hash,
         tag_type,
         message,

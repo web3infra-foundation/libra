@@ -653,6 +653,11 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
             continue;
         }
 
+        let (parsed_message, _) = parse_commit_msg(&commit.message);
+        let mut message_lines = parsed_message.lines();
+        let subject = message_lines.next().unwrap_or("").to_string();
+        let body = message_lines.collect::<Vec<_>>().join("\n");
+
         commits.push(LogCommitEntry {
             hash: commit.id.to_string(),
             short_hash: commit.id.to_string()[..7].to_string(),
@@ -662,18 +667,8 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
             committer_name: commit.committer.name.trim().to_string(),
             committer_email: commit.committer.email.trim().to_string(),
             committer_date: format_log_timestamp(commit.committer.timestamp as i64),
-            subject: parse_commit_msg(&commit.message)
-                .0
-                .lines()
-                .next()
-                .unwrap_or("")
-                .to_string(),
-            body: parse_commit_msg(&commit.message)
-                .0
-                .lines()
-                .skip(1)
-                .collect::<Vec<_>>()
-                .join("\n"),
+            subject,
+            body,
             parents: commit
                 .parent_commit_ids
                 .iter()

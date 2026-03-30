@@ -245,7 +245,7 @@ EXAMPLES:
 #### `tests/command/reset_json_test.rs`（JSON schema 稳定性，新增文件）
 
 - **schema 完整性**：验证 `--json` 输出中每个字段的类型和存在性
-- **`--hard --json`**：`mode == "hard"`，`files_restored > 0`
+- **`--hard --json`**：`mode == "hard"`，`files_restored` 反映实际被恢复的 tracked 文件数；dirty 工作区时 `> 0`，clean repo 上对 `HEAD` 执行时可为 `0`
 - **`--mixed --json`**：`mode == "mixed"`
 - **`--soft --json`**：`mode == "soft"`，`files_unstaged == 0`，`files_restored == 0`
 - **pathspec `--json`**：`pathspecs` 数组非空

@@ -47,6 +47,27 @@ fn test_tag_json_create_output_includes_hash() {
 }
 
 #[test]
+fn test_tag_json_delete_output_includes_deleted_hash() {
+    let repo = create_committed_repo_via_cli();
+
+    let create_output = run_libra_command(&["tag", "v1.0"], repo.path());
+    assert_cli_success(&create_output, "tag v1.0");
+
+    let output = run_libra_command(&["--json", "tag", "-d", "v1.0"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "tag");
+    assert_eq!(json["data"]["action"], "delete");
+    assert_eq!(json["data"]["name"], "v1.0");
+    assert!(json["data"]["hash"].as_str().is_some());
+}
+
+#[test]
 fn test_tag_missing_name_action_flags_return_usage_errors() {
     let repo = create_committed_repo_via_cli();
     let cases = [

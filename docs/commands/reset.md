@@ -32,6 +32,7 @@ M	path/to/file
 ```
 
 `pathspecs` 非空时表示本次仅对指定路径执行 reset。
+`files_restored` 表示 `--hard` 时实际被重写或删除的 tracked 文件数量；clean repo 上对 `HEAD` 执行 hard reset 时它可以是 `0`。
 
 ## Errors
 
