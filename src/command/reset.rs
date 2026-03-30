@@ -130,7 +130,7 @@ async fn run_reset(args: ResetArgs) -> CliResult<ResetOutput> {
         let target_commit_id = resolve_commit(&args.target)
             .await
             .map_err(map_reset_invalid_revision)?;
-        let changed_paths = reset_pathspecs(&args.pathspecs, &args.target).await?;
+        let changed_paths = reset_pathspecs(&args.pathspecs, &target_commit_id).await?;
         let subject = get_commit_summary(&target_commit_id).unwrap_or_default();
 
         return Ok(ResetOutput {
@@ -174,12 +174,11 @@ async fn run_reset(args: ResetArgs) -> CliResult<ResetOutput> {
 
 /// Reset specific files in the index to their state in the target commit.
 /// This function only affects the index, not the working directory.
-async fn reset_pathspecs(pathspecs: &[String], target: &str) -> CliResult<Vec<String>> {
-    let target_commit_id = resolve_commit(target)
-        .await
-        .map_err(map_reset_invalid_revision)?;
-
-    let commit: Commit = load_object(&target_commit_id).map_err(|e| {
+async fn reset_pathspecs(
+    pathspecs: &[String],
+    target_commit_id: &ObjectHash,
+) -> CliResult<Vec<String>> {
+    let commit: Commit = load_object(target_commit_id).map_err(|e| {
         CliError::fatal(format!("failed to load commit: {e}"))
             .with_stable_code(StableErrorCode::RepoCorrupt)
     })?;

@@ -42,6 +42,26 @@ fn test_branch_json_create_output_reports_branch() {
     assert!(json["data"]["commit"].as_str().is_some());
 }
 
+#[test]
+fn test_branch_set_upstream_detached_head_returns_repo_state_error() {
+    let repo = create_committed_repo_via_cli();
+
+    let detach = run_libra_command(&["switch", "--detach", "HEAD"], repo.path());
+    assert!(
+        detach.status.success(),
+        "detach failed: {}",
+        String::from_utf8_lossy(&detach.stderr)
+    );
+
+    let output = run_libra_command(&["branch", "--set-upstream-to", "origin/main"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-REPO-003");
+    assert!(stderr.contains("HEAD is detached"));
+    assert!(stderr.contains("checkout a branch first"));
+}
+
 #[tokio::test]
 #[serial]
 /// Tests core branch management functionality including creation and listing.

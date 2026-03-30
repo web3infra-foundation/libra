@@ -46,6 +46,70 @@ fn test_tag_json_create_output_includes_hash() {
     assert!(json["data"]["hash"].as_str().is_some());
 }
 
+#[test]
+fn test_tag_missing_name_action_flags_return_usage_errors() {
+    let repo = create_committed_repo_via_cli();
+    let cases = [
+        (vec!["tag", "-d"], "tag name is required for --delete"),
+        (vec!["tag", "-f"], "tag name is required for --force"),
+        (
+            vec!["tag", "-m", "annotated release"],
+            "tag name is required when using --message",
+        ),
+    ];
+
+    for (args, expected_message) in cases {
+        let output = run_libra_command(&args, repo.path());
+        let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+        assert_eq!(output.status.code(), Some(129), "args: {:?}", args);
+        assert_eq!(report.error_code, "LBR-CLI-002", "args: {:?}", args);
+        assert!(
+            stderr.contains(expected_message),
+            "expected stderr to contain '{expected_message}', got: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn test_tag_json_missing_name_action_flags_return_usage_errors() {
+    let repo = create_committed_repo_via_cli();
+    let cases = [
+        (
+            vec!["--json", "tag", "-d"],
+            "tag name is required for --delete",
+        ),
+        (
+            vec!["--json", "tag", "-f"],
+            "tag name is required for --force",
+        ),
+        (
+            vec!["--json", "tag", "-m", "annotated release"],
+            "tag name is required when using --message",
+        ),
+    ];
+
+    for (args, expected_message) in cases {
+        let output = run_libra_command(&args, repo.path());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let report: serde_json::Value =
+            serde_json::from_slice(&output.stderr).expect("expected stderr JSON in --json mode");
+
+        assert_eq!(output.status.code(), Some(129), "args: {:?}", args);
+        assert!(
+            output.stdout.is_empty(),
+            "json error should keep stdout empty, args: {:?}, stdout: {}",
+            args,
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert_eq!(report["error_code"], "LBR-CLI-002", "args: {:?}", args);
+        assert!(
+            stderr.contains(expected_message),
+            "expected stderr to contain '{expected_message}', got: {stderr}"
+        );
+    }
+}
+
 /// Return the full ref name for a tag (e.g. "refs/tags/v1.0").
 fn ref_name(tag: &str) -> String {
     format!("refs/tags/{tag}")

@@ -74,6 +74,8 @@ pub async fn execute(args: TagArgs) {
 /// errors and exiting. Lists, creates, or deletes tags depending on the
 /// provided arguments.
 pub async fn execute_safe(args: TagArgs, output: &OutputConfig) -> CliResult<()> {
+    validate_named_tag_action(&args)?;
+
     if output.is_json() {
         let result = run_tag_json(&args).await?;
         return emit_json_data("tag", &result, output);
@@ -103,6 +105,30 @@ pub async fn execute_safe(args: TagArgs, output: &OutputConfig) -> CliResult<()>
             .map_err(|e| CliError::fatal(e.to_string()))?;
         print!("{}", rendered);
     }
+    Ok(())
+}
+
+fn validate_named_tag_action(args: &TagArgs) -> CliResult<()> {
+    if args.name.is_some() {
+        return Ok(());
+    }
+
+    let message = if args.delete {
+        Some("tag name is required for --delete")
+    } else if args.message.is_some() {
+        Some("tag name is required when using --message")
+    } else if args.force {
+        Some("tag name is required for --force")
+    } else {
+        None
+    };
+
+    if let Some(message) = message {
+        return Err(CliError::command_usage(message)
+            .with_hint("use 'libra tag <name>' to create or update a tag")
+            .with_hint("use 'libra tag -l' to list existing tags"));
+    }
+
     Ok(())
 }
 
@@ -231,6 +257,8 @@ async fn show_tag_safe(tag_name: &str) -> CliResult<()> {
 }
 
 async fn run_tag_json(args: &TagArgs) -> CliResult<TagOutput> {
+    validate_named_tag_action(args)?;
+
     if args.list || args.n_lines.is_some() || args.name.is_none() {
         return Ok(TagOutput::List {
             tags: collect_tags(args.n_lines.unwrap_or(0)).await?,

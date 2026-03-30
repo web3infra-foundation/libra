@@ -158,7 +158,7 @@ pub async fn execute_safe(args: BranchArgs, output: &OutputConfig) -> CliResult<
     } else if let Some(upstream) = args.set_upstream_to {
         match Head::current().await {
             Head::Branch(name) => set_upstream_safe_with_output(&name, &upstream, output).await,
-            Head::Detached(_) => Err(CliError::fatal("HEAD is detached")),
+            Head::Detached(_) => Err(detached_head_branch_error()),
         }
     } else if !args.rename.is_empty() {
         rename_branch(args.rename, output).await
@@ -179,6 +179,12 @@ pub async fn execute_safe(args: BranchArgs, output: &OutputConfig) -> CliResult<
             list_branches(list_mode, &args.contains, &args.no_contains).await
         }
     }
+}
+
+fn detached_head_branch_error() -> CliError {
+    CliError::fatal("HEAD is detached")
+        .with_stable_code(StableErrorCode::RepoStateInvalid)
+        .with_hint("checkout a branch first")
 }
 
 pub async fn set_upstream(branch: &str, upstream: &str) {
@@ -415,10 +421,7 @@ async fn rename_branch(args: Vec<String>, output: &OutputConfig) -> CliResult<()
             let head = Head::current().await;
             match head {
                 Head::Branch(name) => (name, args[0].clone()),
-                Head::Detached(_) => {
-                    return Err(CliError::fatal("HEAD is detached")
-                        .with_stable_code(StableErrorCode::RepoStateInvalid));
-                }
+                Head::Detached(_) => return Err(detached_head_branch_error()),
             }
         }
         2 => (args[0].clone(), args[1].clone()),
@@ -814,8 +817,7 @@ async fn run_branch_json(args: BranchArgs, output: &OutputConfig) -> CliResult<B
         let branch = match Head::current().await {
             Head::Branch(name) => name,
             Head::Detached(_) => {
-                return Err(CliError::fatal("HEAD is detached")
-                    .with_stable_code(StableErrorCode::RepoStateInvalid));
+                return Err(detached_head_branch_error());
             }
         };
         let mut quiet_output = output.clone();
@@ -827,8 +829,7 @@ async fn run_branch_json(args: BranchArgs, output: &OutputConfig) -> CliResult<B
             match Head::current().await {
                 Head::Branch(name) => name,
                 Head::Detached(_) => {
-                    return Err(CliError::fatal("HEAD is detached")
-                        .with_stable_code(StableErrorCode::RepoStateInvalid));
+                    return Err(detached_head_branch_error());
                 }
             }
         } else {
