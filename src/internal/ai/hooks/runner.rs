@@ -1,6 +1,6 @@
 //! Hook runner: executes hooks and evaluates results.
 
-use std::{path::Path, time::Duration};
+use std::{io::ErrorKind, path::Path, time::Duration};
 
 use tokio::{io::AsyncWriteExt, process::Command};
 
@@ -146,7 +146,14 @@ impl HookRunner {
                 .spawn()?;
 
             if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(input_json.as_bytes()).await?;
+                // Hooks receive JSON on stdin, but some hooks intentionally ignore it and
+                // close stdin immediately. Treat that as non-fatal and rely on the hook's
+                // exit status to decide whether the action should be allowed or blocked.
+                if let Err(err) = stdin.write_all(input_json.as_bytes()).await {
+                    if err.kind() != ErrorKind::BrokenPipe {
+                        return Err(err);
+                    }
+                }
                 drop(stdin);
             }
 
@@ -239,7 +246,7 @@ mod tests {
         let (runner, _tmp) = make_runner(vec![make_hook(
             HookEvent::PreToolUse,
             "shell",
-            r#"echo "{\"message\":\"dangerous command blocked\"}" && exit 129"#,
+            r#"exec 0<&-; sleep 0.05; echo "{\"message\":\"dangerous command blocked\"}"; exit 129"#,
         )]);
 
         let action = runner
