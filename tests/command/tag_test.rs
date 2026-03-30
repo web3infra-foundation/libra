@@ -110,6 +110,30 @@ fn test_tag_json_missing_name_action_flags_return_usage_errors() {
     }
 }
 
+#[test]
+fn test_tag_quiet_delete_suppresses_stdout() {
+    let repo = create_committed_repo_via_cli();
+
+    let create_output = run_libra_command(&["tag", "v1.0"], repo.path());
+    assert_cli_success(&create_output, "tag v1.0");
+
+    let delete_output = run_libra_command(&["--quiet", "tag", "-d", "v1.0"], repo.path());
+    assert_cli_success(&delete_output, "quiet tag delete");
+    assert!(
+        delete_output.stdout.is_empty(),
+        "quiet delete should keep stdout empty, got: {}",
+        String::from_utf8_lossy(&delete_output.stdout)
+    );
+
+    let list_output = run_libra_command(&["tag", "-l"], repo.path());
+    assert_cli_success(&list_output, "tag -l");
+    let stdout = String::from_utf8_lossy(&list_output.stdout);
+    assert!(
+        !stdout.lines().any(|line| line.trim() == "v1.0"),
+        "deleted tag should not be listed, got: {stdout}"
+    );
+}
+
 /// Return the full ref name for a tag (e.g. "refs/tags/v1.0").
 fn ref_name(tag: &str) -> String {
     format!("refs/tags/{tag}")

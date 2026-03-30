@@ -150,8 +150,9 @@ pub async fn execute_safe(args: ShowArgs, output: &OutputConfig) -> CliResult<()
         return show_commit_file(rev, path, &args).await;
     }
 
-    // Raw object IDs should keep their native schema, including annotated tag objects.
-    if let Ok(hash) = ObjectHash::from_str(object_ref) {
+    // Raw object IDs should keep their native schema, including annotated tag
+    // objects, but hash-like ref names must still fall back to ref resolution.
+    if let Some(hash) = resolve_existing_object_hash(object_ref) {
         return show_object_by_hash(&hash, &args).await;
     }
 
@@ -443,8 +444,9 @@ async fn run_show(args: &ShowArgs) -> CliResult<ShowOutput> {
         return collect_commit_file_output(rev, path).await;
     }
 
-    // Raw object IDs should keep their native schema, including annotated tag objects.
-    if let Ok(hash) = ObjectHash::from_str(object_ref) {
+    // Raw object IDs should keep their native schema, including annotated tag
+    // objects, but hash-like ref names must still fall back to ref resolution.
+    if let Some(hash) = resolve_existing_object_hash(object_ref) {
         return collect_object_output(&hash, &paths).await;
     }
 
@@ -484,6 +486,12 @@ async fn collect_object_output(hash: &ObjectHash, paths: &[PathBuf]) -> CliResul
                 .with_stable_code(StableErrorCode::CliInvalidTarget),
         ),
     }
+}
+
+fn resolve_existing_object_hash(object_ref: &str) -> Option<ObjectHash> {
+    let hash = ObjectHash::from_str(object_ref).ok()?;
+    let storage = ClientStorage::init(path::objects());
+    storage.exist(&hash).then_some(hash)
 }
 
 async fn collect_commit_output(

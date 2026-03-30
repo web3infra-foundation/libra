@@ -200,6 +200,39 @@ fn test_show_json_annotated_tag_hash_preserves_tag_schema() {
 }
 
 #[test]
+fn test_show_hex_like_tag_name_falls_back_to_ref_resolution() {
+    let repo = init_temp_repo();
+    configure_user_identity(repo.path());
+    create_commit(repo.path(), "tracked.txt", "tracked\n", "base");
+
+    let hex_like_tag = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    create_lightweight_tag(repo.path(), hex_like_tag);
+
+    let human_output = run_libra_command(&["show", hex_like_tag], repo.path());
+    assert!(
+        human_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&human_output.stderr)
+    );
+    let human_stdout = String::from_utf8_lossy(&human_output.stdout);
+    assert!(
+        human_stdout.contains("base"),
+        "expected human output to resolve the tag ref, got: {human_stdout}"
+    );
+
+    let json_output = run_libra_command(&["--json", "show", hex_like_tag], repo.path());
+    assert!(
+        json_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&json_output.stderr)
+    );
+    let json = parse_json_stdout(&json_output);
+    assert_eq!(json["command"], "show");
+    assert_eq!(json["data"]["type"], "commit");
+    assert_eq!(json["data"]["subject"], "base");
+}
+
+#[test]
 fn test_show_json_commit_output_respects_pathspec_filters() {
     let repo = create_committed_repo_via_cli();
     std::fs::write(repo.path().join("tracked.txt"), "tracked\nupdated\n")

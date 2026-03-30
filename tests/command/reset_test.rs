@@ -26,6 +26,54 @@ fn test_reset_cli_outside_repository_returns_fatal_128() {
 }
 
 #[test]
+fn test_reset_unborn_head_returns_repo_state_error() {
+    fn copy_dir_recursive(from: &std::path::Path, to: &std::path::Path) {
+        fs::create_dir_all(to).expect("failed to create destination directory");
+        for entry in fs::read_dir(from).expect("failed to read source directory") {
+            let entry = entry.expect("failed to read source entry");
+            let source_path = entry.path();
+            let destination_path = to.join(entry.file_name());
+            if entry
+                .file_type()
+                .expect("failed to read source file type")
+                .is_dir()
+            {
+                copy_dir_recursive(&source_path, &destination_path);
+            } else {
+                fs::copy(&source_path, &destination_path)
+                    .expect("failed to copy object into unborn repository");
+            }
+        }
+    }
+
+    let source_repo = create_committed_repo_via_cli();
+    let source_head = run_libra_command(&["show-ref", "--heads", "main"], source_repo.path());
+    assert_cli_success(&source_head, "show-ref --heads main");
+    let commit_hash = String::from_utf8_lossy(&source_head.stdout)
+        .split_whitespace()
+        .next()
+        .expect("show-ref should return the main commit hash")
+        .to_string();
+
+    let target_repo = tempdir().unwrap();
+    init_repo_via_cli(target_repo.path());
+    copy_dir_recursive(
+        &source_repo.path().join(".libra/objects"),
+        &target_repo.path().join(".libra/objects"),
+    );
+
+    let output = run_libra_command(&["reset", "--hard", &commit_hash], target_repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-REPO-003");
+    assert!(
+        stderr.contains("HEAD is unborn"),
+        "expected unborn HEAD message, got: {stderr}"
+    );
+}
+
+#[test]
 fn test_reset_json_output_reports_target_commit() {
     let repo = create_committed_repo_via_cli();
     fs::write(repo.path().join("tracked.txt"), "tracked\nsecond\n").unwrap();

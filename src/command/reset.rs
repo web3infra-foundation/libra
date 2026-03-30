@@ -651,11 +651,15 @@ fn map_reset_runtime_error(message: String) -> CliError {
         || message.contains("create directory")
     {
         StableErrorCode::IoWriteFailed
+    } else if message.contains("HEAD is unborn") || message.contains("points to no commit") {
+        StableErrorCode::RepoStateInvalid
     } else if message.contains("load commit")
         || message.contains("load tree")
         || message.contains("load current commit")
         || message.contains("load current tree")
         || message.contains("load index")
+        || message.contains("load subtree")
+        || message.contains("load blob")
     {
         StableErrorCode::RepoCorrupt
     } else if message.contains("read directory") {
@@ -732,5 +736,12 @@ mod tests {
 
         let args = ResetArgs::try_parse_from(["reset"]).unwrap();
         assert!(!args.soft && !args.hard);
+    }
+
+    #[test]
+    fn test_map_reset_runtime_error_reports_unborn_head_as_repo_state() {
+        let error =
+            map_reset_runtime_error("Cannot reset: HEAD is unborn and points to no commit.".into());
+        assert_eq!(error.stable_code(), StableErrorCode::RepoStateInvalid);
     }
 }

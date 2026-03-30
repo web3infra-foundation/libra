@@ -129,9 +129,7 @@ async fn run_blame(args: &BlameArgs) -> CliResult<BlameOutput> {
             .with_stable_code(StableErrorCode::RepoCorrupt)
     })?;
 
-    let target_lines = get_file_lines(&commit_obj, &args.file).map_err(|message| {
-        CliError::fatal(message).with_stable_code(StableErrorCode::CliInvalidTarget)
-    })?;
+    let target_lines = get_file_lines(&commit_obj, &args.file).map_err(map_blame_file_error)?;
 
     if target_lines.is_empty() {
         return Ok(BlameOutput {
@@ -249,6 +247,20 @@ fn get_file_lines(commit: &Commit, file_path: &str) -> Result<Vec<String>, Strin
     Ok(content.lines().map(|s| s.to_string()).collect())
 }
 
+fn map_blame_file_error(message: String) -> CliError {
+    let normalized = message.to_ascii_lowercase();
+    let stable_code = if normalized.contains("failed to load tree")
+        || normalized.contains("failed to load blob")
+        || normalized.contains("failed to load object")
+    {
+        StableErrorCode::RepoCorrupt
+    } else {
+        StableErrorCode::CliInvalidTarget
+    };
+
+    CliError::fatal(message).with_stable_code(stable_code)
+}
+
 /// Parse line range from string like "10", "10,20", "10,+5"
 fn parse_line_range(range_str: &str, total_lines: usize) -> Result<(usize, usize), String> {
     let parts: Vec<&str> = range_str.split(',').collect();
@@ -290,5 +302,22 @@ fn parse_line_range(range_str: &str, total_lines: usize) -> Result<(usize, usize
             Ok((start, end))
         }
         _ => Err("Invalid range format. Use: LINE or START,END or START,+COUNT".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn map_blame_file_error_reports_repo_corrupt_for_storage_failures() {
+        let error = map_blame_file_error("Failed to load tree: corrupt object".to_string());
+        assert_eq!(error.stable_code(), StableErrorCode::RepoCorrupt);
+    }
+
+    #[test]
+    fn map_blame_file_error_reports_invalid_target_for_missing_file() {
+        let error = map_blame_file_error("File 'tracked.txt' not found in commit".to_string());
+        assert_eq!(error.stable_code(), StableErrorCode::CliInvalidTarget);
     }
 }

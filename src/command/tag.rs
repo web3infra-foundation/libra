@@ -83,6 +83,9 @@ pub async fn execute_safe(args: TagArgs, output: &OutputConfig) -> CliResult<()>
 
     if args.list || args.n_lines.is_some() {
         let show_lines = args.n_lines.unwrap_or(0);
+        if output.quiet {
+            return Ok(());
+        }
         let rendered = render_tags(show_lines)
             .await
             .map_err(|e| CliError::fatal(e.to_string()))?;
@@ -92,14 +95,17 @@ pub async fn execute_safe(args: TagArgs, output: &OutputConfig) -> CliResult<()>
 
     if let Some(name) = args.name {
         if args.delete {
-            delete_tag_safe(&name).await?;
+            delete_tag_safe(&name, output).await?;
         } else if args.message.is_some() {
             create_tag_safe(&name, args.message, args.force).await?;
         } else {
             create_tag_safe(&name, None, args.force).await?;
-            show_tag_safe(&name).await?;
+            show_tag_safe(&name, output).await?;
         }
     } else {
+        if output.quiet {
+            return Ok(());
+        }
         let rendered = render_tags(0)
             .await
             .map_err(|e| CliError::fatal(e.to_string()))?;
@@ -202,12 +208,12 @@ pub async fn render_tags(show_lines: usize) -> Result<String, anyhow::Error> {
 
 #[cfg(test)]
 async fn delete_tag(tag_name: &str) {
-    if let Err(err) = delete_tag_safe(tag_name).await {
+    if let Err(err) = delete_tag_safe(tag_name, &OutputConfig::default()).await {
         err.print_stderr();
     }
 }
 
-async fn delete_tag_safe(tag_name: &str) -> CliResult<()> {
+async fn delete_tag_safe(tag_name: &str, output: &OutputConfig) -> CliResult<()> {
     let existing = tag::find_tag_and_commit(tag_name).await.map_err(|e| {
         CliError::fatal(e.to_string()).with_stable_code(StableErrorCode::RepoCorrupt)
     })?;
@@ -220,13 +226,18 @@ async fn delete_tag_safe(tag_name: &str) -> CliResult<()> {
     tag::delete(tag_name).await.map_err(|e| {
         CliError::fatal(e.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
     })?;
-    println!("Deleted tag '{}'", tag_name);
+    if !output.quiet {
+        println!("Deleted tag '{}'", tag_name);
+    }
     Ok(())
 }
 
-async fn show_tag_safe(tag_name: &str) -> CliResult<()> {
+async fn show_tag_safe(tag_name: &str, output: &OutputConfig) -> CliResult<()> {
     match tag::find_tag_and_commit(tag_name).await {
         Ok(Some((object, commit))) => {
+            if output.quiet {
+                return Ok(());
+            }
             if object.get_type() == ObjectType::Tag {
                 // Access the tag data directly from the object if it is a Tag variant.
                 if let tag::TagObject::Tag(tag_object) = &object {
