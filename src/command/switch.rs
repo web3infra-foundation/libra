@@ -63,6 +63,8 @@ pub struct SwitchOutput {
     pub commit: String,
     pub created: bool,
     pub detached: bool,
+    /// True when the target branch equals the current branch (no-op switch).
+    pub already_on: bool,
     pub tracking: Option<SwitchTrackingInfo>,
 }
 
@@ -107,6 +109,7 @@ async fn run_switch(args: SwitchArgs, output: &OutputConfig) -> CliResult<Switch
             commit: tracked.commit.to_string(),
             created: true,
             detached: false,
+            already_on: false,
             tracking: Some(SwitchTrackingInfo {
                 remote: tracked.remote,
                 remote_branch: tracked.remote_branch,
@@ -132,6 +135,7 @@ async fn run_switch(args: SwitchArgs, output: &OutputConfig) -> CliResult<Switch
                 commit: commit.to_string(),
                 created: true,
                 detached: false,
+                already_on: false,
                 tracking: None,
             })
         }
@@ -153,6 +157,7 @@ async fn run_switch(args: SwitchArgs, output: &OutputConfig) -> CliResult<Switch
                     commit: commit.to_string(),
                     created: false,
                     detached: true,
+                    already_on: false,
                     tracking: None,
                 })
             }
@@ -162,6 +167,7 @@ async fn run_switch(args: SwitchArgs, output: &OutputConfig) -> CliResult<Switch
                         .with_stable_code(StableErrorCode::CliInvalidArguments)
                 })?;
                 let commit = switch_to_branch(branch.clone(), output).await?;
+                let already_on = previous_branch.as_deref() == Some(&branch);
                 Ok(SwitchOutput {
                     previous_branch,
                     previous_commit,
@@ -169,6 +175,7 @@ async fn run_switch(args: SwitchArgs, output: &OutputConfig) -> CliResult<Switch
                     commit: commit.to_string(),
                     created: false,
                     detached: false,
+                    already_on,
                     tracking: None,
                 })
             }
@@ -449,7 +456,11 @@ fn render_switch_output(result: &SwitchOutput, output: &OutputConfig) -> CliResu
         return Ok(());
     }
 
-    if result.detached {
+    if result.already_on {
+        if let Some(branch) = &result.branch {
+            println!("Already on '{}'", branch);
+        }
+    } else if result.detached {
         println!("HEAD is now at {}", &result.commit[..7]);
     } else if result.created {
         println!(

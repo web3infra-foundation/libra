@@ -637,6 +637,15 @@ fn map_reset_invalid_revision(message: String) -> CliError {
         .with_hint("check the revision name and try again.")
 }
 
+/// Classify a runtime error message from `perform_reset()` into a
+/// [`StableErrorCode`].
+///
+/// **Coupling note:** This function relies on keyword matching against error
+/// messages produced by `perform_reset()`, `rebuild_index_from_tree()`, and
+/// `restore_working_directory_from_tree()`.  If those messages change, the
+/// classification may silently fall through to the default `IoWriteFailed`.
+/// A future refactor should replace these string-based errors with a typed
+/// `ResetError` enum (see docs/improvement/reset.md).
 fn map_reset_runtime_error(message: String) -> CliError {
     let stable_code = if message.contains("save index")
         || message.contains("write file")

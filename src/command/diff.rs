@@ -303,10 +303,8 @@ fn render_diff_output(
         return emit_json_data("diff", result, output);
     }
 
-    if output.quiet {
-        return Ok(());
-    }
-
+    // --output writes are an explicit side-effect and must be honored even
+    // when --quiet is set (quiet only suppresses stdout, not file writes).
     let rendered = if args.name_only {
         result
             .files
@@ -343,6 +341,10 @@ fn render_diff_output(
             CliError::fatal(format!("failed to write output file '{}': {e}", path))
                 .with_stable_code(StableErrorCode::IoWriteFailed)
         })?;
+        return Ok(());
+    }
+
+    if output.quiet {
         return Ok(());
     }
 

@@ -341,6 +341,14 @@ struct Reference {
     name: String,
 }
 
+fn parse_date_arg(value: &str) -> CliResult<i64> {
+    parse_date(value).map_err(|e| {
+        CliError::fatal(e.to_string())
+            .with_stable_code(StableErrorCode::CliInvalidArguments)
+            .with_hint(r#"supported formats: YYYY-MM-DD, "N days ago", unix timestamp"#)
+    })
+}
+
 pub async fn execute(args: LogArgs) {
     if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
         err.print_stderr();
@@ -361,26 +369,8 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     let name_only = args.name_only && !name_status;
     let patch = args.patch && !name_only && !name_status;
 
-    let since = args
-        .since
-        .as_deref()
-        .map(parse_date)
-        .transpose()
-        .map_err(|e| {
-            CliError::fatal(e.to_string())
-                .with_stable_code(StableErrorCode::CliInvalidArguments)
-                .with_hint(r#"supported formats: YYYY-MM-DD, "N days ago", unix timestamp"#)
-        })?;
-    let until = args
-        .until
-        .as_deref()
-        .map(parse_date)
-        .transpose()
-        .map_err(|e| {
-            CliError::fatal(e.to_string())
-                .with_stable_code(StableErrorCode::CliInvalidArguments)
-                .with_hint(r#"supported formats: YYYY-MM-DD, "N days ago", unix timestamp"#)
-        })?;
+    let since = args.since.as_deref().map(parse_date_arg).transpose()?;
+    let until = args.until.as_deref().map(parse_date_arg).transpose()?;
     let path_filters: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
     let filter = CommitFilter::new(args.author.clone(), since, until, path_filters.clone());
 
@@ -600,26 +590,8 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
 }
 
 async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
-    let since = args
-        .since
-        .as_deref()
-        .map(parse_date)
-        .transpose()
-        .map_err(|e| {
-            CliError::fatal(e.to_string())
-                .with_stable_code(StableErrorCode::CliInvalidArguments)
-                .with_hint(r#"supported formats: YYYY-MM-DD, "N days ago", unix timestamp"#)
-        })?;
-    let until = args
-        .until
-        .as_deref()
-        .map(parse_date)
-        .transpose()
-        .map_err(|e| {
-            CliError::fatal(e.to_string())
-                .with_stable_code(StableErrorCode::CliInvalidArguments)
-                .with_hint(r#"supported formats: YYYY-MM-DD, "N days ago", unix timestamp"#)
-        })?;
+    let since = args.since.as_deref().map(parse_date_arg).transpose()?;
+    let until = args.until.as_deref().map(parse_date_arg).transpose()?;
     let path_filters: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
     let filter = CommitFilter::new(args.author.clone(), since, until, path_filters.clone());
 
