@@ -259,7 +259,7 @@ async fn perform_reset(
         .await
         .ok_or_else(|| "Cannot reset: HEAD is unborn and points to no commit.".to_string())?;
     let previously_tracked_paths = if matches!(mode, ResetMode::Hard) {
-        tracked_paths_from_index()?
+        tracked_paths_for_hard_reset(&old_oid)?
     } else {
         HashSet::new()
     };
@@ -607,6 +607,29 @@ fn get_commit_summary(commit_id: &ObjectHash) -> Result<String, String> {
 fn tracked_paths_from_index() -> Result<HashSet<PathBuf>, String> {
     let index = Index::load(path::index()).map_err(|e| format!("failed to load index: {e}"))?;
     Ok(index.tracked_files().into_iter().collect())
+}
+
+fn tracked_paths_from_commit(commit_id: &ObjectHash) -> Result<HashSet<PathBuf>, String> {
+    let commit: Commit =
+        load_object(commit_id).map_err(|e| format!("failed to load commit: {e}"))?;
+    let tree: Tree =
+        load_object(&commit.tree_id).map_err(|e| format!("failed to load tree: {e}"))?;
+    Ok(tree
+        .get_plain_items()
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect())
+}
+
+fn tracked_paths_for_hard_reset(
+    current_commit_id: &ObjectHash,
+) -> Result<HashSet<PathBuf>, String> {
+    // `reset --hard` must remove paths that are tracked either by the current HEAD
+    // tree or by the staged index, otherwise cached removals can leave stale files
+    // behind when the target commit does not contain them.
+    let mut tracked_paths = tracked_paths_from_commit(current_commit_id)?;
+    tracked_paths.extend(tracked_paths_from_index()?);
+    Ok(tracked_paths)
 }
 
 fn render_reset_output(result: &ResetOutput, output: &OutputConfig) -> CliResult<()> {

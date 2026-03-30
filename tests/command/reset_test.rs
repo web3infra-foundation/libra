@@ -7,6 +7,7 @@ use std::fs;
 use libra::{
     command::{
         branch::{self, BranchArgs},
+        remove::{self, RemoveArgs},
         reset::{self, ResetArgs},
         status::{changes_to_be_committed, changes_to_be_staged},
     },
@@ -669,6 +670,109 @@ async fn test_reset_hard_same_target_restores_worktree_and_removes_staged_additi
     assert!(
         unstaged.deleted.is_empty(),
         "tracked deletions should be cleared"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_reset_hard_removes_paths_tracked_only_by_head_tree() {
+    let temp_path = tempdir().unwrap();
+    let _guard = ChangeDirGuard::new(temp_path.path());
+    setup_with_new_libra_in(temp_path.path()).await;
+    setup_reset_user_identity().await;
+
+    fs::write("base.txt", "base\n").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["base.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("base".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await;
+
+    fs::write("tracked.txt", "tracked\n").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["tracked.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("add tracked".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await;
+
+    remove::execute(RemoveArgs {
+        pathspec: vec!["tracked.txt".to_string()],
+        cached: true,
+        recursive: false,
+        force: false,
+        dry_run: false,
+        ignore_unmatch: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
+    })
+    .await;
+    fs::write("tracked.txt", "tracked\nstill here\n").unwrap();
+
+    reset::execute_safe(
+        ResetArgs {
+            target: "HEAD~1".to_string(),
+            soft: false,
+            mixed: false,
+            hard: true,
+            pathspecs: vec![],
+        },
+        &libra::utils::output::OutputConfig::default(),
+    )
+    .await
+    .expect("hard reset should remove files tracked by HEAD even when absent from the index");
+
+    assert!(
+        fs::metadata("tracked.txt").is_err(),
+        "hard reset should remove tracked.txt because the target commit does not contain it"
+    );
+    assert!(
+        changes_to_be_committed().await.is_empty(),
+        "hard reset should clear staged deletions"
+    );
+    let unstaged = changes_to_be_staged().unwrap();
+    assert!(
+        unstaged.deleted.is_empty(),
+        "hard reset should not leave tracked.txt as a deleted path"
     );
 }
 
