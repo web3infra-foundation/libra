@@ -14,8 +14,8 @@
 - `add` 命令主改造已落地：`run_add()` → `AddOutput` 执行层/渲染层拆分、JSON/machine 输出、显式 `StableErrorCode`、warning 接入共享 tracker
 - `status` 命令主改造已落地：`StatusData` 共享数据层、upstream tracking、`--exit-code` 标志、显式 `StableErrorCode`
 
-**已有 JSON 输出的命令（面向终端用户的高层命令）：** commit, status, branch, config, init, clone, add（底层命令如 `cat-file`、`show-ref` 也已支持 JSON，但未纳入本优先级列表；`switch` 仅用 `is_json()` 抑制 human 输出，但 `--json` 模式下不产生结构化 stdout，不计入）
-**已用 StableErrorCode 的命令：** init, clone, add, status, commit, shortlog, lfs, code（共 8 个）
+**已有 JSON 输出的命令（面向终端用户的高层命令）：** commit, status, branch, config, init, clone, add, push, pull（底层命令如 `cat-file`、`show-ref` 也已支持 JSON，但未纳入本优先级列表；`switch` 仅用 `is_json()` 抑制 human 输出，但 `--json` 模式下不产生结构化 stdout，不计入）
+**已用 StableErrorCode 的命令：** init, clone, add, status, commit, push, pull, shortlog, lfs, code（共 10 个）
 
 ---
 
@@ -53,8 +53,8 @@
 | **4** | `add` | ✅ 已落地 | 执行层/渲染层拆分（`run_add()` → `AddOutput`）；JSON/machine 结构化输出；成功摘要；`--dry-run`/`--verbose` 输出经 `OutputConfig` 管控；显式 `StableErrorCode`；ignored/failed 按 warning 处理并接入 `--exit-code-on-warning`（详见 [add.md](add.md)） |
 | **5** | `status` | ✅ 已落地 | `StatusData` 共享数据层消除重复计算；upstream tracking（human/JSON/porcelain v2）；显式 `StableErrorCode`；新增 `--exit-code` dirty → exit `1`；颜色控制统一到 `OutputConfig`（详见 [status.md](status.md)） |
 | **6** | `commit` | ✅ 已落地 | `CommitError`（18 变体）typed enum + 显式 `StableErrorCode`；`run_commit()` + `render_commit_output()` 执行/渲染拆分；JSON 向后兼容扩展（+`branch`/`amend`/`signoff`/`conventional`/`signed`）；hook I/O 隔离；`--help` EXAMPLES（详见 [commit.md](commit.md)） |
-| **7** | `push` | 功能失败/60s 超时/无 JSON | 修复 refspec 语法；10s 连接/空闲超时；human 进度输出；JSON 输出；错误码。**前置依赖**：需在 `protocol/` 建立可替换 transport seam 供超时/auth/protocol 测试 |
-| **8** | `pull` | 级联失败/无 JSON | 聚合 fetch + fast-forward/up-to-date 结果；修复 upstream tracking；JSON 输出；错误码（non-fast-forward merge 留 merge 批次）。**前置依赖**：需在 `fetch.rs`/`merge.rs` 建立 pull 可复用的最小 typed helper（完整 JSON/进度改造留第五/六批） |
+| **7** | `push` | ✅ 已落地 | 修复 refspec 语法；10s 连接/空闲超时；human 进度输出；JSON 输出；错误码。**前置依赖**：需在 `protocol/` 建立可替换 transport seam 供超时/auth/protocol 测试 |
+| **8** | `pull` | ✅ 已落地 | 聚合 fetch + fast-forward/up-to-date 结果；修复 upstream tracking；JSON 输出；错误码（non-fast-forward merge 留 merge 批次）。**前置依赖**：需在 `fetch.rs`/`merge.rs` 建立 pull 可复用的最小 typed helper（完整 JSON/进度改造留第五/六批） |
 
 **理由：** config 是基础设施层，vault 加密存储和 `resolve_env()` 被其他命令（push 认证、code AI provider）依赖，必须最先完成。init/clone 是入口命令（审计指出 init 耗时 ~6s 严重违反 CLIG "100ms 内打印内容"原则）；add 是 commit 前的必经步骤；push 是审计中"最严重的三个缺陷"之一。
 
@@ -122,7 +122,37 @@
 | **25** | `shortlog` | 已有错误码 | 补齐 revision 位置参数；JSON 输出 |
 | **26** | `clean` / `checkout` / `rebase` / `merge` | 与 Git 语法一致 | JSON 输出；merge 冲突结构化输出（pull 依赖的 three-way merge 能力在此批次统一实现） |
 
-### 第七批：全局层面改进（贯穿所有命令）
+### 第七批：工作树操作与文件管理命令（P2 补齐）
+
+已在代码库中实现但未纳入前六批改进计划的用户可见命令。这些命令已具备基本功能，但缺少结构化输出、显式错误码和现代化的执行/渲染分离。
+
+| 顺序 | 命令 | 当前状态 | 改进重点 |
+|------|------|--------|--------|
+| **27** | `mv` | 无 JSON，无 StableErrorCode（492 行） | 执行层/渲染层拆分；JSON 输出（移动/重命名结果）；显式 `StableErrorCode`；成功确认消息 |
+| **28** | `rm` | 无 JSON，无 StableErrorCode（376 行） | 执行层/渲染层拆分；JSON 输出（删除文件列表）；显式 `StableErrorCode`；`--dry-run` 结构化输出 |
+| **29** | `worktree` | 无 JSON，无 StableErrorCode（745 行） | JSON 输出（worktree list 结构化）；显式 `StableErrorCode`；子命令 add/list/lock/unlock/remove 补齐确认消息 |
+| **30** | `open` | 无 JSON，无 StableErrorCode（172 行） | 显式 `StableErrorCode`；无远程 URL 时 hint |
+
+**理由：** `mv`/`rm` 是文件管理基本操作，静默成功违反 CLIG 原则；`worktree` 是多任务并行开发的重要命令；`open` 体量小，可顺带收尾。
+
+### 第八批：底层与特殊用途命令（P2 增强）
+
+底层管道命令和特殊用途命令。这些命令主要面向脚本和内部基础设施，部分已有 JSON 支持。
+
+| 顺序 | 命令 | 当前状态 | 改进重点 |
+|------|------|--------|--------|
+| **31** | `cat-file` | 有 JSON（1,329 行） | 补齐 `StableErrorCode`；统一错误输出格式 |
+| **32** | `show-ref` | 有 JSON（193 行） | 补齐 `StableErrorCode` |
+| **33** | `index-pack` | 无 JSON，无 StableErrorCode（313 行） | 显式 `StableErrorCode`；JSON 进度/结果输出 |
+| **34** | `lfs` | 无 JSON，已有 StableErrorCode（357 行） | 补齐 JSON 输出（batch、lock 子命令） |
+| **35** | `cloud` | 无 JSON，无 StableErrorCode（937 行） | JSON 输出（backup/restore 结果）；显式 `StableErrorCode`；进度输出 |
+
+**不纳入改进计划的模块：**
+- `web_assets.rs`（11 行）：纯资源嵌入模块，无命令逻辑
+- `claude_sdk.rs`（3,576 行）：Claude Agent SDK managed-mode 命令面，属于独立子系统，改进节奏由 SDK 自身演进决定
+- `code.rs`（1,153 行）：`libra code` TUI/Web/MCP 入口，已有 StableErrorCode，改进节奏由 AI Agent 子系统自身演进决定
+
+### 全局层面改进（贯穿所有命令）
 
 这些改进不针对单个命令，而是全局性的：
 
@@ -147,8 +177,16 @@
 - [Add 命令改进详细计划](add.md) ✅ 已落地
 - [Status 命令改进详细计划](status.md) ✅ 已落地
 - [Commit 命令改进详细计划](commit.md) ✅ 已落地
-- [Push 命令改进详细计划](push.md)
-- [Pull 命令改进详细计划](pull.md)
+- [Push 命令改进详细计划](push.md) ✅ 已落地
+- [Pull 命令改进详细计划](pull.md) ✅ 已落地
+- [Switch 命令改进详细计划](switch.md)
+- [Reset 命令改进详细计划](reset.md)
+- [Tag 命令改进详细计划](tag.md)
+- [Branch 命令改进详细计划](branch.md)
+- [Log 命令改进详细计划](log.md)
+- [Diff 命令改进详细计划](diff.md)
+- [Show 命令改进详细计划](show.md)
+- [Blame 命令改进详细计划](blame.md)
 
 ## 命令改进实施记录
 

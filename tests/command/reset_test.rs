@@ -25,6 +25,36 @@ fn test_reset_cli_outside_repository_returns_fatal_128() {
     );
 }
 
+#[test]
+fn test_reset_json_output_reports_target_commit() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nsecond\n").unwrap();
+    let add_output = run_libra_command(&["add", "tracked.txt"], repo.path());
+    assert!(
+        add_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&add_output.stderr)
+    );
+    let commit_output = run_libra_command(&["commit", "-m", "second", "--no-verify"], repo.path());
+    assert!(
+        commit_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&commit_output.stderr)
+    );
+
+    let output = run_libra_command(&["--json", "reset", "--hard", "HEAD~1"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "reset");
+    assert_eq!(json["data"]["mode"], "hard");
+    assert_eq!(json["data"]["subject"], "base");
+}
+
 /// Setup a standard test repository with 4 commits and branches
 async fn setup_standard_repo(
     temp_path: &std::path::Path,

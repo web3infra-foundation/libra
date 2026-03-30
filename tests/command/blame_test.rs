@@ -30,6 +30,39 @@ fn test_blame_cli_outside_repository_returns_fatal_128() {
     );
 }
 
+#[test]
+fn test_blame_json_output_includes_lines() {
+    let repo = create_committed_repo_via_cli();
+    std::fs::write(repo.path().join("tracked.txt"), "line1\nline2\n").unwrap();
+    let add_output = run_libra_command(&["add", "tracked.txt"], repo.path());
+    assert!(
+        add_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&add_output.stderr)
+    );
+    let commit_output = run_libra_command(
+        &["commit", "-m", "update tracked", "--no-verify"],
+        repo.path(),
+    );
+    assert!(
+        commit_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&commit_output.stderr)
+    );
+
+    let output = run_libra_command(&["--json", "blame", "tracked.txt"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "blame");
+    assert_eq!(json["data"]["file"], "tracked.txt");
+    assert!(json["data"]["lines"].as_array().is_some());
+}
+
 async fn setup_repo_with_hash(
     temp: &tempfile::TempDir,
     object_format: &str,

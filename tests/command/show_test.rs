@@ -8,7 +8,7 @@ use std::process::Command;
 use libra::utils::output::OutputConfig;
 use serial_test::serial;
 
-use super::{create_committed_repo_via_cli, run_libra_command};
+use super::{create_committed_repo_via_cli, parse_json_stdout, run_libra_command};
 
 /// Initialize a temporary repository using CLI.
 fn init_temp_repo() -> tempfile::TempDir {
@@ -139,6 +139,24 @@ fn test_show_cli_badref_returns_cli_exit_code() {
     ));
     assert!(stderr.contains("Error-Code: LBR-CLI-003"));
     assert!(stderr.contains("Hint: use '--' to separate paths from revisions"));
+}
+
+#[test]
+fn test_show_json_commit_output_includes_type_and_files() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--json", "show", "HEAD"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "show");
+    assert_eq!(json["data"]["type"], "commit");
+    assert_eq!(json["data"]["subject"], "base");
+    assert!(json["data"]["files"].as_array().is_some());
 }
 
 /// Test that show can display a lightweight tag.

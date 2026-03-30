@@ -66,7 +66,18 @@ const CODEX_STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(200);
     dead_code,
     reason = "Embedded browse page is reserved for the web/TUI code flow"
 )]
-const BROWSE_PAGE_HTML: &str = include_str!("code/index.html");
+const BROWSE_PAGE_HTML: &str = r#"<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Libra Code</title>
+  </head>
+  <body>
+    <h1>Hello, Libra Code!</h1>
+  </body>
+</html>
+"#;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum CodeProvider {

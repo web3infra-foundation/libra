@@ -5,6 +5,7 @@ use std::collections::{HashSet, VecDeque};
 use clap::{ArgGroup, Parser};
 use colored::Colorize;
 use git_internal::{hash::ObjectHash, internal::object::commit::Commit};
+use serde::Serialize;
 
 use crate::{
     command::{get_target_commit, load_object},
@@ -14,7 +15,7 @@ use crate::{
         head::Head,
     },
     utils::{
-        error::{CliError, CliResult},
+        error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
     },
 };
@@ -23,6 +24,38 @@ pub enum BranchListMode {
     Local,
     Remote,
     All,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "action")]
+pub enum BranchOutput {
+    #[serde(rename = "list")]
+    List { branches: Vec<BranchListEntry> },
+    #[serde(rename = "create")]
+    Create { name: String, commit: String },
+    #[serde(rename = "delete")]
+    Delete {
+        name: String,
+        commit: String,
+        force: bool,
+    },
+    #[serde(rename = "rename")]
+    Rename { old_name: String, new_name: String },
+    #[serde(rename = "set-upstream")]
+    SetUpstream { branch: String, upstream: String },
+    #[serde(rename = "show-current")]
+    ShowCurrent {
+        name: Option<String>,
+        detached: bool,
+        commit: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BranchListEntry {
+    pub name: String,
+    pub current: bool,
+    pub commit: String,
 }
 
 const BRANCH_AFTER_HELP: &str = "\
@@ -106,6 +139,11 @@ pub async fn execute(args: BranchArgs) {
 /// errors and exiting. Creates, deletes, renames, or lists branches depending
 /// on the provided arguments.
 pub async fn execute_safe(args: BranchArgs, output: &OutputConfig) -> CliResult<()> {
+    if output.is_json() {
+        let result = run_branch_json(args, output).await?;
+        return emit_json_data("branch", &result, output);
+    }
+
     if let Some(new_branch) = args.new_branch {
         create_branch_safe(new_branch, args.commit_hash).await
     } else if let Some(branch_to_delete) = args.delete {
@@ -134,16 +172,7 @@ pub async fn execute_safe(args: BranchArgs, output: &OutputConfig) -> CliResult<
             BranchListMode::Local
         };
 
-        if output.is_json() {
-            // Collect branch names and emit as JSON.
-            let branches =
-                collect_branch_names(list_mode, &args.contains, &args.no_contains).await?;
-            emit_json_data(
-                "branch",
-                &serde_json::json!({ "branches": branches }),
-                output,
-            )
-        } else if output.quiet {
+        if output.quiet {
             // Quiet mode: suppress branch listing.
             Ok(())
         } else {
@@ -172,7 +201,9 @@ pub async fn set_upstream_safe_with_output(
         let (remote, remote_branch) = match upstream.split_once('/') {
             Some((remote, branch)) => (remote, branch),
             None => {
-                return Err(CliError::fatal(format!("invalid upstream '{}'", upstream)));
+                return Err(CliError::fatal(format!("invalid upstream '{}'", upstream))
+                    .with_stable_code(StableErrorCode::CliInvalidTarget)
+                    .with_hint("expected format: 'remote/branch'"));
             }
         };
         let _ = ConfigKv::set(&format!("branch.{branch}.remote"), remote, false).await;
@@ -204,31 +235,33 @@ pub async fn create_branch_safe(
     tracing::debug!("create branch: {} from {:?}", new_branch, branch_or_commit);
 
     if !is_valid_git_branch_name(&new_branch) {
-        return Err(CliError::fatal(format!(
-            "'{}' is not a valid branch name",
-            new_branch
-        )));
+        return Err(
+            CliError::fatal(format!("'{}' is not a valid branch name", new_branch))
+                .with_stable_code(StableErrorCode::CliInvalidArguments),
+        );
     }
     if branch::is_locked_branch(&new_branch) {
         return Err(CliError::fatal(format!(
             "the '{}' branch is locked and cannot be created",
             new_branch
-        )));
+        ))
+        .with_stable_code(StableErrorCode::ConflictOperationBlocked));
     }
 
     // check if branch exists
     let branch = Branch::find_branch(&new_branch, None).await;
     if branch.is_some() {
-        return Err(CliError::fatal(format!(
-            "a branch named '{}' already exists",
-            new_branch
-        )));
+        return Err(
+            CliError::fatal(format!("a branch named '{}' already exists", new_branch))
+                .with_stable_code(StableErrorCode::ConflictOperationBlocked),
+        );
     }
 
     let base_name = branch_or_commit.clone();
     let commit_id = match branch_or_commit {
         Some(branch_or_commit) => get_target_commit(&branch_or_commit).await.map_err(|_| {
             CliError::fatal(format!("not a valid object name: '{}'", branch_or_commit))
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
         })?,
         None => {
             if let Some(commit_id) = Head::current_commit().await {
@@ -238,10 +271,10 @@ pub async fn create_branch_safe(
                     Head::Branch(name) => name,
                     Head::Detached(commit_hash) => commit_hash.to_string(),
                 };
-                return Err(CliError::fatal(format!(
-                    "not a valid object name: '{}'",
-                    current
-                )));
+                return Err(
+                    CliError::fatal(format!("not a valid object name: '{}'", current))
+                        .with_stable_code(StableErrorCode::CliInvalidTarget),
+                );
             }
         }
     };
@@ -254,12 +287,16 @@ pub async fn create_branch_safe(
             "not a valid object name: '{}'",
             base_name.as_deref().unwrap_or(commit_id_display.as_str())
         ))
+        .with_stable_code(StableErrorCode::CliInvalidTarget)
     })?;
 
     // create branch
     Branch::update_branch(&new_branch, &commit_id.to_string(), None)
         .await
-        .map_err(|e| CliError::fatal(format!("failed to create branch '{}': {e}", new_branch)))?;
+        .map_err(|e| {
+            CliError::fatal(format!("failed to create branch '{}': {e}", new_branch))
+                .with_stable_code(StableErrorCode::IoWriteFailed)
+        })?;
     Ok(())
 }
 
@@ -268,12 +305,17 @@ async fn delete_branch(branch_name: String) -> CliResult<()> {
         return Err(CliError::fatal(format!(
             "the '{}' branch is locked and cannot be deleted",
             branch_name
-        )));
+        ))
+        .with_stable_code(StableErrorCode::ConflictOperationBlocked));
     }
 
     Branch::find_branch(&branch_name, None)
         .await
-        .ok_or_else(|| CliError::fatal(format!("branch '{}' not found", branch_name)))?;
+        .ok_or_else(|| {
+            CliError::fatal(format!("branch '{}' not found", branch_name))
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint("use 'libra branch -l' to list branches")
+        })?;
     let head = Head::current().await;
 
     if let Head::Branch(name) = head
@@ -282,7 +324,8 @@ async fn delete_branch(branch_name: String) -> CliResult<()> {
         return Err(CliError::fatal(format!(
             "Cannot delete the branch '{}' which you are currently on",
             branch_name
-        )));
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid));
     }
 
     Branch::delete_branch(&branch_name, None).await;
@@ -299,13 +342,18 @@ async fn delete_branch_safe(branch_name: String) -> CliResult<()> {
         return Err(CliError::fatal(format!(
             "the '{}' branch is locked and cannot be deleted",
             branch_name
-        )));
+        ))
+        .with_stable_code(StableErrorCode::ConflictOperationBlocked));
     }
 
     // 1. Check if branch exists
     let branch = Branch::find_branch(&branch_name, None)
         .await
-        .ok_or_else(|| CliError::fatal(format!("branch '{}' not found", branch_name)))?;
+        .ok_or_else(|| {
+            CliError::fatal(format!("branch '{}' not found", branch_name))
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint("use 'libra branch -l' to list branches")
+        })?;
 
     // 2. Check if trying to delete current branch
     let head = Head::current().await;
@@ -315,7 +363,8 @@ async fn delete_branch_safe(branch_name: String) -> CliResult<()> {
         return Err(CliError::fatal(format!(
             "Cannot delete the branch '{}' which you are currently on",
             branch_name
-        )));
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid));
     }
 
     // 3. Check if the branch is fully merged into HEAD
@@ -343,6 +392,7 @@ async fn delete_branch_safe(branch_name: String) -> CliResult<()> {
             "The branch '{}' is not fully merged.",
             branch_name
         ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid)
         .with_hint(format!(
             "If you are sure you want to delete it, run 'libra branch -D {}'.",
             branch_name
@@ -363,49 +413,55 @@ async fn rename_branch(args: Vec<String>) -> CliResult<()> {
             match head {
                 Head::Branch(name) => (name, args[0].clone()),
                 Head::Detached(_) => {
-                    return Err(CliError::fatal("HEAD is detached"));
+                    return Err(CliError::fatal("HEAD is detached")
+                        .with_stable_code(StableErrorCode::RepoStateInvalid));
                 }
             }
         }
         2 => (args[0].clone(), args[1].clone()),
         _ => {
-            return Err(CliError::fatal("too many arguments"));
+            return Err(CliError::command_usage("too many arguments")
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint("usage: libra branch -m [old-name] new-name"));
         }
     };
 
     if !is_valid_git_branch_name(&new_name) {
-        return Err(CliError::fatal(format!(
-            "invalid branch name: {}",
-            new_name
-        )));
+        return Err(
+            CliError::fatal(format!("invalid branch name: {}", new_name))
+                .with_stable_code(StableErrorCode::CliInvalidArguments),
+        );
     }
 
     if branch::is_locked_branch(&new_name) {
         return Err(CliError::fatal(format!(
             "the '{}' branch is locked and cannot be overwritten",
             new_name
-        )));
+        ))
+        .with_stable_code(StableErrorCode::ConflictOperationBlocked));
     }
 
     if branch::is_locked_branch(&old_name) {
         return Err(CliError::fatal(format!(
             "the '{}' branch is locked and cannot be renamed",
             old_name
-        )));
+        ))
+        .with_stable_code(StableErrorCode::ConflictOperationBlocked));
     }
 
     // check if old branch exists
-    let old_branch = Branch::find_branch(&old_name, None)
-        .await
-        .ok_or_else(|| CliError::fatal(format!("branch '{}' not found", old_name)))?;
+    let old_branch = Branch::find_branch(&old_name, None).await.ok_or_else(|| {
+        CliError::fatal(format!("branch '{}' not found", old_name))
+            .with_stable_code(StableErrorCode::CliInvalidTarget)
+    })?;
 
     // check if new branch name already exists
     let new_branch_exists = Branch::find_branch(&new_name, None).await;
     if new_branch_exists.is_some() {
-        return Err(CliError::fatal(format!(
-            "A branch named '{}' already exists.",
-            new_name
-        )));
+        return Err(
+            CliError::fatal(format!("A branch named '{}' already exists.", new_name))
+                .with_stable_code(StableErrorCode::ConflictOperationBlocked),
+        );
     }
 
     let commit_hash = old_branch.commit.to_string();
@@ -413,7 +469,10 @@ async fn rename_branch(args: Vec<String>) -> CliResult<()> {
     // create new branch with the same commit
     Branch::update_branch(&new_name, &commit_hash, None)
         .await
-        .map_err(|e| CliError::fatal(format!("failed to create branch '{}': {e}", new_name)))?;
+        .map_err(|e| {
+            CliError::fatal(format!("failed to create branch '{}': {e}", new_name))
+                .with_stable_code(StableErrorCode::IoWriteFailed)
+        })?;
 
     // update HEAD if renaming current branch
     let head = Head::current().await;
@@ -513,7 +572,7 @@ async fn collect_branch_names(
     list_mode: BranchListMode,
     commits_contains: &[String],
     commits_no_contains: &[String],
-) -> CliResult<Vec<serde_json::Value>> {
+) -> CliResult<Vec<BranchListEntry>> {
     // Use the quiet variant: do NOT print "HEAD detached at ..." to stdout.
     let head_name = head_branch_name(false).await;
 
@@ -540,11 +599,11 @@ async fn collect_branch_names(
 
     let mut result = Vec::new();
     for branch in local_branches.iter().chain(remote_branches.iter()) {
-        result.push(serde_json::json!({
-            "name": branch.name,
-            "current": branch.name == head_name,
-            "commit": branch.commit.to_string(),
-        }));
+        result.push(BranchListEntry {
+            name: branch.name.clone(),
+            current: branch.name == head_name,
+            commit: branch.commit.to_string(),
+        });
     }
     Ok(result)
 }
@@ -647,9 +706,9 @@ pub fn filter_branches(
 async fn resolve_commits(commits: &[String]) -> CliResult<HashSet<ObjectHash>> {
     let mut set = HashSet::new();
     for commit in commits {
-        let target_commit = get_target_commit(commit)
-            .await
-            .map_err(|e| CliError::fatal(format!("{}", e)))?;
+        let target_commit = get_target_commit(commit).await.map_err(|e| {
+            CliError::fatal(format!("{}", e)).with_stable_code(StableErrorCode::CliInvalidTarget)
+        })?;
         set.insert(target_commit);
     }
     Ok(set)
@@ -678,6 +737,7 @@ fn commit_contains(
         // enqueue all parent commits of `current_commit`
         let current_commit_object: Commit = load_object(&current_commit).map_err(|e| {
             CliError::fatal(format!("failed to load commit {}: {}", current_commit, e))
+                .with_stable_code(StableErrorCode::RepoCorrupt)
         })?;
         for parent_commit in current_commit_object.parent_commit_ids {
             if !visited.contains(&parent_commit) {
@@ -689,6 +749,100 @@ fn commit_contains(
 
     // contains no commits
     Ok(false)
+}
+
+async fn run_branch_json(args: BranchArgs, output: &OutputConfig) -> CliResult<BranchOutput> {
+    if let Some(new_branch) = args.new_branch {
+        create_branch_safe(new_branch.clone(), args.commit_hash).await?;
+        let branch = Branch::find_branch(&new_branch, None)
+            .await
+            .ok_or_else(|| {
+                CliError::fatal(format!("branch '{}' not found", new_branch))
+                    .with_stable_code(StableErrorCode::InternalInvariant)
+            })?;
+        Ok(BranchOutput::Create {
+            name: new_branch,
+            commit: branch.commit.to_string(),
+        })
+    } else if let Some(branch_to_delete) = args.delete {
+        let branch = Branch::find_branch(&branch_to_delete, None)
+            .await
+            .ok_or_else(|| {
+                CliError::fatal(format!("branch '{}' not found", branch_to_delete))
+                    .with_stable_code(StableErrorCode::CliInvalidTarget)
+                    .with_hint("use 'libra branch -l' to list branches")
+            })?;
+        delete_branch(branch_to_delete.clone()).await?;
+        Ok(BranchOutput::Delete {
+            name: branch_to_delete,
+            commit: branch.commit.to_string(),
+            force: true,
+        })
+    } else if let Some(branch_to_delete) = args.delete_safe {
+        let branch = Branch::find_branch(&branch_to_delete, None)
+            .await
+            .ok_or_else(|| {
+                CliError::fatal(format!("branch '{}' not found", branch_to_delete))
+                    .with_stable_code(StableErrorCode::CliInvalidTarget)
+                    .with_hint("use 'libra branch -l' to list branches")
+            })?;
+        delete_branch_safe(branch_to_delete.clone()).await?;
+        Ok(BranchOutput::Delete {
+            name: branch_to_delete,
+            commit: branch.commit.to_string(),
+            force: false,
+        })
+    } else if args.show_current {
+        Ok(match Head::current().await {
+            Head::Branch(name) => BranchOutput::ShowCurrent {
+                name: Some(name),
+                detached: false,
+                commit: Head::current_commit().await.map(|hash| hash.to_string()),
+            },
+            Head::Detached(hash) => BranchOutput::ShowCurrent {
+                name: None,
+                detached: true,
+                commit: Some(hash.to_string()),
+            },
+        })
+    } else if let Some(upstream) = args.set_upstream_to {
+        let branch = match Head::current().await {
+            Head::Branch(name) => name,
+            Head::Detached(_) => {
+                return Err(CliError::fatal("HEAD is detached")
+                    .with_stable_code(StableErrorCode::RepoStateInvalid));
+            }
+        };
+        let mut quiet_output = output.clone();
+        quiet_output.quiet = true;
+        set_upstream_safe_with_output(&branch, &upstream, &quiet_output).await?;
+        Ok(BranchOutput::SetUpstream { branch, upstream })
+    } else if !args.rename.is_empty() {
+        let old_name = if args.rename.len() == 1 {
+            match Head::current().await {
+                Head::Branch(name) => name,
+                Head::Detached(_) => {
+                    return Err(CliError::fatal("HEAD is detached")
+                        .with_stable_code(StableErrorCode::RepoStateInvalid));
+                }
+            }
+        } else {
+            args.rename[0].clone()
+        };
+        let new_name = args.rename.last().cloned().unwrap_or_default();
+        rename_branch(args.rename).await?;
+        Ok(BranchOutput::Rename { old_name, new_name })
+    } else {
+        let list_mode = if args.all {
+            BranchListMode::All
+        } else if args.remotes {
+            BranchListMode::Remote
+        } else {
+            BranchListMode::Local
+        };
+        let branches = collect_branch_names(list_mode, &args.contains, &args.no_contains).await?;
+        Ok(BranchOutput::List { branches })
+    }
 }
 
 pub fn is_valid_git_branch_name(name: &str) -> bool {

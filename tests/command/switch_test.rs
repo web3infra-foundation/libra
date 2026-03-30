@@ -17,6 +17,24 @@ fn test_switch_cli_missing_branch_returns_cli_exit_code() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("fatal: invalid reference: no-such"));
 }
 
+#[test]
+fn test_switch_json_create_output_reports_new_branch() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--json", "switch", "-c", "feature"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "switch");
+    assert_eq!(json["data"]["branch"], "feature");
+    assert_eq!(json["data"]["created"], true);
+    assert_eq!(json["data"]["detached"], false);
+}
+
 // async fn test_check_status() {
 //     println!("\n\x1b[1mTest check_status function.\x1b[0m");
 //

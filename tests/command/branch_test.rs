@@ -24,6 +24,24 @@ fn test_branch_cli_invalid_start_point_returns_cli_exit_code() {
     assert!(stderr.contains("Error-Code: LBR-CLI-003"));
 }
 
+#[test]
+fn test_branch_json_create_output_reports_branch() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--json", "branch", "feature"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "branch");
+    assert_eq!(json["data"]["action"], "create");
+    assert_eq!(json["data"]["name"], "feature");
+    assert!(json["data"]["commit"].as_str().is_some());
+}
+
 #[tokio::test]
 #[serial]
 /// Tests core branch management functionality including creation and listing.

@@ -47,6 +47,23 @@ fn test_log_cli_empty_repository_returns_fatal_128() {
     );
 }
 
+#[test]
+fn test_log_json_output_includes_commit_list() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--json", "log", "-n", "1"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "log");
+    assert_eq!(json["data"]["commits"][0]["subject"], "base");
+    assert!(json["data"]["commits"][0]["files"].as_array().is_some());
+}
+
 #[tokio::test]
 #[serial]
 /// Tests retrieval of commits reachable from a specific commit hash

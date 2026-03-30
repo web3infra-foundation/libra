@@ -21,6 +21,25 @@ fn test_diff_cli_outside_repository_returns_fatal_128() {
     );
 }
 
+#[test]
+fn test_diff_json_output_includes_file_stats() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nupdated\n").unwrap();
+
+    let output = run_libra_command(&["--json", "diff"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "diff");
+    assert_eq!(json["data"]["files_changed"], 1);
+    assert_eq!(json["data"]["files"][0]["path"], "tracked.txt");
+    assert!(json["data"]["files"][0]["hunks"].as_array().is_some());
+}
+
 /// Helper function to create a file with content.
 fn create_file(path: &str, content: &str) {
     let mut file = fs::File::create(path).unwrap();

@@ -3,6 +3,7 @@
 use std::io::Write;
 
 use clap::Parser;
+use git_internal::errors::GitError;
 use serde::Serialize;
 
 use super::{fetch, merge};
@@ -55,6 +56,8 @@ pub struct PullFetchResult {
 #[derive(Debug, Clone, Serialize)]
 pub struct PullMergeResult {
     pub strategy: String,
+    /// The previous HEAD commit before merge (None for root commits).
+    pub old_commit: Option<String>,
     pub commit: Option<String>,
     pub files_changed: usize,
     pub up_to_date: bool,
@@ -201,6 +204,7 @@ pub(crate) async fn run_pull(
         },
         merge: PullMergeResult {
             strategy: merge_result.strategy,
+            old_commit: merge_result.old_commit,
             commit: merge_result.commit,
             files_changed: merge_result.files_changed,
             up_to_date: merge_result.up_to_date,
@@ -321,6 +325,10 @@ fn render_pull_output(result: &PullOutput, output: &OutputConfig) -> CliResult<(
         return Ok(());
     }
 
+    if let (Some(old), Some(new)) = (&result.merge.old_commit, &result.merge.commit) {
+        writeln!(writer, "Updating {}..{}", short_oid(old), short_oid(new))
+            .map_err(|error| CliError::io(format!("failed to write pull summary: {error}")))?;
+    }
     writeln!(writer, "Fast-forward")
         .map_err(|error| CliError::io(format!("failed to write pull summary: {error}")))?;
     if result.merge.files_changed > 0 {
@@ -359,17 +367,32 @@ fn map_fetch_error_to_cli(error: &fetch::FetchError) -> CliError {
                     .with_stable_code(StableErrorCode::CliInvalidTarget)
             }
         },
-        fetch::FetchError::Discovery { .. } | fetch::FetchError::FetchObjects { .. } => {
-            CliError::fatal(error.to_string())
-                .with_stable_code(StableErrorCode::NetworkUnavailable)
-                .with_hint("check network connectivity and retry")
+        fetch::FetchError::Discovery { source, .. } => {
+            map_fetch_discovery_error(error.to_string(), source)
         }
-        fetch::FetchError::ObjectFormatMismatch { .. }
-        | fetch::FetchError::RemoteBranchNotFound { .. } => {
+        fetch::FetchError::FetchObjects { source, .. } => map_fetch_io_error(
+            error.to_string(),
+            source,
+            StableErrorCode::NetworkUnavailable,
+        )
+        .with_hint("check network connectivity and retry"),
+        fetch::FetchError::PacketRead { source } => {
+            if is_timeout_io_error(source) {
+                return CliError::fatal(error.to_string())
+                    .with_stable_code(StableErrorCode::NetworkUnavailable)
+                    .with_hint("check network connectivity and retry");
+            }
+            CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::NetworkProtocol)
+        }
+        fetch::FetchError::RemoteBranchNotFound { .. } => {
+            CliError::command_usage(error.to_string())
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint("verify the remote branch name and try again")
+        }
+        fetch::FetchError::ObjectFormatMismatch { .. } => {
             CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::RepoStateInvalid)
         }
-        fetch::FetchError::PacketRead { .. }
-        | fetch::FetchError::InvalidPktHeader { .. }
+        fetch::FetchError::InvalidPktHeader { .. }
         | fetch::FetchError::RemoteSideband { .. }
         | fetch::FetchError::ChecksumMismatch
         | fetch::FetchError::IndexPack { .. } => {
@@ -389,6 +412,42 @@ fn map_fetch_error_to_cli(error: &fetch::FetchError) -> CliError {
     }
 }
 
+fn map_fetch_discovery_error(message: String, source: &GitError) -> CliError {
+    match source {
+        GitError::UnAuthorized(_) => CliError::fatal(message)
+            .with_stable_code(StableErrorCode::AuthMissingCredentials)
+            .with_hint("check SSH key or HTTP credentials"),
+        GitError::NetworkError(_) => CliError::fatal(message)
+            .with_stable_code(StableErrorCode::NetworkUnavailable)
+            .with_hint("check network connectivity and retry"),
+        GitError::IOError(error) => {
+            map_fetch_io_error(message, error, StableErrorCode::NetworkUnavailable)
+                .with_hint("check network connectivity and retry")
+        }
+        _ => CliError::fatal(message).with_stable_code(StableErrorCode::NetworkProtocol),
+    }
+}
+
+fn map_fetch_io_error(
+    message: String,
+    error: &std::io::Error,
+    default_code: StableErrorCode,
+) -> CliError {
+    if is_timeout_io_error(error) {
+        CliError::fatal(message).with_stable_code(StableErrorCode::NetworkUnavailable)
+    } else {
+        CliError::fatal(message).with_stable_code(default_code)
+    }
+}
+
+fn is_timeout_io_error(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::TimedOut {
+        return true;
+    }
+    let lower = error.to_string().to_lowercase();
+    lower.contains("timeout") || lower.contains("timed out")
+}
+
 fn map_merge_error_to_cli(error: &merge::PullMergeError) -> CliError {
     match error {
         merge::PullMergeError::InvalidTarget(..) => CliError::command_usage(error.to_string())
@@ -402,6 +461,9 @@ fn map_merge_error_to_cli(error: &merge::PullMergeError) -> CliError {
         merge::PullMergeError::UnrelatedHistories => {
             CliError::failure(error.to_string()).with_stable_code(StableErrorCode::RepoStateInvalid)
         }
+        // ManualMergeRequired is extracted into PullError::ManualMergeRequired in run_pull(),
+        // so this arm is unreachable via PullError::Merge. Keep it for exhaustiveness in case
+        // map_merge_error_to_cli is called from other contexts.
         merge::PullMergeError::ManualMergeRequired { upstream } => CliError::failure(format!(
             "pull requires a non-fast-forward merge from '{upstream}', which is not yet supported"
         ))

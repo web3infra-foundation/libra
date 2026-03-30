@@ -28,6 +28,24 @@ async fn setup_user_identity() {
         .unwrap();
 }
 
+#[test]
+fn test_tag_json_create_output_includes_hash() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--json", "tag", "v1.0"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "tag");
+    assert_eq!(json["data"]["action"], "create");
+    assert_eq!(json["data"]["name"], "v1.0");
+    assert!(json["data"]["hash"].as_str().is_some());
+}
+
 /// Return the full ref name for a tag (e.g. "refs/tags/v1.0").
 fn ref_name(tag: &str) -> String {
     format!("refs/tags/{tag}")

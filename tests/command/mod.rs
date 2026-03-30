@@ -36,6 +36,7 @@ use libra::{
     },
 };
 use serde::Deserialize;
+use serde_json::Value;
 use serial_test::serial;
 use tempfile::tempdir;
 
@@ -92,6 +93,10 @@ fn parse_cli_error_stderr(stderr: &[u8]) -> (String, CliErrorReport) {
     let report: CliErrorReport =
         serde_json::from_str(json_line).expect("expected final stderr line to be JSON");
     (human.to_string(), report)
+}
+
+fn parse_json_stdout(output: &Output) -> Value {
+    serde_json::from_slice(&output.stdout).expect("expected stdout to be valid JSON")
 }
 
 /// Initialize a repository through the CLI to exercise the real process entrypoint.

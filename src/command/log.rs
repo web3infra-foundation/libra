@@ -14,9 +14,11 @@ use git_internal::{
     hash::ObjectHash,
     internal::object::{blob::Blob, commit::Commit, tree::Tree},
 };
+use serde::Serialize;
 
 use crate::{
     command::load_object,
+    common_utils::parse_commit_msg,
     internal::{
         branch::Branch,
         config::ConfigKv,
@@ -27,9 +29,9 @@ use crate::{
         },
     },
     utils::{
-        error::{CliError, CliResult},
+        error::{CliError, CliResult, StableErrorCode},
         object_ext::TreeExt,
-        output::OutputConfig,
+        output::{OutputConfig, emit_json_data},
         pager::Pager,
         util,
     },
@@ -116,6 +118,35 @@ pub enum ChangeType {
 pub struct FileChange {
     pub path: PathBuf,
     pub status: ChangeType,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LogFileChange {
+    pub path: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LogCommitEntry {
+    pub hash: String,
+    pub short_hash: String,
+    pub author_name: String,
+    pub author_email: String,
+    pub author_date: String,
+    pub committer_name: String,
+    pub committer_email: String,
+    pub committer_date: String,
+    pub subject: String,
+    pub body: String,
+    pub parents: Vec<String>,
+    pub refs: Vec<String>,
+    pub files: Vec<LogFileChange>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LogOutput {
+    pub commits: Vec<LogCommitEntry>,
+    pub total: Option<usize>,
 }
 
 struct CommitFilter {
@@ -321,9 +352,8 @@ pub async fn execute(args: LogArgs) {
 /// author, path) and renders formatted log output.
 pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()> {
     if output.is_json() {
-        return Err(CliError::command_usage(
-            "`log` does not yet support --json or --machine output",
-        ));
+        let result = run_log(&args).await?;
+        return emit_json_data("log", &result, output);
     }
 
     let name_status = args.name_status;
@@ -336,19 +366,29 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
         .as_deref()
         .map(parse_date)
         .transpose()
-        .map_err(|e| CliError::fatal(e.to_string()))?;
+        .map_err(|e| {
+            CliError::fatal(e.to_string())
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint(r#"supported formats: YYYY-MM-DD, "N days ago", unix timestamp"#)
+        })?;
     let until = args
         .until
         .as_deref()
         .map(parse_date)
         .transpose()
-        .map_err(|e| CliError::fatal(e.to_string()))?;
+        .map_err(|e| {
+            CliError::fatal(e.to_string())
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint(r#"supported formats: YYYY-MM-DD, "N days ago", unix timestamp"#)
+        })?;
     let path_filters: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
     let filter = CommitFilter::new(args.author.clone(), since, until, path_filters.clone());
 
-    let decorate_option = determine_decorate_option(&args)
-        .await
-        .map_err(|value| CliError::fatal(format!("invalid --decorate option: {value}")))?;
+    let decorate_option = determine_decorate_option(&args).await.map_err(|value| {
+        CliError::fatal(format!("invalid --decorate option: {value}"))
+            .with_stable_code(StableErrorCode::CliInvalidArguments)
+            .with_hint("valid options: no, short, full, auto")
+    })?;
 
     let mut pager = Pager::with_config(output)?;
 
@@ -557,6 +597,173 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
 
     pager.finish()?;
     Ok(())
+}
+
+async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
+    let since = args
+        .since
+        .as_deref()
+        .map(parse_date)
+        .transpose()
+        .map_err(|e| {
+            CliError::fatal(e.to_string())
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint(r#"supported formats: YYYY-MM-DD, "N days ago", unix timestamp"#)
+        })?;
+    let until = args
+        .until
+        .as_deref()
+        .map(parse_date)
+        .transpose()
+        .map_err(|e| {
+            CliError::fatal(e.to_string())
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint(r#"supported formats: YYYY-MM-DD, "N days ago", unix timestamp"#)
+        })?;
+    let path_filters: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
+    let filter = CommitFilter::new(args.author.clone(), since, until, path_filters.clone());
+
+    let head = Head::current().await;
+    let branch_name = if let Head::Branch(name) = head.to_owned() {
+        Some(name)
+    } else {
+        None
+    };
+    if let Some(name) = &branch_name
+        && Branch::find_branch(name, None).await.is_none()
+    {
+        return Err(CliError::fatal(format!(
+            "your current branch '{name}' does not have any commits yet"
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid)
+        .with_hint("create a commit first with 'libra commit'."));
+    }
+
+    let current_head_commit =
+        Head::current_commit()
+            .await
+            .ok_or_else(|| match branch_name.as_deref() {
+                Some(name) => CliError::fatal(format!(
+                    "your current branch '{name}' does not have any commits yet"
+                ))
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_hint("create a commit first with 'libra commit'."),
+                None => CliError::fatal("your current HEAD does not have any commits yet")
+                    .with_stable_code(StableErrorCode::RepoStateInvalid)
+                    .with_hint("create a commit first with 'libra commit'."),
+            })?;
+    let commit_hash = current_head_commit.to_string();
+
+    let mut reachable_commits = get_reachable_commits(commit_hash, None).await?;
+    reachable_commits.sort_by_key(|commit| std::cmp::Reverse(commit.committer.timestamp));
+
+    let max_output_number = min(args.number.unwrap_or(usize::MAX), reachable_commits.len());
+    let total = if args.number.is_some() {
+        None
+    } else {
+        Some(reachable_commits.len())
+    };
+    let ref_commits = create_reference_commit_map().await;
+    let mut commits = Vec::new();
+
+    for commit in reachable_commits {
+        if commits.len() >= max_output_number {
+            break;
+        }
+        if !filter.passes_non_path_filters(&commit) {
+            continue;
+        }
+
+        let files = get_changed_files_for_commit(&commit, &path_filters).await?;
+        if !filter.matches(&commit, Some(&files)).await? {
+            continue;
+        }
+
+        commits.push(LogCommitEntry {
+            hash: commit.id.to_string(),
+            short_hash: commit.id.to_string()[..7].to_string(),
+            author_name: commit.author.name.trim().to_string(),
+            author_email: commit.author.email.trim().to_string(),
+            author_date: format_log_timestamp(commit.author.timestamp as i64),
+            committer_name: commit.committer.name.trim().to_string(),
+            committer_email: commit.committer.email.trim().to_string(),
+            committer_date: format_log_timestamp(commit.committer.timestamp as i64),
+            subject: parse_commit_msg(&commit.message)
+                .0
+                .lines()
+                .next()
+                .unwrap_or("")
+                .to_string(),
+            body: parse_commit_msg(&commit.message)
+                .0
+                .lines()
+                .skip(1)
+                .collect::<Vec<_>>()
+                .join("\n"),
+            parents: commit
+                .parent_commit_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            refs: collect_log_refs(
+                &commit,
+                &ref_commits,
+                branch_name.as_deref(),
+                Some(current_head_commit),
+            ),
+            files: files
+                .into_iter()
+                .map(|file| LogFileChange {
+                    path: file.path.display().to_string(),
+                    status: match file.status {
+                        ChangeType::Added => "added",
+                        ChangeType::Modified => "modified",
+                        ChangeType::Deleted => "deleted",
+                    }
+                    .to_string(),
+                })
+                .collect(),
+        });
+    }
+
+    Ok(LogOutput { commits, total })
+}
+
+fn format_log_timestamp(timestamp: i64) -> String {
+    chrono::DateTime::from_timestamp(timestamp, 0)
+        .map(|date| date.to_rfc3339())
+        .unwrap_or_else(|| timestamp.to_string())
+}
+
+fn collect_log_refs(
+    commit: &Commit,
+    ref_commits: &HashMap<ObjectHash, Vec<Reference>>,
+    head_branch: Option<&str>,
+    current_head_commit: Option<ObjectHash>,
+) -> Vec<String> {
+    let mut refs = Vec::new();
+    if current_head_commit == Some(commit.id) {
+        if let Some(branch) = head_branch {
+            refs.push(format!("HEAD -> {branch}"));
+        } else {
+            refs.push("HEAD".to_string());
+        }
+    }
+
+    let mut extra_refs = ref_commits.get(&commit.id).cloned().unwrap_or_default();
+    extra_refs.sort();
+    for reference in extra_refs {
+        if reference.kind == ReferenceKind::Local && Some(reference.name.as_str()) == head_branch {
+            continue;
+        }
+
+        refs.push(match reference.kind {
+            ReferenceKind::Tag => format!("tag: {}", reference.name),
+            ReferenceKind::Remote | ReferenceKind::Local => reference.name,
+        });
+    }
+
+    refs
 }
 
 async fn commit_touches_paths(commit: &Commit, filters: &[PathBuf]) -> Result<bool, CliError> {
