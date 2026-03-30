@@ -64,6 +64,63 @@ fn test_log_json_output_includes_commit_list() {
     assert!(json["data"]["commits"][0]["files"].as_array().is_some());
 }
 
+#[test]
+fn test_log_json_total_reflects_filtered_scope() {
+    let repo = create_committed_repo_via_cli();
+
+    let name_output = run_libra_command(&["config", "user.name", "Other User"], repo.path());
+    assert!(
+        name_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&name_output.stderr)
+    );
+    let email_output =
+        run_libra_command(&["config", "user.email", "other@example.com"], repo.path());
+    assert!(
+        email_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&email_output.stderr)
+    );
+
+    std::fs::write(
+        repo.path().join("tracked.txt"),
+        "tracked\nupdated by other\n",
+    )
+    .expect("failed to update tracked.txt");
+    let add_output = run_libra_command(&["add", "tracked.txt"], repo.path());
+    assert!(
+        add_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&add_output.stderr)
+    );
+    let commit_output = run_libra_command(
+        &["commit", "-m", "other update", "--no-verify"],
+        repo.path(),
+    );
+    assert!(
+        commit_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&commit_output.stderr)
+    );
+
+    let output = run_libra_command(&["--json", "log", "--author", "Other User"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "log");
+    assert_eq!(json["data"]["total"], 1);
+    let commits = json["data"]["commits"]
+        .as_array()
+        .expect("commits should be an array");
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0]["author_name"], "Other User");
+    assert_eq!(commits[0]["subject"], "other update");
+}
+
 #[tokio::test]
 #[serial]
 /// Tests retrieval of commits reachable from a specific commit hash

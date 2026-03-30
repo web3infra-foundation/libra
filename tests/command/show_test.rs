@@ -165,6 +165,41 @@ fn test_show_json_commit_output_includes_type_and_files() {
 }
 
 #[test]
+fn test_show_json_annotated_tag_hash_preserves_tag_schema() {
+    let repo = init_temp_repo();
+    configure_user_identity(repo.path());
+    create_commit(repo.path(), "tracked.txt", "tracked\n", "base");
+    create_annotated_tag(repo.path(), "v1.0.0", "release notes");
+
+    let show_ref = run_libra_command(&["show-ref", "--tags", "v1.0.0"], repo.path());
+    assert!(
+        show_ref.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&show_ref.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&show_ref.stdout);
+    let tag_hash = stdout
+        .split_whitespace()
+        .next()
+        .expect("show-ref should return the tag object hash");
+
+    let output = run_libra_command(&["--json", "show", tag_hash], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "show");
+    assert_eq!(json["data"]["type"], "tag");
+    assert_eq!(json["data"]["tag_name"], "v1.0.0");
+    assert_eq!(json["data"]["message"], "release notes");
+    assert_eq!(json["data"]["target_type"], "commit");
+    assert!(json["data"]["tagger_name"].as_str().is_some());
+}
+
+#[test]
 fn test_show_json_commit_output_respects_pathspec_filters() {
     let repo = create_committed_repo_via_cli();
     std::fs::write(repo.path().join("tracked.txt"), "tracked\nupdated\n")

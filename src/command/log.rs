@@ -630,16 +630,13 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
     reachable_commits.sort_by_key(|commit| std::cmp::Reverse(commit.committer.timestamp));
 
     let max_output_number = min(args.number.unwrap_or(usize::MAX), reachable_commits.len());
-    let total = if args.number.is_some() {
-        None
-    } else {
-        Some(reachable_commits.len())
-    };
+    let include_total = args.number.is_none();
     let ref_commits = create_reference_commit_map().await;
     let mut commits = Vec::new();
+    let mut total = 0usize;
 
     for commit in reachable_commits {
-        if commits.len() >= max_output_number {
+        if !include_total && commits.len() >= max_output_number {
             break;
         }
         if !filter.passes_non_path_filters(&commit) {
@@ -648,6 +645,11 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
 
         let files = get_changed_files_for_commit(&commit, &path_filters).await?;
         if !filter.matches(&commit, Some(&files)).await? {
+            continue;
+        }
+
+        total += 1;
+        if commits.len() >= max_output_number {
             continue;
         }
 
@@ -698,7 +700,10 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
         });
     }
 
-    Ok(LogOutput { commits, total })
+    Ok(LogOutput {
+        commits,
+        total: include_total.then_some(total),
+    })
 }
 
 fn format_log_timestamp(timestamp: i64) -> String {

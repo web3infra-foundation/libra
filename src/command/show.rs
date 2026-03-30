@@ -150,6 +150,11 @@ pub async fn execute_safe(args: ShowArgs, output: &OutputConfig) -> CliResult<()
         return show_commit_file(rev, path, &args).await;
     }
 
+    // Raw object IDs should keep their native schema, including annotated tag objects.
+    if let Ok(hash) = ObjectHash::from_str(object_ref) {
+        return show_object_by_hash(&hash, &args).await;
+    }
+
     // Resolve refs first so tags keep their custom rendering.
     if let Ok(commit_hash) = util::get_commit_base(object_ref).await {
         // Use find_tag_and_commit to check if it's a tag and get tag info
@@ -168,11 +173,6 @@ pub async fn execute_safe(args: ShowArgs, output: &OutputConfig) -> CliResult<()
                 return show_commit(&commit_hash, &args).await;
             }
         }
-    }
-
-    // Fall back to direct object IDs.
-    if let Ok(hash) = ObjectHash::from_str(object_ref) {
-        return show_object_by_hash(&hash, &args).await;
     }
 
     Err(show_bad_revision_error(object_ref))
@@ -443,6 +443,11 @@ async fn run_show(args: &ShowArgs) -> CliResult<ShowOutput> {
         return collect_commit_file_output(rev, path).await;
     }
 
+    // Raw object IDs should keep their native schema, including annotated tag objects.
+    if let Ok(hash) = ObjectHash::from_str(object_ref) {
+        return collect_object_output(&hash, &paths).await;
+    }
+
     if let Ok(commit_hash) = util::get_commit_base(object_ref).await {
         match tag::find_tag_and_commit(object_ref).await {
             Ok(Some((object, _))) if object.get_type() == ObjectType::Tag => {
@@ -457,10 +462,6 @@ async fn run_show(args: &ShowArgs) -> CliResult<ShowOutput> {
                 return collect_commit_output(&commit_hash, &paths).await;
             }
         }
-    }
-
-    if let Ok(hash) = ObjectHash::from_str(object_ref) {
-        return collect_object_output(&hash, &paths).await;
     }
 
     Err(show_bad_revision_error(object_ref))
