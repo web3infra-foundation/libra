@@ -87,8 +87,9 @@ pub async fn execute_safe(args: BlameArgs, out_config: &OutputConfig) -> CliResu
 
     let mut output = String::new();
     for blame in &result.lines {
-        let author_short = if blame.author.len() > 15 {
-            format!("{}...", &blame.author[..12])
+        let author_short = if blame.author.chars().count() > 15 {
+            let truncated: String = blame.author.chars().take(12).collect();
+            format!("{truncated}...")
         } else {
             format!("{:15}", blame.author)
         };

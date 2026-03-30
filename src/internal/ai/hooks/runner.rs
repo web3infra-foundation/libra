@@ -149,10 +149,10 @@ impl HookRunner {
                 // Hooks receive JSON on stdin, but some hooks intentionally ignore it and
                 // close stdin immediately. Treat that as non-fatal and rely on the hook's
                 // exit status to decide whether the action should be allowed or blocked.
-                if let Err(err) = stdin.write_all(input_json.as_bytes()).await {
-                    if err.kind() != ErrorKind::BrokenPipe {
-                        return Err(err);
-                    }
+                if let Err(err) = stdin.write_all(input_json.as_bytes()).await
+                    && err.kind() != ErrorKind::BrokenPipe
+                {
+                    return Err(err);
                 }
                 drop(stdin);
             }

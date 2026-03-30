@@ -1,10 +1,12 @@
 //! Provides diff command logic comparing commits, the index, and the working tree with algorithm selection, pathspec filtering, and optional file output.
 
 use std::{
+    cell::RefCell,
     collections::HashMap,
     fmt,
     io::{self, IsTerminal},
     path::PathBuf,
+    rc::Rc,
 };
 
 use clap::Parser;
@@ -96,6 +98,8 @@ pub struct DiffFileStat {
     pub insertions: usize,
     pub deletions: usize,
     pub hunks: Vec<DiffHunk>,
+    #[serde(skip_serializing)]
+    raw_diff: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -127,16 +131,51 @@ async fn run_diff(args: &DiffArgs) -> CliResult<DiffOutput> {
             .with_stable_code(StableErrorCode::RepoCorrupt)
     })?;
 
-    let mut content_map: HashMap<ObjectHash, Vec<u8>> = HashMap::new();
-    let (old_ref, old_blobs) =
-        resolve_diff_side(&args.old, args.staged, false, &index, &mut content_map).await?;
-    let (new_ref, new_blobs) =
-        resolve_diff_side(&args.new, args.staged, true, &index, &mut content_map).await?;
+    let old_side = resolve_diff_side(&args.old, args.staged, false, &index).await?;
+    let new_side = resolve_diff_side(&args.new, args.staged, true, &index).await?;
 
     let paths: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
-    let diff_output = Diff::diff(old_blobs, new_blobs, paths, |_, hash| {
-        content_map.get(hash).cloned().unwrap_or_default()
+    let worktree_entries = new_side.worktree_entries.clone();
+    let worktree_cache = RefCell::new(HashMap::<ObjectHash, Vec<u8>>::new());
+    let repo_cache = RefCell::new(HashMap::<ObjectHash, Vec<u8>>::new());
+    let load_error = Rc::new(RefCell::new(None::<CliError>));
+    let load_error_for_read = Rc::clone(&load_error);
+    let diff_output = Diff::diff(old_side.blobs, new_side.blobs, paths, move |path, hash| {
+        if worktree_entries.get(path) == Some(hash) {
+            if let Some(data) = worktree_cache.borrow().get(hash).cloned() {
+                return data;
+            }
+
+            match read_worktree_blob_content(path) {
+                Ok(data) => {
+                    worktree_cache.borrow_mut().insert(*hash, data.clone());
+                    data
+                }
+                Err(err) => {
+                    record_diff_content_error(&load_error_for_read, err);
+                    Vec::new()
+                }
+            }
+        } else {
+            if let Some(data) = repo_cache.borrow().get(hash).cloned() {
+                return data;
+            }
+
+            match load_repo_blob_content(hash) {
+                Ok(data) => {
+                    repo_cache.borrow_mut().insert(*hash, data.clone());
+                    data
+                }
+                Err(err) => {
+                    record_diff_content_error(&load_error_for_read, err);
+                    Vec::new()
+                }
+            }
+        }
     });
+    if let Some(err) = load_error.borrow_mut().take() {
+        return Err(err);
+    }
 
     let files: Vec<DiffFileStat> = diff_output.iter().map(parse_diff_item).collect();
     let total_insertions = files.iter().map(|file| file.insertions).sum();
@@ -144,13 +183,20 @@ async fn run_diff(args: &DiffArgs) -> CliResult<DiffOutput> {
     let files_changed = files.len();
 
     Ok(DiffOutput {
-        old_ref,
-        new_ref,
+        old_ref: old_side.label,
+        new_ref: new_side.label,
         files,
         total_insertions,
         total_deletions,
         files_changed,
     })
+}
+
+#[derive(Debug)]
+struct DiffSide {
+    label: String,
+    blobs: Vec<(PathBuf, ObjectHash)>,
+    worktree_entries: HashMap<PathBuf, ObjectHash>,
 }
 
 /// diff needs to print hashes even if the files have not been staged yet.
@@ -192,8 +238,7 @@ async fn resolve_diff_side(
     staged: bool,
     is_new: bool,
     index: &Index,
-    content_map: &mut HashMap<ObjectHash, Vec<u8>>,
-) -> CliResult<(String, Vec<(PathBuf, ObjectHash)>)> {
+) -> CliResult<DiffSide> {
     if let Some(source) = source {
         let commit_hash = get_target_commit(source).await.map_err(|e| {
             CliError::fatal(format!(
@@ -202,41 +247,55 @@ async fn resolve_diff_side(
             ))
             .with_stable_code(StableErrorCode::CliInvalidTarget)
         })?;
-        let blobs = get_commit_blobs(&commit_hash, content_map).await?;
-        return Ok((source.clone(), blobs));
+        return Ok(DiffSide {
+            label: source.clone(),
+            blobs: get_commit_blobs(&commit_hash).await?,
+            worktree_entries: HashMap::new(),
+        });
     }
 
     if is_new {
         if staged {
-            let blobs = preload_index_blobs(index, content_map)?;
-            Ok(("index".to_string(), blobs))
+            Ok(DiffSide {
+                label: "index".to_string(),
+                blobs: get_index_blobs(index, IgnorePolicy::Respect),
+                worktree_entries: HashMap::new(),
+            })
         } else {
             let files = util::list_workdir_files().map_err(|e| {
                 CliError::fatal(format!("failed to list working directory files: {e}"))
                     .with_stable_code(StableErrorCode::IoReadFailed)
             })?;
             let blobs = get_files_blobs(&files, index, IgnorePolicy::Respect)?;
-            preload_workdir_content(&blobs, content_map)?;
-            Ok(("working tree".to_string(), blobs))
+            Ok(DiffSide {
+                label: "working tree".to_string(),
+                worktree_entries: blobs.iter().cloned().collect(),
+                blobs,
+            })
         }
     } else if staged {
         match Head::current_commit().await {
-            Some(commit_hash) => {
-                let blobs = get_commit_blobs(&commit_hash, content_map).await?;
-                Ok(("HEAD".to_string(), blobs))
-            }
-            None => Ok(("HEAD".to_string(), Vec::new())),
+            Some(commit_hash) => Ok(DiffSide {
+                label: "HEAD".to_string(),
+                blobs: get_commit_blobs(&commit_hash).await?,
+                worktree_entries: HashMap::new(),
+            }),
+            None => Ok(DiffSide {
+                label: "HEAD".to_string(),
+                blobs: Vec::new(),
+                worktree_entries: HashMap::new(),
+            }),
         }
     } else {
-        let blobs = preload_index_blobs(index, content_map)?;
-        Ok(("index".to_string(), blobs))
+        Ok(DiffSide {
+            label: "index".to_string(),
+            blobs: get_index_blobs(index, IgnorePolicy::Respect),
+            worktree_entries: HashMap::new(),
+        })
     }
 }
 
-async fn get_commit_blobs(
-    commit_hash: &ObjectHash,
-    content_map: &mut HashMap<ObjectHash, Vec<u8>>,
-) -> CliResult<Vec<(PathBuf, ObjectHash)>> {
+async fn get_commit_blobs(commit_hash: &ObjectHash) -> CliResult<Vec<(PathBuf, ObjectHash)>> {
     let commit = load_object::<Commit>(commit_hash).map_err(|e| {
         CliError::fatal(format!("failed to load commit {}: {e}", commit_hash))
             .with_stable_code(StableErrorCode::RepoCorrupt)
@@ -245,53 +304,30 @@ async fn get_commit_blobs(
         CliError::fatal(format!("failed to load tree {}: {e}", commit.tree_id))
             .with_stable_code(StableErrorCode::RepoCorrupt)
     })?;
-    let blobs = tree.get_plain_items();
-    preload_blob_content(&blobs, content_map)?;
-    Ok(blobs)
+    Ok(tree.get_plain_items())
 }
 
-fn preload_blob_content(
-    blobs: &[(PathBuf, ObjectHash)],
-    content_map: &mut HashMap<ObjectHash, Vec<u8>>,
-) -> CliResult<()> {
-    for (_, hash) in blobs {
-        if content_map.contains_key(hash) {
-            continue;
-        }
-        let blob = load_object::<Blob>(hash).map_err(|e| {
-            CliError::fatal(format!("failed to load blob '{}': {e}", hash))
-                .with_stable_code(StableErrorCode::RepoCorrupt)
-        })?;
-        content_map.insert(*hash, blob.data);
+fn load_repo_blob_content(hash: &ObjectHash) -> CliResult<Vec<u8>> {
+    let blob = load_object::<Blob>(hash).map_err(|e| {
+        CliError::fatal(format!("failed to load blob '{}': {e}", hash))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+    })?;
+    Ok(blob.data)
+}
+
+fn read_worktree_blob_content(path_buf: &PathBuf) -> CliResult<Vec<u8>> {
+    let absolute = util::workdir_to_absolute(path_buf);
+    std::fs::read(&absolute).map_err(|e| {
+        CliError::fatal(format!("failed to read file '{}': {e}", absolute.display()))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+    })
+}
+
+fn record_diff_content_error(slot: &Rc<RefCell<Option<CliError>>>, error: CliError) {
+    let mut slot = slot.borrow_mut();
+    if slot.is_none() {
+        *slot = Some(error);
     }
-    Ok(())
-}
-
-fn preload_index_blobs(
-    index: &Index,
-    content_map: &mut HashMap<ObjectHash, Vec<u8>>,
-) -> CliResult<Vec<(PathBuf, ObjectHash)>> {
-    let blobs = get_index_blobs(index, IgnorePolicy::Respect);
-    preload_blob_content(&blobs, content_map)?;
-    Ok(blobs)
-}
-
-fn preload_workdir_content(
-    blobs: &[(PathBuf, ObjectHash)],
-    content_map: &mut HashMap<ObjectHash, Vec<u8>>,
-) -> CliResult<()> {
-    for (path_buf, hash) in blobs {
-        if content_map.contains_key(hash) {
-            continue;
-        }
-        let absolute = util::workdir_to_absolute(path_buf);
-        let data = std::fs::read(&absolute).map_err(|e| {
-            CliError::fatal(format!("failed to read file '{}': {e}", absolute.display()))
-                .with_stable_code(StableErrorCode::IoReadFailed)
-        })?;
-        content_map.insert(*hash, data);
-    }
-    Ok(())
 }
 
 fn render_diff_output(
@@ -329,11 +365,7 @@ fn render_diff_output(
     } else if args.stat {
         format_diff_stat_output(result)
     } else {
-        let mut unified = format_unified_diff(result);
-        if io::stdout().is_terminal() {
-            unified = colorize_diff(&unified);
-        }
-        unified
+        format_unified_diff(result)
     };
 
     if let Some(path) = &args.output {
@@ -352,6 +384,11 @@ fn render_diff_output(
     if rendered.is_empty() {
         return Ok(());
     }
+    let rendered = if args.name_only || args.name_status || args.numstat || args.stat {
+        rendered
+    } else {
+        maybe_colorize_diff(&rendered, io::stdout().is_terminal())
+    };
     pager.write_str(&format!("{rendered}\n"))?;
     pager.finish()?;
     Ok(())
@@ -366,28 +403,20 @@ fn diff_status_letter(status: &str) -> &'static str {
 }
 
 fn format_unified_diff(result: &DiffOutput) -> String {
-    let mut output = String::new();
-    for file in &result.files {
-        output.push_str(&format!("diff --git a/{0} b/{0}\n", file.path));
-        match file.status.as_str() {
-            "added" => output.push_str("new file mode 100644\n"),
-            "deleted" => output.push_str("deleted file mode 100644\n"),
-            _ => {}
-        }
-        output.push_str(&format!("--- a/{}\n", file.path));
-        output.push_str(&format!("+++ b/{}\n", file.path));
-        for hunk in &file.hunks {
-            output.push_str(&format!(
-                "@@ -{},{} +{},{} @@\n",
-                hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines
-            ));
-            for line in &hunk.lines {
-                output.push_str(line);
-                output.push('\n');
-            }
-        }
+    result
+        .files
+        .iter()
+        .map(|file| file.raw_diff.trim_end_matches('\n'))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn maybe_colorize_diff(diff_text: &str, should_colorize: bool) -> String {
+    if should_colorize {
+        colorize_diff(diff_text)
+    } else {
+        diff_text.to_string()
     }
-    output.trim_end_matches('\n').to_string()
 }
 
 fn format_diff_stat_output(result: &DiffOutput) -> String {
@@ -443,6 +472,7 @@ fn parse_diff_item(item: &git_internal::diff::DiffItem) -> DiffFileStat {
         insertions,
         deletions,
         hunks: parse_diff_hunks(&item.data),
+        raw_diff: item.data.clone(),
     }
 }
 
@@ -667,6 +697,26 @@ mod test {
         similar_diff_result(old, new, &mut buf);
         let result = String::from_utf8(buf).unwrap();
         println!("{result}");
+    }
+
+    #[test]
+    fn test_maybe_colorize_diff_respects_flag() {
+        let diff = "diff --git a/file.txt b/file.txt\n--- /dev/null\n+++ b/file.txt\n+line\n";
+        colored::control::set_override(true);
+
+        let plain = maybe_colorize_diff(diff, false);
+        let colored = maybe_colorize_diff(diff, true);
+
+        assert!(
+            !plain.contains("\u{1b}["),
+            "plain output should not contain ANSI escapes"
+        );
+        assert!(
+            colored.contains("\u{1b}["),
+            "colored output should contain ANSI escapes"
+        );
+
+        colored::control::unset_override();
     }
 
     #[tokio::test]

@@ -108,6 +108,37 @@ fn test_diff_status_detection_ignores_patch_body_text() {
     assert_eq!(json["data"]["files"][0]["status"], "modified");
 }
 
+#[test]
+fn test_diff_added_and_deleted_files_use_dev_null_headers() {
+    let repo = create_committed_repo_via_cli();
+
+    fs::write(repo.path().join("added.txt"), "added\n").unwrap();
+    let added = run_libra_command(&["diff"], repo.path());
+    assert_cli_success(&added, "diff added file");
+    let added_stdout = String::from_utf8_lossy(&added.stdout);
+    assert!(
+        added_stdout.contains("--- /dev/null"),
+        "expected added file diff to use /dev/null old header, got: {added_stdout}"
+    );
+    assert!(
+        added_stdout.contains("+++ b/added.txt"),
+        "expected added file diff to use b/ path in new header, got: {added_stdout}"
+    );
+
+    fs::remove_file(repo.path().join("tracked.txt")).unwrap();
+    let deleted = run_libra_command(&["diff"], repo.path());
+    assert_cli_success(&deleted, "diff deleted file");
+    let deleted_stdout = String::from_utf8_lossy(&deleted.stdout);
+    assert!(
+        deleted_stdout.contains("--- a/tracked.txt"),
+        "expected deleted file diff to use a/ path in old header, got: {deleted_stdout}"
+    );
+    assert!(
+        deleted_stdout.contains("+++ /dev/null"),
+        "expected deleted file diff to use /dev/null new header, got: {deleted_stdout}"
+    );
+}
+
 /// Helper function to create a file with content.
 fn create_file(path: &str, content: &str) {
     let mut file = fs::File::create(path).unwrap();

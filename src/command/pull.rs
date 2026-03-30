@@ -415,8 +415,8 @@ fn map_fetch_error_to_cli(error: &fetch::FetchError) -> CliError {
 fn map_fetch_discovery_error(message: String, source: &GitError) -> CliError {
     match source {
         GitError::UnAuthorized(_) => CliError::fatal(message)
-            .with_stable_code(StableErrorCode::AuthMissingCredentials)
-            .with_hint("check SSH key or HTTP credentials"),
+            .with_stable_code(StableErrorCode::AuthPermissionDenied)
+            .with_hint("check SSH key / HTTP credentials and repository access rights"),
         GitError::NetworkError(_) => CliError::fatal(message)
             .with_stable_code(StableErrorCode::NetworkUnavailable)
             .with_hint("check network connectivity and retry"),
@@ -471,5 +471,20 @@ fn map_merge_error_to_cli(error: &merge::PullMergeError) -> CliError {
         merge::PullMergeError::HeadUpdate(..) | merge::PullMergeError::Restore(..) => {
             CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_map_fetch_discovery_error_unauthorized_matches_clone() {
+        let cli = map_fetch_discovery_error(
+            "remote discovery failed".to_string(),
+            &GitError::UnAuthorized("permission denied".to_string()),
+        );
+
+        assert_eq!(cli.stable_code(), StableErrorCode::AuthPermissionDenied);
     }
 }

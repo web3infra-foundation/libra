@@ -641,8 +641,7 @@ fn tree_item_mode_to_u32(mode: TreeItemMode) -> u32 {
 
 fn tree_item_mode_to_object_type(mode: TreeItemMode) -> &'static str {
     match mode {
-        TreeItemMode::Blob | TreeItemMode::BlobExecutable => "blob",
-        TreeItemMode::Link => "link",
+        TreeItemMode::Blob | TreeItemMode::BlobExecutable | TreeItemMode::Link => "blob",
         TreeItemMode::Tree => "tree",
         TreeItemMode::Commit => "commit",
     }
@@ -740,7 +739,7 @@ mod tests {
             tree_item_mode_to_object_type(TreeItemMode::BlobExecutable),
             "blob"
         );
-        assert_eq!(tree_item_mode_to_object_type(TreeItemMode::Link), "link");
+        assert_eq!(tree_item_mode_to_object_type(TreeItemMode::Link), "blob");
         assert_eq!(tree_item_mode_to_object_type(TreeItemMode::Tree), "tree");
         assert_eq!(
             tree_item_mode_to_object_type(TreeItemMode::Commit),

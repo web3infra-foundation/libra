@@ -302,12 +302,14 @@ async fn switch_to_tracked_remote_branch(
         ))
         .with_stable_code(StableErrorCode::IoWriteFailed)
     })?;
-    let mut silent_output = output.clone();
-    silent_output.quiet = true;
+    let mut upstream_output = output.clone();
+    if output.is_json() {
+        upstream_output.quiet = true;
+    }
     branch::set_upstream_safe_with_output(
         &remote_branch_name,
         &format!("{remote_name}/{remote_branch_name}"),
-        &silent_output,
+        &upstream_output,
     )
     .await?;
     let commit = switch_to_branch(remote_branch_name.clone(), output).await?;
