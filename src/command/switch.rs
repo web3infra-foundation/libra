@@ -402,7 +402,9 @@ async fn switch_to_branch(branch_name: String, output: &OutputConfig) -> CliResu
     };
 
     if from_ref_name == branch_name {
-        crate::info_println!(output, "Already on '{branch_name}'");
+        // No-op: already on the target branch. The "Already on" message is
+        // rendered by render_switch_output() based on the `already_on` flag,
+        // so we must not emit anything here (it would corrupt --json stdout).
         return Ok(target_commit_id);
     }
 

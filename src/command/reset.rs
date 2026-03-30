@@ -262,10 +262,9 @@ async fn perform_reset(
         .ok_or_else(|| "Cannot reset: HEAD is unborn and points to no commit.".to_string())?;
 
     if old_oid == target_commit_id {
-        println!(
-            "HEAD already at {}, nothing to do.",
-            &target_commit_id.to_string()[..7]
-        );
+        // No-op: HEAD already at target. The caller (run_reset) builds a
+        // ResetOutput and render_reset_output handles the human message,
+        // so we must not print anything here (it would corrupt --json stdout).
         return Ok(());
     }
 

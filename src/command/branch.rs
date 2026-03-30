@@ -149,7 +149,7 @@ pub async fn execute_safe(args: BranchArgs, output: &OutputConfig) -> CliResult<
     } else if let Some(branch_to_delete) = args.delete {
         delete_branch(branch_to_delete).await
     } else if let Some(branch_to_delete) = args.delete_safe {
-        delete_branch_safe(branch_to_delete).await
+        delete_branch_safe(branch_to_delete, output).await
     } else if args.show_current {
         if !output.quiet {
             show_current_branch().await;
@@ -161,7 +161,7 @@ pub async fn execute_safe(args: BranchArgs, output: &OutputConfig) -> CliResult<
             Head::Detached(_) => Err(CliError::fatal("HEAD is detached")),
         }
     } else if !args.rename.is_empty() {
-        rename_branch(args.rename).await
+        rename_branch(args.rename, output).await
     } else {
         // Default behavior: list branches
         let list_mode = if args.all {
@@ -337,7 +337,7 @@ async fn delete_branch(branch_name: String) -> CliResult<()> {
 /// This performs a merge check to ensure the branch is fully merged into HEAD
 /// before deletion. If the branch is not fully merged, prints an error and
 /// suggests using `branch -D` for force deletion.
-async fn delete_branch_safe(branch_name: String) -> CliResult<()> {
+async fn delete_branch_safe(branch_name: String, output: &OutputConfig) -> CliResult<()> {
     if branch::is_locked_branch(&branch_name) {
         return Err(CliError::fatal(format!(
             "the '{}' branch is locked and cannot be deleted",
@@ -400,12 +400,15 @@ async fn delete_branch_safe(branch_name: String) -> CliResult<()> {
     }
 
     // All checks passed, safe to delete
+    let commit = branch.commit.to_string();
     Branch::delete_branch(&branch_name, None).await;
-    println!("Deleted branch {} (was {}).", branch_name, branch.commit);
+    if !output.quiet && !output.is_json() {
+        println!("Deleted branch {} (was {}).", branch_name, commit);
+    }
     Ok(())
 }
 
-async fn rename_branch(args: Vec<String>) -> CliResult<()> {
+async fn rename_branch(args: Vec<String>, output: &OutputConfig) -> CliResult<()> {
     let (old_name, new_name) = match args.len() {
         1 => {
             // rename current branch
@@ -486,7 +489,9 @@ async fn rename_branch(args: Vec<String>) -> CliResult<()> {
     // delete old branch
     Branch::delete_branch(&old_name, None).await;
 
-    println!("Renamed branch '{old_name}' to '{new_name}'");
+    if !output.quiet && !output.is_json() {
+        println!("Renamed branch '{old_name}' to '{new_name}'");
+    }
     Ok(())
 }
 
@@ -786,7 +791,7 @@ async fn run_branch_json(args: BranchArgs, output: &OutputConfig) -> CliResult<B
                     .with_stable_code(StableErrorCode::CliInvalidTarget)
                     .with_hint("use 'libra branch -l' to list branches")
             })?;
-        delete_branch_safe(branch_to_delete.clone()).await?;
+        delete_branch_safe(branch_to_delete.clone(), output).await?;
         Ok(BranchOutput::Delete {
             name: branch_to_delete,
             commit: branch.commit.to_string(),
@@ -830,7 +835,7 @@ async fn run_branch_json(args: BranchArgs, output: &OutputConfig) -> CliResult<B
             args.rename[0].clone()
         };
         let new_name = args.rename.last().cloned().unwrap_or_default();
-        rename_branch(args.rename).await?;
+        rename_branch(args.rename, output).await?;
         Ok(BranchOutput::Rename { old_name, new_name })
     } else {
         let list_mode = if args.all {
