@@ -1093,3 +1093,45 @@ async fn test_log_short_number_flag_with_double_dash_before_subcommand() {
     assert!(status.success(), "libra -- log -2 failed: {err}");
     assert_eq!(count_commit_lines(&out), 2);
 }
+
+// Test grep parameter parsing
+#[test]
+fn test_log_args_grep() {
+    let args = LogArgs::parse_from(["libra", "log", "--grep", "fix"]);
+    assert_eq!(args.grep, Some("fix".to_string()));
+
+    let args = LogArgs::parse_from(["libra", "log"]);
+    assert_eq!(args.grep, None);
+}
+
+// Test grep combined with other arguments
+#[test]
+fn test_grep_with_other_args() {
+    let args =
+        LogArgs::parse_from(["libra", "log", "--grep", "feature", "--oneline", "-n", "5"]);
+    assert_eq!(args.grep, Some("feature".to_string()));
+    assert!(args.oneline);
+    assert_eq!(args.number, Some(5));
+}
+
+// Test case-sensitive matching
+#[test]
+fn test_grep_case_sensitive() {
+    let args = LogArgs::parse_from(["libra", "log", "--grep", "FIX"]);
+    assert_eq!(args.grep, Some("FIX".to_string()));
+}
+
+// Test empty string grep
+#[test]
+fn test_grep_empty_string() {
+    let args = LogArgs::parse_from(["libra", "log", "--grep", ""]);
+    assert_eq!(args.grep, Some("".to_string()));
+}
+
+// Test graph with grep combination
+#[test]
+fn test_graph_with_grep() {
+    let args = LogArgs::parse_from(["libra", "log", "--graph", "--grep", "fix"]);
+    assert!(args.graph);
+    assert_eq!(args.grep, Some("fix".to_string()));
+}
