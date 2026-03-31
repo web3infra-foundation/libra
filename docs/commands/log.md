@@ -1,10 +1,10 @@
 # `libra log`
 
-显示提交历史。human 模式保留现有 `--oneline`、`--graph`、`--pretty`、`--stat`、`--patch` 等表现。
+Show commit history. Human mode preserves the current `--oneline`, `--graph`, `--pretty`, `--stat`, `--patch`, and related output styles.
 
 ## JSON Output
 
-`--json` / `--machine` 返回过滤后的结构化提交列表：
+`--json` / `--machine` returns a filtered, structured commit list:
 
 ```json
 {
@@ -35,13 +35,13 @@
 }
 ```
 
-说明：
+Notes:
 
-- `-n` 对 JSON 同样生效
-- `--graph`、`--pretty`、`--oneline` 在 JSON 模式下不改变 schema
-- `files` 始终是结构化变更摘要，不包含 patch
+- `-n` also applies in JSON mode
+- `--graph`, `--pretty`, and `--oneline` do not change the JSON schema
+- `files` is always a structured change summary and never includes patch text
 
 ## Errors
 
-- 空分支 / 空 HEAD：`LBR-REPO-003`
-- 无效日期参数：`LBR-CLI-002`
+- Empty branch or empty `HEAD`: `LBR-REPO-003`
+- Invalid date argument: `LBR-CLI-002`

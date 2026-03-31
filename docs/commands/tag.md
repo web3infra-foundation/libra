@@ -1,16 +1,16 @@
 # `libra tag`
 
-创建、列出或删除 tag。
+Create, list, or delete tags.
 
 ## Human Output
 
-- `libra tag -l`：打印 tag 列表
-- `libra tag -d v1.0`：`Deleted tag 'v1.0'`
-- 默认 create 路径沿用现有 human 展示逻辑
+- `libra tag -l`: prints the tag list
+- `libra tag -d v1.0`: `Deleted tag 'v1.0'`
+- The default create path preserves the current human-readable output
 
 ## JSON Output
 
-`--json` / `--machine` 使用 `action` 区分操作：
+`--json` / `--machine` uses `action` to distinguish operations:
 
 ```json
 {
@@ -26,11 +26,11 @@
 }
 ```
 
-`action=list` 时返回 `tags` 数组；`action=delete` 时返回 `name` 和 `hash`。
+`action=list` returns a `tags` array; `action=delete` returns `name` and `hash`.
 
 ## Errors
 
-- 重复创建：`LBR-CONFLICT-002`
-- HEAD 没有提交可打 tag：`LBR-REPO-003`
-- tag 不存在：`LBR-CLI-003`
-- 创建或删除写入失败：`LBR-IO-002`
+- Tag already exists: `LBR-CONFLICT-002`
+- `HEAD` has no commit to tag: `LBR-REPO-003`
+- Tag not found: `LBR-CLI-003`
+- Failed to write during create or delete: `LBR-IO-002`

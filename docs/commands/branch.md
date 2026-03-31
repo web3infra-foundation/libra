@@ -1,17 +1,17 @@
 # `libra branch`
 
-创建、删除、重命名、查看或列出分支。
+Create, delete, rename, inspect, or list branches.
 
 ## Human Output
 
-- list：打印分支列表
-- safe delete：`Deleted branch feature (was abc123...)`
-- rename：`Renamed branch 'old' to 'new'`
-- `--show-current`：打印当前分支名，detached 时打印 `HEAD detached at <hash>`
+- List: prints the branch list
+- Safe delete: `Deleted branch feature (was abc123...)`
+- Rename: `Renamed branch 'old' to 'new'`
+- `--show-current`: prints the current branch name, or `HEAD detached at <hash>` when detached
 
 ## JSON Output
 
-`--json` / `--machine` 使用 `action` 区分：
+`--json` / `--machine` uses `action` to distinguish operations:
 
 ```json
 {
@@ -25,7 +25,7 @@
 }
 ```
 
-支持的 action：
+Supported actions:
 
 - `list`: `branches`
 - `create`: `name`, `commit`
@@ -36,7 +36,7 @@
 
 ## Errors
 
-- 无效起点 / 不存在分支：`LBR-CLI-003`
-- 当前分支不可删 / detached HEAD：`LBR-REPO-003`
-- locked / already exists：`LBR-CONFLICT-002`
-- 写 refs 失败：`LBR-IO-002`
+- Invalid start point or missing branch: `LBR-CLI-003`
+- Current branch cannot be deleted or `HEAD` is detached: `LBR-REPO-003`
+- Locked ref or branch already exists: `LBR-CONFLICT-002`
+- Failed to write refs: `LBR-IO-002`

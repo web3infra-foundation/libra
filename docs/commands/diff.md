@@ -1,18 +1,18 @@
 # `libra diff`
 
-比较 `HEAD`、index、工作区或两个 revision 之间的差异。
+Compare differences between `HEAD`, the index, the working tree, or two revisions.
 
 ## Human Output
 
-支持：
+Supported output:
 
-- 默认 unified diff
+- Default unified diff
 - `--name-only`
 - `--name-status`
 - `--numstat`
 - `--stat`
 
-`--output <file>` 会把 human 输出写入文件；`--json` 时忽略该标志，始终写 stdout。
+`--output <file>` writes human-readable output to a file; in `--json` mode this flag is ignored and output always goes to stdout.
 
 ## JSON Output
 
@@ -49,7 +49,7 @@
 
 ## Errors
 
-- 无效 revision：`LBR-CLI-003`
-- index / object 读取失败：`LBR-REPO-002`
-- 文件读取失败：`LBR-IO-001`
-- 输出文件写入失败：`LBR-IO-002`
+- Invalid revision: `LBR-CLI-003`
+- Failed to read the index or object store: `LBR-REPO-002`
+- Failed to read a file: `LBR-IO-001`
+- Failed to write the output file: `LBR-IO-002`

@@ -1,16 +1,16 @@
 # `libra blame`
 
-按行追溯文件内容的最后引入提交。
+Trace each line of a file to the commit that last introduced it.
 
 ## Human Output
 
-human 模式保持：
+Human mode remains:
 
 ```text
 abc12345 (Author Name     2026-03-30 10:00:00 +0800 1) line content
 ```
 
-`-L` 支持：
+`-L` supports:
 
 - `10`
 - `10,20`
@@ -41,6 +41,6 @@ abc12345 (Author Name     2026-03-30 10:00:00 +0800 1) line content
 
 ## Errors
 
-- 无效 revision / 文件不存在：`LBR-CLI-003`
-- 无效 `-L` 范围：`LBR-CLI-002`
-- commit/object 读取失败：`LBR-REPO-002`
+- Invalid revision or missing file: `LBR-CLI-003`
+- Invalid `-L` range: `LBR-CLI-002`
+- Failed to read the commit or object: `LBR-REPO-002`

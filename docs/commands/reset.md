@@ -1,11 +1,11 @@
 # `libra reset`
 
-移动 `HEAD`，并根据模式重置 index 或工作区。
+Move `HEAD` and reset the index or working tree depending on the selected mode.
 
 ## Human Output
 
-- 全量 reset：`HEAD is now at abc1234 <subject>`
-- pathspec reset：
+- Full reset: `HEAD is now at abc1234 <subject>`
+- Pathspec reset:
 
 ```text
 Unstaged changes after reset:
@@ -31,12 +31,12 @@ M	path/to/file
 }
 ```
 
-`pathspecs` 非空时表示本次仅对指定路径执行 reset。
-`files_restored` 表示 `--hard` 时实际被重写或删除的 tracked 文件数量；clean repo 上对 `HEAD` 执行 hard reset 时它可以是 `0`。
+When `pathspecs` is non-empty, the reset only applies to the specified paths.
+`files_restored` is the number of tracked files actually rewritten or removed by `--hard`; on a clean repository, `reset --hard HEAD` can report `0`.
 
 ## Errors
 
-- 无效 revision：`LBR-CLI-003`
-- `--soft` 与 pathspec 组合：`LBR-CLI-002`
-- index / object store 损坏：`LBR-REPO-002`
-- 写入 index / 工作区失败：`LBR-IO-002`
+- Invalid revision: `LBR-CLI-003`
+- `--soft` used with pathspecs: `LBR-CLI-002`
+- Corrupt index or object store: `LBR-REPO-002`
+- Failed to write the index or working tree: `LBR-IO-002`

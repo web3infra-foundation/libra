@@ -1,26 +1,26 @@
 # `libra show`
 
-显示 commit、tag、tree、blob，或 `REV:path` 指向的 blob。
+Show a commit, tag, tree, blob, or the blob referenced by `REV:path`.
 
 ## Human Output
 
-human 模式沿用现有展示：
+Human mode preserves the existing presentation:
 
-- commit：header + 可选 patch / stat / name-only
-- annotated tag：tag 元数据后继续展示目标对象
-- tree：tree entry 列表
-- blob：文本内容或 binary 摘要
+- Commit: header plus optional patch / stat / name-only output
+- Annotated tag: tag metadata followed by the target object
+- Tree: list of tree entries
+- Blob: text content or a binary summary
 
 ## JSON Output
 
-`data.type` 决定 schema：
+`data.type` determines the schema:
 
 - `commit`
 - `tag`
 - `tree`
 - `blob`
 
-示例：
+Example:
 
 ```json
 {
@@ -40,5 +40,5 @@ human 模式沿用现有展示：
 
 ## Errors
 
-- bad revision / path 不存在：`LBR-CLI-003`
-- 对象读取失败：`LBR-REPO-002`
+- Invalid revision or missing path: `LBR-CLI-003`
+- Failed to read the object: `LBR-REPO-002`

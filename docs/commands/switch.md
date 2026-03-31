@@ -1,17 +1,17 @@
 # `libra switch`
 
-切换分支、创建并切换新分支，或切换到 detached HEAD。
+Switch branches, create and switch to a new branch, or move to a detached `HEAD`.
 
 ## Human Output
 
-- 切换分支：`Switched to branch 'main'`
-- 新建并切换：`Switched to a new branch 'feature'`
-- detached：`HEAD is now at abc1234`
-- `--track` 会先输出 upstream 建立信息，再输出切换结果
+- Switch branch: `Switched to branch 'main'`
+- Create and switch: `Switched to a new branch 'feature'`
+- Detached: `HEAD is now at abc1234`
+- `--track` prints the upstream configuration message before the switch result
 
 ## JSON Output
 
-`--json` / `--machine` 返回：
+`--json` / `--machine` returns:
 
 ```json
 {
@@ -29,10 +29,10 @@
 }
 ```
 
-`tracking` 仅在 `--track` 时存在，包含 `remote` 和 `remote_branch`。
+`tracking` is only present with `--track` and includes `remote` and `remote_branch`.
 
 ## Errors
 
-- 不存在的分支 / revision：`LBR-CLI-003`
-- 工作区不干净：`LBR-REPO-003`
-- 更新 HEAD 或恢复工作区失败：`LBR-IO-002`
+- Missing branch or invalid revision: `LBR-CLI-003`
+- Dirty working tree: `LBR-REPO-003`
+- Failed to update `HEAD` or restore the working tree: `LBR-IO-002`
