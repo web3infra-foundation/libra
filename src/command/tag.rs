@@ -240,14 +240,7 @@ async fn delete_tag(tag_name: &str) {
 }
 
 async fn delete_tag_safe(tag_name: &str, output: &OutputConfig) -> CliResult<()> {
-    let existing = tag::find_tag_and_commit(tag_name).await.map_err(|e| {
-        CliError::fatal(e.to_string()).with_stable_code(StableErrorCode::RepoCorrupt)
-    })?;
-    if existing.is_none() {
-        return Err(CliError::fatal(format!("tag '{}' not found", tag_name))
-            .with_stable_code(StableErrorCode::CliInvalidTarget)
-            .with_hint("use 'libra tag -l' to list available tags."));
-    }
+    resolve_tag_ref_for_delete(tag_name).await?;
 
     tag::delete(tag_name).await.map_err(|e| {
         CliError::fatal(e.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
@@ -304,13 +297,13 @@ async fn run_tag_json(args: &TagArgs) -> CliResult<TagOutput> {
 
     let name = args.name.as_deref().unwrap_or_default();
     if args.delete {
-        let snapshot = lookup_tag(name, 0).await?;
+        let snapshot = resolve_tag_ref_for_delete(name).await?;
         tag::delete(name).await.map_err(|e| {
             CliError::fatal(e.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
         })?;
         return Ok(TagOutput::Delete {
-            name: snapshot.name,
-            hash: snapshot.hash,
+            name: name.to_string(),
+            hash: snapshot.target.unwrap_or_default(),
         });
     }
 
@@ -398,6 +391,17 @@ fn trim_tag_message(message: &str, show_lines: usize) -> Option<String> {
         .join("\n");
 
     if value.is_empty() { None } else { Some(value) }
+}
+
+async fn resolve_tag_ref_for_delete(tag_name: &str) -> CliResult<tag::TagReference> {
+    match tag::find_tag_ref(tag_name).await {
+        Ok(Some(reference)) => Ok(reference),
+        Ok(None) => Err(CliError::fatal(format!("tag '{}' not found", tag_name))
+            .with_stable_code(StableErrorCode::CliInvalidTarget)
+            .with_hint("use 'libra tag -l' to list available tags.")),
+        Err(e) => Err(CliError::fatal(format!("failed to query tag ref: {e}"))
+            .with_stable_code(StableErrorCode::RepoCorrupt)),
+    }
 }
 
 #[cfg(test)]

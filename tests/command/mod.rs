@@ -87,12 +87,19 @@ fn assert_cli_success(output: &Output, context: &str) {
 fn parse_cli_error_stderr(stderr: &[u8]) -> (String, CliErrorReport) {
     let stderr = String::from_utf8_lossy(stderr).to_string();
     let trimmed = stderr.trim_end();
-    let (human, json_line) = trimmed
-        .rsplit_once('\n')
-        .expect("expected structured CLI stderr with trailing JSON report");
+    if let Ok(report) = serde_json::from_str::<CliErrorReport>(trimmed) {
+        return (String::new(), report);
+    }
+
+    let json_start = trimmed
+        .rfind("\n{")
+        .map(|index| index + 1)
+        .or_else(|| trimmed.find('{'))
+        .expect("expected structured CLI stderr to contain a JSON report");
+    let (human, json) = trimmed.split_at(json_start);
     let report: CliErrorReport =
-        serde_json::from_str(json_line).expect("expected final stderr line to be JSON");
-    (human.to_string(), report)
+        serde_json::from_str(json.trim()).expect("expected stderr JSON report to be valid JSON");
+    (human.trim_end().to_string(), report)
 }
 
 fn parse_json_stdout(output: &Output) -> Value {

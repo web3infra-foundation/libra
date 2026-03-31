@@ -64,6 +64,16 @@ pub struct Tag {
     pub object: TagObject,
 }
 
+/// Lightweight snapshot of a tag reference row.
+///
+/// This intentionally preserves the raw ref target string so recovery paths
+/// such as `tag -d` can operate even when the target object is missing or the
+/// stored hash is invalid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagReference {
+    pub target: Option<String>,
+}
+
 /// Semantic failures that can occur while creating a tag.
 #[derive(Debug, thiserror::Error)]
 pub enum CreateTagError {
@@ -224,6 +234,20 @@ pub async fn delete(name: &str) -> Result<(), anyhow::Error> {
     } else {
         Ok(())
     }
+}
+
+/// Finds the raw tag reference row without dereferencing the target object.
+pub async fn find_tag_ref(name: &str) -> Result<Option<TagReference>, DbErr> {
+    let db_conn = get_db_conn_instance().await;
+    let full_ref_name = format!("{}{}", TAG_REF_PREFIX, name);
+
+    let model = reference::Entity::find()
+        .filter(reference::Column::Name.eq(full_ref_name))
+        .filter(reference::Column::Kind.eq(reference::ConfigKind::Tag))
+        .one(&db_conn)
+        .await?;
+
+    Ok(model.map(|m| TagReference { target: m.commit }))
 }
 
 /// Finds a tag by name and returns the tag object and the final commit

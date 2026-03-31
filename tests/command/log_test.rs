@@ -65,6 +65,44 @@ fn test_log_json_output_includes_commit_list() {
 }
 
 #[test]
+fn test_log_invalid_since_uses_command_usage_error() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["log", "--since", "not-a-date"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert!(stderr.starts_with("error: "));
+    assert!(stderr.contains("supported formats: YYYY-MM-DD"));
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert_eq!(report.category, "cli");
+    assert_eq!(report.exit_code, 129);
+    assert_eq!(report.severity, "error");
+}
+
+#[test]
+fn test_log_invalid_decorate_uses_command_usage_error() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--json", "log", "--decorate=bogus"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert!(
+        output.stdout.is_empty(),
+        "unexpected stdout: {:?}",
+        output.stdout
+    );
+    assert!(stderr.is_empty(), "unexpected human stderr: {stderr}");
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert_eq!(report.category, "cli");
+    assert_eq!(report.exit_code, 129);
+    assert_eq!(report.severity, "error");
+    assert_eq!(report.message, "invalid --decorate option: bogus");
+    assert_eq!(report.hints, vec!["valid options: no, short, full, auto"]);
+}
+
+#[test]
 fn test_log_json_total_reflects_filtered_scope() {
     let repo = create_committed_repo_via_cli();
 

@@ -8,12 +8,13 @@ use std::os::unix::fs::PermissionsExt;
 
 use libra::{
     command::tag::{self, TagArgs},
-    internal::{config::ConfigKv, tag as internal_tag},
+    internal::{config::ConfigKv, db::get_db_conn_instance, model::reference, tag as internal_tag},
     utils::{
         path,
         test::{ChangeDirGuard, setup_with_new_libra_in},
     },
 };
+use sea_orm::{ActiveModelTrait, Set};
 use serial_test::serial;
 use tempfile::tempdir;
 
@@ -160,6 +161,59 @@ fn test_tag_quiet_delete_suppresses_stdout() {
     );
 }
 
+#[tokio::test]
+#[serial]
+async fn test_tag_delete_allows_invalid_target_hash() {
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+    insert_broken_tag_ref("broken", Some("not-a-valid-object-id")).await;
+
+    let output = run_libra_command(&["tag", "-d", "broken"], repo.path());
+    assert_cli_success(&output, "tag delete should remove broken ref");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Deleted tag 'broken'"),
+        "unexpected stdout: {stdout}"
+    );
+    assert!(
+        internal_tag::find_tag_ref("broken")
+            .await
+            .expect("lookup broken tag ref")
+            .is_none(),
+        "broken tag ref should be deleted"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_tag_json_delete_allows_invalid_target_hash() {
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+    insert_broken_tag_ref("broken-json", Some("not-a-valid-object-id")).await;
+
+    let output = run_libra_command(&["--json", "tag", "-d", "broken-json"], repo.path());
+    assert_cli_success(&output, "json tag delete should remove broken ref");
+    assert!(
+        output.stderr.is_empty(),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "tag");
+    assert_eq!(json["data"]["action"], "delete");
+    assert_eq!(json["data"]["name"], "broken-json");
+    assert_eq!(json["data"]["hash"], "not-a-valid-object-id");
+    assert!(
+        internal_tag::find_tag_ref("broken-json")
+            .await
+            .expect("lookup broken json tag ref")
+            .is_none(),
+        "broken tag ref should be deleted"
+    );
+}
+
 /// Return the full ref name for a tag (e.g. "refs/tags/v1.0").
 fn ref_name(tag: &str) -> String {
     format!("refs/tags/{tag}")
@@ -192,6 +246,20 @@ async fn get_tag_by_name(full_ref: &str) -> Option<internal_tag::Tag> {
 async fn tag_exists(name: &str) -> bool {
     let full = ref_name(name);
     get_tag_by_name(&full).await.is_some()
+}
+
+async fn insert_broken_tag_ref(name: &str, target: Option<&str>) {
+    let db = get_db_conn_instance().await;
+    let row = reference::ActiveModel {
+        name: Set(Some(ref_name(name))),
+        kind: Set(reference::ConfigKind::Tag),
+        commit: Set(target.map(str::to_string)),
+        remote: Set(None),
+        ..Default::default()
+    };
+    row.insert(&db)
+        .await
+        .expect("failed to insert broken tag reference");
 }
 
 /// Read the object id the tag points to (as a string), if present.

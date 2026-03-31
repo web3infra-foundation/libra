@@ -343,9 +343,17 @@ struct Reference {
 
 fn parse_date_arg(value: &str) -> CliResult<i64> {
     parse_date(value).map_err(|e| {
-        CliError::fatal(e.to_string())
+        CliError::command_usage(e.to_string())
             .with_stable_code(StableErrorCode::CliInvalidArguments)
             .with_hint(r#"supported formats: YYYY-MM-DD, "N days ago", unix timestamp"#)
+    })
+}
+
+async fn resolve_decorate_option(args: &LogArgs) -> CliResult<DecorateOptions> {
+    determine_decorate_option(args).await.map_err(|value| {
+        CliError::command_usage(format!("invalid --decorate option: {value}"))
+            .with_stable_code(StableErrorCode::CliInvalidArguments)
+            .with_hint("valid options: no, short, full, auto")
     })
 }
 
@@ -359,6 +367,8 @@ pub async fn execute(args: LogArgs) {
 /// errors and exiting. Walks commit history applying filters (date range,
 /// author, path) and renders formatted log output.
 pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()> {
+    let decorate_option = resolve_decorate_option(&args).await?;
+
     if output.is_json() {
         let result = run_log(&args).await?;
         return emit_json_data("log", &result, output);
@@ -373,12 +383,6 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     let until = args.until.as_deref().map(parse_date_arg).transpose()?;
     let path_filters: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
     let filter = CommitFilter::new(args.author.clone(), since, until, path_filters.clone());
-
-    let decorate_option = determine_decorate_option(&args).await.map_err(|value| {
-        CliError::fatal(format!("invalid --decorate option: {value}"))
-            .with_stable_code(StableErrorCode::CliInvalidArguments)
-            .with_hint("valid options: no, short, full, auto")
-    })?;
 
     let mut pager = Pager::with_config(output)?;
 
