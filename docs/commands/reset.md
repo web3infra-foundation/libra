@@ -31,12 +31,14 @@ M	path/to/file
 }
 ```
 
-When `pathspecs` is non-empty, the reset only applies to the specified paths.
+When `pathspecs` is non-empty, the command performs a mixed reset on the specified paths only.
+`--hard` with pathspecs is rejected.
 `files_restored` is the number of tracked files actually rewritten or removed by `--hard`; on a clean repository, `reset --hard HEAD` can report `0`.
 
 ## Errors
 
 - Invalid revision: `LBR-CLI-003`
 - `--soft` used with pathspecs: `LBR-CLI-002`
+- `--hard` used with pathspecs: `LBR-CLI-002`
 - Corrupt index or object store: `LBR-REPO-002`
 - Failed to write the index or working tree: `LBR-IO-002`

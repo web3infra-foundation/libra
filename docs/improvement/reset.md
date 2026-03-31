@@ -239,6 +239,7 @@ EXAMPLES:
 - **（新增）`ResetError` 变体覆盖**：
   - `InvalidRevision`：无效 revision 返回 exit `129`
   - `PathspecWithSoft`：`--soft` + pathspec 返回 exit `129`
+  - `PathspecWithHard`：`--hard` + pathspec 返回 exit `129`
 - **（新增）成功确认消息**：human 模式下 stdout 包含 `HEAD is now at`
 - **（新增）pathspec reset 输出**：mixed 模式 + pathspec 后 stdout 包含 unstaged 文件列表
 
@@ -248,7 +249,7 @@ EXAMPLES:
 - **`--hard --json`**：`mode == "hard"`，`files_restored` 反映实际被恢复的 tracked 文件数；dirty 工作区时 `> 0`，clean repo 上对 `HEAD` 执行时可为 `0`
 - **`--mixed --json`**：`mode == "mixed"`
 - **`--soft --json`**：`mode == "soft"`，`files_unstaged == 0`，`files_restored == 0`
-- **pathspec `--json`**：`pathspecs` 数组非空
+- **pathspec `--json`**：仅 mixed pathspec reset 成功，`pathspecs` 数组非空
 - **错误 `--json`**：`ok == false` + 错误码
 - **`--machine reset`**：stdout 恰好 1 行非空行
 

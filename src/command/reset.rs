@@ -131,6 +131,13 @@ async fn run_reset(args: ResetArgs) -> CliResult<ResetOutput> {
             .with_stable_code(StableErrorCode::CliInvalidArguments)
             .with_hint("--soft only moves HEAD; use --mixed to reset index for specific paths."));
         }
+        if matches!(mode, ResetMode::Hard) {
+            return Err(CliError::command_usage("Cannot do hard reset with paths.")
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint(
+                    "--hard updates the working tree; omit pathspecs or use --mixed for specific paths.",
+                ));
+        }
 
         let target_commit_id = resolve_commit(&args.target)
             .await
@@ -690,7 +697,7 @@ fn map_reset_runtime_error(message: String) -> CliError {
         || message.contains("load blob")
     {
         StableErrorCode::RepoCorrupt
-    } else if message.contains("read directory") {
+    } else if message.contains("read file") || message.contains("read directory") {
         StableErrorCode::IoReadFailed
     } else {
         StableErrorCode::IoWriteFailed
@@ -763,5 +770,13 @@ mod tests {
         let error =
             map_reset_runtime_error("Cannot reset: HEAD is unborn and points to no commit.".into());
         assert_eq!(error.stable_code(), StableErrorCode::RepoStateInvalid);
+    }
+
+    #[test]
+    fn test_map_reset_runtime_error_reports_file_read_failures_as_io_read() {
+        let error = map_reset_runtime_error(
+            "failed to read file /tmp/repo/tracked.txt: Permission denied".into(),
+        );
+        assert_eq!(error.stable_code(), StableErrorCode::IoReadFailed);
     }
 }

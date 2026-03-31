@@ -155,6 +155,50 @@ fn test_reset_json_hard_head_reports_actual_restored_files() {
     );
 }
 
+#[test]
+fn test_reset_hard_with_pathspec_returns_usage_error() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nupdated\n").unwrap();
+
+    let output = run_libra_command(
+        &["reset", "--hard", "HEAD", "--", "tracked.txt"],
+        repo.path(),
+    );
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        stderr.contains("Cannot do hard reset with paths."),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn test_reset_json_hard_with_pathspec_returns_usage_error() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nupdated\n").unwrap();
+
+    let output = run_libra_command(
+        &["--json", "reset", "--hard", "HEAD", "--", "tracked.txt"],
+        repo.path(),
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stderr).expect("expected stderr JSON in --json mode");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert!(
+        output.stdout.is_empty(),
+        "stdout should stay empty on JSON error"
+    );
+    assert_eq!(report["error_code"], "LBR-CLI-002");
+    assert!(
+        stderr.contains("Cannot do hard reset with paths."),
+        "unexpected stderr: {stderr}"
+    );
+}
+
 /// Setup a standard test repository with 4 commits and branches
 async fn setup_standard_repo(
     temp_path: &std::path::Path,
