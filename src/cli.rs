@@ -260,6 +260,11 @@ enum Commands {
         hide = true
     )]
     Checkout(command::checkout::CheckoutArgs),
+    #[command(
+        subcommand,
+        about = "Use binary search to find the commit that introduced a bug"
+    )]
+    Bisect(Bisect),
 }
 
 #[derive(Subcommand, Debug)]
@@ -286,6 +291,39 @@ pub enum Stash {
         #[arg(help = "The stash to drop")]
         stash: Option<String>,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum Bisect {
+    #[command(about = "Start a new bisect session")]
+    Start {
+        #[arg(help = "Bad commit to start from")]
+        bad: Option<String>,
+        #[arg(long, short, help = "Good commit to mark")]
+        good: Option<String>,
+    },
+    #[command(about = "Mark the current or given commit as bad")]
+    Bad {
+        #[arg(help = "Commit to mark as bad")]
+        rev: Option<String>,
+    },
+    #[command(about = "Mark the current or given commit as good")]
+    Good {
+        #[arg(help = "Commit to mark as good")]
+        rev: Option<String>,
+    },
+    #[command(about = "End bisect session and restore original HEAD")]
+    Reset {
+        #[arg(help = "Commit to reset to (optional)")]
+        rev: Option<String>,
+    },
+    #[command(about = "Skip current commit and move to next")]
+    Skip {
+        #[arg(help = "Commit to skip")]
+        rev: Option<String>,
+    },
+    #[command(about = "Show bisect log")]
+    Log,
 }
 
 /// The main function is the entry point of the Libra application.
@@ -633,6 +671,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Reflog(cmd_args) => command::reflog::execute_safe(cmd_args, &output).await?,
         Commands::Worktree(cmd_args) => command::worktree::execute_safe(cmd_args, &output).await?,
         Commands::Cloud(cmd_args) => command::cloud::execute_safe(cmd_args, &output).await?,
+        Commands::Bisect(bisect_cmd) => command::bisect::execute_safe(bisect_cmd, &output).await?,
     }
 
     // Check for warnings when --exit-code-on-warning is active.

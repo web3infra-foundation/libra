@@ -17,6 +17,26 @@ use crate::{internal::model::*, utils::path};
 // #[cfg(not(test))]
 // use tokio::sync::OnceCell;
 
+/// Normalize a file path for use in a SQLite connection string.
+/// On Windows, this removes the `\\?\` prefix and converts backslashes to forward slashes.
+fn normalize_path_for_sqlite(db_path: &str) -> String {
+    #[cfg(windows)]
+    {
+        // Remove Windows extended-length path prefix if present
+        let path = if db_path.starts_with(r"\\?\") {
+            &db_path[4..]
+        } else {
+            db_path
+        };
+        // Convert backslashes to forward slashes for SQLite URL
+        path.replace('\\', "/")
+    }
+    #[cfg(not(windows))]
+    {
+        db_path.to_string()
+    }
+}
+
 /// Establish a connection to the database.
 ///  - `db_path` is the path to the SQLite database file.
 /// - Returns a `DatabaseConnection` if successful, or an `IOError` if the database file does not exist.
@@ -41,7 +61,8 @@ pub async fn establish_connection_with_busy_timeout(
         ));
     }
 
-    let mut option = ConnectOptions::new(format!("sqlite://{db_path}"));
+    let normalized_path = normalize_path_for_sqlite(db_path);
+    let mut option = ConnectOptions::new(format!("sqlite://{normalized_path}"));
     option.sqlx_logging(false); // TODO use better option
     option.map_sqlx_sqlite_opts(move |sqlx_opts| sqlx_opts.busy_timeout(busy_timeout));
     let conn = Database::connect(option)
@@ -296,7 +317,8 @@ async fn ensure_ai_projection_schema(conn: &DatabaseConnection) -> Result<(), IO
 }
 
 async fn connect_database(db_path: &str) -> io::Result<DatabaseConnection> {
-    let mut option = ConnectOptions::new(format!("sqlite://{db_path}"));
+    let normalized_path = normalize_path_for_sqlite(db_path);
+    let mut option = ConnectOptions::new(format!("sqlite://{normalized_path}"));
     option.sqlx_logging(false); // TODO use better option
     Database::connect(option)
         .await
