@@ -73,14 +73,12 @@ pub enum CreateTagError {
     AlreadyExists(String),
     #[error("failed to query existing tag refs: {0}")]
     CheckExisting(#[source] DbErr),
-    #[error("failed to delete existing tag during forced update: {0}")]
-    DeleteExisting(#[source] anyhow::Error),
     #[error("failed to serialize annotated tag object: {0}")]
     SerializeTag(#[source] GitError),
     #[error("failed to store annotated tag object: {0}")]
     StoreObject(#[source] io::Error),
     #[error("failed to persist tag reference: {0}")]
-    InsertReference(#[source] DbErr),
+    PersistReference(#[source] DbErr),
 }
 
 /// Creates a new tag, either lightweight or annotated, pointing to the current HEAD commit.
@@ -106,9 +104,6 @@ pub async fn create(
 
     if exists.is_some() && !force {
         return Err(CreateTagError::AlreadyExists(name.to_string()));
-    } else if exists.is_some() && force {
-        // Delete existing tag if force is true
-        delete(name).await.map_err(CreateTagError::DeleteExisting)?;
     }
 
     let ref_target_id: ObjectHash;
@@ -152,17 +147,29 @@ pub async fn create(
     };
 
     // Save the reference in the database
-    let db_conn = get_db_conn_instance().await;
-    let new_ref = reference::ActiveModel {
-        name: Set(Some(format!("{}{}", TAG_REF_PREFIX, name))),
-        kind: Set(reference::ConfigKind::Tag),
-        commit: Set(Some(ref_target_id.to_string())),
-        ..Default::default()
-    };
-    new_ref
-        .insert(&db_conn)
-        .await
-        .map_err(CreateTagError::InsertReference)?;
+    let ref_target = ref_target_id.to_string();
+    match exists {
+        Some(existing_ref) => {
+            let mut existing_ref: reference::ActiveModel = existing_ref.into();
+            existing_ref.commit = Set(Some(ref_target));
+            existing_ref
+                .update(&db)
+                .await
+                .map_err(CreateTagError::PersistReference)?;
+        }
+        None => {
+            let new_ref = reference::ActiveModel {
+                name: Set(Some(format!("{}{}", TAG_REF_PREFIX, name))),
+                kind: Set(reference::ConfigKind::Tag),
+                commit: Set(Some(ref_target)),
+                ..Default::default()
+            };
+            new_ref
+                .insert(&db)
+                .await
+                .map_err(CreateTagError::PersistReference)?;
+        }
+    }
 
     Ok(())
 }

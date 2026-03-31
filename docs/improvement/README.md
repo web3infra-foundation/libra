@@ -14,8 +14,8 @@
 - `add` 命令主改造已落地：`run_add()` → `AddOutput` 执行层/渲染层拆分、JSON/machine 输出、显式 `StableErrorCode`、warning 接入共享 tracker
 - `status` 命令主改造已落地：`StatusData` 共享数据层、upstream tracking、`--exit-code` 标志、显式 `StableErrorCode`
 
-**已有 JSON 输出的命令（面向终端用户的高层命令）：** commit, status, branch, config, init, clone, add, push, pull（底层命令如 `cat-file`、`show-ref` 也已支持 JSON，但未纳入本优先级列表；`switch` 仅用 `is_json()` 抑制 human 输出，但 `--json` 模式下不产生结构化 stdout，不计入）
-**已用 StableErrorCode 的命令：** init, clone, add, status, commit, push, pull, shortlog, lfs, code（共 10 个）
+**已有 JSON 输出的命令（面向终端用户的高层命令）：** commit, status, branch, config, init, clone, add, push, pull, switch（底层命令如 `cat-file`、`show-ref` 也已支持 JSON，但未纳入本优先级列表）
+**已用 StableErrorCode 的命令：** init, clone, add, status, commit, push, pull, switch, shortlog, lfs, code（共 11 个）
 
 ---
 

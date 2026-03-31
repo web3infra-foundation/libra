@@ -657,10 +657,12 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
         let mut message_lines = parsed_message.lines();
         let subject = message_lines.next().unwrap_or("").to_string();
         let body = message_lines.collect::<Vec<_>>().join("\n");
+        let hash = commit.id.to_string();
+        let short_hash = hash.get(..7).unwrap_or(&hash).to_string();
 
         commits.push(LogCommitEntry {
-            hash: commit.id.to_string(),
-            short_hash: commit.id.to_string()[..7].to_string(),
+            hash,
+            short_hash,
             author_name: commit.author.name.trim().to_string(),
             author_email: commit.author.email.trim().to_string(),
             author_date: format_log_timestamp(commit.author.timestamp as i64),

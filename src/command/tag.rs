@@ -170,11 +170,6 @@ fn map_create_tag_error(tag_name: &str, error: tag::CreateTagError) -> CliError 
             tag_name
         ))
         .with_stable_code(StableErrorCode::RepoCorrupt),
-        tag::CreateTagError::DeleteExisting(source) => CliError::fatal(format!(
-            "failed to replace existing tag '{}': {source}",
-            tag_name
-        ))
-        .with_stable_code(StableErrorCode::IoWriteFailed),
         tag::CreateTagError::SerializeTag(source) => CliError::fatal(format!(
             "failed to serialize annotated tag object: {source}"
         ))
@@ -183,7 +178,7 @@ fn map_create_tag_error(tag_name: &str, error: tag::CreateTagError) -> CliError 
             CliError::fatal(format!("failed to store annotated tag object: {source}"))
                 .with_stable_code(StableErrorCode::IoWriteFailed)
         }
-        tag::CreateTagError::InsertReference(source) => CliError::fatal(format!(
+        tag::CreateTagError::PersistReference(source) => CliError::fatal(format!(
             "failed to persist tag reference '{}': {source}",
             tag_name
         ))

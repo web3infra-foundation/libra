@@ -3,6 +3,8 @@
 //! **Layer:** L1 — deterministic, no external dependencies.
 
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use libra::{
     command::{
@@ -12,7 +14,7 @@ use libra::{
         status::{changes_to_be_committed, changes_to_be_staged},
     },
     internal::config::ConfigKv,
-    utils::test::setup_with_new_libra_in,
+    utils::{error::StableErrorCode, test::setup_with_new_libra_in},
 };
 
 use super::*;
@@ -196,6 +198,107 @@ fn test_reset_json_hard_with_pathspec_returns_usage_error() {
     assert!(
         stderr.contains("Cannot do hard reset with paths."),
         "unexpected stderr: {stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn test_reset_hard_io_failure_rolls_back_index_and_keeps_head() {
+    let temp_path = tempdir().unwrap();
+    let _guard = ChangeDirGuard::new(temp_path.path());
+    setup_with_new_libra_in(temp_path.path()).await;
+    setup_reset_user_identity().await;
+
+    fs::write("base.txt", "base\n").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["base.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("base".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await;
+
+    fs::write("tracked.txt", "tracked\n").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["tracked.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("add tracked".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await;
+
+    let head_before = Head::current_commit().await.unwrap();
+    let original_mode = fs::metadata(temp_path.path()).unwrap().permissions().mode();
+    fs::set_permissions(temp_path.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let result = reset::execute_safe(
+        ResetArgs {
+            target: "HEAD~1".to_string(),
+            soft: false,
+            mixed: false,
+            hard: true,
+            pathspecs: vec![],
+        },
+        &libra::utils::output::OutputConfig::default(),
+    )
+    .await;
+
+    fs::set_permissions(
+        temp_path.path(),
+        std::fs::Permissions::from_mode(original_mode),
+    )
+    .unwrap();
+
+    let error = result.expect_err("hard reset should fail when tracked file removal is denied");
+    assert_eq!(error.stable_code(), StableErrorCode::IoWriteFailed);
+    assert_eq!(Head::current_commit().await.unwrap(), head_before);
+    assert!(temp_path.path().join("tracked.txt").exists());
+    assert!(
+        changes_to_be_committed().await.is_empty(),
+        "failed hard reset should restore the index to match HEAD"
+    );
+    assert!(
+        changes_to_be_staged().unwrap().modified.is_empty()
+            && changes_to_be_staged().unwrap().deleted.is_empty()
+            && changes_to_be_staged().unwrap().new.is_empty(),
+        "failed hard reset should restore the working tree to match HEAD"
     );
 }
 

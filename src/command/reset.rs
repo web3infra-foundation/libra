@@ -17,7 +17,6 @@ use git_internal::{
 use serde::Serialize;
 
 use crate::{
-    cli_error,
     command::{get_target_commit, load_object},
     common_utils::parse_commit_msg,
     internal::{
@@ -265,74 +264,127 @@ async fn perform_reset(
     let old_oid = Head::current_commit_with_conn(&db)
         .await
         .ok_or_else(|| "Cannot reset: HEAD is unborn and points to no commit.".to_string())?;
+    let current_head_state = if old_oid != target_commit_id {
+        Some(Head::current_with_conn(&db).await)
+    } else {
+        None
+    };
     let previously_tracked_paths = if matches!(mode, ResetMode::Hard) {
         tracked_paths_for_hard_reset(&old_oid)?
     } else {
         HashSet::new()
     };
-
-    if old_oid != target_commit_id {
-        // determine if HEAD is attached to a branch or detached. This is crucial for
-        // deciding which reference pointer to update in the transaction.
-        let current_head_state = Head::current_with_conn(&db).await;
-
-        let action = ReflogAction::Reset {
-            target: target_ref_str.to_string(),
-        };
-        let context = ReflogContext {
-            old_oid: old_oid.to_string(),
-            new_oid: target_commit_id.to_string(),
-            action,
+    let stats =
+        match apply_reset_side_effects(mode, &target_commit_id, &previously_tracked_paths).await {
+            Ok(stats) => stats,
+            Err(error) => {
+                let rollback = rollback_reset_side_effects(mode, &old_oid, &target_commit_id).await;
+                return Err(merge_reset_failure(error, rollback));
+            }
         };
 
-        with_reflog(
-            context,
-            move |txn| {
-                Box::pin(async move {
-                    match &current_head_state {
-                        // If on a branch, update the branch pointer. HEAD will move with it.
-                        Head::Branch(branch_name) => {
-                            Branch::update_branch_with_conn(
-                                txn,
-                                branch_name,
-                                &target_commit_id.to_string(),
-                                None,
-                            )
-                            .await?;
-                        }
-                        // If in a detached state, update the HEAD pointer directly.
-                        Head::Detached(_) => {
-                            let new_head = Head::Detached(target_commit_id);
-                            Head::update_with_conn(txn, new_head, None).await;
-                        }
-                    }
-                    Ok(())
-                })
-            },
-            true,
+    if let Some(current_head_state) = current_head_state
+        && let Err(error) = update_reset_reference(
+            current_head_state,
+            old_oid,
+            target_commit_id,
+            target_ref_str,
         )
         .await
-        .map_err(|e| e.to_string())?;
+    {
+        let rollback = rollback_reset_side_effects(mode, &old_oid, &target_commit_id).await;
+        return Err(merge_reset_failure(error, rollback));
     }
 
+    Ok(stats)
+}
+
+async fn apply_reset_side_effects(
+    mode: ResetMode,
+    target_commit_id: &ObjectHash,
+    previously_tracked_paths: &HashSet<PathBuf>,
+) -> Result<ResetStats, String> {
     let mut stats = ResetStats::default();
     match mode {
-        ResetMode::Soft => {
-            // Only move HEAD, nothing else to do
-        }
+        ResetMode::Soft => {}
         ResetMode::Mixed => {
-            // Reset index to target commit
-            reset_index_to_commit(&target_commit_id)?;
+            reset_index_to_commit(target_commit_id)?;
         }
         ResetMode::Hard => {
-            // Reset index and working directory
-            reset_index_to_commit(&target_commit_id)?;
+            reset_index_to_commit(target_commit_id)?;
             stats.files_restored =
-                reset_working_directory_to_commit(&target_commit_id, &previously_tracked_paths)
+                reset_working_directory_to_commit(target_commit_id, previously_tracked_paths)
                     .await?;
         }
     }
     Ok(stats)
+}
+
+async fn rollback_reset_side_effects(
+    mode: ResetMode,
+    old_oid: &ObjectHash,
+    target_commit_id: &ObjectHash,
+) -> Result<(), String> {
+    match mode {
+        ResetMode::Soft => Ok(()),
+        ResetMode::Mixed => reset_index_to_commit(old_oid),
+        ResetMode::Hard => {
+            reset_index_to_commit(old_oid)?;
+            let rollback_paths = tracked_paths_for_hard_reset(target_commit_id)?;
+            reset_working_directory_to_commit(old_oid, &rollback_paths).await?;
+            Ok(())
+        }
+    }
+}
+
+async fn update_reset_reference(
+    current_head_state: Head,
+    old_oid: ObjectHash,
+    target_commit_id: ObjectHash,
+    target_ref_str: &str,
+) -> Result<(), String> {
+    let action = ReflogAction::Reset {
+        target: target_ref_str.to_string(),
+    };
+    let context = ReflogContext {
+        old_oid: old_oid.to_string(),
+        new_oid: target_commit_id.to_string(),
+        action,
+    };
+
+    with_reflog(
+        context,
+        move |txn| {
+            Box::pin(async move {
+                match &current_head_state {
+                    Head::Branch(branch_name) => {
+                        Branch::update_branch_with_conn(
+                            txn,
+                            branch_name,
+                            &target_commit_id.to_string(),
+                            None,
+                        )
+                        .await?;
+                    }
+                    Head::Detached(_) => {
+                        let new_head = Head::Detached(target_commit_id);
+                        Head::update_with_conn(txn, new_head, None).await;
+                    }
+                }
+                Ok(())
+            })
+        },
+        true,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+fn merge_reset_failure(error: String, rollback: Result<(), String>) -> String {
+    match rollback {
+        Ok(()) => error,
+        Err(rollback_error) => format!("{error}; rollback failed: {rollback_error}"),
+    }
 }
 
 /// Reset the index to match the specified commit's tree.
@@ -380,10 +432,9 @@ pub(crate) async fn reset_working_directory_to_commit(
         if !target_files_set.contains(file_path) {
             let full_path = workdir.join(file_path);
             if full_path.exists() {
-                match fs::remove_file(&full_path) {
-                    Ok(()) => files_restored += 1,
-                    Err(e) => cli_error!(e, "warning: failed to remove '{}'", full_path.display()),
-                }
+                fs::remove_file(&full_path)
+                    .map_err(|e| format!("failed to remove file {}: {}", full_path.display(), e))?;
+                files_restored += 1;
             }
         }
     }
