@@ -17,6 +17,73 @@ fn test_switch_cli_missing_branch_returns_cli_exit_code() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("fatal: invalid reference: no-such"));
 }
 
+#[test]
+fn test_switch_json_create_output_reports_new_branch() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--json", "switch", "-c", "feature"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "switch");
+    assert_eq!(json["data"]["branch"], "feature");
+    assert_eq!(json["data"]["created"], true);
+    assert_eq!(json["data"]["detached"], false);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_switch_json_track_output_stays_clean() {
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+
+    let head = Head::current_commit().await.unwrap();
+    Branch::update_branch("refs/remotes/origin/feature", &head.to_string(), None)
+        .await
+        .unwrap();
+
+    let output = run_libra_command(
+        &["--json", "switch", "--track", "origin/feature"],
+        repo.path(),
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "switch");
+    assert_eq!(json["data"]["branch"], "feature");
+    assert_eq!(json["data"]["tracking"]["remote"], "origin");
+    assert_eq!(json["data"]["tracking"]["remote_branch"], "feature");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_switch_track_human_output_keeps_tracking_message() {
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+
+    let head = Head::current_commit().await.unwrap();
+    Branch::update_branch("refs/remotes/origin/feature", &head.to_string(), None)
+        .await
+        .unwrap();
+
+    let output = run_libra_command(&["switch", "--track", "origin/feature"], repo.path());
+    assert_cli_success(&output, "switch --track");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Branch 'feature' set up to track remote branch 'origin/feature'"),
+        "expected upstream tracking message in stdout, got: {stdout}"
+    );
+}
+
 // async fn test_check_status() {
 //     println!("\n\x1b[1mTest check_status function.\x1b[0m");
 //

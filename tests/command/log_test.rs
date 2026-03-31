@@ -47,6 +47,118 @@ fn test_log_cli_empty_repository_returns_fatal_128() {
     );
 }
 
+#[test]
+fn test_log_json_output_includes_commit_list() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--json", "log", "-n", "1"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "log");
+    assert_eq!(json["data"]["commits"][0]["subject"], "base");
+    assert!(json["data"]["commits"][0]["files"].as_array().is_some());
+}
+
+#[test]
+fn test_log_invalid_since_uses_command_usage_error() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["log", "--since", "not-a-date"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert!(stderr.starts_with("error: "));
+    assert!(stderr.contains("supported formats: YYYY-MM-DD"));
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert_eq!(report.category, "cli");
+    assert_eq!(report.exit_code, 129);
+    assert_eq!(report.severity, "error");
+}
+
+#[test]
+fn test_log_invalid_decorate_uses_command_usage_error() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--json", "log", "--decorate=bogus"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert!(
+        output.stdout.is_empty(),
+        "unexpected stdout: {:?}",
+        output.stdout
+    );
+    assert!(stderr.is_empty(), "unexpected human stderr: {stderr}");
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert_eq!(report.category, "cli");
+    assert_eq!(report.exit_code, 129);
+    assert_eq!(report.severity, "error");
+    assert_eq!(report.message, "invalid --decorate option: bogus");
+    assert_eq!(report.hints, vec!["valid options: no, short, full, auto"]);
+}
+
+#[test]
+fn test_log_json_total_reflects_filtered_scope() {
+    let repo = create_committed_repo_via_cli();
+
+    let name_output = run_libra_command(&["config", "user.name", "Other User"], repo.path());
+    assert!(
+        name_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&name_output.stderr)
+    );
+    let email_output =
+        run_libra_command(&["config", "user.email", "other@example.com"], repo.path());
+    assert!(
+        email_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&email_output.stderr)
+    );
+
+    std::fs::write(
+        repo.path().join("tracked.txt"),
+        "tracked\nupdated by other\n",
+    )
+    .expect("failed to update tracked.txt");
+    let add_output = run_libra_command(&["add", "tracked.txt"], repo.path());
+    assert!(
+        add_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&add_output.stderr)
+    );
+    let commit_output = run_libra_command(
+        &["commit", "-m", "other update", "--no-verify"],
+        repo.path(),
+    );
+    assert!(
+        commit_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&commit_output.stderr)
+    );
+
+    let output = run_libra_command(&["--json", "log", "--author", "Other User"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "log");
+    assert_eq!(json["data"]["total"], 1);
+    let commits = json["data"]["commits"]
+        .as_array()
+        .expect("commits should be an array");
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0]["author_name"], "Other User");
+    assert_eq!(commits[0]["subject"], "other update");
+}
+
 #[tokio::test]
 #[serial]
 /// Tests retrieval of commits reachable from a specific commit hash

@@ -1432,45 +1432,51 @@ mod test {
     #[serial]
     // Tests the recursive tree creation from index entries (uses original test data via absolute path)
     async fn test_create_tree() {
-        // 1. 初始化临时 Libra 仓库（保持原有逻辑，确保仓库结构正确）
+        // 1. Initialize a temporary Libra repository
         let temp_path = tempdir().unwrap();
         setup_with_new_libra_in(temp_path.path()).await;
         let _guard = ChangeDirGuard::new(temp_path.path());
 
-        // 2. 基于项目根目录（CARGO_MANIFEST_DIR）构建测试 index 文件的绝对路径（关键修复）
-        let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")); // 项目根目录（Cargo.toml 所在处）
-        let index_file_path = project_root.join("tests/data/index/index-760"); // 绝对路径：根目录/tests/data/...
+        // 2. Build absolute path to the test index file using the project root (CARGO_MANIFEST_DIR)
+        let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let index_file_path = project_root.join("tests/data/index/index-760");
 
-        // 3. 检查文件是否存在，给出明确提示（指导你补充文件）
+        // 3. Verify the test fixture exists
         assert!(
             index_file_path.exists(),
-            "测试文件不存在！请在项目根目录下创建路径：{}，并放入 index-760 文件",
+            "test fixture not found: {}; please place the index-760 file at that path",
             index_file_path.display()
         );
 
-        // 4. 加载 index 文件（使用绝对路径，不再报错）
+        // 4. Load the index file
         let index = Index::from_file(index_file_path).unwrap_or_else(|e| {
-            panic!("加载 index 文件失败：{}，请确认文件格式正确", e);
+            panic!(
+                "failed to load index file: {}; verify the file format is correct",
+                e
+            );
         });
         println!(
-            "加载的 index 包含 {} 个跟踪文件",
+            "loaded index contains {} tracked entries",
             index.tracked_entries(0).len()
         );
 
-        // 5. 初始化存储（确保指向临时仓库的 objects 目录，避免干扰主仓库）
-        let temp_objects_dir = temp_path.path().join(".libra/objects"); // 临时仓库的 objects 目录
+        // 5. Initialize storage pointing at the temp repo's objects directory
+        let temp_objects_dir = temp_path.path().join(".libra/objects");
         let storage = ClientStorage::init(temp_objects_dir);
 
-        // 6. 调用 create_tree（current_root 设为空，因为 index 中路径是相对于仓库根的）
+        // 6. Call create_tree with an empty root (index paths are repo-root-relative)
         let tree = create_tree(&index, &storage, PathBuf::new()).await.unwrap();
 
-        // 7. 原有验证逻辑（不变）
-        assert!(storage.get(&tree.id).is_ok(), "根 tree 未保存到存储");
+        // 7. Verify tree structure
+        assert!(
+            storage.get(&tree.id).is_ok(),
+            "root tree not saved to storage"
+        );
         for item in tree.tree_items.iter() {
             if item.mode == TreeItemMode::Tree {
                 assert!(
                     storage.get(&item.id).is_ok(),
-                    "子 tree 未保存：{}",
+                    "sub-tree not saved: {}",
                     item.name
                 );
                 if item.name == "DeveloperExperience" {
@@ -1479,7 +1485,7 @@ mod test {
                     assert_eq!(
                         sub_tree.tree_items.len(),
                         4,
-                        "DeveloperExperience 子 tree 条目数错误"
+                        "DeveloperExperience sub-tree entry count mismatch"
                     );
                 }
             }

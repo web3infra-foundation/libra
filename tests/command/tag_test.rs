@@ -3,12 +3,18 @@
 //! **Layer:** L1 — deterministic, no external dependencies.
 
 use std::collections::HashSet;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use libra::{
     command::tag::{self, TagArgs},
-    internal::{config::ConfigKv, tag as internal_tag},
-    utils::test::{ChangeDirGuard, setup_with_new_libra_in},
+    internal::{config::ConfigKv, db::get_db_conn_instance, model::reference, tag as internal_tag},
+    utils::{
+        path,
+        test::{ChangeDirGuard, setup_with_new_libra_in},
+    },
 };
+use sea_orm::{ActiveModelTrait, Set};
 use serial_test::serial;
 use tempfile::tempdir;
 
@@ -26,6 +32,213 @@ async fn setup_user_identity() {
     ConfigKv::set("user.email", "test@example.com", false)
         .await
         .unwrap();
+}
+
+#[test]
+fn test_tag_json_create_output_includes_hash() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--json", "tag", "v1.0"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "tag");
+    assert_eq!(json["data"]["action"], "create");
+    assert_eq!(json["data"]["name"], "v1.0");
+    assert!(json["data"]["hash"].as_str().is_some());
+}
+
+#[test]
+fn test_tag_json_delete_output_includes_deleted_hash() {
+    let repo = create_committed_repo_via_cli();
+
+    let create_output = run_libra_command(&["tag", "v1.0"], repo.path());
+    assert_cli_success(&create_output, "tag v1.0");
+
+    let output = run_libra_command(&["--json", "tag", "-d", "v1.0"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "tag");
+    assert_eq!(json["data"]["action"], "delete");
+    assert_eq!(json["data"]["name"], "v1.0");
+    assert!(json["data"]["hash"].as_str().is_some());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_tag_json_delete_missing_target_emits_null_hash() {
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+    insert_broken_tag_ref("missing-target", None).await;
+
+    let output = run_libra_command(&["--json", "tag", "-d", "missing-target"], repo.path());
+    assert_cli_success(&output, "json tag delete should remove ref without target");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "tag");
+    assert_eq!(json["data"]["action"], "delete");
+    assert_eq!(json["data"]["name"], "missing-target");
+    assert!(
+        json["data"]["hash"].is_null(),
+        "expected null hash for missing target, got: {json}"
+    );
+    assert!(
+        internal_tag::find_tag_ref("missing-target")
+            .await
+            .expect("lookup missing-target tag ref")
+            .is_none(),
+        "tag ref should be deleted"
+    );
+}
+
+#[test]
+fn test_tag_missing_name_action_flags_return_usage_errors() {
+    let repo = create_committed_repo_via_cli();
+    let cases = [
+        (vec!["tag", "-d"], "tag name is required for --delete"),
+        (vec!["tag", "-f"], "tag name is required for --force"),
+        (
+            vec!["tag", "-m", "annotated release"],
+            "tag name is required when using --message",
+        ),
+    ];
+
+    for (args, expected_message) in cases {
+        let output = run_libra_command(&args, repo.path());
+        let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+        assert_eq!(output.status.code(), Some(129), "args: {:?}", args);
+        assert_eq!(report.error_code, "LBR-CLI-002", "args: {:?}", args);
+        assert!(
+            stderr.contains(expected_message),
+            "expected stderr to contain '{expected_message}', got: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn test_tag_json_missing_name_action_flags_return_usage_errors() {
+    let repo = create_committed_repo_via_cli();
+    let cases = [
+        (
+            vec!["--json", "tag", "-d"],
+            "tag name is required for --delete",
+        ),
+        (
+            vec!["--json", "tag", "-f"],
+            "tag name is required for --force",
+        ),
+        (
+            vec!["--json", "tag", "-m", "annotated release"],
+            "tag name is required when using --message",
+        ),
+    ];
+
+    for (args, expected_message) in cases {
+        let output = run_libra_command(&args, repo.path());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let report: serde_json::Value =
+            serde_json::from_slice(&output.stderr).expect("expected stderr JSON in --json mode");
+
+        assert_eq!(output.status.code(), Some(129), "args: {:?}", args);
+        assert!(
+            output.stdout.is_empty(),
+            "json error should keep stdout empty, args: {:?}, stdout: {}",
+            args,
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert_eq!(report["error_code"], "LBR-CLI-002", "args: {:?}", args);
+        assert!(
+            stderr.contains(expected_message),
+            "expected stderr to contain '{expected_message}', got: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn test_tag_quiet_delete_suppresses_stdout() {
+    let repo = create_committed_repo_via_cli();
+
+    let create_output = run_libra_command(&["tag", "v1.0"], repo.path());
+    assert_cli_success(&create_output, "tag v1.0");
+
+    let delete_output = run_libra_command(&["--quiet", "tag", "-d", "v1.0"], repo.path());
+    assert_cli_success(&delete_output, "quiet tag delete");
+    assert!(
+        delete_output.stdout.is_empty(),
+        "quiet delete should keep stdout empty, got: {}",
+        String::from_utf8_lossy(&delete_output.stdout)
+    );
+
+    let list_output = run_libra_command(&["tag", "-l"], repo.path());
+    assert_cli_success(&list_output, "tag -l");
+    let stdout = String::from_utf8_lossy(&list_output.stdout);
+    assert!(
+        !stdout.lines().any(|line| line.trim() == "v1.0"),
+        "deleted tag should not be listed, got: {stdout}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_tag_delete_allows_invalid_target_hash() {
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+    insert_broken_tag_ref("broken", Some("not-a-valid-object-id")).await;
+
+    let output = run_libra_command(&["tag", "-d", "broken"], repo.path());
+    assert_cli_success(&output, "tag delete should remove broken ref");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Deleted tag 'broken'"),
+        "unexpected stdout: {stdout}"
+    );
+    assert!(
+        internal_tag::find_tag_ref("broken")
+            .await
+            .expect("lookup broken tag ref")
+            .is_none(),
+        "broken tag ref should be deleted"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_tag_json_delete_allows_invalid_target_hash() {
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+    insert_broken_tag_ref("broken-json", Some("not-a-valid-object-id")).await;
+
+    let output = run_libra_command(&["--json", "tag", "-d", "broken-json"], repo.path());
+    assert_cli_success(&output, "json tag delete should remove broken ref");
+    assert!(
+        output.stderr.is_empty(),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "tag");
+    assert_eq!(json["data"]["action"], "delete");
+    assert_eq!(json["data"]["name"], "broken-json");
+    assert_eq!(json["data"]["hash"], "not-a-valid-object-id");
+    assert!(
+        internal_tag::find_tag_ref("broken-json")
+            .await
+            .expect("lookup broken json tag ref")
+            .is_none(),
+        "broken tag ref should be deleted"
+    );
 }
 
 /// Return the full ref name for a tag (e.g. "refs/tags/v1.0").
@@ -62,6 +275,20 @@ async fn tag_exists(name: &str) -> bool {
     get_tag_by_name(&full).await.is_some()
 }
 
+async fn insert_broken_tag_ref(name: &str, target: Option<&str>) {
+    let db = get_db_conn_instance().await;
+    let row = reference::ActiveModel {
+        name: Set(Some(ref_name(name))),
+        kind: Set(reference::ConfigKind::Tag),
+        commit: Set(target.map(str::to_string)),
+        remote: Set(None),
+        ..Default::default()
+    };
+    row.insert(&db)
+        .await
+        .expect("failed to insert broken tag reference");
+}
+
 /// Read the object id the tag points to (as a string), if present.
 async fn read_tag_oid(name: &str) -> Option<String> {
     let full = ref_name(name);
@@ -88,6 +315,37 @@ async fn assert_tag_exists(name: &str) {
 /// Assert the tag is absent; provide helpful failure message.
 async fn assert_tag_absent(name: &str) {
     assert!(!tag_exists(name).await, "Tag still exists: {}", name);
+}
+
+#[cfg(unix)]
+fn collect_directory_modes(path: &std::path::Path, modes: &mut Vec<(std::path::PathBuf, u32)>) {
+    let metadata = std::fs::metadata(path).expect("failed to stat path");
+    modes.push((path.to_path_buf(), metadata.permissions().mode()));
+    for entry in std::fs::read_dir(path).expect("failed to read directory") {
+        let entry = entry.expect("failed to read directory entry");
+        let child = entry.path();
+        if child.is_dir() {
+            collect_directory_modes(&child, modes);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn set_directory_mode_recursive(path: &std::path::Path, mode: u32) {
+    let mut modes = Vec::new();
+    collect_directory_modes(path, &mut modes);
+    for (dir, _) in modes {
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode))
+            .expect("failed to update directory permissions");
+    }
+}
+
+#[cfg(unix)]
+fn restore_directory_modes(modes: &[(std::path::PathBuf, u32)]) {
+    for (dir, mode) in modes.iter().rev() {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(*mode))
+            .expect("failed to restore directory permissions");
+    }
 }
 
 // --- Shared setup helpers ---
@@ -155,6 +413,56 @@ fn test_tag_cli_duplicate_tag_returns_conflict_exit_code_without_stdout() {
     assert!(stdout.trim().is_empty(), "unexpected stdout: {stdout}");
     assert!(stderr.contains("fatal: tag 'v1' already exists"));
     assert!(stderr.contains("Error-Code: LBR-CONFLICT-002"));
+}
+
+#[test]
+fn test_tag_cli_unborn_head_returns_repo_state_error() {
+    let repo = tempdir().expect("failed to create repository root");
+    init_repo_via_cli(repo.path());
+
+    let output = run_libra_command(&["tag", "v1"], repo.path());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert!(stdout.trim().is_empty(), "unexpected stdout: {stdout}");
+    assert_eq!(report.error_code, "LBR-REPO-003");
+    assert_eq!(report.category, "repo");
+    assert!(
+        stderr.contains("fatal: Cannot create tag: HEAD does not point to a commit"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        report
+            .hints
+            .iter()
+            .any(|hint| hint == "create a commit first before tagging HEAD."),
+        "expected repo-state hint, got: {:?}",
+        report.hints
+    );
+}
+
+#[test]
+fn test_tag_json_unborn_head_returns_repo_state_error() {
+    let repo = tempdir().expect("failed to create repository root");
+    init_repo_via_cli(repo.path());
+
+    let output = run_libra_command(&["--json", "tag", "v1"], repo.path());
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stderr).expect("expected stderr JSON in --json mode");
+
+    assert_eq!(output.status.code(), Some(128));
+    assert!(
+        output.stdout.is_empty(),
+        "json error should keep stdout empty, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(report["error_code"], "LBR-REPO-003");
+    assert_eq!(report["category"], "repo");
+    assert_eq!(
+        report["message"],
+        "Cannot create tag: HEAD does not point to a commit"
+    );
 }
 
 // Test cases
@@ -263,6 +571,50 @@ async fn test_force_tag() {
         before,
         after
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn test_force_tag_store_failure_preserves_existing_ref() {
+    let (_temp, _guard) = setup_repo_with_commit_with("content", "Base").await;
+
+    internal_tag::create("v1.0", Some("Initial".into()), false)
+        .await
+        .unwrap();
+    let (before_object, _) = internal_tag::find_tag_and_commit("v1.0")
+        .await
+        .unwrap()
+        .expect("tag should exist before failed force update");
+    let before_message = match before_object {
+        internal_tag::TagObject::Tag(tag_object) => tag_object.message,
+        other => panic!("expected annotated tag before update, got {other:?}"),
+    };
+
+    let objects_dir = path::objects();
+    let mut original_modes = Vec::new();
+    collect_directory_modes(&objects_dir, &mut original_modes);
+    set_directory_mode_recursive(&objects_dir, 0o555);
+
+    let result = internal_tag::create("v1.0", Some("Updated".into()), true).await;
+
+    restore_directory_modes(&original_modes);
+
+    assert!(
+        matches!(result, Err(internal_tag::CreateTagError::StoreObject(_))),
+        "expected store failure, got: {result:?}"
+    );
+
+    let (after_object, _) = internal_tag::find_tag_and_commit("v1.0")
+        .await
+        .unwrap()
+        .expect("original tag should remain after failed force update");
+    match after_object {
+        internal_tag::TagObject::Tag(tag_object) => {
+            assert_eq!(tag_object.message, before_message);
+        }
+        other => panic!("expected annotated tag after failed update, got {other:?}"),
+    }
 }
 
 #[tokio::test]

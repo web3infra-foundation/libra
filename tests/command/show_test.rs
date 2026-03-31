@@ -5,10 +5,15 @@
 
 use std::process::Command;
 
-use libra::utils::output::OutputConfig;
+use git_internal::internal::object::commit::Commit;
+use libra::{
+    command::load_object,
+    internal::head::Head,
+    utils::{output::OutputConfig, test::ChangeDirGuard},
+};
 use serial_test::serial;
 
-use super::{create_committed_repo_via_cli, run_libra_command};
+use super::{create_committed_repo_via_cli, parse_json_stdout, run_libra_command};
 
 /// Initialize a temporary repository using CLI.
 fn init_temp_repo() -> tempfile::TempDir {
@@ -139,6 +144,184 @@ fn test_show_cli_badref_returns_cli_exit_code() {
     ));
     assert!(stderr.contains("Error-Code: LBR-CLI-003"));
     assert!(stderr.contains("Hint: use '--' to separate paths from revisions"));
+}
+
+#[test]
+fn test_show_json_commit_output_includes_type_and_files() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--json", "show", "HEAD"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "show");
+    assert_eq!(json["data"]["type"], "commit");
+    assert_eq!(json["data"]["subject"], "base");
+    assert!(json["data"]["files"].as_array().is_some());
+}
+
+#[test]
+fn test_show_json_annotated_tag_hash_preserves_tag_schema() {
+    let repo = init_temp_repo();
+    configure_user_identity(repo.path());
+    create_commit(repo.path(), "tracked.txt", "tracked\n", "base");
+    create_annotated_tag(repo.path(), "v1.0.0", "release notes");
+
+    let show_ref = run_libra_command(&["show-ref", "--tags", "v1.0.0"], repo.path());
+    assert!(
+        show_ref.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&show_ref.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&show_ref.stdout);
+    let tag_hash = stdout
+        .split_whitespace()
+        .next()
+        .expect("show-ref should return the tag object hash");
+
+    let output = run_libra_command(&["--json", "show", tag_hash], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "show");
+    assert_eq!(json["data"]["type"], "tag");
+    assert_eq!(json["data"]["tag_name"], "v1.0.0");
+    assert_eq!(json["data"]["message"], "release notes");
+    assert_eq!(json["data"]["target_type"], "commit");
+    assert!(json["data"]["tagger_name"].as_str().is_some());
+}
+
+#[test]
+fn test_show_hex_like_tag_name_falls_back_to_ref_resolution() {
+    let repo = init_temp_repo();
+    configure_user_identity(repo.path());
+    create_commit(repo.path(), "tracked.txt", "tracked\n", "base");
+
+    let hex_like_tag = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    create_lightweight_tag(repo.path(), hex_like_tag);
+
+    let human_output = run_libra_command(&["show", hex_like_tag], repo.path());
+    assert!(
+        human_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&human_output.stderr)
+    );
+    let human_stdout = String::from_utf8_lossy(&human_output.stdout);
+    assert!(
+        human_stdout.contains("base"),
+        "expected human output to resolve the tag ref, got: {human_stdout}"
+    );
+
+    let json_output = run_libra_command(&["--json", "show", hex_like_tag], repo.path());
+    assert!(
+        json_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&json_output.stderr)
+    );
+    let json = parse_json_stdout(&json_output);
+    assert_eq!(json["command"], "show");
+    assert_eq!(json["data"]["type"], "commit");
+    assert_eq!(json["data"]["subject"], "base");
+}
+
+#[test]
+fn test_show_json_commit_output_respects_pathspec_filters() {
+    let repo = create_committed_repo_via_cli();
+    std::fs::write(repo.path().join("tracked.txt"), "tracked\nupdated\n")
+        .expect("failed to update tracked file");
+    std::fs::write(repo.path().join("other.txt"), "other\n").expect("failed to create other file");
+
+    let add_output = run_libra_command(&["add", "tracked.txt", "other.txt"], repo.path());
+    assert!(
+        add_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&add_output.stderr)
+    );
+
+    let commit_output = run_libra_command(&["commit", "-m", "update", "--no-verify"], repo.path());
+    assert!(
+        commit_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&commit_output.stderr)
+    );
+
+    let unfiltered = run_libra_command(&["--json", "show", "HEAD"], repo.path());
+    assert!(
+        unfiltered.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&unfiltered.stderr)
+    );
+    let unfiltered_json = parse_json_stdout(&unfiltered);
+    assert_eq!(
+        unfiltered_json["data"]["files"]
+            .as_array()
+            .expect("files should be an array")
+            .len(),
+        2
+    );
+
+    let filtered = run_libra_command(&["--json", "show", "HEAD", "tracked.txt"], repo.path());
+    assert!(
+        filtered.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&filtered.stderr)
+    );
+
+    let filtered_json = parse_json_stdout(&filtered);
+    let files = filtered_json["data"]["files"]
+        .as_array()
+        .expect("files should be an array");
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0]["path"], "tracked.txt");
+    assert_eq!(files[0]["status"], "modified");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_show_tree_output_uses_git_modes_and_types() {
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+    let head = Head::current_commit().await.unwrap();
+    let commit: Commit = load_object(&head).unwrap();
+    let tree_hash = commit.tree_id.to_string();
+
+    let human = run_libra_command(&["show", &tree_hash], repo.path());
+    assert!(
+        human.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    let human_stdout = String::from_utf8_lossy(&human.stdout);
+    assert!(
+        human_stdout.contains("100644 blob"),
+        "expected git tree mode/type in human output, got: {human_stdout}"
+    );
+    assert!(
+        human_stdout.contains("\ttracked.txt"),
+        "expected tracked entry in human output, got: {human_stdout}"
+    );
+
+    let output = run_libra_command(&["--json", "show", &tree_hash], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "show");
+    assert_eq!(json["data"]["type"], "tree");
+    assert_eq!(json["data"]["entries"][0]["mode"], "100644");
+    assert_eq!(json["data"]["entries"][0]["object_type"], "blob");
+    assert_eq!(json["data"]["entries"][0]["name"], "tracked.txt");
 }
 
 /// Test that show can display a lightweight tag.

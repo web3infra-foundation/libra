@@ -1,6 +1,6 @@
 //! Tag operations that resolve target objects, build annotated or lightweight tags, persist refs in the database, and write tag objects to storage.
 
-use std::str::FromStr;
+use std::{io, str::FromStr};
 
 use git_internal::{
     errors::GitError,
@@ -15,7 +15,7 @@ use git_internal::{
         types::ObjectType,
     },
 };
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+use sea_orm::{ActiveModelTrait, ColumnTrait, DbErr, EntityTrait, QueryFilter, Set};
 
 use crate::{
     command::load_object,
@@ -64,27 +64,56 @@ pub struct Tag {
     pub object: TagObject,
 }
 
+/// Lightweight snapshot of a tag reference row.
+///
+/// This intentionally preserves the raw ref target string so recovery paths
+/// such as `tag -d` can operate even when the target object is missing or the
+/// stored hash is invalid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagReference {
+    pub target: Option<String>,
+}
+
+/// Semantic failures that can occur while creating a tag.
+#[derive(Debug, thiserror::Error)]
+pub enum CreateTagError {
+    #[error("Cannot create tag: HEAD does not point to a commit")]
+    HeadUnborn,
+    #[error("Tag '{0}' already exists")]
+    AlreadyExists(String),
+    #[error("failed to query existing tag refs: {0}")]
+    CheckExisting(#[source] DbErr),
+    #[error("failed to serialize annotated tag object: {0}")]
+    SerializeTag(#[source] GitError),
+    #[error("failed to store annotated tag object: {0}")]
+    StoreObject(#[source] io::Error),
+    #[error("failed to persist tag reference: {0}")]
+    PersistReference(#[source] DbErr),
+}
+
 /// Creates a new tag, either lightweight or annotated, pointing to the current HEAD commit.
 ///
 /// * `name` - The name of the tag.
 /// * `message` - If `Some`, creates an annotated tag with the given message. If `None`, creates a lightweight tag.
-pub async fn create(name: &str, message: Option<String>, force: bool) -> Result<(), anyhow::Error> {
+pub async fn create(
+    name: &str,
+    message: Option<String>,
+    force: bool,
+) -> Result<(), CreateTagError> {
     let head_commit_id = Head::current_commit()
         .await
-        .ok_or_else(|| anyhow::anyhow!("Cannot create tag: HEAD does not point to a commit"))?;
+        .ok_or(CreateTagError::HeadUnborn)?;
 
     let db = get_db_conn_instance().await;
     let exists = reference::Entity::find()
         .filter(reference::Column::Name.eq(format!("{}{}", TAG_REF_PREFIX, name)))
         .filter(reference::Column::Kind.eq(reference::ConfigKind::Tag))
         .one(&db)
-        .await?;
+        .await
+        .map_err(CreateTagError::CheckExisting)?;
 
     if exists.is_some() && !force {
-        return Err(anyhow::anyhow!("Tag '{}' already exists", name));
-    } else if exists.is_some() && force {
-        // Delete existing tag if force is true
-        delete(name).await?;
+        return Err(CreateTagError::AlreadyExists(name.to_string()));
     }
 
     let ref_target_id: ObjectHash;
@@ -113,9 +142,13 @@ pub async fn create(name: &str, message: Option<String>, force: bool) -> Result<
         );
 
         // The ID is now calculated inside git_internalTag::new, so we can use it directly.
-        let tag_data = git_internal_tag.to_data()?;
+        let tag_data = git_internal_tag
+            .to_data()
+            .map_err(CreateTagError::SerializeTag)?;
         let storage = ClientStorage::init(path::objects());
-        storage.put(&git_internal_tag.id, &tag_data, git_internal_tag.get_type())?;
+        storage
+            .put(&git_internal_tag.id, &tag_data, git_internal_tag.get_type())
+            .map_err(CreateTagError::StoreObject)?;
 
         ref_target_id = git_internal_tag.id;
     } else {
@@ -124,14 +157,29 @@ pub async fn create(name: &str, message: Option<String>, force: bool) -> Result<
     };
 
     // Save the reference in the database
-    let db_conn = get_db_conn_instance().await;
-    let new_ref = reference::ActiveModel {
-        name: Set(Some(format!("{}{}", TAG_REF_PREFIX, name))),
-        kind: Set(reference::ConfigKind::Tag),
-        commit: Set(Some(ref_target_id.to_string())),
-        ..Default::default()
-    };
-    new_ref.insert(&db_conn).await?;
+    let ref_target = ref_target_id.to_string();
+    match exists {
+        Some(existing_ref) => {
+            let mut existing_ref: reference::ActiveModel = existing_ref.into();
+            existing_ref.commit = Set(Some(ref_target));
+            existing_ref
+                .update(&db)
+                .await
+                .map_err(CreateTagError::PersistReference)?;
+        }
+        None => {
+            let new_ref = reference::ActiveModel {
+                name: Set(Some(format!("{}{}", TAG_REF_PREFIX, name))),
+                kind: Set(reference::ConfigKind::Tag),
+                commit: Set(Some(ref_target)),
+                ..Default::default()
+            };
+            new_ref
+                .insert(&db)
+                .await
+                .map_err(CreateTagError::PersistReference)?;
+        }
+    }
 
     Ok(())
 }
@@ -186,6 +234,20 @@ pub async fn delete(name: &str) -> Result<(), anyhow::Error> {
     } else {
         Ok(())
     }
+}
+
+/// Finds the raw tag reference row without dereferencing the target object.
+pub async fn find_tag_ref(name: &str) -> Result<Option<TagReference>, DbErr> {
+    let db_conn = get_db_conn_instance().await;
+    let full_ref_name = format!("{}{}", TAG_REF_PREFIX, name);
+
+    let model = reference::Entity::find()
+        .filter(reference::Column::Name.eq(full_ref_name))
+        .filter(reference::Column::Kind.eq(reference::ConfigKind::Tag))
+        .one(&db_conn)
+        .await?;
+
+    Ok(model.map(|m| TagReference { target: m.commit }))
 }
 
 /// Finds a tag by name and returns the tag object and the final commit

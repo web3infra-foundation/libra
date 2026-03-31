@@ -30,6 +30,77 @@ fn test_blame_cli_outside_repository_returns_fatal_128() {
     );
 }
 
+#[test]
+fn test_blame_json_output_includes_lines() {
+    let repo = create_committed_repo_via_cli();
+    std::fs::write(repo.path().join("tracked.txt"), "line1\nline2\n").unwrap();
+    let add_output = run_libra_command(&["add", "tracked.txt"], repo.path());
+    assert!(
+        add_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&add_output.stderr)
+    );
+    let commit_output = run_libra_command(
+        &["commit", "-m", "update tracked", "--no-verify"],
+        repo.path(),
+    );
+    assert!(
+        commit_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&commit_output.stderr)
+    );
+
+    let output = run_libra_command(&["--json", "blame", "tracked.txt"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "blame");
+    assert_eq!(json["data"]["file"], "tracked.txt");
+    assert!(json["data"]["lines"].as_array().is_some());
+}
+
+#[test]
+fn test_blame_human_output_handles_long_unicode_author_names() {
+    let repo = create_committed_repo_via_cli();
+
+    let name_output = run_libra_command(
+        &[
+            "config",
+            "user.name",
+            "测试作者名字很长很长很长很长很长很长",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&name_output, "config user.name");
+    let email_output = run_libra_command(
+        &["config", "user.email", "unicode@example.com"],
+        repo.path(),
+    );
+    assert_cli_success(&email_output, "config user.email");
+
+    std::fs::write(repo.path().join("tracked.txt"), "unicode blame line\n").unwrap();
+    let add_output = run_libra_command(&["add", "tracked.txt"], repo.path());
+    assert_cli_success(&add_output, "add tracked.txt");
+    let commit_output = run_libra_command(
+        &["commit", "-m", "unicode author", "--no-verify"],
+        repo.path(),
+    );
+    assert_cli_success(&commit_output, "commit unicode author");
+
+    let output = run_libra_command(&["blame", "tracked.txt"], repo.path());
+    assert_cli_success(&output, "blame tracked.txt");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("..."),
+        "expected truncated author marker in blame output, got: {stdout}"
+    );
+}
+
 async fn setup_repo_with_hash(
     temp: &tempfile::TempDir,
     object_format: &str,
