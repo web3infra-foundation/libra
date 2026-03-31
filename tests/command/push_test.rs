@@ -13,6 +13,7 @@ use libra::{
     internal::{db::get_db_conn_instance, reflog::Reflog},
     utils::test::ChangeDirGuard,
 };
+#[cfg(unix)]
 use serde_json::Value;
 use serial_test::serial;
 use tempfile::TempDir;

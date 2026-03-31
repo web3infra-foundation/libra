@@ -23,11 +23,7 @@ fn normalize_path_for_sqlite(db_path: &str) -> String {
     #[cfg(windows)]
     {
         // Remove Windows extended-length path prefix if present
-        let path = if db_path.starts_with(r"\\?\") {
-            &db_path[4..]
-        } else {
-            db_path
-        };
+        let path = db_path.strip_prefix(r"\\?\").unwrap_or(db_path);
         // Convert backslashes to forward slashes for SQLite URL
         path.replace('\\', "/")
     }

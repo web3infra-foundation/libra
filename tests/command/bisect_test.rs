@@ -284,7 +284,7 @@ async fn test_bisect_reset() {
     execute_safe(args, &OutputConfig::default()).await.unwrap();
 
     // Should be on middle commit
-    let state = BisectState::load().await.unwrap();
+    let _state = BisectState::load().await.unwrap();
     assert_ne!(Head::current_commit().await.unwrap().to_string(), orig_head);
 
     // Reset

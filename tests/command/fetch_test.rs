@@ -11,14 +11,17 @@ use std::{
     time::Duration,
 };
 
+#[cfg(unix)]
+use libra::internal::vault;
+#[cfg(unix)]
+use libra::utils::test::ScopedEnvVar;
 use libra::{
     command::fetch,
     internal::{
         branch::Branch,
         config::{ConfigKv, RemoteConfig},
-        vault,
     },
-    utils::test::{ChangeDirGuard, ScopedEnvVar, setup_with_new_libra_in},
+    utils::test::{ChangeDirGuard, setup_with_new_libra_in},
 };
 use serial_test::serial;
 use tempfile::{TempDir, tempdir};

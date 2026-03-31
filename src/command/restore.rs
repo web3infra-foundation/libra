@@ -315,7 +315,7 @@ async fn restore_to_file_typed(hash: &ObjectHash, path: &PathBuf) -> Result<(), 
 /// Restore a blob to file.
 /// If blob is an LFS pointer, download the actual file from LFS server.
 /// - `path` : to workdir
-async fn restore_to_file(hash: &ObjectHash, path: &PathBuf) -> io::Result<()> {
+pub async fn restore_to_file(hash: &ObjectHash, path: &PathBuf) -> io::Result<()> {
     let blob = Blob::load(hash);
     let path_abs = util::workdir_to_absolute(path);
     if let Some(parent) = path_abs.parent() {

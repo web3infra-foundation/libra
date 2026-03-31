@@ -17,7 +17,7 @@ use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait, Value};
 
 use crate::{
     cli::Bisect,
-    command::load_object,
+    command::{load_object, restore},
     internal::{db::get_db_conn_instance, head::Head},
     utils::{
         error::{CliError, CliResult},
@@ -631,8 +631,8 @@ async fn restore_to_commit(commit_hash: ObjectHash, _output: &OutputConfig) -> C
     // Clear working directory (except .libra)
     clear_workdir_except_libra(&workdir)?;
 
-    // Restore files from tree
-    restore_tree_to_workdir(&workdir, &tree)?;
+    // Restore files from tree (handles LFS pointers via restore::restore_to_file)
+    restore_tree_to_workdir(&tree).await?;
 
     Ok(())
 }
@@ -665,29 +665,13 @@ fn clear_workdir_except_libra(workdir: &std::path::Path) -> CliResult<()> {
 }
 
 /// Restore tree contents to working directory
-fn restore_tree_to_workdir(workdir: &std::path::Path, tree: &Tree) -> CliResult<()> {
-    for item in tree.get_plain_items_with_mode() {
-        let (path, hash, mode) = item;
-        let path = workdir.join(&path);
-
-        // Skip tree entries (directories are handled implicitly when files are created)
-        if mode == git_internal::internal::object::tree::TreeItemMode::Tree {
-            continue;
-        }
-
-        // Create parent directories if needed
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                CliError::fatal(format!("Failed to create dir {}: {}", parent.display(), e))
-            })?;
-        }
-
-        // File entry - write blob content
-        let blob = load_object::<git_internal::internal::object::blob::Blob>(&hash)
-            .map_err(|e| CliError::fatal(format!("Failed to load blob: {e}")))?;
-
-        std::fs::write(&path, &blob.data).map_err(|e| {
-            CliError::fatal(format!("Failed to write file {}: {}", path.display(), e))
+/// Uses restore::restore_to_file to properly handle LFS pointers
+async fn restore_tree_to_workdir(tree: &Tree) -> CliResult<()> {
+    let items = tree.get_plain_items();
+    for (path, hash) in items {
+        // path is already a PathBuf relative to workdir
+        restore::restore_to_file(&hash, &path).await.map_err(|e| {
+            CliError::fatal(format!("Failed to restore file {}: {}", path.display(), e))
         })?;
     }
 
