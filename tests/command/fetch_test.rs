@@ -3,21 +3,25 @@
 //! **Layer:** L1 (most tests). `test_fetch_invalid_remote` is L2 — requires `LIBRA_TEST_GITHUB_TOKEN`.
 
 #[cfg(unix)]
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::{
     fs,
+    path::Path,
     process::{Command, Stdio},
     time::Duration,
 };
 
+#[cfg(unix)]
+use libra::internal::vault;
+#[cfg(unix)]
+use libra::utils::test::ScopedEnvVar;
 use libra::{
     command::fetch,
     internal::{
         branch::Branch,
         config::{ConfigKv, RemoteConfig},
-        vault,
     },
-    utils::test::{ChangeDirGuard, ScopedEnvVar, setup_with_new_libra_in},
+    utils::test::{ChangeDirGuard, setup_with_new_libra_in},
 };
 use serial_test::serial;
 use tempfile::{TempDir, tempdir};

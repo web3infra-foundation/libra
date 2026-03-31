@@ -164,6 +164,8 @@ impl SandboxManager {
         let _ = use_linux_sandbox_bwrap;
         #[cfg(not(target_os = "linux"))]
         let _ = linux_sandbox_exe;
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let _ = sandbox_policy_cwd;
 
         if spec.program.is_empty() {
             return Err(SandboxTransformError::MissingProgram);
