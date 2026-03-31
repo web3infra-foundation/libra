@@ -575,7 +575,7 @@ fn display_branches(branches: Vec<Branch>, head_name: &str, is_remote: bool) {
     }
 }
 
-/// Collect branch names as strings for JSON output.
+/// Collect structured branch list entries for JSON output.
 async fn collect_branch_names(
     list_mode: BranchListMode,
     commits_contains: &[String],
