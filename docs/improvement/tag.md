@@ -43,15 +43,15 @@
 - 补齐 `--help` EXAMPLES 段
 
 **本批非目标：**
-- **不改变 `internal::tag` 底层 API**。tag 创建/删除/查询逻辑不变
+- **不重写 `internal::tag` 底层业务语义**。允许做类型收紧和错误建模调整（例如 `create()` 返回 `CreateTagError`），但不改变 tag 创建/删除/查询的语义行为
 - **不引入 tag 签名（GPG 签名 tag）**。这是独立特性
 - **不引入 `--sort` 选项**。tag 排序留后续
 - **不引入 `--verify` 选项**
 
 ### 设计原则
 
-1. **执行层与渲染层拆分**：`execute_safe()` 调用 `run_tag()` 收集结构化结果，再根据 `OutputConfig` 渲染
-2. **JSON 覆盖 list、create、delete、show 四种操作**：通过 `action` 字段区分
+1. **执行路径与渲染职责拆分**：`execute_safe()` 根据 `OutputConfig` 分流 human / JSON 路径，JSON 路径返回结构化 `TagOutput`
+2. **JSON 覆盖 list、create、delete 三种操作**：通过 `action` 字段区分
 3. **错误码显式映射**：每个 `TagError` 变体都有确定的 `StableErrorCode`
 4. **保留现有 hint**：重复创建时的 hint 保持一致
 
@@ -115,8 +115,6 @@ pub enum TagOutput {
     Create(TagCreateOutput),
     #[serde(rename = "delete")]
     Delete(TagDeleteOutput),
-    #[serde(rename = "show")]
-    Show(TagShowOutput),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -147,18 +145,6 @@ pub struct TagDeleteOutput {
     pub name: String,
     pub hash: String,
 }
-
-#[derive(Debug, Clone, Serialize)]
-pub struct TagShowOutput {
-    pub name: String,
-    pub hash: String,
-    pub tag_type: String,
-    pub tagger: Option<String>,
-    pub date: Option<String>,
-    pub message: Option<String>,
-    pub target_hash: String,
-    pub target_type: String,
-}
 ```
 
 **渲染规则：**
@@ -166,27 +152,10 @@ pub struct TagShowOutput {
 | 模式 | stdout | stderr |
 |------|--------|--------|
 | human list | tag 名称列表（可选 `-n` 注释行数） | 无 |
-| human create | 确认消息（如 `Created tag 'v1.0'`） | 无 |
+| human create | 保留现有创建路径输出（lightweight create 后展示 tag/commit 信息；annotated create 无额外确认消息） | 无 |
 | human delete | 确认消息（如 `Deleted tag 'v1.0' (was abc1234)`） | 无 |
-| human show | tag 详情（沿用现有 `show_tag_safe()` 格式） | 无 |
 | human + `--quiet` | 无 | 无 |
 | `--json` / `--machine` | JSON envelope（含 `action` 字段区分操作类型） | 无 |
-
-**human 模式新增确认消息：**
-
-```text
-# 创建 lightweight tag
-Created tag 'v1.0' at abc1234
-
-# 创建 annotated tag
-Created tag 'v1.0' at abc1234 (annotated)
-
-# 删除 tag
-Deleted tag 'v1.0' (was abc1234)
-
-# force 覆盖
-Updated tag 'v1.0' to abc1234 (was def5678)
-```
 
 ### 特性 3：JSON 输出设计
 
@@ -272,7 +241,7 @@ EXAMPLES:
     libra tag -d v1.0                      Delete a tag
     libra tag -f v1.0                      Force update a tag
     libra tag --json -l                    List tags as JSON
-    libra tag v1.0 abc1234                 Tag a specific commit
+    libra tag --json v1.0                  Create a lightweight tag and emit JSON
 ```
 
 ### 测试要求
@@ -283,11 +252,11 @@ EXAMPLES:
 - **（新增）`TagError` 变体覆盖**：
   - `NotFound`：删除不存在 tag 返回 exit `129`
   - `MissingName`：无 tag 名返回 exit `129`
-- **（新增）成功确认消息**：human 模式下 stdout 包含 `Created tag` / `Deleted tag`
-- **（新增）force 覆盖消息**：`-f` 覆盖 tag 后 stdout 包含 `Updated tag`
+- **（新增）quiet / delete 输出约束**：`--quiet tag -d` 不应污染 stdout；human delete 保持确认消息
+- **（新增）force 失败路径回归**：`-f` 遇到对象存储失败时必须保留原有 ref，不得丢 tag
 - **（修复）全角括号**：将 `（lightweight tag）` 等改为 `(lightweight tag)`
 
-#### `tests/command/tag_json_test.rs`（JSON schema 稳定性，新增文件）
+#### `tests/command/tag_test.rs`（JSON schema 稳定性扩展）
 
 - **list `--json`**：`action == "list"`，`tags` 数组包含 `name`/`hash`/`tag_type`/`message`
 - **create `--json`**：`action == "create"`，`name` 和 `hash` 存在
@@ -309,7 +278,5 @@ EXAMPLES:
 
 | 文件 | 改动类型 | 说明 |
 |------|---------|------|
-| `src/command/tag.rs` | **重构** | 新增 `TagError` typed enum；新增 `TagOutput` / `TagListOutput` / `TagCreateOutput` / `TagDeleteOutput` / `TagShowOutput` 结构体；新增 `run_tag()` 纯执行入口；`TagError → CliError` 显式 `StableErrorCode` 映射；JSON 输出；添加 create/delete/update 确认消息；补齐 `--help` EXAMPLES |
-| `tests/command/tag_test.rs` | **扩展** | 新增 `TagError` 变体覆盖、确认消息验证、修复全角括号 |
-| `tests/command/tag_json_test.rs` | **新增** | JSON schema 完整性和稳定性验证 |
-| `tests/command/mod.rs` | **修改** | 注册新增的测试文件 |
+| `src/command/tag.rs` | **重构** | 新增 `TagError` typed enum；新增 `TagOutput` / `TagListOutput` / `TagCreateOutput` / `TagDeleteOutput` 结构体；命令层 `TagError → CliError` 显式 `StableErrorCode` 映射；JSON 输出；quiet/delete 输出约束；补齐 `--help` EXAMPLES |
+| `tests/command/tag_test.rs` | **扩展** | 新增 `TagError` 变体覆盖、JSON schema 回归、force 失败路径保护、修复全角括号 |

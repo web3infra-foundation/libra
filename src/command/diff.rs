@@ -455,16 +455,7 @@ fn format_diff_stat_output(result: &DiffOutput) -> String {
 
 fn parse_diff_item(item: &git_internal::diff::DiffItem) -> DiffFileStat {
     let status = parse_diff_status(&item.data);
-    let insertions = item
-        .data
-        .lines()
-        .filter(|line| line.starts_with('+') && !line.starts_with("+++"))
-        .count();
-    let deletions = item
-        .data
-        .lines()
-        .filter(|line| line.starts_with('-') && !line.starts_with("---"))
-        .count();
+    let (insertions, deletions) = count_hunk_line_changes(&item.data);
 
     DiffFileStat {
         path: item.path.clone(),
@@ -490,6 +481,31 @@ fn parse_diff_status(diff_text: &str) -> &'static str {
     }
 
     "modified"
+}
+
+fn count_hunk_line_changes(diff_text: &str) -> (usize, usize) {
+    let mut insertions = 0;
+    let mut deletions = 0;
+    let mut in_hunk = false;
+
+    for line in diff_text.lines() {
+        if line.starts_with("@@ ") {
+            in_hunk = true;
+            continue;
+        }
+
+        if !in_hunk {
+            continue;
+        }
+
+        if line.starts_with('+') {
+            insertions += 1;
+        } else if line.starts_with('-') {
+            deletions += 1;
+        }
+    }
+
+    (insertions, deletions)
 }
 
 fn parse_diff_hunks(diff_text: &str) -> Vec<DiffHunk> {

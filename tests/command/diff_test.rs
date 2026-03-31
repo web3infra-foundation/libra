@@ -109,6 +109,46 @@ fn test_diff_status_detection_ignores_patch_body_text() {
 }
 
 #[test]
+fn test_diff_stats_count_hunk_lines_that_start_with_header_prefixes() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\n---gone\n").unwrap();
+    let add_output = run_libra_command(&["add", "tracked.txt"], repo.path());
+    assert_cli_success(&add_output, "add tracked.txt");
+    let commit_output =
+        run_libra_command(&["commit", "-m", "seed header-like content"], repo.path());
+    assert_cli_success(&commit_output, "commit seed header-like content");
+
+    fs::write(repo.path().join("tracked.txt"), "+++added\n").unwrap();
+
+    let numstat = run_libra_command(&["diff", "--numstat"], repo.path());
+    assert_cli_success(&numstat, "diff --numstat");
+    assert_eq!(
+        String::from_utf8_lossy(&numstat.stdout).trim(),
+        "1\t2\ttracked.txt"
+    );
+
+    let stat = run_libra_command(&["diff", "--stat"], repo.path());
+    assert_cli_success(&stat, "diff --stat");
+    let stat_stdout = String::from_utf8_lossy(&stat.stdout);
+    assert!(
+        stat_stdout.contains("tracked.txt | 3 +--"),
+        "expected stat output to count header-like hunk lines, got: {stat_stdout}"
+    );
+    assert!(
+        stat_stdout.contains("1 file changed, 1 insertion(+), 2 deletions(-)"),
+        "expected stat summary to count header-like hunk lines, got: {stat_stdout}"
+    );
+
+    let json = run_libra_command(&["--json", "diff"], repo.path());
+    assert_cli_success(&json, "diff --json");
+    let json = parse_json_stdout(&json);
+    assert_eq!(json["data"]["files"][0]["insertions"], 1);
+    assert_eq!(json["data"]["files"][0]["deletions"], 2);
+    assert_eq!(json["data"]["total_insertions"], 1);
+    assert_eq!(json["data"]["total_deletions"], 2);
+}
+
+#[test]
 fn test_diff_added_and_deleted_files_use_dev_null_headers() {
     let repo = create_committed_repo_via_cli();
 
