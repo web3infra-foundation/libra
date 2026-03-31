@@ -1,7 +1,6 @@
 //! Manages tags by resolving target commits, creating lightweight or annotated tag objects, storing refs, and listing existing tags.
 
 use clap::Parser;
-use git_internal::internal::object::types::ObjectType;
 use sea_orm::sqlx::types::chrono;
 use serde::Serialize;
 
@@ -53,7 +52,7 @@ pub enum TagOutput {
         message: Option<String>,
     },
     #[serde(rename = "delete")]
-    Delete { name: String, hash: String },
+    Delete { name: String, hash: Option<String> },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -257,15 +256,10 @@ async fn show_tag_safe(tag_name: &str, output: &OutputConfig) -> CliResult<()> {
             if output.quiet {
                 return Ok(());
             }
-            if object.get_type() == ObjectType::Tag {
-                // Access the tag data directly from the object if it is a Tag variant.
-                if let tag::TagObject::Tag(tag_object) = &object {
-                    println!("tag {}", tag_object.tag_name);
-                    println!("Tagger: {}", tag_object.tagger.to_string().trim());
-                    println!("\n{}", tag_object.message);
-                } else {
-                    return Err(CliError::fatal("object is not a Tag variant"));
-                }
+            if let tag::TagObject::Tag(tag_object) = &object {
+                println!("tag {}", tag_object.tag_name);
+                println!("Tagger: {}", tag_object.tagger.to_string().trim());
+                println!("\n{}", tag_object.message);
             }
 
             println!("\ncommit {}", commit.id);
@@ -303,7 +297,7 @@ async fn run_tag_json(args: &TagArgs) -> CliResult<TagOutput> {
         })?;
         return Ok(TagOutput::Delete {
             name: name.to_string(),
-            hash: snapshot.target.unwrap_or_default(),
+            hash: snapshot.target,
         });
     }
 

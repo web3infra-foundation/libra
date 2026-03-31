@@ -73,6 +73,33 @@ fn test_tag_json_delete_output_includes_deleted_hash() {
     assert!(json["data"]["hash"].as_str().is_some());
 }
 
+#[tokio::test]
+#[serial]
+async fn test_tag_json_delete_missing_target_emits_null_hash() {
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+    insert_broken_tag_ref("missing-target", None).await;
+
+    let output = run_libra_command(&["--json", "tag", "-d", "missing-target"], repo.path());
+    assert_cli_success(&output, "json tag delete should remove ref without target");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "tag");
+    assert_eq!(json["data"]["action"], "delete");
+    assert_eq!(json["data"]["name"], "missing-target");
+    assert!(
+        json["data"]["hash"].is_null(),
+        "expected null hash for missing target, got: {json}"
+    );
+    assert!(
+        internal_tag::find_tag_ref("missing-target")
+            .await
+            .expect("lookup missing-target tag ref")
+            .is_none(),
+        "tag ref should be deleted"
+    );
+}
+
 #[test]
 fn test_tag_missing_name_action_flags_return_usage_errors() {
     let repo = create_committed_repo_via_cli();

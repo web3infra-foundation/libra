@@ -143,7 +143,7 @@ pub struct TagCreateOutput {
 #[derive(Debug, Clone, Serialize)]
 pub struct TagDeleteOutput {
     pub name: String,
-    pub hash: String,
+    pub hash: Option<String>,
 }
 ```
 
@@ -204,6 +204,8 @@ pub struct TagDeleteOutput {
   }
 }
 ```
+
+When deleting malformed refs that have no stored target, `hash` is `null`.
 
 **错误 JSON（重复创建）：**
 

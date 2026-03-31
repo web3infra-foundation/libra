@@ -27,6 +27,7 @@ Create, list, or delete tags.
 ```
 
 `action=list` returns a `tags` array; `action=delete` returns `name` and `hash`.
+For recovery deletes of malformed tag refs, `hash` can be `null` when the stored target is missing.
 
 ## Errors
 

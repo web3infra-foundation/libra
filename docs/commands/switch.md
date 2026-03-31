@@ -33,6 +33,7 @@ Switch branches, create and switch to a new branch, or move to a detached `HEAD`
 
 ## Errors
 
-- Missing branch or invalid revision: `LBR-CLI-003`
+- Missing branch name or missing `--track` remote branch argument: `LBR-CLI-002`
+- Invalid switch target, invalid revision, or missing remote-tracking branch: `LBR-CLI-003`
 - Dirty working tree: `LBR-REPO-003`
 - Failed to update `HEAD` or restore the working tree: `LBR-IO-002`
