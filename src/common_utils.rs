@@ -29,7 +29,11 @@ pub fn parse_commit_msg(msg_gpg: &str) -> (&str, Option<&str>) {
     });
 
     if let Some(caps) = SIG_REGEX.captures(msg_gpg) {
-        let signature = caps.get(1).unwrap().as_str();
+        // INVARIANT: SIG_PATTERN defines capture group 1 for the full signature body.
+        let signature = caps
+            .get(1)
+            .expect("SIG_PATTERN must capture the signature body")
+            .as_str();
 
         let msg = &msg_gpg[signature.len() + GPGSIG_PREFIX_LEN..].trim_start();
         (msg, Some(signature))
@@ -51,7 +55,8 @@ pub fn check_conventional_commits_message(msg: &str) -> bool {
         r"^(?P<type>[\p{{L}}\p{{N}}_-]+)(?:\((?P<scope>[{unicode_pattern}]+)\))?!?: (?P<description>[{unicode_pattern}]+)$",
     );
 
-    let re = Regex::new(&regex_str).unwrap();
+    // INVARIANT: regex_str is assembled from static, validated fragments.
+    let re = Regex::new(&regex_str).expect("conventional commit regex must compile");
     const RECOMMENDED_TYPES: [&str; 8] = [
         "build", "chore", "ci", "docs", "feat", "fix", "perf", "refactor",
     ];
@@ -65,7 +70,9 @@ pub fn check_conventional_commits_message(msg: &str) -> bool {
             return false;
         }
 
-        let commit_type = commit_type.unwrap();
+        let Some(commit_type) = commit_type else {
+            return false;
+        };
         let _is_recommended = RECOMMENDED_TYPES.contains(&commit_type.to_lowercase().as_str());
 
         // println!("{}({}): {}\n{}", commit_type, scope.unwrap_or("None".to_string()), description.unwrap(), body_footer);
