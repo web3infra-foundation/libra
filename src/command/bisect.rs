@@ -94,51 +94,30 @@ impl BisectState {
 
     /// Create the bisect_state table if it doesn't exist, and migrate schema if needed
     async fn ensure_bisect_state_table_exists<C: ConnectionTrait>(db: &C) -> Result<(), String> {
-        let stmt = Statement::from_sql_and_values(
+        // Use IF NOT EXISTS for idempotency (handles concurrent creation)
+        let create_table_stmt = Statement::from_string(
             DbBackend::Sqlite,
             r#"
-                SELECT COUNT(*)
-                FROM sqlite_master
-                WHERE type='table' AND name=?;
-            "#,
-            ["bisect_state".into()],
+                CREATE TABLE IF NOT EXISTS bisect_state (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    orig_head    TEXT NOT NULL,
+                    orig_head_name TEXT,
+                    bad          TEXT,
+                    good         TEXT NOT NULL,
+                    current      TEXT,
+                    skipped      TEXT,
+                    steps        INTEGER,
+                    completed    INTEGER NOT NULL DEFAULT 0
+                );
+            "#
+            .to_string(),
         );
 
-        if let Some(result) = db
-            .query_one(stmt)
+        db.execute(create_table_stmt)
             .await
-            .map_err(|e| format!("failed to check bisect_state table: {e}"))?
-        {
-            let count: i64 = result.try_get_by_index(0).unwrap_or(0);
-            if count == 0 {
-                // Table doesn't exist, create it with the full schema
-                let create_table_stmt = Statement::from_string(
-                    DbBackend::Sqlite,
-                    r#"
-                        CREATE TABLE bisect_state (
-                            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                            orig_head    TEXT NOT NULL,
-                            orig_head_name TEXT,
-                            bad          TEXT,
-                            good         TEXT NOT NULL,
-                            current      TEXT,
-                            skipped      TEXT,
-                            steps        INTEGER,
-                            completed    INTEGER NOT NULL DEFAULT 0
-                        );
-                    "#
-                    .to_string(),
-                );
+            .map_err(|e| format!("failed to create bisect_state table: {e}"))?;
 
-                db.execute(create_table_stmt)
-                    .await
-                    .map_err(|e| format!("failed to create bisect_state table: {e}"))?;
-
-                return Ok(());
-            }
-        }
-
-        // Table exists - check if completed column exists (migration for older tables)
+        // Check if completed column exists (migration for older tables without it)
         let check_column_stmt = Statement::from_string(
             DbBackend::Sqlite,
             r#"
@@ -333,11 +312,26 @@ pub async fn execute_safe(bisect_cmd: Bisect, output: &OutputConfig) -> CliResul
 }
 
 /// Check if the repository is bare (no working tree)
+/// Parses Git boolean values: true/yes/on/1, false/no/off/0
 async fn is_bare_repository() -> bool {
-    matches!(
-        ConfigKv::get("core.bare").await.ok().flatten().map(|e| e.value),
-        Some(value) if value.eq_ignore_ascii_case("true")
-    )
+    fn parse_git_bool(value: &str) -> Option<bool> {
+        match value.trim() {
+            v if v.eq_ignore_ascii_case("true")
+                || v.eq_ignore_ascii_case("yes")
+                || v.eq_ignore_ascii_case("on")
+                || v == "1" => Some(true),
+            v if v.eq_ignore_ascii_case("false")
+                || v.eq_ignore_ascii_case("no")
+                || v.eq_ignore_ascii_case("off")
+                || v == "0" => Some(false),
+            _ => None,
+        }
+    }
+
+    match ConfigKv::get("core.bare").await {
+        Ok(Some(entry)) => parse_git_bool(&entry.value).unwrap_or(false),
+        _ => false,
+    }
 }
 
 /// Handle `bisect start` - initialize a new bisect session
@@ -366,7 +360,7 @@ async fn handle_start(
         return Err(CliError::fatal(
             "working tree contains uncommitted changes",
         )
-        .with_hint("commit or stash your changes before running bisect to prevent data loss"));
+        .with_hint("commit or stash your changes before running bisect. Note: each 'bisect good/bad/skip' step resets the working tree and deletes untracked/ignored files (including build artifacts), so keep important generated files outside the repo or stashed"));
     }
 
     // Check if there's any existing bisect state (active or completed)
@@ -414,6 +408,16 @@ async fn handle_start(
         completed: false,
     };
 
+    // If both bad and good are provided, validate bounds before saving state
+    // This prevents leaving orphaned state if bounds are invalid
+    if bad_hash.is_some() && good_hash.is_some() {
+        // Validate that there are commits to test between bad and good
+        if let Err(e) = find_next_bisect_point(&state).await {
+            // Don't save state for invalid bounds - return error immediately
+            return Err(CliError::fatal(e));
+        }
+    }
+
     state.save().await.map_err(CliError::fatal)?;
 
     crate::info_println!(output, "Bisect session started");
@@ -430,7 +434,7 @@ async fn handle_start(
         return Ok(());
     }
 
-    // If both bad and good are provided, try to find the first bisect point
+    // If both bad and good are provided, find the first bisect point (already validated above)
     if bad_hash.is_some() && good_hash.is_some() {
         match find_next_bisect_point(&state)
             .await
@@ -466,6 +470,14 @@ async fn handle_start(
 /// Handle `bisect bad` - mark a commit as bad
 async fn handle_bad(rev: Option<String>, output: &OutputConfig) -> CliResult<()> {
     let mut state = BisectState::load().await.map_err(CliError::fatal)?;
+
+    // Block operations on completed sessions - user must reset first
+    if state.completed {
+        return Err(CliError::fatal(
+            "bisect session has already found the culprit",
+        )
+        .with_hint("run 'bisect reset' to end the session and restore your original HEAD"));
+    }
 
     let bad_hash = if let Some(rev) = rev {
         resolve_ref(&rev).await?
@@ -519,6 +531,14 @@ async fn handle_bad(rev: Option<String>, output: &OutputConfig) -> CliResult<()>
 /// Handle `bisect good` - mark a commit as good
 async fn handle_good(rev: Option<String>, output: &OutputConfig) -> CliResult<()> {
     let mut state = BisectState::load().await.map_err(CliError::fatal)?;
+
+    // Block operations on completed sessions - user must reset first
+    if state.completed {
+        return Err(CliError::fatal(
+            "bisect session has already found the culprit",
+        )
+        .with_hint("run 'bisect reset' to end the session and restore your original HEAD"));
+    }
 
     let good_hash = if let Some(rev) = rev {
         resolve_ref(&rev).await?
@@ -624,11 +644,20 @@ async fn restore_to_branch(
 
     // Update HEAD to point to the branch
     let new_head = Head::Branch(branch_name.clone());
-    Head::update_with_conn(&txn, new_head, None).await;
+    Head::update_with_conn(&txn, new_head.clone(), None).await;
 
     txn.commit()
         .await
         .map_err(|e| CliError::fatal(format!("Failed to commit transaction: {e}")))?;
+
+    // Verify HEAD was updated correctly (update_with_conn logs errors but doesn't return Result)
+    let actual_head = Head::current().await;
+    if !matches!(actual_head, Head::Branch(ref name) if name == &branch_name) {
+        return Err(CliError::fatal(format!(
+            "Failed to update HEAD to branch '{}'",
+            branch_name
+        )));
+    }
 
     // Restore working directory to the commit's tree
     restore_to_commit(commit_hash, output).await?;
@@ -645,6 +674,14 @@ async fn restore_to_branch(
 /// Handle `bisect skip` - skip the current commit
 async fn handle_skip(rev: Option<String>, output: &OutputConfig) -> CliResult<()> {
     let mut state = BisectState::load().await.map_err(CliError::fatal)?;
+
+    // Block operations on completed sessions - user must reset first
+    if state.completed {
+        return Err(CliError::fatal(
+            "bisect session has already found the culprit",
+        )
+        .with_hint("run 'bisect reset' to end the session and restore your original HEAD"));
+    }
 
     let skip_hash = if let Some(rev) = rev {
         resolve_ref(&rev).await?
