@@ -880,10 +880,25 @@ async fn find_next_bisect_point(state: &BisectState) -> Result<Option<ObjectHash
     let testable = get_testable_commits(&bad, &state.good, &state.skipped).await?;
 
     if testable.is_empty() {
-        // Empty testable set indicates invalid input (e.g., same commit marked both good and bad)
-        return Err(
-            "No commits left to test between good and bad bounds - check that good and bad commits have a valid ancestor relationship".to_string()
-        );
+        // Check if this is because all candidates were skipped
+        // If there are no skipped commits, it's invalid bounds (bad is ancestor of good)
+        // If there are skipped commits, check if unskipped testable would be non-empty
+        if state.skipped.is_empty() {
+            // No skipped commits but empty testable = invalid bounds
+            return Err(
+                "No commits left to test between good and bad bounds - check that good and bad commits have a valid ancestor relationship".to_string()
+            );
+        }
+        // There are skipped commits - check if without skip filter we'd have candidates
+        let testable_without_skip = get_testable_commits(&bad, &state.good, &[]).await?;
+        if testable_without_skip.is_empty() {
+            // Still empty without skip filter = invalid bounds
+            return Err(
+                "No commits left to test between good and bad bounds - check that good and bad commits have a valid ancestor relationship".to_string()
+            );
+        }
+        // Would have candidates without skip = all candidates were skipped
+        return Ok(None);
     }
 
     // If only one commit is testable, it's the first bad commit
