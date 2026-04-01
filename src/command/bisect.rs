@@ -19,11 +19,12 @@ use crate::{
     cli::Bisect,
     command::{
         load_object, restore,
-        status::{changes_to_be_committed_safe, changes_to_be_staged},
+        status::{changes_to_be_committed_safe, changes_to_be_staged_with_policy},
     },
     internal::{config::ConfigKv, db::get_db_conn_instance, head::Head},
     utils::{
         error::{CliError, CliResult},
+        ignore::IgnorePolicy,
         object_ext::TreeExt,
         output::OutputConfig,
         util,
@@ -91,7 +92,7 @@ impl BisectState {
         Self::clear_state_in_db(&db).await
     }
 
-    /// Create the bisect_state table if it doesn't exist
+    /// Create the bisect_state table if it doesn't exist, and migrate schema if needed
     async fn ensure_bisect_state_table_exists<C: ConnectionTrait>(db: &C) -> Result<(), String> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Sqlite,
@@ -109,32 +110,64 @@ impl BisectState {
             .map_err(|e| format!("failed to check bisect_state table: {e}"))?
         {
             let count: i64 = result.try_get_by_index(0).unwrap_or(0);
-            if count > 0 {
+            if count == 0 {
+                // Table doesn't exist, create it with the full schema
+                let create_table_stmt = Statement::from_string(
+                    DbBackend::Sqlite,
+                    r#"
+                        CREATE TABLE bisect_state (
+                            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                            orig_head    TEXT NOT NULL,
+                            orig_head_name TEXT,
+                            bad          TEXT,
+                            good         TEXT NOT NULL,
+                            current      TEXT,
+                            skipped      TEXT,
+                            steps        INTEGER,
+                            completed    INTEGER NOT NULL DEFAULT 0
+                        );
+                    "#
+                    .to_string(),
+                );
+
+                db.execute(create_table_stmt)
+                    .await
+                    .map_err(|e| format!("failed to create bisect_state table: {e}"))?;
+
                 return Ok(());
             }
         }
 
-        let create_table_stmt = Statement::from_string(
+        // Table exists - check if completed column exists (migration for older tables)
+        let check_column_stmt = Statement::from_string(
             DbBackend::Sqlite,
             r#"
-                CREATE TABLE IF NOT EXISTS bisect_state (
-                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                    orig_head    TEXT NOT NULL,
-                    orig_head_name TEXT,
-                    bad          TEXT,
-                    good         TEXT NOT NULL,
-                    current      TEXT,
-                    skipped      TEXT,
-                    steps        INTEGER,
-                    completed    INTEGER NOT NULL DEFAULT 0
-                );
+                SELECT COUNT(*)
+                FROM pragma_table_info('bisect_state')
+                WHERE name='completed';
             "#
             .to_string(),
         );
 
-        db.execute(create_table_stmt)
+        if let Some(result) = db
+            .query_one(check_column_stmt)
             .await
-            .map_err(|e| format!("failed to create bisect_state table: {e}"))?;
+            .map_err(|e| format!("failed to check bisect_state columns: {e}"))?
+        {
+            let count: i64 = result.try_get_by_index(0).unwrap_or(0);
+            if count == 0 {
+                // completed column doesn't exist - add it
+                let alter_stmt = Statement::from_string(
+                    DbBackend::Sqlite,
+                    "ALTER TABLE bisect_state ADD COLUMN completed INTEGER NOT NULL DEFAULT 0;"
+                        .to_string(),
+                );
+
+                db.execute(alter_stmt)
+                    .await
+                    .map_err(|e| format!("failed to add completed column: {e}"))?;
+            }
+        }
 
         Ok(())
     }
@@ -323,10 +356,11 @@ async fn handle_start(
 
     // Require a clean working tree to prevent data loss
     // Bisect checkout removes and restores files, which would delete untracked content
+    // Use IncludeIgnored policy to catch ignored files (.env, cache dirs) that would also be deleted
     let staged = changes_to_be_committed_safe()
         .await
         .map_err(|e| CliError::fatal(format!("Failed to check staged changes: {e}")))?;
-    let unstaged = changes_to_be_staged()
+    let unstaged = changes_to_be_staged_with_policy(IgnorePolicy::IncludeIgnored)
         .map_err(|e| CliError::fatal(format!("Failed to check unstaged changes: {e}")))?;
     if !staged.is_empty() || !unstaged.is_empty() {
         return Err(CliError::fatal(
