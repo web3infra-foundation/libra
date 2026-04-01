@@ -258,6 +258,37 @@ fn test_switch_current_branch_with_dirty_worktree_is_noop() {
     assert_eq!(content, "modified content\n");
 }
 
+#[test]
+fn test_switch_create_branch_from_valid_commit() {
+    let repo = create_committed_repo_via_cli();
+
+    std::fs::write(repo.path().join("tracked.txt"), "tracked second\n").unwrap();
+    let add = run_libra_command(&["add", "tracked.txt"], repo.path());
+    assert_cli_success(&add, "add tracked.txt");
+    let commit = run_libra_command(&["commit", "-m", "second", "--no-verify"], repo.path());
+    assert_cli_success(&commit, "commit second");
+
+    let output = run_libra_command(&["switch", "-c", "feature-from-base", "HEAD^"], repo.path());
+    assert_cli_success(&output, "switch -c feature-from-base HEAD^");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Switched to a new branch 'feature-from-base'"),
+        "expected branch creation message, got: {stdout}"
+    );
+
+    let log_output = run_libra_command(&["log", "--oneline", "-1"], repo.path());
+    assert_cli_success(&log_output, "log -1 after switch");
+    let log_stdout = String::from_utf8_lossy(&log_output.stdout);
+    assert!(
+        log_stdout.contains("base"),
+        "expected new branch to point at the requested base commit, got: {log_stdout}"
+    );
+
+    let content = std::fs::read_to_string(repo.path().join("tracked.txt")).unwrap();
+    assert_eq!(content, "tracked\n");
+}
+
 #[tokio::test]
 #[serial]
 async fn test_switch_track_sets_upstream() {

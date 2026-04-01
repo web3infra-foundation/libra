@@ -268,23 +268,67 @@ async fn validate_new_branch_request(
     Ok(())
 }
 
-async fn validate_switch_branch_target(branch_name: &str) -> Result<(), SwitchError> {
+#[derive(Debug, Clone)]
+struct ResolvedSwitchBranch {
+    name: String,
+    commit: ObjectHash,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedTrackedRemoteTarget {
+    remote: String,
+    remote_branch: String,
+    commit: ObjectHash,
+}
+
+fn find_similar_branch_names(branch_name: &str, branches: &[Branch]) -> Vec<String> {
+    let target_len = branch_name.chars().count();
+    let mut best: Option<(usize, String)> = None;
+
+    for branch in branches {
+        if branch.name.chars().count().abs_diff(target_len) > 2 {
+            continue;
+        }
+
+        let distance = levenshtein(&branch.name, branch_name);
+        if distance > 2 {
+            continue;
+        }
+
+        match &mut best {
+            Some((best_distance, best_name))
+                if distance < *best_distance
+                    || (distance == *best_distance && branch.name < *best_name) =>
+            {
+                *best_distance = distance;
+                *best_name = branch.name.clone();
+            }
+            None => best = Some((distance, branch.name.clone())),
+            _ => {}
+        }
+    }
+
+    best.into_iter().map(|(_, name)| name).collect()
+}
+
+async fn resolve_switch_branch_target(
+    branch_name: &str,
+) -> Result<ResolvedSwitchBranch, SwitchError> {
     if is_internal_switch_target(branch_name) {
         return Err(SwitchError::InternalBranchBlocked(branch_name.to_string()));
     }
-    if Branch::find_branch(branch_name, None).await.is_some() {
-        return Ok(());
+    if let Some(branch) = Branch::find_branch(branch_name, None).await {
+        return Ok(ResolvedSwitchBranch {
+            name: branch.name,
+            commit: branch.commit,
+        });
     }
     if !Branch::search_branch(branch_name).await.is_empty() {
         return Err(SwitchError::GotRemoteBranch(branch_name.to_string()));
     }
 
-    let similar: Vec<String> = Branch::list_branches(None)
-        .await
-        .iter()
-        .filter(|branch| levenshtein(&branch.name, branch_name) <= 2)
-        .map(|branch| branch.name.clone())
-        .collect();
+    let all_branches = Branch::list_branches(None).await;
+    let similar = find_similar_branch_names(branch_name, &all_branches);
     Err(SwitchError::BranchNotFound {
         name: branch_name.to_string(),
         similar,
@@ -306,7 +350,9 @@ fn parse_remote_switch_target(target: &str) -> Result<(String, String), SwitchEr
     Ok(("origin".to_string(), target.to_string()))
 }
 
-async fn validate_tracked_remote_target(target: &str) -> Result<(), SwitchError> {
+async fn resolve_tracked_remote_target(
+    target: &str,
+) -> Result<ResolvedTrackedRemoteTarget, SwitchError> {
     let (remote_name, remote_branch_name) = parse_remote_switch_target(target)?;
 
     if is_internal_switch_target(&remote_branch_name) {
@@ -314,22 +360,45 @@ async fn validate_tracked_remote_target(target: &str) -> Result<(), SwitchError>
     }
 
     let remote_tracking_ref = format!("refs/remotes/{remote_name}/{remote_branch_name}");
-    if Branch::find_branch(&remote_tracking_ref, None)
+    let remote_tracking_branch = Branch::find_branch(&remote_tracking_ref, None)
         .await
-        .is_none()
-    {
-        return Err(SwitchError::RemoteBranchNotFound {
-            remote: remote_name,
-            branch: remote_branch_name,
-        });
-    }
+        .ok_or_else(|| SwitchError::RemoteBranchNotFound {
+            remote: remote_name.clone(),
+            branch: remote_branch_name.clone(),
+        })?;
     if Branch::find_branch(&remote_branch_name, None)
         .await
         .is_some()
     {
         return Err(SwitchError::BranchAlreadyExists(remote_branch_name));
     }
-    Ok(())
+    Ok(ResolvedTrackedRemoteTarget {
+        remote: remote_name,
+        remote_branch: remote_branch_name,
+        commit: remote_tracking_branch.commit,
+    })
+}
+
+fn internal_switch_invariant(message: impl Into<String>) -> SwitchError {
+    SwitchError::DelegatedCli(
+        CliError::fatal(message.into()).with_stable_code(StableErrorCode::InternalInvariant),
+    )
+}
+
+async fn resolve_created_branch(branch_name: &str) -> Result<ResolvedSwitchBranch, SwitchError> {
+    let branch = Branch::find_branch(branch_name, None)
+        .await
+        .ok_or_else(|| {
+            internal_switch_invariant(format!(
+                "failed to resolve newly created branch '{}'",
+                branch_name
+            ))
+        })?;
+
+    Ok(ResolvedSwitchBranch {
+        name: branch.name,
+        commit: branch.commit,
+    })
 }
 
 pub async fn execute(args: SwitchArgs) {
@@ -339,8 +408,9 @@ pub async fn execute(args: SwitchArgs) {
 }
 
 /// Safe entry point that returns structured [`CliResult`] instead of printing
-/// errors and exiting. Validates clean working-tree state, then switches,
-/// creates, or detaches HEAD to the requested branch.
+/// errors and exiting. When a branch or commit change will occur, validates a
+/// clean working-tree state before switching, creating, or detaching HEAD.
+/// No-op "already on" cases return before the cleanliness check.
 pub async fn execute_safe(args: SwitchArgs, output: &OutputConfig) -> CliResult<()> {
     let result = run_switch(args, output).await.map_err(CliError::from)?;
     render_switch_output(&result, output)
@@ -357,10 +427,10 @@ async fn run_switch(args: SwitchArgs, output: &OutputConfig) -> Result<SwitchOut
 
     if track {
         let target = branch.ok_or(SwitchError::MissingTrackTarget)?;
-        validate_tracked_remote_target(&target).await?;
+        let tracked_target = resolve_tracked_remote_target(&target).await?;
         ensure_clean_status(output).await?;
 
-        let tracked = switch_to_tracked_remote_branch(target, output).await?;
+        let tracked = switch_to_tracked_remote_branch(tracked_target, output).await?;
         return Ok(SwitchOutput {
             previous_branch,
             previous_commit,
@@ -381,7 +451,8 @@ async fn run_switch(args: SwitchArgs, output: &OutputConfig) -> Result<SwitchOut
         ensure_clean_status(output).await?;
 
         branch::create_branch_safe(new_branch_name.clone(), branch).await?;
-        let commit = switch_to_branch(new_branch_name.clone(), output).await?;
+        let created_branch = resolve_created_branch(&new_branch_name).await?;
+        let commit = switch_to_resolved_branch(created_branch, output).await?;
         return Ok(SwitchOutput {
             previous_branch,
             previous_commit,
@@ -415,16 +486,13 @@ async fn run_switch(args: SwitchArgs, output: &OutputConfig) -> Result<SwitchOut
     }
 
     let branch = branch.ok_or(SwitchError::MissingBranchName)?;
-    if is_internal_switch_target(&branch) {
-        return Err(SwitchError::InternalBranchBlocked(branch));
-    }
+    let target_branch = resolve_switch_branch_target(&branch).await?;
     if previous_branch.as_deref() == Some(&branch) {
         return Ok(SwitchOutput {
             previous_branch,
             previous_commit: previous_commit.clone(),
             branch: Some(branch),
-            commit: previous_commit
-                .unwrap_or_else(|| ObjectHash::zero_str(get_hash_kind()).to_string()),
+            commit: target_branch.commit.to_string(),
             created: false,
             detached: false,
             already_on: true,
@@ -432,10 +500,9 @@ async fn run_switch(args: SwitchArgs, output: &OutputConfig) -> Result<SwitchOut
         });
     }
 
-    validate_switch_branch_target(&branch).await?;
     ensure_clean_status(output).await?;
 
-    let commit = switch_to_branch(branch.clone(), output).await?;
+    let commit = switch_to_resolved_branch(target_branch, output).await?;
     Ok(SwitchOutput {
         previous_branch,
         previous_commit,
@@ -491,61 +558,39 @@ struct TrackedSwitchResult {
 }
 
 async fn switch_to_tracked_remote_branch(
-    target: String,
+    target: ResolvedTrackedRemoteTarget,
     output: &OutputConfig,
 ) -> Result<TrackedSwitchResult, SwitchError> {
-    let (remote_name, remote_branch_name) = parse_remote_switch_target(&target)?;
+    let local_branch = target.remote_branch.clone();
 
-    if is_internal_switch_target(&remote_branch_name) {
-        return Err(SwitchError::InternalBranchBlocked(
-            remote_branch_name.clone(),
-        ));
-    }
-
-    let remote_tracking_ref = format!("refs/remotes/{remote_name}/{remote_branch_name}");
-
-    let remote_tracking_branch = match Branch::find_branch(&remote_tracking_ref, None).await {
-        Some(branch) => branch,
-        None => {
-            return Err(SwitchError::RemoteBranchNotFound {
-                remote: remote_name,
-                branch: remote_branch_name,
-            });
-        }
-    };
-
-    if Branch::find_branch(&remote_branch_name, None)
+    Branch::update_branch(&local_branch, &target.commit.to_string(), None)
         .await
-        .is_some()
-    {
-        return Err(SwitchError::BranchAlreadyExists(remote_branch_name.clone()));
-    }
-
-    Branch::update_branch(
-        &remote_branch_name,
-        &remote_tracking_branch.commit.to_string(),
-        None,
-    )
-    .await
-    .map_err(|e| SwitchError::BranchCreate {
-        branch: remote_branch_name.clone(),
-        detail: e.to_string(),
-    })?;
+        .map_err(|e| SwitchError::BranchCreate {
+            branch: local_branch.clone(),
+            detail: e.to_string(),
+        })?;
     let mut upstream_output = output.clone();
     if output.is_json() {
         upstream_output.quiet = true;
     }
     branch::set_upstream_safe_with_output(
-        &remote_branch_name,
-        &format!("{remote_name}/{remote_branch_name}"),
+        &local_branch,
+        &format!("{}/{local_branch}", target.remote),
         &upstream_output,
     )
     .await?;
-    let commit = switch_to_branch(remote_branch_name.clone(), output).await?;
+    let commit = switch_to_resolved_branch(
+        ResolvedSwitchBranch {
+            name: local_branch.clone(),
+            commit: target.commit,
+        },
+        output,
+    )
+    .await?;
     Ok(TrackedSwitchResult {
-        remote: remote_name,
-        remote_branch: remote_branch_name.clone(),
-        local_branch: remote_branch_name,
+        remote: target.remote,
+        remote_branch: target.remote_branch,
+        local_branch,
         commit,
     })
 }
@@ -598,36 +643,15 @@ async fn switch_to_commit(
     Ok(commit_hash)
 }
 
-async fn switch_to_branch(
-    branch_name: String,
+async fn switch_to_resolved_branch(
+    target_branch: ResolvedSwitchBranch,
     output: &OutputConfig,
 ) -> Result<ObjectHash, SwitchError> {
-    if is_internal_switch_target(&branch_name) {
-        return Err(SwitchError::InternalBranchBlocked(branch_name));
-    }
+    let ResolvedSwitchBranch {
+        name: branch_name,
+        commit: target_commit_id,
+    } = target_branch;
     let db = get_db_conn_instance().await;
-
-    let target_branch = match Branch::find_branch_with_conn(&db, &branch_name, None).await {
-        Some(b) => b,
-        None => {
-            if !Branch::search_branch(&branch_name).await.is_empty() {
-                return Err(SwitchError::GotRemoteBranch(branch_name));
-            } else {
-                // Collect similar branch names for fuzzy suggestion
-                let all_branches = Branch::list_branches(None).await;
-                let similar: Vec<String> = all_branches
-                    .iter()
-                    .filter(|b| levenshtein(&b.name, &branch_name) <= 2)
-                    .map(|b| b.name.clone())
-                    .collect();
-                return Err(SwitchError::BranchNotFound {
-                    name: branch_name,
-                    similar,
-                });
-            }
-        }
-    };
-    let target_commit_id = target_branch.commit;
 
     let old_oid = Head::current_commit_with_conn(&db)
         .await

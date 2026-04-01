@@ -82,6 +82,37 @@ fn json_switch_already_on() {
 }
 
 #[test]
+fn json_switch_unborn_current_branch_reports_error() {
+    let repo = tempdir().expect("failed to create repository root");
+    init_repo_via_cli(repo.path());
+
+    let output = run_libra_command(&["--json", "switch", "main"], repo.path());
+    assert_eq!(output.status.code(), Some(129));
+    assert!(
+        output.stdout.is_empty(),
+        "json errors should keep stdout empty, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(stderr.trim())
+        .unwrap_or_else(|e| panic!("expected JSON on stderr, got: {stderr}\nerror: {e}"));
+    assert_eq!(parsed["ok"], false);
+    assert_eq!(parsed["message"], "branch 'main' not found");
+    assert!(
+        parsed["hints"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .any(|hint| hint
+                .as_str()
+                .unwrap_or_default()
+                .contains("libra switch -c main")),
+        "expected create hint in JSON error, got: {parsed}"
+    );
+}
+
+#[test]
 fn json_error_branch_not_found() {
     let repo = create_committed_repo_via_cli();
     let output = run_libra_command(&["--json", "switch", "nonexistent"], repo.path());
