@@ -265,7 +265,7 @@ fn internal_branch_blocked_returns_cli_invalid_target() {
         &output,
         129,
         StableErrorCode::CliInvalidTarget,
-        "switching to 'intent' branch is not allowed",
+        "'intent' is a reserved branch name",
         &[],
     );
 }
@@ -277,9 +277,13 @@ async fn branch_already_exists_with_track_returns_conflict() {
     let _guard = ChangeDirGuard::new(repo.path());
 
     let head = Head::current_commit().await.unwrap();
-    Branch::update_branch("refs/remotes/origin/main", &head.to_string(), None)
-        .await
-        .unwrap();
+    Branch::update_branch(
+        "refs/remotes/origin/main",
+        &head.to_string(),
+        Some("origin"),
+    )
+    .await
+    .unwrap();
 
     let output = run_libra_command(&["switch", "--track", "origin/main"], repo.path());
     assert_cli_error_contract(

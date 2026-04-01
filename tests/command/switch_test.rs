@@ -42,9 +42,13 @@ async fn test_switch_json_track_output_stays_clean() {
     let _guard = ChangeDirGuard::new(repo.path());
 
     let head = Head::current_commit().await.unwrap();
-    Branch::update_branch("refs/remotes/origin/feature", &head.to_string(), None)
-        .await
-        .unwrap();
+    Branch::update_branch(
+        "refs/remotes/origin/feature",
+        &head.to_string(),
+        Some("origin"),
+    )
+    .await
+    .unwrap();
 
     let output = run_libra_command(
         &["--json", "switch", "--track", "origin/feature"],
@@ -70,9 +74,13 @@ async fn test_switch_track_human_output_keeps_tracking_message() {
     let _guard = ChangeDirGuard::new(repo.path());
 
     let head = Head::current_commit().await.unwrap();
-    Branch::update_branch("refs/remotes/origin/feature", &head.to_string(), None)
-        .await
-        .unwrap();
+    Branch::update_branch(
+        "refs/remotes/origin/feature",
+        &head.to_string(),
+        Some("origin"),
+    )
+    .await
+    .unwrap();
 
     let output = run_libra_command(&["switch", "--track", "origin/feature"], repo.path());
     assert_cli_success(&output, "switch --track");
@@ -315,7 +323,7 @@ async fn test_switch_track_sets_upstream() {
     Branch::update_branch(
         "refs/remotes/origin/feature",
         &master_commit.to_string(),
-        None,
+        Some("origin"),
     )
     .await
     .unwrap();

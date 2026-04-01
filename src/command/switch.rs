@@ -107,7 +107,7 @@ pub enum SwitchError {
     #[error("a branch named '{0}' already exists")]
     BranchAlreadyExists(String),
 
-    #[error("creating/switching to '{0}' branch is not allowed")]
+    #[error("'{0}' is a reserved branch name")]
     InternalBranchBlocked(String),
 
     #[error("unstaged changes, can't switch branch")]
@@ -360,8 +360,14 @@ async fn resolve_tracked_remote_target(
     }
 
     let remote_tracking_ref = format!("refs/remotes/{remote_name}/{remote_branch_name}");
-    let remote_tracking_branch = Branch::find_branch(&remote_tracking_ref, None)
-        .await
+    let remote_tracking_branch =
+        if let Some(branch) = Branch::find_branch(&remote_tracking_ref, Some(&remote_name)).await {
+            Some(branch)
+        } else if let Some(branch) = Branch::find_branch(&remote_tracking_ref, None).await {
+            Some(branch)
+        } else {
+            Branch::find_branch(&remote_branch_name, Some(&remote_name)).await
+        }
         .ok_or_else(|| SwitchError::RemoteBranchNotFound {
             remote: remote_name.clone(),
             branch: remote_branch_name.clone(),
@@ -757,6 +763,7 @@ mod tests {
 
     use super::*;
     use crate::command::restore::RestoreArgs;
+
     #[test]
     /// Test parsing RestoreArgs from command-line style arguments
     fn test_parse_from() {
@@ -770,5 +777,15 @@ mod tests {
             "./",
         ]);
         println!("{restore_args:?}");
+    }
+
+    #[test]
+    fn levenshtein_handles_basic_edge_cases() {
+        assert_eq!(levenshtein("", ""), 0);
+        assert_eq!(levenshtein("", "abc"), 3);
+        assert_eq!(levenshtein("abc", ""), 3);
+        assert_eq!(levenshtein("main", "main"), 0);
+        assert_eq!(levenshtein("main", "maim"), 1);
+        assert_eq!(levenshtein("feature", "featur"), 1);
     }
 }

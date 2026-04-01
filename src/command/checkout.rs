@@ -31,7 +31,7 @@ EXAMPLES:
 #[derive(Parser, Debug)]
 #[command(after_help = CHECKOUT_EXAMPLES)]
 pub struct CheckoutArgs {
-    /// Target branche name
+    /// Target branch name
     branch: Option<String>,
 
     /// Create and switch to a new branch with the same content as the current branch
