@@ -41,6 +41,7 @@ Commands:
   pull         Fetch from and integrate with another repository or a local branch
   diff         Show changes between commits, commit and working tree, etc
   blame        Show author and history of each line of a file
+  bisect       Find the commit that introduced a bug by binary search
   revert       Revert some existing commits
   remote       Manage set of tracked repositories
   open         Open the repository in the browser
@@ -424,7 +425,6 @@ The following Git top-level commands are currently **not implemented** in Libra 
 - `remote-prune` – prune stale remote-tracking branches
 - `fetch-pack` / `push-pack` – low-level fetch/push operations
 - `grep` – search file contents with regex
-- `bisect` – binary search for a bad commit
 - `filter-branch` (or `git filter-repo`) – rewrite history
 - `notes` – attach arbitrary metadata to objects
 - `archive` – create tar/zip archives of tree snapshots
