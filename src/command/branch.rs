@@ -205,7 +205,7 @@ enum BranchError {
     #[error("failed to query branch storage: {0}")]
     StorageQueryFailed(String),
 
-    #[error("stored branch reference is corrupt: {0}")]
+    #[error("{0}")]
     StoredReferenceCorrupt(String),
 
     #[error("failed to create branch '{branch}': {detail}")]
@@ -288,8 +288,7 @@ impl From<BranchError> for CliError {
                     .with_stable_code(StableErrorCode::IoReadFailed)
             }
             BranchError::StoredReferenceCorrupt(detail) => {
-                CliError::fatal(format!("stored branch reference is corrupt: {detail}"))
-                    .with_stable_code(StableErrorCode::RepoCorrupt)
+                CliError::fatal(detail).with_stable_code(StableErrorCode::RepoCorrupt)
             }
             BranchError::CreateFailed { branch, detail } => {
                 CliError::fatal(format!("failed to create branch '{branch}': {detail}"))
@@ -314,9 +313,9 @@ fn detached_head_branch_error() -> BranchError {
 fn map_branch_store_error(error: branch::BranchStoreError) -> BranchError {
     match error {
         branch::BranchStoreError::Query(detail) => BranchError::StorageQueryFailed(detail),
-        branch::BranchStoreError::Corrupt { detail, .. } => {
-            BranchError::StoredReferenceCorrupt(detail)
-        }
+        branch::BranchStoreError::Corrupt { name, detail } => BranchError::StoredReferenceCorrupt(
+            format!("stored branch reference '{name}' is corrupt: {detail}"),
+        ),
         branch::BranchStoreError::NotFound(name) => BranchError::NotFound {
             name,
             similar: Vec::new(),

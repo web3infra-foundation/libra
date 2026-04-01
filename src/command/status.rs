@@ -1176,6 +1176,11 @@ fn status_branch_store_error(context: &str, error: BranchStoreError) -> CliError
     }
 }
 
+fn status_config_read_error(context: &str, error: anyhow::Error) -> CliError {
+    CliError::fatal(format!("failed to {context}: {error}"))
+        .with_stable_code(StableErrorCode::IoReadFailed)
+}
+
 async fn resolve_upstream_info(
     head: &Head,
     local_commit: Option<&ObjectHash>,
@@ -1185,8 +1190,15 @@ async fn resolve_upstream_info(
         Head::Detached(_) => return Ok(None),
     };
 
-    let Some(branch_config) = ConfigKv::branch_config(&branch_name).await.ok().flatten() else {
-        return Ok(None);
+    let branch_config = match ConfigKv::branch_config(&branch_name).await {
+        Ok(Some(config)) => config,
+        Ok(None) => return Ok(None),
+        Err(error) => {
+            return Err(status_config_read_error(
+                &format!("read branch configuration for '{branch_name}'"),
+                error,
+            ));
+        }
     };
 
     let remote = &branch_config.remote;
@@ -1569,4 +1581,47 @@ pub fn list_ignored_files() -> Result<Changes, StatusError> {
 }
 
 #[cfg(test)]
-mod test {}
+mod test {
+    use sea_orm::{ConnectionTrait, Statement};
+    use serial_test::serial;
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::{
+        internal::db::{get_db_conn_instance, reset_db_conn_instance_for_path},
+        utils::{
+            error::StableErrorCode,
+            test::{self, ChangeDirGuard},
+        },
+    };
+
+    #[tokio::test]
+    #[serial]
+    async fn resolve_upstream_info_surfaces_branch_config_query_failures() {
+        let repo = tempdir().expect("failed to create temp repo");
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = ChangeDirGuard::new(repo.path());
+        let db_path = repo.path().join(".libra").join("libra.db");
+
+        let db = get_db_conn_instance().await;
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            "DROP TABLE config_kv",
+        ))
+        .await
+        .expect("dropping config_kv table should succeed");
+
+        let err = resolve_upstream_info(&Head::Branch("main".to_string()), None)
+            .await
+            .expect_err("missing config_kv table should surface as an error");
+
+        assert_eq!(err.stable_code(), StableErrorCode::IoReadFailed);
+        assert!(
+            err.to_string()
+                .contains("failed to read branch configuration for 'main'"),
+            "unexpected error: {err}"
+        );
+
+        reset_db_conn_instance_for_path(&db_path).await;
+    }
+}

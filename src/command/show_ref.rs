@@ -161,7 +161,8 @@ async fn collect_show_ref_entries(args: &ShowRefArgs) -> CliResult<Vec<ShowRefEn
     }
 
     if entries.is_empty() {
-        return Err(CliError::failure("no matching refs found"));
+        return Err(CliError::failure("no matching refs found")
+            .with_stable_code(StableErrorCode::CliInvalidTarget));
     }
 
     Ok(entries)

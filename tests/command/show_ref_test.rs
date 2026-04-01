@@ -218,7 +218,9 @@ async fn test_show_ref_pattern_no_match() {
         .output()
         .unwrap();
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-003");
     assert!(
         stderr.contains("no matching refs found"),
         "expected error for non-matching pattern, got stderr: {stderr}"

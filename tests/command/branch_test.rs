@@ -456,6 +456,28 @@ async fn test_branch_show_current_surfaces_corrupt_head_storage() {
 
 #[tokio::test]
 #[serial]
+async fn test_branch_list_surfaces_corrupt_reference_name() {
+    let repo = create_committed_repo_via_cli();
+    {
+        let _guard = ChangeDirGuard::new(repo.path());
+        Branch::update_branch("broken-topic", "not-a-valid-hash", None)
+            .await
+            .unwrap();
+    }
+
+    let output = run_libra_command(&["branch"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-REPO-002");
+    assert!(
+        stderr.contains("stored branch reference 'broken-topic' is corrupt"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[tokio::test]
+#[serial]
 /// Tests the behavior of creating a branch with an invalid name.
 async fn test_invalid_branch_name() {
     let temp_path = tempdir().unwrap();
