@@ -708,18 +708,23 @@ async fn run_branch(args: &BranchArgs) -> Result<BranchOutput, BranchError> {
     } else if let Some(branch_to_delete) = args.delete_safe.clone() {
         delete_branch_impl(branch_to_delete, false).await
     } else if args.show_current {
-        Ok(match Head::current().await {
+        let head = Head::current().await;
+        let output = match head {
             Head::Branch(name) => BranchOutput::ShowCurrent {
                 name: Some(name),
                 detached: false,
-                commit: Head::current_commit().await.map(|hash| hash.to_string()),
+                commit: Head::current_commit_result()
+                    .await
+                    .map_err(map_head_commit_store_error)?
+                    .map(|hash| hash.to_string()),
             },
             Head::Detached(hash) => BranchOutput::ShowCurrent {
                 name: None,
                 detached: true,
                 commit: Some(hash.to_string()),
             },
-        })
+        };
+        Ok(output)
     } else if let Some(upstream) = args.set_upstream_to.as_deref() {
         let branch = match Head::current().await {
             Head::Branch(name) => name,
