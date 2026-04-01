@@ -458,7 +458,8 @@ fn target_index_for_commit(commit_id: &ObjectHash) -> Result<Index, SwitchError>
 }
 
 fn ensure_no_untracked_overwrite(target_commit: ObjectHash) -> Result<(), SwitchError> {
-    let current_index = Index::load(path::index()).unwrap_or_else(|_| Index::new());
+    let current_index =
+        Index::load(path::index()).map_err(|err| SwitchError::StatusCheck(err.to_string()))?;
     let untracked_paths =
         worktree::untracked_workdir_paths(&current_index).map_err(SwitchError::StatusCheck)?;
     let target_index = target_index_for_commit(&target_commit)?;
@@ -598,6 +599,8 @@ pub async fn ensure_clean_status(output: &OutputConfig) -> Result<(), SwitchErro
     ensure_clean_status_internal(None, output).await
 }
 
+/// Like [`ensure_clean_status`], but also rejects untracked files that the
+/// target commit would overwrite during the branch/commit change.
 pub async fn ensure_clean_status_for_commit(
     target_commit: ObjectHash,
     output: &OutputConfig,
@@ -619,26 +622,27 @@ async fn ensure_clean_status_internal(
         if !output.quiet && !output.is_json() {
             status::execute(StatusArgs::default()).await;
         }
-        Err(SwitchError::DirtyUnstaged)
-    } else {
-        let staged = match status::changes_to_be_committed_safe().await {
-            Ok(c) => c,
-            Err(err) => {
-                return Err(SwitchError::StatusCheck(err.to_string()));
-            }
-        };
-        if !staged.is_empty() {
-            if !output.quiet && !output.is_json() {
-                status::execute(StatusArgs::default()).await;
-            }
-            Err(SwitchError::DirtyUncommitted)
-        } else {
-            if let Some(target_commit) = target_commit {
-                ensure_no_untracked_overwrite(target_commit)?;
-            }
-            Ok(())
-        }
+        return Err(SwitchError::DirtyUnstaged);
     }
+
+    let staged = match status::changes_to_be_committed_safe().await {
+        Ok(c) => c,
+        Err(err) => {
+            return Err(SwitchError::StatusCheck(err.to_string()));
+        }
+    };
+    if !staged.is_empty() {
+        if !output.quiet && !output.is_json() {
+            status::execute(StatusArgs::default()).await;
+        }
+        return Err(SwitchError::DirtyUncommitted);
+    }
+
+    if let Some(target_commit) = target_commit {
+        ensure_no_untracked_overwrite(target_commit)?;
+    }
+
+    Ok(())
 }
 
 struct TrackedSwitchResult {

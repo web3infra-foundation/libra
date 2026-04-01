@@ -155,6 +155,7 @@ Every `SwitchError` variant maps to an explicit `StableErrorCode`.
 | Internal branch blocked | `LBR-CLI-003` | 129 | -- |
 | Unstaged changes | `LBR-REPO-003` | 128 | "commit or stash your changes before switching." |
 | Uncommitted changes | `LBR-REPO-003` | 128 | "commit or stash your changes before switching." |
+| Untracked file would be overwritten | `LBR-CONFLICT-002` | 128 | "move or remove it before switching." |
 | Status check failed | `LBR-IO-001` | 128 | -- |
 | Commit resolve failed | `LBR-CLI-003` | 129 | "check the revision name and try again." |
 | Branch creation failed | `LBR-IO-002` | 128 | -- |
@@ -177,4 +178,4 @@ hint.
 | Track remote | `git switch --track origin/main` | `libra switch --track origin/main` |
 | Structured output | No | `--json` / `--machine` |
 | Fuzzy suggestions | No | Levenshtein-based "did you mean" hints |
-| Error hints | Minimal | Every error has an actionable hint |
+| Error hints | Minimal | Most errors include actionable hints |

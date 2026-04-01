@@ -16,16 +16,16 @@
 - `OutputConfig` + `emit_json_data()` + `info_println!()` 输出框架已可用
 - `StableErrorCode` 体系已有 18 个错误码
 - `CliError` 支持 `.with_hint()`、`.with_stable_code()`、`.with_detail()`
-- `execute()` / `execute_safe(args, output)` 双入口已存在（`switch.rs:71/80`）
+- `execute()` / `execute_safe(args, output)` 双入口已存在（见 `execute()` / `execute_safe()`）
 - `--create` / `--detach` / `--track` 已实现
-- `ensure_clean_status()` 检测工作树脏状态已实现（`switch.rs:191-229`），且为 `pub`，被 `checkout.rs:69` 调用
-- `switch_to_branch()` / `switch_to_commit()` / `switch_to_tracked_remote_branch()` 三条主路径已实现
+- `ensure_clean_status()` / `ensure_clean_status_for_commit()` 检测工作树脏状态已实现，并由 `checkout::execute_safe()` 复用
+- `switch_to_resolved_branch()` / `switch_to_commit()` / `switch_to_tracked_remote_branch()` 三条主路径已实现
 - `restore_to_commit()` 委托给 `restore::execute_safe()` 更新工作树
 - reflog 记录已集成（`ReflogContext` + `with_reflog()`）
 
 **已确认的跨命令调用关系：**
 
-- `checkout.rs:69` 调用 `switch::ensure_clean_status(output)`，并通过 `err.message()` 字符串匹配区分 `DirtyUnstaged` / `DirtyUncommitted`（fragile pattern，需在本批一并改进）
+- `checkout::execute_safe()` 会根据目标是否可解析到本地 commit，调用 `switch::ensure_clean_status()` 或 `switch::ensure_clean_status_for_commit()`，并直接匹配 `SwitchError` 变体保持 `checkout` 现有对外文案
 - `run_switch()` 调用 `branch::create_branch_safe()` → 返回 `CliResult<()>`
 - `switch_to_tracked_remote_branch()` 调用 `branch::set_upstream_safe_with_output()` → 返回 `CliResult<()>`
 - `restore_to_commit()` 调用 `restore::execute_safe()` → 返回 `CliResult<()>`
@@ -37,19 +37,19 @@
 已改进（当前代码已具备）：
 
 - **结构化 JSON 输出已可用**：`render_switch_output()` 已调用 `emit_json_data("switch", result, output)`，`--json` 模式输出完整的 `SwitchOutput` 结构
-- **执行层与渲染层已拆分**：`run_switch(args, output) -> CliResult<SwitchOutput>` 纯执行入口已存在（`switch.rs:85`），`render_switch_output()` 负责 human/JSON/quiet 三模式渲染
+- **执行层与渲染层已拆分**：`run_switch(args, output) -> Result<SwitchOutput, SwitchError>` 纯执行入口已存在，`render_switch_output()` 负责 human/JSON/quiet 三模式渲染
+- **`SwitchError` typed enum 已落地**：`impl From<SwitchError> for CliError` 集中负责 stable code / hint 映射
 - **`SwitchOutput` 结构体已定义**：包含 `previous_branch`、`previous_commit`、`branch`、`commit`、`created`、`detached`、`already_on`、`tracking` 字段
 - **`SwitchTrackingInfo` 嵌套结构已定义**：`remote` + `remote_branch`
 - **成功确认消息已统一**：`render_switch_output()` 覆盖 4 种场景（already on / detached / new branch / existing branch）
 - **大部分错误已带 `StableErrorCode`**：~12 处 `.with_stable_code()` 调用覆盖了主要错误路径
-- **分支不存在时已有 `-c` 提示**：`switch_to_branch()` 中已实现 `create it with 'libra switch -c {}'` hint（`switch.rs:391`）
+- **分支不存在时已有 `-c` 提示和模糊建议**：`resolve_switch_branch_target()` 会构造 `BranchNotFound`，由 `impl From<SwitchError> for CliError` 统一补全 hint
+- **`checkout` 已不再依赖字符串匹配**：`checkout::execute_safe()` 直接匹配 `SwitchError::DirtyUnstaged | DirtyUncommitted | UntrackedOverwrite(..)` 变体
 
 仍需改进：
 
-- **无 `SwitchError` typed enum**：错误仍散落在 `run_switch()`、`ensure_clean_status()`、`switch_to_branch()`、`switch_to_commit()`、`switch_to_tracked_remote_branch()` 多个函数中，使用 inline `CliError::fatal()` / `CliError::command_usage()` 构造，而非第一批命令（`CommitError`/`PushError`）的统一 typed enum + `impl From` 映射模式
-- **`checkout.rs` 依赖 `err.message()` 字符串匹配**：`checkout.rs:72-76` 用 `matches!(err.message(), "unstaged changes..." | "uncommitted changes...")` 区分脏状态类型，fragile 且无法在 message 文案变化时编译期捕获
-- **无 Levenshtein 模糊匹配**：分支不存在时只提示 `-c` 创建，不提供近似分支名建议
-- **缺少 `--help` EXAMPLES 段**
+- **目标感知的 untracked 覆盖检查仍会重建目标 index**：如果后续在超大仓库中观察到切换延迟，可继续优化 `utils::worktree::untracked_overwrite_path()` 这条共享路径
+- **命令文档需持续跟随行为演进**：例如错误表和 feature comparison 需要随着新增错误场景与 hint 覆盖面更新
 
 ### 目标与非目标
 
@@ -245,7 +245,7 @@ pub async fn execute_safe(args: SwitchArgs, output: &OutputConfig) -> CliResult<
 
 `checkout` 侧的完整边界、非目标、代码变更和测试要求见 [checkout.md](checkout.md)。
 
-`switch` 需要知晓的共享接口变更：`ensure_clean_status()` 返回 `Result<(), SwitchError>` 后，`checkout.rs:69-83` 从 `err.message()` 字符串匹配改为 `SwitchError::DirtyUnstaged | DirtyUncommitted` 变体匹配，其余错误通过 `CliError::from(err)` 转换。`checkout` 现有对外行为不变。
+`switch` 需要知晓的共享接口变更：`ensure_clean_status()` / `ensure_clean_status_for_commit()` 返回 `Result<(), SwitchError>` 后，`checkout::execute_safe()` 直接匹配 `SwitchError::DirtyUnstaged | DirtyUncommitted | UntrackedOverwrite(..)` 变体，其余错误通过 `CliError::from(err)` 转换。`checkout` 现有对外行为不变。
 
 ### 特性 4：Levenshtein 模糊匹配
 
@@ -419,8 +419,8 @@ EXAMPLES:
 #### `tests/command/output_flags_test.rs`（已有回归测试，保留并验证）
 
 已有测试：
-- `machine_switch_dirty_repo_returns_only_json_error()`（line 664）：`--machine switch` 在 dirty repo 上仅向 stderr 输出 JSON error，不泄漏 `status::execute()` human summary
-- `quiet_switch_dirty_repo_suppresses_status_summary()`（line 690）：`--quiet switch` 在 dirty repo 上抑制 status summary
+- `machine_switch_dirty_repo_returns_only_json_error()`：`--machine switch` 在 dirty repo 上仅向 stderr 输出 JSON error，不泄漏 `status::execute()` human summary
+- `quiet_switch_dirty_repo_suppresses_status_summary()`：`--quiet switch` 在 dirty repo 上抑制 status summary
 
 这两条测试在 `ensure_clean_status()` 返回类型重构后**必须继续通过**，作为全局输出契约的回归保障。
 
@@ -446,7 +446,7 @@ EXAMPLES:
 | 文件 | 改动类型 | 说明 |
 |------|---------|------|
 | `src/command/switch.rs` | **重构** | 新增 `SwitchError` typed enum（含 `DelegatedCli` passthrough 例外）；`impl From<SwitchError> for CliError` 集中映射；`run_switch()` 及辅助函数返回 `SwitchError`；`branch::create_branch_safe` / `set_upstream_safe_with_output` / `restore::execute_safe` 现阶段通过 `DelegatedCli` 保留原有契约；Levenshtein 模糊匹配；补齐 `--help` EXAMPLES。**不变更**：`SwitchOutput`、`SwitchTrackingInfo`、`render_switch_output()`、JSON schema |
-| `src/command/checkout.rs` | **适配** | `ensure_clean_status()` 返回 `Result<(), SwitchError>` 后，将 `err.message()` 字符串匹配替换为 `SwitchError::DirtyUnstaged | DirtyUncommitted` 变体匹配；其余错误通过 `CliError::from(err)` 转换。新增 `use super::switch::SwitchError;` 导入 |
+| `src/command/checkout.rs` | **适配** | `ensure_clean_status()` / `ensure_clean_status_for_commit()` 返回 `Result<(), SwitchError>` 后，直接匹配 `SwitchError::DirtyUnstaged | DirtyUncommitted | UntrackedOverwrite(..)` 变体；其余错误通过 `CliError::from(err)` 转换 |
 | `tests/command/switch_test.rs` | **扩展** | 核心成功路径、tracking message 与确认消息验证 |
 | `tests/command/switch_error_test.rs` | **新增** | 错误码 / hint / 全部 `SwitchError` 变体覆盖 |
 | `tests/command/switch_json_test.rs` | **新增** | JSON schema 完整性和稳定性验证（含 `already_on` 字段） |
