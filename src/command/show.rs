@@ -21,7 +21,11 @@ use crate::{
         log::{ChangeType, generate_diff, get_changed_files_for_commit},
     },
     common_utils::parse_commit_msg,
-    internal::{branch::Branch, head::Head, tag},
+    internal::{
+        branch::{Branch, BranchStoreError},
+        head::Head,
+        tag,
+    },
     utils::{
         client_storage::ClientStorage,
         error::{CliError, CliResult, StableErrorCode},
@@ -521,7 +525,7 @@ async fn collect_commit_output(
             .iter()
             .map(ToString::to_string)
             .collect(),
-        refs: collect_reference_names(commit.id).await,
+        refs: collect_reference_names(commit.id).await?,
         files: files
             .into_iter()
             .map(|file| ShowFileChange {
@@ -656,14 +660,37 @@ fn tree_item_mode_to_object_type(mode: TreeItemMode) -> &'static str {
     }
 }
 
-async fn collect_reference_names(commit_id: ObjectHash) -> Vec<String> {
+fn show_branch_store_error(context: &str, error: BranchStoreError) -> CliError {
+    match error {
+        BranchStoreError::Query(detail) => {
+            CliError::fatal(format!("failed to {context}: {detail}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        }
+        other => CliError::fatal(format!("failed to {context}: {other}"))
+            .with_stable_code(StableErrorCode::RepoCorrupt),
+    }
+}
+
+async fn collect_reference_names(commit_id: ObjectHash) -> CliResult<Vec<String>> {
     let mut refs = Vec::new();
-    let head_branch = match (Head::current().await, Head::current_commit().await) {
-        (Head::Branch(name), Some(head_commit)) if head_commit == commit_id => Some(name),
-        _ => None,
+    let head_branch = match Head::current_commit_result().await {
+        Ok(Some(head_commit)) => match Head::current().await {
+            Head::Branch(name) if head_commit == commit_id => Some(name),
+            _ => None,
+        },
+        Ok(None) => None,
+        Err(error) => {
+            return Err(show_branch_store_error(
+                "resolve HEAD for show output",
+                error,
+            ));
+        }
     };
 
-    for branch in Branch::list_branches(None).await {
+    for branch in Branch::list_branches_result(None)
+        .await
+        .map_err(|error| show_branch_store_error("list branches for show output", error))?
+    {
         if branch.commit != commit_id {
             continue;
         }
@@ -692,7 +719,7 @@ async fn collect_reference_names(commit_id: ObjectHash) -> Vec<String> {
     }
 
     refs.sort();
-    refs
+    Ok(refs)
 }
 
 #[cfg(test)]

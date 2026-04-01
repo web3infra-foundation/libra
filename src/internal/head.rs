@@ -9,7 +9,11 @@ use sea_orm::{
 };
 use tokio::time::sleep;
 
-use crate::internal::{branch::Branch, db::get_db_conn_instance, model::reference};
+use crate::internal::{
+    branch::{Branch, BranchStoreError},
+    db::get_db_conn_instance,
+    model::reference,
+};
 
 #[derive(Debug, Clone)]
 pub enum Head {
@@ -151,15 +155,34 @@ impl Head {
         Self::remote_current_with_conn(&db_conn, remote).await
     }
 
-    pub async fn current_commit_with_conn<C>(db: &C) -> Option<ObjectHash>
+    pub async fn current_commit_result_with_conn<C>(
+        db: &C,
+    ) -> Result<Option<ObjectHash>, BranchStoreError>
     where
         C: ConnectionTrait,
     {
         match Self::current_with_conn(db).await {
-            Head::Detached(commit_hash) => Some(commit_hash),
-            Head::Branch(name) => {
-                let branch = Branch::find_branch_with_conn(db, &name, None).await;
-                branch.map(|b| b.commit)
+            Head::Detached(commit_hash) => Ok(Some(commit_hash)),
+            Head::Branch(name) => Ok(Branch::find_branch_result_with_conn(db, &name, None)
+                .await?
+                .map(|branch| branch.commit)),
+        }
+    }
+
+    pub async fn current_commit_result() -> Result<Option<ObjectHash>, BranchStoreError> {
+        let db_conn = get_db_conn_instance().await;
+        Self::current_commit_result_with_conn(&db_conn).await
+    }
+
+    pub async fn current_commit_with_conn<C>(db: &C) -> Option<ObjectHash>
+    where
+        C: ConnectionTrait,
+    {
+        match Self::current_commit_result_with_conn(db).await {
+            Ok(commit) => commit,
+            Err(error) => {
+                tracing::error!("failed to resolve HEAD commit: {error}");
+                None
             }
         }
     }

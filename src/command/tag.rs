@@ -8,6 +8,7 @@ use crate::{
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
+        text::short_display_hash,
         util,
     },
 };
@@ -269,12 +270,12 @@ fn render_tag_output(result: &TagOutput, output: &OutputConfig) -> CliResult<()>
         } => {
             println!(
                 "Created {tag_type} tag '{name}' at {}",
-                abbreviate_hash(hash)
+                short_display_hash(hash)
             );
         }
         TagOutput::Delete { name, hash } => {
             if let Some(hash) = hash {
-                println!("Deleted tag '{name}' (was {})", abbreviate_hash(hash));
+                println!("Deleted tag '{name}' (was {})", short_display_hash(hash));
             } else {
                 println!("Deleted tag '{name}'");
             }
@@ -282,12 +283,6 @@ fn render_tag_output(result: &TagOutput, output: &OutputConfig) -> CliResult<()>
     }
 
     Ok(())
-}
-
-fn abbreviate_hash(hash: &str) -> &str {
-    const SHORT_HASH_LEN: usize = 7;
-    let end = hash.len().min(SHORT_HASH_LEN);
-    &hash[..end]
 }
 
 pub async fn render_tags(show_lines: usize) -> Result<String, anyhow::Error> {

@@ -7,9 +7,13 @@ use git_internal::hash::get_hash_kind;
 
 use crate::{
     command::fetch::RemoteClient,
-    internal::{branch::Branch, config::ConfigKv, protocol::set_wire_hash_kind},
+    internal::{
+        branch::{Branch, BranchStoreError},
+        config::ConfigKv,
+        protocol::set_wire_hash_kind,
+    },
     utils::{
-        error::{CliError, CliResult},
+        error::{CliError, CliResult, StableErrorCode},
         output::OutputConfig,
     },
 };
@@ -271,6 +275,21 @@ async fn show_remote_verbose(remote: &str) -> CliResult<()> {
     Ok(())
 }
 
+fn remote_branch_store_error(context: &str, error: BranchStoreError) -> CliError {
+    match error {
+        BranchStoreError::Query(detail) => {
+            CliError::fatal(format!("failed to {context}: {detail}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        }
+        BranchStoreError::Delete { name, detail } => CliError::fatal(format!(
+            "failed to delete branch '{name}' while {context}: {detail}"
+        ))
+        .with_stable_code(StableErrorCode::IoWriteFailed),
+        other => CliError::fatal(format!("failed to {context}: {other}"))
+            .with_stable_code(StableErrorCode::RepoCorrupt),
+    }
+}
+
 async fn prune_remote(name: &str, dry_run: bool) -> Result<(), CliError> {
     // Check if the remote exists
     let Some(remote_config) = ConfigKv::remote_config(name).await.ok().flatten() else {
@@ -324,7 +343,9 @@ async fn prune_remote(name: &str, dry_run: bool) -> Result<(), CliError> {
         })
         .collect();
     // Get local remote-tracking branches (format: "refs/remotes/{remote}/branch_name")
-    let local_remote_branches = Branch::list_branches(Some(name)).await;
+    let local_remote_branches = Branch::list_branches_result(Some(name))
+        .await
+        .map_err(|error| remote_branch_store_error("list remote-tracking branches", error))?;
 
     // Find and prune stale branches
     let mut pruned_count = 0;
@@ -346,7 +367,11 @@ async fn prune_remote(name: &str, dry_run: bool) -> Result<(), CliError> {
             if dry_run {
                 println!(" * [would prune] {}/{}", name, branch_name);
             } else {
-                Branch::delete_branch(&local_branch.name, Some(name)).await;
+                Branch::delete_branch_result(&local_branch.name, Some(name))
+                    .await
+                    .map_err(|error| {
+                        remote_branch_store_error("pruning remote-tracking branch", error)
+                    })?;
                 println!(" * [pruned] {}/{}", name, branch_name);
             }
             pruned_count += 1;

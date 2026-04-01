@@ -242,11 +242,31 @@ impl Branch {
     where
         C: ConnectionTrait,
     {
+        match Self::search_branch_result_with_conn(db, branch_name).await {
+            Ok(branches) => branches,
+            Err(error) => {
+                log_branch_store_error(
+                    &format!("failed to search branches matching '{branch_name}'"),
+                    &error,
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    pub async fn search_branch_result_with_conn<C>(
+        db: &C,
+        branch_name: &str,
+    ) -> Result<Vec<Self>, BranchStoreError>
+    where
+        C: ConnectionTrait,
+    {
         let mut branch_name_str = branch_name.to_string();
         let mut remote = String::new();
 
         let mut branches = vec![];
-        if let Some(branch) = Self::find_branch_with_conn(db, &branch_name_str, None).await {
+        if let Some(branch) = Self::find_branch_result_with_conn(db, &branch_name_str, None).await?
+        {
             branches.push(branch)
         }
 
@@ -256,13 +276,13 @@ impl Branch {
             }
             remote += branch_name_str.get(..index).unwrap();
             branch_name_str = branch_name_str.get(index + 1..).unwrap().to_string();
-            // Important: Call the `_with_conn` variant inside the loop
-            let branch = Self::find_branch_with_conn(db, &branch_name_str, Some(&remote)).await;
-            if let Some(branch) = branch {
+            if let Some(branch) =
+                Self::find_branch_result_with_conn(db, &branch_name_str, Some(&remote)).await?
+            {
                 branches.push(branch);
             }
         }
-        branches
+        Ok(branches)
     }
 
     /// search branch with full name, return vec of branches
@@ -271,6 +291,11 @@ impl Branch {
     pub async fn search_branch(branch_name: &str) -> Vec<Self> {
         let db_conn = get_db_conn_instance().await;
         Self::search_branch_with_conn(&db_conn, branch_name).await
+    }
+
+    pub async fn search_branch_result(branch_name: &str) -> Result<Vec<Self>, BranchStoreError> {
+        let db_conn = get_db_conn_instance().await;
+        Self::search_branch_result_with_conn(&db_conn, branch_name).await
     }
 
     //  `_with_conn` version for `update_branch`

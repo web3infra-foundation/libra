@@ -40,7 +40,7 @@ use crate::{
         reflog::{HEAD, Reflog, ReflogAction, ReflogContext, ReflogError},
     },
     utils::{
-        error::{CliError, CliResult},
+        error::{CliError, CliResult, StableErrorCode},
         output::OutputConfig,
         path, util,
     },
@@ -543,7 +543,10 @@ pub async fn execute_safe(args: FetchArgs, output: &OutputConfig) -> CliResult<(
     tracing::debug!("`fetch` args: {:?}", args);
 
     if args.all {
-        for remote in ConfigKv::all_remote_configs().await.unwrap_or_default() {
+        for remote in ConfigKv::all_remote_configs().await.map_err(|error| {
+            CliError::fatal(format!("failed to read remote configuration: {error}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        })? {
             fetch_repository_safe(remote, None, false, None, output)
                 .await
                 .map_err(CliError::from)?;
@@ -1070,14 +1073,20 @@ async fn current_have_safe() -> Result<Vec<String>, FetchError> {
 
     let mut remotes = ConfigKv::all_remote_configs()
         .await
-        .unwrap_or_default()
+        .map_err(|source| FetchError::LocalState {
+            message: format!("failed to read remote configuration: {source}"),
+        })?
         .iter()
         .map(|remote| Some(remote.name.to_owned()))
         .collect::<Vec<_>>();
     remotes.push(None);
 
     for remote in remotes {
-        let branches = Branch::list_branches(remote.as_deref()).await;
+        let branches = Branch::list_branches_result(remote.as_deref())
+            .await
+            .map_err(|source| FetchError::LocalState {
+                message: format!("failed to list local branches: {source}"),
+            })?;
         for branch in branches {
             let commit: Commit =
                 load_object(&branch.commit).map_err(|source| FetchError::LocalState {

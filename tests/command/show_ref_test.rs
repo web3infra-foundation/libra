@@ -4,7 +4,8 @@
 
 use std::{fs, io::Write, process::Command};
 
-use libra::internal::branch::Branch;
+use libra::internal::{branch::Branch, db::get_db_conn_instance, model::reference};
+use sea_orm::{ActiveModelTrait, Set};
 use serial_test::serial;
 use tempfile::tempdir;
 
@@ -84,6 +85,39 @@ async fn test_show_ref_lists_branch() {
     assert!(
         stdout.contains(&head_commit.to_string()),
         "expected commit hash in output, got: {stdout}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_show_ref_surfaces_corrupt_branch_storage() {
+    let temp = tempdir().unwrap();
+    let _guard = setup_repo_with_commit(&temp).await;
+    let db = get_db_conn_instance().await;
+    reference::ActiveModel {
+        name: Set(Some("broken".to_string())),
+        kind: Set(reference::ConfigKind::Branch),
+        commit: Set(Some("not-a-valid-hash".to_string())),
+        remote: Set(None),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp.path())
+        .arg("show-ref")
+        .arg("--heads")
+        .output()
+        .unwrap();
+
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-REPO-002");
+    assert!(
+        stderr.contains("stored branch reference 'broken' is corrupt"),
+        "unexpected stderr: {stderr}"
     );
 }
 

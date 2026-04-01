@@ -116,6 +116,24 @@ fn test_branch_set_upstream_surfaces_config_write_failure() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn test_branch_set_upstream_idempotent_path_skips_redundant_write() {
+    let repo = create_committed_repo_via_cli();
+
+    let first = run_libra_command(&["branch", "--set-upstream-to", "origin/main"], repo.path());
+    assert_cli_success(&first, "initial set-upstream");
+
+    let db_path = repo.path().join(".libra").join("libra.db");
+    let original_mode = fs::metadata(&db_path).unwrap().permissions().mode();
+
+    fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let second = run_libra_command(&["branch", "--set-upstream-to", "origin/main"], repo.path());
+    fs::set_permissions(&db_path, std::fs::Permissions::from_mode(original_mode)).unwrap();
+
+    assert_cli_success(&second, "idempotent set-upstream");
+}
+
 #[test]
 fn test_branch_force_delete_outputs_confirmation() {
     let repo = create_committed_repo_via_cli();

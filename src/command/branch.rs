@@ -19,6 +19,7 @@ use crate::{
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
+        text::{levenshtein, short_display_hash},
     },
 };
 
@@ -327,32 +328,6 @@ fn map_branch_store_error(error: branch::BranchStoreError) -> BranchError {
     }
 }
 
-fn short_hash(hash: &str) -> &str {
-    let end = hash.len().min(7);
-    &hash[..end]
-}
-
-fn levenshtein(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    let (a, b) = if a.len() > b.len() {
-        (&b, &a)
-    } else {
-        (&a, &b)
-    };
-    let mut prev: Vec<usize> = (0..=a.len()).collect();
-    let mut curr = vec![0; a.len() + 1];
-    for (i, cb) in b.iter().enumerate() {
-        curr[0] = i + 1;
-        for (j, ca) in a.iter().enumerate() {
-            let cost = usize::from(ca != cb);
-            curr[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(curr[j] + 1);
-        }
-        std::mem::swap(&mut prev, &mut curr);
-    }
-    prev[a.len()]
-}
-
 fn find_similar_branch_names(branch_name: &str, branches: &[Branch]) -> Vec<String> {
     let target_len = branch_name.chars().count();
     let mut best: Option<(usize, String)> = None;
@@ -383,15 +358,15 @@ fn find_similar_branch_names(branch_name: &str, branches: &[Branch]) -> Vec<Stri
     best.into_iter().map(|(_, name)| name).collect()
 }
 
-async fn branch_not_found_error(branch_name: &str) -> BranchError {
+async fn branch_not_found_error(branch_name: &str) -> Result<BranchError, BranchError> {
     let similar = Branch::list_branches_result(None)
         .await
         .map(|branches| find_similar_branch_names(branch_name, &branches))
-        .unwrap_or_default();
-    BranchError::NotFound {
+        .map_err(map_branch_store_error)?;
+    Ok(BranchError::NotFound {
         name: branch_name.to_string(),
         similar,
-    }
+    })
 }
 
 async fn require_existing_local_branch(branch_name: &str) -> Result<Branch, BranchError> {
@@ -400,7 +375,7 @@ async fn require_existing_local_branch(branch_name: &str) -> Result<Branch, Bran
         .map_err(map_branch_store_error)?
     {
         Some(branch) => Ok(branch),
-        None => Err(branch_not_found_error(branch_name).await),
+        None => Err(branch_not_found_error(branch_name).await?),
     }
 }
 
@@ -430,6 +405,8 @@ async fn set_upstream_with_conn<C: ConnectionTrait>(
             branch_config_read_error(format!("upstream config for branch '{branch}'"), e)
         })?;
     let merge_ref = format!("refs/heads/{remote_branch}");
+    // `branch_config_with_conn()` normalizes `refs/heads/<name>` to `<name>`,
+    // so the idempotency check must compare against the short branch name.
     let should_write = branch_config
         .as_ref()
         .map(|config| config.remote != remote || config.merge != remote_branch)
@@ -759,7 +736,10 @@ fn render_branch_output(result: &BranchOutput, output: &OutputConfig) -> CliResu
             show_unborn_head,
         } => {
             if let Some(detached_head) = detached_head {
-                println!("HEAD detached at {}", short_hash(detached_head).green());
+                println!(
+                    "HEAD detached at {}",
+                    short_display_hash(detached_head).green()
+                );
             }
             if branches.is_empty() {
                 if *show_unborn_head && let Some(head_name) = head_name {
@@ -788,14 +768,17 @@ fn render_branch_output(result: &BranchOutput, output: &OutputConfig) -> CliResu
             }
         }
         BranchOutput::Create { name, commit } => {
-            println!("Created branch '{name}' at {}", short_hash(commit));
+            println!("Created branch '{name}' at {}", short_display_hash(commit));
         }
         BranchOutput::Delete {
             name,
             commit,
             force: _,
         } => {
-            println!("Deleted branch {name} (was {}).", short_hash(commit));
+            println!(
+                "Deleted branch {name} (was {}).",
+                short_display_hash(commit)
+            );
         }
         BranchOutput::Rename { old_name, new_name } => {
             println!("Renamed branch '{old_name}' to '{new_name}'");
@@ -810,7 +793,7 @@ fn render_branch_output(result: &BranchOutput, output: &OutputConfig) -> CliResu
         } => {
             if *detached {
                 if let Some(commit) = commit {
-                    println!("HEAD detached at {}", short_hash(commit));
+                    println!("HEAD detached at {}", short_display_hash(commit));
                 }
             } else if let Some(name) = name {
                 println!("{name}");

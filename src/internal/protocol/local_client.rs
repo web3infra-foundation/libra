@@ -159,29 +159,37 @@ impl LocalClient {
             RepoType::LibraRepo => {
                 let original_dir = cur_dir();
                 env::set_current_dir(&self.repo_path)?;
-                let local_branches = Branch::list_branches(None).await;
+                let local_branches = Branch::list_branches_result(None)
+                    .await
+                    .map_err(|error| GitError::CustomError(error.to_string()))?;
 
-                let remote_configs = ConfigKv::all_remote_configs().await.unwrap_or_default();
+                let remote_configs = ConfigKv::all_remote_configs()
+                    .await
+                    .map_err(|error| GitError::CustomError(error.to_string()))?;
                 let mut remote_branches: Vec<_> = vec![];
                 for remote in remote_configs {
-                    remote_branches.extend(Branch::list_branches(Some(&remote.name)).await);
+                    remote_branches.extend(
+                        Branch::list_branches_result(Some(&remote.name))
+                            .await
+                            .map_err(|error| GitError::CustomError(error.to_string()))?,
+                    );
                 }
-                let result =
-                    DiscoveryResult {
-                        refs: local_branches
-                            .into_iter()
-                            .chain(remote_branches)
-                            .map(Into::into)
-                            .chain(Head::current_commit().await.map(|x| x.to_string()).map(
-                                |hash| DiscRef {
-                                    _hash: hash,
-                                    _ref: reflog::HEAD.to_string(),
-                                },
-                            ))
-                            .collect::<Vec<_>>(),
-                        capabilities: vec![],
-                        hash_kind: get_hash_kind(),
-                    };
+                let head_commit = Head::current_commit_result()
+                    .await
+                    .map_err(|error| GitError::CustomError(error.to_string()))?;
+                let result = DiscoveryResult {
+                    refs: local_branches
+                        .into_iter()
+                        .chain(remote_branches)
+                        .map(Into::into)
+                        .chain(head_commit.map(|x| x.to_string()).map(|hash| DiscRef {
+                            _hash: hash,
+                            _ref: reflog::HEAD.to_string(),
+                        }))
+                        .collect::<Vec<_>>(),
+                    capabilities: vec![],
+                    hash_kind: get_hash_kind(),
+                };
                 env::set_current_dir(original_dir)?;
                 Ok(result)
             }

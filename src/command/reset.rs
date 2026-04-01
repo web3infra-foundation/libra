@@ -267,7 +267,7 @@ async fn run_reset(args: ResetArgs) -> Result<ResetExecution, ResetError> {
 
         let target_commit_id = resolve_commit(&args.target).await?;
         let changed_paths = reset_pathspecs(&args.pathspecs, &target_commit_id).await?;
-        let subject = get_commit_summary(&target_commit_id).unwrap_or_default();
+        let subject = load_commit_summary_or_warn(&target_commit_id);
 
         return Ok(ResetExecution {
             output: ResetOutput {
@@ -287,7 +287,7 @@ async fn run_reset(args: ResetArgs) -> Result<ResetExecution, ResetError> {
     let target_commit_id = resolve_commit(&args.target).await?;
     let reset_stats = perform_reset(target_commit_id, mode, &args.target).await?;
 
-    let subject = get_commit_summary(&target_commit_id).unwrap_or_default();
+    let subject = load_commit_summary_or_warn(&target_commit_id);
     Ok(ResetExecution {
         output: ResetOutput {
             mode: mode.as_str().to_string(),
@@ -440,10 +440,24 @@ async fn rollback_reset_side_effects(
         ResetMode::Hard => {
             reset_index_to_commit_typed(old_oid)?;
             let rollback_paths = tracked_paths_for_hard_reset(target_commit_id)?;
-            let _ = reset_working_directory_to_commit(old_oid, &rollback_paths).await?;
+            let rollback_stats =
+                reset_working_directory_to_commit(old_oid, &rollback_paths).await?;
+            if !rollback_stats.warnings.is_empty() {
+                tracing::warn!(
+                    warnings = ?rollback_stats.warnings,
+                    "rollback after reset completed with worktree warnings"
+                );
+            }
             Ok(())
         }
     }
+}
+
+fn load_commit_summary_or_warn(commit_id: &ObjectHash) -> String {
+    get_commit_summary(commit_id).unwrap_or_else(|error| {
+        tracing::warn!("failed to load commit summary for {commit_id}: {error}");
+        String::new()
+    })
 }
 
 async fn update_reset_reference(

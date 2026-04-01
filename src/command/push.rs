@@ -46,6 +46,7 @@ use crate::{
         error::{CliError, CliResult, StableErrorCode, emit_warning},
         object_ext::{BlobExt, CommitExt, TreeExt},
         output::{OutputConfig, ProgressMode, ProgressReporter, emit_json_data},
+        text::levenshtein,
     },
 };
 
@@ -407,7 +408,10 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
         None => (current_branch.clone(), current_branch.clone()),
     };
 
-    let commit_hash = match Branch::find_branch(&local_branch, None).await {
+    let commit_hash = match Branch::find_branch_result(&local_branch, None)
+        .await
+        .map_err(|error| PushError::RepoState(error.to_string()))?
+    {
         Some(branch_info) => branch_info.commit.to_string(),
         None => return Err(PushError::SourceRefNotFound(local_branch.clone())),
     };
@@ -941,27 +945,6 @@ async fn suggest_remote_name(input: &str) -> Option<String> {
         }
     }
     best.map(|(name, _)| name)
-}
-
-fn levenshtein(a: &str, b: &str) -> usize {
-    let m = a.len();
-    let n = b.len();
-    let mut dp = vec![vec![0usize; n + 1]; m + 1];
-    for (i, row) in dp.iter_mut().enumerate() {
-        row[0] = i;
-    }
-    for (j, val) in dp[0].iter_mut().enumerate() {
-        *val = j;
-    }
-    for (i, ca) in a.chars().enumerate() {
-        for (j, cb) in b.chars().enumerate() {
-            let cost = if ca == cb { 0 } else { 1 };
-            dp[i + 1][j + 1] = (dp[i][j + 1] + 1)
-                .min(dp[i + 1][j] + 1)
-                .min(dp[i][j] + cost);
-        }
-    }
-    dp[m][n]
 }
 
 fn emit_push_warnings(warnings: &[String]) {

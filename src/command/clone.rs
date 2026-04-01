@@ -142,6 +142,8 @@ pub enum CloneError {
     InitializeRepository { source: InitError },
     #[error("remote branch {branch} not found in upstream origin")]
     RemoteBranchNotFound { branch: String },
+    #[error("failed to inspect local branch state after fetch: {message}")]
+    LocalBranchState { message: String },
     #[error("fetch failed: {source}")]
     FetchFailed { source: fetch::FetchError },
     #[error("failed to checkout working tree")]
@@ -194,6 +196,11 @@ impl From<CloneError> for CliError {
             .with_hint(
                 "use `-b <branch>` to specify an existing branch, or omit to use remote HEAD",
             ),
+            CloneError::LocalBranchState { message } => CliError::fatal(format!(
+                "failed to inspect local branch state after fetch: {message}"
+            ))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+            .with_hint("run 'libra status' to verify the local repository state"),
             CloneError::FetchFailed { source } => map_fetch_error(source),
             CloneError::CheckoutFailed { source } => map_checkout_error(source),
             CloneError::SetupFailed { .. } => CliError::fatal(error.to_string())
@@ -742,12 +749,18 @@ pub(crate) async fn setup_repository(
 
     if let Some(branch_name) = branch_to_checkout {
         let remote_tracking_ref = format!("refs/remotes/{}/{}", remote_config.name, branch_name);
-        let origin_branch =
-            Branch::find_branch_with_conn(&db, &remote_tracking_ref, Some(&remote_config.name))
-                .await
-                .ok_or_else(|| CloneError::RemoteBranchNotFound {
-                    branch: branch_name.clone(),
-                })?;
+        let origin_branch = Branch::find_branch_result_with_conn(
+            &db,
+            &remote_tracking_ref,
+            Some(&remote_config.name),
+        )
+        .await
+        .map_err(|error| CloneError::LocalBranchState {
+            message: error.to_string(),
+        })?
+        .ok_or_else(|| CloneError::RemoteBranchNotFound {
+            branch: branch_name.clone(),
+        })?;
 
         let action = ReflogAction::Clone {
             from: remote_config.url.clone(),

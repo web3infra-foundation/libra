@@ -465,7 +465,10 @@ pub fn path_to_string(path: &Path) -> String {
 pub async fn get_commit_base(name: &str) -> Result<ObjectHash, String> {
     // 1. Check for HEAD
     if name.to_uppercase() == "HEAD" {
-        if let Some(commit_id) = Head::current_commit().await {
+        if let Some(commit_id) = Head::current_commit_result()
+            .await
+            .map_err(|error| format!("fatal: failed to resolve HEAD: {error}"))?
+        {
             return Ok(commit_id);
         } else {
             return Err("fatal: HEAD does not point to a commit".to_string());
@@ -473,7 +476,10 @@ pub async fn get_commit_base(name: &str) -> Result<ObjectHash, String> {
     }
 
     // 2. Check for a local branch
-    if let Some(branch) = Branch::find_branch(name, None).await {
+    if let Some(branch) = Branch::find_branch_result(name, None)
+        .await
+        .map_err(|error| format!("fatal: failed to resolve branch '{name}': {error}"))?
+    {
         return Ok(branch.commit);
     }
 
@@ -481,7 +487,11 @@ pub async fn get_commit_base(name: &str) -> Result<ObjectHash, String> {
     if let Some((remote, branch_name)) = name.split_once('/')
         && !remote.is_empty()
         && !branch_name.is_empty()
-        && let Some(branch) = Branch::find_branch(branch_name, Some(remote)).await
+        && let Some(branch) = Branch::find_branch_result(branch_name, Some(remote))
+            .await
+            .map_err(|error| {
+                format!("fatal: failed to resolve remote branch '{remote}/{branch_name}': {error}")
+            })?
     {
         return Ok(branch.commit);
     }

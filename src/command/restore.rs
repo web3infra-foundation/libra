@@ -17,7 +17,11 @@ use git_internal::{
 
 use crate::{
     command::{calc_file_blob_hash, load_object},
-    internal::{branch::Branch, head::Head, protocol::lfs_client::LFSClient},
+    internal::{
+        branch::{Branch, BranchStoreError},
+        head::Head,
+        protocol::lfs_client::LFSClient,
+    },
     utils::{
         error::{CliError, CliResult},
         lfs,
@@ -117,12 +121,13 @@ pub async fn execute_checked(args: RestoreArgs) -> io::Result<()> {
             // ref: prevent moving `source`
             if src == HEAD {
                 // Default Source
-                Head::current_commit().await
-            } else if Branch::exists(src).await {
-                // Branch Name, e.g. master
-                let branch = Branch::find_branch(src, None)
+                Head::current_commit_result()
                     .await
-                    .ok_or_else(|| io::Error::other(format!("could not resolve {src}")))?;
+                    .map_err(|error| io::Error::other(error.to_string()))?
+            } else if let Some(branch) = Branch::find_branch_result(src, None)
+                .await
+                .map_err(|error| io::Error::other(error.to_string()))?
+            {
                 Some(branch.commit)
             } else {
                 // [Commit Hash, e.g. a1b2c3d4] || [Wrong Branch Name]
@@ -223,14 +228,15 @@ pub async fn execute_checked_typed(args: RestoreArgs) -> Result<(), RestoreError
         }
         Some(src) => {
             let commit = if src == HEAD {
-                Head::current_commit()
+                Head::current_commit_result()
                     .await
+                    .map_err(map_restore_branch_store_error)?
                     .ok_or(RestoreError::ResolveSource)?
-            } else if Branch::exists(src).await {
-                Branch::find_branch(src, None)
-                    .await
-                    .ok_or(RestoreError::ResolveSource)?
-                    .commit
+            } else if let Some(branch) = Branch::find_branch_result(src, None)
+                .await
+                .map_err(map_restore_branch_store_error)?
+            {
+                branch.commit
             } else {
                 let objs = storage.search(src).await;
                 if objs.len() != 1 {
@@ -259,6 +265,15 @@ pub async fn execute_checked_typed(args: RestoreArgs) -> Result<(), RestoreError
         restore_index_typed(&paths, &target_blobs)?;
     }
     Ok(())
+}
+
+fn map_restore_branch_store_error(error: BranchStoreError) -> RestoreError {
+    match error {
+        BranchStoreError::Query(_) => RestoreError::ReadObject,
+        BranchStoreError::Corrupt { .. } => RestoreError::ReadObject,
+        BranchStoreError::NotFound(_) => RestoreError::ResolveSource,
+        BranchStoreError::Delete { .. } => RestoreError::ReadObject,
+    }
 }
 
 /// to HashMap

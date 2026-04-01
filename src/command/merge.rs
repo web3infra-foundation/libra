@@ -17,7 +17,7 @@ use super::{
 };
 use crate::{
     internal::{
-        branch::Branch,
+        branch::{Branch, BranchStoreError},
         db::get_db_conn_instance,
         head::Head,
         reflog::{ReflogAction, ReflogContext, with_reflog},
@@ -192,7 +192,9 @@ pub(crate) async fn run_merge_for_pull(
 async fn resolve_merge_target(target_ref: &str) -> Result<ObjectHash, Box<dyn std::error::Error>> {
     if let Some(remote) = target_ref.strip_prefix("refs/remotes/")
         && let Some((remote_name, _)) = remote.split_once('/')
-        && let Some(branch) = Branch::find_branch(target_ref, Some(remote_name)).await
+        && let Some(branch) = Branch::find_branch_result(target_ref, Some(remote_name))
+            .await
+            .map_err(|error: BranchStoreError| Box::new(error) as Box<dyn std::error::Error>)?
     {
         return Ok(branch.commit);
     }

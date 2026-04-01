@@ -59,7 +59,7 @@ use clap::Parser;
 use git_internal::internal::object::commit::Commit;
 
 use crate::{
-    internal::{head::Head, log::date_parser::parse_date},
+    internal::{branch::BranchStoreError, head::Head, log::date_parser::parse_date},
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::OutputConfig,
@@ -258,8 +258,9 @@ async fn get_commits_for_shortlog(
     let head = Head::current().await;
     let commit_hash = match head {
         Head::Branch(name) => {
-            let branch = crate::internal::branch::Branch::find_branch(&name, None)
+            let branch = crate::internal::branch::Branch::find_branch_result(&name, None)
                 .await
+                .map_err(shortlog_branch_store_error)?
                 .map(|b| b.commit.to_string());
             match branch {
                 Some(h) => h,
@@ -280,6 +281,17 @@ async fn get_commits_for_shortlog(
     commits.sort_by_key(|b| std::cmp::Reverse(b.author.timestamp));
 
     Ok(commits)
+}
+
+fn shortlog_branch_store_error(error: BranchStoreError) -> CliError {
+    match error {
+        BranchStoreError::Query(detail) => {
+            CliError::fatal(format!("failed to read branch storage: {detail}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        }
+        other => CliError::fatal(format!("failed to resolve current branch: {other}"))
+            .with_stable_code(StableErrorCode::RepoCorrupt),
+    }
 }
 
 fn passes_filter(commit: &Commit, since_ts: Option<i64>, until_ts: Option<i64>) -> bool {

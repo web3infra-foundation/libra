@@ -25,7 +25,11 @@ use serde::Serialize;
 use super::stash;
 use crate::{
     command::calc_file_blob_hash,
-    internal::{branch::Branch, config::ConfigKv, head::Head},
+    internal::{
+        branch::{Branch, BranchStoreError},
+        config::ConfigKv,
+        head::Head,
+    },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         ignore::IgnorePolicy,
@@ -294,7 +298,7 @@ async fn collect_status_data(args: &StatusArgs) -> CliResult<StatusData> {
     };
 
     // Resolve upstream tracking info
-    let upstream = resolve_upstream_info(&head, head_oid.as_ref()).await;
+    let upstream = resolve_upstream_info(&head, head_oid.as_ref()).await?;
     let porcelain_v2 = if matches!(args.porcelain, Some(PorcelainVersion::V2)) {
         let index = maybe_index
             .take()
@@ -1161,33 +1165,48 @@ fn write_branch_info_v2(
 // Upstream tracking resolution
 // ---------------------------------------------------------------------------
 
+fn status_branch_store_error(context: &str, error: BranchStoreError) -> CliError {
+    match error {
+        BranchStoreError::Query(detail) => {
+            CliError::fatal(format!("failed to {context}: {detail}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        }
+        other => CliError::fatal(format!("failed to {context}: {other}"))
+            .with_stable_code(StableErrorCode::RepoCorrupt),
+    }
+}
+
 async fn resolve_upstream_info(
     head: &Head,
     local_commit: Option<&ObjectHash>,
-) -> Option<UpstreamInfo> {
+) -> CliResult<Option<UpstreamInfo>> {
     let branch_name = match head {
         Head::Branch(name) => name.clone(),
-        Head::Detached(_) => return None,
+        Head::Detached(_) => return Ok(None),
     };
 
-    let branch_config = ConfigKv::branch_config(&branch_name).await.ok().flatten()?;
+    let Some(branch_config) = ConfigKv::branch_config(&branch_name).await.ok().flatten() else {
+        return Ok(None);
+    };
 
     let remote = &branch_config.remote;
     let merge_branch = &branch_config.merge;
     let remote_ref_display = format!("{remote}/{merge_branch}");
 
-    let tracking_branch = Branch::find_branch(merge_branch, Some(remote)).await;
+    let tracking_branch = Branch::find_branch_result(merge_branch, Some(remote))
+        .await
+        .map_err(|error| status_branch_store_error("resolve upstream branch", error))?;
 
     let tracking_commit = match tracking_branch {
         Some(b) => b.commit,
         None => {
             // Upstream configured but tracking ref doesn't exist → gone
-            return Some(UpstreamInfo {
+            return Ok(Some(UpstreamInfo {
                 remote_ref: remote_ref_display,
                 ahead: None,
                 behind: None,
                 gone: true,
-            });
+            }));
         }
     };
 
@@ -1197,23 +1216,23 @@ async fn resolve_upstream_info(
             // Unborn branch: no local commit to compare against.
             // Return None for ahead/behind — numeric counts would imply
             // a comparison that never happened.
-            return Some(UpstreamInfo {
+            return Ok(Some(UpstreamInfo {
                 remote_ref: remote_ref_display,
                 ahead: None,
                 behind: None,
                 gone: false,
-            });
+            }));
         }
     };
 
     let (ahead, behind) = compute_ahead_behind(local_commit, &tracking_commit);
 
-    Some(UpstreamInfo {
+    Ok(Some(UpstreamInfo {
         remote_ref: remote_ref_display,
         ahead: Some(ahead),
         behind: Some(behind),
         gone: false,
-    })
+    }))
 }
 
 /// Compute the number of commits ahead/behind between two refs.
