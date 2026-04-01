@@ -483,17 +483,31 @@ pub async fn get_commit_base(name: &str) -> Result<ObjectHash, String> {
         return Ok(branch.commit);
     }
 
-    // Added: detect remote branch in remote/branch format
+    // Support both short remote branches (`main` with `remote = origin`) and
+    // fetched remote-tracking refs (`refs/remotes/origin/main`) for inputs such
+    // as `origin/main`.
     if let Some((remote, branch_name)) = name.split_once('/')
         && !remote.is_empty()
         && !branch_name.is_empty()
-        && let Some(branch) = Branch::find_branch_result(branch_name, Some(remote))
-            .await
-            .map_err(|error| {
-                format!("fatal: failed to resolve remote branch '{remote}/{branch_name}': {error}")
-            })?
     {
-        return Ok(branch.commit);
+        let remote_tracking_ref = format!("refs/remotes/{remote}/{branch_name}");
+        let remote_lookup_error = |error| {
+            format!("fatal: failed to resolve remote branch '{remote}/{branch_name}': {error}")
+        };
+
+        if let Some(branch) = Branch::find_branch_result(&remote_tracking_ref, Some(remote))
+            .await
+            .map_err(remote_lookup_error)?
+        {
+            return Ok(branch.commit);
+        }
+
+        if let Some(branch) = Branch::find_branch_result(branch_name, Some(remote))
+            .await
+            .map_err(remote_lookup_error)?
+        {
+            return Ok(branch.commit);
+        }
     }
 
     // 3. Check for a tag

@@ -3,6 +3,7 @@
 use std::{
     collections::HashSet,
     env,
+    future::Future,
     io::Error as IoError,
     path::{Path, PathBuf},
 };
@@ -69,6 +70,34 @@ impl ProtocolClient for LocalClient {
 }
 
 impl LocalClient {
+    async fn with_repo_current_dir<T, E, F, Fut>(&self, operation: F) -> Result<T, E>
+    where
+        E: From<IoError>,
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T, E>>,
+    {
+        let original_dir = cur_dir();
+        env::set_current_dir(&self.repo_path).map_err(E::from)?;
+
+        match operation().await {
+            Ok(value) => {
+                env::set_current_dir(&original_dir).map_err(E::from)?;
+                Ok(value)
+            }
+            Err(error) => {
+                if let Err(restore_error) = env::set_current_dir(&original_dir) {
+                    tracing::error!(
+                        repo_path = %self.repo_path.display(),
+                        restore_dir = %original_dir.display(),
+                        error = %restore_error,
+                        "failed to restore working directory after local protocol operation"
+                    );
+                }
+                Err(error)
+            }
+        }
+    }
+
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, IoError> {
         let path = path.as_ref();
         let absolute = if path.is_absolute() {
@@ -157,41 +186,40 @@ impl LocalClient {
                 parse_discovered_references(bytes, service)
             }
             RepoType::LibraRepo => {
-                let original_dir = cur_dir();
-                env::set_current_dir(&self.repo_path)?;
-                let local_branches = Branch::list_branches_result(None)
-                    .await
-                    .map_err(|error| GitError::CustomError(error.to_string()))?;
+                self.with_repo_current_dir(|| async {
+                    let local_branches = Branch::list_branches_result(None)
+                        .await
+                        .map_err(|error| GitError::CustomError(error.to_string()))?;
 
-                let remote_configs = ConfigKv::all_remote_configs()
-                    .await
-                    .map_err(|error| GitError::CustomError(error.to_string()))?;
-                let mut remote_branches: Vec<_> = vec![];
-                for remote in remote_configs {
-                    remote_branches.extend(
-                        Branch::list_branches_result(Some(&remote.name))
-                            .await
-                            .map_err(|error| GitError::CustomError(error.to_string()))?,
-                    );
-                }
-                let head_commit = Head::current_commit_result()
-                    .await
-                    .map_err(|error| GitError::CustomError(error.to_string()))?;
-                let result = DiscoveryResult {
-                    refs: local_branches
-                        .into_iter()
-                        .chain(remote_branches)
-                        .map(Into::into)
-                        .chain(head_commit.map(|x| x.to_string()).map(|hash| DiscRef {
-                            _hash: hash,
-                            _ref: reflog::HEAD.to_string(),
-                        }))
-                        .collect::<Vec<_>>(),
-                    capabilities: vec![],
-                    hash_kind: get_hash_kind(),
-                };
-                env::set_current_dir(original_dir)?;
-                Ok(result)
+                    let remote_configs = ConfigKv::all_remote_configs()
+                        .await
+                        .map_err(|error| GitError::CustomError(error.to_string()))?;
+                    let mut remote_branches: Vec<_> = vec![];
+                    for remote in remote_configs {
+                        remote_branches.extend(
+                            Branch::list_branches_result(Some(&remote.name))
+                                .await
+                                .map_err(|error| GitError::CustomError(error.to_string()))?,
+                        );
+                    }
+                    let head_commit = Head::current_commit_result()
+                        .await
+                        .map_err(|error| GitError::CustomError(error.to_string()))?;
+                    Ok(DiscoveryResult {
+                        refs: local_branches
+                            .into_iter()
+                            .chain(remote_branches)
+                            .map(Into::into)
+                            .chain(head_commit.map(|x| x.to_string()).map(|hash| DiscRef {
+                                _hash: hash,
+                                _ref: reflog::HEAD.to_string(),
+                            }))
+                            .collect::<Vec<_>>(),
+                        capabilities: vec![],
+                        hash_kind: get_hash_kind(),
+                    })
+                })
+                .await
             }
         }
     }
@@ -237,171 +265,169 @@ impl LocalClient {
                 Ok(stream::once(async move { Ok(stdout) }).boxed())
             }
             RepoType::LibraRepo => {
-                let original_dir = cur_dir();
-                env::set_current_dir(&self.repo_path)?;
+                self.with_repo_current_dir(|| async {
+                    let mut seen = HashSet::new();
+                    have.iter().for_each(|hash| {
+                        seen.insert(hash.clone());
+                    });
 
-                let mut seen = HashSet::new();
-                have.iter().for_each(|hash| {
-                    seen.insert(hash.clone());
-                });
+                    let commits = stream::iter(want)
+                        .then(|branch_hash| async move {
+                            // TODO: `unwrap_or_default` silently swallows storage
+                            // errors. Propagate once the surrounding pipeline
+                            // supports fallible streams.
+                            get_reachable_commits(branch_hash.to_string(), depth)
+                                .await
+                                .unwrap_or_else(|e| {
+                                    tracing::warn!(
+                                        %branch_hash,
+                                        error = %e,
+                                        "failed to walk reachable commits; treating as empty"
+                                    );
+                                    Vec::new()
+                                })
+                        })
+                        .flat_map(stream::iter)
+                        .collect::<Vec<Commit>>()
+                        .await
+                        .into_iter()
+                        .filter(|c| seen.insert(c.id.to_string()))
+                        .collect::<Vec<_>>();
 
-                let commits = stream::iter(want)
-                    .then(|branch_hash| async move {
-                        // TODO: `unwrap_or_default` silently swallows storage
-                        // errors. Propagate once the surrounding pipeline
-                        // supports fallible streams.
-                        get_reachable_commits(branch_hash.to_string(), depth)
-                            .await
-                            .unwrap_or_else(|e| {
-                                tracing::warn!(
-                                    %branch_hash,
-                                    error = %e,
-                                    "failed to walk reachable commits; treating as empty"
-                                );
-                                Vec::new()
-                            })
-                    })
-                    .flat_map(stream::iter)
-                    .collect::<Vec<Commit>>()
-                    .await
-                    .into_iter()
-                    .filter(|c| seen.insert(c.id.to_string()))
-                    .collect::<Vec<_>>();
+                    let (tree_hash, blob_hash): (Vec<_>, Vec<_>) = commits
+                        .iter()
+                        .map(|commit| &commit.tree_id)
+                        .map(load_object::<Tree>)
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|giterror| match giterror {
+                            GitError::IOError(io_error) => io_error,
+                            _ => IoError::other(format!("{}", giterror)),
+                        })?
+                        .into_iter()
+                        .flat_map(|t| {
+                            t.get_items_with_mode()
+                                .into_iter()
+                                .map(|(_, hash, mode)| (hash, mode))
+                        })
+                        .filter(|(hash, _)| seen.insert(hash.to_string()))
+                        .partition(|(_, mode)| *mode == TreeItemMode::Tree);
 
-                let (tree_hash, blob_hash): (Vec<_>, Vec<_>) = commits
-                    .iter()
-                    .map(|commit| &commit.tree_id)
-                    .map(load_object::<Tree>)
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|giterror| match giterror {
-                        GitError::IOError(io_error) => io_error,
-                        _ => IoError::other(format!("{}", giterror)),
-                    })?
-                    .into_iter()
-                    .flat_map(|t| {
-                        t.get_items_with_mode()
-                            .into_iter()
-                            .map(|(_, hash, mode)| (hash, mode))
-                    })
-                    .filter(|(hash, _)| seen.insert(hash.to_string()))
-                    .partition(|(_, mode)| *mode == TreeItemMode::Tree);
+                    let trees = tree_hash
+                        .into_iter()
+                        .map(|(hash, _)| load_object::<Tree>(&hash))
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|giterror| match giterror {
+                            GitError::IOError(io_error) => io_error,
+                            _ => IoError::other(format!("{}", giterror)),
+                        })?;
 
-                let trees = tree_hash
-                    .into_iter()
-                    .map(|(hash, _)| load_object::<Tree>(&hash))
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|giterror| match giterror {
-                        GitError::IOError(io_error) => io_error,
-                        _ => IoError::other(format!("{}", giterror)),
-                    })?;
+                    let blobs = blob_hash
+                        .into_iter()
+                        .map(|(hash, _)| load_object::<Blob>(&hash))
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|giterror| match giterror {
+                            GitError::IOError(io_error) => io_error,
+                            _ => IoError::other(format!("{}", giterror)),
+                        })?;
 
-                let blobs = blob_hash
-                    .into_iter()
-                    .map(|(hash, _)| load_object::<Blob>(&hash))
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|giterror| match giterror {
-                        GitError::IOError(io_error) => io_error,
-                        _ => IoError::other(format!("{}", giterror)),
-                    })?;
+                    let commit_entries: Vec<Entry> = commits.into_iter().map(Entry::from).collect();
 
-                let commit_entries: Vec<Entry> = commits.into_iter().map(Entry::from).collect();
+                    let tree_entries: Vec<Entry> = trees.into_iter().map(Entry::from).collect();
 
-                let tree_entries: Vec<Entry> = trees.into_iter().map(Entry::from).collect();
+                    let blob_entries: Vec<Entry> = blobs.into_iter().map(Entry::from).collect();
 
-                let blob_entries: Vec<Entry> = blobs.into_iter().map(Entry::from).collect();
+                    let mut all_entries = Vec::new();
+                    all_entries.extend(commit_entries);
+                    all_entries.extend(tree_entries);
+                    all_entries.extend(blob_entries);
 
-                let mut all_entries = Vec::new();
-                all_entries.extend(commit_entries);
-                all_entries.extend(tree_entries);
-                all_entries.extend(blob_entries);
+                    let (entry_tx, entry_rx) =
+                        tokio::sync::mpsc::channel::<MetaAttached<Entry, EntryMeta>>(1_000);
+                    let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(1_000);
 
-                let (entry_tx, entry_rx) =
-                    tokio::sync::mpsc::channel::<MetaAttached<Entry, EntryMeta>>(1_000);
-                let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(1_000);
+                    let total_objects = all_entries.len();
+                    let window_size = 0;
 
-                let total_objects = all_entries.len();
-                let window_size = 0;
+                    let encoder = PackEncoder::new(total_objects, window_size, stream_tx);
 
-                let encoder = PackEncoder::new(total_objects, window_size, stream_tx);
+                    let encode_handle = encoder
+                        .encode_async(entry_rx)
+                        .await
+                        .map_err(|e| IoError::other(format!("Failed to start encoding: {}", e)))?;
 
-                let encode_handle = encoder
-                    .encode_async(entry_rx)
-                    .await
-                    .map_err(|e| IoError::other(format!("Failed to start encoding: {}", e)))?;
+                    for entry in all_entries {
+                        let entry_meta = EntryMeta::default();
+                        let meta_entry = MetaAttached {
+                            inner: entry,
+                            meta: entry_meta,
+                        };
 
-                for entry in all_entries {
-                    let entry_meta = EntryMeta::default();
-                    let meta_entry = MetaAttached {
-                        inner: entry,
-                        meta: entry_meta,
-                    };
-
-                    if let Err(e) = entry_tx.send(meta_entry).await {
-                        return Err(IoError::other(format!("Failed to send entry: {}", e)));
+                        if let Err(e) = entry_tx.send(meta_entry).await {
+                            return Err(IoError::other(format!("Failed to send entry: {}", e)));
+                        }
                     }
-                }
 
-                drop(entry_tx);
+                    drop(entry_tx);
 
-                let mut pack_data = Vec::new();
-                while let Some(chunk) = stream_rx.recv().await {
-                    pack_data.extend(chunk);
-                }
-
-                encode_handle
-                    .await
-                    .map_err(|e| IoError::other(format!("Encode task panicked: {}", e)))?;
-
-                if pack_data.len() < 12 {
-                    return Err(IoError::other("Pack data too short"));
-                }
-
-                if &pack_data[0..4] != b"PACK" {
-                    return Err(IoError::other("Invalid pack signature"));
-                }
-
-                let mut response_data = Vec::new();
-
-                let nak_line = "NAK\n";
-                let nak_len = nak_line.len() + 4;
-                let nak_len_hex = format!("{:04x}", nak_len);
-                response_data.extend_from_slice(nak_len_hex.as_bytes());
-                response_data.extend_from_slice(nak_line.as_bytes());
-
-                let chunk_size = 65500;
-                for chunk in pack_data.chunks(chunk_size) {
-                    let mut sideband_data = Vec::with_capacity(1 + chunk.len());
-                    sideband_data.push(1);
-                    sideband_data.extend_from_slice(chunk);
-
-                    let total_len = sideband_data.len() + 4;
-                    let len_hex = format!("{:04x}", total_len);
-
-                    response_data.extend_from_slice(len_hex.as_bytes());
-                    response_data.extend_from_slice(&sideband_data);
-
-                    // Send progress update every ~10 chunks (approximately 655KB)
-                    const PROGRESS_CHUNK_INTERVAL: usize = 10;
-                    if response_data.len() % (chunk_size * PROGRESS_CHUNK_INTERVAL) == 0 {
-                        let progress_msg =
-                            format!("Pack {}/{}...\n", response_data.len(), pack_data.len());
-                        let mut progress_data = Vec::with_capacity(1 + progress_msg.len());
-                        progress_data.push(2);
-                        progress_data.extend_from_slice(progress_msg.as_bytes());
-
-                        let progress_len = progress_data.len() + 4;
-                        let progress_len_hex = format!("{:04x}", progress_len);
-                        response_data.extend_from_slice(progress_len_hex.as_bytes());
-                        response_data.extend_from_slice(&progress_data);
+                    let mut pack_data = Vec::new();
+                    while let Some(chunk) = stream_rx.recv().await {
+                        pack_data.extend(chunk);
                     }
-                }
 
-                response_data.extend_from_slice(b"0000");
+                    encode_handle
+                        .await
+                        .map_err(|e| IoError::other(format!("Encode task panicked: {}", e)))?;
 
-                let response_stream = stream::iter(vec![Ok(Bytes::from(response_data))]);
+                    if pack_data.len() < 12 {
+                        return Err(IoError::other("Pack data too short"));
+                    }
 
-                env::set_current_dir(&original_dir)?;
-                Ok(Box::pin(response_stream))
+                    if &pack_data[0..4] != b"PACK" {
+                        return Err(IoError::other("Invalid pack signature"));
+                    }
+
+                    let mut response_data = Vec::new();
+
+                    let nak_line = "NAK\n";
+                    let nak_len = nak_line.len() + 4;
+                    let nak_len_hex = format!("{:04x}", nak_len);
+                    response_data.extend_from_slice(nak_len_hex.as_bytes());
+                    response_data.extend_from_slice(nak_line.as_bytes());
+
+                    let chunk_size = 65500;
+                    for chunk in pack_data.chunks(chunk_size) {
+                        let mut sideband_data = Vec::with_capacity(1 + chunk.len());
+                        sideband_data.push(1);
+                        sideband_data.extend_from_slice(chunk);
+
+                        let total_len = sideband_data.len() + 4;
+                        let len_hex = format!("{:04x}", total_len);
+
+                        response_data.extend_from_slice(len_hex.as_bytes());
+                        response_data.extend_from_slice(&sideband_data);
+
+                        // Send progress update every ~10 chunks (approximately 655KB)
+                        const PROGRESS_CHUNK_INTERVAL: usize = 10;
+                        if response_data.len() % (chunk_size * PROGRESS_CHUNK_INTERVAL) == 0 {
+                            let progress_msg =
+                                format!("Pack {}/{}...\n", response_data.len(), pack_data.len());
+                            let mut progress_data = Vec::with_capacity(1 + progress_msg.len());
+                            progress_data.push(2);
+                            progress_data.extend_from_slice(progress_msg.as_bytes());
+
+                            let progress_len = progress_data.len() + 4;
+                            let progress_len_hex = format!("{:04x}", progress_len);
+                            response_data.extend_from_slice(progress_len_hex.as_bytes());
+                            response_data.extend_from_slice(&progress_data);
+                        }
+                    }
+
+                    response_data.extend_from_slice(b"0000");
+
+                    let response_stream = stream::iter(vec![Ok(Bytes::from(response_data))]);
+                    Ok(Box::pin(response_stream) as FetchStream)
+                })
+                .await
             }
         }
     }

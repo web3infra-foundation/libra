@@ -326,6 +326,110 @@ async fn test_create_branch_from_remote() {
 
 #[tokio::test]
 #[serial]
+async fn test_create_branch_from_remote_tracking_ref() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    commit::execute(CommitArgs {
+        message: Some("first".to_string()),
+        allow_empty: true,
+        disable_pre: true,
+        no_verify: false,
+        ..Default::default()
+    })
+    .await;
+
+    let hash = Head::current_commit().await.unwrap();
+    Branch::update_branch(
+        "refs/remotes/origin/main",
+        &hash.to_string(),
+        Some("origin"),
+    )
+    .await
+    .unwrap();
+
+    assert!(get_target_commit("origin/main").await.is_ok());
+
+    execute(BranchArgs {
+        new_branch: Some("tracking-copy".to_string()),
+        commit_hash: Some("origin/main".into()),
+        list: false,
+        delete: None,
+        delete_safe: None,
+        set_upstream_to: None,
+        show_current: false,
+        rename: vec![],
+        remotes: false,
+        all: false,
+        contains: vec![],
+        no_contains: vec![],
+    })
+    .await;
+
+    let branch = Branch::find_branch("tracking-copy", None)
+        .await
+        .expect("branch create from tracking ref failed");
+    assert_eq!(branch.commit, hash);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_branch_create_without_base_surfaces_corrupt_head_storage() {
+    let repo = create_committed_repo_via_cli();
+    {
+        let _guard = ChangeDirGuard::new(repo.path());
+        Branch::update_branch("main", "not-a-valid-hash", None)
+            .await
+            .unwrap();
+    }
+
+    let output = run_libra_command(&["branch", "feature"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-REPO-002");
+    assert!(
+        stderr.contains("failed to resolve HEAD commit"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("stored branch reference 'main' is corrupt"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_branch_delete_safe_surfaces_corrupt_head_storage() {
+    let repo = create_committed_repo_via_cli();
+    let create = run_libra_command(&["branch", "topic"], repo.path());
+    assert_cli_success(&create, "branch topic");
+
+    {
+        let _guard = ChangeDirGuard::new(repo.path());
+        Branch::update_branch("main", "not-a-valid-hash", None)
+            .await
+            .unwrap();
+    }
+
+    let output = run_libra_command(&["branch", "-d", "topic"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-REPO-002");
+    assert!(
+        stderr.contains("failed to resolve HEAD commit"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("stored branch reference 'main' is corrupt"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[tokio::test]
+#[serial]
 /// Tests the behavior of creating a branch with an invalid name.
 async fn test_invalid_branch_name() {
     let temp_path = tempdir().unwrap();

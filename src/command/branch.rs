@@ -328,6 +328,18 @@ fn map_branch_store_error(error: branch::BranchStoreError) -> BranchError {
     }
 }
 
+fn map_head_commit_store_error(error: branch::BranchStoreError) -> BranchError {
+    let cli_error = match error {
+        branch::BranchStoreError::Query(detail) => {
+            CliError::fatal(format!("failed to resolve HEAD commit: {detail}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        }
+        other => CliError::fatal(format!("failed to resolve HEAD commit: {other}"))
+            .with_stable_code(StableErrorCode::RepoCorrupt),
+    };
+    BranchError::DelegatedCli(cli_error)
+}
+
 fn find_similar_branch_names(branch_name: &str, branches: &[Branch]) -> Vec<String> {
     let target_len = branch_name.chars().count();
     let mut best: Option<(usize, String)> = None;
@@ -358,15 +370,14 @@ fn find_similar_branch_names(branch_name: &str, branches: &[Branch]) -> Vec<Stri
     best.into_iter().map(|(_, name)| name).collect()
 }
 
-async fn branch_not_found_error(branch_name: &str) -> Result<BranchError, BranchError> {
-    let similar = Branch::list_branches_result(None)
-        .await
-        .map(|branches| find_similar_branch_names(branch_name, &branches))
-        .map_err(map_branch_store_error)?;
-    Ok(BranchError::NotFound {
-        name: branch_name.to_string(),
-        similar,
-    })
+async fn branch_not_found_error(branch_name: &str) -> BranchError {
+    match Branch::list_branches_result(None).await {
+        Ok(branches) => BranchError::NotFound {
+            name: branch_name.to_string(),
+            similar: find_similar_branch_names(branch_name, &branches),
+        },
+        Err(error) => map_branch_store_error(error),
+    }
 }
 
 async fn require_existing_local_branch(branch_name: &str) -> Result<Branch, BranchError> {
@@ -375,7 +386,7 @@ async fn require_existing_local_branch(branch_name: &str) -> Result<Branch, Bran
         .map_err(map_branch_store_error)?
     {
         Some(branch) => Ok(branch),
-        None => Err(branch_not_found_error(branch_name).await?),
+        None => Err(branch_not_found_error(branch_name).await),
     }
 }
 
@@ -480,7 +491,10 @@ async fn create_branch_impl(
             .await
             .map_err(|_| BranchError::InvalidCommit(branch_or_commit))?,
         None => {
-            if let Some(commit_id) = Head::current_commit().await {
+            if let Some(commit_id) = Head::current_commit_result()
+                .await
+                .map_err(map_head_commit_store_error)?
+            {
                 commit_id
             } else {
                 let current = match Head::current().await {
@@ -530,12 +544,15 @@ async fn delete_branch_impl(branch_name: String, force: bool) -> Result<BranchOu
 
     if !force {
         let head_commit = match head {
-            Head::Branch(_) => Head::current_commit().await.ok_or_else(|| {
-                BranchError::DelegatedCli(
-                    CliError::fatal("cannot get HEAD commit")
-                        .with_stable_code(StableErrorCode::RepoStateInvalid),
-                )
-            })?,
+            Head::Branch(_) => Head::current_commit_result()
+                .await
+                .map_err(map_head_commit_store_error)?
+                .ok_or_else(|| {
+                    BranchError::DelegatedCli(
+                        CliError::fatal("cannot get HEAD commit")
+                            .with_stable_code(StableErrorCode::RepoStateInvalid),
+                    )
+                })?,
             Head::Detached(commit_hash) => commit_hash,
         };
 
@@ -1017,7 +1034,11 @@ mod tests {
     use git_internal::hash::{ObjectHash, get_hash_kind};
     use sea_orm::Database;
 
-    use super::{Branch, BranchError, format_branch_name, load_remote_branches_with_conn};
+    use super::{
+        Branch, BranchError, format_branch_name, load_remote_branches_with_conn,
+        map_head_commit_store_error,
+    };
+    use crate::utils::error::{CliError, StableErrorCode};
 
     fn any_hash() -> ObjectHash {
         ObjectHash::from_str(&ObjectHash::zero_str(get_hash_kind())).unwrap()
@@ -1059,5 +1080,13 @@ mod tests {
             }
             other => panic!("expected config read failure, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_head_commit_query_error_maps_to_io_read_failed() {
+        let cli_error = CliError::from(map_head_commit_store_error(
+            crate::internal::branch::BranchStoreError::Query("database is locked".into()),
+        ));
+        assert_eq!(cli_error.stable_code(), StableErrorCode::IoReadFailed);
     }
 }

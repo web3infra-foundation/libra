@@ -20,7 +20,7 @@ use crate::{
     command::{get_target_commit, load_object},
     common_utils::parse_commit_msg,
     internal::{
-        branch::Branch,
+        branch::{self, Branch},
         db::get_db_conn_instance,
         head::Head,
         reflog::{ReflogAction, ReflogContext, with_reflog},
@@ -140,6 +140,12 @@ enum ResetError {
     #[error("Cannot reset: HEAD is unborn and points to no commit.")]
     HeadUnborn,
 
+    #[error("failed to resolve HEAD commit: {0}")]
+    HeadRead(String),
+
+    #[error("stored HEAD reference is corrupt: {0}")]
+    HeadCorrupt(String),
+
     #[error("failed to load {kind} '{object_id}': {detail}")]
     ObjectLoad {
         kind: &'static str,
@@ -185,6 +191,12 @@ impl From<ResetError> for CliError {
             ResetError::HeadUnborn => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::RepoStateInvalid)
                 .with_hint("create a commit first before resetting HEAD."),
+            ResetError::HeadRead(_) => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::IoReadFailed)
+                .with_hint("check whether the repository database is readable."),
+            ResetError::HeadCorrupt(_) => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+                .with_hint("the HEAD reference or branch metadata may be corrupted."),
             ResetError::ObjectLoad { .. } => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::RepoCorrupt)
                 .with_hint("the object store may be corrupted."),
@@ -242,6 +254,13 @@ fn object_load_error(
         kind,
         object_id: object_id.into(),
         detail: detail.into(),
+    }
+}
+
+fn map_reset_head_commit_error(error: branch::BranchStoreError) -> ResetError {
+    match error {
+        branch::BranchStoreError::Query(detail) => ResetError::HeadRead(detail),
+        other => ResetError::HeadCorrupt(other.to_string()),
     }
 }
 
@@ -368,8 +387,9 @@ async fn perform_reset(
 ) -> Result<ResetStats, ResetError> {
     // avoids holding the transaction open while doing read-only preparations.
     let db = get_db_conn_instance().await;
-    let old_oid = Head::current_commit_with_conn(&db)
+    let old_oid = Head::current_commit_result_with_conn(&db)
         .await
+        .map_err(map_reset_head_commit_error)?
         .ok_or(ResetError::HeadUnborn)?;
     let current_head_state = if old_oid != target_commit_id {
         Some(Head::current_with_conn(&db).await)
@@ -950,6 +970,12 @@ mod tests {
     fn test_reset_error_maps_unborn_head_as_repo_state() {
         let error = CliError::from(ResetError::HeadUnborn);
         assert_eq!(error.stable_code(), StableErrorCode::RepoStateInvalid);
+    }
+
+    #[test]
+    fn test_reset_error_maps_head_read_failures_as_io_read() {
+        let error = CliError::from(ResetError::HeadRead("database is locked".into()));
+        assert_eq!(error.stable_code(), StableErrorCode::IoReadFailed);
     }
 
     #[test]

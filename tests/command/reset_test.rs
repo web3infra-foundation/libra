@@ -203,6 +203,44 @@ fn test_reset_json_hard_with_pathspec_returns_usage_error() {
 
 #[tokio::test]
 #[serial]
+async fn test_reset_corrupt_head_reference_returns_repo_corrupt() {
+    let repo = create_committed_repo_via_cli();
+    let target_commit = {
+        let _guard = ChangeDirGuard::new(repo.path());
+        InternalBranch::find_branch("main", None)
+            .await
+            .expect("main branch should exist")
+            .commit
+            .to_string()
+    };
+    {
+        let _guard = ChangeDirGuard::new(repo.path());
+        InternalBranch::update_branch("main", "not-a-valid-hash", None)
+            .await
+            .unwrap();
+    }
+
+    let output = run_libra_command(&["reset", &target_commit], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-REPO-002");
+    assert!(
+        stderr.contains("stored HEAD reference is corrupt"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("stored branch reference 'main' is corrupt"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("HEAD is unborn"),
+        "reset should not misreport corrupt HEAD as unborn: {stderr}"
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_reset_pathspec_surfaces_subtree_corruption_as_repo_corrupt() {
     let repo = create_committed_repo_via_cli();
     fs::create_dir_all(repo.path().join("dir")).unwrap();
