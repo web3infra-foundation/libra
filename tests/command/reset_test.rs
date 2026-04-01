@@ -3,14 +3,30 @@
 //! **Layer:** L1 — deterministic, no external dependencies.
 
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
-use libra::command::{
-    branch::{self, BranchArgs},
-    reset::{self, ResetArgs},
-    status::changes_to_be_staged,
+use libra::{
+    command::{
+        branch::{self, BranchArgs},
+        remove::{self, RemoveArgs},
+        reset::{self, ResetArgs},
+        status::{changes_to_be_committed, changes_to_be_staged},
+    },
+    internal::config::ConfigKv,
+    utils::{error::StableErrorCode, test::setup_with_new_libra_in},
 };
 
 use super::*;
+
+async fn setup_reset_user_identity() {
+    ConfigKv::set("user.name", "Test User", false)
+        .await
+        .unwrap();
+    ConfigKv::set("user.email", "test@example.com", false)
+        .await
+        .unwrap();
+}
 
 #[test]
 #[serial]
@@ -22,6 +38,267 @@ fn test_reset_cli_outside_repository_returns_fatal_128() {
     assert!(
         stderr.contains("fatal: not a libra repository"),
         "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn test_reset_unborn_head_returns_repo_state_error() {
+    fn copy_dir_recursive(from: &std::path::Path, to: &std::path::Path) {
+        fs::create_dir_all(to).expect("failed to create destination directory");
+        for entry in fs::read_dir(from).expect("failed to read source directory") {
+            let entry = entry.expect("failed to read source entry");
+            let source_path = entry.path();
+            let destination_path = to.join(entry.file_name());
+            if entry
+                .file_type()
+                .expect("failed to read source file type")
+                .is_dir()
+            {
+                copy_dir_recursive(&source_path, &destination_path);
+            } else {
+                fs::copy(&source_path, &destination_path)
+                    .expect("failed to copy object into unborn repository");
+            }
+        }
+    }
+
+    let source_repo = create_committed_repo_via_cli();
+    let source_head = run_libra_command(&["show-ref", "--heads", "main"], source_repo.path());
+    assert_cli_success(&source_head, "show-ref --heads main");
+    let commit_hash = String::from_utf8_lossy(&source_head.stdout)
+        .split_whitespace()
+        .next()
+        .expect("show-ref should return the main commit hash")
+        .to_string();
+
+    let target_repo = tempdir().unwrap();
+    init_repo_via_cli(target_repo.path());
+    copy_dir_recursive(
+        &source_repo.path().join(".libra/objects"),
+        &target_repo.path().join(".libra/objects"),
+    );
+
+    let output = run_libra_command(&["reset", "--hard", &commit_hash], target_repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-REPO-003");
+    assert!(
+        stderr.contains("HEAD is unborn"),
+        "expected unborn HEAD message, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_reset_json_output_reports_target_commit() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nsecond\n").unwrap();
+    let add_output = run_libra_command(&["add", "tracked.txt"], repo.path());
+    assert!(
+        add_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&add_output.stderr)
+    );
+    let commit_output = run_libra_command(&["commit", "-m", "second", "--no-verify"], repo.path());
+    assert!(
+        commit_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&commit_output.stderr)
+    );
+
+    let output = run_libra_command(&["--json", "reset", "--hard", "HEAD~1"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "reset");
+    assert_eq!(json["data"]["mode"], "hard");
+    assert_eq!(json["data"]["subject"], "base");
+    assert_eq!(json["data"]["files_restored"], 1);
+}
+
+#[test]
+fn test_reset_json_hard_head_clean_repo_reports_zero_restores() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--json", "reset", "--hard", "HEAD"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["mode"], "hard");
+    assert_eq!(json["data"]["files_restored"], 0);
+}
+
+#[test]
+fn test_reset_json_hard_head_reports_actual_restored_files() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nupdated\n").unwrap();
+
+    let output = run_libra_command(&["--json", "reset", "--hard", "HEAD"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["mode"], "hard");
+    assert_eq!(json["data"]["files_restored"], 1);
+    assert_eq!(
+        fs::read_to_string(repo.path().join("tracked.txt")).unwrap(),
+        "tracked\n"
+    );
+}
+
+#[test]
+fn test_reset_hard_with_pathspec_returns_usage_error() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nupdated\n").unwrap();
+
+    let output = run_libra_command(
+        &["reset", "--hard", "HEAD", "--", "tracked.txt"],
+        repo.path(),
+    );
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        stderr.contains("Cannot do hard reset with paths."),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn test_reset_json_hard_with_pathspec_returns_usage_error() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nupdated\n").unwrap();
+
+    let output = run_libra_command(
+        &["--json", "reset", "--hard", "HEAD", "--", "tracked.txt"],
+        repo.path(),
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stderr).expect("expected stderr JSON in --json mode");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert!(
+        output.stdout.is_empty(),
+        "stdout should stay empty on JSON error"
+    );
+    assert_eq!(report["error_code"], "LBR-CLI-002");
+    assert!(
+        stderr.contains("Cannot do hard reset with paths."),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn test_reset_hard_io_failure_rolls_back_index_and_keeps_head() {
+    let temp_path = tempdir().unwrap();
+    let _guard = ChangeDirGuard::new(temp_path.path());
+    setup_with_new_libra_in(temp_path.path()).await;
+    setup_reset_user_identity().await;
+
+    fs::write("base.txt", "base\n").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["base.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("base".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await;
+
+    fs::write("tracked.txt", "tracked\n").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["tracked.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("add tracked".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await;
+
+    let head_before = Head::current_commit().await.unwrap();
+    let original_mode = fs::metadata(temp_path.path()).unwrap().permissions().mode();
+    fs::set_permissions(temp_path.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let result = reset::execute_safe(
+        ResetArgs {
+            target: "HEAD~1".to_string(),
+            soft: false,
+            mixed: false,
+            hard: true,
+            pathspecs: vec![],
+        },
+        &libra::utils::output::OutputConfig::default(),
+    )
+    .await;
+
+    fs::set_permissions(
+        temp_path.path(),
+        std::fs::Permissions::from_mode(original_mode),
+    )
+    .unwrap();
+
+    let error = result.expect_err("hard reset should fail when tracked file removal is denied");
+    assert_eq!(error.stable_code(), StableErrorCode::IoWriteFailed);
+    assert_eq!(Head::current_commit().await.unwrap(), head_before);
+    assert!(temp_path.path().join("tracked.txt").exists());
+    assert!(
+        changes_to_be_committed().await.is_empty(),
+        "failed hard reset should restore the index to match HEAD"
+    );
+    assert!(
+        changes_to_be_staged().unwrap().modified.is_empty()
+            && changes_to_be_staged().unwrap().deleted.is_empty()
+            && changes_to_be_staged().unwrap().new.is_empty(),
+        "failed hard reset should restore the working tree to match HEAD"
     );
 }
 
@@ -382,6 +659,268 @@ async fn test_reset_hard() {
         "Should have no modified files"
     );
     assert!(unstaged.deleted.is_empty(), "Should have no deleted files");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_reset_mixed_same_target_resets_index_without_moving_head() {
+    let temp_path = tempdir().unwrap();
+    let _guard = ChangeDirGuard::new(temp_path.path());
+    setup_with_new_libra_in(temp_path.path()).await;
+    setup_reset_user_identity().await;
+
+    fs::write("tracked.txt", "tracked\n").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["tracked.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("base".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await;
+    let head_before = Head::current_commit().await.unwrap();
+
+    fs::write("tracked.txt", "tracked\nstaged\n").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["tracked.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+
+    reset::execute_safe(
+        ResetArgs {
+            target: "HEAD".to_string(),
+            soft: false,
+            mixed: true,
+            hard: false,
+            pathspecs: vec![],
+        },
+        &libra::utils::output::OutputConfig::default(),
+    )
+    .await
+    .expect("mixed reset to HEAD should succeed");
+
+    assert_eq!(Head::current_commit().await.unwrap(), head_before);
+    assert!(
+        changes_to_be_committed().await.is_empty(),
+        "mixed reset to HEAD should unstage tracked changes"
+    );
+    let unstaged = changes_to_be_staged().unwrap();
+    assert!(
+        unstaged
+            .modified
+            .iter()
+            .any(|path| path.file_name().and_then(|name| name.to_str()) == Some("tracked.txt")),
+        "tracked.txt should remain modified in the worktree after mixed reset"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_reset_hard_same_target_restores_worktree_and_removes_staged_additions() {
+    let temp_path = tempdir().unwrap();
+    let _guard = ChangeDirGuard::new(temp_path.path());
+    setup_with_new_libra_in(temp_path.path()).await;
+    setup_reset_user_identity().await;
+
+    fs::write("tracked.txt", "tracked\n").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["tracked.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("base".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await;
+
+    fs::write("tracked.txt", "tracked\nmodified\n").unwrap();
+    fs::write("new.txt", "new\n").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["new.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+
+    reset::execute_safe(
+        ResetArgs {
+            target: "HEAD".to_string(),
+            soft: false,
+            mixed: false,
+            hard: true,
+            pathspecs: vec![],
+        },
+        &libra::utils::output::OutputConfig::default(),
+    )
+    .await
+    .expect("hard reset to HEAD should succeed");
+
+    assert_eq!(fs::read_to_string("tracked.txt").unwrap(), "tracked\n");
+    assert!(
+        fs::metadata("new.txt").is_err(),
+        "hard reset to HEAD should remove staged additions not present in the target tree"
+    );
+    assert!(
+        changes_to_be_committed().await.is_empty(),
+        "hard reset to HEAD should clear staged changes"
+    );
+    let unstaged = changes_to_be_staged().unwrap();
+    assert!(
+        unstaged.modified.is_empty(),
+        "tracked changes should be restored"
+    );
+    assert!(
+        unstaged.deleted.is_empty(),
+        "tracked deletions should be cleared"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_reset_hard_removes_paths_tracked_only_by_head_tree() {
+    let temp_path = tempdir().unwrap();
+    let _guard = ChangeDirGuard::new(temp_path.path());
+    setup_with_new_libra_in(temp_path.path()).await;
+    setup_reset_user_identity().await;
+
+    fs::write("base.txt", "base\n").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["base.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("base".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await;
+
+    fs::write("tracked.txt", "tracked\n").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["tracked.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("add tracked".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await;
+
+    remove::execute(RemoveArgs {
+        pathspec: vec!["tracked.txt".to_string()],
+        cached: true,
+        recursive: false,
+        force: false,
+        dry_run: false,
+        ignore_unmatch: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
+    })
+    .await;
+    fs::write("tracked.txt", "tracked\nstill here\n").unwrap();
+
+    reset::execute_safe(
+        ResetArgs {
+            target: "HEAD~1".to_string(),
+            soft: false,
+            mixed: false,
+            hard: true,
+            pathspecs: vec![],
+        },
+        &libra::utils::output::OutputConfig::default(),
+    )
+    .await
+    .expect("hard reset should remove files tracked by HEAD even when absent from the index");
+
+    assert!(
+        fs::metadata("tracked.txt").is_err(),
+        "hard reset should remove tracked.txt because the target commit does not contain it"
+    );
+    assert!(
+        changes_to_be_committed().await.is_empty(),
+        "hard reset should clear staged deletions"
+    );
+    let unstaged = changes_to_be_staged().unwrap();
+    assert!(
+        unstaged.deleted.is_empty(),
+        "hard reset should not leave tracked.txt as a deleted path"
+    );
 }
 
 #[tokio::test]

@@ -7,13 +7,14 @@ use git_internal::{
     hash::ObjectHash,
     internal::object::{blob::Blob, commit::Commit, tree::Tree},
 };
+use serde::Serialize;
 
 use crate::{
     command::{get_target_commit, load_object},
     utils::{
-        error::{CliError, CliResult},
+        error::{CliError, CliResult, StableErrorCode},
         object_ext::TreeExt,
-        output::OutputConfig,
+        output::{OutputConfig, emit_json_data},
         pager::Pager,
         util,
     },
@@ -34,6 +35,23 @@ pub struct BlameArgs {
     pub line_range: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct BlameLine {
+    pub line_number: usize,
+    pub short_hash: String,
+    pub hash: String,
+    pub author: String,
+    pub date: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BlameOutput {
+    pub file: String,
+    pub revision: String,
+    pub lines: Vec<BlameLine>,
+}
+
 struct LineBlame {
     line_number: usize,
     commit_id: ObjectHash,
@@ -52,32 +70,75 @@ pub async fn execute(args: BlameArgs) {
 /// errors and exiting. Walks commit history for the target file, attributing
 /// each line to the commit that last changed it.
 pub async fn execute_safe(args: BlameArgs, out_config: &OutputConfig) -> CliResult<()> {
-    util::require_repo().map_err(|_| CliError::repo_not_found())?;
+    let result = run_blame(&args).await?;
 
     if out_config.is_json() {
-        return Err(CliError::command_usage(
-            "`blame` does not yet support --json or --machine output",
-        ));
+        return emit_json_data("blame", &result, out_config);
     }
 
-    let commit_id = get_target_commit(&args.commit)
-        .await
-        .map_err(|e| CliError::fatal(e.to_string()))?;
-
-    let commit_obj = load_object::<Commit>(&commit_id)
-        .map_err(|e| CliError::fatal(format!("failed to load commit: {e}")))?;
-
-    // get the final file content (the version we're blaming)
-    let target_lines = get_file_lines(&commit_obj, &args.file).map_err(CliError::fatal)?;
-
-    if target_lines.is_empty() {
-        if !out_config.quiet {
-            println!("File is empty");
-        }
+    if out_config.quiet {
         return Ok(());
     }
 
-    // Initialize blame: assume all lines come from the target commit initially
+    if result.lines.is_empty() {
+        println!("File is empty");
+        return Ok(());
+    }
+
+    let mut output = String::new();
+    for blame in &result.lines {
+        let author_short = if blame.author.chars().count() > 15 {
+            let truncated: String = blame.author.chars().take(12).collect();
+            format!("{truncated}...")
+        } else {
+            format!("{:15}", blame.author)
+        };
+        let date_formatted = blame
+            .date
+            .parse::<i64>()
+            .ok()
+            .and_then(|timestamp| DateTime::from_timestamp(timestamp, 0))
+            .map(|dt| {
+                dt.with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d %H:%M:%S %z")
+                    .to_string()
+            })
+            .unwrap_or_else(|| blame.date.clone());
+
+        output.push_str(&format!(
+            "{} ({:19} {} {}) {}\n",
+            blame.short_hash, author_short, date_formatted, blame.line_number, blame.content
+        ));
+    }
+
+    let mut pager = Pager::with_config(out_config)?;
+    pager.write_str(&output)?;
+    pager.finish()?;
+    Ok(())
+}
+
+async fn run_blame(args: &BlameArgs) -> CliResult<BlameOutput> {
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
+
+    let commit_id = get_target_commit(&args.commit).await.map_err(|e| {
+        CliError::fatal(e.to_string()).with_stable_code(StableErrorCode::CliInvalidTarget)
+    })?;
+
+    let commit_obj = load_object::<Commit>(&commit_id).map_err(|e| {
+        CliError::fatal(format!("failed to load commit: {e}"))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+    })?;
+
+    let target_lines = get_file_lines(&commit_obj, &args.file).map_err(map_blame_file_error)?;
+
+    if target_lines.is_empty() {
+        return Ok(BlameOutput {
+            file: args.file.clone(),
+            revision: commit_id.to_string(),
+            lines: Vec::new(),
+        });
+    }
+
     let mut blame_lines: Vec<LineBlame> = target_lines
         .iter()
         .enumerate()
@@ -90,13 +151,11 @@ pub async fn execute_safe(args: BlameArgs, out_config: &OutputConfig) -> CliResu
         })
         .collect();
 
-    // walk backwards through commit history, handling all parents (for merges)
     use std::collections::VecDeque;
     let mut queue: VecDeque<(ObjectHash, Commit, Vec<String>)> = VecDeque::new();
     queue.push_back((commit_id, commit_obj, target_lines));
 
     while let Some((current_id, current_commit, current_lines)) = queue.pop_front() {
-        // if no lines are blamed to the current commit, stop traversing this branch
         if !blame_lines.iter().any(|b| b.commit_id == current_id) {
             continue;
         }
@@ -108,97 +167,66 @@ pub async fn execute_safe(args: BlameArgs, out_config: &OutputConfig) -> CliResu
             };
 
             let parent_lines = match get_file_lines(&parent_commit, &args.file) {
-                Ok(lines) => {
-                    if lines.is_empty() {
-                        continue;
-                    }
-                    lines
-                }
-                Err(_) => continue, // file was created in current commit
+                Ok(lines) if !lines.is_empty() => lines,
+                _ => continue,
             };
 
-            // compute diff operations between parent and current
             let operations = compute_diff(&parent_lines, &current_lines);
-
             for op in operations {
                 use git_internal::diff::DiffOperation;
                 match op {
-                    DiffOperation::Insert { .. } => {}
+                    DiffOperation::Insert { .. } | DiffOperation::Delete { .. } => {}
                     DiffOperation::Equal { old_line, new_line } => {
                         let final_idx = new_line - 1;
-                        if let Some(blame) = blame_lines.get_mut(final_idx) {
-                            // move blame if it currently belongs to the current commit
-                            if blame.commit_id == current_id {
-                                let parent_content = parent_lines.get(old_line - 1);
-                                if Some(&blame.content) == parent_content {
-                                    blame.commit_id = *parent_id;
-                                    blame.author = parent_commit.author.name.clone();
-                                    blame.date = parent_commit.author.timestamp.to_string();
-                                }
+                        if let Some(blame) = blame_lines.get_mut(final_idx)
+                            && blame.commit_id == current_id
+                        {
+                            let parent_content = parent_lines.get(old_line - 1);
+                            if Some(&blame.content) == parent_content {
+                                blame.commit_id = *parent_id;
+                                blame.author = parent_commit.author.name.clone();
+                                blame.date = parent_commit.author.timestamp.to_string();
                             }
                         }
                     }
-                    DiffOperation::Delete { .. } => {}
                 }
             }
             queue.push_back((*parent_id, parent_commit, parent_lines));
         }
     }
 
-    // line range if specified
     let filtered_lines = if let Some(ref range) = args.line_range {
-        match parse_line_range(range, blame_lines.len()) {
-            Ok((start, end)) => blame_lines
-                .into_iter()
-                .filter(|b| b.line_number >= start && b.line_number <= end)
-                .collect(),
-            Err(e) => {
-                return Err(CliError::command_usage(format!("invalid line range: {e}")));
-            }
-        }
+        let (start, end) = parse_line_range(range, blame_lines.len()).map_err(|e| {
+            CliError::command_usage(format!("invalid line range: {e}"))
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint(r#"supported formats: "10", "10,20", "10,+5""#)
+        })?;
+        blame_lines
+            .into_iter()
+            .filter(|b| b.line_number >= start && b.line_number <= end)
+            .collect::<Vec<_>>()
     } else {
         blame_lines
     };
 
-    let mut output = String::new();
-
-    for blame in &filtered_lines {
-        let short_hash = blame
-            .commit_id
-            .to_string()
-            .chars()
-            .take(8)
-            .collect::<String>();
-        let author_short = if blame.author.len() > 15 {
-            format!("{}...", &blame.author[..12])
-        } else {
-            format!("{:15}", blame.author)
-        };
-
-        let date_formatted = if let Ok(timestamp) = blame.date.parse::<i64>() {
-            DateTime::from_timestamp(timestamp, 0)
-                .map(|dt| {
-                    dt.with_timezone(&chrono::Local)
-                        .format("%Y-%m-%d %H:%M:%S %z")
-                        .to_string()
-                })
-                .unwrap_or_else(|| blame.date.clone())
-        } else {
-            blame.date.clone()
-        };
-
-        output.push_str(&format!(
-            "{} ({:19} {} {}) {}\n",
-            short_hash, author_short, date_formatted, blame.line_number, blame.content
-        ));
-    }
-
-    if !out_config.quiet {
-        let mut pager = Pager::with_config(out_config)?;
-        pager.write_str(&output)?;
-        pager.finish()?;
-    }
-    Ok(())
+    Ok(BlameOutput {
+        file: args.file.clone(),
+        revision: commit_id.to_string(),
+        lines: filtered_lines
+            .into_iter()
+            .map(|line| {
+                let hash = line.commit_id.to_string();
+                BlameLine {
+                    line_number: line.line_number,
+                    short_hash: hash.chars().take(8).collect(),
+                    hash,
+                    author: line.author,
+                    date: line.date,
+                    content: line.content,
+                }
+            })
+            .collect(),
+    })
 }
 fn get_file_lines(commit: &Commit, file_path: &str) -> Result<Vec<String>, String> {
     let tree =
@@ -217,6 +245,20 @@ fn get_file_lines(commit: &Commit, file_path: &str) -> Result<Vec<String>, Strin
 
     let content = String::from_utf8_lossy(&blob.data);
     Ok(content.lines().map(|s| s.to_string()).collect())
+}
+
+fn map_blame_file_error(message: String) -> CliError {
+    let normalized = message.to_ascii_lowercase();
+    let stable_code = if normalized.contains("failed to load tree")
+        || normalized.contains("failed to load blob")
+        || normalized.contains("failed to load object")
+    {
+        StableErrorCode::RepoCorrupt
+    } else {
+        StableErrorCode::CliInvalidTarget
+    };
+
+    CliError::fatal(message).with_stable_code(stable_code)
 }
 
 /// Parse line range from string like "10", "10,20", "10,+5"
@@ -260,5 +302,22 @@ fn parse_line_range(range_str: &str, total_lines: usize) -> Result<(usize, usize
             Ok((start, end))
         }
         _ => Err("Invalid range format. Use: LINE or START,END or START,+COUNT".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn map_blame_file_error_reports_repo_corrupt_for_storage_failures() {
+        let error = map_blame_file_error("Failed to load tree: corrupt object".to_string());
+        assert_eq!(error.stable_code(), StableErrorCode::RepoCorrupt);
+    }
+
+    #[test]
+    fn map_blame_file_error_reports_invalid_target_for_missing_file() {
+        let error = map_blame_file_error("File 'tracked.txt' not found in commit".to_string());
+        assert_eq!(error.stable_code(), StableErrorCode::CliInvalidTarget);
     }
 }

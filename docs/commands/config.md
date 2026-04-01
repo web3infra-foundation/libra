@@ -97,7 +97,7 @@ Supported `--usage` values are `signing` and `encrypt`.
 
 | Feature | Git | jj | Libra |
 |---------|-----|-----|-------|
-| Implicit set | `git config key val` | No (requires `set`) | `libra config set key val` + 兼容 `libra config key val` |
+| Implicit set | `git config key val` | No (requires `set`) | `libra config set key val` plus compatible `libra config key val` |
 | Subcommand style | No | Yes (`set/get/list/edit/path`) | Yes (`set/get/list/unset/import/path`) |
 | Get value | `git config key` | `jj config get key` | `libra config get key` |
 | List | `git config -l` | `jj config list` | `libra config list` |

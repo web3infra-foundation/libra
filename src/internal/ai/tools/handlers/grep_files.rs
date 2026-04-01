@@ -196,7 +196,7 @@ fn grep_files_blocking(
     }
 
     // Sort by modification time, most recent first.
-    matched.sort_by(|a, b| b.1.cmp(&a.1));
+    matched.sort_by_key(|entry| std::cmp::Reverse(entry.1));
 
     Ok(matched.into_iter().map(|(p, _)| p).take(limit).collect())
 }

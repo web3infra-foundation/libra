@@ -62,11 +62,6 @@ const DEFAULT_BIND_HOST: &str = "127.0.0.1";
 const DEFAULT_CODEX_BIN: &str = "codex";
 const CODEX_STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const CODEX_STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(200);
-#[expect(
-    dead_code,
-    reason = "Embedded browse page is reserved for the web/TUI code flow"
-)]
-const BROWSE_PAGE_HTML: &str = include_str!("code/index.html");
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum CodeProvider {

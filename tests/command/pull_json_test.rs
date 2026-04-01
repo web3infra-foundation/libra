@@ -90,6 +90,25 @@ fn configure_pull_tracking(repo: &Path, remote_dir: &Path, branch: &str) {
     assert_cli_success(&branch_merge, "set branch.main.merge");
 }
 
+fn push_remote_commit(
+    work_dir: &Path,
+    branch: &str,
+    file: &str,
+    content: &str,
+    message: &str,
+) -> (String, String) {
+    let previous = git_stdout(&["rev-parse", "HEAD"], work_dir);
+    fs::write(work_dir.join(file), content).expect("failed to write remote file");
+    git(&["add", file], work_dir);
+    git(&["commit", "-m", message], work_dir);
+    git(
+        &["push", "origin", &format!("HEAD:refs/heads/{branch}")],
+        work_dir,
+    );
+    let current = git_stdout(&["rev-parse", "HEAD"], work_dir);
+    (previous, current)
+}
+
 #[test]
 #[serial]
 fn json_pull_fast_forward_returns_structured_data() {
@@ -116,6 +135,7 @@ fn json_pull_fast_forward_returns_structured_data() {
     assert!(data["fetch"]["url"].is_string());
     assert!(data["fetch"]["refs_updated"].is_array());
     assert!(data["fetch"]["objects_fetched"].is_number());
+    assert!(data["merge"]["old_commit"].is_null());
     assert_eq!(data["merge"]["strategy"], "fast-forward");
     assert!(data["merge"]["commit"].is_string());
     assert!(data["merge"]["files_changed"].is_number());
@@ -149,6 +169,7 @@ fn json_pull_already_up_to_date_returns_structured_data() {
     let data = &parsed["data"];
 
     assert_eq!(data["merge"]["strategy"], "already-up-to-date");
+    assert!(data["merge"]["old_commit"].is_string());
     assert_eq!(data["merge"]["commit"], serde_json::Value::Null);
     assert_eq!(data["merge"]["files_changed"], 0);
     assert_eq!(data["merge"]["up_to_date"], true);
@@ -191,4 +212,39 @@ fn machine_pull_emits_single_json_line() {
         "machine pull success should keep stderr clean, got: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+#[serial]
+fn json_pull_follow_up_fast_forward_reports_old_and_new_commits() {
+    let (_temp_root, remote_dir, work_dir, branch) = create_remote_fixture();
+
+    let local_repo = tempdir().expect("failed to create local repo");
+    init_repo_via_cli(local_repo.path());
+    configure_identity_via_cli(local_repo.path());
+    configure_pull_tracking(local_repo.path(), &remote_dir, &branch);
+
+    let first_pull = run_libra_command(&["pull"], local_repo.path());
+    assert_cli_success(&first_pull, "initial pull");
+
+    let (previous, current) = push_remote_commit(
+        &work_dir,
+        &branch,
+        "follow-up.txt",
+        "follow-up change\n",
+        "remote follow-up",
+    );
+
+    let output = run_libra_command(&["--json", "pull"], local_repo.path());
+    assert_cli_success(&output, "follow-up json pull");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("expected JSON on stdout, got: {stdout}\nerror: {e}"));
+    let data = &parsed["data"];
+
+    assert_eq!(data["merge"]["strategy"], "fast-forward");
+    assert_eq!(data["merge"]["old_commit"], previous);
+    assert_eq!(data["merge"]["commit"], current);
+    assert_eq!(data["merge"]["up_to_date"], false);
 }
