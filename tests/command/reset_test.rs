@@ -14,7 +14,7 @@ use libra::{
         status::{changes_to_be_committed, changes_to_be_staged},
     },
     internal::config::ConfigKv,
-    utils::{error::StableErrorCode, test::setup_with_new_libra_in},
+    utils::{test::setup_with_new_libra_in},
 };
 
 use super::*;
