@@ -322,6 +322,56 @@ Note:
 
 ---
 
+## Bisect - Binary Search for Bugs
+
+Libra implements a `bisect` subcommand that uses binary search to find the commit that introduced a bug. It is broadly compatible with `git bisect`.
+
+### Basic Usage
+
+```bash
+# Start a bisect session
+libra bisect start
+
+# Mark the current commit as bad (contains the bug)
+libra bisect bad
+
+# Mark a known-good commit
+libra bisect good <commit>
+
+# After marking, bisect will checkout commits for you to test
+# Continue marking commits as good/bad until the culprit is found
+
+# End the session and restore your original HEAD
+libra bisect reset
+```
+
+### Quick Start with Known Bounds
+
+```bash
+# Start with both bad and good commits specified
+libra bisect start HEAD~10 HEAD~20  # HEAD~10 is bad, HEAD~20 is good
+```
+
+### Subcommands
+
+- `libra bisect start [<bad> [<good>]]` – start a new bisect session
+- `libra bisect bad [<rev>]` – mark a commit as bad (contains the bug)
+- `libra bisect good [<rev>]` – mark a commit as good (bug-free)
+- `libra bisect skip [<rev>]` – skip the current commit (untestable)
+- `libra bisect reset [<rev>]` – end the session and restore original HEAD
+- `libra bisect log` – show the current bisect state
+
+### Safety Features
+
+Libra's bisect implementation includes several safety guards:
+
+- **Clean working tree required**: Bisect will not start if you have uncommitted changes (including ignored files like `.env`)
+- **Bare repository protection**: Bisect is blocked in bare repositories (no working tree)
+- **State preserved until reset**: After finding the culprit, bisect state is preserved so you can run `bisect reset` to restore your original branch
+- **Branch restoration**: `bisect reset` restores you to your original branch, not a detached HEAD
+
+---
+
 ## Worktree Management
 
 Libra implements a `worktree` subcommand that is broadly compatible with `git worktree`, allowing you to manage multiple working directories attached to the same repository storage.
