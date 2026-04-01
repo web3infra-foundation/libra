@@ -519,3 +519,44 @@ async fn test_checkout_existing_branch_with_unstaged_dirty_worktree_returns_erro
         err.message()
     );
 }
+
+#[test]
+fn test_checkout_existing_branch_with_conflicting_untracked_file_returns_error() {
+    use super::{
+        assert_cli_success, create_committed_repo_via_cli, parse_cli_error_stderr,
+        run_libra_command,
+    };
+
+    let repo = create_committed_repo_via_cli();
+
+    let create = run_libra_command(&["switch", "-c", "other"], repo.path());
+    assert_cli_success(&create, "switch -c other");
+
+    std::fs::write(repo.path().join("conflict.txt"), "tracked on other\n").unwrap();
+    let add = run_libra_command(&["add", "conflict.txt"], repo.path());
+    assert_cli_success(&add, "add conflict.txt on other");
+    let commit = run_libra_command(
+        &["commit", "-m", "other adds conflict", "--no-verify"],
+        repo.path(),
+    );
+    assert_cli_success(&commit, "commit conflict.txt on other");
+
+    let back = run_libra_command(&["switch", "main"], repo.path());
+    assert_cli_success(&back, "switch main");
+
+    std::fs::write(repo.path().join("conflict.txt"), "local untracked\n").unwrap();
+
+    let output = run_libra_command(&["checkout", "other"], repo.path());
+    assert_eq!(output.status.code(), Some(128));
+    let (_human, report) = parse_cli_error_stderr(&output.stderr);
+    assert!(
+        report
+            .message
+            .contains("local changes would be overwritten by checkout"),
+        "error should preserve checkout wording, got: {}",
+        report.message
+    );
+
+    let content = std::fs::read_to_string(repo.path().join("conflict.txt")).unwrap();
+    assert_eq!(content, "local untracked\n");
+}

@@ -216,6 +216,40 @@ fn dirty_uncommitted_returns_exit_128_with_repo_state_error() {
 }
 
 #[test]
+fn untracked_file_conflicting_with_target_branch_is_rejected() {
+    let repo = create_committed_repo_via_cli();
+
+    let create = run_libra_command(&["switch", "-c", "other"], repo.path());
+    assert_cli_success(&create, "switch -c other");
+
+    std::fs::write(repo.path().join("conflict.txt"), "tracked on other\n").unwrap();
+    let add = run_libra_command(&["add", "conflict.txt"], repo.path());
+    assert_cli_success(&add, "add conflict.txt on other");
+    let commit = run_libra_command(
+        &["commit", "-m", "other adds conflict", "--no-verify"],
+        repo.path(),
+    );
+    assert_cli_success(&commit, "commit conflict.txt on other");
+
+    let back = run_libra_command(&["switch", "main"], repo.path());
+    assert_cli_success(&back, "switch main");
+
+    std::fs::write(repo.path().join("conflict.txt"), "local untracked\n").unwrap();
+
+    let output = run_libra_command(&["switch", "other"], repo.path());
+    assert_cli_error_contract(
+        &output,
+        128,
+        StableErrorCode::ConflictOperationBlocked,
+        "untracked working tree file would be overwritten by switch: conflict.txt",
+        &["move or remove it before switching"],
+    );
+
+    let content = std::fs::read_to_string(repo.path().join("conflict.txt")).unwrap();
+    assert_eq!(content, "local untracked\n");
+}
+
+#[test]
 fn dirty_repo_branch_not_found_preserves_invalid_target_priority() {
     let repo = create_committed_repo_via_cli();
     std::fs::write(repo.path().join("tracked.txt"), "modified content\n").unwrap();

@@ -1,15 +1,19 @@
 //! Switch command to change branches safely, validating clean state, handling creation, and delegating checkout behavior to restore logic.
 
 use clap::Parser;
-use git_internal::hash::{ObjectHash, get_hash_kind};
+use git_internal::{
+    hash::{ObjectHash, get_hash_kind},
+    internal::index::Index,
+};
 use serde::Serialize;
 
 use super::{
+    reset,
     restore::{self, RestoreArgs},
     status,
 };
 use crate::{
-    command::{branch, status::StatusArgs},
+    command::{branch, load_object, status::StatusArgs},
     internal::{
         branch::{self as repo_branch, Branch},
         db::get_db_conn_instance,
@@ -19,7 +23,9 @@ use crate::{
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
-        util::{self, get_commit_base},
+        path, util,
+        util::get_commit_base,
+        worktree,
     },
 };
 
@@ -116,6 +122,9 @@ pub enum SwitchError {
     #[error("uncommitted changes, can't switch branch")]
     DirtyUncommitted,
 
+    #[error("untracked working tree file would be overwritten by switch: {0}")]
+    UntrackedOverwrite(String),
+
     #[error("failed to determine working tree status: {0}")]
     StatusCheck(String),
 
@@ -187,6 +196,9 @@ impl From<SwitchError> for CliError {
             SwitchError::DirtyUncommitted => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::RepoStateInvalid)
                 .with_hint("commit or stash your changes before switching."),
+            SwitchError::UntrackedOverwrite(..) => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+                .with_hint("move or remove it before switching."),
             SwitchError::StatusCheck(..) => {
                 CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
             }
@@ -407,6 +419,59 @@ async fn resolve_created_branch(branch_name: &str) -> Result<ResolvedSwitchBranc
     })
 }
 
+async fn resolve_create_switch_target(
+    branch_or_commit: Option<&str>,
+) -> Result<Option<ObjectHash>, SwitchError> {
+    match branch_or_commit {
+        Some(target) => get_commit_base(target)
+            .await
+            .map(Some)
+            .map_err(|_| SwitchError::DelegatedCli(invalid_branch_base_error(target))),
+        None => Ok(Head::current_commit().await),
+    }
+}
+
+fn repo_corrupt_switch_error(message: impl Into<String>) -> SwitchError {
+    SwitchError::DelegatedCli(
+        CliError::fatal(message.into()).with_stable_code(StableErrorCode::RepoCorrupt),
+    )
+}
+
+fn target_index_for_commit(commit_id: &ObjectHash) -> Result<Index, SwitchError> {
+    let commit: git_internal::internal::object::commit::Commit =
+        load_object(commit_id).map_err(|e| {
+            repo_corrupt_switch_error(format!("failed to inspect target commit {commit_id}: {e}"))
+        })?;
+    let tree: git_internal::internal::object::tree::Tree =
+        load_object(&commit.tree_id).map_err(|e| {
+            repo_corrupt_switch_error(format!(
+                "failed to inspect target tree {}: {e}",
+                commit.tree_id
+            ))
+        })?;
+
+    let mut index = Index::new();
+    reset::rebuild_index_from_tree(&tree, &mut index, "").map_err(|e| {
+        repo_corrupt_switch_error(format!("failed to inspect target tree state: {e}"))
+    })?;
+    Ok(index)
+}
+
+fn ensure_no_untracked_overwrite(target_commit: ObjectHash) -> Result<(), SwitchError> {
+    let current_index = Index::load(path::index()).unwrap_or_else(|_| Index::new());
+    let untracked_paths =
+        worktree::untracked_workdir_paths(&current_index).map_err(SwitchError::StatusCheck)?;
+    let target_index = target_index_for_commit(&target_commit)?;
+
+    if let Some(conflict) = worktree::untracked_overwrite_path(&untracked_paths, &target_index) {
+        return Err(SwitchError::UntrackedOverwrite(
+            conflict.display().to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 pub async fn execute(args: SwitchArgs) {
     if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
         err.print_stderr();
@@ -434,7 +499,7 @@ async fn run_switch(args: SwitchArgs, output: &OutputConfig) -> Result<SwitchOut
     if track {
         let target = branch.ok_or(SwitchError::MissingTrackTarget)?;
         let tracked_target = resolve_tracked_remote_target(&target).await?;
-        ensure_clean_status(output).await?;
+        ensure_clean_status_for_commit(tracked_target.commit, output).await?;
 
         let tracked = switch_to_tracked_remote_branch(tracked_target, output).await?;
         return Ok(SwitchOutput {
@@ -454,7 +519,10 @@ async fn run_switch(args: SwitchArgs, output: &OutputConfig) -> Result<SwitchOut
 
     if let Some(new_branch_name) = create {
         validate_new_branch_request(&new_branch_name, branch.as_deref()).await?;
-        ensure_clean_status(output).await?;
+        match resolve_create_switch_target(branch.as_deref()).await? {
+            Some(target_commit) => ensure_clean_status_for_commit(target_commit, output).await?,
+            None => ensure_clean_status(output).await?,
+        }
 
         branch::create_branch_safe(new_branch_name.clone(), branch).await?;
         let created_branch = resolve_created_branch(&new_branch_name).await?;
@@ -476,7 +544,7 @@ async fn run_switch(args: SwitchArgs, output: &OutputConfig) -> Result<SwitchOut
         let commit_base = get_commit_base(&target)
             .await
             .map_err(|e| SwitchError::CommitResolve(e.to_string()))?;
-        ensure_clean_status(output).await?;
+        ensure_clean_status_for_commit(commit_base, output).await?;
 
         let commit = switch_to_commit(commit_base, output).await?;
         return Ok(SwitchOutput {
@@ -506,7 +574,7 @@ async fn run_switch(args: SwitchArgs, output: &OutputConfig) -> Result<SwitchOut
         });
     }
 
-    ensure_clean_status(output).await?;
+    ensure_clean_status_for_commit(target_branch.commit, output).await?;
 
     let commit = switch_to_resolved_branch(target_branch, output).await?;
     Ok(SwitchOutput {
@@ -527,6 +595,20 @@ async fn run_switch(args: SwitchArgs, output: &OutputConfig) -> Result<SwitchOut
 /// status summary (via `status::execute`) unless the caller requested quiet or
 /// structured output, then returns the corresponding [`SwitchError`] variant.
 pub async fn ensure_clean_status(output: &OutputConfig) -> Result<(), SwitchError> {
+    ensure_clean_status_internal(None, output).await
+}
+
+pub async fn ensure_clean_status_for_commit(
+    target_commit: ObjectHash,
+    output: &OutputConfig,
+) -> Result<(), SwitchError> {
+    ensure_clean_status_internal(Some(target_commit), output).await
+}
+
+async fn ensure_clean_status_internal(
+    target_commit: Option<ObjectHash>,
+    output: &OutputConfig,
+) -> Result<(), SwitchError> {
     let unstaged = match status::changes_to_be_staged() {
         Ok(c) => c,
         Err(err) => {
@@ -551,6 +633,9 @@ pub async fn ensure_clean_status(output: &OutputConfig) -> Result<(), SwitchErro
             }
             Err(SwitchError::DirtyUncommitted)
         } else {
+            if let Some(target_commit) = target_commit {
+                ensure_no_untracked_overwrite(target_commit)?;
+            }
             Ok(())
         }
     }

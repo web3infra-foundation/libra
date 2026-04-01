@@ -75,9 +75,26 @@ pub async fn execute_safe(args: CheckoutArgs, output: &OutputConfig) -> CliResul
         return Ok(());
     }
 
-    match switch::ensure_clean_status(output).await {
+    let target_commit = if let Some(ref branch_name) = args.branch {
+        Branch::find_branch(branch_name, None)
+            .await
+            .map(|branch| branch.commit)
+    } else {
+        None
+    };
+
+    let clean_status = match target_commit {
+        Some(target_commit) => switch::ensure_clean_status_for_commit(target_commit, output).await,
+        None => switch::ensure_clean_status(output).await,
+    };
+
+    match clean_status {
         Ok(()) => {}
-        Err(switch::SwitchError::DirtyUnstaged | switch::SwitchError::DirtyUncommitted) => {
+        Err(
+            switch::SwitchError::DirtyUnstaged
+            | switch::SwitchError::DirtyUncommitted
+            | switch::SwitchError::UntrackedOverwrite(..),
+        ) => {
             return Err(CliError::failure(
                 "local changes would be overwritten by checkout",
             ));
