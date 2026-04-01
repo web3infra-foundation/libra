@@ -21,7 +21,7 @@ use crate::{
         load_object, restore,
         status::{changes_to_be_committed_safe, changes_to_be_staged_with_policy},
     },
-    internal::{config::ConfigKv, db::get_db_conn_instance, head::Head},
+    internal::{branch::Branch, config::ConfigKv, db::get_db_conn_instance, head::Head},
     utils::{
         error::{CliError, CliResult},
         ignore::IgnorePolicy,
@@ -313,7 +313,8 @@ pub async fn execute_safe(bisect_cmd: Bisect, output: &OutputConfig) -> CliResul
 
 /// Check if the repository is bare (no working tree)
 /// Parses Git boolean values: true/yes/on/1, false/no/off/0
-async fn is_bare_repository() -> bool {
+/// Returns error on unreadable or invalid config (fail-closed for safety)
+async fn is_bare_repository() -> CliResult<bool> {
     fn parse_git_bool(value: &str) -> Option<bool> {
         match value.trim() {
             v if v.eq_ignore_ascii_case("true")
@@ -335,8 +336,16 @@ async fn is_bare_repository() -> bool {
     }
 
     match ConfigKv::get("core.bare").await {
-        Ok(Some(entry)) => parse_git_bool(&entry.value).unwrap_or(false),
-        _ => false,
+        Ok(Some(entry)) => parse_git_bool(&entry.value).ok_or_else(|| {
+            CliError::fatal(format!(
+                "Invalid core.bare value: '{}'. Expected true/false/yes/no/on/off/1/0",
+                entry.value
+            ))
+        }),
+        Ok(None) => Ok(false), // No config = not bare
+        Err(e) => Err(CliError::fatal(format!(
+            "Failed to read core.bare config: {e}"
+        ))),
     }
 }
 
@@ -347,7 +356,7 @@ async fn handle_start(
     output: &OutputConfig,
 ) -> CliResult<()> {
     // Bare repositories have no working tree - bisect requires checkout operations
-    if is_bare_repository().await {
+    if is_bare_repository().await? {
         return Err(CliError::fatal("bisect cannot be run in a bare repository")
             .with_hint("bisect requires a working tree to check out commits for testing"));
     }
@@ -605,8 +614,17 @@ async fn handle_reset(rev: Option<String>, output: &OutputConfig) -> CliResult<(
     // Determine where to reset
     let (target_hash, target_branch) = if let Some(rev) = rev {
         (resolve_ref(&rev).await?, None)
+    } else if let Some(ref branch_name) = state.orig_head_name {
+        // Restore to original branch - use its current commit (branch may have moved during bisect)
+        match Branch::find_branch(branch_name, None).await {
+            Some(branch) => (branch.commit, Some(branch_name.clone())),
+            None => {
+                // Branch no longer exists - fall back to orig_head commit
+                (state.orig_head, None)
+            }
+        }
     } else {
-        (state.orig_head, state.orig_head_name.clone())
+        (state.orig_head, None)
     };
 
     // Restore original HEAD - use branch if available to avoid detached state
