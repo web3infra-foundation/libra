@@ -37,6 +37,10 @@ pub enum BranchStoreError {
     Delete { name: String, detail: String },
 }
 
+fn log_branch_store_error(context: &str, error: &BranchStoreError) {
+    tracing::error!("{context}: {error}");
+}
+
 fn branch_from_model(model: reference::Model) -> Result<Option<Branch>, BranchStoreError> {
     let Some(name) = model.name.clone() else {
         return Err(BranchStoreError::Corrupt {
@@ -140,9 +144,13 @@ impl Branch {
     where
         C: ConnectionTrait,
     {
-        Self::list_branches_result_with_conn(db, remote)
-            .await
-            .unwrap_or_default()
+        match Self::list_branches_result_with_conn(db, remote).await {
+            Ok(branches) => branches,
+            Err(error) => {
+                log_branch_store_error("failed to list branches", &error);
+                Vec::new()
+            }
+        }
     }
 
     /// list all remote branches
@@ -180,10 +188,22 @@ impl Branch {
     where
         C: ConnectionTrait,
     {
-        Self::find_branch_result_with_conn(db, branch_name, remote)
-            .await
-            .ok()
-            .flatten()
+        match Self::find_branch_result_with_conn(db, branch_name, remote).await {
+            Ok(branch) => branch,
+            Err(error) => {
+                log_branch_store_error(
+                    &format!(
+                        "failed to resolve branch lookup for '{}'{}",
+                        branch_name,
+                        remote
+                            .map(|name| format!(" on remote '{name}'"))
+                            .unwrap_or_default()
+                    ),
+                    &error,
+                );
+                None
+            }
+        }
     }
 
     /// get the branch by name
@@ -322,7 +342,18 @@ impl Branch {
     where
         C: ConnectionTrait,
     {
-        let _ = Self::delete_branch_result_with_conn(db, branch_name, remote).await;
+        if let Err(error) = Self::delete_branch_result_with_conn(db, branch_name, remote).await {
+            log_branch_store_error(
+                &format!(
+                    "failed to delete branch '{}'{}",
+                    branch_name,
+                    remote
+                        .map(|name| format!(" on remote '{name}'"))
+                        .unwrap_or_default()
+                ),
+                &error,
+            );
+        }
     }
 
     pub async fn delete_branch(branch_name: &str, remote: Option<&str>) {

@@ -36,26 +36,25 @@
 - **执行层与渲染层已拆分**：`execute_safe()` 调用 `run_reset()` 收集结构化结果，再统一渲染
 - **成功确认消息已落地**：全量 reset 会输出 `HEAD is now at ...`，pathspec reset 会输出 unstaged 文件列表
 - **主要错误已带显式 `StableErrorCode`**：invalid revision、pathspec/mode 冲突、repo corrupt、I/O 失败等路径都已显式映射
+- **`ResetError` typed enum 已落地**：object load、index、HEAD、worktree、pathspec 等路径都已统一收口到 typed error
+- **运行时 helper 已完成 typed 化**：`perform_reset()`、pathspec 查找、目录清理等路径已移除关键词匹配分类
+- **warning 管线已落地**：目录清理 warning 已改走共享 `emit_warning()` / warning tracker，不再直写 stderr
+- **`--help` EXAMPLES 已落地**
 - **JSON 回归测试已存在**：`tests/command/reset_test.rs` 已覆盖 `--json` schema、`--hard HEAD` restore 计数和 pathspec usage error
 
 仍需改进：
 
-- **无 `ResetError` typed enum**：`run_reset()` 仍返回 `CliResult<ResetOutput>`，typed error 收口尚未完成
-- **运行时错误仍是 stringly typed**：`perform_reset()` / `remove_empty_directories()` 等内部 helper 仍返回 `Result<T, String>`，`map_reset_runtime_error()` 依赖关键词匹配分类，较脆弱
-- **pathspec 错误仍未纳入 typed enum**：如 `path contains invalid UTF-8`、`pathspec ... did not match any file(s) known to libra` 仍是 inline `CliError`
-- **非致命 warning 仍直写 stderr**：目录清理失败仍通过 `eprintln!()` 输出，尚未接入共享 warning/output 管线
-- **缺少 `--help` EXAMPLES 段**：Cross-Cutting **B** 在 `reset` 上仍未落地
-- **Cross-Cutting `G` 尚未接入**：意外内部错误还未统一附带 Issues URL
+- **rollback 边界需要继续回归保护**：reset 失败后 rollback 再失败时，必须保持主错误分类不变，避免把 repo corruption 误报成 worktree/I/O 错误
+- **Cross-Cutting `G` 仍可继续增强**：如果后续引入真正的 internal-invariant 类兜底错误，可再统一附带 Issues URL
 
 ### 目标与非目标
 
-**本批目标：**
-- 引入 `ResetError` typed error enum，收口剩余的 string-based runtime 错误路径
-- 将 pathspec 相关的用户输入错误一并纳入 typed enum，避免残留 inline `CliError`
-- 将 `perform_reset()` / `remove_empty_directories()` 等 helper 从 `Result<T, String>` 升级到 typed error
-- 将非致命 cleanup warning 接入共享 `emit_warning()` / warning tracker，避免直写 stderr，同时不改变现有 `ResetOutput` JSON schema
-- 保持已落地的 `ResetOutput` / JSON / human 确认消息契约不回退
-- 补齐 `--help` EXAMPLES 段，并为异常内部错误预留 Issues URL 接入点
+**已完成目标：**
+- `ResetError` typed error enum、typed helper、pathspec typed error、warning 管线、`run_reset()` / `render_reset_output()` 分层与 `--help` EXAMPLES 已落地
+
+**后续收口目标：**
+- 继续用回归测试锁住 rollback / warning / pathspec corruption 这些边界行为
+- 如后续增加 internal invariant 兜底错误，再统一接入 Issues URL
 
 **本批非目标：**
 - **不改变 soft/mixed/hard reset 核心逻辑**。索引重建和工作树恢复行为不变
@@ -337,6 +336,6 @@ EXAMPLES:
 
 | 文件 | 改动类型 | 说明 |
 |------|---------|------|
-| `src/command/reset.rs` | **收口** | 保持已落地的 `ResetOutput` / `run_reset()` / `render_reset_output()` / JSON / human 确认消息；后续补齐 `ResetError` typed enum、移除 `map_reset_runtime_error()` 的关键词分类、把目录清理 warning 接入共享输出、补齐 `--help` EXAMPLES |
+| `src/command/reset.rs` | **维护** | 保持已落地的 `ResetOutput` / `ResetError` / `run_reset()` / `render_reset_output()` / warning 管线 / JSON / human 确认消息 / `--help` EXAMPLES 不回退；后续仅维护 rollback 与边界回归 |
 | `tests/command/reset_test.rs` | **扩展** | 在现有 JSON / human 输出回归基础上，补齐 typed error、warning 路径与 help EXAMPLES 回归 |
 | `tests/command/reset_json_test.rs` | **可选拆分** | 若 `reset_test.rs` 中的 JSON 覆盖继续膨胀，可再拆出独立 schema 稳定性文件；当前不是阻断项 |

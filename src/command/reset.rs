@@ -506,7 +506,12 @@ fn merge_reset_failure(error: ResetError, rollback: Result<(), ResetError>) -> R
                 ResetError::WorktreeRestore(format!("{detail}; rollback failed: {rollback_error}"))
             }
             other => {
-                ResetError::WorktreeRestore(format!("{other}; rollback failed: {rollback_error}"))
+                tracing::error!(
+                    "rollback after reset failed: {} (primary error: {})",
+                    rollback_error,
+                    other
+                );
+                other
             }
         },
     }
@@ -939,5 +944,23 @@ mod tests {
             "failed to read file /tmp/repo/tracked.txt: Permission denied".into(),
         ));
         assert_eq!(error.stable_code(), StableErrorCode::IoReadFailed);
+    }
+
+    #[test]
+    fn test_merge_reset_failure_preserves_primary_error_category() {
+        let merged = merge_reset_failure(
+            ResetError::ObjectLoad {
+                kind: "tree",
+                object_id: "deadbeef".into(),
+                detail: "corrupt object".into(),
+            },
+            Err(ResetError::WorktreeRestore(
+                "failed to restore working tree".into(),
+            )),
+        );
+
+        assert!(matches!(merged, ResetError::ObjectLoad { .. }));
+        let cli_error = CliError::from(merged);
+        assert_eq!(cli_error.stable_code(), StableErrorCode::RepoCorrupt);
     }
 }

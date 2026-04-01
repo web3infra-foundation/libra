@@ -17,48 +17,42 @@
 - `StableErrorCode` 体系已有 18 个错误码
 - `CliError` 支持 `.with_hint()`、`.with_stable_code()`、`.with_detail()`
 - `execute()` / `execute_safe(args, output)` 双入口已存在
-- `BranchOutput` + `run_branch_json()` 已覆盖 list / create / delete / rename / set-upstream / show-current 的 JSON 输出
+- `BranchOutput` + `run_branch()` 已覆盖 list / create / delete / rename / set-upstream / show-current 的 JSON 输出
 - `--list` / `--delete` / `--delete-force` / `--set-upstream-to` / `--show-current` / `--move` / `--remotes` / `--all` / `--contains` / `--no-contains` 已实现
 - create / delete / rename / set-upstream / show-current 路径都已补上命令层 `StableErrorCode`
 - `is_valid_git_branch_name()` 分支名验证已实现（`branch.rs:694-725`）
 - `delete_branch_safe()` 已有 merge 检查和 `.with_hint()`（`branch.rs:342-349`）
-- human 路径已至少覆盖 delete-safe、rename、set-upstream、show-current 的确认输出
-- `after_help` 已有 compatibility notes，但尚未补 EXAMPLES
+- human 路径已覆盖 create / delete-safe / force-delete / rename / set-upstream / show-current 的确认输出
+- `after_help` 已同时包含 compatibility notes 和 EXAMPLES
 
 **基于当前代码的 Review 结论（已改进部分 vs 仍需改进部分）：**
 
 已改进（当前代码已具备）：
 
-- **JSON 已覆盖主要操作**：`BranchOutput` + `run_branch_json()` 已支持 list / create / delete / rename / set-upstream / show-current，list schema 也已保持向后兼容
+- **JSON 已覆盖主要操作**：`BranchOutput` + `run_branch()` 已支持 list / create / delete / rename / set-upstream / show-current，list schema 也已保持向后兼容
 - **大部分命令层错误已带显式 `StableErrorCode`**：invalid name、already exists、invalid commit、branch not found、detached HEAD、I/O 写失败等主要路径已显式映射
 - **退出码对齐已部分落地**：删除不存在分支已走 `CliInvalidTarget`（exit `129`），删除当前分支走 `RepoStateInvalid`（exit `128`）
-- **部分成功确认消息已落地**：safe delete、rename、set-upstream、show-current 均已有 human 输出
+- **`BranchError` typed enum 已落地**：create / delete / rename / list / set-upstream 等路径已统一收口到命令层 typed error
+- **统一 `run_branch()` / `render_branch_output()` 分层已落地**：human / JSON / machine 已走同一执行层和渲染层
+- **成功确认消息已落地**：create、safe delete、force-delete、rename、set-upstream、show-current 均已有 human 输出
+- **fuzzy suggestion 已落地**：分支不存在时会返回 Levenshtein 近似提示
+- **`--help` EXAMPLES 已落地**：帮助文本已同时保留 compatibility notes 和示例
 - **现有测试已验证关键契约**：`branch_test.rs` 已覆盖 invalid start point error code、detached HEAD set-upstream 和 JSON create schema
 
 仍需改进：
 
-- **无 `BranchError` typed enum**：错误仍散落在 create/delete/rename/list 各函数中
-- **无统一 `run_branch()` / `render_branch_output()` 分层**：当前只有 JSON 路径走 `run_branch_json()`，human 路径仍按分支直接执行
-- **create / force-delete 仍缺确认消息**：`create_branch_safe()` 和 `delete_branch()` 成功后仍然沉默，不符合第二批“状态变更必须确认”的目标
-- **缺少 fuzzy suggestion**：分支不存在时还没有 Levenshtein 类 `did you mean ...` 提示
-- **`--help` 仍缺 EXAMPLES**：当前 `after_help` 只有 compatibility notes
-- **仍有零散错误未显式赋码**：例如 `cannot get HEAD commit` 等路径还依赖默认推断
-- **`delete_branch()` / `delete_branch_safe()` 仍有重复前置检查**：locked/current/not-found 检查可继续抽取复用
-- **`internal::branch` 仍吞掉底层失败**：`list_branches_with_conn()` 里存在 `unwrap()`，`find_branch_with_conn()` / `delete_branch_with_conn()` 仍用 `eprintln!()` 吞掉查询/删除失败；不先把这些 API 改成 fallible，命令层无法真正收口为 `BranchError`
+- **`internal::branch` 兼容 wrapper 仍保留 lossy 返回类型**：`list_branches_with_conn()` / `find_branch_with_conn()` / `delete_branch_with_conn()` 仍为了兼容旧调用点返回 `Vec` / `Option` / `()`；虽然现在会显式记录错误日志，但后续仍建议继续迁移旧调用方到 `*_result` API
+- **仍有少量旧调用点未直接使用 fallible API**：例如非第二批范围内的旧命令和工具模块，后续可继续把分支查询失败从“best effort”迁移到显式传播
+- **`DelegatedCli` 仍是兼容边界**：`switch` / `checkout` 相关委托路径当前仍通过 `DelegatedCli` 透传，后续如需更细粒度 typed error 可再拆分
 
 ### 目标与非目标
 
-**本批目标：**
-- 引入 `BranchError` typed error enum，覆盖 branch 层面的错误场景
-- 所有 `BranchError → CliError` 映射使用显式 `StableErrorCode`
-- 在保留既有 `BranchOutput` JSON schema 的前提下，补齐统一的 `run_branch()` / `render_branch_output()` 分层
-- 先把 `internal::branch` 的 `list/find/delete` 改成 fallible API（去掉 `unwrap()` / `eprintln!()`），让命令层能接住真实失败
-- 抽取 delete 共享前置检查，减少 `delete_branch()` / `delete_branch_safe()` 重复逻辑
-- 补齐 create / force-delete 的 human 确认消息
-- 收口剩余未显式赋码的错误路径
-- 消除 `delete_branch()` 和 `delete_branch_safe()` 的重复代码
-- 补齐 `--help` EXAMPLES 段
-- 为分支不存在路径补齐 fuzzy suggestion
+**已完成目标：**
+- `BranchError` typed error enum、显式 `StableErrorCode`、统一 `run_branch()` / `render_branch_output()`、create / force-delete 确认消息、fuzzy suggestion 与 `--help` EXAMPLES 已落地
+
+**后续收口目标：**
+- 继续把 `internal::branch` 的旧兼容 wrapper 调用点迁移到 `list/find/delete *_result` fallible API，逐步消除 best-effort 查询路径
+- 继续收口少量 `DelegatedCli` 兼容透传边界，让跨命令委托也能保留更细粒度的 branch 语义
 
 **本批非目标：**
 - **不改变 `--contains` / `--no-contains` 过滤逻辑**。BFS 可达性检查保持现有算法
@@ -138,7 +132,7 @@ pub enum BranchError {
 
 > **`NotFound` 携带 `similar` 列表**：与 `SwitchError::BranchNotFound` 模式一致，在错误构造点预计算 Levenshtein ≤ 2 近似分支名列表，`impl From<BranchError> for CliError` 只负责渲染 hint。Levenshtein 距离计算复用 switch 批次落地的共享工具函数（~10 行，位于 `src/utils/` 或 `src/command/mod.rs`）。
 
-> **关于底层 branch store 的前置收口**：在引入 `BranchError` 之前，需要先把 `src/internal/branch.rs` 中的 `list_branches_with_conn()`、`find_branch_with_conn()`、`delete_branch_with_conn()` 改成 `Result` 风格，去掉当前的 `unwrap()` / `eprintln!()`。否则命令层根本拿不到真实失败，只能把查询失败误判成 `NotFound` 或直接 panic。
+> **关于底层 branch store 的后续收口**：当前命令层已经引入 `BranchError`，但 `src/internal/branch.rs` 仍保留 `list_branches_with_conn()`、`find_branch_with_conn()`、`delete_branch_with_conn()` 这组兼容 wrapper，旧调用点还可能走 best-effort 路径。后续应继续把这些旧调用方迁移到 `*_result` API，最终彻底消除 lossy 查询。
 
 **`BranchError → CliError` 显式映射：**
 
@@ -200,7 +194,7 @@ pub enum BranchError {
 
 **本批变更：统一 `run_branch()` / `render_branch_output()` 分层**
 
-当前架构问题：human 路径在 `execute_safe()` 内按分支直接执行（create/delete/rename/set-upstream/list 各自独立），JSON 路径单独走 `run_branch_json()`。两条路径各自拼装逻辑，create 和 force-delete 成功后在 human 路径沉默。
+当前架构已经统一：`execute_safe()` 调用 `run_branch()` 收集结构化结果，再由 `render_branch_output()` 统一渲染 human / JSON / machine。create、delete、rename、set-upstream 等状态变更路径都已走同一输出框架。
 
 目标架构：
 
@@ -218,7 +212,7 @@ pub async fn execute_safe(args: BranchArgs, output: &OutputConfig) -> CliResult<
 }
 ```
 
-现有 `run_branch_json()` 将被合并入 `run_branch()`。`list_branches()`、`display_branches()` 的渲染逻辑将移入 `render_branch_output()` 的 human list 分支。
+历史上的 `run_branch_json()` 已合并入 `run_branch()`；list 渲染逻辑也已集中到 `render_branch_output()` 的 human list 分支。
 
 **渲染规则：**
 
@@ -397,6 +391,6 @@ EXAMPLES:
 | 文件 | 改动类型 | 说明 |
 |------|---------|------|
 | `src/internal/branch.rs` | **收口** | 把 `list_branches_with_conn()` / `find_branch_with_conn()` / `delete_branch_with_conn()` 从 `unwrap()` / `eprintln!()` 风格改为 `Result` 风格，暴露真实查询/删除失败与存储损坏，并扩展该文件内现有单元测试覆盖这些失败面 |
-| `src/command/branch.rs` | **收口** | 保持已落地的 `BranchOutput` / JSON schema / 主要 `StableErrorCode` 不回退；后续补齐 `BranchError` typed enum（含 `StorageQueryFailed`/`StoredReferenceCorrupt`/`DeleteFailed` 新变体和 `DelegatedCli` 透传）、统一 `run_branch()` / `render_branch_output()`（替代 `run_branch_json()`）、抽取 delete 共享前置检查、补齐 create/force-delete 确认消息、fuzzy suggestion 和 `--help` EXAMPLES |
+| `src/command/branch.rs` | **维护** | 保持已落地的 `BranchOutput` / `BranchError` / `run_branch()` / `render_branch_output()` / human 确认消息 / fuzzy suggestion / `--help` EXAMPLES 不回退；后续仅继续清理兼容边界与旧调用点 |
 | `tests/command/branch_test.rs` | **扩展** | 在现有错误码和 JSON create 回归基础上，补齐 `BranchError` 变体覆盖、create/force-delete 确认消息和 fuzzy suggestion |
 | `tests/command/branch_json_test.rs` | **可选拆分** | 若 `branch_test.rs` 中的 JSON 覆盖继续膨胀，可再拆出独立 schema 稳定性文件；当前不是阻断项 |

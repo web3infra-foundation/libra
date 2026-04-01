@@ -17,9 +17,9 @@
 - `StableErrorCode` 体系已有 18 个错误码
 - `CliError` 支持 `.with_hint()`、`.with_stable_code()`、`.with_detail()`
 - `execute()` / `execute_safe(args, output)` 双入口已存在
-- `run_tag_json()` + `TagOutput` 已实现 list / create / delete 的 JSON / machine 输出
+- `run_tag()` + `TagOutput` 已实现 list / create / delete 的 JSON / machine 输出
 - `-l` / `-d` / `-m` / `-f` / `-n` 短标志已实现
-- `create_tag_safe()` 已有 `.with_hint()` 提供重复创建时的 hint（`tag.rs:87-96`）
+- 重复创建时的 hint 已在 `map_create_tag_error()` → `CliError` 映射中保留
 - `render_tags()` 支持 `-n` 控制注释行数显示
 - `internal::tag` 模块提供底层 tag API
 - create / delete / find major error path 已在命令层映射显式 `StableErrorCode`
@@ -29,32 +29,28 @@
 
 已改进（当前代码已具备）：
 
-- **结构化输出已落地**：`run_tag_json()` + `TagOutput` 已覆盖 list / create / delete 三类操作，`--json` / `--machine` 可直接使用
+- **结构化输出已落地**：`run_tag()` + `TagOutput` 已覆盖 list / create / delete 三类操作，`--json` / `--machine` 可直接使用
 - **主要命令层错误已带显式 `StableErrorCode`**：重复创建、HEAD unborn、tag not found、delete I/O 失败、repo read failure 等路径已有稳定错误码
+- **`TagError` typed enum 已落地**：create / list / delete / load 路径已统一收口到命令层 typed error
+- **统一 `run_tag()` / `render_tag_output()` 分层已落地**：human / JSON / machine 已走同一执行层和渲染层
 - **重复创建 hint 已落地**：`map_create_tag_error()` 已保留删除旧 tag 或更换 tag 名的提示
+- **human 成功反馈已统一**：lightweight / annotated create 与 delete 都已输出单行确认消息
+- **`--help` EXAMPLES 已落地**
 - **quiet / malformed ref delete 回归已覆盖**：当前测试已覆盖 quiet delete、删除损坏 tag ref、JSON delete `hash = null` 等边界
 
 仍需改进：
 
-- **无 `TagError` typed enum**：错误仍散落在 `execute_safe()`、`create_tag_safe()`、`delete_tag_safe()`、`show_tag_safe()` 中
-- **无统一 `run_tag()` / `render_tag_output()` 分层**：human 路径仍在 `execute_safe()` 内分支拼装，JSON 路径单独走 `run_tag_json()`
-- **list / show 路径仍有隐式错误码**：`render_tags()` 失败在 human 路径仍通过 `CliError::fatal(e.to_string())` 返回，缺少显式 `StableErrorCode`
-- **human 成功反馈仍不完全一致**：lightweight create 复用 `show_tag_safe()` 输出对象详情，annotated create 没有单独确认消息，delete 也未回显被删 tag 的 hash
-- **create 失败来源尚未结构化区分**：`CheckExisting` / `SerializeTag` / `StoreObject` / `PersistReference` 需要映射到不同稳定错误码，不能继续折叠成一个泛化的 create 失败
-- **缺少 `--help` EXAMPLES 段**
-- **测试注释仍有全角括号**：`tag_test.rs` 中 `（lightweight tag）` 等注释尚未清理
+- **legacy 说明尚未完全清理**：本文后文仍有少量历史设计叙述，需要继续收口为“现状 + follow-up”格式
+- **human / JSON 双契约需持续维护**：lightweight tag 当前保持 `message: null` 的 machine 契约，同时 human `-n` 列表仍显示 commit message；后续需要继续用回归测试锁住这一行为
 
 ### 目标与非目标
 
-**本批目标：**
-- 引入 `TagError` typed error enum，覆盖 tag 层面的错误场景
-- 所有 `TagError → CliError` 映射使用显式 `StableErrorCode`
-- 在保留既有 `TagOutput` JSON schema 的前提下，补齐统一的 `run_tag()` / `render_tag_output()` 分层
-- 补齐 list / show 路径的显式 `StableErrorCode`
-- 统一 human create / delete 成功反馈为简短确认消息，不再沿用当前 lightweight/annotated 两套不同输出习惯
-- 让 create 失败来源在 `TagError` 中显式编码，避免同一变体对应多个 `StableErrorCode`
-- 修复测试注释中的全角括号
-- 补齐 `--help` EXAMPLES 段
+**已完成目标：**
+- `TagError` typed error enum、显式 `StableErrorCode`、统一 `run_tag()` / `render_tag_output()` 分层、human 成功确认消息、create 失败来源结构化映射和 `--help` EXAMPLES 已落地
+
+**后续收口目标：**
+- 继续维护 lightweight tag 的 human / machine 双契约和边界回归测试
+- 持续清理本文残留的历史设计说明，使计划文档完全反映当前实现
 
 **本批非目标：**
 - **不重写 `internal::tag` 底层业务语义**。允许做类型收紧和错误建模调整（例如 `create()` 返回 `CreateTagError`），但不改变 tag 创建/删除/查询的语义行为
@@ -115,7 +111,7 @@ pub enum TagError {
 }
 ```
 
-> **与 `internal::tag::CreateTagError` 的关系**：`CreateTagError` 是底层业务模块定义的错误类型（含 `AlreadyExists`、`HeadUnborn`、`CheckExisting`、`SerializeTag`、`StoreObject`、`PersistReference`）。`TagError` 是命令层 typed enum，通过 `impl From<CreateTagError> for TagError` 收口映射（现有 `map_create_tag_error()` 将被替代）：`CheckExisting` → `CheckExistingFailed`，`SerializeTag` → `SerializeAnnotatedTag`，`StoreObject` → `StoreObjectFailed`，`PersistReference` → `PersistReferenceFailed`。
+> **与 `internal::tag::CreateTagError` 的关系**：`CreateTagError` 是底层业务模块定义的错误类型（含 `AlreadyExists`、`HeadUnborn`、`CheckExisting`、`SerializeTag`、`StoreObject`、`PersistReference`）。`TagError` 是命令层 typed enum，当前代码通过 `map_create_tag_error()` 完成收口映射：`CheckExisting` → `CheckExistingFailed`，`SerializeTag` → `SerializeAnnotatedTag`，`StoreObject` → `StoreObjectFailed`，`PersistReference` → `PersistReferenceFailed`。
 
 **`TagError → CliError` 显式映射：**
 
@@ -147,9 +143,9 @@ pub enum TagError {
 | `map_create_tag_error:176-178` | `CreateTagError::StoreObject` | `StoreObjectFailed` |
 | `map_create_tag_error:180-184` | `CreateTagError::PersistReference` | `PersistReferenceFailed` |
 | `delete_tag_safe:242-246` | `tag::delete().map_err(...)` | `DeleteFailed` |
-| `show_tag_safe:274-276` | `Ok(None)` tag not found | `NotFound` |
-| `show_tag_safe:277-279` | `Err(e)` repo corrupt | `LoadFailed` |
-| `run_tag_json:315-317` | `tag::list().map_err(...)` | `ListFailed` |
+| `lookup_tag:357-365` | `Ok(None)` tag not found | `NotFound` |
+| `lookup_tag:357-365` | `Err(e)` repo corrupt | `LoadFailed` |
+| `collect_tags:346-350` | `tag::list().map_err(...)` | `ListFailed` |
 | `lookup_tag:332-334` | `Ok(None)` tag not found | `NotFound` |
 | `lookup_tag:335-337` | `Err(e)` repo corrupt | `LoadFailed` |
 
@@ -159,7 +155,7 @@ pub enum TagError {
 
 **本批变更：统一 `run_tag()` / `render_tag_output()` 分层**
 
-当前架构问题：human 路径在 `execute_safe()` 内分支拼装（list 走 `render_tags()`，create 走 `create_tag_safe()` + `show_tag_safe()`，delete 走 `delete_tag_safe()`），JSON 路径单独走 `run_tag_json()`。两条路径各自拼装逻辑，违反执行/渲染分离原则。
+当前架构已经统一：`execute_safe()` 调用 `run_tag()` 收集结构化结果，再由 `render_tag_output()` 统一渲染 human / JSON / machine。list / create / delete 三类路径已经合流。
 
 目标架构：
 
@@ -177,7 +173,7 @@ pub async fn execute_safe(args: TagArgs, output: &OutputConfig) -> CliResult<()>
 }
 ```
 
-现有 `run_tag_json()` 将被合并入 `run_tag()`，`render_tags()` 的渲染逻辑将移入 `render_tag_output()` 的 human list 分支。
+历史上的 `run_tag_json()` 已合并入 `run_tag()`；`render_tags()` 当前主要保留给测试和辅助调用，实际 CLI human 列表渲染已在 `render_tag_output()` 中统一处理。
 
 **渲染规则：**
 
@@ -314,5 +310,5 @@ EXAMPLES:
 
 | 文件 | 改动类型 | 说明 |
 |------|---------|------|
-| `src/command/tag.rs` | **收口** | 保持已落地的 `TagOutput` / `run_tag_json()` / JSON schema / create hint 不回退；后续补齐 `TagError` typed enum、统一 `run_tag()` / `render_tag_output()`、收口 list/show 路径的显式错误码、统一 human 确认消息、补齐 `--help` EXAMPLES |
-| `tests/command/tag_test.rs` | **扩展** | 在现有 JSON / quiet / malformed ref delete 回归基础上，补齐 `TagError` 变体覆盖、human 成功反馈一致性校验和全角括号清理 |
+| `src/command/tag.rs` | **维护** | 保持已落地的 `TagOutput` / `TagError` / `run_tag()` / `render_tag_output()` / create hint / human 确认消息 / `--help` EXAMPLES 不回退；后续仅维护双契约与边界回归 |
+| `tests/command/tag_test.rs` | **维护** | 在现有 JSON / quiet / malformed ref delete / lightweight-human-vs-machine 契约回归基础上，继续维护 `TagError` 变体覆盖与成功反馈一致性校验 |
