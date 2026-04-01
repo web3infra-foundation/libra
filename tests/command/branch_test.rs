@@ -4,7 +4,9 @@
 
 #![cfg(test)]
 
-use std::collections::HashSet;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+use std::{collections::HashSet, fs};
 
 use libra::internal::config::ConfigKv;
 use serial_test::serial;
@@ -43,6 +45,38 @@ fn test_branch_json_create_output_reports_branch() {
 }
 
 #[test]
+fn test_branch_create_outputs_confirmation() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["branch", "feature"], repo.path());
+    assert_cli_success(&output, "branch feature");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Created branch 'feature' at "),
+        "unexpected stdout: {stdout}"
+    );
+}
+
+#[test]
+fn test_branch_not_found_suggests_similar_name() {
+    let repo = create_committed_repo_via_cli();
+
+    let create = run_libra_command(&["branch", "featur"], repo.path());
+    assert_cli_success(&create, "branch featur");
+
+    let output = run_libra_command(&["branch", "-d", "feature"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert!(
+        stderr.contains("did you mean 'featur'?"),
+        "expected suggestion in stderr, got: {stderr}"
+    );
+}
+
+#[test]
 fn test_branch_set_upstream_detached_head_returns_repo_state_error() {
     let repo = create_committed_repo_via_cli();
 
@@ -60,6 +94,43 @@ fn test_branch_set_upstream_detached_head_returns_repo_state_error() {
     assert_eq!(report.error_code, "LBR-REPO-003");
     assert!(stderr.contains("HEAD is detached"));
     assert!(stderr.contains("checkout a branch first"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_branch_set_upstream_surfaces_config_write_failure() {
+    let repo = create_committed_repo_via_cli();
+    let db_path = repo.path().join(".libra").join("libra.db");
+    let original_mode = fs::metadata(&db_path).unwrap().permissions().mode();
+
+    fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let output = run_libra_command(&["branch", "--set-upstream-to", "origin/main"], repo.path());
+    fs::set_permissions(&db_path, std::fs::Permissions::from_mode(original_mode)).unwrap();
+
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-IO-002");
+    assert!(
+        stderr.contains("failed to persist branch config 'branch.main.remote'"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn test_branch_force_delete_outputs_confirmation() {
+    let repo = create_committed_repo_via_cli();
+
+    let create = run_libra_command(&["branch", "topic"], repo.path());
+    assert_cli_success(&create, "branch topic");
+
+    let output = run_libra_command(&["branch", "-D", "topic"], repo.path());
+    assert_cli_success(&output, "branch -D topic");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Deleted branch topic (was "),
+        "unexpected stdout: {stdout}"
+    );
 }
 
 #[tokio::test]

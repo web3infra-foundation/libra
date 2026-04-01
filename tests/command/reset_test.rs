@@ -13,7 +13,7 @@ use libra::{
         reset::{self, ResetArgs},
         status::{changes_to_be_committed, changes_to_be_staged},
     },
-    internal::config::ConfigKv,
+    internal::{branch::Branch as InternalBranch, config::ConfigKv},
     utils::{error::StableErrorCode, test::setup_with_new_libra_in},
 };
 
@@ -197,6 +197,53 @@ fn test_reset_json_hard_with_pathspec_returns_usage_error() {
     assert_eq!(report["error_code"], "LBR-CLI-002");
     assert!(
         stderr.contains("Cannot do hard reset with paths."),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_reset_pathspec_surfaces_subtree_corruption_as_repo_corrupt() {
+    let repo = create_committed_repo_via_cli();
+    fs::create_dir_all(repo.path().join("dir")).unwrap();
+    fs::write(repo.path().join("dir").join("nested.txt"), "nested\n").unwrap();
+
+    let add = run_libra_command(&["add", "dir/nested.txt"], repo.path());
+    assert_cli_success(&add, "add dir/nested.txt");
+
+    let commit = run_libra_command(&["commit", "-m", "nested", "--no-verify"], repo.path());
+    assert_cli_success(&commit, "commit nested");
+
+    {
+        let _guard = ChangeDirGuard::new(repo.path());
+        let head = InternalBranch::find_branch("main", None)
+            .await
+            .expect("main branch should exist")
+            .commit;
+        let commit: Commit = load_object(&head).expect("load HEAD commit");
+        let tree: Tree = load_object(&commit.tree_id).expect("load root tree");
+        let dir_item = tree
+            .tree_items
+            .iter()
+            .find(|item| item.name == "dir")
+            .expect("expected dir subtree");
+        let dir_hash = dir_item.id.to_string();
+        let object_path = repo
+            .path()
+            .join(".libra")
+            .join("objects")
+            .join(&dir_hash[..2])
+            .join(&dir_hash[2..]);
+        fs::write(object_path, b"corrupt subtree").unwrap();
+    }
+
+    let output = run_libra_command(&["reset", "HEAD", "--", "dir/nested.txt"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-REPO-002");
+    assert!(
+        stderr.contains("failed to load tree"),
         "unexpected stderr: {stderr}"
     );
 }

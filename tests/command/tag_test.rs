@@ -35,7 +35,7 @@ async fn setup_user_identity() {
 }
 
 #[test]
-fn test_tag_json_create_output_includes_hash() {
+fn test_tag_json_create_output_keeps_lightweight_message_null() {
     let repo = create_committed_repo_via_cli();
 
     let output = run_libra_command(&["--json", "tag", "v1.0"], repo.path());
@@ -50,6 +50,71 @@ fn test_tag_json_create_output_includes_hash() {
     assert_eq!(json["data"]["action"], "create");
     assert_eq!(json["data"]["name"], "v1.0");
     assert!(json["data"]["hash"].as_str().is_some());
+    assert!(
+        json["data"]["message"].is_null(),
+        "expected lightweight create message to stay null, got: {json}"
+    );
+}
+
+#[test]
+fn test_tag_json_list_keeps_lightweight_message_null() {
+    let repo = create_committed_repo_via_cli();
+
+    let create_lightweight = run_libra_command(&["tag", "v1.0"], repo.path());
+    assert_cli_success(&create_lightweight, "tag v1.0");
+
+    let create_annotated = run_libra_command(&["tag", "-m", "Release v1.1", "v1.1"], repo.path());
+    assert_cli_success(&create_annotated, "tag -m Release v1.1 v1.1");
+
+    let output = run_libra_command(&["--json", "tag", "-l", "-n", "1"], repo.path());
+    assert_cli_success(&output, "tag --json -l -n 1");
+
+    let json = parse_json_stdout(&output);
+    let tags = json["data"]["tags"]
+        .as_array()
+        .expect("expected tags array");
+    let lightweight = tags
+        .iter()
+        .find(|entry| entry["name"] == "v1.0")
+        .expect("expected lightweight tag entry");
+    let annotated = tags
+        .iter()
+        .find(|entry| entry["name"] == "v1.1")
+        .expect("expected annotated tag entry");
+
+    assert!(
+        lightweight["message"].is_null(),
+        "unexpected lightweight tag: {lightweight}"
+    );
+    assert_eq!(annotated["message"], "Release v1.1");
+}
+
+#[test]
+fn test_tag_create_outputs_concise_confirmation() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["tag", "v1.0"], repo.path());
+    assert_cli_success(&output, "tag v1.0");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Created lightweight tag 'v1.0' at "),
+        "unexpected stdout: {stdout}"
+    );
+}
+
+#[test]
+fn test_annotated_tag_create_outputs_concise_confirmation() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["tag", "-m", "Release v1.1", "v1.1"], repo.path());
+    assert_cli_success(&output, "tag -m Release v1.1 v1.1");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Created annotated tag 'v1.1' at "),
+        "unexpected stdout: {stdout}"
+    );
 }
 
 #[test]
@@ -202,6 +267,10 @@ async fn test_tag_delete_allows_invalid_target_hash() {
     assert!(
         stdout.contains("Deleted tag 'broken'"),
         "unexpected stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("(was not-a-v"),
+        "delete output should include abbreviated target hash, got: {stdout}"
     );
     assert!(
         internal_tag::find_tag_ref("broken")
@@ -748,13 +817,13 @@ async fn test_annotation_lines_tag() {
         .filter(|line| !line.is_empty())
         .collect();
 
-    // v1.0.0（lightweight tag）
+    // v1.0.0 (lightweight tag)
     assert!(output_lines1.contains(&"v1.0.0               First"));
 
-    // v1.0.1（single line tag）
+    // v1.0.1 (single line tag)
     assert!(output_lines1.contains(&"v1.0.1               Single line annotation message"));
 
-    // v1.0.3（multi line tag）
+    // v1.0.3 (multi line tag)
     assert!(output_lines1.contains(&"v1.0.3               multi"));
     assert!(output_lines1.contains(&"line"));
     assert!(output_lines1.contains(&"annotation"));
@@ -769,13 +838,13 @@ async fn test_annotation_lines_tag() {
         .filter(|line| !line.is_empty())
         .collect();
 
-    // v1.0.0（lightweight tag）
+    // v1.0.0 (lightweight tag)
     assert!(output_lines2.contains(&"v1.0.0               First"));
 
-    // v1.0.1（single line tag）
+    // v1.0.1 (single line tag)
     assert!(output_lines2.contains(&"v1.0.1               Single line annotation message"));
 
-    // v1.0.3（multi line tag）
+    // v1.0.3 (multi line tag)
     assert!(output_lines2.contains(&"v1.0.3               multi"));
     assert!(output_lines2.contains(&"line"));
     assert!(!output_lines2.contains(&"annotation"));
