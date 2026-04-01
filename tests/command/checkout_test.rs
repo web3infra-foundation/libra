@@ -436,3 +436,86 @@ async fn test_checkout_current_branch_with_dirty_worktree_succeeds() {
     let content = std::fs::read_to_string("base.txt").unwrap();
     assert_eq!(content, "base\nlocal change");
 }
+
+/// Switching to another branch should keep checkout-specific dirty-worktree
+/// wording even when the worktree has only unstaged changes.
+#[tokio::test]
+#[serial]
+async fn test_checkout_existing_branch_with_unstaged_dirty_worktree_returns_error() {
+    use clap::Parser;
+    use libra::{
+        command::{
+            add::{self, AddArgs},
+            checkout::{self, CheckoutArgs},
+            commit,
+        },
+        internal::config::ConfigKv,
+        utils::test::{self, ChangeDirGuard},
+    };
+
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    ConfigKv::set("user.name", "Checkout Tester", false)
+        .await
+        .unwrap();
+    ConfigKv::set("user.email", "checkout@test.com", false)
+        .await
+        .unwrap();
+
+    test::ensure_file("base.txt", Some("base"));
+    add::execute_safe(
+        AddArgs {
+            pathspec: vec!["base.txt".into()],
+            all: false,
+            update: false,
+            refresh: false,
+            verbose: false,
+            force: false,
+            dry_run: false,
+            ignore_errors: false,
+        },
+        &OutputConfig::default(),
+    )
+    .await
+    .expect("add should succeed");
+    commit::execute_safe(
+        commit::CommitArgs {
+            message: Some("initial".into()),
+            file: None,
+            allow_empty: false,
+            conventional: false,
+            no_edit: false,
+            amend: false,
+            signoff: false,
+            disable_pre: true,
+            all: false,
+            no_verify: false,
+            author: None,
+        },
+        &OutputConfig::default(),
+    )
+    .await
+    .expect("initial commit should succeed");
+
+    branch::create_branch(String::from("other"), get_current_branch().await).await;
+
+    test::ensure_file("base.txt", Some("base\nlocal change"));
+
+    let result = checkout::execute_safe(
+        CheckoutArgs::try_parse_from(["checkout", "other"]).unwrap(),
+        &OutputConfig::default(),
+    )
+    .await;
+    if let Ok(()) = result {
+        panic!("checkout should fail when unstaged changes would be overwritten");
+    }
+    let err = result.unwrap_err();
+    assert!(
+        err.message()
+            .contains("local changes would be overwritten by checkout"),
+        "error should preserve checkout dirty-worktree wording, got: {}",
+        err.message()
+    );
+}

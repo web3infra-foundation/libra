@@ -190,6 +190,8 @@ mod show_test;
 mod status_error_test;
 mod status_json_test;
 mod status_test;
+mod switch_error_test;
+mod switch_json_test;
 mod switch_test;
 mod tag_test;
 mod worktree_test;

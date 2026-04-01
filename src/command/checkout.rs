@@ -20,7 +20,16 @@ use crate::{
     },
 };
 
+const CHECKOUT_EXAMPLES: &str = "\
+EXAMPLES:
+    libra checkout                         Show the current branch
+    libra checkout main                    Switch to an existing local branch
+    libra checkout feature-x               Switch to another branch
+    libra checkout -b feature-x            Create and switch to a new branch
+    libra checkout --quiet main            Switch without informational stdout";
+
 #[derive(Parser, Debug)]
+#[command(after_help = CHECKOUT_EXAMPLES)]
 pub struct CheckoutArgs {
     /// Target branche name
     branch: Option<String>,
@@ -68,18 +77,12 @@ pub async fn execute_safe(args: CheckoutArgs, output: &OutputConfig) -> CliResul
 
     match switch::ensure_clean_status(output).await {
         Ok(()) => {}
-        Err(err)
-            if matches!(
-                err.message(),
-                "unstaged changes, can't switch branch"
-                    | "uncommitted changes, can't switch branch"
-            ) =>
-        {
+        Err(switch::SwitchError::DirtyUnstaged | switch::SwitchError::DirtyUncommitted) => {
             return Err(CliError::failure(
                 "local changes would be overwritten by checkout",
             ));
         }
-        Err(err) => return Err(err),
+        Err(err) => return Err(CliError::from(err)),
     }
 
     match (args.branch, args.new_branch) {

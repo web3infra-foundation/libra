@@ -14,7 +14,7 @@ fn test_switch_cli_missing_branch_returns_cli_exit_code() {
     let output = run_libra_command(&["switch", "no-such"], repo.path());
 
     assert_eq!(output.status.code(), Some(129));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("fatal: invalid reference: no-such"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("branch 'no-such' not found"));
 }
 
 #[test]
@@ -235,6 +235,27 @@ async fn test_parts_of_switch_module_function() {
 
     // Test the switch module funsctions
     // test_check_status().await;
+}
+
+#[test]
+fn test_switch_current_branch_with_dirty_worktree_is_noop() {
+    let repo = create_committed_repo_via_cli();
+    std::fs::write(repo.path().join("tracked.txt"), "modified content\n").unwrap();
+
+    let output = run_libra_command(&["switch", "main"], repo.path());
+    assert_cli_success(&output, "switch current branch");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Already on 'main'"),
+        "switch current branch should remain a no-op, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("Changes not staged") && !stdout.contains("On branch"),
+        "switch current branch should not print a status summary, got: {stdout}"
+    );
+    let content = std::fs::read_to_string(repo.path().join("tracked.txt")).unwrap();
+    assert_eq!(content, "modified content\n");
 }
 
 #[tokio::test]
