@@ -14,7 +14,7 @@ fn test_switch_cli_missing_branch_returns_cli_exit_code() {
     let output = run_libra_command(&["switch", "no-such"], repo.path());
 
     assert_eq!(output.status.code(), Some(129));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("fatal: invalid reference: no-such"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("branch 'no-such' not found"));
 }
 
 #[test]
@@ -42,9 +42,13 @@ async fn test_switch_json_track_output_stays_clean() {
     let _guard = ChangeDirGuard::new(repo.path());
 
     let head = Head::current_commit().await.unwrap();
-    Branch::update_branch("refs/remotes/origin/feature", &head.to_string(), None)
-        .await
-        .unwrap();
+    Branch::update_branch(
+        "refs/remotes/origin/feature",
+        &head.to_string(),
+        Some("origin"),
+    )
+    .await
+    .unwrap();
 
     let output = run_libra_command(
         &["--json", "switch", "--track", "origin/feature"],
@@ -70,9 +74,13 @@ async fn test_switch_track_human_output_keeps_tracking_message() {
     let _guard = ChangeDirGuard::new(repo.path());
 
     let head = Head::current_commit().await.unwrap();
-    Branch::update_branch("refs/remotes/origin/feature", &head.to_string(), None)
-        .await
-        .unwrap();
+    Branch::update_branch(
+        "refs/remotes/origin/feature",
+        &head.to_string(),
+        Some("origin"),
+    )
+    .await
+    .unwrap();
 
     let output = run_libra_command(&["switch", "--track", "origin/feature"], repo.path());
     assert_cli_success(&output, "switch --track");
@@ -237,6 +245,58 @@ async fn test_parts_of_switch_module_function() {
     // test_check_status().await;
 }
 
+#[test]
+fn test_switch_current_branch_with_dirty_worktree_is_noop() {
+    let repo = create_committed_repo_via_cli();
+    std::fs::write(repo.path().join("tracked.txt"), "modified content\n").unwrap();
+
+    let output = run_libra_command(&["switch", "main"], repo.path());
+    assert_cli_success(&output, "switch current branch");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Already on 'main'"),
+        "switch current branch should remain a no-op, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("Changes not staged") && !stdout.contains("On branch"),
+        "switch current branch should not print a status summary, got: {stdout}"
+    );
+    let content = std::fs::read_to_string(repo.path().join("tracked.txt")).unwrap();
+    assert_eq!(content, "modified content\n");
+}
+
+#[test]
+fn test_switch_create_branch_from_valid_commit() {
+    let repo = create_committed_repo_via_cli();
+
+    std::fs::write(repo.path().join("tracked.txt"), "tracked second\n").unwrap();
+    let add = run_libra_command(&["add", "tracked.txt"], repo.path());
+    assert_cli_success(&add, "add tracked.txt");
+    let commit = run_libra_command(&["commit", "-m", "second", "--no-verify"], repo.path());
+    assert_cli_success(&commit, "commit second");
+
+    let output = run_libra_command(&["switch", "-c", "feature-from-base", "HEAD^"], repo.path());
+    assert_cli_success(&output, "switch -c feature-from-base HEAD^");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Switched to a new branch 'feature-from-base'"),
+        "expected branch creation message, got: {stdout}"
+    );
+
+    let log_output = run_libra_command(&["log", "--oneline", "-1"], repo.path());
+    assert_cli_success(&log_output, "log -1 after switch");
+    let log_stdout = String::from_utf8_lossy(&log_output.stdout);
+    assert!(
+        log_stdout.contains("base"),
+        "expected new branch to point at the requested base commit, got: {log_stdout}"
+    );
+
+    let content = std::fs::read_to_string(repo.path().join("tracked.txt")).unwrap();
+    assert_eq!(content, "tracked\n");
+}
+
 #[tokio::test]
 #[serial]
 async fn test_switch_track_sets_upstream() {
@@ -263,7 +323,7 @@ async fn test_switch_track_sets_upstream() {
     Branch::update_branch(
         "refs/remotes/origin/feature",
         &master_commit.to_string(),
-        None,
+        Some("origin"),
     )
     .await
     .unwrap();

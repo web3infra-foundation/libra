@@ -73,12 +73,13 @@
 
 | 顺序 | 命令 | 当前状态 | 改进重点 |
 |------|------|--------|--------|
-| **9** | `switch` | 有 JSON + 确认消息 | 补齐 StableErrorCode；切换不存在分支时提示 `did you mean -c` |
+| **9** | `switch` | 有 JSON + 确认消息 | `SwitchError` typed enum + 显式 `StableErrorCode`；`run_switch()` 返回 `Result<SwitchOutput, SwitchError>`；Levenshtein 模糊匹配；`--help` EXAMPLES（详见 [switch.md](switch.md)） |
+| **9a** | `checkout`（兼容收口） | 依赖 `switch::ensure_clean_status()` | 随 `switch` 联动：`err.message()` 字符串匹配改为 `SwitchError` 变体匹配；`--help` EXAMPLES。**不是完整现代化**——JSON / `CheckoutError` / render split 仍留第六批（详见 [checkout.md](checkout.md)） |
 | **10** | `reset` | 有确认消息，无 JSON | 输出 "HEAD is now at \<SHA\> \<msg\>"；JSON 输出；错误码 |
 | **11** | `tag` | 有短标志 -l/-d/-m/-a | 补齐 JSON 输出；重复创建时 hint；退出码对齐 exit 1 |
 | **12** | `branch` | 有 JSON | 补齐 StableErrorCode；退出码对齐（删除不存在分支 exit 1） |
 
-**理由：** 这些命令改变仓库状态，必须告知用户发生了什么。
+**理由：** 这些命令改变仓库状态，必须告知用户发生了什么。`checkout` 的兼容收口随 `switch` 一起落地，因为 `switch` 的 `ensure_clean_status()` 签名变更强制要求 `checkout` 同步适配。
 
 ### 第三批：历史查询命令（P1 结构化输出）
 
@@ -120,7 +121,7 @@
 | **23** | `reflog` | 子命令结构偏离 Git | 重构为 `libra reflog [-n N]`；JSON 输出 |
 | **24** | `describe` | 有 --abbrev/--tags | 补齐 --always；JSON 输出 |
 | **25** | `shortlog` | 已有错误码 | 补齐 revision 位置参数；JSON 输出 |
-| **26** | `clean` / `checkout` / `rebase` / `merge` | 与 Git 语法一致 | JSON 输出；merge 冲突结构化输出（pull 依赖的 three-way merge 能力在此批次统一实现） |
+| **26** | `clean` / `checkout` / `rebase` / `merge` | 与 Git 语法一致 | JSON 输出；merge 冲突结构化输出（pull 依赖的 three-way merge 能力在此批次统一实现）。**说明**：`checkout` 的兼容性收口（`SwitchError` 变体匹配适配、`--help` EXAMPLES）已随第二批 `switch` 提前落地（见 [checkout.md](checkout.md)）；本批次负责 `checkout` 的完整现代化（`CheckoutError` typed enum、JSON 输出、执行/渲染拆分） |
 
 ### 第七批：工作树操作与文件管理命令（P2 补齐）
 
@@ -180,6 +181,7 @@
 - [Push 命令改进详细计划](push.md) ✅ 已落地
 - [Pull 命令改进详细计划](pull.md) ✅ 已落地
 - [Switch 命令改进详细计划](switch.md)
+- [Checkout 命令改进详细计划（第二批兼容收口）](checkout.md)
 - [Reset 命令改进详细计划](reset.md)
 - [Tag 命令改进详细计划](tag.md)
 - [Branch 命令改进详细计划](branch.md)
