@@ -319,11 +319,17 @@ async fn is_bare_repository() -> bool {
             v if v.eq_ignore_ascii_case("true")
                 || v.eq_ignore_ascii_case("yes")
                 || v.eq_ignore_ascii_case("on")
-                || v == "1" => Some(true),
+                || v == "1" =>
+            {
+                Some(true)
+            }
             v if v.eq_ignore_ascii_case("false")
                 || v.eq_ignore_ascii_case("no")
                 || v.eq_ignore_ascii_case("off")
-                || v == "0" => Some(false),
+                || v == "0" =>
+            {
+                Some(false)
+            }
             _ => None,
         }
     }
@@ -342,10 +348,8 @@ async fn handle_start(
 ) -> CliResult<()> {
     // Bare repositories have no working tree - bisect requires checkout operations
     if is_bare_repository().await {
-        return Err(CliError::fatal(
-            "bisect cannot be run in a bare repository",
-        )
-        .with_hint("bisect requires a working tree to check out commits for testing"));
+        return Err(CliError::fatal("bisect cannot be run in a bare repository")
+            .with_hint("bisect requires a working tree to check out commits for testing"));
     }
 
     // Require a clean working tree to prevent data loss
@@ -365,10 +369,7 @@ async fn handle_start(
 
     // Check if there's any existing bisect state (active or completed)
     // Must use has_state to prevent overwriting preserved orig_head from a completed session
-    if BisectState::has_state()
-        .await
-        .map_err(CliError::fatal)?
-    {
+    if BisectState::has_state().await.map_err(CliError::fatal)? {
         return Err(CliError::fatal(
             "bisect is already in progress, use 'bisect reset' to end it first",
         ));
@@ -473,10 +474,10 @@ async fn handle_bad(rev: Option<String>, output: &OutputConfig) -> CliResult<()>
 
     // Block operations on completed sessions - user must reset first
     if state.completed {
-        return Err(CliError::fatal(
-            "bisect session has already found the culprit",
-        )
-        .with_hint("run 'bisect reset' to end the session and restore your original HEAD"));
+        return Err(
+            CliError::fatal("bisect session has already found the culprit")
+                .with_hint("run 'bisect reset' to end the session and restore your original HEAD"),
+        );
     }
 
     let bad_hash = if let Some(rev) = rev {
@@ -534,10 +535,10 @@ async fn handle_good(rev: Option<String>, output: &OutputConfig) -> CliResult<()
 
     // Block operations on completed sessions - user must reset first
     if state.completed {
-        return Err(CliError::fatal(
-            "bisect session has already found the culprit",
-        )
-        .with_hint("run 'bisect reset' to end the session and restore your original HEAD"));
+        return Err(
+            CliError::fatal("bisect session has already found the culprit")
+                .with_hint("run 'bisect reset' to end the session and restore your original HEAD"),
+        );
     }
 
     let good_hash = if let Some(rev) = rev {
@@ -592,9 +593,7 @@ async fn handle_good(rev: Option<String>, output: &OutputConfig) -> CliResult<()
 /// Handle `bisect reset` - end the bisect session
 async fn handle_reset(rev: Option<String>, output: &OutputConfig) -> CliResult<()> {
     // Use has_state to check if there's any bisect state (active or completed)
-    let has_state = BisectState::has_state()
-        .await
-        .map_err(CliError::fatal)?;
+    let has_state = BisectState::has_state().await.map_err(CliError::fatal)?;
 
     if !has_state {
         crate::info_println!(output, "No bisect in progress");
@@ -677,10 +676,10 @@ async fn handle_skip(rev: Option<String>, output: &OutputConfig) -> CliResult<()
 
     // Block operations on completed sessions - user must reset first
     if state.completed {
-        return Err(CliError::fatal(
-            "bisect session has already found the culprit",
-        )
-        .with_hint("run 'bisect reset' to end the session and restore your original HEAD"));
+        return Err(
+            CliError::fatal("bisect session has already found the culprit")
+                .with_hint("run 'bisect reset' to end the session and restore your original HEAD"),
+        );
     }
 
     let skip_hash = if let Some(rev) = rev {
