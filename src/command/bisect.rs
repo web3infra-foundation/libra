@@ -17,7 +17,10 @@ use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait, Value};
 
 use crate::{
     cli::Bisect,
-    command::{load_object, restore},
+    command::{
+        load_object, restore,
+        status::{changes_to_be_committed_safe, changes_to_be_staged},
+    },
     internal::{config::ConfigKv, db::get_db_conn_instance, head::Head},
     utils::{
         error::{CliError, CliResult},
@@ -318,8 +321,23 @@ async fn handle_start(
         .with_hint("bisect requires a working tree to check out commits for testing"));
     }
 
-    // Check if bisect is already in progress
-    if BisectState::is_in_progress()
+    // Require a clean working tree to prevent data loss
+    // Bisect checkout removes and restores files, which would delete untracked content
+    let staged = changes_to_be_committed_safe()
+        .await
+        .map_err(|e| CliError::fatal(format!("Failed to check staged changes: {e}")))?;
+    let unstaged = changes_to_be_staged()
+        .map_err(|e| CliError::fatal(format!("Failed to check unstaged changes: {e}")))?;
+    if !staged.is_empty() || !unstaged.is_empty() {
+        return Err(CliError::fatal(
+            "working tree contains uncommitted changes",
+        )
+        .with_hint("commit or stash your changes before running bisect to prevent data loss"));
+    }
+
+    // Check if there's any existing bisect state (active or completed)
+    // Must use has_state to prevent overwriting preserved orig_head from a completed session
+    if BisectState::has_state()
         .await
         .map_err(CliError::fatal)?
     {
