@@ -502,7 +502,19 @@ async fn execute_task_in_task_worktree<M: CompletionModel>(
                 let main_working_dir = config.working_dir.clone();
                 let task_worktree_dir = prepared.root.clone();
                 let baseline = prepared.baseline.clone();
-                move || sync_task_worktree_back(&main_working_dir, &task_worktree_dir, &baseline)
+                let touch_files = task.contract.touch_files.clone();
+                let scope_in = task.scope_in.clone();
+                let scope_out = task.scope_out.clone();
+                move || {
+                    sync_task_worktree_back(
+                        &main_working_dir,
+                        &task_worktree_dir,
+                        &baseline,
+                        &touch_files,
+                        &scope_in,
+                        &scope_out,
+                    )
+                }
             })
             .await
         };

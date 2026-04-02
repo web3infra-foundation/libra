@@ -7,6 +7,7 @@ use std::{
 use git_internal::hash::ObjectHash;
 use uuid::Uuid;
 
+use super::acl::{ScopeVerdict, check_scope};
 use crate::{command::calc_file_blob_hash, utils::util};
 
 #[derive(Clone, Debug, Default)]
@@ -59,9 +60,25 @@ pub(crate) fn sync_task_worktree_back(
     main_working_dir: &Path,
     task_worktree_dir: &Path,
     baseline: &WorkspaceSnapshot,
+    touch_files: &[String],
+    in_scope: &[String],
+    out_of_scope: &[String],
 ) -> io::Result<()> {
     let task_snapshot = snapshot_workspace(task_worktree_dir)?;
     let changed_paths = changed_paths_since_baseline(baseline, &task_snapshot);
+
+    for rel_path in &changed_paths {
+        let rel_path_str = rel_path.to_string_lossy();
+        if let Some(reason) =
+            sync_contract_violation(touch_files, in_scope, out_of_scope, &rel_path_str)
+        {
+            return Err(io::Error::other(format!(
+                "task worktree modified '{}' outside its declared contract: {}",
+                rel_path.display(),
+                reason
+            )));
+        }
+    }
 
     for rel_path in &changed_paths {
         let expected = baseline.entries.get(rel_path).cloned();
@@ -83,6 +100,28 @@ pub(crate) fn sync_task_worktree_back(
     }
 
     Ok(())
+}
+
+fn sync_contract_violation(
+    touch_files: &[String],
+    in_scope: &[String],
+    out_of_scope: &[String],
+    path: &str,
+) -> Option<String> {
+    if !touch_files.is_empty() {
+        if let ScopeVerdict::OutOfScope(reason) = check_scope(&[], out_of_scope, path) {
+            return Some(reason);
+        }
+        return match check_scope(touch_files, &[], path) {
+            ScopeVerdict::InScope => None,
+            ScopeVerdict::OutOfScope(reason) => Some(format!("not in touchFiles: {reason}")),
+        };
+    }
+
+    match check_scope(in_scope, out_of_scope, path) {
+        ScopeVerdict::InScope => None,
+        ScopeVerdict::OutOfScope(reason) => Some(reason),
+    }
 }
 
 fn snapshot_workspace(root: &Path) -> io::Result<WorkspaceSnapshot> {
@@ -418,7 +457,7 @@ mod tests {
         std::fs::remove_file(task.join("link.txt")).unwrap();
         symlink_path(std::path::Path::new("updated.txt"), &task.join("link.txt")).unwrap();
 
-        sync_task_worktree_back(&main, &task, &baseline).unwrap();
+        sync_task_worktree_back(&main, &task, &baseline, &[], &[], &[]).unwrap();
 
         assert!(
             std::fs::symlink_metadata(main.join("link.txt"))
@@ -429,6 +468,65 @@ mod tests {
         assert_eq!(
             std::fs::read_link(main.join("link.txt")).unwrap(),
             PathBuf::from("updated.txt")
+        );
+    }
+
+    #[test]
+    fn sync_rejects_changes_outside_touch_files_contract() {
+        let temp = tempdir().unwrap();
+        let main = temp.path().join("main");
+        let task = temp.path().join("task");
+        std::fs::create_dir_all(main.join("src")).unwrap();
+        std::fs::write(main.join("src/allowed.rs"), "base\n").unwrap();
+        std::fs::write(main.join("src/other.rs"), "base\n").unwrap();
+
+        let baseline = snapshot_workspace(&main).unwrap();
+        std::fs::create_dir_all(&task).unwrap();
+        materialize_workspace(&main, &task, &baseline).unwrap();
+        std::fs::write(task.join("src/other.rs"), "changed\n").unwrap();
+
+        let err = sync_task_worktree_back(
+            &main,
+            &task,
+            &baseline,
+            &["src/allowed.rs".to_string()],
+            &["src/".to_string()],
+            &[],
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("outside its declared contract"));
+        assert_eq!(
+            std::fs::read_to_string(main.join("src/other.rs")).unwrap(),
+            "base\n"
+        );
+    }
+
+    #[test]
+    fn sync_rejects_changes_outside_write_scope_when_touch_files_absent() {
+        let temp = tempdir().unwrap();
+        let main = temp.path().join("main");
+        let task = temp.path().join("task");
+        std::fs::create_dir_all(main.join("src")).unwrap();
+        std::fs::create_dir_all(main.join("docs")).unwrap();
+        std::fs::write(main.join("src/allowed.rs"), "base\n").unwrap();
+        std::fs::write(main.join("docs/readme.md"), "base\n").unwrap();
+
+        let baseline = snapshot_workspace(&main).unwrap();
+        std::fs::create_dir_all(&task).unwrap();
+        materialize_workspace(&main, &task, &baseline).unwrap();
+        std::fs::write(task.join("docs/readme.md"), "changed\n").unwrap();
+
+        let err = sync_task_worktree_back(&main, &task, &baseline, &[], &["src/".to_string()], &[])
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("path 'docs/readme.md' not in any in-scope pattern")
+        );
+        assert_eq!(
+            std::fs::read_to_string(main.join("docs/readme.md")).unwrap(),
+            "base\n"
         );
     }
 }
