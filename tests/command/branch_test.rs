@@ -140,6 +140,11 @@ fn test_branch_set_upstream_detached_head_returns_repo_state_error() {
 #[cfg(unix)]
 #[test]
 fn test_branch_set_upstream_surfaces_config_write_failure() {
+    if skip_permission_denied_test_if_root("test_branch_set_upstream_surfaces_config_write_failure")
+    {
+        return;
+    }
+
     let repo = create_committed_repo_via_cli();
     let db_path = repo.path().join(".libra").join("libra.db");
     let original_mode = fs::metadata(&db_path).unwrap().permissions().mode();
@@ -160,6 +165,12 @@ fn test_branch_set_upstream_surfaces_config_write_failure() {
 #[cfg(unix)]
 #[test]
 fn test_branch_set_upstream_idempotent_path_skips_redundant_write() {
+    if skip_permission_denied_test_if_root(
+        "test_branch_set_upstream_idempotent_path_skips_redundant_write",
+    ) {
+        return;
+    }
+
     let repo = create_committed_repo_via_cli();
 
     let first = run_libra_command(&["branch", "--set-upstream-to", "origin/main"], repo.path());

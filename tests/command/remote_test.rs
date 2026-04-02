@@ -759,6 +759,12 @@ async fn test_remote_prune_nonexistent_remote_returns_error() {
 #[tokio::test]
 #[serial]
 async fn test_remote_prune_does_not_report_success_when_delete_fails() {
+    if skip_permission_denied_test_if_root(
+        "test_remote_prune_does_not_report_success_when_delete_fails",
+    ) {
+        return;
+    }
+
     let temp_root = tempdir().unwrap();
     let remote_dir = temp_root.path().join("remote.git");
     let work_dir = temp_root.path().join("workdir");
