@@ -30,7 +30,6 @@ pub(crate) fn prepare_task_worktree(
     main_working_dir: &Path,
     task_id: Uuid,
 ) -> io::Result<TaskWorktree> {
-    let storage = util::try_get_storage_path(Some(main_working_dir.to_path_buf()))?;
     let root = std::env::temp_dir().join(format!(
         "libra-task-worktree-{}-{}",
         std::process::id(),
@@ -41,7 +40,11 @@ pub(crate) fn prepare_task_worktree(
         fs::remove_dir_all(&root)?;
     }
     fs::create_dir_all(&root)?;
-    create_storage_link(&storage, &root.join(util::ROOT_DIR))?;
+    match util::try_get_storage_path(Some(main_working_dir.to_path_buf())) {
+        Ok(storage) => create_storage_link(&storage, &root.join(util::ROOT_DIR))?,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+    }
 
     let baseline = snapshot_workspace(main_working_dir)?;
     materialize_workspace(main_working_dir, &root, &baseline)?;
@@ -379,11 +382,13 @@ mod tests {
     use std::{io, path::PathBuf};
 
     use tempfile::tempdir;
+    use uuid::Uuid;
 
     use super::{
-        WorkspaceEntry, clone_or_copy_file, materialize_workspace, snapshot_workspace,
-        sync_task_worktree_back,
+        WorkspaceEntry, cleanup_task_worktree, clone_or_copy_file, materialize_workspace,
+        prepare_task_worktree, snapshot_workspace, sync_task_worktree_back,
     };
+    use crate::utils::util;
 
     #[cfg(unix)]
     fn symlink_path(target: &std::path::Path, link: &std::path::Path) -> io::Result<()> {
@@ -528,5 +533,23 @@ mod tests {
             std::fs::read_to_string(main.join("docs/readme.md")).unwrap(),
             "base\n"
         );
+    }
+
+    #[test]
+    fn prepare_task_worktree_supports_plain_directories_without_repo_storage() {
+        let temp = tempdir().unwrap();
+        let main = temp.path().join("workspace");
+        std::fs::create_dir_all(main.join("src")).unwrap();
+        std::fs::write(main.join("src/lib.rs"), "fn main() {}\n").unwrap();
+
+        let task_worktree = prepare_task_worktree(&main, Uuid::new_v4()).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(task_worktree.root.join("src/lib.rs")).unwrap(),
+            "fn main() {}\n"
+        );
+        assert!(!task_worktree.root.join(util::ROOT_DIR).exists());
+
+        cleanup_task_worktree(&task_worktree.root).unwrap();
     }
 }
