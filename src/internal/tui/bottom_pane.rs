@@ -35,6 +35,9 @@ struct ExecApprovalSnapshot {
     cwd: String,
     reason: Option<String>,
     is_retry: bool,
+    sandbox_label: String,
+    network_access: bool,
+    writable_roots: Vec<String>,
 }
 
 /// State for the slash-command autocomplete popup.
@@ -153,13 +156,19 @@ impl BottomPane {
         cwd: Option<String>,
         reason: Option<String>,
         is_retry: bool,
+        sandbox_label: Option<String>,
+        network_access: bool,
+        writable_roots: Vec<String>,
     ) {
-        self.exec_approval = match (command, cwd) {
-            (Some(command), Some(cwd)) => Some(ExecApprovalSnapshot {
+        self.exec_approval = match (command, cwd, sandbox_label) {
+            (Some(command), Some(cwd), Some(sandbox_label)) => Some(ExecApprovalSnapshot {
                 command,
                 cwd,
                 reason,
                 is_retry,
+                sandbox_label,
+                network_access,
+                writable_roots,
             }),
             _ => None,
         };
@@ -695,7 +704,7 @@ impl BottomPane {
 
         let chunks = Layout::vertical([
             Constraint::Length(1), // Status bar
-            Constraint::Length(3), // Command summary
+            Constraint::Length(7), // Command summary
             Constraint::Length(4), // Options
             Constraint::Length(1), // Help text
         ])
@@ -710,10 +719,49 @@ impl BottomPane {
                 theme::text::primary(),
             ),
             Line::styled(
+                format!("  sandbox: {}", approval.sandbox_label),
+                theme::text::muted(),
+            ),
+            Line::styled(
+                format!(
+                    "  network: {}",
+                    if approval.network_access {
+                        "enabled"
+                    } else {
+                        "restricted"
+                    }
+                ),
+                theme::text::muted(),
+            ),
+            Line::styled(
                 format!("  cwd: {}", approval.cwd),
                 theme::text::muted().add_modifier(Modifier::DIM),
             ),
         ];
+        if let Some(label) = self.input_context_label.as_deref() {
+            summary_lines.push(Line::styled(
+                format!("  context: {label}"),
+                theme::interactive::title(),
+            ));
+        }
+        if !approval.writable_roots.is_empty() {
+            let preview = approval
+                .writable_roots
+                .iter()
+                .take(2)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            let suffix = if approval.writable_roots.len() > 2 {
+                format!(" (+{} more)", approval.writable_roots.len() - 2)
+            } else {
+                String::new()
+            };
+            summary_lines.push(Line::styled(
+                format!("  write roots: {preview}{suffix}"),
+                theme::text::muted(),
+            ));
+        }
         if let Some(reason) = approval.reason.as_deref() {
             summary_lines.push(Line::styled(
                 format!("  reason: {reason}"),

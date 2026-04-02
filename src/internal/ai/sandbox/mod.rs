@@ -123,6 +123,9 @@ pub struct ExecApprovalRequest {
     pub cwd: PathBuf,
     pub reason: Option<String>,
     pub is_retry: bool,
+    pub sandbox_label: String,
+    pub network_access: bool,
+    pub writable_roots: Vec<PathBuf>,
     pub response_tx: oneshot::Sender<ReviewDecision>,
 }
 
@@ -134,6 +137,9 @@ impl std::fmt::Debug for ExecApprovalRequest {
             .field("cwd", &self.cwd)
             .field("reason", &self.reason)
             .field("is_retry", &self.is_retry)
+            .field("sandbox_label", &self.sandbox_label)
+            .field("network_access", &self.network_access)
+            .field("writable_roots", &self.writable_roots)
             .field("response_tx", &"<oneshot::Sender>")
             .finish()
     }
@@ -258,6 +264,7 @@ pub async fn run_shell_command_with_approval(
                             .filter(|text| !text.is_empty())
                             .map(ToString::to_string)
                     }),
+                    sandbox.as_ref().map(|s| &s.policy),
                     spec.sandbox_permissions,
                     false,
                 )
@@ -317,6 +324,7 @@ pub async fn run_shell_command_with_approval(
             &command,
             &cwd,
             Some(build_denial_reason_from_output(&first_output)),
+            sandbox.as_ref().map(|s| &s.policy),
             spec.sandbox_permissions,
             true,
         )
@@ -447,9 +455,12 @@ async fn request_exec_approval(
     command: &str,
     cwd: &Path,
     reason: Option<String>,
+    sandbox_policy: Option<&SandboxPolicy>,
     sandbox_permissions: SandboxPermissions,
     is_retry: bool,
 ) -> ReviewDecision {
+    let (sandbox_label, network_access, writable_roots) =
+        approval_request_context(sandbox_policy, cwd, sandbox_permissions, is_retry);
     let keys = vec![shell_approval_key(command, cwd, sandbox_permissions)];
     request_cached_approval_with_keys(ctx, &keys, |response_tx| ExecApprovalRequest {
         call_id: call_id.to_string(),
@@ -457,9 +468,43 @@ async fn request_exec_approval(
         cwd: cwd.to_path_buf(),
         reason,
         is_retry,
+        sandbox_label,
+        network_access,
+        writable_roots,
         response_tx,
     })
     .await
+}
+
+fn approval_request_context(
+    sandbox_policy: Option<&SandboxPolicy>,
+    cwd: &Path,
+    sandbox_permissions: SandboxPermissions,
+    is_retry: bool,
+) -> (String, bool, Vec<PathBuf>) {
+    if sandbox_permissions.requires_escalated_permissions() || is_retry {
+        return ("outside sandbox".to_string(), true, Vec::new());
+    }
+
+    match sandbox_policy {
+        Some(SandboxPolicy::DangerFullAccess) => ("danger-full-access".to_string(), true, Vec::new()),
+        Some(SandboxPolicy::ExternalSandbox { network_access }) => (
+            "external-sandbox".to_string(),
+            network_access.is_enabled(),
+            Vec::new(),
+        ),
+        Some(SandboxPolicy::ReadOnly) => ("read-only".to_string(), false, Vec::new()),
+        Some(policy @ SandboxPolicy::WorkspaceWrite { network_access, .. }) => (
+            "workspace-write".to_string(),
+            *network_access,
+            policy
+                .get_writable_roots_with_cwd(cwd)
+                .into_iter()
+                .map(|root| root.root)
+                .collect(),
+        ),
+        None => ("no sandbox".to_string(), true, Vec::new()),
+    }
 }
 
 fn shell_approval_key(
@@ -743,6 +788,41 @@ mod tests {
         assert!(is_likely_sandbox_denied(&output));
     }
 
+    #[test]
+    fn approval_context_reports_workspace_write_details() {
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![PathBuf::from("src")],
+            network_access: false,
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
+        };
+
+        let (sandbox_label, network_access, writable_roots) = approval_request_context(
+            Some(&policy),
+            Path::new("/tmp/workspace"),
+            SandboxPermissions::UseDefault,
+            false,
+        );
+
+        assert_eq!(sandbox_label, "workspace-write");
+        assert!(!network_access);
+        assert_eq!(writable_roots, vec![PathBuf::from("/tmp/workspace/src")]);
+    }
+
+    #[test]
+    fn approval_context_marks_retry_as_outside_sandbox() {
+        let (sandbox_label, network_access, writable_roots) = approval_request_context(
+            Some(&SandboxPolicy::ReadOnly),
+            Path::new("/tmp/workspace"),
+            SandboxPermissions::UseDefault,
+            true,
+        );
+
+        assert_eq!(sandbox_label, "outside sandbox");
+        assert!(network_access);
+        assert!(writable_roots.is_empty());
+    }
+
     #[tokio::test]
     async fn cached_approval_skips_prompt_when_all_keys_are_preapproved() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -766,6 +846,9 @@ mod tests {
                 cwd: PathBuf::from("/tmp"),
                 reason: None,
                 is_retry: false,
+                sandbox_label: "workspace-write".to_string(),
+                network_access: false,
+                writable_roots: vec![PathBuf::from("/tmp")],
                 response_tx,
             })
             .await;
@@ -797,6 +880,9 @@ mod tests {
                 cwd: PathBuf::from("/tmp"),
                 reason: Some("test".to_string()),
                 is_retry: false,
+                sandbox_label: "workspace-write".to_string(),
+                network_access: false,
+                writable_roots: vec![PathBuf::from("/tmp")],
                 response_tx,
             })
             .await;

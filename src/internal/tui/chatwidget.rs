@@ -551,11 +551,13 @@ impl ChatWidget {
             TaskMuxMode::Overview => "Overview",
             TaskMuxMode::Focused => "Focus",
         };
+        let workspace_label = if task.isolated { "isolated" } else { "shared" };
         Some(format!(
-            "Mux · {} · {:02} {}",
+            "Mux · {} · {:02} {} · {}",
             mode_label,
             task.ordinal,
-            truncate_label(&task.title, 18)
+            truncate_label(&task.title, 18),
+            workspace_label
         ))
     }
 
