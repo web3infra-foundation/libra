@@ -18,7 +18,7 @@ pub(super) struct ResolveExtractionArgs {
     pub(super) risk_level: Option<String>,
     #[arg(
         long,
-        default_value = "claude-sdk",
+        default_value = "claudecode",
         help = "createdBy.id used in the resolved IntentSpec preview"
     )]
     pub(super) created_by_id: String,
@@ -183,7 +183,7 @@ pub(super) async fn resolve_extraction_internal(
     args: ResolveExtractionArgs,
 ) -> Result<ResolveExtractionResult> {
     let storage_path = util::try_get_storage_path(None)
-        .context("claude-sdk commands must be run inside a Libra repository")?;
+        .context("Claude Code managed commands must be run inside a Libra repository")?;
     let working_dir =
         util::try_working_dir().context("failed to resolve repository working directory")?;
     resolve_extraction_internal_with_paths(&storage_path, &working_dir, args).await
@@ -289,7 +289,7 @@ pub(super) async fn persist_intent_internal(
     args: PersistIntentArgs,
 ) -> Result<PersistIntentResult> {
     let storage_path = util::try_get_storage_path(None)
-        .context("claude-sdk commands must be run inside a Libra repository")?;
+        .context("Claude Code managed commands must be run inside a Libra repository")?;
     persist_intent_internal_with_storage(&storage_path, args).await
 }
 

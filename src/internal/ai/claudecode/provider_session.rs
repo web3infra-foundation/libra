@@ -4,14 +4,14 @@ use super::*;
 
 #[derive(Args, Debug)]
 pub(super) struct SyncSessionsArgs {
-    #[arg(long, help = "Working directory used as the Claude SDK project dir")]
+    #[arg(long, help = "Working directory used as the Claude Code project dir")]
     pub(super) cwd: Option<PathBuf>,
     #[arg(
         long,
         help = "Optional provider session id to sync; defaults to all sessions in the project"
     )]
     pub(super) provider_session_id: Option<String>,
-    #[arg(long, help = "Maximum number of sessions to request from Claude SDK")]
+    #[arg(long, help = "Maximum number of sessions to request from Claude Code")]
     pub(super) limit: Option<usize>,
     #[arg(
         long,
@@ -23,7 +23,7 @@ pub(super) struct SyncSessionsArgs {
         long,
         default_value_t = true,
         action = clap::ArgAction::Set,
-        help = "Whether Claude SDK should include sessions from git worktrees when cwd is inside a repo"
+        help = "Whether Claude Code should include sessions from git worktrees when cwd is inside a repo"
     )]
     pub(super) include_worktrees: bool,
     #[arg(
@@ -41,9 +41,9 @@ pub(super) struct SyncSessionsArgs {
 
 #[derive(Args, Debug)]
 pub(super) struct HydrateSessionArgs {
-    #[arg(long, help = "Working directory used as the Claude SDK project dir")]
+    #[arg(long, help = "Working directory used as the Claude Code project dir")]
     pub(super) cwd: Option<PathBuf>,
-    #[arg(long, help = "Provider session id to hydrate from Claude SDK")]
+    #[arg(long, help = "Provider session id to hydrate from Claude Code")]
     pub(super) provider_session_id: String,
     #[arg(long, help = "Maximum number of session messages to request")]
     pub(super) limit: Option<usize>,
@@ -186,7 +186,7 @@ impl HelperResponse for SessionCatalogHelperRequest {
     fn parse_response(stdout: &str, stderr: &str) -> Result<Self::Output> {
         serde_json::from_str(stdout.trim()).with_context(|| {
             format!(
-                "failed to parse Claude SDK helper output as a session catalog response (stderr: {})",
+                "failed to parse Claude Code helper output as a session catalog response (stderr: {})",
                 stderr.trim()
             )
         })
@@ -199,7 +199,7 @@ impl HelperResponse for SessionMessagesHelperRequest {
     fn parse_response(stdout: &str, stderr: &str) -> Result<Self::Output> {
         serde_json::from_str(stdout.trim()).with_context(|| {
             format!(
-                "failed to parse Claude SDK helper output as a session messages response (stderr: {})",
+                "failed to parse Claude Code helper output as a session messages response (stderr: {})",
                 stderr.trim()
             )
         })
@@ -208,7 +208,7 @@ impl HelperResponse for SessionMessagesHelperRequest {
 
 pub(super) async fn sync_sessions(args: SyncSessionsArgs) -> Result<()> {
     let storage_path = util::try_get_storage_path(None)
-        .context("claude-sdk commands must be run inside a Libra repository")?;
+        .context("Claude Code managed commands must be run inside a Libra repository")?;
     let cwd = args
         .cwd
         .unwrap_or(std::env::current_dir().context("failed to read current directory")?);
@@ -227,7 +227,7 @@ pub(super) async fn sync_sessions(args: SyncSessionsArgs) -> Result<()> {
     let sessions: Vec<ClaudeSdkSessionInfo> =
         invoke_helper_json(custom_helper, &python_binary, &helper_path, &helper_request)
             .await
-            .context("failed to fetch Claude SDK session catalog")?;
+            .context("failed to fetch Claude Code session catalog")?;
 
     let filtered_sessions = if let Some(session_id) = args.provider_session_id.as_deref() {
         sessions
@@ -259,7 +259,7 @@ pub(super) async fn sync_sessions(args: SyncSessionsArgs) -> Result<()> {
 
 pub(super) async fn hydrate_session(args: HydrateSessionArgs) -> Result<()> {
     let storage_path = util::try_get_storage_path(None)
-        .context("claude-sdk commands must be run inside a Libra repository")?;
+        .context("Claude Code managed commands must be run inside a Libra repository")?;
     let cwd = args
         .cwd
         .unwrap_or(std::env::current_dir().context("failed to read current directory")?);
@@ -269,7 +269,7 @@ pub(super) async fn hydrate_session(args: HydrateSessionArgs) -> Result<()> {
         .await
         .with_context(|| {
             format!(
-                "failed to read provider session snapshot '{}'; run `claude-sdk sync-sessions --provider-session-id {}` first",
+                "failed to read provider session snapshot '{}'; sync the Claude Code provider session '{}' first",
                 artifact_path.display(),
                 args.provider_session_id
             )
@@ -289,7 +289,7 @@ pub(super) async fn hydrate_session(args: HydrateSessionArgs) -> Result<()> {
     let messages: Vec<Value> =
         invoke_helper_json(custom_helper, &python_binary, &helper_path, &helper_request)
             .await
-            .context("failed to fetch Claude SDK session messages")?;
+            .context("failed to fetch Claude Code session messages")?;
 
     let captured_at = Utc::now().to_rfc3339();
     let messages_artifact_path = provider_session_messages_artifact_path(&storage_path, &object_id);
@@ -340,7 +340,7 @@ pub(super) async fn hydrate_session(args: HydrateSessionArgs) -> Result<()> {
 
 pub(super) async fn build_evidence_input(args: BuildEvidenceInputArgs) -> Result<()> {
     let storage_path = util::try_get_storage_path(None)
-        .context("claude-sdk commands must be run inside a Libra repository")?;
+        .context("Claude Code managed commands must be run inside a Libra repository")?;
     let provider_session_object_id = build_provider_session_object_id(&args.provider_session_id)?;
     let provider_session_path =
         provider_session_artifact_path(&storage_path, &provider_session_object_id);
@@ -348,14 +348,14 @@ pub(super) async fn build_evidence_input(args: BuildEvidenceInputArgs) -> Result
         .await
         .with_context(|| {
             format!(
-                "failed to read provider session snapshot '{}'; run `claude-sdk sync-sessions --provider-session-id {}` first",
+                "failed to read provider session snapshot '{}'; sync the Claude Code provider session '{}' first",
                 provider_session_path.display(),
                 args.provider_session_id
             )
         })?;
     let message_sync = snapshot.message_sync.as_ref().ok_or_else(|| {
         anyhow!(
-            "provider session '{}' has no hydrated messages; run `claude-sdk hydrate-session --provider-session-id {}` first",
+            "provider session '{}' has no hydrated messages; hydrate the Claude Code provider session '{}' first",
             snapshot.object_id,
             args.provider_session_id
         )

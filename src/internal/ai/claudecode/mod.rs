@@ -108,32 +108,42 @@ pub struct ClaudecodeCodeArgs {
 }
 
 pub async fn execute(args: ClaudecodeCodeArgs) -> Result<()> {
-    let mut chat_args = default_chat_managed_args();
-    chat_args.cwd = Some(args.working_dir);
-    if let Some(model) = args.model {
-        chat_args.model = model;
-    }
-    if let Some(python_binary) = args.python_binary {
-        chat_args.python_binary = python_binary;
-    }
-    chat_args.helper_path = args.helper_path;
-    if let Some(timeout_seconds) = args.timeout_seconds {
-        chat_args.timeout_seconds = timeout_seconds;
-    }
-    chat_args.interactive_approvals = args.interactive_approvals;
-    if let Some(permission_mode) = args.permission_mode {
-        chat_args.permission_mode = permission_mode;
-    }
-    chat_args.continue_session = args.continue_session;
-    chat_args.resume = args.resume;
-    chat_args.fork_session = args.fork_session;
-    chat_args.session_id = args.session_id;
-    chat_args.resume_session_at = args.resume_session_at;
+    let chat_args = build_chat_managed_args(&args);
     chat_managed(chat_args, &OutputConfig::default()).await
 }
 
 pub(crate) fn is_auth_error(error: &anyhow::Error) -> bool {
     project_settings::is_auth_error(error)
+}
+
+pub(crate) fn validate_code_args(args: &ClaudecodeCodeArgs, output: &OutputConfig) -> Result<()> {
+    let chat_args = build_chat_managed_args(args);
+    validate_chat_managed_args(&chat_args, output)
+}
+
+fn build_chat_managed_args(args: &ClaudecodeCodeArgs) -> ChatManagedArgs {
+    let mut chat_args = default_chat_managed_args();
+    chat_args.cwd = Some(args.working_dir.clone());
+    if let Some(model) = args.model.as_ref() {
+        chat_args.model = model.clone();
+    }
+    if let Some(python_binary) = args.python_binary.as_ref() {
+        chat_args.python_binary = python_binary.clone();
+    }
+    chat_args.helper_path = args.helper_path.clone();
+    if let Some(timeout_seconds) = args.timeout_seconds {
+        chat_args.timeout_seconds = timeout_seconds;
+    }
+    chat_args.interactive_approvals = args.interactive_approvals;
+    if let Some(permission_mode) = args.permission_mode.as_ref() {
+        chat_args.permission_mode = permission_mode.clone();
+    }
+    chat_args.continue_session = args.continue_session;
+    chat_args.resume = args.resume.clone();
+    chat_args.fork_session = args.fork_session;
+    chat_args.session_id = args.session_id.clone();
+    chat_args.resume_session_at = args.resume_session_at.clone();
+    chat_args
 }
 
 #[derive(Debug, Clone)]
@@ -150,6 +160,11 @@ impl ClaudecodeTuiRuntime {
 
     pub(crate) fn session_control(&self) -> ManagedSessionControl {
         lock_unpoisoned(&self.session_control).clone()
+    }
+
+    pub(crate) fn reset_for_new_conversation(&mut self) {
+        *lock_unpoisoned(&self.session_control) = self.driver.initial_session_control();
+        *lock_unpoisoned(&self.latest_structured_plan) = None;
     }
 
     fn resolved_permission_mode(&self, session_control: &ManagedSessionControl) -> String {
@@ -201,27 +216,7 @@ impl ClaudecodeTuiRuntime {
 }
 
 pub(crate) async fn prepare_tui_runtime(args: ClaudecodeCodeArgs) -> Result<ClaudecodeTuiRuntime> {
-    let mut chat_args = default_chat_managed_args();
-    chat_args.cwd = Some(args.working_dir);
-    if let Some(model) = args.model {
-        chat_args.model = model;
-    }
-    if let Some(python_binary) = args.python_binary {
-        chat_args.python_binary = python_binary;
-    }
-    chat_args.helper_path = args.helper_path;
-    if let Some(timeout_seconds) = args.timeout_seconds {
-        chat_args.timeout_seconds = timeout_seconds;
-    }
-    chat_args.interactive_approvals = args.interactive_approvals;
-    if let Some(permission_mode) = args.permission_mode {
-        chat_args.permission_mode = permission_mode;
-    }
-    chat_args.continue_session = args.continue_session;
-    chat_args.resume = args.resume;
-    chat_args.fork_session = args.fork_session;
-    chat_args.session_id = args.session_id;
-    chat_args.resume_session_at = args.resume_session_at;
+    let chat_args = build_chat_managed_args(&args);
     validate_chat_managed_args(&chat_args, &OutputConfig::default())?;
     let session_control = ManagedSessionControl::from_chat_args(&chat_args);
     let (user_input_tx, _user_input_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -517,7 +512,7 @@ pub(crate) async fn run_tui_turn(
 pub(super) struct BridgeRunArgs {
     #[arg(
         long,
-        help = "Claude SDK ai_session_id to bridge into formal Task/Run objects"
+        help = "Claude Code ai_session_id to bridge into formal Task/Run objects"
     )]
     ai_session_id: String,
     #[arg(
@@ -538,7 +533,7 @@ pub(super) struct BridgeRunArgs {
 struct PersistEvidenceArgs {
     #[arg(
         long,
-        help = "Claude SDK ai_session_id whose formal run should receive Evidence"
+        help = "Claude Code ai_session_id whose formal run should receive Evidence"
     )]
     ai_session_id: String,
 }
@@ -547,7 +542,7 @@ struct PersistEvidenceArgs {
 struct PersistPatchSetArgs {
     #[arg(
         long,
-        help = "Claude SDK ai_session_id whose formal run should receive a PatchSet"
+        help = "Claude Code ai_session_id whose formal run should receive a PatchSet"
     )]
     ai_session_id: String,
     #[arg(
@@ -561,7 +556,7 @@ struct PersistPatchSetArgs {
 struct PersistDecisionArgs {
     #[arg(
         long,
-        help = "Claude SDK ai_session_id whose formal run should receive a terminal Decision"
+        help = "Claude Code ai_session_id whose formal run should receive a terminal Decision"
     )]
     ai_session_id: String,
 }
@@ -1011,7 +1006,7 @@ async fn bridge_run(args: BridgeRunArgs) -> Result<()> {
 
 pub(super) async fn bridge_run_internal(args: BridgeRunArgs) -> Result<BridgeRunResult> {
     let storage_path = util::try_get_storage_path(None)
-        .context("claude-sdk commands must be run inside a Libra repository")?;
+        .context("Claude Code managed commands must be run inside a Libra repository")?;
     validate_ai_session_id(&args.ai_session_id)?;
     if args.intent_binding.is_some() && args.intent_id.is_some() {
         bail!("pass either --intent-binding or --intent-id, not both");
@@ -1090,7 +1085,7 @@ pub(super) async fn bridge_run_internal(args: BridgeRunArgs) -> Result<BridgeRun
     let mcp_server = init_local_mcp_server(&storage_path).await?;
     let actor = mcp_server
         .resolve_actor_from_params(Some("system"), Some("claude-sdk-bridge"))
-        .map_err(|error| anyhow!("failed to resolve Claude SDK bridge actor: {error:?}"))?;
+        .map_err(|error| anyhow!("failed to resolve Claude Code bridge actor: {error:?}"))?;
     let planning_context_frame_ids = if let Some(intent_id) = requested_intent_id.as_deref() {
         create_context_frames_for_audit_bundle(
             &mcp_server,
@@ -1126,7 +1121,7 @@ pub(super) async fn bridge_run_internal(args: BridgeRunArgs) -> Result<BridgeRun
                     origin_step_id: None,
                     status: Some(task_status_for_managed_run(&managed_run_status).to_string()),
                     reason: Some(format!(
-                        "Claude SDK managed session {} bridged into formal task",
+                        "Claude Code managed session {} bridged into formal task",
                         args.ai_session_id
                     )),
                     tags: None,
@@ -1174,7 +1169,7 @@ pub(super) async fn bridge_run_internal(args: BridgeRunArgs) -> Result<BridgeRun
                         .to_string(),
                     ),
                     reason: Some(format!(
-                        "Claude SDK managed session {} bridged into formal run",
+                        "Claude Code managed session {} bridged into formal run",
                         args.ai_session_id
                     )),
                     orchestrator_version: None,
@@ -1235,7 +1230,7 @@ async fn ensure_formal_runtime_side_objects(
     let mcp_server = init_local_mcp_server(storage_path).await?;
     let actor = mcp_server
         .resolve_actor_from_params(Some("system"), Some("claude-sdk-runtime"))
-        .map_err(|error| anyhow!("failed to resolve Claude SDK runtime actor: {error:?}"))?;
+        .map_err(|error| anyhow!("failed to resolve Claude Code runtime actor: {error:?}"))?;
 
     ensure_formal_provenance_object(storage_path, &mcp_server, &actor, run_binding, audit_bundle)
         .await?;
@@ -1600,7 +1595,7 @@ async fn persist_evidence(args: PersistEvidenceArgs) -> Result<()> {
 
 async fn persist_evidence_internal(args: PersistEvidenceArgs) -> Result<PersistEvidenceResult> {
     let storage_path = util::try_get_storage_path(None)
-        .context("claude-sdk commands must be run inside a Libra repository")?;
+        .context("Claude Code managed commands must be run inside a Libra repository")?;
     validate_ai_session_id(&args.ai_session_id)?;
 
     let run_binding_path = formal_run_binding_path(&storage_path, &args.ai_session_id);
@@ -1609,7 +1604,7 @@ async fn persist_evidence_internal(args: PersistEvidenceArgs) -> Result<PersistE
             .await
             .with_context(|| {
                 format!(
-                    "run 'claude-sdk bridge-run --ai-session-id {}' first",
+                    "run a managed Claude Code turn for ai_session_id '{}' first",
                     args.ai_session_id
                 )
             })?;
@@ -1756,7 +1751,7 @@ async fn persist_evidence_internal(args: PersistEvidenceArgs) -> Result<PersistE
     let mcp_server = init_local_mcp_server(&storage_path).await?;
     let actor = mcp_server
         .resolve_actor_from_params(Some("system"), Some("claude-sdk-evidence"))
-        .map_err(|error| anyhow!("failed to resolve Claude SDK evidence actor: {error:?}"))?;
+        .map_err(|error| anyhow!("failed to resolve Claude Code evidence actor: {error:?}"))?;
     let mut evidence_entries = Vec::new();
     for entry in entries {
         let evidence_id = parse_created_id(
@@ -1767,7 +1762,7 @@ async fn persist_evidence_internal(args: PersistEvidenceArgs) -> Result<PersistE
                         run_id: run_binding.run_id.clone(),
                         patchset_id: patchset_id.clone(),
                         kind: entry.kind.clone(),
-                        tool: "claude-sdk".to_string(),
+                        tool: "claudecode".to_string(),
                         command: None,
                         exit_code: None,
                         summary: Some(entry.summary.clone()),
@@ -1827,7 +1822,7 @@ async fn persist_patchset(args: PersistPatchSetArgs) -> Result<()> {
 
 async fn persist_patchset_internal(args: PersistPatchSetArgs) -> Result<PersistPatchSetResult> {
     let storage_path = util::try_get_storage_path(None)
-        .context("claude-sdk commands must be run inside a Libra repository")?;
+        .context("Claude Code managed commands must be run inside a Libra repository")?;
     validate_ai_session_id(&args.ai_session_id)?;
 
     let run_binding_path = formal_run_binding_path(&storage_path, &args.ai_session_id);
@@ -1836,7 +1831,7 @@ async fn persist_patchset_internal(args: PersistPatchSetArgs) -> Result<PersistP
             .await
             .with_context(|| {
                 format!(
-                    "run 'claude-sdk bridge-run --ai-session-id {}' first",
+                    "run a managed Claude Code turn for ai_session_id '{}' first",
                     args.ai_session_id
                 )
             })?;
@@ -1853,7 +1848,7 @@ async fn persist_patchset_internal(args: PersistPatchSetArgs) -> Result<PersistP
     .await
     .with_context(|| {
         format!(
-            "run 'claude-sdk build-managed-evidence-input --ai-session-id {}' first",
+            "build the managed Claude Code evidence input for ai_session_id '{}' first",
             args.ai_session_id
         )
     })?;
@@ -1923,7 +1918,7 @@ async fn persist_patchset_internal(args: PersistPatchSetArgs) -> Result<PersistP
     let mcp_server = init_local_mcp_server(&storage_path).await?;
     let actor = mcp_server
         .resolve_actor_from_params(Some("system"), Some("claude-sdk-patchset"))
-        .map_err(|error| anyhow!("failed to resolve Claude SDK patchset actor: {error:?}"))?;
+        .map_err(|error| anyhow!("failed to resolve Claude Code patchset actor: {error:?}"))?;
     let touched_files = managed_evidence_input
         .patch_overview
         .touched_files
@@ -2142,7 +2137,7 @@ async fn persist_decision(args: PersistDecisionArgs) -> Result<()> {
 
 async fn persist_decision_internal(args: PersistDecisionArgs) -> Result<PersistDecisionResult> {
     let storage_path = util::try_get_storage_path(None)
-        .context("claude-sdk commands must be run inside a Libra repository")?;
+        .context("Claude Code managed commands must be run inside a Libra repository")?;
     validate_ai_session_id(&args.ai_session_id)?;
 
     let run_binding_path = formal_run_binding_path(&storage_path, &args.ai_session_id);
@@ -2151,7 +2146,7 @@ async fn persist_decision_internal(args: PersistDecisionArgs) -> Result<PersistD
             .await
             .with_context(|| {
                 format!(
-                    "run 'claude-sdk bridge-run --ai-session-id {}' first",
+                    "run a managed Claude Code turn for ai_session_id '{}' first",
                     args.ai_session_id
                 )
             })?;
@@ -2163,22 +2158,21 @@ async fn persist_decision_internal(args: PersistDecisionArgs) -> Result<PersistD
             .await
             .with_context(|| {
                 format!(
-                    "run 'claude-sdk persist-evidence --ai-session-id {}' first",
+                    "persist Evidence for ai_session_id '{}' first",
                     args.ai_session_id
                 )
             })?;
     validate_evidence_binding_consistency(&evidence_binding, &args.ai_session_id, &run_binding)?;
     if !evidence_binding_objects_exist(&storage_path, &evidence_binding).await? {
         bail!(
-            "Claude evidence binding references missing Evidence objects; run 'claude-sdk persist-evidence --ai-session-id {}' again",
+            "Claude evidence binding references missing Evidence objects; persist Evidence for ai_session_id '{}' again",
             args.ai_session_id
         );
     }
     if !evidence_binding_patchset_exists(&storage_path, &evidence_binding).await? {
         bail!(
-            "Claude evidence binding references a missing PatchSet object; run 'claude-sdk persist-patchset --ai-session-id {}' and then 'claude-sdk persist-evidence --ai-session-id {}' again",
+            "Claude evidence binding references a missing PatchSet object; persist the PatchSet for ai_session_id '{}' and then persist Evidence again",
             args.ai_session_id,
-            args.ai_session_id
         );
     }
     let resolved_patchset_binding =
@@ -2195,7 +2189,7 @@ async fn persist_decision_internal(args: PersistDecisionArgs) -> Result<PersistD
         || evidence_binding.patchset_id.as_deref() != patchset_id.as_deref()
     {
         bail!(
-            "Claude evidence binding has stale patchset references; run 'claude-sdk persist-evidence --ai-session-id {}' again",
+            "Claude evidence binding has stale patchset references; persist Evidence for ai_session_id '{}' again",
             args.ai_session_id
         );
     }
@@ -2263,7 +2257,7 @@ async fn persist_decision_internal(args: PersistDecisionArgs) -> Result<PersistD
     let mcp_server = init_local_mcp_server(&storage_path).await?;
     let actor = mcp_server
         .resolve_actor_from_params(Some("system"), Some("claude-sdk-decision"))
-        .map_err(|error| anyhow!("failed to resolve Claude SDK decision actor: {error:?}"))?;
+        .map_err(|error| anyhow!("failed to resolve Claude Code decision actor: {error:?}"))?;
     let decision_id = parse_created_id(
         "decision",
         &mcp_server
@@ -2470,7 +2464,7 @@ fn derive_formal_task_summary(
         .and_then(|value| value.get("summary"))
         .and_then(Value::as_str)
         .map(ToString::to_string)
-        .unwrap_or_else(|| format!("Claude SDK session {}", audit_bundle.provider_session_id))
+        .unwrap_or_else(|| format!("Claude Code session {}", audit_bundle.provider_session_id))
 }
 
 fn derive_formal_task_description(audit_bundle: &ManagedAuditBundle) -> String {
@@ -2479,7 +2473,7 @@ fn derive_formal_task_description(audit_bundle: &ManagedAuditBundle) -> String {
     }
 
     format!(
-        "Formalized Claude SDK session {} from managed audit bundle.",
+        "Formalized Claude Code session {} from managed audit bundle.",
         audit_bundle.provider_session_id
     )
 }
@@ -2718,8 +2712,8 @@ fn run_status_for_managed_run(managed_run_status: &str) -> &'static str {
 
 fn run_error_for_managed_status(managed_run_status: &str) -> Option<String> {
     match managed_run_status {
-        "failed" => Some("Claude SDK managed session ended in failed state".to_string()),
-        "timed_out" => Some("Claude SDK managed helper timed out".to_string()),
+        "failed" => Some("Claude Code managed session ended in failed state".to_string()),
+        "timed_out" => Some("Claude Code managed helper timed out".to_string()),
         _ => None,
     }
 }
@@ -2982,7 +2976,7 @@ async fn load_patchset_binding_for_ai_session(
     validate_patchset_binding_consistency(&binding, ai_session_id, run_binding)?;
     if !local_object_exists(storage_path, "patchset", &binding.patchset_id).await? {
         bail!(
-            "Claude patchset binding references missing PatchSet object; run 'claude-sdk persist-patchset --ai-session-id {}' again",
+            "Claude patchset binding references missing PatchSet object; rerun the managed Claude Code flow for ai_session_id '{}' to rebuild it",
             ai_session_id
         );
     }
@@ -3467,6 +3461,36 @@ mod tests {
     fn build_plan_update_cell_skips_unchanged_plan() {
         let plan = vec!["Inspect files".to_string(), "Implement change".to_string()];
         assert!(build_plan_update_cell(7, 0, Some(&plan), &plan).is_none());
+    }
+
+    #[test]
+    fn reset_for_new_conversation_restores_initial_session_control() {
+        let args = ClaudecodeCodeArgs {
+            working_dir: PathBuf::from("/tmp/repo"),
+            model: Some("claude-sonnet-4-6".to_string()),
+            permission_mode: Some("plan".to_string()),
+            continue_session: true,
+            ..ClaudecodeCodeArgs::default()
+        };
+        let chat_args = build_chat_managed_args(&args);
+        let initial_control = ManagedSessionControl::from_chat_args(&chat_args);
+        let mut runtime = ClaudecodeTuiRuntime {
+            driver: build_test_tui_driver(chat_args),
+            session_control: Arc::new(Mutex::new(ManagedSessionControl::followup(
+                "provider-session-123".to_string(),
+                "acceptEdits",
+                false,
+            ))),
+            latest_structured_plan: Arc::new(Mutex::new(Some(vec![
+                "Inspect files".to_string(),
+                "Implement change".to_string(),
+            ]))),
+        };
+
+        runtime.reset_for_new_conversation();
+
+        assert_eq!(runtime.session_control(), initial_control);
+        assert!(lock_unpoisoned(&runtime.latest_structured_plan).is_none());
     }
 
     #[tokio::test]

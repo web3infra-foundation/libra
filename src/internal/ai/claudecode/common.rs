@@ -305,8 +305,9 @@ pub(super) async fn load_managed_audit_bundle_for_ai_session(
             .await
             .with_context(|| {
                 format!(
-                    "failed to load managed audit bundle at '{}'; run 'claude-sdk run --prompt ...' or 'claude-sdk import --artifact ...' first",
-                    audit_bundle_path.display()
+                    "failed to load managed audit bundle at '{}'; run a managed Claude Code turn or import a managed artifact for ai_session_id '{}' first",
+                    audit_bundle_path.display(),
+                    ai_session_id
                 )
             })?;
     if audit_bundle.schema != "libra.claude_managed_audit_bundle.v1" {
@@ -335,7 +336,7 @@ pub(super) async fn materialize_helper(
     }
 
     let temp_dir = tempfile::Builder::new()
-        .prefix("libra-claude-sdk-helper-")
+        .prefix("libra-claudecode-helper-")
         .tempdir()
         .context("failed to create temporary helper directory")?;
     let temp_dir_path = temp_dir.path().to_path_buf();
@@ -489,7 +490,7 @@ where
     T: Serialize + HelperResponse,
 {
     let serialized_request =
-        serde_json::to_vec(request).context("failed to serialize Claude SDK helper request")?;
+        serde_json::to_vec(request).context("failed to serialize Claude Code helper request")?;
     let executable = if custom_helper {
         helper_path.display().to_string()
     } else {
@@ -502,7 +503,7 @@ where
         .spawn()
         .with_context(|| {
             format!(
-                "failed to start Claude SDK helper with '{}' '{}'",
+                "failed to start Claude Code helper with '{}' '{}'",
                 executable,
                 helper_path.display()
             )
@@ -512,13 +513,13 @@ where
         stdin
             .write_all(&serialized_request)
             .await
-            .context("failed to send request to Claude SDK helper")?;
+            .context("failed to send request to Claude Code helper")?;
     }
 
     let output = child
         .wait_with_output()
         .await
-        .context("failed to wait for Claude SDK helper process")?;
+        .context("failed to wait for Claude Code helper process")?;
     let stdout = String::from_utf8(output.stdout).context("helper stdout is not valid UTF-8")?;
     let stderr = String::from_utf8(output.stderr).context("helper stderr is not valid UTF-8")?;
 
@@ -528,7 +529,7 @@ where
         } else {
             stderr.trim().to_string()
         };
-        return Err(anyhow!("Claude SDK helper failed: {detail}"));
+        return Err(anyhow!("Claude Code helper failed: {detail}"));
     }
 
     T::parse_response(stdout.trim(), stderr.trim())

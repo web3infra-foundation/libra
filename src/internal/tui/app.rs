@@ -1630,6 +1630,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 self.session = SessionState::new(&self.registry.working_dir().to_string_lossy());
                 self.mcp_plan_id = None;
                 self.mcp_run_id = None;
+                reset_managed_claudecode_session(self.managed_claudecode.as_mut());
             }
             BuiltinCommand::Model => {
                 let info = format!(
@@ -3348,6 +3349,12 @@ async fn current_head_sha_async(working_dir: std::path::PathBuf) -> String {
 
 fn should_start_mcp_turn_tracking(has_managed_claudecode: bool) -> bool {
     !has_managed_claudecode
+}
+
+fn reset_managed_claudecode_session(runtime: Option<&mut ClaudecodeTuiRuntime>) {
+    if let Some(runtime) = runtime {
+        runtime.reset_for_new_conversation();
+    }
 }
 
 #[derive(Debug, Clone, Default)]

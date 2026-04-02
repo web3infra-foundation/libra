@@ -23,8 +23,8 @@
         "tool_name": "StructuredOutput",
         "tool_use_id": "toolu_fixture_structured_output",
         "tool_input": {
-          "summary": "Audit the Claude SDK to Libra bridge using real managed artifacts",
-          "problemStatement": "Libra needs a Claude SDK normalization path grounded in real managed artifacts rather than speculative fixtures.",
+          "summary": "Audit the Claude Code managed bridge using real managed artifacts",
+          "problemStatement": "Libra needs a Claude Code normalization path grounded in real managed artifacts rather than speculative fixtures.",
           "changeType": "refactor",
           "objectives": [
             "Ground Claude normalization tests in sanitized real SDK artifact shape",
@@ -32,16 +32,16 @@
             "Keep structured extraction aligned with the managed output schema"
           ],
           "inScope": [
-            "src/command/claude_sdk.rs",
-            "tests/command/claude_sdk_test.rs"
+            "src/command/code.rs",
+            "tests/command/code_claudecode_test.rs"
           ],
           "outOfScope": [
             "Projection execution/runtime driver changes"
           ],
           "touchHints": {
             "files": [
-              "src/command/claude_sdk.rs",
-              "tests/command/claude_sdk_test.rs",
+              "src/command/code.rs",
+              "tests/command/code_claudecode_test.rs",
               "__TOUCHED_FILE__"
             ],
             "symbols": [
@@ -49,8 +49,8 @@
               "extract_bridge_plan_steps"
             ],
             "apis": [
-              "claude-sdk run",
-              "claude-sdk bridge-run"
+              "libra code --provider claudecode",
+              "libra cat-file --ai"
             ]
           },
           "successCriteria": [
@@ -68,7 +68,7 @@
           "integrationChecks": [],
           "securityChecks": [],
           "releaseChecks": [],
-          "riskRationale": "The change is confined to Claude SDK normalization and test grounding, but a bad fixture could hide a provider-contract mismatch.",
+          "riskRationale": "The change is confined to Claude Code normalization and test grounding, but a bad fixture could hide a provider-contract mismatch.",
           "riskFactors": [
             "Fixture drift from the real Claude helper artifact shape",
             "Plan extraction can overfit to markdown formatting if not kept conservative"
@@ -89,8 +89,8 @@
         "tool_response": "Structured output provided successfully",
         "tool_use_id": "toolu_fixture_structured_output",
         "tool_input": {
-          "summary": "Audit the Claude SDK to Libra bridge using real managed artifacts",
-          "problemStatement": "Libra needs a Claude SDK normalization path grounded in real managed artifacts rather than speculative fixtures.",
+          "summary": "Audit the Claude Code managed bridge using real managed artifacts",
+          "problemStatement": "Libra needs a Claude Code normalization path grounded in real managed artifacts rather than speculative fixtures.",
           "changeType": "refactor",
           "objectives": [
             "Ground Claude normalization tests in sanitized real SDK artifact shape",
@@ -98,16 +98,16 @@
             "Keep structured extraction aligned with the managed output schema"
           ],
           "inScope": [
-            "src/command/claude_sdk.rs",
-            "tests/command/claude_sdk_test.rs"
+            "src/command/code.rs",
+            "tests/command/code_claudecode_test.rs"
           ],
           "outOfScope": [
             "Projection execution/runtime driver changes"
           ],
           "touchHints": {
             "files": [
-              "src/command/claude_sdk.rs",
-              "tests/command/claude_sdk_test.rs",
+              "src/command/code.rs",
+              "tests/command/code_claudecode_test.rs",
               "__TOUCHED_FILE__"
             ],
             "symbols": [
@@ -115,8 +115,8 @@
               "extract_bridge_plan_steps"
             ],
             "apis": [
-              "claude-sdk run",
-              "claude-sdk bridge-run"
+              "libra code --provider claudecode",
+              "libra cat-file --ai"
             ]
           },
           "successCriteria": [
@@ -134,7 +134,7 @@
           "integrationChecks": [],
           "securityChecks": [],
           "releaseChecks": [],
-          "riskRationale": "The change is confined to Claude SDK normalization and test grounding, but a bad fixture could hide a provider-contract mismatch.",
+          "riskRationale": "The change is confined to Claude Code normalization and test grounding, but a bad fixture could hide a provider-contract mismatch.",
           "riskFactors": [
             "Fixture drift from the real Claude helper artifact shape",
             "Plan extraction can overfit to markdown formatting if not kept conservative"
@@ -242,7 +242,7 @@
         "content": [
           {
             "type": "text",
-            "text": "I'll help you audit the Claude SDK to Libra semantic-agent bridge. Let me start with a structured approach.\n\n## 3-Step Audit Plan\n\n1. **Inspect Bridge Architecture** -> Identify initialization sequence, provider contracts, and task event flow between Claude SDK and Libra components\n2. **Audit Runtime Behavior** -> Trace provider-native facts (actual type signatures, event payloads, transformation logic) vs semantic candidate interpretations\n3. **Extract Structured Intent** -> Map observed runtime evidence to semantic intent model with grounded validation\n\n---\n\n## Next Step\n\nI will use the available code context to ground the extraction."
+            "text": "I'll help you audit the Claude Code managed bridge into Libra's semantic-agent layer. Let me start with a structured approach.\n\n## 3-Step Audit Plan\n\n1. **Inspect Bridge Architecture** -> Identify initialization sequence, provider contracts, and task event flow between Claude Code and Libra components\n2. **Audit Runtime Behavior** -> Trace provider-native facts (actual type signatures, event payloads, transformation logic) vs semantic candidate interpretations\n3. **Extract Structured Intent** -> Map observed runtime evidence to semantic intent model with grounded validation\n\n---\n\n## Next Step\n\nI will use the available code context to ground the extraction."
           }
         ],
         "stop_reason": null,
@@ -296,8 +296,8 @@
       "session_id": "109731a6-ad2d-4b3e-9f6a-a04292d3b63e",
       "total_cost_usd": 0.0084588,
       "structured_output": {
-        "summary": "Audit the Claude SDK to Libra bridge using real managed artifacts",
-        "problemStatement": "Libra needs a Claude SDK normalization path grounded in real managed artifacts rather than speculative fixtures.",
+        "summary": "Audit the Claude Code managed bridge using real managed artifacts",
+        "problemStatement": "Libra needs a Claude Code normalization path grounded in real managed artifacts rather than speculative fixtures.",
         "changeType": "refactor",
         "objectives": [
           "Ground Claude normalization tests in sanitized real SDK artifact shape",
@@ -305,8 +305,8 @@
           "Keep structured extraction aligned with the managed output schema"
         ],
         "inScope": [
-          "src/command/claude_sdk.rs",
-          "tests/command/claude_sdk_test.rs"
+          "src/command/code.rs",
+          "tests/command/code_claudecode_test.rs"
         ],
         "outOfScope": [
           "Projection execution/runtime driver changes"
@@ -314,8 +314,8 @@
         "planningSummary": "Use the opening numbered plan as runtime guidance only; formal Plan objects still come from raw assistant plan text.",
         "touchHints": {
           "files": [
-            "src/command/claude_sdk.rs",
-            "tests/command/claude_sdk_test.rs",
+            "src/command/code.rs",
+            "tests/command/code_claudecode_test.rs",
             "__TOUCHED_FILE__"
           ],
           "symbols": [
@@ -323,8 +323,8 @@
             "extract_bridge_plan_steps"
           ],
           "apis": [
-            "claude-sdk run",
-            "claude-sdk bridge-run"
+            "libra code --provider claudecode",
+            "libra cat-file --ai"
           ]
         },
         "successCriteria": [
@@ -342,7 +342,7 @@
         "integrationChecks": [],
         "securityChecks": [],
         "releaseChecks": [],
-        "riskRationale": "The change is confined to Claude SDK normalization and test grounding, but a bad fixture could hide a provider-contract mismatch.",
+        "riskRationale": "The change is confined to Claude Code normalization and test grounding, but a bad fixture could hide a provider-contract mismatch.",
         "riskFactors": [
           "Fixture drift from the real Claude helper artifact shape",
           "Plan extraction can overfit to markdown formatting if not kept conservative"
@@ -380,8 +380,8 @@
     "session_id": "109731a6-ad2d-4b3e-9f6a-a04292d3b63e",
     "total_cost_usd": 0.0084588,
     "structured_output": {
-      "summary": "Audit the Claude SDK to Libra bridge using real managed artifacts",
-      "problemStatement": "Libra needs a Claude SDK normalization path grounded in real managed artifacts rather than speculative fixtures.",
+      "summary": "Audit the Claude Code managed bridge using real managed artifacts",
+      "problemStatement": "Libra needs a Claude Code normalization path grounded in real managed artifacts rather than speculative fixtures.",
       "changeType": "refactor",
       "objectives": [
         "Ground Claude normalization tests in sanitized real SDK artifact shape",
@@ -389,8 +389,8 @@
         "Keep structured extraction aligned with the managed output schema"
       ],
       "inScope": [
-        "src/command/claude_sdk.rs",
-        "tests/command/claude_sdk_test.rs"
+        "src/command/code.rs",
+        "tests/command/code_claudecode_test.rs"
       ],
       "outOfScope": [
         "Projection execution/runtime driver changes"
@@ -398,8 +398,8 @@
       "planningSummary": "Use the opening numbered plan as runtime guidance only; formal Plan objects still come from raw assistant plan text.",
       "touchHints": {
         "files": [
-          "src/command/claude_sdk.rs",
-          "tests/command/claude_sdk_test.rs",
+          "src/command/code.rs",
+          "tests/command/code_claudecode_test.rs",
           "__TOUCHED_FILE__"
         ],
         "symbols": [
@@ -407,8 +407,8 @@
           "extract_bridge_plan_steps"
         ],
         "apis": [
-          "claude-sdk run",
-          "claude-sdk bridge-run"
+          "libra code --provider claudecode",
+          "libra cat-file --ai"
         ]
       },
       "successCriteria": [
@@ -426,7 +426,7 @@
       "integrationChecks": [],
       "securityChecks": [],
       "releaseChecks": [],
-      "riskRationale": "The change is confined to Claude SDK normalization and test grounding, but a bad fixture could hide a provider-contract mismatch.",
+      "riskRationale": "The change is confined to Claude Code normalization and test grounding, but a bad fixture could hide a provider-contract mismatch.",
       "riskFactors": [
         "Fixture drift from the real Claude helper artifact shape",
         "Plan extraction can overfit to markdown formatting if not kept conservative"

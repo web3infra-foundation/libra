@@ -6,7 +6,7 @@ use super::*;
 pub(super) struct BuildManagedEvidenceInputArgs {
     #[arg(
         long,
-        help = "Claude SDK ai_session_id to derive a managed evidence input from"
+        help = "Claude Code ai_session_id to derive a managed evidence input from"
     )]
     pub(super) ai_session_id: String,
     #[arg(
@@ -20,7 +20,7 @@ pub(super) struct BuildManagedEvidenceInputArgs {
 pub(super) struct BuildDecisionInputArgs {
     #[arg(
         long,
-        help = "Claude SDK ai_session_id to derive a decision input from"
+        help = "Claude Code ai_session_id to derive a decision input from"
     )]
     pub(super) ai_session_id: String,
     #[arg(
@@ -86,7 +86,7 @@ pub(super) async fn build_managed_evidence_input(
     args: BuildManagedEvidenceInputArgs,
 ) -> Result<()> {
     let storage_path = util::try_get_storage_path(None)
-        .context("claude-sdk commands must be run inside a Libra repository")?;
+        .context("Claude Code managed commands must be run inside a Libra repository")?;
     validate_ai_session_id(&args.ai_session_id)?;
 
     let raw_artifact_path = managed_artifact_path(&storage_path, &args.ai_session_id);
@@ -149,7 +149,7 @@ pub(super) async fn build_managed_evidence_input(
 
 pub(super) async fn build_decision_input(args: BuildDecisionInputArgs) -> Result<()> {
     let storage_path = util::try_get_storage_path(None)
-        .context("claude-sdk commands must be run inside a Libra repository")?;
+        .context("Claude Code managed commands must be run inside a Libra repository")?;
     validate_ai_session_id(&args.ai_session_id)?;
 
     let (audit_bundle_path, audit_bundle) =

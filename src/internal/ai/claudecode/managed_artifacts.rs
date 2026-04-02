@@ -1599,7 +1599,7 @@ fn managed_run_error(artifact: &ClaudeManagedArtifact) -> Option<String> {
             .result
             .clone()
             .filter(|value| !value.trim().is_empty())
-            .or_else(|| Some("managed Claude SDK run reported an error".to_string()));
+            .or_else(|| Some("managed Claude Code run reported an error".to_string()));
     }
     artifact.helper_error.clone()
 }
@@ -2263,7 +2263,7 @@ fn build_field_provenance(
             serde_json::to_value(session_control)
                 .context("failed to serialize managed session control provenance")?,
             Some(
-                "Libra-selected Claude SDK continuity settings; these guide provider session reuse but do not define formal thread, plan, or scheduler semantics.".to_string(),
+                "Libra-selected Claude Code continuity settings; these guide provider session reuse but do not define formal thread, plan, or scheduler semantics.".to_string(),
             ),
         );
     }

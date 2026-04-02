@@ -71,18 +71,18 @@ pub(super) struct ImportArtifactArgs {
 
 #[derive(Args, Debug)]
 pub(super) struct RunManagedArgs {
-    #[arg(long, help = "Prompt text for the managed Claude SDK session")]
+    #[arg(long, help = "Prompt text for the managed Claude Code session")]
     pub(super) prompt: Option<String>,
     #[arg(long, help = "Read the prompt text from a UTF-8 file")]
     pub(super) prompt_file: Option<PathBuf>,
-    #[arg(long, help = "Working directory for the Claude SDK session")]
+    #[arg(long, help = "Working directory for the managed Claude Code session")]
     pub(super) cwd: Option<PathBuf>,
     #[arg(long, default_value = DEFAULT_MODEL, help = "Claude model identifier")]
     pub(super) model: String,
     #[arg(
         long,
         default_value = "default",
-        help = "Claude SDK permission mode passed to query()"
+        help = "Claude Code permission mode passed to query()"
     )]
     pub(super) permission_mode: String,
     #[arg(
@@ -92,7 +92,7 @@ pub(super) struct RunManagedArgs {
     pub(super) timeout_seconds: Option<u64>,
     #[arg(
         long = "tool",
-        help = "Tool name to enable and allow for the managed Claude SDK session"
+        help = "Tool name to enable and allow for the managed Claude Code session"
     )]
     pub(super) tools: Vec<String>,
     #[arg(
@@ -140,31 +140,31 @@ pub(super) struct RunManagedArgs {
         long,
         default_value_t = false,
         action = clap::ArgAction::Set,
-        help = "Whether Claude SDK should enable file checkpointing and emit files_persisted facts for managed runs"
+        help = "Whether Claude Code should enable file checkpointing and emit files_persisted facts for managed runs"
     )]
     pub(super) enable_file_checkpointing: bool,
     #[arg(
         long = "continue",
         default_value_t = false,
         action = clap::ArgAction::Set,
-        help = "Continue the most recent Claude SDK session in the selected working directory on the first turn"
+        help = "Continue the most recent Claude Code session in the selected working directory on the first turn"
     )]
     pub(super) continue_session: bool,
     #[arg(
         long,
-        help = "Resume a specific Claude SDK provider session by UUID on the first turn"
+        help = "Resume a specific Claude Code provider session by UUID on the first turn"
     )]
     pub(super) resume: Option<String>,
     #[arg(
         long,
         default_value_t = false,
         action = clap::ArgAction::Set,
-        help = "When resuming on the first turn, fork into a new Claude SDK session instead of continuing the original session"
+        help = "When resuming on the first turn, fork into a new Claude Code session instead of continuing the original session"
     )]
     pub(super) fork_session: bool,
     #[arg(
         long,
-        help = "Use a specific UUID for the Claude SDK session on the first turn; when resuming, this requires --fork-session"
+        help = "Use a specific UUID for the Claude Code session on the first turn; when resuming, this requires --fork-session"
     )]
     pub(super) session_id: Option<String>,
     #[arg(
@@ -187,14 +187,14 @@ pub(super) struct RunManagedArgs {
 
 #[derive(Args, Debug, Clone)]
 pub(crate) struct ChatManagedArgs {
-    #[arg(long, help = "Working directory for the Claude SDK session")]
+    #[arg(long, help = "Working directory for the managed Claude Code session")]
     pub(crate) cwd: Option<PathBuf>,
     #[arg(long, default_value = DEFAULT_MODEL, help = "Claude model identifier")]
     pub(crate) model: String,
     #[arg(
         long,
         default_value = "default",
-        help = "Claude SDK permission mode passed to query()"
+        help = "Claude Code permission mode passed to query()"
     )]
     pub(crate) permission_mode: String,
     #[arg(
@@ -206,7 +206,7 @@ pub(crate) struct ChatManagedArgs {
     #[arg(
         long = "tool",
         default_values = DEFAULT_CHAT_TOOLS,
-        help = "Tool name to enable and allow for the managed Claude SDK session"
+        help = "Tool name to enable and allow for the managed Claude Code session"
     )]
     pub(crate) tools: Vec<String>,
     #[arg(
@@ -234,28 +234,28 @@ pub(crate) struct ChatManagedArgs {
         long,
         default_value_t = false,
         action = clap::ArgAction::Set,
-        help = "Whether Claude SDK should enable file checkpointing and emit files_persisted facts for managed runs"
+        help = "Whether Claude Code should enable file checkpointing and emit files_persisted facts for managed runs"
     )]
     pub(crate) enable_file_checkpointing: bool,
     #[arg(
         long = "continue",
         default_value_t = false,
         action = clap::ArgAction::Set,
-        help = "Continue the most recent Claude SDK session in the selected working directory"
+        help = "Continue the most recent Claude Code session in the selected working directory"
     )]
     pub(crate) continue_session: bool,
-    #[arg(long, help = "Resume a specific Claude SDK provider session by UUID")]
+    #[arg(long, help = "Resume a specific Claude Code provider session by UUID")]
     pub(crate) resume: Option<String>,
     #[arg(
         long,
         default_value_t = false,
         action = clap::ArgAction::Set,
-        help = "When resuming, fork into a new Claude SDK session instead of continuing the original session"
+        help = "When resuming, fork into a new Claude Code session instead of continuing the original session"
     )]
     pub(crate) fork_session: bool,
     #[arg(
         long,
-        help = "Use a specific UUID for the Claude SDK session; when resuming, this requires --fork-session"
+        help = "Use a specific UUID for the Claude Code session; when resuming, this requires --fork-session"
     )]
     pub(crate) session_id: Option<String>,
     #[arg(
@@ -420,7 +420,7 @@ fn format_helper_exit_error(status: ExitStatus, stderr: &str) -> String {
     } else {
         stderr.trim().to_string()
     };
-    format!("Claude SDK helper failed with status {status}: {detail}")
+    format!("Claude Code helper failed with status {status}: {detail}")
 }
 
 async fn read_helper_stderr_limited<R>(mut stderr: R) -> Result<(Vec<u8>, bool)>
@@ -434,7 +434,7 @@ where
         let read = stderr
             .read(&mut buffer)
             .await
-            .context("failed to read Claude SDK helper stderr")?;
+            .context("failed to read Claude Code helper stderr")?;
         if read == 0 {
             break;
         }
@@ -467,16 +467,16 @@ where
             .await
             .map_err(|_| {
                 anyhow!(
-                    "Claude SDK helper {helper_label} timed out after {}s while waiting for stream output",
+                    "Claude Code helper {helper_label} timed out after {}s while waiting for stream output",
                     timeout_window.as_secs()
                 )
             })?
-            .with_context(|| format!("failed to read Claude SDK helper {helper_label} stream"))
+            .with_context(|| format!("failed to read Claude Code helper {helper_label} stream"))
     } else {
         stdout_lines
             .next_line()
             .await
-            .with_context(|| format!("failed to read Claude SDK helper {helper_label} stream"))
+            .with_context(|| format!("failed to read Claude Code helper {helper_label} stream"))
     }
 }
 
@@ -490,16 +490,15 @@ async fn wait_for_helper_exit(
             .await
             .map_err(|_| {
                 anyhow!(
-                    "Claude SDK helper {helper_label} timed out after {}s while waiting for process exit",
+                    "Claude Code helper {helper_label} timed out after {}s while waiting for process exit",
                     timeout_window.as_secs()
                 )
             })?
-            .with_context(|| format!("failed to wait for Claude SDK helper {helper_label} process"))
+            .with_context(|| format!("failed to wait for Claude Code helper {helper_label} process"))
     } else {
-        child
-            .wait()
-            .await
-            .with_context(|| format!("failed to wait for Claude SDK helper {helper_label} process"))
+        child.wait().await.with_context(|| {
+            format!("failed to wait for Claude Code helper {helper_label} process")
+        })
     }
 }
 
@@ -591,7 +590,7 @@ enum ChatTurnUiEvent {
     Completed(Box<Result<ManagedStreamingTurnOutcome, String>>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ManagedSessionControl {
     continue_session: bool,
     resume: Option<String>,
@@ -782,7 +781,7 @@ async fn ensure_streaming_formal_run_binding(
     let mcp_server = init_local_mcp_server(storage_path).await?;
     let actor = mcp_server
         .resolve_actor_from_params(Some("system"), Some("claude-sdk-stream"))
-        .map_err(|error| anyhow!("failed to resolve Claude SDK stream actor: {error:?}"))?;
+        .map_err(|error| anyhow!("failed to resolve Claude Code stream actor: {error:?}"))?;
     let context_snapshot_id =
         create_context_snapshot_for_audit_bundle(&mcp_server, &actor, &audit_bundle).await?;
     let task_id = parse_created_id(
@@ -803,7 +802,7 @@ async fn ensure_streaming_formal_run_binding(
                     origin_step_id: None,
                     status: Some(task_status_for_managed_run(&managed_run_status).to_string()),
                     reason: Some(format!(
-                        "Claude SDK streaming session {ai_session_id} bridged into formal task"
+                        "Claude Code streaming session {ai_session_id} bridged into formal task"
                     )),
                     tags: None,
                     external_ids: None,
@@ -838,7 +837,7 @@ async fn ensure_streaming_formal_run_binding(
                         .to_string(),
                     ),
                     reason: Some(format!(
-                        "Claude SDK streaming session {ai_session_id} bridged into formal run"
+                        "Claude Code streaming session {ai_session_id} bridged into formal run"
                     )),
                     orchestrator_version: None,
                     tags: None,
@@ -942,7 +941,7 @@ async fn sync_streaming_tool_invocations(
     let mcp_server = init_local_mcp_server(storage_path).await?;
     let actor = mcp_server
         .resolve_actor_from_params(Some("system"), Some("claude-sdk-stream"))
-        .map_err(|error| anyhow!("failed to resolve Claude SDK stream actor: {error:?}"))?;
+        .map_err(|error| anyhow!("failed to resolve Claude Code stream actor: {error:?}"))?;
 
     for invocation in &audit_bundle.bridge.tool_invocations {
         let Some(status) = tool_status.get(&invocation.tool_use_id) else {
@@ -1063,7 +1062,7 @@ impl HelperResponse for ManagedHelperRequest {
     fn parse_response(stdout: &str, stderr: &str) -> Result<Self::Output> {
         serde_json::from_str(stdout.trim()).with_context(|| {
             format!(
-                "failed to parse Claude SDK helper output as a managed artifact (stderr: {})",
+                "failed to parse Claude Code helper output as a managed artifact (stderr: {})",
                 stderr.trim()
             )
         })
@@ -1072,7 +1071,7 @@ impl HelperResponse for ManagedHelperRequest {
 
 pub(super) async fn import_artifact(args: ImportArtifactArgs) -> Result<()> {
     let storage_path = util::try_get_storage_path(None)
-        .context("claude-sdk commands must be run inside a Libra repository")?;
+        .context("Claude Code managed commands must be run inside a Libra repository")?;
     let artifact = read_artifact(&args.artifact).await?;
     let outcome = persist_managed_artifact(&storage_path, &artifact).await?;
     print_result("import", &outcome)?;
@@ -1194,6 +1193,29 @@ impl ManagedClaudecodeTuiDriver {
             &mut emit,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn build_test_tui_driver(args: ChatManagedArgs) -> ManagedClaudecodeTuiDriver {
+    let (user_input_tx, _user_input_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (exec_approval_tx, _exec_approval_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    ManagedClaudecodeTuiDriver {
+        args,
+        storage_path: PathBuf::from("/tmp/repo/.libra"),
+        cwd: PathBuf::from("/tmp/repo"),
+        helper_path: PathBuf::from("/tmp/helper.py"),
+        project_bootstrap: ClaudecodeProjectBootstrap {
+            provider_env_overrides: BTreeMap::new(),
+            provider_env_unset: Vec::new(),
+            credential_source: None,
+            startup_note: String::new(),
+        },
+        custom_helper: false,
+        temp_helper_dir: None,
+        user_input_tx,
+        exec_approval_tx,
     }
 }
 
@@ -1333,7 +1355,7 @@ fn streaming_render_mode(output: &OutputConfig) -> StreamingRenderMode {
 
 pub(super) async fn run_managed(args: RunManagedArgs, output: &OutputConfig) -> Result<()> {
     let storage_path = util::try_get_storage_path(None)
-        .context("claude-sdk commands must be run inside a Libra repository")?;
+        .context("Claude Code managed commands must be run inside a Libra repository")?;
     let project_bootstrap = prepare_claudecode_project_bootstrap(&storage_path).await?;
     emit_project_bootstrap_note(&project_bootstrap);
     validate_run_managed_args(&args)?;
@@ -1344,7 +1366,7 @@ pub(super) async fn run_managed(args: RunManagedArgs, output: &OutputConfig) -> 
         )
     {
         bail!(
-            "interactive claude-sdk run supports only --json=ndjson; use --batch for pretty or compact JSON output"
+            "interactive Claude Code managed run supports only --json=ndjson; use --batch for pretty or compact JSON output"
         );
     }
 
@@ -1436,7 +1458,7 @@ pub(super) async fn run_managed(args: RunManagedArgs, output: &OutputConfig) -> 
 
 pub(crate) async fn chat_managed(args: ChatManagedArgs, output: &OutputConfig) -> Result<()> {
     let storage_path = util::try_get_storage_path(None)
-        .context("claude-sdk commands must be run inside a Libra repository")?;
+        .context("Claude Code managed commands must be run inside a Libra repository")?;
     let project_bootstrap = prepare_claudecode_project_bootstrap(&storage_path).await?;
     emit_project_bootstrap_note(&project_bootstrap);
     validate_chat_managed_args(&args, output)?;
@@ -1707,7 +1729,7 @@ impl ChatTuiState {
                         .borders(Borders::ALL)
                         .title(Line::from(vec![
                             Span::styled(
-                                " Claude SDK Chat ",
+                                " Claude Code Chat ",
                                 Style::default().add_modifier(Modifier::BOLD),
                             ),
                             Span::styled(
@@ -1799,7 +1821,7 @@ impl ChatTuiState {
                     });
                 }
             })
-            .context("failed to draw claude-sdk chat TUI frame")?;
+            .context("failed to draw Claude Code chat TUI frame")?;
         Ok(())
     }
 }
@@ -2088,7 +2110,7 @@ where
     F: FnMut(ClaudecodeTuiEvent) + Send,
 {
     let serialized_request = serde_json::to_vec(helper_request)
-        .context("failed to serialize Claude SDK helper TUI request")?;
+        .context("failed to serialize Claude Code helper TUI request")?;
     let helper_timeout = helper_timeout_window(helper_request);
     let executable = if custom_helper {
         helper_path.display().to_string()
@@ -2102,7 +2124,7 @@ where
         .spawn()
         .with_context(|| {
             format!(
-                "failed to start Claude SDK helper with '{}' '{}'",
+                "failed to start Claude Code helper with '{}' '{}'",
                 executable,
                 helper_path.display()
             )
@@ -2112,17 +2134,17 @@ where
         stdin
             .write_all(&serialized_request)
             .await
-            .context("failed to send TUI request to Claude SDK helper")?;
+            .context("failed to send TUI request to Claude Code helper")?;
     }
 
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| anyhow!("Claude SDK helper stdout was not captured"))?;
+        .ok_or_else(|| anyhow!("Claude Code helper stdout was not captured"))?;
     let stderr = child
         .stderr
         .take()
-        .ok_or_else(|| anyhow!("Claude SDK helper stderr was not captured"))?;
+        .ok_or_else(|| anyhow!("Claude Code helper stderr was not captured"))?;
 
     let stderr_task = tokio::spawn(async move { read_helper_stderr_limited(stderr).await });
 
@@ -2139,7 +2161,7 @@ where
         }
 
         let event: Value = serde_json::from_str(trimmed).with_context(|| {
-            format!("failed to parse Claude SDK helper TUI NDJSON event: {trimmed}")
+            format!("failed to parse Claude Code helper TUI NDJSON event: {trimmed}")
         })?;
 
         handle_claudecode_tui_stream_event(
@@ -2214,7 +2236,7 @@ where
     let status = wait_for_helper_exit(&mut child, helper_timeout, "TUI").await?;
     let (stderr, stderr_truncated) = stderr_task
         .await
-        .context("failed to join Claude SDK helper TUI stderr reader")??;
+        .context("failed to join Claude Code helper TUI stderr reader")??;
     let stderr = finalize_captured_stderr(stderr, stderr_truncated)?;
 
     if !status.success() {
@@ -2222,7 +2244,7 @@ where
     }
 
     let artifact = final_artifact
-        .ok_or_else(|| anyhow!("Claude SDK helper stream ended without a final_artifact event"))?;
+        .ok_or_else(|| anyhow!("Claude Code helper stream ended without a final_artifact event"))?;
     let outcome = if let Some(outcome) = latest_persisted_outcome {
         outcome
     } else {
@@ -2875,7 +2897,7 @@ async fn execute_managed_streaming_turn(
     ui_event_tx: Option<UnboundedSender<ChatTurnUiEvent>>,
 ) -> Result<ManagedStreamingTurnOutcome> {
     let serialized_request = serde_json::to_vec(helper_request)
-        .context("failed to serialize Claude SDK helper streaming request")?;
+        .context("failed to serialize Claude Code helper streaming request")?;
     let helper_timeout = helper_timeout_window(helper_request);
     let executable = if custom_helper {
         helper_path.display().to_string()
@@ -2889,7 +2911,7 @@ async fn execute_managed_streaming_turn(
         .spawn()
         .with_context(|| {
             format!(
-                "failed to start Claude SDK helper with '{}' '{}'",
+                "failed to start Claude Code helper with '{}' '{}'",
                 executable,
                 helper_path.display()
             )
@@ -2899,17 +2921,17 @@ async fn execute_managed_streaming_turn(
         stdin
             .write_all(&serialized_request)
             .await
-            .context("failed to send streaming request to Claude SDK helper")?;
+            .context("failed to send streaming request to Claude Code helper")?;
     }
 
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| anyhow!("Claude SDK helper stdout was not captured"))?;
+        .ok_or_else(|| anyhow!("Claude Code helper stdout was not captured"))?;
     let stderr = child
         .stderr
         .take()
-        .ok_or_else(|| anyhow!("Claude SDK helper stderr was not captured"))?;
+        .ok_or_else(|| anyhow!("Claude Code helper stderr was not captured"))?;
 
     let stderr_task = tokio::spawn(async move { read_helper_stderr_limited(stderr).await });
 
@@ -2928,7 +2950,7 @@ async fn execute_managed_streaming_turn(
         }
 
         let event: Value = serde_json::from_str(trimmed).with_context(|| {
-            format!("failed to parse Claude SDK helper NDJSON event: {trimmed}")
+            format!("failed to parse Claude Code helper NDJSON event: {trimmed}")
         })?;
         match render_mode {
             StreamingRenderMode::Ndjson => println!("{trimmed}"),
@@ -3005,7 +3027,7 @@ async fn execute_managed_streaming_turn(
     let status = wait_for_helper_exit(&mut child, helper_timeout, "streaming").await?;
     let (stderr, stderr_truncated) = stderr_task
         .await
-        .context("failed to join Claude SDK helper stderr reader")??;
+        .context("failed to join Claude Code helper stderr reader")??;
     let stderr = finalize_captured_stderr(stderr, stderr_truncated)?;
 
     if !status.success() {
@@ -3013,7 +3035,7 @@ async fn execute_managed_streaming_turn(
     }
 
     let artifact = final_artifact
-        .ok_or_else(|| anyhow!("Claude SDK helper stream ended without a final_artifact event"))?;
+        .ok_or_else(|| anyhow!("Claude Code helper stream ended without a final_artifact event"))?;
     let outcome = if let Some(outcome) = latest_persisted_outcome {
         outcome
     } else {
@@ -3059,7 +3081,7 @@ async fn execute_managed_streaming_turn(
                     already_persisted: result.outcome.already_persisted,
                     auto_finalize: result.auto_finalize.clone(),
                 })
-                .context("failed to serialize streaming Claude SDK result")?
+                .context("failed to serialize streaming Claude Code result")?
             );
         }
         StreamingRenderMode::Human { print_completion } => {
@@ -3073,7 +3095,7 @@ async fn execute_managed_streaming_turn(
 
 fn print_streaming_turn_human_result(result: &ManagedStreamingTurnOutcome, print_completion: bool) {
     if print_completion {
-        println!("Claude SDK session persisted.");
+        println!("Claude Code session persisted.");
         println!("Managed artifact: {}", result.outcome.raw_artifact_path);
         println!("Audit bundle: {}", result.outcome.audit_bundle_path);
     }
@@ -3497,7 +3519,7 @@ async fn auto_finalize_intent_objects(
             extraction: None,
             ai_session_id: Some(ai_session_id.to_string()),
             risk_level: None,
-            created_by_id: "claude-sdk".to_string(),
+            created_by_id: "claudecode".to_string(),
             output: None,
         },
     )
@@ -3581,9 +3603,8 @@ fn render_stream_event_human(event: &Value, assistant_line_open: &mut bool) -> R
     match kind {
         "session_init" => {
             finish_assistant_line(assistant_line_open)?;
-            if let Some(message) = event.get("message") {
-                let model = message.get("model").and_then(Value::as_str).unwrap_or("-");
-                eprintln!("Claude session started ({model})");
+            if let Some(notice) = session_init_notice(event) {
+                eprintln!("{notice}");
             }
         }
         "assistant_delta" => {
@@ -3640,6 +3661,12 @@ fn render_stream_event_human(event: &Value, assistant_line_open: &mut bool) -> R
     }
 
     Ok(())
+}
+
+fn session_init_notice(event: &Value) -> Option<String> {
+    let message = event.get("message")?;
+    let model = message.get("model").and_then(Value::as_str).unwrap_or("-");
+    Some(format!("Claude session started ({model})"))
 }
 
 fn maybe_emit_chat_turn_ui_event(event: &Value, tx: Option<&UnboundedSender<ChatTurnUiEvent>>) {
@@ -3782,7 +3809,7 @@ pub(crate) fn validate_chat_managed_args(
 ) -> Result<()> {
     if output.is_json() || output.quiet {
         bail!(
-            "claude-sdk chat is interactive and does not support --json, --machine, or --quiet; use claude-sdk run for scripted output"
+            "claudecode chat is interactive and does not support --json, --machine, or --quiet; use `libra code --provider claudecode` for interactive use and a managed run command for scripted output"
         );
     }
 
@@ -3842,11 +3869,11 @@ fn managed_artifact_terminal_error(artifact: &ClaudeManagedArtifact) -> Option<S
             .result
             .clone()
             .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "managed Claude SDK run reported an error".to_string());
+            .unwrap_or_else(|| "managed Claude Code run reported an error".to_string());
         return Some(format!("Claude Code returned an error result: {detail}"));
     }
     if artifact.helper_timed_out {
-        return Some("Claude SDK helper timed out".to_string());
+        return Some("Claude Code helper timed out".to_string());
     }
     artifact.helper_error.clone()
 }
@@ -3981,20 +4008,15 @@ fn print_result(mode: &'static str, outcome: &PersistedManagedArtifactOutcome) -
     println!(
         "{}",
         serde_json::to_string_pretty(&payload)
-            .context("failed to serialize managed Claude SDK output")?
+            .context("failed to serialize managed Claude Code output")?
     );
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::BTreeMap,
-        io::{Read, Write},
-        path::Path,
-    };
+    use std::{collections::BTreeMap, path::Path};
 
-    use gag::BufferRedirect;
     use git_internal::internal::object::{provenance::Provenance, run::Run, task::Task};
     use serial_test::serial;
     use tempfile::tempdir;
@@ -4219,7 +4241,7 @@ mod tests {
         assert!(
             json_error
                 .to_string()
-                .contains("claude-sdk chat is interactive and does not support")
+                .contains("claudecode chat is interactive and does not support")
         );
 
         let quiet_output = OutputConfig {
@@ -4231,7 +4253,7 @@ mod tests {
         assert!(
             quiet_error
                 .to_string()
-                .contains("claude-sdk chat is interactive and does not support")
+                .contains("claudecode chat is interactive and does not support")
         );
     }
 
@@ -4264,17 +4286,7 @@ mod tests {
                 "model": "claude-sonnet-4-6"
             }
         });
-        let mut assistant_line_open = false;
-        let mut stderr = BufferRedirect::stderr().expect("failed to redirect stderr");
-
-        render_stream_event_human(&event, &mut assistant_line_open)
-            .expect("session init render should succeed");
-
-        std::io::stderr().flush().expect("failed to flush stderr");
-        let mut rendered = String::new();
-        stderr
-            .read_to_string(&mut rendered)
-            .expect("failed to read redirected stderr");
+        let rendered = session_init_notice(&event).expect("session init notice");
 
         assert!(rendered.contains("Claude session started (claude-sonnet-4-6)"));
         assert!(

@@ -36,7 +36,7 @@ const SEMANTIC_FULL_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/data/ai/claude_managed_semantic_full_template.json"
 ));
-const DEFAULT_MANAGED_PROMPT: &str = "Bridge a managed Claude SDK session into Libra artifacts.";
+const DEFAULT_MANAGED_PROMPT: &str = "Bridge a managed Claude Code session into Libra artifacts.";
 
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r#"'\''"#))
@@ -1325,12 +1325,12 @@ async fn test_code_claudecode_surfaces_helper_timeout_artifact_failure() {
 
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
     assert!(
-        report.message.contains("Claude SDK helper timed out"),
+        report.message.contains("Claude Code helper timed out"),
         "structured error should mention helper timeout: {:?}",
         report.message
     );
     assert!(
-        stderr.contains("Claude SDK helper timed out"),
+        stderr.contains("Claude Code helper timed out"),
         "human-readable stderr should mention helper timeout: {stderr}"
     );
 }
@@ -1373,7 +1373,7 @@ async fn test_code_claudecode_surfaces_nonzero_helper_exit() {
     assert!(
         report
             .message
-            .contains("Claude SDK helper failed with status"),
+            .contains("Claude Code helper failed with status"),
         "structured error should mention helper exit status: {:?}",
         report.message
     );
@@ -1448,7 +1448,7 @@ async fn test_code_claudecode_rejects_malformed_final_artifact() {
 
 #[tokio::test]
 #[serial]
-async fn test_claude_sdk_command_is_removed_from_help() {
+async fn test_removed_claude_sdk_command_is_not_listed_in_help() {
     let repo = tempdir().expect("failed to create repo root");
     let output = run_libra_command(&["--help"], repo.path());
     assert_cli_success(&output, "libra --help should succeed");

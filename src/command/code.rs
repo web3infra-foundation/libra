@@ -507,27 +507,10 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
                 return execute_claudecode_mode(args, working_dir).await;
             }
 
-            let runtime =
-                agent_claudecode::prepare_tui_runtime(agent_claudecode::ClaudecodeCodeArgs {
-                    working_dir,
-                    model: args.model.clone(),
-                    python_binary: args.python_binary.clone(),
-                    helper_path: args.helper_path.clone(),
-                    timeout_seconds: args.timeout_seconds,
-                    interactive_approvals: approval_policy_enables_claudecode_interactive_approvals(
-                        args.approval_policy,
-                        args.permission_mode.as_deref(),
-                    ),
-                    permission_mode: Some(args.permission_mode.clone().unwrap_or_else(|| {
-                        approval_policy_to_claudecode_managed_permission_mode(args.approval_policy)
-                            .to_string()
-                    })),
-                    continue_session: args.resume,
-                    resume: args.resume_session.clone(),
-                    fork_session: args.fork_session,
-                    session_id: args.session_id.clone(),
-                    resume_session_at: args.resume_at.clone(),
-                })
+            let claudecode_args = build_claudecode_code_args(&args, working_dir);
+            validate_claudecode_code_args(&claudecode_args)?;
+
+            let runtime = agent_claudecode::prepare_tui_runtime(claudecode_args)
                 .await
                 .map_err(map_claudecode_cli_error)?;
 
@@ -642,27 +625,44 @@ async fn execute_claudecode_mode(args: CodeArgs, working_dir: PathBuf) -> CliRes
         println!("Claude Code session continuity: resume {}", resume_session);
     }
 
-    agent_claudecode::execute(agent_claudecode::ClaudecodeCodeArgs {
+    let claudecode_args = build_claudecode_code_args(&args, working_dir);
+    validate_claudecode_code_args(&claudecode_args)?;
+
+    agent_claudecode::execute(claudecode_args)
+        .await
+        .map_err(map_claudecode_cli_error)
+}
+
+fn build_claudecode_code_args(
+    args: &CodeArgs,
+    working_dir: PathBuf,
+) -> agent_claudecode::ClaudecodeCodeArgs {
+    agent_claudecode::ClaudecodeCodeArgs {
         working_dir,
-        model: args.model,
-        python_binary: args.python_binary,
-        helper_path: args.helper_path,
+        model: args.model.clone(),
+        python_binary: args.python_binary.clone(),
+        helper_path: args.helper_path.clone(),
         timeout_seconds: args.timeout_seconds,
         interactive_approvals: approval_policy_enables_claudecode_interactive_approvals(
             args.approval_policy,
             args.permission_mode.as_deref(),
         ),
-        permission_mode: Some(args.permission_mode.unwrap_or_else(|| {
+        permission_mode: Some(args.permission_mode.clone().unwrap_or_else(|| {
             approval_policy_to_claudecode_managed_permission_mode(args.approval_policy).to_string()
         })),
         continue_session: args.resume,
-        resume: args.resume_session,
+        resume: args.resume_session.clone(),
         fork_session: args.fork_session,
-        session_id: args.session_id,
-        resume_session_at: args.resume_at,
-    })
-    .await
-    .map_err(map_claudecode_cli_error)
+        session_id: args.session_id.clone(),
+        resume_session_at: args.resume_at.clone(),
+    }
+}
+
+fn validate_claudecode_code_args(
+    args: &agent_claudecode::ClaudecodeCodeArgs,
+) -> Result<(), CliError> {
+    agent_claudecode::validate_code_args(args, &OutputConfig::default())
+        .map_err(|error| CliError::command_usage(error.to_string()))
 }
 
 fn approval_policy_to_codex(policy: CodeApprovalPolicy) -> &'static str {
@@ -1513,5 +1513,29 @@ mod tests {
             ..OutputConfig::default()
         };
         assert!(validate_mode_args(&args, &output).is_err());
+    }
+
+    #[test]
+    fn invalid_claudecode_resume_session_is_reported_as_command_usage() {
+        let mut args = base_args();
+        args.provider = CodeProvider::Claudecode;
+        args.resume_session = Some("not-a-uuid".to_string());
+
+        let cli = validate_claudecode_code_args(&build_claudecode_code_args(
+            &args,
+            PathBuf::from("/tmp/libra-claudecode"),
+        ))
+        .expect_err("invalid resume UUID should be rejected");
+
+        assert_eq!(cli.kind(), crate::utils::error::CliErrorKind::CommandUsage);
+        assert_eq!(
+            cli.stable_code(),
+            crate::utils::error::StableErrorCode::CliInvalidArguments
+        );
+        assert!(
+            cli.message().contains("--resume must be a valid UUID"),
+            "unexpected usage message: {}",
+            cli.message()
+        );
     }
 }
