@@ -422,6 +422,7 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
         registry,
         preamble,
         temperature,
+        context: args.context,
         resume,
         approval_policy: args.approval_policy.into(),
         user_input_rx,
@@ -702,6 +703,7 @@ struct TuiLaunchConfig {
     registry: Arc<ToolRegistry>,
     preamble: String,
     temperature: Option<f64>,
+    context: Option<CodeContext>,
     resume: bool,
     approval_policy: AskForApproval,
     user_input_rx:
@@ -735,24 +737,12 @@ where
         temperature: params.temperature,
         hook_runner,
         allowed_tools: None,
-        runtime_context: Some(ToolRuntimeContext {
-            sandbox: Some(ToolSandboxContext {
-                policy: SandboxPolicy::WorkspaceWrite {
-                    writable_roots: vec![registry.working_dir().to_path_buf()],
-                    network_access: true,
-                    exclude_tmpdir_env_var: false,
-                    exclude_slash_tmp: false,
-                },
-                permissions: SandboxPermissions::UseDefault,
-            }),
-            sandbox_runtime: None,
-            approval: Some(ToolApprovalContext {
-                policy: params.approval_policy,
-                request_tx: params.exec_approval_tx.clone(),
-                store: Arc::new(tokio::sync::Mutex::new(ApprovalStore::default())),
-            }),
-            max_output_bytes: None,
-        }),
+        runtime_context: Some(default_tui_runtime_context(
+            registry.working_dir(),
+            params.context,
+            params.approval_policy,
+            params.exec_approval_tx.clone(),
+        )),
         max_turns: None,
     };
 
@@ -941,6 +931,37 @@ fn system_preamble(working_dir: &std::path::Path, context: Option<CodeContext>) 
     builder.build()
 }
 
+fn default_tui_runtime_context(
+    working_dir: &std::path::Path,
+    context: Option<CodeContext>,
+    approval_policy: AskForApproval,
+    exec_approval_tx: tokio::sync::mpsc::UnboundedSender<ExecApprovalRequest>,
+) -> ToolRuntimeContext {
+    let policy = match context {
+        Some(CodeContext::Review | CodeContext::Research) => SandboxPolicy::ReadOnly,
+        Some(CodeContext::Dev) | None => SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![working_dir.to_path_buf()],
+            network_access: false,
+            exclude_tmpdir_env_var: false,
+            exclude_slash_tmp: false,
+        },
+    };
+
+    ToolRuntimeContext {
+        sandbox: Some(ToolSandboxContext {
+            policy,
+            permissions: SandboxPermissions::UseDefault,
+        }),
+        sandbox_runtime: None,
+        approval: Some(ToolApprovalContext {
+            policy: approval_policy,
+            request_tx: exec_approval_tx,
+            store: Arc::new(tokio::sync::Mutex::new(ApprovalStore::default())),
+        }),
+        max_output_bytes: None,
+    }
+}
+
 async fn init_mcp_server(working_dir: &std::path::Path) -> Arc<LibraMcpServer> {
     let storage_dir = resolve_storage_root(working_dir);
     let objects_dir = storage_dir.join("objects");
@@ -1088,6 +1109,10 @@ fn reject_non_tui_flags(args: &CodeArgs, mode: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
+    use tokio::sync::mpsc::unbounded_channel;
+
     use super::*;
 
     fn base_args() -> CodeArgs {
@@ -1138,5 +1163,42 @@ mod tests {
     fn accepts_default_tui_mode() {
         let args = base_args();
         assert!(validate_mode_args(&args).is_ok());
+    }
+
+    #[test]
+    fn default_tui_runtime_context_denies_network_in_dev_mode() {
+        let (tx, _rx) = unbounded_channel();
+        let runtime = default_tui_runtime_context(
+            Path::new("/tmp/workspace"),
+            Some(CodeContext::Dev),
+            AskForApproval::OnRequest,
+            tx,
+        );
+
+        let sandbox = runtime.sandbox.expect("sandbox context should be present");
+        assert!(matches!(
+            sandbox.policy,
+            SandboxPolicy::WorkspaceWrite {
+                writable_roots,
+                network_access,
+                ..
+            } if writable_roots == vec![PathBuf::from("/tmp/workspace")] && !network_access
+        ));
+    }
+
+    #[test]
+    fn default_tui_runtime_context_is_read_only_for_review_and_research() {
+        for context in [CodeContext::Review, CodeContext::Research] {
+            let (tx, _rx) = unbounded_channel();
+            let runtime = default_tui_runtime_context(
+                Path::new("/tmp/workspace"),
+                Some(context),
+                AskForApproval::OnRequest,
+                tx,
+            );
+
+            let sandbox = runtime.sandbox.expect("sandbox context should be present");
+            assert!(matches!(sandbox.policy, SandboxPolicy::ReadOnly));
+        }
     }
 }
