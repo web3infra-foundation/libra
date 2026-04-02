@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use super::{
     acl::{AclVerdict, ScopeVerdict, check_scope, check_tool_acl_with_context},
-    types::{PolicyViolation, TaskSpec, ToolCallRecord, ToolDiffRecord},
+    types::{PolicyViolation, TaskKind, TaskSpec, ToolCallRecord, ToolDiffRecord},
 };
 use crate::internal::ai::{
     intentspec::types::{IntentSpec, NetworkPolicy},
@@ -45,12 +45,18 @@ pub fn evaluate_tool_call(
     ) {
         AclVerdict::Allow => {}
         AclVerdict::Deny(reason) => {
-            return Err(PolicyViolation {
-                code: "tool-acl-deny".into(),
-                message: reason,
-                tool_name: Some(tool_name.to_string()),
-                path: None,
-            });
+            if gate_shell_uses_internal_verification_allowance(task, tool_name, &reason) {
+                // Gate tasks execute spec-defined verification commands directly, so
+                // they do not need the interactive shell ACL that governs agent-chosen
+                // tool calls.
+            } else {
+                return Err(PolicyViolation {
+                    code: "tool-acl-deny".into(),
+                    message: reason,
+                    tool_name: Some(tool_name.to_string()),
+                    path: None,
+                });
+            }
         }
     }
 
@@ -116,6 +122,16 @@ pub fn evaluate_tool_call(
             diffs: Vec::new(),
         },
     })
+}
+
+fn gate_shell_uses_internal_verification_allowance(
+    task: &TaskSpec,
+    tool_name: &str,
+    reason: &str,
+) -> bool {
+    task.kind == TaskKind::Gate
+        && tool_name == "shell"
+        && reason.starts_with("no allow rule for tool 'shell' action 'execute'")
 }
 
 pub fn evaluate_tool_result(
@@ -580,6 +596,14 @@ mod tests {
         }
     }
 
+    fn gate_task() -> TaskSpec {
+        TaskSpec {
+            kind: TaskKind::Gate,
+            owner_role: Some("verifier".into()),
+            ..task()
+        }
+    }
+
     #[test]
     fn test_scope_violation_rejected() {
         let res = evaluate_tool_call(
@@ -660,5 +684,46 @@ mod tests {
             Path::new("/tmp/work"),
         );
         assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_gate_shell_is_allowed_without_interactive_shell_acl() {
+        let mut intent = spec();
+        intent
+            .security
+            .tool_acl
+            .allow
+            .retain(|rule| rule.tool != "shell");
+        let res = evaluate_tool_call(
+            &intent,
+            &gate_task(),
+            "shell",
+            &serde_json::json!({ "command": "cargo test --lib" }),
+            Path::new("/tmp/work"),
+        );
+        assert!(res.is_ok(), "{res:?}");
+    }
+
+    #[test]
+    fn test_gate_shell_still_honors_explicit_shell_denies() {
+        let mut intent = spec();
+        intent
+            .security
+            .tool_acl
+            .allow
+            .retain(|rule| rule.tool != "shell");
+        intent.security.tool_acl.deny.push(ToolRule {
+            tool: "shell".into(),
+            actions: vec!["execute".into()],
+            constraints: BTreeMap::new(),
+        });
+        let res = evaluate_tool_call(
+            &intent,
+            &gate_task(),
+            "shell",
+            &serde_json::json!({ "command": "cargo test --lib" }),
+            Path::new("/tmp/work"),
+        );
+        assert!(matches!(res, Err(PolicyViolation { code, .. }) if code == "tool-acl-deny"));
     }
 }

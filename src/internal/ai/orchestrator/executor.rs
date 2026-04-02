@@ -333,7 +333,7 @@ async fn execute_gate_task(
     inherited_runtime: Option<&ToolRuntimeContext>,
     observer: Option<&Arc<dyn OrchestratorObserver>>,
 ) -> TaskResult {
-    let runtime_context = runtime_context_for_gate_task(spec, inherited_runtime);
+    let runtime_context = runtime_context_for_gate_task(spec, working_dir, inherited_runtime);
     let gate_report = if task.checks.is_empty() {
         GateReport::empty()
     } else {
@@ -1189,20 +1189,20 @@ fn runtime_context_for_task(
 
 fn runtime_context_for_gate_task(
     spec: &IntentSpec,
+    working_dir: &Path,
     inherited_runtime: Option<&ToolRuntimeContext>,
 ) -> ToolRuntimeContext {
-    let network_access = if matches!(
-        spec.constraints.security.network_policy,
-        NetworkPolicy::Allow
-    ) {
-        crate::internal::ai::sandbox::NetworkAccess::Enabled
-    } else {
-        crate::internal::ai::sandbox::NetworkAccess::Restricted
-    };
-
     ToolRuntimeContext {
         sandbox: Some(ToolSandboxContext {
-            policy: SandboxPolicy::ExternalSandbox { network_access },
+            policy: SandboxPolicy::WorkspaceWrite {
+                writable_roots: vec![working_dir.to_path_buf()],
+                network_access: matches!(
+                    spec.constraints.security.network_policy,
+                    NetworkPolicy::Allow
+                ),
+                exclude_tmpdir_env_var: false,
+                exclude_slash_tmp: false,
+            },
             permissions: SandboxPermissions::UseDefault,
         }),
         sandbox_runtime: inherited_runtime.and_then(|ctx| ctx.sandbox_runtime.clone()),
@@ -1321,6 +1321,7 @@ fn matches_tool_glob(pattern: &str, tool_name: &str) -> bool {
 mod tests {
     use std::{
         collections::BTreeMap,
+        path::PathBuf,
         sync::{Arc, Mutex},
         time::Duration,
     };
@@ -1777,6 +1778,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_execute_gate_task_with_default_security() {
+        let task = TaskSpec {
+            kind: TaskKind::Gate,
+            gate_stage: Some(super::super::types::GateStage::Fast),
+            checks: vec![Check {
+                id: "verify".into(),
+                kind: CheckKind::Command,
+                command: Some(":".into()),
+                timeout_seconds: Some(10),
+                expected_exit_code: Some(0),
+                required: true,
+                artifacts_produced: vec![],
+            }],
+            ..implementation_task()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut spec = (*spec()).clone();
+        spec.security = profiles::default_security();
+
+        let result = execute_gate_task(&task, dir.path(), &spec, None, None).await;
+
+        assert_eq!(result.status, TaskNodeStatus::Completed);
+        assert!(result.gate_report.unwrap().all_required_passed);
+    }
+
+    #[tokio::test]
     async fn test_execute_implementation_task() {
         let model = MockModel {
             final_text: "done".into(),
@@ -1869,6 +1896,21 @@ mod tests {
         assert!(tools.contains(&"read_file".to_string()));
         assert!(tools.contains(&"apply_patch".to_string()));
         assert!(!tools.contains(&"shell".to_string()));
+    }
+
+    #[test]
+    fn gate_runtime_uses_workspace_write_sandbox() {
+        let runtime = runtime_context_for_gate_task(&spec(), Path::new("/tmp/workspace"), None);
+        let sandbox = runtime
+            .sandbox
+            .expect("gate tasks should always execute with sandbox context");
+        assert!(matches!(
+            sandbox.policy,
+            SandboxPolicy::WorkspaceWrite {
+                writable_roots,
+                ..
+            } if writable_roots == vec![PathBuf::from("/tmp/workspace")]
+        ));
     }
 
     #[test]
