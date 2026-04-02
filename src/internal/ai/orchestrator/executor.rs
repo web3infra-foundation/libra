@@ -665,7 +665,10 @@ impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
                 terminal_task_result(
                     &self.task,
                     TaskNodeStatus::Skipped,
-                    Some("skipped because an upstream dependency did not complete successfully".into()),
+                    Some(
+                        "skipped because an upstream dependency did not complete successfully"
+                            .into(),
+                    ),
                 ),
             )
             .await;
@@ -1344,44 +1347,81 @@ fn runtime_context_for_reviewer(
 
 fn collect_writable_roots(spec: &IntentSpec, task: &TaskSpec, working_dir: &Path) -> Vec<PathBuf> {
     let mut roots = Vec::<PathBuf>::new();
-    push_unique_root(&mut roots, working_dir.to_path_buf());
 
-    for scope in &task.scope_in {
-        if scope.contains('*') {
-            continue;
+    for touch_file in &task.contract.touch_files {
+        if let Some(resolved) = resolve_writable_root_candidate(touch_file, working_dir, true) {
+            push_unique_root(&mut roots, resolved);
         }
-        let resolved = if Path::new(scope).is_absolute() {
-            PathBuf::from(scope)
-        } else {
-            working_dir.join(scope)
-        };
-        push_unique_root(&mut roots, resolved);
     }
 
-    for rule in &spec.security.tool_acl.allow {
-        let writes_allowed = rule
-            .actions
-            .iter()
-            .any(|action| action == "*" || action == "write");
-        if !writes_allowed {
-            continue;
-        }
-        if let Some(serde_json::Value::Array(write_roots)) = rule.constraints.get("writeRoots") {
-            for root in write_roots.iter().filter_map(serde_json::Value::as_str) {
-                if root.contains('*') {
-                    continue;
-                }
-                let resolved = if Path::new(root).is_absolute() {
-                    PathBuf::from(root)
-                } else {
-                    working_dir.join(root)
-                };
+    if roots.is_empty() {
+        for scope in task.scope_in.iter().chain(task.contract.write_scope.iter()) {
+            if let Some(resolved) = resolve_writable_root_candidate(scope, working_dir, false) {
                 push_unique_root(&mut roots, resolved);
             }
         }
     }
 
+    if roots.is_empty() {
+        for rule in &spec.security.tool_acl.allow {
+            let writes_allowed = rule
+                .actions
+                .iter()
+                .any(|action| action == "*" || action == "write");
+            if !writes_allowed {
+                continue;
+            }
+            if let Some(serde_json::Value::Array(write_roots)) = rule.constraints.get("writeRoots")
+            {
+                for root in write_roots.iter().filter_map(serde_json::Value::as_str) {
+                    if let Some(resolved) =
+                        resolve_writable_root_candidate(root, working_dir, false)
+                    {
+                        push_unique_root(&mut roots, resolved);
+                    }
+                }
+            }
+        }
+    }
+
+    if roots.is_empty() {
+        push_unique_root(&mut roots, working_dir.to_path_buf());
+    }
+
     roots
+}
+
+fn resolve_writable_root_candidate(
+    raw: &str,
+    working_dir: &Path,
+    prefer_parent_for_missing_leaf: bool,
+) -> Option<PathBuf> {
+    let normalized = raw.trim().replace('\\', "/");
+    let trimmed = normalized.trim_start_matches("./");
+    if trimmed.is_empty() || matches!(trimmed, "*" | "**") {
+        return None;
+    }
+
+    let literal_or_root = trimmed
+        .find(['*', '?', '[', '{'])
+        .map(|index| trimmed[..index].trim_end_matches('/').to_string())
+        .unwrap_or_else(|| trimmed.trim_end_matches('/').to_string());
+
+    if literal_or_root.is_empty() {
+        return None;
+    }
+
+    let resolved = if Path::new(&literal_or_root).is_absolute() {
+        PathBuf::from(&literal_or_root)
+    } else {
+        working_dir.join(&literal_or_root)
+    };
+
+    if prefer_parent_for_missing_leaf && !resolved.exists() {
+        return resolved.parent().map(Path::to_path_buf).or(Some(resolved));
+    }
+
+    Some(resolved)
 }
 
 fn push_unique_root(roots: &mut Vec<PathBuf>, root: PathBuf) {
@@ -2020,6 +2060,48 @@ mod tests {
     }
 
     #[test]
+    fn task_runtime_prefers_touch_files_as_writable_roots() {
+        let workspace = tempfile::tempdir().unwrap();
+        let src_dir = workspace.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(src_dir.join("main.rs"), "fn main() {}\n").unwrap();
+        let expected_root = workspace.path().join("src/main.rs").canonicalize().unwrap();
+
+        let runtime =
+            runtime_context_for_task(&spec(), &implementation_task(), workspace.path(), None);
+        let sandbox = runtime
+            .sandbox
+            .expect("implementation tasks should always execute with sandbox context");
+        assert!(matches!(
+            sandbox.policy,
+            SandboxPolicy::WorkspaceWrite {
+                writable_roots,
+                ..
+            } if writable_roots == vec![expected_root]
+        ));
+    }
+
+    #[test]
+    fn task_runtime_falls_back_to_scope_roots_when_touch_files_are_absent() {
+        let mut task = implementation_task();
+        task.contract.touch_files.clear();
+        task.scope_in = vec!["src/**/*.rs".into()];
+        task.contract.write_scope = vec!["src/**/*.rs".into()];
+
+        let runtime = runtime_context_for_task(&spec(), &task, Path::new("/tmp/workspace"), None);
+        let sandbox = runtime
+            .sandbox
+            .expect("implementation tasks should always execute with sandbox context");
+        assert!(matches!(
+            sandbox.policy,
+            SandboxPolicy::WorkspaceWrite {
+                writable_roots,
+                ..
+            } if writable_roots == vec![PathBuf::from("/tmp/workspace/src")]
+        ));
+    }
+
+    #[test]
     fn analysis_tasks_do_not_get_apply_patch() {
         let task = analysis_task();
         let mut spec = (*spec()).clone();
@@ -2210,7 +2292,9 @@ mod tests {
         second.objective = "Second".into();
 
         let plan = plan_for_tasks(vec![first.clone(), second.clone()], 1);
-        let run_state = execute_dag(&plan, &model, &registry, &config).await.unwrap();
+        let run_state = execute_dag(&plan, &model, &registry, &config)
+            .await
+            .unwrap();
 
         let completed = run_state
             .ordered_task_results()
