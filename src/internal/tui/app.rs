@@ -1643,6 +1643,15 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         }
 
         if let Some(spec_json) = self.pending_plan_revision.take() {
+            if text.trim_start().starts_with('/') {
+                self.pending_plan_revision = Some(spec_json);
+                self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                    pending_plan_revision_help_message(),
+                )));
+                self.sync_mux_input_context();
+                self.schedule_draw();
+                return;
+            }
             self.begin_plan_revision_flow(spec_json, &text).await;
             return;
         }
@@ -1729,8 +1738,31 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     .add_cell(Box::new(AssistantHistoryCell::new(status)));
             }
             BuiltinCommand::Plan => {
-                self.pending_plan_revision = None;
-                self.start_plan_workflow(args).await;
+                if let Some(spec_json) = self.pending_plan_revision.take() {
+                    match parse_pending_plan_revision_command(args) {
+                        PendingPlanRevisionCommand::Modify(request) => {
+                            self.begin_plan_revision_flow(spec_json, request).await;
+                        }
+                        PendingPlanRevisionCommand::Cancel => {
+                            self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                                "Spec revision canceled.".to_string(),
+                            )));
+                            self.widget.bottom_pane.set_status(AgentStatus::Idle);
+                            self.sync_mux_input_context();
+                            self.schedule_draw();
+                        }
+                        PendingPlanRevisionCommand::Invalid => {
+                            self.pending_plan_revision = Some(spec_json);
+                            self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                                pending_plan_revision_help_message(),
+                            )));
+                            self.sync_mux_input_context();
+                            self.schedule_draw();
+                        }
+                    }
+                } else {
+                    self.start_plan_workflow(args).await;
+                }
             }
             BuiltinCommand::Intent => {
                 self.handle_intent_command(args).await;
@@ -1866,7 +1898,8 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 .bottom_pane
                 .set_input_context_label(Some("Revise IntentSpec".to_string()));
             self.widget.bottom_pane.set_input_hint(Some(
-                "Describe the changes to make to the current spec...".to_string(),
+                "Describe spec changes, or use /plan modify <changes> or /plan cancel"
+                    .to_string(),
             ));
         } else {
             self.widget.bottom_pane.set_input_context_label(None);
@@ -1891,7 +1924,10 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 // Modify (1) or Cancel (2+)
                 if pending.selected == 1 {
                     self.pending_plan_revision = Some(pending.spec_json);
-                    let msg = "Describe what to change in the current IntentSpec. Your next message will reopen planning from this spec and produce an updated workflow.".to_string();
+                    let msg = format!(
+                        "{} Your next plain-text message will revise the current spec.",
+                        pending_plan_revision_help_message()
+                    );
                     self.widget
                         .add_cell(Box::new(AssistantHistoryCell::new(msg.clone())));
                     self.history.push(Message::assistant(msg.clone()));
@@ -2256,7 +2292,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         let request = request.trim();
         if request.is_empty() {
             self.widget.add_cell(Box::new(AssistantHistoryCell::new(
-                "Describe the changes to make to the current IntentSpec.".to_string(),
+                pending_plan_revision_help_message(),
             )));
             self.pending_plan_revision = Some(spec_json);
             self.sync_mux_input_context();
@@ -2869,6 +2905,32 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
     }
 }
 
+enum PendingPlanRevisionCommand<'a> {
+    Modify(&'a str),
+    Cancel,
+    Invalid,
+}
+
+fn parse_pending_plan_revision_command(args: &str) -> PendingPlanRevisionCommand<'_> {
+    let trimmed = args.trim();
+    if trimmed.eq_ignore_ascii_case("cancel") {
+        return PendingPlanRevisionCommand::Cancel;
+    }
+    if let Some(request) = trimmed
+        .strip_prefix("modify ")
+        .or_else(|| trimmed.strip_prefix("revise "))
+        .map(str::trim)
+        .filter(|request| !request.is_empty())
+    {
+        return PendingPlanRevisionCommand::Modify(request);
+    }
+    PendingPlanRevisionCommand::Invalid
+}
+
+fn pending_plan_revision_help_message() -> String {
+    "Revise mode is active. Describe changes in plain text, use `/plan modify <changes>` to keep revising, or `/plan cancel` to exit.".to_string()
+}
+
 fn append_to_last_tool_group_cell(
     cells: &mut Vec<Box<dyn super::history_cell::HistoryCell>>,
     call_id: String,
@@ -3242,7 +3304,8 @@ mod tests {
 
     use super::{
         append_to_last_tool_group_cell, build_plan_revision_prompt, format_orchestrator_result,
-        should_hide_tool_failure,
+        parse_pending_plan_revision_command, pending_plan_revision_help_message,
+        should_hide_tool_failure, PendingPlanRevisionCommand,
     };
     use crate::internal::{
         ai::{
@@ -3410,6 +3473,33 @@ mod tests {
         assert!(prompt.contains("\"kind\": \"IntentSpec\""));
         assert!(prompt.contains("Requested changes:\nadd an integration gate for cargo test"));
         assert!(prompt.contains("submit_intent_draft exactly once"));
+    }
+
+    #[test]
+    fn parses_pending_revision_builtin_commands() {
+        assert!(matches!(
+            parse_pending_plan_revision_command("modify tighten sandbox"),
+            PendingPlanRevisionCommand::Modify("tighten sandbox")
+        ));
+        assert!(matches!(
+            parse_pending_plan_revision_command("revise add checks"),
+            PendingPlanRevisionCommand::Modify("add checks")
+        ));
+        assert!(matches!(
+            parse_pending_plan_revision_command("cancel"),
+            PendingPlanRevisionCommand::Cancel
+        ));
+        assert!(matches!(
+            parse_pending_plan_revision_command("status"),
+            PendingPlanRevisionCommand::Invalid
+        ));
+    }
+
+    #[test]
+    fn pending_revision_help_mentions_escape_hatch() {
+        let help = pending_plan_revision_help_message();
+        assert!(help.contains("/plan modify <changes>"));
+        assert!(help.contains("/plan cancel"));
     }
 }
 
