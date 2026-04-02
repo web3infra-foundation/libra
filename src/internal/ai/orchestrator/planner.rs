@@ -56,12 +56,6 @@ pub fn compile_execution_plan_spec(
     ) {
         make_sequential(&mut tasks);
     }
-    let serial_implementation_flow = should_force_serial(
-        &plan_config,
-        max_parallel,
-        contains_implementation_tasks(&tasks),
-    );
-
     let has_implementation_work = contains_implementation_tasks(&tasks);
     let work_task_ids: Vec<Uuid> = tasks
         .iter()
@@ -82,7 +76,7 @@ pub fn compile_execution_plan_spec(
                 .cloned()
                 .collect::<Vec<_>>();
 
-            for (index, task) in work_tasks.iter().enumerate() {
+            for task in &work_tasks {
                 let task_title = task.title().to_string();
                 let fast_gate = task_spec(
                     git_task(
@@ -114,16 +108,7 @@ pub fn compile_execution_plan_spec(
                     after_tasks: vec![gate_id],
                     reason: format!("fast gate boundary for {}", task.title()),
                 });
-                if serial_implementation_flow
-                    && task.kind == TaskKind::Implementation
-                    && let Some(next_task_id) = work_tasks.get(index + 1).map(TaskSpec::id)
-                    && let Some(next_task) = tasks
-                        .iter_mut()
-                        .find(|candidate| candidate.id() == next_task_id)
-                    && !next_task.dependencies().contains(&gate_id)
-                {
-                    next_task.task.add_dependency(gate_id);
-                }
+                add_fast_gate_to_direct_dependents(&mut tasks, task.id(), gate_id);
                 tasks.push(fast_gate);
             }
 
@@ -691,6 +676,19 @@ fn make_sequential(nodes: &mut [TaskSpec]) {
     }
 }
 
+fn add_fast_gate_to_direct_dependents(tasks: &mut [TaskSpec], task_id: Uuid, gate_id: Uuid) {
+    for task in tasks
+        .iter_mut()
+        .filter(|task| task.kind != TaskKind::Gate)
+        .filter(|task| task.id() != task_id)
+        .filter(|task| task.dependencies().contains(&task_id))
+    {
+        if !task.dependencies().contains(&gate_id) {
+            task.task.add_dependency(gate_id);
+        }
+    }
+}
+
 fn contains_implementation_tasks(tasks: &[TaskSpec]) -> bool {
     tasks
         .iter()
@@ -986,8 +984,8 @@ mod tests {
         let plan = compile_execution_plan_spec(&minimal_spec()).unwrap();
         assert_eq!(plan.tasks.len(), 7);
         let groups = plan.parallel_groups();
-        assert_eq!(groups.len(), 6);
-        assert!(groups.iter().any(|group| group.len() == 2), "{groups:?}");
+        assert_eq!(groups.len(), 7);
+        assert!(groups.iter().all(|group| group.len() == 1), "{groups:?}");
         assert!(
             plan.tasks
                 .iter()
@@ -1007,8 +1005,8 @@ mod tests {
                 .any(|task| task.gate_stage == Some(GateStage::Fast))
         );
         let groups = plan_spec.parallel_groups();
-        assert_eq!(groups.len(), 6);
-        assert!(groups.iter().any(|group| group.len() == 2), "{groups:?}");
+        assert_eq!(groups.len(), 7);
+        assert!(groups.iter().all(|group| group.len() == 1), "{groups:?}");
     }
 
     #[test]
@@ -1042,13 +1040,21 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(implementation_tasks.len(), 2);
-        assert!(implementation_tasks.iter().all(|task| task.contract.touch_files.len() == 1));
-        assert!(implementation_tasks.iter().any(
-            |task| task.contract.touch_files == vec!["src/auth/login.rs".to_string()]
-        ));
-        assert!(implementation_tasks.iter().any(
-            |task| task.contract.touch_files == vec!["src/auth/logout.rs".to_string()]
-        ));
+        assert!(
+            implementation_tasks
+                .iter()
+                .all(|task| task.contract.touch_files.len() == 1)
+        );
+        assert!(
+            implementation_tasks
+                .iter()
+                .any(|task| task.contract.touch_files == vec!["src/auth/login.rs".to_string()])
+        );
+        assert!(
+            implementation_tasks
+                .iter()
+                .any(|task| task.contract.touch_files == vec!["src/auth/logout.rs".to_string()])
+        );
     }
 
     #[test]
@@ -1136,6 +1142,39 @@ mod tests {
                 .iter()
                 .map(|task| (task.title().to_string(), task.dependencies().to_vec()))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_fast_gate_blocks_downstream_tasks_after_overlap_serialization() {
+        let mut spec = minimal_spec();
+        spec.intent.touch_hints = None;
+        spec.execution.concurrency.max_parallel_tasks = 2;
+
+        let plan = compile_execution_plan_spec(&spec).unwrap();
+        let implementation_tasks = plan
+            .tasks
+            .iter()
+            .filter(|task| task.kind == TaskKind::Implementation)
+            .collect::<Vec<_>>();
+        assert_eq!(implementation_tasks.len(), 2);
+
+        let first_task = implementation_tasks[0];
+        let second_task = implementation_tasks[1];
+        let first_fast_gate = plan
+            .tasks
+            .iter()
+            .find(|task| {
+                task.gate_stage == Some(GateStage::Fast)
+                    && task.dependencies() == [first_task.id()]
+            })
+            .expect("fast gate for first implementation task");
+
+        assert!(second_task.dependencies().contains(&first_task.id()));
+        assert!(
+            second_task.dependencies().contains(&first_fast_gate.id()),
+            "{:?}",
+            second_task.dependencies()
         );
     }
 
