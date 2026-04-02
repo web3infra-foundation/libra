@@ -23,6 +23,7 @@ use crate::{
         protocol::lfs_client::LFSClient,
     },
     utils::{
+        client_storage::ClientStorage,
         error::{CliError, CliResult},
         lfs,
         object_ext::{BlobExt, CommitExt, TreeExt},
@@ -124,20 +125,11 @@ pub async fn execute_checked(args: RestoreArgs) -> io::Result<()> {
                 Head::current_commit_result()
                     .await
                     .map_err(|error| io::Error::other(error.to_string()))?
-            } else if let Some(branch) = Branch::find_branch_result(src, None)
-                .await
-                .map_err(|error| io::Error::other(error.to_string()))?
-            {
-                Some(branch.commit)
             } else {
-                // [Commit Hash, e.g. a1b2c3d4] || [Wrong Branch Name]
-                let objs = storage.search(src).await;
-                // TODO hash can be `commit` or `tree`
-                if objs.len() != 1 || !storage.is_object_type(&objs[0], ObjectType::Commit) {
-                    None // Wrong Commit Hash
-                } else {
-                    Some(objs[0])
-                }
+                resolve_source_commit(src, &storage)
+                    .await
+                    .map(Some)
+                    .map_err(|error| io::Error::other(error.to_string()))?
             }
         }
     };
@@ -232,20 +224,8 @@ pub async fn execute_checked_typed(args: RestoreArgs) -> Result<(), RestoreError
                     .await
                     .map_err(map_restore_branch_store_error)?
                     .ok_or(RestoreError::ResolveSource)?
-            } else if let Some(branch) = Branch::find_branch_result(src, None)
-                .await
-                .map_err(map_restore_branch_store_error)?
-            {
-                branch.commit
             } else {
-                let objs = storage.search(src).await;
-                if objs.len() != 1 {
-                    return Err(RestoreError::ResolveSource);
-                }
-                if !storage.is_object_type(&objs[0], ObjectType::Commit) {
-                    return Err(RestoreError::ReferenceNotCommit);
-                }
-                objs[0]
+                resolve_source_commit(src, &storage).await?
             };
 
             let tree_id = load_object::<Commit>(&commit)
@@ -265,6 +245,34 @@ pub async fn execute_checked_typed(args: RestoreArgs) -> Result<(), RestoreError
         restore_index_typed(&paths, &target_blobs)?;
     }
     Ok(())
+}
+
+async fn resolve_source_commit(
+    src: &str,
+    storage: &ClientStorage,
+) -> Result<ObjectHash, RestoreError> {
+    if let Some(branch) = Branch::find_branch_result(src, None)
+        .await
+        .map_err(map_restore_branch_store_error)?
+    {
+        return Ok(branch.commit);
+    }
+
+    if Branch::exists_result(src, None)
+        .await
+        .map_err(map_restore_branch_store_error)?
+    {
+        return Err(RestoreError::ResolveSource);
+    }
+
+    let objs = storage.search(src).await;
+    if objs.len() != 1 {
+        return Err(RestoreError::ResolveSource);
+    }
+    if !storage.is_object_type(&objs[0], ObjectType::Commit) {
+        return Err(RestoreError::ReferenceNotCommit);
+    }
+    Ok(objs[0])
 }
 
 fn map_restore_branch_store_error(error: BranchStoreError) -> RestoreError {

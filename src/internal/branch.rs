@@ -179,6 +179,28 @@ impl Branch {
         Self::exists_with_conn(&db_conn, branch_name).await
     }
 
+    pub async fn exists_result_with_conn<C>(
+        db: &C,
+        branch_name: &str,
+        remote: Option<&str>,
+    ) -> Result<bool, BranchStoreError>
+    where
+        C: ConnectionTrait,
+    {
+        query_reference_with_conn(db, branch_name, remote)
+            .await
+            .map(|branch| branch.is_some())
+            .map_err(|err| BranchStoreError::Query(err.to_string()))
+    }
+
+    pub async fn exists_result(
+        branch_name: &str,
+        remote: Option<&str>,
+    ) -> Result<bool, BranchStoreError> {
+        let db_conn = get_db_conn_instance().await;
+        Self::exists_result_with_conn(&db_conn, branch_name, remote).await
+    }
+
     //  `_with_conn` version for `find_branch`
     pub async fn find_branch_with_conn<C>(
         db: &C,

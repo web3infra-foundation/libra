@@ -785,11 +785,7 @@ fn restore_working_directory_from_tree_counted_typed(
 /// except for the .libra directory and the working directory root.
 pub(crate) fn remove_empty_directories(workdir: &Path) -> Result<(), String> {
     remove_empty_directories_with_warnings(workdir)
-        .map(|warnings| {
-            for warning in warnings {
-                emit_warning(warning);
-            }
-        })
+        .map(|_| ())
         .map_err(|e| e.to_string())
 }
 

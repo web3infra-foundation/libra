@@ -145,6 +145,8 @@ fn skip_permission_denied_test_if_root(test_name: &str) -> bool {
         fn geteuid() -> u32;
     }
 
+    // SAFETY: On Unix targets libc exposes `geteuid()` with no arguments and a
+    // numeric return type compatible with `u32` on the platforms this suite runs on.
     let is_root = unsafe { geteuid() == 0 };
     if is_root {
         eprintln!(
