@@ -567,6 +567,35 @@ fn task_workspace_failure(task: &TaskSpec, err: io::Error) -> TaskResult {
     }
 }
 
+fn terminal_task_result(
+    task: &TaskSpec,
+    status: TaskNodeStatus,
+    agent_output: impl Into<Option<String>>,
+) -> TaskResult {
+    TaskResult {
+        task_id: task.id(),
+        status,
+        gate_report: None,
+        agent_output: agent_output.into(),
+        retry_count: 0,
+        tool_calls: Vec::new(),
+        policy_violations: Vec::new(),
+        review: None,
+    }
+}
+
+async fn record_terminal_result(
+    run_state: &RunStateStore,
+    observer: Option<&Arc<dyn OrchestratorObserver>>,
+    task: &TaskSpec,
+    result: TaskResult,
+) {
+    if let Some(observer) = observer {
+        observer.on_task_completed(task, &result);
+    }
+    run_state.record_result(result).await;
+}
+
 struct TaskDagrsAction<M: CompletionModel + 'static> {
     task: TaskSpec,
     model: M,
@@ -626,6 +655,17 @@ impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
         }
 
         if !dependencies_ok {
+            record_terminal_result(
+                &self.run_state,
+                self.config.observer.as_ref(),
+                &self.task,
+                terminal_task_result(
+                    &self.task,
+                    TaskNodeStatus::Skipped,
+                    Some("skipped because an upstream dependency did not complete successfully".into()),
+                ),
+            )
+            .await;
             broadcast_dependency_signal(out_channels, false).await;
             return Output::empty();
         }
@@ -633,12 +673,20 @@ impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
         let _parallel_permit = match Arc::clone(&self.parallelism).acquire_owned().await {
             Ok(permit) => permit,
             Err(err) => {
-                broadcast_dependency_signal(out_channels, false).await;
-                return Output::error(format!(
+                let message = format!(
                     "failed to acquire execution permit for task {}: {}",
                     self.task.title(),
                     err
-                ));
+                );
+                record_terminal_result(
+                    &self.run_state,
+                    self.config.observer.as_ref(),
+                    &self.task,
+                    terminal_task_result(&self.task, TaskNodeStatus::Failed, Some(message.clone())),
+                )
+                .await;
+                broadcast_dependency_signal(out_channels, false).await;
+                return Output::error(message);
             }
         };
 
@@ -652,11 +700,19 @@ impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
                 .metered_result_count(&self.metered_task_ids)
                 .await;
             if consumed >= max_cost_units {
-                broadcast_dependency_signal(out_channels, false).await;
-                return Output::error(format!(
+                let message = format!(
                     "cost budget exceeded: maxCostUnits={} consumed={}",
                     max_cost_units, consumed
-                ));
+                );
+                record_terminal_result(
+                    &self.run_state,
+                    self.config.observer.as_ref(),
+                    &self.task,
+                    terminal_task_result(&self.task, TaskNodeStatus::Failed, Some(message.clone())),
+                )
+                .await;
+                broadcast_dependency_signal(out_channels, false).await;
+                return Output::error(message);
             }
 
             let remaining = max_cost_units.saturating_sub(consumed);
@@ -667,11 +723,23 @@ impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
                     .metered_result_count(&self.metered_task_ids)
                     .await;
                 if consumed_after_lock >= max_cost_units {
-                    broadcast_dependency_signal(out_channels, false).await;
-                    return Output::error(format!(
+                    let message = format!(
                         "cost budget exceeded: maxCostUnits={} consumed={}",
                         max_cost_units, consumed_after_lock
-                    ));
+                    );
+                    record_terminal_result(
+                        &self.run_state,
+                        self.config.observer.as_ref(),
+                        &self.task,
+                        terminal_task_result(
+                            &self.task,
+                            TaskNodeStatus::Failed,
+                            Some(message.clone()),
+                        ),
+                    )
+                    .await;
+                    broadcast_dependency_signal(out_channels, false).await;
+                    return Output::error(message);
                 }
                 cost_budget_guard = Some(guard);
             }
@@ -961,16 +1029,34 @@ pub async fn execute_dag<M: CompletionModel + 'static>(
         tracing::warn!("dagrs event monitor terminated unexpectedly: {}", err);
     }
 
-    if let Err(ref err) = execution_result {
+    let execution_error = execution_result.err().map(|err| {
         tracing::warn!("dagrs execution terminated with error: {}", err);
-        if !run_state.has_results().await {
-            return Err(OrchestratorError::AgentError(format!(
-                "dagrs execution failed before any task completed: {err}"
-            )));
-        }
-    }
+        err.to_string()
+    });
 
     let snapshot = run_state.snapshot(plan_spec).await;
+    let incomplete_tasks = plan_spec
+        .tasks
+        .iter()
+        .filter(|task| {
+            matches!(
+                snapshot.status_for(task.id()),
+                TaskNodeStatus::Pending | TaskNodeStatus::Running
+            )
+        })
+        .map(|task| task.title().to_string())
+        .collect::<Vec<_>>();
+    if !incomplete_tasks.is_empty() {
+        let detail = execution_error
+            .as_deref()
+            .map(|err| format!("; dagrs_error={err}"))
+            .unwrap_or_default();
+        return Err(OrchestratorError::AgentError(format!(
+            "dagrs execution ended with incomplete tasks: {}{}",
+            incomplete_tasks.join(", "),
+            detail
+        )));
+    }
     Ok(snapshot)
 }
 
@@ -2072,12 +2158,87 @@ mod tests {
             .filter_map(|event| event.strip_prefix("start:").map(ToString::to_string))
             .collect();
         assert_eq!(start_order, vec!["Fail first"]);
-        assert_eq!(run_state.task_results.len(), 1);
+        assert_eq!(run_state.task_results.len(), 2);
         assert_eq!(run_state.task_results[0].task_id, failing.id());
         assert_eq!(run_state.task_results[0].status, TaskNodeStatus::Failed);
+        assert_eq!(run_state.task_results[1].task_id, later.id());
+        assert_eq!(run_state.task_results[1].status, TaskNodeStatus::Skipped);
         assert_eq!(run_state.dagrs_runtime.total_nodes, 2);
         assert_eq!(run_state.dagrs_runtime.completed_nodes, 2);
-        assert_eq!(run_state.status_for(later.id()), TaskNodeStatus::Pending);
+        assert_eq!(run_state.status_for(later.id()), TaskNodeStatus::Skipped);
+    }
+
+    #[tokio::test]
+    async fn execute_dag_records_cost_budget_abort_as_failure() {
+        let model = MockModel {
+            final_text: "done".into(),
+        };
+        let registry = Arc::new(ToolRegistry::new());
+        let dir = tempfile::tempdir().unwrap();
+        let mut spec = (*spec()).clone();
+        spec.constraints.resources.max_cost_units = 1;
+        spec.execution.concurrency.max_parallel_tasks = 1;
+        let config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig::default(),
+            max_retries: 0,
+            backoff_seconds: 0,
+            working_dir: dir.path().to_path_buf(),
+            spec: Arc::new(spec),
+            reviewer_preamble: None,
+            dagrs_resume_checkpoint_id: None,
+            observer: None,
+        };
+
+        let first = implementation_task();
+        let mut second = implementation_task();
+        second.task = {
+            let actor = ActorRef::agent("test-executor").unwrap();
+            let mut task = GitTask::new(actor, "Second", None).unwrap();
+            task.set_description(Some("Implement change".into()));
+            task.add_constraint("network:allow");
+            task.add_acceptance_criterion("tests pass");
+            task
+        };
+        second.objective = "Second".into();
+
+        let plan = plan_for_tasks(vec![first.clone(), second.clone()], 1);
+        let run_state = execute_dag(&plan, &model, &registry, &config).await.unwrap();
+
+        let completed = run_state
+            .ordered_task_results()
+            .iter()
+            .filter(|result| result.status == TaskNodeStatus::Completed)
+            .count();
+        let failed = run_state
+            .ordered_task_results()
+            .iter()
+            .filter(|result| result.status == TaskNodeStatus::Failed)
+            .count();
+        assert_eq!(completed, 1, "{:?}", run_state.ordered_task_results());
+        assert_eq!(failed, 1, "{:?}", run_state.ordered_task_results());
+
+        let failure = run_state
+            .ordered_task_results()
+            .iter()
+            .find(|result| result.status == TaskNodeStatus::Failed)
+            .expect("budget-exhausted task result should be recorded");
+        assert!(
+            failure
+                .agent_output
+                .as_deref()
+                .is_some_and(|message| message.contains("cost budget exceeded")),
+            "{failure:?}"
+        );
+        assert!(
+            [first.id(), second.id()].into_iter().all(|task_id| {
+                !matches!(
+                    run_state.status_for(task_id),
+                    TaskNodeStatus::Pending | TaskNodeStatus::Running
+                )
+            }),
+            "{:?}",
+            run_state.task_statuses
+        );
     }
 
     #[tokio::test]

@@ -21,8 +21,13 @@ pub fn build_system_report(
         .unwrap_or_else(GateReport::empty);
     let (review_passed, review_findings) = review_report(plan, run_state);
     let (artifacts_complete, missing_artifacts) = artifact_report(spec, plan, run_state);
+    let execution_complete = plan
+        .tasks
+        .iter()
+        .all(|task| run_state.status_for(task.id()) == super::types::TaskNodeStatus::Completed);
 
-    let overall_passed = integration.all_required_passed
+    let overall_passed = execution_complete
+        && integration.all_required_passed
         && security.all_required_passed
         && release.all_required_passed
         && review_passed
@@ -588,6 +593,41 @@ mod tests {
                 .iter()
                 .any(|name| name == "test-log@release")
         );
+    }
+
+    #[test]
+    fn test_incomplete_or_failed_execution_never_passes_system_report() {
+        let mut spec = spec_with_required_artifacts();
+        spec.artifacts.required.clear();
+        let plan = plan_with_gates();
+        let run_state = RunStateSnapshot {
+            intent_spec_id: plan.intent_spec_id.clone(),
+            revision: plan.revision,
+            task_statuses: vec![
+                TaskStatusSnapshot {
+                    task_id: plan.tasks[0].id(),
+                    status: TaskNodeStatus::Failed,
+                },
+                TaskStatusSnapshot {
+                    task_id: plan.tasks[1].id(),
+                    status: TaskNodeStatus::Skipped,
+                },
+            ],
+            task_results: vec![TaskResult {
+                task_id: plan.tasks[0].id(),
+                status: TaskNodeStatus::Failed,
+                gate_report: None,
+                agent_output: Some("task failed".into()),
+                retry_count: 0,
+                tool_calls: vec![],
+                policy_violations: vec![],
+                review: None,
+            }],
+            dagrs_runtime: Default::default(),
+        };
+
+        let report = build_system_report(&spec, &plan, &run_state);
+        assert!(!report.overall_passed);
     }
 
     #[test]
