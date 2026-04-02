@@ -1711,7 +1711,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             .map(|a| a.system_prompt.clone());
         let reviewer_preamble = self
             .agent_router
-            .get("reviewer")
+            .get("code_reviewer")
             .map(|a| a.system_prompt.clone());
         let mcp_server = self.mcp_server.clone();
         let tx = self.app_event_tx.clone();
