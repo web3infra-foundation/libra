@@ -138,11 +138,7 @@ impl ToolHandler for ShellHandler {
         } else {
             ToolOutput::failure(formatted)
         };
-        if output.exit_code == 0 {
-            Ok(rendered.with_metadata(metadata))
-        } else {
-            Ok(rendered.with_metadata(metadata))
-        }
+        Ok(rendered.with_metadata(metadata))
     }
 
     fn schema(&self) -> ToolSpec {

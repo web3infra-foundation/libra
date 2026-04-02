@@ -14,6 +14,7 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{app_event::AgentStatus, theme};
+use crate::internal::ai::sandbox::ExecApprovalRequest;
 
 /// Snapshot of user-input question data for rendering (avoids borrowing the request).
 #[derive(Clone)]
@@ -150,28 +151,20 @@ impl BottomPane {
         self.user_input_notes_text.clear();
     }
 
-    pub fn set_exec_approval(
-        &mut self,
-        command: Option<String>,
-        cwd: Option<String>,
-        reason: Option<String>,
-        is_retry: bool,
-        sandbox_label: Option<String>,
-        network_access: bool,
-        writable_roots: Vec<String>,
-    ) {
-        self.exec_approval = match (command, cwd, sandbox_label) {
-            (Some(command), Some(cwd), Some(sandbox_label)) => Some(ExecApprovalSnapshot {
-                command,
-                cwd,
-                reason,
-                is_retry,
-                sandbox_label,
-                network_access,
-                writable_roots,
-            }),
-            _ => None,
-        };
+    pub fn set_exec_approval(&mut self, request: Option<&ExecApprovalRequest>) {
+        self.exec_approval = request.map(|request| ExecApprovalSnapshot {
+            command: request.command.clone(),
+            cwd: request.cwd.display().to_string(),
+            reason: request.reason.clone(),
+            is_retry: request.is_retry,
+            sandbox_label: request.sandbox_label.clone(),
+            network_access: request.network_access,
+            writable_roots: request
+                .writable_roots
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect(),
+        });
         self.exec_approval_selected = 0;
     }
 

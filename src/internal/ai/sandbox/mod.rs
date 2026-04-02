@@ -254,19 +254,21 @@ pub async fn run_shell_command_with_approval(
             ExecApprovalRequirement::NeedsApproval { ref reason } => {
                 let decision = request_exec_approval(
                     approval_ctx,
-                    &call_id,
-                    &command,
-                    &cwd,
-                    reason.clone().or_else(|| {
-                        justification
-                            .as_deref()
-                            .map(str::trim)
-                            .filter(|text| !text.is_empty())
-                            .map(ToString::to_string)
-                    }),
-                    sandbox.as_ref().map(|s| &s.policy),
-                    spec.sandbox_permissions,
-                    false,
+                    ExecApprovalPrompt {
+                        call_id: &call_id,
+                        command: &command,
+                        cwd: &cwd,
+                        reason: reason.clone().or_else(|| {
+                            justification
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|text| !text.is_empty())
+                                .map(ToString::to_string)
+                        }),
+                        sandbox_policy: sandbox.as_ref().map(|s| &s.policy),
+                        sandbox_permissions: spec.sandbox_permissions,
+                        is_retry: false,
+                    },
                 )
                 .await;
 
@@ -320,13 +322,15 @@ pub async fn run_shell_command_with_approval(
     if !should_bypass_approval(approval_ctx.policy, already_approved) {
         let decision = request_exec_approval(
             approval_ctx,
-            &call_id,
-            &command,
-            &cwd,
-            Some(build_denial_reason_from_output(&first_output)),
-            sandbox.as_ref().map(|s| &s.policy),
-            spec.sandbox_permissions,
-            true,
+            ExecApprovalPrompt {
+                call_id: &call_id,
+                command: &command,
+                cwd: &cwd,
+                reason: Some(build_denial_reason_from_output(&first_output)),
+                sandbox_policy: sandbox.as_ref().map(|s| &s.policy),
+                sandbox_permissions: spec.sandbox_permissions,
+                is_retry: true,
+            },
         )
         .await;
 
@@ -451,14 +455,17 @@ fn env_flag_enabled(name: &str) -> bool {
 
 async fn request_exec_approval(
     ctx: &ToolApprovalContext,
-    call_id: &str,
-    command: &str,
-    cwd: &Path,
-    reason: Option<String>,
-    sandbox_policy: Option<&SandboxPolicy>,
-    sandbox_permissions: SandboxPermissions,
-    is_retry: bool,
+    request: ExecApprovalPrompt<'_>,
 ) -> ReviewDecision {
+    let ExecApprovalPrompt {
+        call_id,
+        command,
+        cwd,
+        reason,
+        sandbox_policy,
+        sandbox_permissions,
+        is_retry,
+    } = request;
     let (sandbox_label, network_access, writable_roots) =
         approval_request_context(sandbox_policy, cwd, sandbox_permissions, is_retry);
     let keys = vec![shell_approval_key(command, cwd, sandbox_permissions)];
@@ -476,6 +483,16 @@ async fn request_exec_approval(
     .await
 }
 
+struct ExecApprovalPrompt<'a> {
+    call_id: &'a str,
+    command: &'a str,
+    cwd: &'a Path,
+    reason: Option<String>,
+    sandbox_policy: Option<&'a SandboxPolicy>,
+    sandbox_permissions: SandboxPermissions,
+    is_retry: bool,
+}
+
 fn approval_request_context(
     sandbox_policy: Option<&SandboxPolicy>,
     cwd: &Path,
@@ -487,7 +504,9 @@ fn approval_request_context(
     }
 
     match sandbox_policy {
-        Some(SandboxPolicy::DangerFullAccess) => ("danger-full-access".to_string(), true, Vec::new()),
+        Some(SandboxPolicy::DangerFullAccess) => {
+            ("danger-full-access".to_string(), true, Vec::new())
+        }
         Some(SandboxPolicy::ExternalSandbox { network_access }) => (
             "external-sandbox".to_string(),
             network_access.is_enabled(),

@@ -992,19 +992,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             return;
         }
 
-        self.widget.bottom_pane.set_exec_approval(
-            Some(request.command.clone()),
-            Some(request.cwd.display().to_string()),
-            request.reason.clone(),
-            request.is_retry,
-            Some(request.sandbox_label.clone()),
-            request.network_access,
-            request
-                .writable_roots
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect(),
-        );
+        self.widget.bottom_pane.set_exec_approval(Some(&request));
         self.pending_exec_approval = Some(PendingExecApproval {
             request,
             selected: 0,
@@ -1030,9 +1018,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         };
         let _ = pending.request.response_tx.send(decision);
 
-        self.widget
-            .bottom_pane
-            .set_exec_approval(None, None, None, false, None, false, Vec::new());
+        self.widget.bottom_pane.set_exec_approval(None);
 
         if decision == ReviewDecision::Abort {
             self.enqueue_mcp_turn_decision(
@@ -1059,9 +1045,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         if let Some(pending) = self.pending_exec_approval.take() {
             let _ = pending.request.response_tx.send(ReviewDecision::Denied);
         }
-        self.widget
-            .bottom_pane
-            .set_exec_approval(None, None, None, false, None, false, Vec::new());
+        self.widget.bottom_pane.set_exec_approval(None);
         self.widget
             .bottom_pane
             .set_status(AgentStatus::ExecutingTool);
@@ -1073,9 +1057,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         if let Some(pending) = self.pending_exec_approval.take() {
             let _ = pending.request.response_tx.send(ReviewDecision::Denied);
         }
-        self.widget
-            .bottom_pane
-            .set_exec_approval(None, None, None, false, None, false, Vec::new());
+        self.widget.bottom_pane.set_exec_approval(None);
     }
 
     fn handle_mouse_event(&mut self, mouse: crossterm::event::MouseEvent) {
