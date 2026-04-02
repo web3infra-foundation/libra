@@ -225,6 +225,8 @@ enum Commands {
     Pull(command::pull::PullArgs),
     #[command(about = "Show changes between commits, commit and working tree, etc")]
     Diff(command::diff::DiffArgs),
+    #[command(about = "Search for patterns in tracked files")]
+    Grep(command::grep::GrepArgs),
     #[command(about = "Show author and history of each line of a file")]
     Blame(command::blame::BlameArgs),
     #[command(about = "Revert some existing commits")]
@@ -661,6 +663,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::IndexPack(cmd_args) => command::index_pack::execute_safe(cmd_args, &output)?,
         Commands::Fetch(cmd_args) => command::fetch::execute_safe(cmd_args, &output).await?,
         Commands::Diff(cmd_args) => command::diff::execute_safe(cmd_args, &output).await?,
+        Commands::Grep(cmd_args) => command::grep::execute_safe(cmd_args, &output).await?,
         Commands::Blame(cmd_args) => command::blame::execute_safe(cmd_args, &output).await?,
         Commands::Revert(cmd_args) => command::revert::execute_safe(cmd_args, &output).await?,
         Commands::Remote(cmd) => command::remote::execute_safe(cmd, &output).await?,
