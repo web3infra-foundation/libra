@@ -6,6 +6,8 @@ use std::collections::HashSet;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+#[cfg(unix)]
+use libra::utils::path;
 use libra::{
     command::tag::{self, TagArgs},
     internal::{config::ConfigKv, db::get_db_conn_instance, model::reference, tag as internal_tag},
