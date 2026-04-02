@@ -17,7 +17,7 @@ use git_internal::{
 use serde::Serialize;
 
 use crate::{
-    command::{get_target_commit, load_object},
+    command::load_object,
     common_utils::parse_commit_msg,
     internal::{
         branch::{self, Branch},
@@ -168,6 +168,12 @@ enum ResetError {
     #[error("failed to restore working tree: {0}")]
     WorktreeRestore(String),
 
+    #[error("{0}")]
+    RevisionRead(String),
+
+    #[error("{0}")]
+    RevisionCorrupt(String),
+
     #[error("path contains invalid UTF-8: {0}")]
     InvalidPathspecEncoding(String),
 
@@ -201,6 +207,8 @@ impl ResetError {
             Self::HeadUpdate(_) => StableErrorCode::IoWriteFailed,
             Self::WorktreeRead(_) => StableErrorCode::IoReadFailed,
             Self::WorktreeRestore(_) => StableErrorCode::IoWriteFailed,
+            Self::RevisionRead(_) => StableErrorCode::IoReadFailed,
+            Self::RevisionCorrupt(_) => StableErrorCode::RepoCorrupt,
             Self::InvalidPathspecEncoding(_) => StableErrorCode::CliInvalidArguments,
             Self::PathspecWithSoft(_) => StableErrorCode::CliInvalidArguments,
             Self::PathspecWithHard => StableErrorCode::CliInvalidArguments,
@@ -230,6 +238,12 @@ impl ResetError {
                 "--hard updates the working tree; omit pathspecs or use --mixed for specific paths.",
             ),
             Self::PathspecNotMatched(_) => Some("check the path and try again."),
+            Self::RevisionRead(_) => {
+                Some("check whether the repository references and object storage are readable.")
+            }
+            Self::RevisionCorrupt(_) => {
+                Some("the referenced branch, tag, or object metadata may be corrupted.")
+            }
             Self::IndexSave(_)
             | Self::HeadUpdate(_)
             | Self::WorktreeRead(_)
@@ -767,7 +781,11 @@ fn restore_working_directory_from_tree_counted_typed(
 /// except for the .libra directory and the working directory root.
 pub(crate) fn remove_empty_directories(workdir: &Path) -> Result<(), String> {
     remove_empty_directories_with_warnings(workdir)
-        .map(|_| ())
+        .map(|warnings| {
+            for warning in warnings {
+                emit_warning(warning);
+            }
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -843,9 +861,18 @@ fn remove_empty_directories_with_warnings(workdir: &Path) -> Result<Vec<String>,
 /// Resolve a reference string to a commit ObjectHash.
 /// Accepts commit hashes, branch names, or HEAD references.
 async fn resolve_commit(reference: &str) -> Result<ObjectHash, ResetError> {
-    get_target_commit(reference)
+    util::get_commit_base_typed(reference)
         .await
-        .map_err(|e| ResetError::InvalidRevision(e.to_string()))
+        .map_err(map_commit_base_error)
+}
+
+fn map_commit_base_error(error: util::CommitBaseError) -> ResetError {
+    match error {
+        util::CommitBaseError::HeadUnborn => ResetError::HeadUnborn,
+        util::CommitBaseError::InvalidReference(message) => ResetError::InvalidRevision(message),
+        util::CommitBaseError::ReadFailure(message) => ResetError::RevisionRead(message),
+        util::CommitBaseError::CorruptReference(message) => ResetError::RevisionCorrupt(message),
+    }
 }
 
 /// Get the first line of a commit's message for display purposes.
@@ -992,6 +1019,24 @@ mod tests {
             "failed to read file /tmp/repo/tracked.txt: Permission denied".into(),
         ));
         assert_eq!(error.stable_code(), StableErrorCode::IoReadFailed);
+    }
+
+    #[test]
+    fn test_reset_error_maps_revision_read_failures_as_io_read() {
+        let error = CliError::from(ResetError::RevisionRead(
+            "failed to resolve branch 'main': failed to query branch storage: database is locked"
+                .into(),
+        ));
+        assert_eq!(error.stable_code(), StableErrorCode::IoReadFailed);
+    }
+
+    #[test]
+    fn test_reset_error_maps_revision_corruption_as_repo_corrupt() {
+        let error = CliError::from(ResetError::RevisionCorrupt(
+            "failed to resolve branch 'main': stored branch reference 'main' is corrupt: invalid hash"
+                .into(),
+        ));
+        assert_eq!(error.stable_code(), StableErrorCode::RepoCorrupt);
     }
 
     #[test]

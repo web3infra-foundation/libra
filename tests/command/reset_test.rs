@@ -241,6 +241,36 @@ async fn test_reset_corrupt_head_reference_returns_repo_corrupt() {
 
 #[tokio::test]
 #[serial]
+async fn test_reset_corrupt_target_branch_returns_repo_corrupt() {
+    let repo = create_committed_repo_via_cli();
+    {
+        let _guard = ChangeDirGuard::new(repo.path());
+        InternalBranch::update_branch("main", "not-a-valid-hash", None)
+            .await
+            .unwrap();
+    }
+
+    let output = run_libra_command(&["reset", "main"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-REPO-002");
+    assert!(
+        stderr.contains("failed to resolve branch 'main'"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("stored branch reference 'main' is corrupt"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("invalid reference"),
+        "reset should not misclassify corrupt branch storage as invalid target: {stderr}"
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_reset_pathspec_surfaces_subtree_corruption_as_repo_corrupt() {
     let repo = create_committed_repo_via_cli();
     fs::create_dir_all(repo.path().join("dir")).unwrap();

@@ -18,7 +18,11 @@ use once_cell::sync::Lazy;
 use path_absolutize::*;
 
 use crate::{
-    internal::{branch::Branch, head::Head, tag},
+    internal::{
+        branch::{Branch, BranchStoreError},
+        head::Head,
+        tag,
+    },
     utils::{client_storage::ClientStorage, path, path_ext::PathExt},
 };
 
@@ -455,32 +459,70 @@ pub fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
 
-/// Resolve a string to a commit ObjectHash.
-/// The string can be a branch name, a tag name, or a commit hash prefix.
-/// Order of resolution:
-/// 1. HEAD
-/// 2. Local Branch
-/// 3. Tag
-/// 4. Commit hash prefix
-pub async fn get_commit_base(name: &str) -> Result<ObjectHash, String> {
-    // 1. Check for HEAD
-    if name.to_uppercase() == "HEAD" {
-        if let Some(commit_id) = Head::current_commit_result()
-            .await
-            .map_err(|error| format!("fatal: failed to resolve HEAD: {error}"))?
-        {
-            return Ok(commit_id);
-        } else {
-            return Err("fatal: HEAD does not point to a commit".to_string());
+#[derive(Debug, thiserror::Error)]
+pub enum CommitBaseError {
+    #[error("HEAD does not point to a commit")]
+    HeadUnborn,
+    #[error("{0}")]
+    InvalidReference(String),
+    #[error("{0}")]
+    ReadFailure(String),
+    #[error("{0}")]
+    CorruptReference(String),
+}
+
+impl CommitBaseError {
+    fn from_branch_store_error(context: String, error: BranchStoreError) -> Self {
+        let message = format!("{context}: {error}");
+        match error {
+            BranchStoreError::Query(_) | BranchStoreError::Delete { .. } => {
+                Self::ReadFailure(message)
+            }
+            BranchStoreError::Corrupt { .. } => Self::CorruptReference(message),
+            BranchStoreError::NotFound(_) => Self::InvalidReference(message),
         }
     }
 
+    fn classify_storage_failure(message: String) -> Self {
+        let lower = message.to_ascii_lowercase();
+        if lower.contains("database is locked")
+            || lower.contains("database schema is locked")
+            || lower.contains("permission denied")
+            || lower.contains("input/output error")
+            || lower.contains("failed to read")
+            || lower.contains("could not read")
+            || lower.contains("failed to query")
+        {
+            Self::ReadFailure(message)
+        } else {
+            Self::CorruptReference(message)
+        }
+    }
+}
+
+pub async fn get_commit_base_typed(name: &str) -> Result<ObjectHash, CommitBaseError> {
+    // 1. Check for HEAD
+    if name.eq_ignore_ascii_case("HEAD") {
+        return match Head::current_commit_result().await {
+            Ok(Some(commit_id)) => Ok(commit_id),
+            Ok(None) => Err(CommitBaseError::HeadUnborn),
+            Err(error) => Err(CommitBaseError::from_branch_store_error(
+                "failed to resolve HEAD".to_string(),
+                error,
+            )),
+        };
+    }
+
     // 2. Check for a local branch
-    if let Some(branch) = Branch::find_branch_result(name, None)
-        .await
-        .map_err(|error| format!("fatal: failed to resolve branch '{name}': {error}"))?
-    {
-        return Ok(branch.commit);
+    match Branch::find_branch_result(name, None).await {
+        Ok(Some(branch)) => return Ok(branch.commit),
+        Ok(None) => {}
+        Err(error) => {
+            return Err(CommitBaseError::from_branch_store_error(
+                format!("failed to resolve branch '{name}'"),
+                error,
+            ));
+        }
     }
 
     // Support both short remote branches (`main` with `remote = origin`) and
@@ -490,62 +532,97 @@ pub async fn get_commit_base(name: &str) -> Result<ObjectHash, String> {
         && !remote.is_empty()
         && !branch_name.is_empty()
     {
-        let remote_tracking_ref = format!("refs/remotes/{remote}/{branch_name}");
-        let remote_lookup_error = |error| {
-            format!("fatal: failed to resolve remote branch '{remote}/{branch_name}': {error}")
-        };
+        let remote_lookup_context =
+            format!("failed to resolve remote branch '{remote}/{branch_name}'");
 
-        if let Some(branch) = Branch::find_branch_result(&remote_tracking_ref, Some(remote))
-            .await
-            .map_err(remote_lookup_error)?
+        match Branch::find_branch_result(
+            &format!("refs/remotes/{remote}/{branch_name}"),
+            Some(remote),
+        )
+        .await
         {
-            return Ok(branch.commit);
+            Ok(Some(branch)) => return Ok(branch.commit),
+            Ok(None) => {}
+            Err(error) => {
+                return Err(CommitBaseError::from_branch_store_error(
+                    remote_lookup_context.clone(),
+                    error,
+                ));
+            }
         }
 
-        if let Some(branch) = Branch::find_branch_result(branch_name, Some(remote))
-            .await
-            .map_err(remote_lookup_error)?
-        {
-            return Ok(branch.commit);
+        match Branch::find_branch_result(branch_name, Some(remote)).await {
+            Ok(Some(branch)) => return Ok(branch.commit),
+            Ok(None) => {}
+            Err(error) => {
+                return Err(CommitBaseError::from_branch_store_error(
+                    remote_lookup_context,
+                    error,
+                ));
+            }
         }
     }
 
     // 3. Check for a tag
-    if let Ok(Some((_tag_object, commit))) = tag::find_tag_and_commit(name).await {
-        // The find_tag_and_commit function already dereferences annotated tags for us.
-        return Ok(commit.id);
+    match tag::find_tag_and_commit(name).await {
+        Ok(Some((_tag_object, commit))) => return Ok(commit.id),
+        Ok(None) => {}
+        Err(error) => {
+            return Err(CommitBaseError::classify_storage_failure(format!(
+                "failed to resolve tag '{name}': {error}"
+            )));
+        }
     }
 
     // 4. Check for a hash prefix
     let storage = objects_storage();
     let commits = storage.search(name).await;
     if commits.is_empty() {
-        return Err(format!("fatal: invalid reference: {}", name));
+        return Err(CommitBaseError::InvalidReference(format!(
+            "invalid reference: {name}"
+        )));
     } else if commits.len() > 1 {
-        return Err(format!("fatal: ambiguous argument: {}", name));
+        return Err(CommitBaseError::InvalidReference(format!(
+            "ambiguous argument: {name}"
+        )));
     }
 
     let object_id = commits[0];
-    let object_type = storage
-        .get_object_type(&object_id)
-        .map_err(|e| format!("fatal: could not read object type for {}: {}", name, e))?;
+    let object_type = storage.get_object_type(&object_id).map_err(|e| {
+        CommitBaseError::classify_storage_failure(format!(
+            "could not read object type for {name}: {e}"
+        ))
+    })?;
 
     match object_type {
         ObjectType::Commit => Ok(object_id),
         ObjectType::Tag => {
             // Manually dereference tag if search returned a tag object directly
             let tag_obj: git_internal::internal::object::tag::Tag =
-                match crate::command::load_object(&object_id) {
-                    Ok(obj) => obj,
-                    Err(e) => return Err(format!("fatal: failed to load tag object: {}", e)),
-                };
+                crate::command::load_object(&object_id).map_err(|e| {
+                    CommitBaseError::classify_storage_failure(format!(
+                        "failed to load tag object: {e}"
+                    ))
+                })?;
             Ok(tag_obj.object_hash)
         }
-        _ => Err(format!(
-            "fatal: reference is not a commit: {}, is {}",
-            name, object_type
-        )),
+        _ => Err(CommitBaseError::InvalidReference(format!(
+            "reference is not a commit: {name}, is {object_type}"
+        ))),
     }
+}
+
+/// Resolve a string to a commit ObjectHash.
+/// The string can be a branch name, a tag name, or a commit hash prefix.
+/// Order of resolution:
+/// 1. HEAD
+/// 2. Local Branch
+/// 3. Tag
+/// 4. Commit hash prefix
+pub async fn get_commit_base(name: &str) -> Result<ObjectHash, String> {
+    get_commit_base_typed(name)
+        .await
+        .map_err(|error| format!("fatal: {error}"))
 }
 
 /// Get the repository name from the url
