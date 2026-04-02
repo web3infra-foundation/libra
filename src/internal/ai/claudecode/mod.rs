@@ -1084,7 +1084,7 @@ pub(super) async fn bridge_run_internal(args: BridgeRunArgs) -> Result<BridgeRun
 
     let mcp_server = init_local_mcp_server(&storage_path).await?;
     let actor = mcp_server
-        .resolve_actor_from_params(Some("system"), Some("claude-sdk-bridge"))
+        .resolve_actor_from_params(Some("system"), Some("claudecode-bridge"))
         .map_err(|error| anyhow!("failed to resolve Claude Code bridge actor: {error:?}"))?;
     let planning_context_frame_ids = if let Some(intent_id) = requested_intent_id.as_deref() {
         create_context_frames_for_audit_bundle(
@@ -1121,7 +1121,7 @@ pub(super) async fn bridge_run_internal(args: BridgeRunArgs) -> Result<BridgeRun
                     tags: None,
                     external_ids: None,
                     actor_kind: Some("system".to_string()),
-                    actor_id: Some("claude-sdk-bridge".to_string()),
+                    actor_id: Some("claudecode-bridge".to_string()),
                 },
                 actor.clone(),
             )
@@ -1165,7 +1165,7 @@ pub(super) async fn bridge_run_internal(args: BridgeRunArgs) -> Result<BridgeRun
                     tags: None,
                     external_ids: None,
                     actor_kind: Some("system".to_string()),
-                    actor_id: Some("claude-sdk-bridge".to_string()),
+                    actor_id: Some("claudecode-bridge".to_string()),
                 },
                 actor.clone(),
             )
@@ -1218,7 +1218,7 @@ async fn ensure_formal_runtime_side_objects(
 ) -> Result<()> {
     let mcp_server = init_local_mcp_server(storage_path).await?;
     let actor = mcp_server
-        .resolve_actor_from_params(Some("system"), Some("claude-sdk-runtime"))
+        .resolve_actor_from_params(Some("system"), Some("claudecode-runtime"))
         .map_err(|error| anyhow!("failed to resolve Claude Code runtime actor: {error:?}"))?;
 
     ensure_formal_provenance_object(storage_path, &mcp_server, &actor, run_binding, audit_bundle)
@@ -1248,7 +1248,7 @@ async fn create_context_snapshot_for_audit_bundle(
                 tags: None,
                 external_ids: None,
                 actor_kind: Some("system".to_string()),
-                actor_id: Some("claude-sdk-context".to_string()),
+                actor_id: Some("claudecode-context".to_string()),
             },
             actor.clone(),
         )
@@ -1317,7 +1317,7 @@ async fn create_context_frames_for_audit_bundle(
                     data: Some(data),
                     token_estimate: Some(token_estimate_for_summary(&summary)),
                     actor_kind: Some("system".to_string()),
-                    actor_id: Some("claude-sdk-context".to_string()),
+                    actor_id: Some("claudecode-context".to_string()),
                 },
                 actor.clone(),
             )
@@ -1448,7 +1448,7 @@ async fn ensure_formal_provenance_object(
                 tags: None,
                 external_ids: None,
                 actor_kind: Some("system".to_string()),
-                actor_id: Some("claude-sdk-runtime".to_string()),
+                actor_id: Some("claudecode-runtime".to_string()),
             },
             actor.clone(),
         )
@@ -1500,7 +1500,7 @@ async fn ensure_formal_run_usage_object(
                 output_tokens,
                 cost_usd,
                 actor_kind: Some("system".to_string()),
-                actor_id: Some("claude-sdk-runtime".to_string()),
+                actor_id: Some("claudecode-runtime".to_string()),
             },
             actor.clone(),
         )
@@ -1739,7 +1739,7 @@ async fn persist_evidence_internal(args: PersistEvidenceArgs) -> Result<PersistE
 
     let mcp_server = init_local_mcp_server(&storage_path).await?;
     let actor = mcp_server
-        .resolve_actor_from_params(Some("system"), Some("claude-sdk-evidence"))
+        .resolve_actor_from_params(Some("system"), Some("claudecode-evidence"))
         .map_err(|error| anyhow!("failed to resolve Claude Code evidence actor: {error:?}"))?;
     let mut evidence_entries = Vec::new();
     for entry in entries {
@@ -1759,7 +1759,7 @@ async fn persist_evidence_internal(args: PersistEvidenceArgs) -> Result<PersistE
                         tags: None,
                         external_ids: None,
                         actor_kind: Some("system".to_string()),
-                        actor_id: Some("claude-sdk-evidence".to_string()),
+                        actor_id: Some("claudecode-evidence".to_string()),
                     },
                     actor.clone(),
                 )
@@ -1906,7 +1906,7 @@ async fn persist_patchset_internal(args: PersistPatchSetArgs) -> Result<PersistP
 
     let mcp_server = init_local_mcp_server(&storage_path).await?;
     let actor = mcp_server
-        .resolve_actor_from_params(Some("system"), Some("claude-sdk-patchset"))
+        .resolve_actor_from_params(Some("system"), Some("claudecode-patchset"))
         .map_err(|error| anyhow!("failed to resolve Claude Code patchset actor: {error:?}"))?;
     let touched_files = managed_evidence_input
         .patch_overview
@@ -1956,7 +1956,7 @@ async fn persist_patchset_internal(args: PersistPatchSetArgs) -> Result<PersistP
                     tags: None,
                     external_ids: None,
                     actor_kind: Some("system".to_string()),
-                    actor_id: Some("claude-sdk-patchset".to_string()),
+                    actor_id: Some("claudecode-patchset".to_string()),
                 },
                 actor,
             )
@@ -2245,7 +2245,7 @@ async fn persist_decision_internal(args: PersistDecisionArgs) -> Result<PersistD
 
     let mcp_server = init_local_mcp_server(&storage_path).await?;
     let actor = mcp_server
-        .resolve_actor_from_params(Some("system"), Some("claude-sdk-decision"))
+        .resolve_actor_from_params(Some("system"), Some("claudecode-decision"))
         .map_err(|error| anyhow!("failed to resolve Claude Code decision actor: {error:?}"))?;
     let decision_id = parse_created_id(
         "decision",
@@ -2261,7 +2261,7 @@ async fn persist_decision_internal(args: PersistDecisionArgs) -> Result<PersistD
                     tags: None,
                     external_ids: None,
                     actor_kind: Some("system".to_string()),
-                    actor_id: Some("claude-sdk-decision".to_string()),
+                    actor_id: Some("claudecode-decision".to_string()),
                 },
                 actor,
             )
@@ -2607,7 +2607,7 @@ async fn bridge_run_plan_id(
                 tags: None,
                 external_ids: None,
                 actor_kind: Some("system".to_string()),
-                actor_id: Some("claude-sdk-bridge".to_string()),
+                actor_id: Some("claudecode-bridge".to_string()),
             },
             actor.clone(),
         )

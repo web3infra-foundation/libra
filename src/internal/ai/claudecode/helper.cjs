@@ -420,7 +420,7 @@ function loadClaudeAgentSdk(cwd) {
 
   const resolverCwd = path.resolve(cwd || process.cwd());
   attempts.push(() =>
-    createRequire(path.join(resolverCwd, '__libra_claude_sdk__.cjs'))(
+    createRequire(path.join(resolverCwd, '__libra_claudecode__.cjs'))(
       '@anthropic-ai/claude-agent-sdk'
     )
   );

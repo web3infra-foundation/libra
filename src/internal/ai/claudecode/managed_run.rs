@@ -780,7 +780,7 @@ async fn ensure_streaming_formal_run_binding(
 
     let mcp_server = init_local_mcp_server(storage_path).await?;
     let actor = mcp_server
-        .resolve_actor_from_params(Some("system"), Some("claude-sdk-stream"))
+        .resolve_actor_from_params(Some("system"), Some("claudecode-stream"))
         .map_err(|error| anyhow!("failed to resolve Claude Code stream actor: {error:?}"))?;
     let context_snapshot_id =
         create_context_snapshot_for_audit_bundle(&mcp_server, &actor, &audit_bundle).await?;
@@ -805,7 +805,7 @@ async fn ensure_streaming_formal_run_binding(
                     tags: None,
                     external_ids: None,
                     actor_kind: Some("system".to_string()),
-                    actor_id: Some("claude-sdk-stream".to_string()),
+                    actor_id: Some("claudecode-stream".to_string()),
                 },
                 actor.clone(),
             )
@@ -837,7 +837,7 @@ async fn ensure_streaming_formal_run_binding(
                     tags: None,
                     external_ids: None,
                     actor_kind: Some("system".to_string()),
-                    actor_id: Some("claude-sdk-stream".to_string()),
+                    actor_id: Some("claudecode-stream".to_string()),
                 },
                 actor.clone(),
             )
@@ -934,7 +934,7 @@ async fn sync_streaming_tool_invocations(
 
     let mcp_server = init_local_mcp_server(storage_path).await?;
     let actor = mcp_server
-        .resolve_actor_from_params(Some("system"), Some("claude-sdk-stream"))
+        .resolve_actor_from_params(Some("system"), Some("claudecode-stream"))
         .map_err(|error| anyhow!("failed to resolve Claude Code stream actor: {error:?}"))?;
 
     for invocation in &audit_bundle.bridge.tool_invocations {
@@ -979,7 +979,7 @@ async fn sync_streaming_tool_invocations(
                             invocation.tool_use_id.clone(),
                         )])),
                         actor_kind: Some("system".to_string()),
-                        actor_id: Some("claude-sdk-stream".to_string()),
+                        actor_id: Some("claudecode-stream".to_string()),
                     },
                     actor.clone(),
                 )
@@ -1190,6 +1190,7 @@ impl ManagedClaudecodeTuiDriver {
             &self.args.python_binary,
             &self.helper_path,
             &helper_request,
+            &self.project_bootstrap,
             interactive_response_dir.as_ref().map(TempDir::path),
             &self.user_input_tx,
             &self.exec_approval_tx,
@@ -1328,8 +1329,9 @@ fn apply_project_bootstrap_to_helper_request(
     request: &mut ManagedHelperRequest,
     project_bootstrap: &ClaudecodeProjectBootstrap,
 ) {
-    request.provider_env_overrides = project_bootstrap.provider_env_overrides.clone();
-    request.provider_env_unset = project_bootstrap.provider_env_unset.clone();
+    // Credential-bearing env overrides are applied directly on the child
+    // Command via `apply_provider_env_to_command` to keep secret values out of
+    // the serialised request body.  Only non-sensitive metadata is set here.
     request.credential_source = project_bootstrap
         .credential_source
         .map(|source| source.request_value().to_string());
@@ -1415,8 +1417,15 @@ pub(super) async fn run_managed(args: RunManagedArgs, output: &OutputConfig) -> 
             output_schema: Some(managed_output_schema()),
         };
         apply_project_bootstrap_to_helper_request(&mut helper_request, &project_bootstrap);
-        let artifact =
-            invoke_helper(custom_helper, &python_binary, &helper_path, &helper_request).await?;
+        let artifact = invoke_helper(
+            custom_helper,
+            &python_binary,
+            &helper_path,
+            &helper_request,
+            &project_bootstrap.provider_env_overrides,
+            &project_bootstrap.provider_env_unset,
+        )
+        .await?;
         let outcome = persist_managed_artifact(&storage_path, &artifact).await?;
         ensure_managed_artifact_succeeded(&artifact)?;
         print_result("run", &outcome)?;
@@ -1449,6 +1458,8 @@ pub(super) async fn run_managed(args: RunManagedArgs, output: &OutputConfig) -> 
         &python_binary,
         &helper_path,
         &helper_request,
+        &project_bootstrap.provider_env_overrides,
+        &project_bootstrap.provider_env_unset,
         streaming_render_mode(output),
         None,
     )
@@ -2085,6 +2096,8 @@ async fn execute_chat_turn(
         &args.python_binary,
         helper_path,
         &helper_request,
+        &project_bootstrap.provider_env_overrides,
+        &project_bootstrap.provider_env_unset,
         render_mode,
         ui_event_tx,
     )
@@ -2099,6 +2112,7 @@ async fn execute_managed_tui_turn<F>(
     python_binary: &str,
     helper_path: &Path,
     helper_request: &ManagedHelperRequest,
+    project_bootstrap: &ClaudecodeProjectBootstrap,
     interactive_response_dir: Option<&Path>,
     user_input_tx: &UnboundedSender<UserInputRequest>,
     exec_approval_tx: &UnboundedSender<ExecApprovalRequest>,
@@ -2115,7 +2129,13 @@ where
     } else {
         python_binary.to_string()
     };
-    let mut child = build_helper_command(custom_helper, python_binary, helper_path)
+    let mut command = build_helper_command(custom_helper, python_binary, helper_path);
+    apply_provider_env_to_command(
+        &mut command,
+        &project_bootstrap.provider_env_overrides,
+        &project_bootstrap.provider_env_unset,
+    );
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -2891,6 +2911,8 @@ async fn execute_managed_streaming_turn(
     python_binary: &str,
     helper_path: &Path,
     helper_request: &ManagedHelperRequest,
+    provider_env_overrides: &BTreeMap<String, String>,
+    provider_env_unset: &[String],
     render_mode: StreamingRenderMode,
     ui_event_tx: Option<UnboundedSender<ChatTurnUiEvent>>,
 ) -> Result<ManagedStreamingTurnOutcome> {
@@ -2902,7 +2924,9 @@ async fn execute_managed_streaming_turn(
     } else {
         python_binary.to_string()
     };
-    let mut child = build_helper_command(custom_helper, python_binary, helper_path)
+    let mut command = build_helper_command(custom_helper, python_binary, helper_path);
+    apply_provider_env_to_command(&mut command, provider_env_overrides, provider_env_unset);
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -4190,9 +4214,9 @@ mod tests {
         ai_session_id: &str,
     ) -> ClaudeToolInvocationBindingArtifact {
         let bindings_dir = storage_path.join(TOOL_INVOCATION_BINDINGS_DIR);
-        let mut entries = std::fs::read_dir(&bindings_dir)
+        let entries = std::fs::read_dir(&bindings_dir)
             .expect("tool invocation bindings directory should be readable");
-        while let Some(entry) = entries.next() {
+        for entry in entries {
             let entry = entry.expect("tool invocation binding directory entry should be readable");
             let path = entry.path();
             if path.extension().and_then(|extension| extension.to_str()) != Some("json") {

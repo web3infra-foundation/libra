@@ -439,6 +439,22 @@ pub(super) fn build_helper_command(
     command
 }
 
+/// Apply credential-bearing environment overrides directly on the child
+/// process `Command` rather than serialising them into the JSON request body.
+/// This keeps secret values out of any serialised/logged data path.
+pub(super) fn apply_provider_env_to_command(
+    command: &mut Command,
+    overrides: &BTreeMap<String, String>,
+    unset: &[String],
+) {
+    for (key, value) in overrides {
+        command.env(key, value);
+    }
+    for key in unset {
+        command.env_remove(key);
+    }
+}
+
 pub(super) async fn upsert_tracked_json_object<T>(
     storage_path: &Path,
     object_type: &str,
@@ -476,8 +492,18 @@ pub(super) async fn invoke_helper(
     python_binary: &str,
     helper_path: &Path,
     request: &ManagedHelperRequest,
+    provider_env_overrides: &BTreeMap<String, String>,
+    provider_env_unset: &[String],
 ) -> Result<ClaudeManagedArtifact> {
-    invoke_helper_json(custom_helper, python_binary, helper_path, request).await
+    invoke_helper_json_with_env(
+        custom_helper,
+        python_binary,
+        helper_path,
+        request,
+        provider_env_overrides,
+        provider_env_unset,
+    )
+    .await
 }
 
 pub(super) async fn invoke_helper_json<T>(
@@ -489,6 +515,20 @@ pub(super) async fn invoke_helper_json<T>(
 where
     T: Serialize + HelperResponse,
 {
+    invoke_helper_json_with_env(custom_helper, python_binary, helper_path, request, &BTreeMap::new(), &[]).await
+}
+
+async fn invoke_helper_json_with_env<T>(
+    custom_helper: bool,
+    python_binary: &str,
+    helper_path: &Path,
+    request: &T,
+    provider_env_overrides: &BTreeMap<String, String>,
+    provider_env_unset: &[String],
+) -> Result<T::Output>
+where
+    T: Serialize + HelperResponse,
+{
     let serialized_request =
         serde_json::to_vec(request).context("failed to serialize Claude Code helper request")?;
     let executable = if custom_helper {
@@ -496,7 +536,9 @@ where
     } else {
         python_binary.to_string()
     };
-    let mut child = build_helper_command(custom_helper, python_binary, helper_path)
+    let mut command = build_helper_command(custom_helper, python_binary, helper_path);
+    apply_provider_env_to_command(&mut command, provider_env_overrides, provider_env_unset);
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

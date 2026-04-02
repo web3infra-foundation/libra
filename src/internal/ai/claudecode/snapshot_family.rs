@@ -201,7 +201,7 @@ pub(super) async fn ensure_full_family_plan_objects(
     let projection_context = PlanProjectionContext::load(storage_path).await?;
     let actor = projection_context
         .mcp_server
-        .resolve_actor_from_params(Some("system"), Some("claude-sdk-snapshot"))
+        .resolve_actor_from_params(Some("system"), Some("claudecode-snapshot"))
         .map_err(|error| anyhow!("failed to resolve Claude snapshot actor: {error:?}"))?;
     let plan_snapshot = PlanSnapshot {
         id: plan_id.to_string(),
@@ -302,7 +302,7 @@ pub(super) async fn ensure_full_family_plan_objects(
                         spawned_task_id: Some(task_uuid.to_string()),
                         outputs: None,
                         actor_kind: Some("system".to_string()),
-                        actor_id: Some("claude-sdk-snapshot".to_string()),
+                        actor_id: Some("claudecode-snapshot".to_string()),
                     },
                     actor.clone(),
                 )
@@ -351,7 +351,7 @@ async fn ensure_formal_plan_step_task(
                 tags: None,
                 external_ids: None,
                 actor_kind: Some("system".to_string()),
-                actor_id: Some("claude-sdk-snapshot".to_string()),
+                actor_id: Some("claudecode-snapshot".to_string()),
             },
             actor.clone(),
         )
