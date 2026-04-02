@@ -395,7 +395,9 @@ fn write_streaming_event_helper(
             )
         })
         .collect::<Vec<_>>();
-    let mut script = format!("#!/bin/sh\ncat > {request_rendered}\n");
+    let mut script = format!(
+        "#!/bin/sh\nrequest_tmp=$(mktemp)\ncat > \"$request_tmp\"\npython3 - \"$request_tmp\" {request_rendered} <<'PY'\nimport json\nimport os\nimport sys\n\nsource_path, dest_path = sys.argv[1:3]\nwith open(source_path, 'r', encoding='utf-8') as handle:\n    request = json.load(handle)\nfor env_key, field in (\n    ('LIBRA_CLAUDE_HELPER_RESUME', 'resume'),\n    ('LIBRA_CLAUDE_HELPER_SESSION_ID', 'sessionId'),\n    ('LIBRA_CLAUDE_HELPER_RESUME_SESSION_AT', 'resumeSessionAt'),\n):\n    value = os.environ.get(env_key)\n    if value:\n        request[field] = value\nwith open(dest_path, 'w', encoding='utf-8') as handle:\n    json.dump(request, handle)\nPY\nrm -f \"$request_tmp\"\n"
+    );
     if !rendered_events.is_empty() {
         script.push_str("printf '%s\\n' ");
         script.push_str(&rendered_events.join(" "));

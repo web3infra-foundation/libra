@@ -36,6 +36,11 @@ except Exception as exc:  # pragma: no cover - runtime import guard
     query = None
 
 
+HELPER_RESUME_ENV = "LIBRA_CLAUDE_HELPER_RESUME"
+HELPER_SESSION_ID_ENV = "LIBRA_CLAUDE_HELPER_SESSION_ID"
+HELPER_RESUME_AT_ENV = "LIBRA_CLAUDE_HELPER_RESUME_SESSION_AT"
+
+
 def read_stdin() -> str:
     return sys.stdin.read()
 
@@ -71,6 +76,32 @@ def collect_provider_env(request: dict[str, Any]) -> dict[str, str]:
             env.pop(key, None)
 
     return env
+
+
+def apply_sensitive_session_control_env(request: dict[str, Any]) -> dict[str, Any]:
+    request = dict(request)
+
+    resume = os.environ.get(HELPER_RESUME_ENV)
+    if not isinstance(request.get("resume"), str) and isinstance(resume, str) and resume:
+        request["resume"] = resume
+
+    session_id = os.environ.get(HELPER_SESSION_ID_ENV)
+    if (
+        not isinstance(request.get("sessionId"), str)
+        and isinstance(session_id, str)
+        and session_id
+    ):
+        request["sessionId"] = session_id
+
+    resume_at = os.environ.get(HELPER_RESUME_AT_ENV)
+    if (
+        not isinstance(request.get("resumeSessionAt"), str)
+        and isinstance(resume_at, str)
+        and resume_at
+    ):
+        request["resumeSessionAt"] = resume_at
+
+    return request
 
 
 def stable_normalize(value: Any) -> Any:
@@ -142,16 +173,12 @@ def build_artifact(
             "enableFileCheckpointing": request.get("enableFileCheckpointing") is True,
             "interactiveApprovals": request.get("interactiveApprovals") is True,
             "continue": request.get("continue") is True,
-            "resume": request.get("resume")
-            if isinstance(request.get("resume"), str)
-            else None,
             "forkSession": request.get("forkSession") is True,
-            "sessionId": request.get("sessionId")
-            if isinstance(request.get("sessionId"), str)
-            else None,
-            "resumeSessionAt": request.get("resumeSessionAt")
-            if isinstance(request.get("resumeSessionAt"), str)
-            else None,
+            "resumeProvided": isinstance(request.get("resume"), str),
+            "sessionIdProvided": isinstance(request.get("sessionId"), str),
+            "resumeSessionAtProvided": isinstance(
+                request.get("resumeSessionAt"), str
+            ),
         },
         "helperTimedOut": helper_timed_out,
         "helperError": helper_error,
@@ -1488,7 +1515,7 @@ async def async_main() -> None:
     if not request_body.strip():
         raise RuntimeError("managed helper request is empty")
 
-    request = json.loads(request_body)
+    request = apply_sensitive_session_control_env(json.loads(request_body))
     mode = request.get("mode")
     if mode in {"query", "queryStream"}:
         await execute_query(request)

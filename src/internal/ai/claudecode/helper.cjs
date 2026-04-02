@@ -3,6 +3,10 @@ const path = require('path');
 const { createRequire } = require('module');
 const readline = require('readline/promises');
 
+const HELPER_RESUME_ENV = 'LIBRA_CLAUDE_HELPER_RESUME';
+const HELPER_SESSION_ID_ENV = 'LIBRA_CLAUDE_HELPER_SESSION_ID';
+const HELPER_RESUME_AT_ENV = 'LIBRA_CLAUDE_HELPER_RESUME_SESSION_AT';
+
 async function readStdin() {
   const chunks = [];
   for await (const chunk of process.stdin) {
@@ -40,6 +44,33 @@ function collectProviderEnv(request) {
   }
 
   return env;
+}
+
+function applySensitiveSessionControlEnv(request) {
+  const next = { ...request };
+
+  if (typeof next.resume !== 'string' || next.resume.length === 0) {
+    const resume = process.env[HELPER_RESUME_ENV];
+    if (typeof resume === 'string' && resume.length > 0) {
+      next.resume = resume;
+    }
+  }
+
+  if (typeof next.sessionId !== 'string' || next.sessionId.length === 0) {
+    const sessionId = process.env[HELPER_SESSION_ID_ENV];
+    if (typeof sessionId === 'string' && sessionId.length > 0) {
+      next.sessionId = sessionId;
+    }
+  }
+
+  if (typeof next.resumeSessionAt !== 'string' || next.resumeSessionAt.length === 0) {
+    const resumeSessionAt = process.env[HELPER_RESUME_AT_ENV];
+    if (typeof resumeSessionAt === 'string' && resumeSessionAt.length > 0) {
+      next.resumeSessionAt = resumeSessionAt;
+    }
+  }
+
+  return next;
 }
 
 function findLastResultMessage(messages) {
@@ -103,10 +134,11 @@ function buildArtifact(request, hookEvents, messages, helperTimedOut, helperErro
       enableFileCheckpointing: request.enableFileCheckpointing === true,
       interactiveApprovals: request.interactiveApprovals === true,
       continue: request.continue === true,
-      resume: typeof request.resume === 'string' ? request.resume : null,
       forkSession: request.forkSession === true,
-      sessionId: typeof request.sessionId === 'string' ? request.sessionId : null,
-      resumeSessionAt: typeof request.resumeSessionAt === 'string' ? request.resumeSessionAt : null,
+      resumeProvided: typeof request.resume === 'string' && request.resume.length > 0,
+      sessionIdProvided: typeof request.sessionId === 'string' && request.sessionId.length > 0,
+      resumeSessionAtProvided:
+        typeof request.resumeSessionAt === 'string' && request.resumeSessionAt.length > 0,
     },
     helperTimedOut,
     helperError,
@@ -503,7 +535,7 @@ async function main() {
     throw new Error('managed helper request is empty');
   }
 
-  const request = JSON.parse(requestBody);
+  const request = applySensitiveSessionControlEnv(JSON.parse(requestBody));
   const sdk = loadClaudeAgentSdk(request.cwd);
   if (request.mode === 'listSessions') {
     if (typeof sdk.listSessions !== 'function') {

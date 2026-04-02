@@ -302,10 +302,6 @@ pub(super) struct ClaudeSdkCommandOutput {
     ok: bool,
     #[serde(rename = "mode")]
     command_mode: &'static str,
-    #[serde(rename = "providerSessionId")]
-    provider_session_id: String,
-    #[serde(rename = "aiSessionId")]
-    ai_session_id: String,
     #[serde(rename = "aiSessionObjectHash")]
     ai_session_object_hash: String,
     #[serde(rename = "alreadyPersisted")]
@@ -321,7 +317,7 @@ pub(super) struct ClaudeSdkCommandOutput {
     audit_bundle_path: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub(super) struct ManagedHelperRequest {
     pub(super) mode: &'static str,
     pub(super) prompt: String,
@@ -385,7 +381,7 @@ pub(super) struct ManagedHelperRequest {
     pub(super) output_schema: Option<Value>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub(super) struct ManagedSystemPrompt {
     #[serde(rename = "type")]
     pub(super) kind: &'static str,
@@ -2121,7 +2117,8 @@ async fn execute_managed_tui_turn<F>(
 where
     F: FnMut(ClaudecodeTuiEvent) + Send,
 {
-    let serialized_request = serde_json::to_vec(helper_request)
+    let redacted_request = redact_helper_request_session_controls(helper_request);
+    let serialized_request = serde_json::to_vec(&redacted_request)
         .context("failed to serialize Claude Code helper TUI request")?;
     let helper_timeout = helper_timeout_window(helper_request);
     let executable = if custom_helper {
@@ -2130,6 +2127,7 @@ where
         python_binary.to_string()
     };
     let mut command = build_helper_command(custom_helper, python_binary, helper_path);
+    apply_helper_session_controls_to_command(&mut command, helper_request);
     apply_provider_env_to_command(
         &mut command,
         &project_bootstrap.provider_env_overrides,
@@ -2916,7 +2914,8 @@ async fn execute_managed_streaming_turn(
     render_mode: StreamingRenderMode,
     ui_event_tx: Option<UnboundedSender<ChatTurnUiEvent>>,
 ) -> Result<ManagedStreamingTurnOutcome> {
-    let serialized_request = serde_json::to_vec(helper_request)
+    let redacted_request = redact_helper_request_session_controls(helper_request);
+    let serialized_request = serde_json::to_vec(&redacted_request)
         .context("failed to serialize Claude Code helper streaming request")?;
     let helper_timeout = helper_timeout_window(helper_request);
     let executable = if custom_helper {
@@ -2925,6 +2924,7 @@ async fn execute_managed_streaming_turn(
         python_binary.to_string()
     };
     let mut command = build_helper_command(custom_helper, python_binary, helper_path);
+    apply_helper_session_controls_to_command(&mut command, helper_request);
     apply_provider_env_to_command(&mut command, provider_env_overrides, provider_env_unset);
     let mut child = command
         .stdin(Stdio::piped())
@@ -4019,8 +4019,6 @@ fn print_result(mode: &'static str, outcome: &PersistedManagedArtifactOutcome) -
     let payload = ClaudeSdkCommandOutput {
         ok: true,
         command_mode: mode,
-        provider_session_id: outcome.provider_session_id.clone(),
-        ai_session_id: outcome.ai_session_id.clone(),
         ai_session_object_hash: outcome.ai_session_object_hash.clone(),
         already_persisted: outcome.already_persisted,
         intent_extraction_path: outcome.intent_extraction_path.clone(),

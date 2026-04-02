@@ -7,6 +7,10 @@ pub(super) struct EmbeddedHelperDir {
     _temp_dir: TempDir,
 }
 
+const HELPER_RESUME_ENV: &str = "LIBRA_CLAUDE_HELPER_RESUME";
+const HELPER_SESSION_ID_ENV: &str = "LIBRA_CLAUDE_HELPER_SESSION_ID";
+const HELPER_RESUME_AT_ENV: &str = "LIBRA_CLAUDE_HELPER_RESUME_SESSION_AT";
+
 pub(super) type BindingObjectSelector<T> = (&'static str, fn(&T) -> &str);
 
 pub(super) trait BindingArtifactSchema {
@@ -455,6 +459,41 @@ pub(super) fn apply_provider_env_to_command(
     }
 }
 
+fn set_optional_command_env(command: &mut Command, key: &str, value: Option<&str>) {
+    if let Some(value) = value {
+        command.env(key, value);
+    } else {
+        command.env_remove(key);
+    }
+}
+
+pub(super) fn apply_helper_session_controls_to_command(
+    command: &mut Command,
+    request: &ManagedHelperRequest,
+) {
+    set_optional_command_env(command, HELPER_RESUME_ENV, request.resume.as_deref());
+    set_optional_command_env(
+        command,
+        HELPER_SESSION_ID_ENV,
+        request.session_id.as_deref(),
+    );
+    set_optional_command_env(
+        command,
+        HELPER_RESUME_AT_ENV,
+        request.resume_session_at.as_deref(),
+    );
+}
+
+pub(super) fn redact_helper_request_session_controls(
+    request: &ManagedHelperRequest,
+) -> ManagedHelperRequest {
+    let mut redacted = request.clone();
+    redacted.resume = None;
+    redacted.session_id = None;
+    redacted.resume_session_at = None;
+    redacted
+}
+
 pub(super) async fn upsert_tracked_json_object<T>(
     storage_path: &Path,
     object_type: &str,
@@ -495,15 +534,53 @@ pub(super) async fn invoke_helper(
     provider_env_overrides: &BTreeMap<String, String>,
     provider_env_unset: &[String],
 ) -> Result<ClaudeManagedArtifact> {
-    invoke_helper_json_with_env(
-        custom_helper,
-        python_binary,
-        helper_path,
-        request,
-        provider_env_overrides,
-        provider_env_unset,
-    )
-    .await
+    let redacted_request = redact_helper_request_session_controls(request);
+    let serialized_request = serde_json::to_vec(&redacted_request)
+        .context("failed to serialize Claude Code helper request")?;
+    let executable = if custom_helper {
+        helper_path.display().to_string()
+    } else {
+        python_binary.to_string()
+    };
+    let mut command = build_helper_command(custom_helper, python_binary, helper_path);
+    apply_helper_session_controls_to_command(&mut command, request);
+    apply_provider_env_to_command(&mut command, provider_env_overrides, provider_env_unset);
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| {
+            format!(
+                "failed to start Claude Code helper with '{}' '{}'",
+                executable,
+                helper_path.display()
+            )
+        })?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(&serialized_request)
+            .await
+            .context("failed to send request to Claude Code helper")?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .await
+        .context("failed to wait for Claude Code helper process")?;
+    let stdout = String::from_utf8(output.stdout).context("helper stdout is not valid UTF-8")?;
+    let stderr = String::from_utf8(output.stderr).context("helper stderr is not valid UTF-8")?;
+
+    if !output.status.success() {
+        bail!(
+            "Claude Code helper exited with status {}: {}",
+            output.status,
+            stderr.trim()
+        );
+    }
+
+    <ManagedHelperRequest as HelperResponse>::parse_response(&stdout, &stderr)
 }
 
 pub(super) async fn invoke_helper_json<T>(
@@ -515,7 +592,15 @@ pub(super) async fn invoke_helper_json<T>(
 where
     T: Serialize + HelperResponse,
 {
-    invoke_helper_json_with_env(custom_helper, python_binary, helper_path, request, &BTreeMap::new(), &[]).await
+    invoke_helper_json_with_env(
+        custom_helper,
+        python_binary,
+        helper_path,
+        request,
+        &BTreeMap::new(),
+        &[],
+    )
+    .await
 }
 
 async fn invoke_helper_json_with_env<T>(
