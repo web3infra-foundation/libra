@@ -3,21 +3,41 @@
 //! Executes shell commands in the user's default shell with configurable
 //! working directory and timeout. Output is capped to prevent memory issues.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 use async_trait::async_trait;
+use git_internal::hash::ObjectHash;
 
 use super::parse_arguments;
-use crate::internal::ai::tools::{
-    context::{ShellArgs, ToolInvocation, ToolKind, ToolOutput, ToolPayload},
-    error::{ToolError, ToolResult},
-    registry::ToolHandler,
-    spec::ToolSpec,
-    utils::validate_path,
+use crate::{
+    command::calc_file_blob_hash,
+    internal::ai::tools::{
+        context::{ShellArgs, ToolInvocation, ToolKind, ToolOutput, ToolPayload},
+        error::{ToolError, ToolResult},
+        registry::ToolHandler,
+        spec::ToolSpec,
+        utils::validate_path,
+    },
+    utils::util,
 };
 
 /// Handler for executing shell commands.
 pub struct ShellHandler;
+
+#[derive(Clone, Debug, Default)]
+struct WorkspaceSnapshot {
+    entries: BTreeMap<PathBuf, WorkspaceEntry>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum WorkspaceEntry {
+    File(ObjectHash),
+    Symlink(PathBuf),
+}
 
 /// Maximum bytes captured per stream (stdout or stderr) before truncation.
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 100 * 1024; // 100 KiB
@@ -75,6 +95,9 @@ impl ToolHandler for ShellHandler {
                 sandbox
             })
         });
+        let baseline_snapshot = snapshot_workspace(&working_dir).map_err(|err| {
+            ToolError::ExecutionFailed(format!("failed to snapshot workspace: {err}"))
+        })?;
 
         let output = crate::internal::ai::sandbox::run_shell_command_with_approval(
             crate::internal::ai::sandbox::ShellCommandRequest {
@@ -91,6 +114,18 @@ impl ToolHandler for ShellHandler {
         )
         .await
         .map_err(ToolError::ExecutionFailed)?;
+        let final_snapshot = snapshot_workspace(&working_dir).map_err(|err| {
+            ToolError::ExecutionFailed(format!(
+                "failed to inspect workspace changes after shell command: {err}"
+            ))
+        })?;
+        let metadata = serde_json::json!({
+            "paths_written": changed_paths_since_baseline(
+                &baseline_snapshot,
+                &final_snapshot,
+                &working_dir,
+            ),
+        });
 
         let formatted = format_output(
             output.exit_code,
@@ -98,10 +133,15 @@ impl ToolHandler for ShellHandler {
             &output.stderr,
             output.timed_out,
         );
-        if output.exit_code == 0 {
-            Ok(ToolOutput::success(formatted))
+        let rendered = if output.exit_code == 0 {
+            ToolOutput::success(formatted)
         } else {
-            Ok(ToolOutput::failure(formatted))
+            ToolOutput::failure(formatted)
+        };
+        if output.exit_code == 0 {
+            Ok(rendered.with_metadata(metadata))
+        } else {
+            Ok(rendered.with_metadata(metadata))
         }
     }
 
@@ -158,6 +198,74 @@ fn resolve_workdir(requested_workdir: Option<&str>, working_dir: &Path) -> ToolR
     }
 
     Ok(requested_canon)
+}
+
+fn snapshot_workspace(root: &Path) -> io::Result<WorkspaceSnapshot> {
+    fn visit_dir(
+        root: &Path,
+        dir: &Path,
+        entries: &mut BTreeMap<PathBuf, WorkspaceEntry>,
+    ) -> io::Result<()> {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            if protected_workspace_entry(&entry.file_name()) {
+                continue;
+            }
+
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                visit_dir(root, &path, entries)?;
+                continue;
+            }
+
+            let rel = path
+                .strip_prefix(root)
+                .map_err(|err| io::Error::other(err.to_string()))?
+                .to_path_buf();
+            entries.insert(rel, snapshot_entry(&path, &file_type)?);
+        }
+        Ok(())
+    }
+
+    let mut entries = BTreeMap::new();
+    visit_dir(root, root, &mut entries)?;
+    Ok(WorkspaceSnapshot { entries })
+}
+
+fn protected_workspace_entry(file_name: &std::ffi::OsStr) -> bool {
+    file_name
+        .to_str()
+        .is_some_and(|name| matches!(name, ".git" | ".libra" | ".codex" | ".agents"))
+}
+
+fn snapshot_entry(path: &Path, file_type: &fs::FileType) -> io::Result<WorkspaceEntry> {
+    if file_type.is_symlink() {
+        return Ok(WorkspaceEntry::Symlink(fs::read_link(path)?));
+    }
+
+    Ok(WorkspaceEntry::File(calc_file_blob_hash(path)?))
+}
+
+fn changed_paths_since_baseline(
+    baseline: &WorkspaceSnapshot,
+    current: &WorkspaceSnapshot,
+    root: &Path,
+) -> Vec<String> {
+    baseline
+        .entries
+        .keys()
+        .chain(current.entries.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|path| baseline.entries.get(path) != current.entries.get(path))
+        .map(|path| {
+            util::workdir_to_relative(root.join(path), root)
+                .to_string_lossy()
+                .to_string()
+        })
+        .collect()
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -417,6 +525,24 @@ mod tests {
         assert!(
             text.contains("truncated"),
             "expected truncation notice:\n{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shell_metadata_tracks_written_paths() {
+        let temp = TempDir::new().unwrap();
+        let inv = make_invocation(
+            serde_json::json!({ "command": "printf 'hello\\n' > touched.txt" }),
+            temp.path().to_path_buf(),
+        );
+        let result = ShellHandler.handle(inv).await.unwrap();
+
+        let metadata = result
+            .metadata()
+            .expect("shell results should include metadata");
+        assert_eq!(
+            metadata["paths_written"],
+            serde_json::json!(["touched.txt"])
         );
     }
 

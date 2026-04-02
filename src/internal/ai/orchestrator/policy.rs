@@ -136,6 +136,7 @@ fn gate_shell_uses_internal_verification_allowance(
 
 pub fn evaluate_tool_result(
     spec: &IntentSpec,
+    task: &TaskSpec,
     tool_name: &str,
     output: &ToolOutput,
     record: &mut ToolCallRecord,
@@ -145,10 +146,17 @@ pub fn evaluate_tool_result(
         .as_text()
         .map(|text| text.lines().next().unwrap_or_default().trim().to_string())
         .filter(|summary| !summary.is_empty());
-    if tool_name == "apply_patch"
-        && let Some(meta) = output.metadata()
-    {
-        record.diffs = extract_patch_diffs(meta);
+    if let Some(meta) = output.metadata() {
+        if tool_name == "apply_patch" || tool_name == "shell" {
+            record.diffs = extract_patch_diffs(meta);
+        }
+        if tool_name == "shell" {
+            record.paths_written = extract_written_paths(meta);
+        }
+    }
+
+    if tool_name == "shell" && !record.paths_written.is_empty() {
+        validate_recorded_writes(spec, task, record)?;
     }
 
     if spec.security.output_handling.no_direct_eval
@@ -227,6 +235,66 @@ fn extract_patch_diffs(meta: &Value) -> Vec<ToolDiffRecord> {
             })
         })
         .collect()
+}
+
+fn extract_written_paths(meta: &Value) -> Vec<String> {
+    let mut paths = meta
+        .get("paths_written")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+
+    for diff in extract_patch_diffs(meta) {
+        if !paths.iter().any(|path| path == &diff.path) {
+            paths.push(diff.path);
+        }
+    }
+
+    paths
+}
+
+fn validate_recorded_writes(
+    spec: &IntentSpec,
+    task: &TaskSpec,
+    record: &ToolCallRecord,
+) -> Result<(), PolicyViolation> {
+    let acl_tool = acl_tool_alias(&record.tool_name);
+    match check_tool_acl_with_context(
+        &spec.security.tool_acl,
+        acl_tool,
+        &record.action,
+        record.arguments_json.as_ref(),
+        &record.paths_written,
+    ) {
+        AclVerdict::Allow => {}
+        AclVerdict::Deny(reason) => {
+            return Err(PolicyViolation {
+                code: "tool-acl-deny".into(),
+                message: reason,
+                tool_name: Some(record.tool_name.clone()),
+                path: record.paths_written.first().cloned(),
+            });
+        }
+    }
+
+    for path in &record.paths_written {
+        match check_scope(&task.scope_in, &task.scope_out, path) {
+            ScopeVerdict::InScope => {}
+            ScopeVerdict::OutOfScope(reason) => {
+                return Err(PolicyViolation {
+                    code: "scope-creep".into(),
+                    message: reason,
+                    tool_name: Some(record.tool_name.clone()),
+                    path: Some(path.clone()),
+                });
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn derive_tool_footprint(
@@ -417,7 +485,7 @@ mod tests {
             QualityGates, RepoTarget, RepoType, Risk, RiskLevel, SecretAccessPolicy, SecretPolicy,
             SecurityPolicy, Target, ToolAcl, ToolRule, TouchHints, TrustTier,
         },
-        orchestrator::types::{TaskContract, TaskKind, TaskSpec},
+        orchestrator::types::{TaskContract, TaskKind, TaskSpec, ToolCallRecord},
     };
 
     fn spec() -> IntentSpec {
@@ -725,5 +793,45 @@ mod tests {
             Path::new("/tmp/work"),
         );
         assert!(matches!(res, Err(PolicyViolation { code, .. }) if code == "tool-acl-deny"));
+    }
+
+    #[test]
+    fn test_shell_result_records_written_paths_from_metadata() {
+        let output = ToolOutput::success("Exit code: 0").with_metadata(serde_json::json!({
+            "paths_written": ["src/lib.rs"]
+        }));
+        let mut record = ToolCallRecord {
+            tool_name: "shell".into(),
+            action: "execute".into(),
+            arguments_json: Some(
+                serde_json::json!({ "command": "perl -pi -e 's/x/y/' src/lib.rs" }),
+            ),
+            ..ToolCallRecord::default()
+        };
+
+        evaluate_tool_result(&spec(), &task(), "shell", &output, &mut record).unwrap();
+
+        assert_eq!(record.paths_written, vec!["src/lib.rs".to_string()]);
+    }
+
+    #[test]
+    fn test_shell_result_rejects_out_of_scope_metadata_writes() {
+        let output = ToolOutput::success("Exit code: 0").with_metadata(serde_json::json!({
+            "paths_written": ["vendor/generated.rs"]
+        }));
+        let mut record = ToolCallRecord {
+            tool_name: "shell".into(),
+            action: "execute".into(),
+            arguments_json: Some(
+                serde_json::json!({ "command": "printf hi > vendor/generated.rs" }),
+            ),
+            ..ToolCallRecord::default()
+        };
+
+        let violation = evaluate_tool_result(&spec(), &task(), "shell", &output, &mut record)
+            .expect_err("out-of-scope shell writes must be rejected");
+
+        assert_eq!(violation.code, "scope-creep");
+        assert_eq!(violation.path.as_deref(), Some("vendor/generated.rs"));
     }
 }

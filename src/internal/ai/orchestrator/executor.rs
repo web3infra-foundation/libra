@@ -134,9 +134,13 @@ impl ToolLoopObserver for TaskExecutionObserver {
         if let Some(mut record) = self.in_flight.remove(call_id) {
             match result {
                 Ok(output) => {
-                    if let Err(violation) =
-                        policy::evaluate_tool_result(&self.spec, tool_name, output, &mut record)
-                    {
+                    if let Err(violation) = policy::evaluate_tool_result(
+                        &self.spec,
+                        &self.task,
+                        tool_name,
+                        output,
+                        &mut record,
+                    ) {
                         self.violations.push(violation);
                     }
                 }
