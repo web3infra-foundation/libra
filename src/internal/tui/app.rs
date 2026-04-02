@@ -2342,20 +2342,10 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
     }
 
     async fn load_latest_intentspec_json(&self) -> Option<String> {
-        let working_dir = self.registry.working_dir();
-        let workspace_locator = canonical_working_dir_label(working_dir);
-        let head_sha = current_head_sha(working_dir);
-
-        if let (Some(id), Some(mcp)) = (
-            self.session
-                .metadata
-                .get(LATEST_INTENTSPEC_INTENT_ID)
-                .and_then(|v| v.as_str()),
-            self.mcp_server.clone(),
-        ) && let Some(spec) = fetch_intentspec_from_object_id(&mcp, id).await
-            && intentspec_matches_workspace(&spec, &workspace_locator, &head_sha)
-        {
-            return serde_json::to_string_pretty(&spec).ok();
+        let binding = current_intentspec_binding(self.registry.working_dir());
+        let binding_matches = latest_intentspec_binding_matches(&self.session.metadata, &binding);
+        if !binding_matches {
+            return None;
         }
 
         if let Some(json_text) = self
@@ -2363,21 +2353,25 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             .metadata
             .get(LATEST_INTENTSPEC_JSON)
             .and_then(|v| v.as_str())
-            && let Ok(spec) = serde_json::from_str::<crate::internal::ai::intentspec::IntentSpec>(json_text)
-            && intentspec_matches_workspace(&spec, &workspace_locator, &head_sha)
+            && let Ok(spec) =
+                serde_json::from_str::<crate::internal::ai::intentspec::IntentSpec>(json_text)
+            && intentspec_matches_workspace(&spec, &binding.workspace_key, &binding.base_ref)
         {
             return Some(json_text.to_string());
         }
 
         let mcp = self.mcp_server.clone()?;
-        let ids = list_intent_object_ids(&mcp).await;
-        for id in ids.into_iter().rev() {
-            if let Some(spec) = fetch_intentspec_from_object_id(&mcp, &id).await {
-                if intentspec_matches_workspace(&spec, &workspace_locator, &head_sha) {
-                    return serde_json::to_string_pretty(&spec).ok();
-                }
-            }
+        if let Some(id) = self
+            .session
+            .metadata
+            .get(LATEST_INTENTSPEC_INTENT_ID)
+            .and_then(|v| v.as_str())
+            && let Some(spec) = fetch_intentspec_from_object_id(&mcp, id).await
+            && intentspec_matches_workspace(&spec, &binding.workspace_key, &binding.base_ref)
+        {
+            return serde_json::to_string_pretty(&spec).ok();
         }
+
         None
     }
 
@@ -3259,6 +3253,24 @@ fn current_intentspec_binding(working_dir: &std::path::Path) -> IntentSpecBindin
     }
 }
 
+fn latest_intentspec_binding_matches(
+    metadata: &HashMap<String, serde_json::Value>,
+    binding: &IntentSpecBinding,
+) -> bool {
+    metadata
+        .get(LATEST_INTENTSPEC_WORKSPACE_KEY)
+        .and_then(|value| value.as_str())
+        .is_some_and(|workspace| workspace == binding.workspace_key)
+        && metadata
+            .get(LATEST_INTENTSPEC_BASE_REF)
+            .and_then(|value| value.as_str())
+            .is_some_and(|base_ref| base_ref == binding.base_ref)
+        && metadata
+            .get(LATEST_INTENTSPEC_BRANCH_LABEL)
+            .and_then(|value| value.as_str())
+            == binding.branch_label.as_deref()
+}
+
 fn intentspec_matches_workspace(
     spec: &crate::internal::ai::intentspec::IntentSpec,
     workspace_locator: &str,
@@ -3528,6 +3540,24 @@ fn format_task_completion_note(
     note
 }
 
+fn format_task_workspace_note(
+    title: &str,
+    working_dir: &std::path::Path,
+    isolated: bool,
+) -> String {
+    let mode = if isolated {
+        "isolated worktree"
+    } else {
+        "shared workspace"
+    };
+    format!(
+        "Workspace · {}  \n{} · {}",
+        title.trim(),
+        mode,
+        working_dir.display()
+    )
+}
+
 fn task_status_heading(
     status: &crate::internal::ai::orchestrator::types::TaskNodeStatus,
 ) -> &'static str {
@@ -3584,26 +3614,6 @@ fn summarize_failed_gate_report(
     }
 }
 
-async fn list_intent_object_ids(mcp: &Arc<LibraMcpServer>) -> Vec<String> {
-    let mut ids = Vec::new();
-    let resources = match mcp.read_resource_impl("libra://objects/intent").await {
-        Ok(v) => v,
-        Err(_) => return ids,
-    };
-    let Some(content) = resources.first() else {
-        return ids;
-    };
-    let Some(text) = resource_text(content) else {
-        return ids;
-    };
-    for line in text.lines() {
-        if let Some(id) = line.split_whitespace().next() {
-            ids.push(id.to_string());
-        }
-    }
-    ids
-}
-
 async fn fetch_intentspec_from_object_id(
     mcp: &Arc<LibraMcpServer>,
     object_id: &str,
@@ -3640,10 +3650,17 @@ fn extract_content_field(value: &serde_json::Value) -> Option<String> {
 
 #[cfg(test)]
 mod orchestrator_result_tests {
+    use std::collections::HashMap;
+
     use git_internal::internal::object::{plan::PlanStep, task::Task as GitTask, types::ActorRef};
     use uuid::Uuid;
 
-    use super::{format_orchestrator_result, format_task_completion_note};
+    use super::{
+        IntentSpecBinding, LATEST_INTENTSPEC_BASE_REF, LATEST_INTENTSPEC_BRANCH_LABEL,
+        LATEST_INTENTSPEC_WORKSPACE_KEY, canonical_working_dir_label,
+        format_orchestrator_result, format_task_completion_note, format_task_workspace_note,
+        intentspec_matches_workspace, latest_intentspec_binding_matches,
+    };
     use crate::internal::ai::orchestrator::{
         run_state::RunStateSnapshot,
         types::{
@@ -3651,6 +3668,16 @@ mod orchestrator_result_tests {
             ReviewOutcome, SystemReport, TaskContract, TaskKind, TaskNodeStatus, TaskResult,
             TaskSpec,
         },
+    };
+    use crate::internal::ai::intentspec::types::{
+        Acceptance, Artifacts, ChangeType, ConstraintLicensing, ConstraintPlatform,
+        ConstraintPrivacy, ConstraintResources, ConstraintSecurity, Constraints, CreatedBy,
+        CreatorType, DomainAllowlistMode, EncodingPolicy, EvidencePolicy, EvidenceStrategy,
+        ExecutionPolicy, HumanInLoop, Intent, IntentSpec, Lifecycle, LifecycleStatus, Metadata,
+        NetworkPolicy, Objective, ObjectiveKind, OutputHandlingPolicy, PromptInjectionPolicy,
+        ProvenanceBindings, ProvenancePolicy, RepoTarget, RepoType, RetryPolicy, Risk, RiskLevel,
+        SecretAccessPolicy, SecretPolicy, SecurityPolicy, Target, ToolAcl,
+        TransparencyLogPolicy, TransparencyMode, TrustTier, VerificationPlan,
     };
 
     fn test_task_spec(title: &str, kind: TaskKind) -> TaskSpec {
@@ -3667,6 +3694,145 @@ mod orchestrator_result_tests {
             scope_out: vec![],
             checks: vec![],
             contract: TaskContract::default(),
+        }
+    }
+
+    fn intentspec_fixture(locator: &str, base_ref: &str) -> IntentSpec {
+        IntentSpec {
+            api_version: "intentspec.io/v1alpha1".into(),
+            kind: "IntentSpec".into(),
+            metadata: Metadata {
+                id: "intent-1".into(),
+                created_at: "2026-04-02T00:00:00Z".into(),
+                created_by: CreatedBy {
+                    creator_type: CreatorType::User,
+                    id: "tester".into(),
+                    display_name: None,
+                },
+                target: Target {
+                    repo: RepoTarget {
+                        repo_type: RepoType::Local,
+                        locator: locator.into(),
+                    },
+                    base_ref: base_ref.into(),
+                    workspace_id: None,
+                    labels: Default::default(),
+                },
+            },
+            intent: Intent {
+                summary: "summary".into(),
+                problem_statement: "problem".into(),
+                change_type: ChangeType::Feature,
+                objectives: vec![Objective {
+                    title: "Ship feature".into(),
+                    kind: ObjectiveKind::Implementation,
+                }],
+                in_scope: vec!["src/".into()],
+                out_of_scope: vec![],
+                touch_hints: None,
+            },
+            acceptance: Acceptance {
+                success_criteria: vec!["tests pass".into()],
+                verification_plan: VerificationPlan {
+                    fast_checks: vec![],
+                    integration_checks: vec![],
+                    security_checks: vec![],
+                    release_checks: vec![],
+                },
+                quality_gates: None,
+            },
+            constraints: Constraints {
+                security: ConstraintSecurity {
+                    network_policy: NetworkPolicy::Deny,
+                    dependency_policy: crate::internal::ai::intentspec::types::DependencyPolicy::NoNew,
+                    crypto_policy: String::new(),
+                },
+                privacy: ConstraintPrivacy {
+                    data_classes_allowed: vec![],
+                    redaction_required: false,
+                    retention_days: 30,
+                },
+                licensing: ConstraintLicensing {
+                    allowed_spdx: vec![],
+                    forbid_new_licenses: false,
+                },
+                platform: ConstraintPlatform {
+                    language_runtime: "rust".into(),
+                    supported_os: vec![],
+                },
+                resources: ConstraintResources {
+                    max_wall_clock_seconds: 30,
+                    max_cost_units: 0,
+                },
+            },
+            risk: Risk {
+                level: RiskLevel::Low,
+                rationale: "low".into(),
+                factors: vec![],
+                human_in_loop: HumanInLoop {
+                    required: false,
+                    min_approvers: 0,
+                },
+            },
+            evidence: EvidencePolicy {
+                strategy: EvidenceStrategy::RepoFirst,
+                trust_tiers: vec![TrustTier::Repo],
+                domain_allowlist_mode: DomainAllowlistMode::Disabled,
+                allowed_domains: vec![],
+                blocked_domains: vec![],
+                min_citations_per_decision: 1,
+            },
+            security: SecurityPolicy {
+                tool_acl: ToolAcl {
+                    allow: vec![],
+                    deny: vec![],
+                },
+                secrets: SecretPolicy {
+                    policy: SecretAccessPolicy::DenyAll,
+                    allowed_scopes: vec![],
+                },
+                prompt_injection: PromptInjectionPolicy {
+                    treat_retrieved_content_as_untrusted: true,
+                    enforce_output_schema: true,
+                    disallow_instruction_from_evidence: true,
+                },
+                output_handling: OutputHandlingPolicy {
+                    encoding_policy: EncodingPolicy::StrictJson,
+                    no_direct_eval: true,
+                },
+            },
+            execution: ExecutionPolicy {
+                retry: RetryPolicy {
+                    max_retries: 0,
+                    backoff_seconds: 0,
+                },
+                replan: crate::internal::ai::intentspec::types::ReplanPolicy { triggers: vec![] },
+                concurrency: crate::internal::ai::intentspec::types::ConcurrencyPolicy {
+                    max_parallel_tasks: 1,
+                },
+            },
+            artifacts: Artifacts {
+                required: vec![],
+                retention: crate::internal::ai::intentspec::types::ArtifactRetention { days: 30 },
+            },
+            provenance: ProvenancePolicy {
+                require_slsa_provenance: false,
+                require_sbom: false,
+                transparency_log: TransparencyLogPolicy {
+                    mode: TransparencyMode::None,
+                },
+                bindings: ProvenanceBindings {
+                    embed_intent_spec_digest: false,
+                    embed_evidence_digests: false,
+                },
+            },
+            lifecycle: Lifecycle {
+                schema_version: "1.0.0".into(),
+                status: LifecycleStatus::Active,
+                change_log: vec![],
+            },
+            libra: None,
+            extensions: Default::default(),
         }
     }
 
@@ -3742,6 +3908,92 @@ mod orchestrator_result_tests {
         );
 
         assert!(note.contains("reason · cargo-test (exit 101: tests failed)"));
+    }
+
+    #[test]
+    fn workspace_note_includes_mode_and_directory() {
+        let isolated_note = format_task_workspace_note(
+            "Implement parser",
+            std::path::Path::new("/tmp/libra/.libra/worktrees/task-1"),
+            true,
+        );
+        assert!(isolated_note.contains("Workspace · Implement parser"));
+        assert!(isolated_note.contains("isolated worktree"));
+        assert!(isolated_note.contains("/tmp/libra/.libra/worktrees/task-1"));
+
+        let shared_note =
+            format_task_workspace_note("Run gate", std::path::Path::new("/tmp/libra"), false);
+        assert!(shared_note.contains("shared workspace"));
+        assert!(shared_note.contains("/tmp/libra"));
+    }
+
+    #[test]
+    fn intentspec_match_requires_same_workspace_and_head() {
+        let workspace = tempfile::tempdir().unwrap();
+        let locator = canonical_working_dir_label(workspace.path());
+        let spec = intentspec_fixture(&locator, "abc123");
+        assert!(intentspec_matches_workspace(&spec, &locator, "abc123"));
+        assert!(!intentspec_matches_workspace(&spec, &locator, "def456"));
+    }
+
+    #[test]
+    fn intentspec_match_rejects_other_worktree_locator() {
+        let workspace = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let locator = canonical_working_dir_label(workspace.path());
+        let other_locator = canonical_working_dir_label(other.path());
+        let spec = intentspec_fixture(&other_locator, "abc123");
+        assert!(!intentspec_matches_workspace(&spec, &locator, "abc123"));
+    }
+
+    #[test]
+    fn latest_intentspec_binding_requires_exact_worktree_head_and_branch() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            LATEST_INTENTSPEC_WORKSPACE_KEY.to_string(),
+            serde_json::Value::String("/repo/worktree-a".into()),
+        );
+        metadata.insert(
+            LATEST_INTENTSPEC_BASE_REF.to_string(),
+            serde_json::Value::String("abc123".into()),
+        );
+        metadata.insert(
+            LATEST_INTENTSPEC_BRANCH_LABEL.to_string(),
+            serde_json::Value::String("feature/spec".into()),
+        );
+
+        assert!(latest_intentspec_binding_matches(
+            &metadata,
+            &IntentSpecBinding {
+                workspace_key: "/repo/worktree-a".into(),
+                base_ref: "abc123".into(),
+                branch_label: Some("feature/spec".into()),
+            }
+        ));
+        assert!(!latest_intentspec_binding_matches(
+            &metadata,
+            &IntentSpecBinding {
+                workspace_key: "/repo/worktree-b".into(),
+                base_ref: "abc123".into(),
+                branch_label: Some("feature/spec".into()),
+            }
+        ));
+        assert!(!latest_intentspec_binding_matches(
+            &metadata,
+            &IntentSpecBinding {
+                workspace_key: "/repo/worktree-a".into(),
+                base_ref: "def456".into(),
+                branch_label: Some("feature/spec".into()),
+            }
+        ));
+        assert!(!latest_intentspec_binding_matches(
+            &metadata,
+            &IntentSpecBinding {
+                workspace_key: "/repo/worktree-a".into(),
+                base_ref: "abc123".into(),
+                branch_label: Some("main".into()),
+            }
+        ));
     }
 
     #[test]

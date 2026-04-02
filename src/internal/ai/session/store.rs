@@ -110,6 +110,40 @@ impl SessionStore {
         Ok(latest.map(|(session, _)| session))
     }
 
+    /// Load the most recently updated session for a specific working directory.
+    pub fn load_latest_for_working_dir(&self, working_dir: &str) -> io::Result<Option<SessionState>> {
+        let sessions = self.list()?;
+        if sessions.is_empty() {
+            return Ok(None);
+        }
+
+        let mut latest: Option<(SessionState, SystemTime)> = None;
+
+        for info in sessions {
+            match self.load(&info.id) {
+                Ok(session) if session.working_dir == working_dir => {
+                    let path = self.session_path(&info.id);
+                    let modified = fs::metadata(&path)
+                        .and_then(|m| m.modified())
+                        .unwrap_or(SystemTime::UNIX_EPOCH);
+
+                    if latest
+                        .as_ref()
+                        .is_none_or(|(_, best_time)| modified > *best_time)
+                    {
+                        latest = Some((session, modified));
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(session_id = %info.id, error = %e, "skipping corrupt session file");
+                }
+            }
+        }
+
+        Ok(latest.map(|(session, _)| session))
+    }
+
     /// List all saved sessions (basic info only).
     pub fn list(&self) -> io::Result<Vec<SessionInfo>> {
         if !self.sessions_dir.exists() {
@@ -443,6 +477,40 @@ mod tests {
 
         let latest = store.load_latest().unwrap().unwrap();
         assert_eq!(latest.summary, "latest");
+    }
+
+    #[test]
+    fn test_load_latest_for_working_dir_filters_shared_storage() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = SessionStore::from_storage_path(tmp.path());
+
+        let mut worktree_a_old = SessionState::new("/repo/.worktrees/a");
+        worktree_a_old.summary = "a-old".to_string();
+        store.save(&worktree_a_old).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        let mut worktree_b = SessionState::new("/repo/.worktrees/b");
+        worktree_b.summary = "b-latest".to_string();
+        store.save(&worktree_b).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        let mut worktree_a_new = SessionState::new("/repo/.worktrees/a");
+        worktree_a_new.summary = "a-latest".to_string();
+        store.save(&worktree_a_new).unwrap();
+
+        let latest_for_a = store
+            .load_latest_for_working_dir("/repo/.worktrees/a")
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest_for_a.summary, "a-latest");
+
+        let latest_for_b = store
+            .load_latest_for_working_dir("/repo/.worktrees/b")
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest_for_b.summary, "b-latest");
     }
 
     #[test]

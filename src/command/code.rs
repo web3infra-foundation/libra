@@ -806,7 +806,7 @@ where
     let session_store =
         crate::internal::ai::session::SessionStore::from_storage_path(&storage_root);
     let session = if params.resume {
-        match session_store.load_latest() {
+        match session_store.load_latest_for_working_dir(&working_dir_str) {
             Ok(Some(s)) => s,
             _ => crate::internal::ai::session::SessionState::new(&working_dir_str),
         }
