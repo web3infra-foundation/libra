@@ -8,6 +8,7 @@
 use std::os::unix::fs::PermissionsExt;
 use std::{collections::HashSet, fs};
 
+use git_internal::hash::{ObjectHash, get_hash_kind};
 use libra::internal::config::ConfigKv;
 use serial_test::serial;
 use tempfile::tempdir;
@@ -55,6 +56,46 @@ fn test_branch_create_outputs_confirmation() {
     assert!(
         stdout.contains("Created branch 'feature' at "),
         "unexpected stdout: {stdout}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_branch_all_shows_unborn_head_even_with_remote_refs() {
+    let repo = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = ChangeDirGuard::new(repo.path());
+
+    let remote_add = run_libra_command(
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/repo.git",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&remote_add, "remote add origin");
+
+    Branch::update_branch(
+        "refs/remotes/origin/main",
+        &ObjectHash::zero_str(get_hash_kind()),
+        Some("origin"),
+    )
+    .await
+    .unwrap();
+
+    let output = run_libra_command(&["branch", "-a"], repo.path());
+    assert_cli_success(&output, "branch -a on unborn repo with remotes");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("* main"),
+        "expected unborn HEAD marker in stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("origin/main"),
+        "expected remote branch in stdout: {stdout}"
     );
 }
 

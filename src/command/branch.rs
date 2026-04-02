@@ -663,6 +663,7 @@ async fn collect_branch_output(args: &BranchArgs) -> Result<BranchOutput, Branch
         filter_branches(branches, &contains_set, &no_contains_set)
             .map_err(BranchError::DelegatedCli)?;
     }
+    let local_branches_empty = local_branches.is_empty();
 
     let current_name = head_name.as_deref();
     let mut entries = Vec::new();
@@ -683,7 +684,7 @@ async fn collect_branch_output(args: &BranchArgs) -> Result<BranchOutput, Branch
         });
     }
 
-    let show_unborn_head = entries.is_empty()
+    let show_unborn_head = local_branches_empty
         && detached_head.is_none()
         && !has_commit_filters
         && matches!(list_mode, BranchListMode::Local | BranchListMode::All)
@@ -762,10 +763,10 @@ fn render_branch_output(result: &BranchOutput, output: &OutputConfig) -> CliResu
                     short_display_hash(detached_head).green()
                 );
             }
+            if *show_unborn_head && let Some(head_name) = head_name {
+                println!("* {}", head_name.green());
+            }
             if branches.is_empty() {
-                if *show_unborn_head && let Some(head_name) = head_name {
-                    println!("* {}", head_name.green());
-                }
                 return Ok(());
             }
 

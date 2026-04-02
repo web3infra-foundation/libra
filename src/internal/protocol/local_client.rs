@@ -49,6 +49,49 @@ pub struct LocalClient {
     source_type: RepoType,
 }
 
+/// RAII guard for temporarily switching the process current directory.
+///
+/// This supports an explicit `restore()` so callers can surface restore
+/// failures on the success path, while `Drop` still restores the directory if
+/// the surrounding future is cancelled or aborted.
+struct RepoCurrentDirGuard {
+    original_dir: PathBuf,
+    restored: bool,
+}
+
+impl RepoCurrentDirGuard {
+    fn change_to(new_dir: &Path) -> Result<Self, IoError> {
+        let original_dir = env::current_dir()?;
+        env::set_current_dir(new_dir)?;
+        Ok(Self {
+            original_dir,
+            restored: false,
+        })
+    }
+
+    fn restore(&mut self) -> Result<(), IoError> {
+        env::set_current_dir(&self.original_dir)?;
+        self.restored = true;
+        Ok(())
+    }
+}
+
+impl Drop for RepoCurrentDirGuard {
+    fn drop(&mut self) {
+        if self.restored {
+            return;
+        }
+
+        if let Err(error) = env::set_current_dir(&self.original_dir) {
+            tracing::error!(
+                restore_dir = %self.original_dir.display(),
+                error = %error,
+                "failed to restore working directory after local protocol operation"
+            );
+        }
+    }
+}
+
 impl ProtocolClient for LocalClient {
     fn from_url(url: &Url) -> Self {
         let path = url
@@ -76,25 +119,23 @@ impl LocalClient {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<T, E>>,
     {
-        let original_dir = cur_dir();
-        env::set_current_dir(&self.repo_path).map_err(E::from)?;
+        let mut guard = RepoCurrentDirGuard::change_to(&self.repo_path).map_err(E::from)?;
+        let result = operation().await;
 
-        match operation().await {
-            Ok(value) => {
-                env::set_current_dir(&original_dir).map_err(E::from)?;
-                Ok(value)
-            }
-            Err(error) => {
-                if let Err(restore_error) = env::set_current_dir(&original_dir) {
+        match guard.restore() {
+            Ok(()) => result,
+            Err(restore_error) => match result {
+                Ok(_) => Err(E::from(restore_error)),
+                Err(error) => {
                     tracing::error!(
                         repo_path = %self.repo_path.display(),
-                        restore_dir = %original_dir.display(),
+                        restore_dir = %guard.original_dir.display(),
                         error = %restore_error,
                         "failed to restore working directory after local protocol operation"
                     );
+                    Err(error)
                 }
-                Err(error)
-            }
+            },
         }
     }
 
@@ -435,14 +476,18 @@ impl LocalClient {
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsStr, process::Command as StdCommand};
+    use std::{ffi::OsStr, fs, future::pending, process::Command as StdCommand};
 
+    use serial_test::serial;
     use tempfile::tempdir;
-    use tokio::io::AsyncReadExt;
+    use tokio::{io::AsyncReadExt, sync::oneshot};
     use tokio_util::io::StreamReader;
 
     use super::*;
-    use crate::git_protocol::ServiceType;
+    use crate::{
+        git_protocol::ServiceType,
+        utils::test::{ChangeDirGuard, setup_with_new_libra_in},
+    };
 
     fn run_git<I, S>(cwd: Option<&Path>, args: I) -> StdCommand
     where
@@ -576,5 +621,48 @@ mod tests {
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf).await.unwrap();
         assert!(buf.windows(4).any(|w| w == b"PACK"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn with_repo_current_dir_restores_current_dir_when_task_is_cancelled() {
+        let caller_dir = tempdir().unwrap();
+        let repo_dir = tempdir().unwrap();
+        let _guard = ChangeDirGuard::new(caller_dir.path());
+        setup_with_new_libra_in(repo_dir.path()).await;
+
+        let client = LocalClient::from_path(repo_dir.path()).unwrap();
+        let original_dir = env::current_dir().unwrap();
+        let repo_storage_dir = client.repo_path().to_path_buf();
+        let (entered_tx, entered_rx) = oneshot::channel();
+
+        let handle = tokio::spawn({
+            let client = client.clone();
+            async move {
+                let _ = client
+                    .with_repo_current_dir(|| async move {
+                        let _ = entered_tx.send(env::current_dir().unwrap());
+                        pending::<()>().await;
+                        #[allow(unreachable_code)]
+                        Ok::<(), IoError>(())
+                    })
+                    .await;
+            }
+        });
+
+        let entered_dir = entered_rx.await.unwrap();
+        assert_eq!(
+            fs::canonicalize(entered_dir).unwrap(),
+            fs::canonicalize(repo_storage_dir).unwrap()
+        );
+
+        handle.abort();
+        let _ = handle.await;
+
+        assert_eq!(
+            fs::canonicalize(env::current_dir().unwrap()).unwrap(),
+            fs::canonicalize(original_dir).unwrap(),
+            "aborted local protocol operation should restore caller cwd",
+        );
     }
 }
