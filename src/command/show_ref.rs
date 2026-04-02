@@ -3,6 +3,7 @@
 use std::io::Write;
 
 use clap::Parser;
+use sea_orm::DbErr;
 use serde::Serialize;
 
 use crate::{
@@ -95,6 +96,19 @@ fn show_ref_branch_store_error(context: &str, error: BranchStoreError) -> CliErr
     }
 }
 
+fn show_ref_tag_list_error(error: anyhow::Error) -> CliError {
+    let stable_code = if error
+        .chain()
+        .any(|cause| cause.downcast_ref::<DbErr>().is_some())
+    {
+        StableErrorCode::IoReadFailed
+    } else {
+        StableErrorCode::RepoCorrupt
+    };
+
+    CliError::fatal(format!("failed to list tags: {error}")).with_stable_code(stable_code)
+}
+
 async fn collect_show_ref_entries(args: &ShowRefArgs) -> CliResult<Vec<ShowRefEntry>> {
     // When neither --heads nor --tags is specified, show both
     let show_heads = args.heads || !args.tags;
@@ -131,9 +145,7 @@ async fn collect_show_ref_entries(args: &ShowRefArgs) -> CliResult<Vec<ShowRefEn
 
     // Collect tags: refs/tags/<name>
     if show_tags {
-        let tag_list = tag::list()
-            .await
-            .map_err(|e| CliError::failure(e.to_string()))?;
+        let tag_list = tag::list().await.map_err(show_ref_tag_list_error)?;
         for t in tag_list {
             // For annotated tags use the tag object hash; for lightweight use the commit hash.
             let hash = match &t.object {

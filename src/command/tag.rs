@@ -89,6 +89,10 @@ pub async fn execute_safe(args: TagArgs, output: &OutputConfig) -> CliResult<()>
     render_tag_output(&result, output)
 }
 
+pub(crate) fn validate_cli_args(args: &TagArgs) -> CliResult<()> {
+    validate_named_tag_action(args).map_err(CliError::from)
+}
+
 #[derive(Debug, thiserror::Error)]
 enum TagError {
     #[error("not a libra repository")]
@@ -232,8 +236,8 @@ fn map_create_tag_error(tag_name: &str, error: tag::CreateTagError) -> TagError 
 }
 
 async fn run_tag(args: &TagArgs) -> Result<TagOutput, TagError> {
-    util::require_repo().map_err(|_| TagError::NotInRepo)?;
     validate_named_tag_action(args)?;
+    util::require_repo().map_err(|_| TagError::NotInRepo)?;
 
     if args.list || args.n_lines.is_some() || args.name.is_none() {
         return Ok(TagOutput::List {

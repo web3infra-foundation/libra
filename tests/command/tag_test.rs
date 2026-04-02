@@ -191,6 +191,25 @@ fn test_tag_missing_name_action_flags_return_usage_errors() {
 }
 
 #[test]
+fn test_tag_missing_name_usage_outranks_repo_not_found_outside_repo() {
+    let cwd = tempdir().expect("failed to create non-repo directory");
+
+    let output = run_libra_command(&["tag", "-d"], cwd.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert!(
+        stderr.contains("tag name is required for --delete"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("not a Libra repository"),
+        "usage error should outrank repo precondition, got: {stderr}"
+    );
+}
+
+#[test]
 fn test_tag_json_missing_name_action_flags_return_usage_errors() {
     let repo = create_committed_repo_via_cli();
     let cases = [
