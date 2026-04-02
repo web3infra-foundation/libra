@@ -1809,10 +1809,11 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 }
             }
             "list" => {
-                if let Some(label) = self.widget.task_mux_context_label() {
+                if let Some(lines) = self.widget.task_mux_list_lines() {
                     self.widget
                         .add_cell(Box::new(AssistantHistoryCell::new(format!(
-                            "Task mux: {label}"
+                            "Task mux panes:\n{}",
+                            lines.join("\n")
                         ))));
                     true
                 } else {

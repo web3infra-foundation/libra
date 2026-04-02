@@ -561,6 +561,31 @@ impl ChatWidget {
         ))
     }
 
+    pub fn task_mux_list_lines(&self) -> Option<Vec<String>> {
+        let task_mux = self.task_mux.as_ref()?;
+        let focus_index = task_mux.current_focus_index();
+        Some(
+            task_mux
+                .tasks
+                .iter()
+                .enumerate()
+                .map(|(index, task)| {
+                    let focus_marker = if index == focus_index { ">" } else { " " };
+                    let workspace_label = if task.isolated { "isolated" } else { "shared" };
+                    format!(
+                        "{} {:02} {:<8} {:<10} {:<9} {}",
+                        focus_marker,
+                        task.ordinal,
+                        task_kind_label(&task.kind),
+                        task_status_label(&task.status),
+                        workspace_label,
+                        task.title
+                    )
+                })
+                .collect(),
+        )
+    }
+
     pub fn task_mux_input_hint(&self) -> Option<String> {
         self.task_mux.as_ref().map(|task_mux| {
             let total = task_mux.tasks.len();
@@ -1615,6 +1640,21 @@ mod tests {
 
         assert!(label.contains("02"));
         assert!(label.contains("Implement B"));
+    }
+
+    #[test]
+    fn task_mux_list_includes_all_panes_and_focus_marker() {
+        let mut widget = ChatWidget::new();
+        widget.show_dag_panel(sample_parallel_plan());
+
+        assert!(widget.task_mux_focus_index(1));
+        let lines = widget.task_mux_list_lines().unwrap();
+
+        assert_eq!(lines.len(), 3);
+        assert!(lines[1].starts_with("> 02"));
+        assert!(lines[0].contains("Implement A"));
+        assert!(lines[1].contains("Implement B"));
+        assert!(lines[2].contains("Fast gate"));
     }
 
     #[test]
