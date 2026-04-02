@@ -8,7 +8,7 @@ use sea_orm::DbErr;
 use serde::Serialize;
 
 use crate::{
-    internal::{tag, tag::TagObject},
+    internal::{branch, tag, tag::TagObject},
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
@@ -114,6 +114,9 @@ enum TagError {
     #[error("Cannot create tag: HEAD does not point to a commit")]
     HeadUnborn,
 
+    #[error("failed to resolve HEAD commit: {0}")]
+    ResolveHead(#[source] branch::BranchStoreError),
+
     #[error("failed to read existing tags before creating '{name}': {source}")]
     CheckExistingFailed {
         name: String,
@@ -184,6 +187,13 @@ impl From<TagError> for CliError {
             TagError::HeadUnborn => CliError::fatal(message)
                 .with_stable_code(StableErrorCode::RepoStateInvalid)
                 .with_hint("create a commit first before tagging HEAD."),
+            TagError::ResolveHead(source) => {
+                let stable_code = match source {
+                    branch::BranchStoreError::Query(_) => StableErrorCode::IoReadFailed,
+                    _ => StableErrorCode::RepoCorrupt,
+                };
+                CliError::fatal(message).with_stable_code(stable_code)
+            }
             TagError::CheckExistingFailed { .. } => {
                 CliError::fatal(message).with_stable_code(StableErrorCode::IoReadFailed)
             }
@@ -253,6 +263,7 @@ fn map_create_tag_error(tag_name: &str, error: tag::CreateTagError) -> TagError 
             TagError::AlreadyExists(existing_tag_name)
         }
         tag::CreateTagError::HeadUnborn => TagError::HeadUnborn,
+        tag::CreateTagError::ResolveHead(source) => TagError::ResolveHead(source),
         tag::CreateTagError::CheckExisting(source) => TagError::CheckExistingFailed {
             name: tag_name.to_string(),
             source,
@@ -346,16 +357,18 @@ async fn run_create_tag(
     message: Option<String>,
     force: bool,
 ) -> Result<TagOutput, TagError> {
-    tag::create(tag_name, message, force)
+    let created = tag::create(tag_name, message, force)
         .await
         .map_err(|error| map_create_tag_error(tag_name, error))?;
-
-    let snapshot = lookup_tag(tag_name, usize::MAX).await?;
     Ok(TagOutput::Create {
-        name: snapshot.name,
-        hash: snapshot.hash,
-        tag_type: snapshot.tag_type,
-        message: snapshot.message,
+        name: created.name,
+        hash: created.target.to_string(),
+        tag_type: if created.annotated {
+            "annotated".to_string()
+        } else {
+            "lightweight".to_string()
+        },
+        message: created.message,
     })
 }
 
@@ -380,21 +393,6 @@ async fn collect_tags(show_lines: usize) -> Result<Vec<TagListEntry>, TagError> 
         entries.push(tag_to_list_entry(tag, show_lines));
     }
     Ok(entries)
-}
-
-async fn lookup_tag(tag_name: &str, show_lines: usize) -> Result<TagListEntry, TagError> {
-    match tag::find_tag_and_commit(tag_name).await {
-        Ok(Some((object, _commit))) => Ok(tag_object_to_list_entry(
-            tag_name.to_string(),
-            object,
-            show_lines,
-        )),
-        Ok(None) => Err(TagError::NotFound(tag_name.to_string())),
-        Err(source) => Err(TagError::LoadFailed {
-            name: tag_name.to_string(),
-            source: source.into(),
-        }),
-    }
 }
 
 fn tag_to_list_entry(tag: tag::Tag, show_lines: usize) -> TagListEntry {

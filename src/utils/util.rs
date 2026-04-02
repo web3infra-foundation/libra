@@ -612,13 +612,15 @@ pub async fn get_commit_base_typed(name: &str) -> Result<ObjectHash, CommitBaseE
     }
 }
 
-/// Resolve a string to a commit ObjectHash.
-/// The string can be a branch name, a tag name, or a commit hash prefix.
+/// Resolve a string to a commit [`ObjectHash`].
+/// The string can be a local branch name, a remote-tracking branch name
+/// (such as `origin/main`), a tag name, or a commit hash prefix.
 /// Order of resolution:
 /// 1. HEAD
-/// 2. Local Branch
-/// 3. Tag
-/// 4. Commit hash prefix
+/// 2. Local branch
+/// 3. Remote-tracking branch (e.g. `origin/main`)
+/// 4. Tag
+/// 5. Commit hash prefix
 pub async fn get_commit_base(name: &str) -> Result<ObjectHash, String> {
     get_commit_base_typed(name)
         .await

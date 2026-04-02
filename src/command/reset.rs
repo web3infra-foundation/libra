@@ -29,7 +29,9 @@ use crate::{
         error::{CliError, CliResult, StableErrorCode, emit_warning},
         object_ext::{BlobExt, TreeExt},
         output::{OutputConfig, emit_json_data},
-        path, util,
+        path,
+        text::short_display_hash,
+        util,
     },
 };
 
@@ -327,12 +329,13 @@ async fn run_reset(args: ResetArgs) -> Result<ResetExecution, ResetError> {
         let target_commit_id = resolve_commit(&args.target).await?;
         let changed_paths = reset_pathspecs(&args.pathspecs, &target_commit_id).await?;
         let subject = load_commit_summary_or_warn(&target_commit_id);
+        let commit = target_commit_id.to_string();
 
         return Ok(ResetExecution {
             output: ResetOutput {
                 mode: mode.as_str().to_string(),
-                commit: target_commit_id.to_string(),
-                short_commit: target_commit_id.to_string()[..7].to_string(),
+                short_commit: short_display_hash(&commit).to_string(),
+                commit,
                 subject,
                 previous_commit,
                 files_unstaged: changed_paths.len(),
@@ -347,11 +350,12 @@ async fn run_reset(args: ResetArgs) -> Result<ResetExecution, ResetError> {
     let reset_stats = perform_reset(target_commit_id, mode, &args.target).await?;
 
     let subject = load_commit_summary_or_warn(&target_commit_id);
+    let commit = target_commit_id.to_string();
     Ok(ResetExecution {
         output: ResetOutput {
             mode: mode.as_str().to_string(),
-            commit: target_commit_id.to_string(),
-            short_commit: target_commit_id.to_string()[..7].to_string(),
+            short_commit: short_display_hash(&commit).to_string(),
+            commit,
             subject,
             previous_commit,
             files_unstaged: 0,

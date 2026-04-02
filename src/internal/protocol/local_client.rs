@@ -6,6 +6,7 @@ use std::{
     future::Future,
     io::Error as IoError,
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
 
 use bytes::Bytes;
@@ -23,7 +24,7 @@ use git_internal::{
         pack::{encode::PackEncoder, entry::Entry},
     },
 };
-use tokio::{io::AsyncWriteExt, process::Command};
+use tokio::{io::AsyncWriteExt, process::Command, sync::Mutex};
 use url::Url;
 
 use super::{
@@ -47,6 +48,12 @@ enum RepoType {
 pub struct LocalClient {
     repo_path: PathBuf,
     source_type: RepoType,
+}
+
+static LOCAL_PROTOCOL_CWD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn local_protocol_cwd_lock() -> &'static Mutex<()> {
+    LOCAL_PROTOCOL_CWD_LOCK.get_or_init(|| Mutex::new(()))
 }
 
 /// RAII guard for temporarily switching the process current directory.
@@ -130,6 +137,9 @@ impl LocalClient {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<T, E>>,
     {
+        // Local protocol operations mutate the process cwd, so serialize them
+        // to avoid cross-task races while the repo-scoped cwd is active.
+        let _cwd_lock = local_protocol_cwd_lock().lock().await;
         let mut guard = RepoCurrentDirGuard::change_to(&self.repo_path).map_err(E::from)?;
         let result = operation().await;
 
@@ -492,7 +502,11 @@ mod tests {
 
     use serial_test::serial;
     use tempfile::tempdir;
-    use tokio::{io::AsyncReadExt, sync::oneshot};
+    use tokio::{
+        io::AsyncReadExt,
+        sync::{mpsc, oneshot},
+        time::{Duration, timeout},
+    };
     use tokio_util::io::StreamReader;
 
     use super::*;
@@ -675,6 +689,89 @@ mod tests {
             fs::canonicalize(env::current_dir().unwrap()).unwrap(),
             fs::canonicalize(original_dir).unwrap(),
             "aborted local protocol operation should restore caller cwd",
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn with_repo_current_dir_serializes_concurrent_operations() {
+        let caller_dir = tempdir().unwrap();
+        let repo_a = tempdir().unwrap();
+        let repo_b = tempdir().unwrap();
+        let _guard = ChangeDirGuard::new(caller_dir.path());
+        setup_with_new_libra_in(repo_a.path()).await;
+        setup_with_new_libra_in(repo_b.path()).await;
+
+        let client_a = LocalClient::from_path(repo_a.path()).unwrap();
+        let client_b = LocalClient::from_path(repo_b.path()).unwrap();
+        let repo_a_storage_dir = client_a.repo_path().to_path_buf();
+        let repo_b_storage_dir = client_b.repo_path().to_path_buf();
+        let original_dir = env::current_dir().unwrap();
+        let (entered_tx, mut entered_rx) = mpsc::unbounded_channel::<(u8, PathBuf)>();
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+
+        let handle_a = tokio::spawn({
+            let client = client_a.clone();
+            let entered_tx = entered_tx.clone();
+            async move {
+                client
+                    .with_repo_current_dir(|| async move {
+                        let _ = entered_tx.send((1, env::current_dir().unwrap()));
+                        let _ = release_rx.await;
+                        Ok::<(), IoError>(())
+                    })
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let (first_id, first_dir) = entered_rx.recv().await.unwrap();
+        assert_eq!(first_id, 1);
+        assert_eq!(
+            fs::canonicalize(first_dir).unwrap(),
+            fs::canonicalize(repo_a_storage_dir).unwrap()
+        );
+
+        let handle_b = tokio::spawn({
+            let client = client_b.clone();
+            let entered_tx = entered_tx.clone();
+            async move {
+                client
+                    .with_repo_current_dir(|| async move {
+                        let _ = entered_tx.send((2, env::current_dir().unwrap()));
+                        Ok::<(), IoError>(())
+                    })
+                    .await
+                    .unwrap();
+            }
+        });
+
+        assert!(
+            timeout(Duration::from_millis(100), entered_rx.recv())
+                .await
+                .is_err(),
+            "concurrent local protocol operations should serialize cwd changes",
+        );
+
+        release_tx.send(()).unwrap();
+
+        let (second_id, second_dir) = timeout(Duration::from_secs(5), entered_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second_id, 2);
+        assert_eq!(
+            fs::canonicalize(second_dir).unwrap(),
+            fs::canonicalize(repo_b_storage_dir).unwrap()
+        );
+
+        handle_a.await.unwrap();
+        handle_b.await.unwrap();
+
+        assert_eq!(
+            fs::canonicalize(env::current_dir().unwrap()).unwrap(),
+            fs::canonicalize(original_dir).unwrap(),
+            "serialized local protocol operations should restore caller cwd",
         );
     }
 }

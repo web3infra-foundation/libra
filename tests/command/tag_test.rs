@@ -8,7 +8,10 @@ use std::os::unix::fs::PermissionsExt;
 
 use libra::{
     command::tag::{self, TagArgs},
-    internal::{config::ConfigKv, db::get_db_conn_instance, model::reference, tag as internal_tag},
+    internal::{
+        branch::Branch, config::ConfigKv, db::get_db_conn_instance, model::reference,
+        tag as internal_tag,
+    },
     utils::{
         path,
         test::{ChangeDirGuard, setup_with_new_libra_in},
@@ -530,6 +533,33 @@ fn test_tag_cli_unborn_head_returns_repo_state_error() {
     );
 }
 
+#[tokio::test]
+#[serial]
+async fn test_tag_cli_corrupt_head_storage_returns_repo_corrupt() {
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+    Branch::update_branch("main", "not-a-valid-hash", None)
+        .await
+        .unwrap();
+
+    let output = run_libra_command(&["tag", "v1"], repo.path());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert!(stdout.trim().is_empty(), "unexpected stdout: {stdout}");
+    assert_eq!(report.error_code, "LBR-REPO-002");
+    assert_eq!(report.category, "repo");
+    assert!(
+        stderr.contains("failed to resolve HEAD commit"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("stored branch reference 'main' is corrupt"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
 #[test]
 fn test_tag_json_unborn_head_returns_repo_state_error() {
     let repo = tempdir().expect("failed to create repository root");
@@ -703,6 +733,29 @@ async fn test_force_tag_store_failure_preserves_existing_ref() {
         }
         other => panic!("expected annotated tag after failed update, got {other:?}"),
     }
+}
+
+#[tokio::test]
+#[serial]
+async fn test_internal_create_returns_metadata_for_annotated_tag() {
+    let (_temp, _guard) = setup_repo_with_commit_with("content", "Base").await;
+
+    let created = internal_tag::create("v1.0", Some("Release v1.0".into()), false)
+        .await
+        .unwrap();
+
+    assert_eq!(created.name, "v1.0");
+    assert!(created.annotated);
+    assert_eq!(created.message.as_deref(), Some("Release v1.0"));
+
+    let tag = get_tag_by_name("v1.0")
+        .await
+        .expect("created tag should exist");
+    let stored_hash = match tag.object {
+        internal_tag::TagObject::Tag(tag_object) => tag_object.id.to_string(),
+        other => panic!("expected annotated tag object, got {other:?}"),
+    };
+    assert_eq!(created.target.to_string(), stored_hash);
 }
 
 #[tokio::test]
