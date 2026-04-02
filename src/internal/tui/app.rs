@@ -112,6 +112,9 @@ impl McpWriteTracker {
 const LATEST_INTENTSPEC_INTENT_ID: &str = "latest_intentspec_intent_id";
 const LATEST_EXECUTION_PLAN_ID: &str = "latest_execution_plan_id";
 const LATEST_INTENTSPEC_JSON: &str = "latest_intentspec_json";
+const LATEST_INTENTSPEC_WORKSPACE_KEY: &str = "latest_intentspec_workspace_key";
+const LATEST_INTENTSPEC_BASE_REF: &str = "latest_intentspec_base_ref";
+const LATEST_INTENTSPEC_BRANCH_LABEL: &str = "latest_intentspec_branch_label";
 const MAX_INTENTSPEC_REPAIR_ATTEMPTS: usize = 2;
 const MCP_WRITE_TIMEOUT: Duration = Duration::from_secs(8);
 const MCP_TURN_TRACKING_TIMEOUT: Duration = Duration::from_secs(3);
@@ -1298,6 +1301,23 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     LATEST_INTENTSPEC_JSON.to_string(),
                     serde_json::Value::String(spec_json.clone()),
                 );
+                let binding = current_intentspec_binding(self.registry.working_dir());
+                self.session.metadata.insert(
+                    LATEST_INTENTSPEC_WORKSPACE_KEY.to_string(),
+                    serde_json::Value::String(binding.workspace_key),
+                );
+                self.session.metadata.insert(
+                    LATEST_INTENTSPEC_BASE_REF.to_string(),
+                    serde_json::Value::String(binding.base_ref),
+                );
+                if let Some(branch_label) = binding.branch_label {
+                    self.session.metadata.insert(
+                        LATEST_INTENTSPEC_BRANCH_LABEL.to_string(),
+                        serde_json::Value::String(branch_label),
+                    );
+                } else {
+                    self.session.metadata.remove(LATEST_INTENTSPEC_BRANCH_LABEL);
+                }
                 if let Some(ref id) = intent_id {
                     self.session.metadata.insert(
                         LATEST_INTENTSPEC_INTENT_ID.to_string(),
@@ -2135,7 +2155,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 draft,
                 risk_level,
                 ResolveContext {
-                    working_dir: working_dir.display().to_string(),
+                    working_dir: canonical_working_dir_label(&working_dir),
                     base_ref: current_head_sha(&working_dir),
                     created_by_id: "tui-user".to_string(),
                 },
@@ -2322,6 +2342,10 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
     }
 
     async fn load_latest_intentspec_json(&self) -> Option<String> {
+        let working_dir = self.registry.working_dir();
+        let workspace_locator = canonical_working_dir_label(working_dir);
+        let head_sha = current_head_sha(working_dir);
+
         if let (Some(id), Some(mcp)) = (
             self.session
                 .metadata
@@ -2329,6 +2353,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 .and_then(|v| v.as_str()),
             self.mcp_server.clone(),
         ) && let Some(spec) = fetch_intentspec_from_object_id(&mcp, id).await
+            && intentspec_matches_workspace(&spec, &workspace_locator, &head_sha)
         {
             return serde_json::to_string_pretty(&spec).ok();
         }
@@ -2338,6 +2363,8 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             .metadata
             .get(LATEST_INTENTSPEC_JSON)
             .and_then(|v| v.as_str())
+            && let Ok(spec) = serde_json::from_str::<crate::internal::ai::intentspec::IntentSpec>(json_text)
+            && intentspec_matches_workspace(&spec, &workspace_locator, &head_sha)
         {
             return Some(json_text.to_string());
         }
@@ -2346,7 +2373,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         let ids = list_intent_object_ids(&mcp).await;
         for id in ids.into_iter().rev() {
             if let Some(spec) = fetch_intentspec_from_object_id(&mcp, &id).await {
-                return serde_json::to_string_pretty(&spec).ok();
+                if intentspec_matches_workspace(&spec, &workspace_locator, &head_sha) {
+                    return serde_json::to_string_pretty(&spec).ok();
+                }
             }
         }
         None
@@ -3207,6 +3236,35 @@ fn current_head_sha(working_dir: &std::path::Path) -> String {
         }
         _ => "HEAD".to_string(),
     }
+}
+
+struct IntentSpecBinding {
+    workspace_key: String,
+    base_ref: String,
+    branch_label: Option<String>,
+}
+
+fn canonical_working_dir_label(working_dir: &std::path::Path) -> String {
+    std::fs::canonicalize(working_dir)
+        .unwrap_or_else(|_| working_dir.to_path_buf())
+        .display()
+        .to_string()
+}
+
+fn current_intentspec_binding(working_dir: &std::path::Path) -> IntentSpecBinding {
+    IntentSpecBinding {
+        workspace_key: canonical_working_dir_label(working_dir),
+        base_ref: current_head_sha(working_dir),
+        branch_label: current_git_branch_label(working_dir),
+    }
+}
+
+fn intentspec_matches_workspace(
+    spec: &crate::internal::ai::intentspec::IntentSpec,
+    workspace_locator: &str,
+    head_sha: &str,
+) -> bool {
+    spec.metadata.target.repo.locator == workspace_locator && spec.metadata.target.base_ref == head_sha
 }
 
 fn current_git_branch_label(working_dir: &std::path::Path) -> Option<String> {
