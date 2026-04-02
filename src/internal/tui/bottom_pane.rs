@@ -85,6 +85,10 @@ pub struct BottomPane {
     git_branch: Option<String>,
     /// Current retry notice shown in the status line.
     retry_notice: Option<String>,
+    /// Optional context label shown on the input box title.
+    input_context_label: Option<String>,
+    /// Optional placeholder override for local TUI controls.
+    input_hint: Option<String>,
 }
 
 impl BottomPane {
@@ -112,6 +116,8 @@ impl BottomPane {
             cwd: None,
             git_branch: None,
             retry_notice: None,
+            input_context_label: None,
+            input_hint: None,
         }
     }
 
@@ -247,6 +253,16 @@ impl BottomPane {
     pub fn set_retry_notice(&mut self, notice: String) {
         self.retry_notice = Some(notice);
         self.status = AgentStatus::Retrying;
+    }
+
+    /// Set or clear a contextual title for the shared input box.
+    pub fn set_input_context_label(&mut self, label: Option<String>) {
+        self.input_context_label = label;
+    }
+
+    /// Set or clear a placeholder override for the shared input box.
+    pub fn set_input_hint(&mut self, hint: Option<String>) {
+        self.input_hint = hint;
     }
 
     // ── Slash-command autocomplete popup ────────────────────────────
@@ -886,10 +902,16 @@ impl BottomPane {
             theme::border::idle()
         };
 
-        let block = Block::default()
+        let mut block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(border_style);
+        if let Some(label) = self.input_context_label.as_deref() {
+            block = block.title(Line::styled(
+                format!(" {} ", label),
+                theme::interactive::title(),
+            ));
+        }
 
         let inner = block.inner(area);
 
@@ -899,7 +921,7 @@ impl BottomPane {
             let placeholder = if self.status == AgentStatus::AwaitingUserInput {
                 "Type custom answer..."
             } else {
-                "Type your message..."
+                self.input_hint.as_deref().unwrap_or("Type your message...")
             };
             (
                 Text::from(vec![Line::styled(placeholder, theme::text::placeholder())]),
@@ -971,7 +993,11 @@ impl BottomPane {
                 }
             }
             AgentStatus::Thinking | AgentStatus::Retrying | AgentStatus::ExecutingTool => {
-                "[Esc: Interrupt] [PgUp/PgDn: Scroll] [Shift+Drag: Select] [Ctrl+C: Exit]"
+                if self.input_hint.is_some() {
+                    "[Tab/Shift+Tab: Switch pane] [Ctrl+O: Overview] [Ctrl+F: Focus] [Enter: Run /mux] [Esc: Clear/Interrupt]"
+                } else {
+                    "[Esc: Interrupt] [PgUp/PgDn: Scroll] [Shift+Drag: Select] [Ctrl+C: Exit]"
+                }
             }
             AgentStatus::AwaitingUserInput => {
                 "[Up/Down: Select] [1-9: Quick select] [Enter: Submit] [Esc: Cancel]"

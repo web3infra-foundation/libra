@@ -56,6 +56,15 @@ pub enum AgentStatus {
     AwaitingPostPlanChoice,
 }
 
+/// Categories of task-scoped mux activity rendered inside the workflow panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskMuxLogKind {
+    Note,
+    Assistant,
+    Tool,
+    Error,
+}
+
 /// Application-level events.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
@@ -89,6 +98,7 @@ pub enum AppEvent {
     /// Tool call is starting.
     ToolCallBegin {
         turn_id: TurnId,
+        task_id: Option<Uuid>,
         call_id: String,
         tool_name: String,
         arguments: Value,
@@ -96,9 +106,24 @@ pub enum AppEvent {
     /// Tool call has completed.
     ToolCallEnd {
         turn_id: TurnId,
+        task_id: Option<Uuid>,
         call_id: String,
         tool_name: String,
         result: Result<ToolOutput, String>,
+    },
+    /// A task received a concrete workspace to execute in.
+    TaskWorkspaceReady {
+        turn_id: TurnId,
+        task_id: Uuid,
+        working_dir: std::path::PathBuf,
+        isolated: bool,
+    },
+    /// Append a task-scoped note inside the task mux panel.
+    TaskMuxLog {
+        turn_id: TurnId,
+        task_id: Uuid,
+        kind: TaskMuxLogKind,
+        text: String,
     },
     /// Agent status has changed.
     AgentStatusUpdate {
@@ -145,6 +170,8 @@ impl AppEvent {
             | AppEvent::InsertHistoryCell { turn_id, .. }
             | AppEvent::ToolCallBegin { turn_id, .. }
             | AppEvent::ToolCallEnd { turn_id, .. }
+            | AppEvent::TaskWorkspaceReady { turn_id, .. }
+            | AppEvent::TaskMuxLog { turn_id, .. }
             | AppEvent::AgentStatusUpdate { turn_id, .. }
             | AppEvent::McpTurnTrackingReady { turn_id, .. }
             | AppEvent::DagGraphBegin { turn_id, .. }

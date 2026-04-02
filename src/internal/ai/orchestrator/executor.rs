@@ -492,6 +492,9 @@ async fn execute_task_in_task_worktree<M: CompletionModel>(
     task_config.working_dir = prepared.root.clone();
     task_config.tool_loop_config =
         clone_tool_loop_config_for_workdir(&config.tool_loop_config, &prepared.root);
+    if let Some(observer) = &config.observer {
+        observer.on_task_workspace_ready(task, &prepared.root, true);
+    }
 
     let mut result = execute_task(task, model, &task_registry, &task_config).await;
 
@@ -749,7 +752,12 @@ impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
             observer.on_task_started(&self.task);
         }
 
-        let result = if should_use_task_worktree(&self.task, self.worktree_parallelism) {
+        let use_task_worktree = should_use_task_worktree(&self.task, self.worktree_parallelism);
+        if !use_task_worktree && let Some(observer) = &self.config.observer {
+            observer.on_task_workspace_ready(&self.task, &self.config.working_dir, false);
+        }
+
+        let result = if use_task_worktree {
             execute_task_in_task_worktree(
                 &self.task,
                 &self.model,

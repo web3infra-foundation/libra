@@ -13,6 +13,7 @@ pub enum BuiltinCommand {
     Status,
     Plan,
     Intent,
+    Mux,
     Quit,
 }
 
@@ -26,6 +27,7 @@ impl BuiltinCommand {
             Self::Status => "status",
             Self::Plan => "plan",
             Self::Intent => "intent",
+            Self::Mux => "mux",
             Self::Quit => "quit",
         }
     }
@@ -39,6 +41,7 @@ impl BuiltinCommand {
             Self::Status => "Show current status",
             Self::Plan => "Generate validated IntentSpec from a request",
             Self::Intent => "IntentSpec utilities (show latest or execute it)",
+            Self::Mux => "Control task mux view during parallel execution",
             Self::Quit => "Quit the application",
         }
     }
@@ -52,6 +55,7 @@ impl BuiltinCommand {
             Self::Status,
             Self::Plan,
             Self::Intent,
+            Self::Mux,
             Self::Quit,
         ]
     }
@@ -103,6 +107,10 @@ mod tests {
             Some((BuiltinCommand::Intent, "execute"))
         );
         assert_eq!(
+            parse_builtin("/mux next"),
+            Some((BuiltinCommand::Mux, "next"))
+        );
+        assert_eq!(
             parse_builtin("/model gemini"),
             Some((BuiltinCommand::Model, "gemini"))
         );
@@ -125,10 +133,11 @@ mod tests {
     #[test]
     fn all_hints_returns_all() {
         let hints = BuiltinCommand::all_hints();
-        assert_eq!(hints.len(), 7);
+        assert_eq!(hints.len(), 8);
         assert!(hints.iter().any(|(n, _)| n == "help"));
         assert!(hints.iter().any(|(n, _)| n == "quit"));
         assert!(hints.iter().any(|(n, _)| n == "plan"));
         assert!(hints.iter().any(|(n, _)| n == "intent"));
+        assert!(hints.iter().any(|(n, _)| n == "mux"));
     }
 }

@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
@@ -401,6 +401,8 @@ pub struct PersistedExecution {
 /// Best-effort observer for surfacing orchestrator runtime progress.
 pub trait OrchestratorObserver: Send + Sync {
     fn on_plan_compiled(&self, _plan: &ExecutionPlanSpec) {}
+
+    fn on_task_workspace_ready(&self, _task: &TaskSpec, _working_dir: &Path, _isolated: bool) {}
 
     fn on_task_started(&self, _task: &TaskSpec) {}
 

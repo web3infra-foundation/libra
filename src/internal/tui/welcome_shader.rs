@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{path::Path, sync::LazyLock, time::Instant};
 
 use ratatui::{
     prelude::*,
@@ -6,6 +6,8 @@ use ratatui::{
 };
 
 use super::theme;
+
+static WELCOME_ANIMATION_START: LazyLock<Instant> = LazyLock::new(Instant::now);
 
 pub(crate) struct WelcomeView<'a> {
     pub welcome_message: &'a str,
@@ -28,10 +30,25 @@ fn render_info_panel(area: Rect, buf: &mut Buffer, view: &WelcomeView<'_>) {
         return;
     }
 
+    let logo_lines = [
+        "██╗     ██╗██████╗ ██████╗  █████╗     ██████╗ ██████╗ ██████╗ ███████╗",
+        "██║     ██║██╔══██╗██╔══██╗██╔══██╗   ██╔════╝██╔═══██╗██╔══██╗██╔════╝",
+        "██║     ██║██████╔╝██████╔╝███████║   ██║     ██║   ██║██║  ██║█████╗  ",
+        "██║     ██║██╔══██╗██╔══██╗██╔══██║   ██║     ██║   ██║██║  ██║██╔══╝  ",
+        "███████╗██║██████╔╝██║  ██║██║  ██║   ╚██████╗╚██████╔╝██████╔╝███████╗",
+        "╚══════╝╚═╝╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝    ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝",
+    ];
+
     let value_width = area.width.saturating_sub(13) as usize;
     let path = truncate_middle(&view.cwd.display().to_string(), value_width.max(8));
-    let mut lines = vec![
-        Line::styled("L I B R A   C O D E", theme::interactive::title()),
+    let mut lines = vec![];
+
+    for (i, text) in logo_lines.iter().enumerate() {
+        lines.push(shader_line(text, i));
+    }
+
+    lines.extend([
+        Line::raw(""),
         Line::styled("interactive agent console", theme::text::subtle()),
         Line::raw(""),
         kv_line("provider", view.provider_name, theme::text::primary()),
@@ -49,7 +66,7 @@ fn render_info_panel(area: Rect, buf: &mut Buffer, view: &WelcomeView<'_>) {
         ),
         Line::raw(""),
         Line::styled(view.welcome_message, theme::text::muted()),
-    ];
+    ]);
 
     if lines.len() > area.height as usize {
         lines.truncate(area.height as usize);
@@ -58,6 +75,76 @@ fn render_info_panel(area: Rect, buf: &mut Buffer, view: &WelcomeView<'_>) {
     Paragraph::new(Text::from(lines))
         .wrap(Wrap { trim: false })
         .render(area, buf);
+}
+
+fn shader_line(text: &str, row: usize) -> Line<'static> {
+    let time = WELCOME_ANIMATION_START.elapsed().as_secs_f64();
+
+    let mut spans = Vec::with_capacity(text.chars().count());
+    for (col, ch) in text.chars().enumerate() {
+        let color = gradient_color(col, row, time);
+        spans.push(Span::styled(
+            ch.to_string(),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn gradient_color(x: usize, y: usize, time: f64) -> Color {
+    let palette = theme::animation::welcome_gradient();
+    let phase = gradient_phase(x, y, time);
+
+    sample_gradient(&palette, phase)
+}
+
+fn gradient_phase(x: usize, y: usize, time: f64) -> f64 {
+    let x = x as f64;
+    let y = y as f64;
+
+    let base_phase = x * 0.024 + y * 0.075 + time * 0.14;
+    let shimmer = ((x * 0.12) - (y * 0.18) + time * 1.1).sin() * 0.045;
+    let drift = (x * 0.03 + y * 0.015 + time * 0.42).cos() * 0.02;
+    (base_phase + shimmer + drift).rem_euclid(1.0)
+}
+
+fn sample_gradient(colors: &[Color], phase: f64) -> Color {
+    if colors.is_empty() {
+        return Color::Reset;
+    }
+    if colors.len() == 1 {
+        return colors[0];
+    }
+
+    let scaled = phase.clamp(0.0, 0.999_9) * (colors.len() - 1) as f64;
+    let index = scaled.floor() as usize;
+    let next = (index + 1).min(colors.len() - 1);
+    let mix = scaled - index as f64;
+
+    lerp_color(colors[index], colors[next], mix)
+}
+
+fn lerp_color(from: Color, to: Color, t: f64) -> Color {
+    let Some((fr, fg, fb)) = rgb_components(from) else {
+        return to;
+    };
+    let Some((tr, tg, tb)) = rgb_components(to) else {
+        return from;
+    };
+
+    let mix = t.clamp(0.0, 1.0);
+    let lerp = |start: u8, end: u8| -> u8 {
+        (start as f64 + (end as f64 - start as f64) * mix).round() as u8
+    };
+
+    Color::Rgb(lerp(fr, tr), lerp(fg, tg), lerp(fb, tb))
+}
+
+fn rgb_components(color: Color) -> Option<(u8, u8, u8)> {
+    match color {
+        Color::Rgb(r, g, b) => Some((r, g, b)),
+        _ => None,
+    }
 }
 
 fn kv_line(label: &str, value: &str, value_style: Style) -> Line<'static> {
@@ -72,7 +159,7 @@ fn kv_line(label: &str, value: &str, value_style: Style) -> Line<'static> {
 
 fn centered_canvas(area: Rect) -> Rect {
     let width = 96u16.min(area.width.saturating_sub(2));
-    let height = 16u16.min(area.height);
+    let height = 20u16.min(area.height);
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     Rect::new(x, y, width, height)
@@ -134,5 +221,30 @@ mod tests {
         assert!(rect.height <= 30);
         assert!(rect.x <= 120);
         assert!(rect.y <= 30);
+    }
+
+    #[test]
+    fn welcome_gradient_uses_theme_palette_range() {
+        let palette = theme::animation::welcome_gradient();
+        let color = gradient_color(12, 3, 1.75);
+
+        assert!(palette.contains(&sample_gradient(&palette, 0.0)));
+        assert!(matches!(color, Color::Rgb(_, _, _)));
+    }
+
+    #[test]
+    fn gradient_changes_over_time_for_same_character() {
+        let first = gradient_color(18, 2, 0.0);
+        let later = gradient_color(18, 2, 0.5);
+        assert_ne!(first, later);
+    }
+
+    #[test]
+    fn gradient_stays_continuous_across_long_runtime() {
+        let before = gradient_phase(18, 2, 31.99);
+        let after = gradient_phase(18, 2, 32.01);
+        let diff = (after - before).abs();
+        let wrapped_diff = diff.min(1.0 - diff);
+        assert!(wrapped_diff < 0.01, "phase jumped too far: {wrapped_diff}");
     }
 }

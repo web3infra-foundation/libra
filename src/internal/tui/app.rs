@@ -23,7 +23,7 @@ use tokio::{
 use tokio_stream::StreamExt;
 
 use super::{
-    app_event::{AgentEvent, AgentStatus, AppEvent, TurnId},
+    app_event::{AgentEvent, AgentStatus, AppEvent, TaskMuxLogKind, TurnId},
     chatwidget::ChatWidget,
     diff::FileChange,
     history_cell::{
@@ -259,6 +259,8 @@ pub struct App<M: CompletionModel> {
     pending_exec_approval: Option<PendingExecApproval>,
     /// Post-plan dialog state (present when user is choosing Execute/Modify/Cancel).
     pending_post_plan: Option<PendingPostPlan>,
+    /// Base IntentSpec JSON for the next spec-revision request, if the user chose Modify.
+    pending_plan_revision: Option<String>,
     /// Display name of the active model.
     model_name: String,
     /// Provider identifier.
@@ -366,6 +368,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             pending_user_input: None,
             pending_exec_approval: None,
             pending_post_plan: None,
+            pending_plan_revision: None,
             model_name: app_config.model_name,
             provider_name: app_config.provider_name,
             mcp_server: app_config.mcp_server,
@@ -691,18 +694,85 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 _ => {}
             },
             AgentStatus::Thinking | AgentStatus::Retrying | AgentStatus::ExecutingTool => {
-                // During processing, only handle Escape for interrupt
-                if key.code == KeyCode::Esc {
-                    self.enqueue_mcp_turn_decision(
-                        "abandon",
-                        "Turn interrupted by user".to_string(),
-                    );
-                    self.interrupt_agent_task();
-                    self.clear_mcp_run_id();
-                    self.widget.bottom_pane.set_status(AgentStatus::Idle);
-                    self.complete_streaming_assistant_cell("Interrupted.".to_string());
-                    self.complete_running_tool_cells_with_interrupt();
-                    self.schedule_draw();
+                let mux_visible = self.widget.has_task_mux();
+                match key.code {
+                    KeyCode::Tab if mux_visible => {
+                        self.widget.task_mux_next();
+                        self.sync_mux_input_context();
+                        self.schedule_draw();
+                    }
+                    KeyCode::BackTab if mux_visible => {
+                        self.widget.task_mux_prev();
+                        self.sync_mux_input_context();
+                        self.schedule_draw();
+                    }
+                    KeyCode::Char('o')
+                        if mux_visible && key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        self.widget.task_mux_show_overview();
+                        self.sync_mux_input_context();
+                        self.schedule_draw();
+                    }
+                    KeyCode::Char('f')
+                        if mux_visible && key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        self.widget.task_mux_focus_selected();
+                        self.sync_mux_input_context();
+                        self.schedule_draw();
+                    }
+                    KeyCode::Enter if mux_visible && !self.widget.bottom_pane.is_empty() => {
+                        let command = self.widget.bottom_pane.take_input();
+                        if let Some(args) = command.trim().strip_prefix("/mux") {
+                            if !self.handle_mux_command(args) {
+                                self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                                    "Unknown mux command. Use `/mux next`, `/mux prev`, `/mux focus <n>`, `/mux overview`, or `/mux toggle`.".to_string(),
+                                )));
+                            }
+                        } else {
+                            self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                                "Workflow is running. Only local `/mux ...` commands are accepted in the shared input box right now.".to_string(),
+                            )));
+                        }
+                        self.schedule_draw();
+                    }
+                    KeyCode::Char(c) if mux_visible => {
+                        self.widget.bottom_pane.insert_char(c);
+                        self.schedule_draw();
+                    }
+                    KeyCode::Backspace if mux_visible => {
+                        self.widget.bottom_pane.backspace();
+                        self.schedule_draw();
+                    }
+                    KeyCode::Delete if mux_visible => {
+                        self.widget.bottom_pane.delete();
+                        self.schedule_draw();
+                    }
+                    KeyCode::Left if mux_visible => {
+                        self.widget.bottom_pane.cursor_left();
+                        self.schedule_draw();
+                    }
+                    KeyCode::Right if mux_visible => {
+                        self.widget.bottom_pane.cursor_right();
+                        self.schedule_draw();
+                    }
+                    KeyCode::Esc if mux_visible && !self.widget.bottom_pane.is_empty() => {
+                        self.widget.bottom_pane.clear();
+                        self.schedule_draw();
+                    }
+                    KeyCode::Esc => {
+                        self.enqueue_mcp_turn_decision(
+                            "abandon",
+                            "Turn interrupted by user".to_string(),
+                        );
+                        self.interrupt_agent_task();
+                        self.clear_mcp_run_id();
+                        self.widget.bottom_pane.set_status(AgentStatus::Idle);
+                        self.sync_mux_input_context();
+                        self.complete_streaming_assistant_cell("Interrupted.".to_string());
+                        self.complete_running_tool_cells_with_interrupt();
+                        self.schedule_draw();
+                    }
+                    _ => {}
                 }
             }
         }
@@ -799,6 +869,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             KeyCode::Esc => {
                 self.cancel_pending_user_input();
                 self.widget.bottom_pane.set_status(AgentStatus::Thinking);
+                self.sync_mux_input_context();
                 self.schedule_draw();
             }
             _ => {}
@@ -909,6 +980,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         self.widget
             .bottom_pane
             .set_status(AgentStatus::AwaitingUserInput);
+        self.sync_mux_input_context();
         self.widget.bottom_pane.clear();
         self.sync_user_input_to_pane();
         self.schedule_draw();
@@ -934,6 +1006,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         self.widget
             .bottom_pane
             .set_status(AgentStatus::AwaitingApproval);
+        self.sync_mux_input_context();
         self.schedule_draw();
     }
 
@@ -971,6 +1044,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         self.widget
             .bottom_pane
             .set_status(AgentStatus::ExecutingTool);
+        self.sync_mux_input_context();
         self.schedule_draw();
     }
 
@@ -984,6 +1058,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         self.widget
             .bottom_pane
             .set_status(AgentStatus::ExecutingTool);
+        self.sync_mux_input_context();
         self.schedule_draw();
     }
 
@@ -1039,6 +1114,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 self.widget
                     .add_cell(Box::new(AssistantHistoryCell::streaming()));
                 self.widget.bottom_pane.set_status(AgentStatus::Thinking);
+                self.sync_mux_input_context();
                 self.schedule_draw();
                 self.clear_mcp_run_id();
                 if let Some(run_id_slot) = self.active_turn_run_id.as_ref()
@@ -1114,6 +1190,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         ) {
                             let _ = self.tx.send(AppEvent::ToolCallBegin {
                                 turn_id: self.turn_id,
+                                task_id: None,
                                 call_id: call_id.to_string(),
                                 tool_name: tool_name.to_string(),
                                 arguments: arguments.clone(),
@@ -1128,6 +1205,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         ) {
                             let _ = self.tx.send(AppEvent::ToolCallEnd {
                                 turn_id: self.turn_id,
+                                task_id: None,
                                 call_id: call_id.to_string(),
                                 tool_name: tool_name.to_string(),
                                 result: result.clone(),
@@ -1337,6 +1415,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     self.mcp_plan_id = None;
                 }
 
+                self.widget.show_dag_panel((*plan).clone());
                 self.replace_streaming_assistant_cell(Box::new(PlanSummaryHistoryCell::new(
                     *spec,
                     *plan,
@@ -1354,6 +1433,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 self.widget
                     .bottom_pane
                     .set_status(AgentStatus::AwaitingPostPlanChoice);
+                self.sync_mux_input_context();
                 self.schedule_draw();
             }
             AppEvent::InsertHistoryCell {
@@ -1368,6 +1448,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 plan,
             } => {
                 self.widget.show_dag_panel(plan);
+                self.sync_mux_input_context();
                 self.schedule_draw();
             }
             AppEvent::DagTaskStatus {
@@ -1388,10 +1469,16 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             }
             AppEvent::ToolCallBegin {
                 turn_id: _turn_id,
+                task_id,
                 call_id,
                 tool_name,
                 arguments,
             } => {
+                if let Some(task_id) = task_id {
+                    let summary = summarize_task_tool_begin(&tool_name, &arguments);
+                    self.widget
+                        .push_task_mux_log(task_id, TaskMuxLogKind::Tool, summary);
+                }
                 if tool_name == "update_plan" {
                     // Parse the plan arguments and render a specialised cell.
                     let (explanation, steps) =
@@ -1417,10 +1504,20 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             }
             AppEvent::ToolCallEnd {
                 turn_id: _turn_id,
+                task_id,
                 call_id,
                 tool_name,
                 result,
             } => {
+                if let Some(task_id) = task_id {
+                    let summary = summarize_task_tool_end(&tool_name, &result);
+                    let kind = if result.is_ok() {
+                        TaskMuxLogKind::Note
+                    } else {
+                        TaskMuxLogKind::Error
+                    };
+                    self.widget.push_task_mux_log(task_id, kind, summary);
+                }
                 let should_hide_failure = should_hide_tool_failure(&tool_name, &result);
                 // For successful apply_patch, insert a visual diff cell.
                 if tool_name == "apply_patch"
@@ -1474,6 +1571,26 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 status,
             } => {
                 self.widget.bottom_pane.set_status(status);
+                self.sync_mux_input_context();
+                self.schedule_draw();
+            }
+            AppEvent::TaskWorkspaceReady {
+                turn_id: _turn_id,
+                task_id,
+                working_dir,
+                isolated,
+            } => {
+                self.widget
+                    .set_task_workspace(task_id, working_dir, isolated);
+                self.schedule_draw();
+            }
+            AppEvent::TaskMuxLog {
+                turn_id: _turn_id,
+                task_id,
+                kind,
+                text,
+            } => {
+                self.widget.push_task_mux_log(task_id, kind, text);
                 self.schedule_draw();
             }
             AppEvent::McpTurnTrackingReady {
@@ -1518,6 +1635,11 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             return;
         }
 
+        if let Some(spec_json) = self.pending_plan_revision.take() {
+            self.begin_plan_revision_flow(spec_json, &text).await;
+            return;
+        }
+
         // 2. Try YAML-defined slash commands (sent to model).
         let (effective_text, agent_name) =
             if let Some(result) = self.command_dispatcher.dispatch(&text) {
@@ -1542,6 +1664,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         };
 
         self.widget.clear_dag_panel();
+        self.sync_mux_input_context();
         let turn_id = self.begin_turn();
         let _ = self.app_event_tx.send(AppEvent::SubmitUserMessage {
             turn_id,
@@ -1577,6 +1700,8 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 self.session = SessionState::new(&self.registry.working_dir().to_string_lossy());
                 self.mcp_plan_id = None;
                 self.mcp_run_id = None;
+                self.pending_plan_revision = None;
+                self.sync_mux_input_context();
             }
             BuiltinCommand::Model => {
                 let info = format!(
@@ -1597,10 +1722,20 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     .add_cell(Box::new(AssistantHistoryCell::new(status)));
             }
             BuiltinCommand::Plan => {
+                self.pending_plan_revision = None;
                 self.start_plan_workflow(args).await;
             }
             BuiltinCommand::Intent => {
                 self.handle_intent_command(args).await;
+            }
+            BuiltinCommand::Mux => {
+                let handled = self.handle_mux_command(args);
+                if !handled {
+                    self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                        "Mux unavailable. Start a parallel workflow first, or use `/mux next|prev|focus <n>|overview|toggle|list` while it is running.".to_string(),
+                    )));
+                }
+                self.schedule_draw();
             }
             BuiltinCommand::Quit => {
                 self.exit_info = Some(AppExitInfo {
@@ -1608,6 +1743,49 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 });
             }
         }
+    }
+
+    fn handle_mux_command(&mut self, args: &str) -> bool {
+        if !self.widget.has_task_mux() {
+            return false;
+        }
+
+        let trimmed = args.trim();
+        let mut parts = trimmed.split_whitespace();
+        let command = parts.next().unwrap_or("toggle");
+        let handled = match command {
+            "" | "toggle" => self.widget.task_mux_toggle_mode(),
+            "next" => self.widget.task_mux_next(),
+            "prev" => self.widget.task_mux_prev(),
+            "overview" => self.widget.task_mux_show_overview(),
+            "focus" => {
+                if let Some(index_text) = parts.next() {
+                    index_text
+                        .parse::<usize>()
+                        .ok()
+                        .and_then(|index| index.checked_sub(1))
+                        .is_some_and(|index| self.widget.task_mux_focus_index(index))
+                } else {
+                    self.widget.task_mux_focus_selected()
+                }
+            }
+            "list" => {
+                if let Some(label) = self.widget.task_mux_context_label() {
+                    self.widget
+                        .add_cell(Box::new(AssistantHistoryCell::new(format!(
+                            "Task mux: {label}"
+                        ))));
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
+        if handled {
+            self.sync_mux_input_context();
+        }
+        handled
     }
 
     async fn create_mcp_exit_decision(&self, reason: &ExitReason) {
@@ -1654,7 +1832,36 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             .bottom_pane
             .set_git_branch(current_git_branch_label(self.registry.working_dir()));
         self.widget.bottom_pane.set_status(AgentStatus::Idle);
+        self.sync_mux_input_context();
         self.schedule_draw();
+    }
+
+    fn sync_mux_input_context(&mut self) {
+        let show_mux_context = self.widget.has_task_mux()
+            && matches!(
+                self.widget.bottom_pane.status,
+                AgentStatus::Thinking | AgentStatus::Retrying | AgentStatus::ExecutingTool
+            );
+        if show_mux_context {
+            self.widget
+                .bottom_pane
+                .set_input_context_label(self.widget.task_mux_context_label());
+            self.widget
+                .bottom_pane
+                .set_input_hint(self.widget.task_mux_input_hint());
+        } else if self.pending_plan_revision.is_some()
+            && matches!(self.widget.bottom_pane.status, AgentStatus::Idle)
+        {
+            self.widget
+                .bottom_pane
+                .set_input_context_label(Some("Revise IntentSpec".to_string()));
+            self.widget.bottom_pane.set_input_hint(Some(
+                "Describe the changes to make to the current spec...".to_string(),
+            ));
+        } else {
+            self.widget.bottom_pane.set_input_context_label(None);
+            self.widget.bottom_pane.set_input_hint(None);
+        }
     }
 
     // ── Post-plan dialog ────────────────────────────────────────────
@@ -1673,16 +1880,15 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             _ => {
                 // Modify (1) or Cancel (2+)
                 if pending.selected == 1 {
-                    let msg = format!(
-                        "Here is the current IntentSpec. Please tell me what you'd like to change:\n\n```json\n{}\n```",
-                        pending.spec_json
-                    );
+                    self.pending_plan_revision = Some(pending.spec_json);
+                    let msg = "Describe what to change in the current IntentSpec. Your next message will reopen planning from this spec and produce an updated workflow.".to_string();
                     self.widget
                         .add_cell(Box::new(AssistantHistoryCell::new(msg.clone())));
                     self.history.push(Message::assistant(msg.clone()));
                     self.session.add_assistant_message(&msg);
                 }
                 self.widget.bottom_pane.set_status(AgentStatus::Idle);
+                self.sync_mux_input_context();
             }
         }
         self.schedule_draw();
@@ -1718,6 +1924,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         self.widget
             .add_cell(Box::new(AssistantHistoryCell::streaming()));
         self.widget.bottom_pane.set_status(AgentStatus::Thinking);
+        self.sync_mux_input_context();
         self.schedule_draw();
         let turn_id = self.begin_turn();
         self.running_tool_calls = 0;
@@ -1787,10 +1994,35 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         turn_id: self.turn_id,
                         status: AgentStatus::Thinking,
                     });
+                    let _ = self.tx.send(AppEvent::TaskMuxLog {
+                        turn_id: self.turn_id,
+                        task_id: task.id(),
+                        kind: TaskMuxLogKind::Note,
+                        text: format!("started {}", task.title()),
+                    });
                     let _ = self.tx.send(AppEvent::DagTaskStatus {
                         turn_id: self.turn_id,
                         task_id: task.id(),
                         status: crate::internal::ai::orchestrator::types::TaskNodeStatus::Running,
+                    });
+                }
+
+                fn on_task_workspace_ready(
+                    &self,
+                    task: &TaskSpec,
+                    working_dir: &std::path::Path,
+                    isolated: bool,
+                ) {
+                    self.send_note(format_task_workspace_note(
+                        task.title(),
+                        working_dir,
+                        isolated,
+                    ));
+                    let _ = self.tx.send(AppEvent::TaskWorkspaceReady {
+                        turn_id: self.turn_id,
+                        task_id: task.id(),
+                        working_dir: working_dir.to_path_buf(),
+                        isolated,
                     });
                 }
 
@@ -1799,15 +2031,35 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     task: &TaskSpec,
                     result: &crate::internal::ai::orchestrator::types::TaskResult,
                 ) {
+                    let completion_summary = format_task_completion_note(task.title(), result);
+                    let _ = self.tx.send(AppEvent::TaskMuxLog {
+                        turn_id: self.turn_id,
+                        task_id: task.id(),
+                        kind: if result.status
+                            == crate::internal::ai::orchestrator::types::TaskNodeStatus::Failed
+                        {
+                            TaskMuxLogKind::Error
+                        } else {
+                            TaskMuxLogKind::Note
+                        },
+                        text: completion_summary.clone(),
+                    });
                     let _ = self.tx.send(AppEvent::DagTaskStatus {
                         turn_id: self.turn_id,
                         task_id: task.id(),
                         status: result.status.clone(),
                     });
-                    self.send_note(format_task_completion_note(task.title(), result));
+                    self.send_note(completion_summary);
                 }
 
-                fn on_task_assistant_message(&self, _task: &TaskSpec, _text: &str) {}
+                fn on_task_assistant_message(&self, task: &TaskSpec, text: &str) {
+                    let _ = self.tx.send(AppEvent::TaskMuxLog {
+                        turn_id: self.turn_id,
+                        task_id: task.id(),
+                        kind: TaskMuxLogKind::Assistant,
+                        text: text.to_string(),
+                    });
+                }
 
                 fn on_tool_call_begin(
                     &self,
@@ -1818,6 +2070,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 ) {
                     let _ = self.tx.send(AppEvent::ToolCallBegin {
                         turn_id: self.turn_id,
+                        task_id: Some(task.id()),
                         call_id: Self::scoped_call_id(task, call_id),
                         tool_name: tool_name.to_string(),
                         arguments: arguments.clone(),
@@ -1833,6 +2086,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 ) {
                     let _ = self.tx.send(AppEvent::ToolCallEnd {
                         turn_id: self.turn_id,
+                        task_id: Some(task.id()),
                         call_id: Self::scoped_call_id(task, call_id),
                         tool_name: tool_name.to_string(),
                         result: result.clone(),
@@ -1859,6 +2113,12 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         task.title(),
                         summary
                     ));
+                    let _ = self.tx.send(AppEvent::TaskMuxLog {
+                        turn_id: self.turn_id,
+                        task_id: task.id(),
+                        kind: TaskMuxLogKind::Tool,
+                        text: format!("gate running · {}", summary),
+                    });
                 }
 
                 fn on_gate_check_completed(
@@ -1884,6 +2144,16 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         task.title(),
                         metrics.join(" · ")
                     ));
+                    let _ = self.tx.send(AppEvent::TaskMuxLog {
+                        turn_id: self.turn_id,
+                        task_id: task.id(),
+                        kind: if result.passed {
+                            TaskMuxLogKind::Note
+                        } else {
+                            TaskMuxLogKind::Error
+                        },
+                        text: format!("gate {} · {}", outcome, metrics.join(" · ")),
+                    });
                 }
 
                 fn on_graph_progress(&self, completed: usize, total: usize) {
@@ -1962,27 +2232,53 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             return;
         }
 
+        let prompt_body = build_plan_prompt(request);
+        let prompt = if let Some(agent) = self.agent_router.get("planner") {
+            format!("{}\n\n---\n\n{}", agent.system_prompt, prompt_body)
+        } else {
+            prompt_body
+        };
         let user_text = format!("/plan {request}");
+        self.begin_plan_workflow(user_text, prompt).await;
+    }
+
+    async fn begin_plan_revision_flow(&mut self, spec_json: String, request: &str) {
+        let request = request.trim();
+        if request.is_empty() {
+            self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                "Describe the changes to make to the current IntentSpec.".to_string(),
+            )));
+            self.pending_plan_revision = Some(spec_json);
+            self.sync_mux_input_context();
+            self.schedule_draw();
+            return;
+        }
+
+        let prompt_body = build_plan_revision_prompt(&spec_json, request);
+        let prompt = if let Some(agent) = self.agent_router.get("planner") {
+            format!("{}\n\n---\n\n{}", agent.system_prompt, prompt_body)
+        } else {
+            prompt_body
+        };
+        let user_text = format!("Modify current spec: {request}");
+        self.begin_plan_workflow(user_text, prompt).await;
+    }
+
+    async fn begin_plan_workflow(&mut self, user_text: String, prompt: String) {
+        self.pending_plan_revision = None;
         let turn_id = self.begin_turn();
         self.running_tool_calls = 0;
         self.session.add_user_message(&user_text);
         self.widget
             .add_cell(Box::new(UserHistoryCell::new(user_text.clone())));
         self.widget.clear_dag_panel();
+        self.sync_mux_input_context();
         self.widget
             .add_cell(Box::new(AssistantHistoryCell::streaming()));
         self.widget.bottom_pane.set_status(AgentStatus::Thinking);
+        self.sync_mux_input_context();
         self.schedule_draw();
 
-        let prompt = if let Some(agent) = self.agent_router.get("planner") {
-            format!(
-                "{}\n\n---\n\n{}",
-                agent.system_prompt,
-                build_plan_prompt(request)
-            )
-        } else {
-            build_plan_prompt(request)
-        };
         let model = self.model.clone();
         let registry = self.registry.clone();
         let mut config = self.config.clone();
@@ -2028,6 +2324,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 ) {
                     let _ = self.tx.send(AppEvent::ToolCallBegin {
                         turn_id: self.turn_id,
+                        task_id: None,
                         call_id: call_id.to_string(),
                         tool_name: tool_name.to_string(),
                         arguments: arguments.clone(),
@@ -2060,6 +2357,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 ) {
                     let _ = self.tx.send(AppEvent::ToolCallEnd {
                         turn_id: self.turn_id,
+                        task_id: None,
                         call_id: call_id.to_string(),
                         tool_name: tool_name.to_string(),
                         result: result.clone(),
@@ -2398,6 +2696,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             AgentStatus::Idle
         };
         self.widget.bottom_pane.set_status(next_status);
+        self.sync_mux_input_context();
     }
 
     fn insert_before_streaming_assistant(
@@ -2600,6 +2899,50 @@ fn should_hide_tool_failure(tool_name: &str, result: &Result<ToolOutput, String>
         tool_name,
         "read_file" | "list_dir" | "grep_files" | "apply_patch"
     ) && !matches!(result, Ok(output) if output.is_success())
+}
+
+fn summarize_task_tool_begin(tool_name: &str, arguments: &serde_json::Value) -> String {
+    let mut summary = tool_name.to_string();
+    match tool_name {
+        "read_file" | "list_dir" | "grep_files" | "apply_patch" | "shell" => {
+            if let Some(path) = arguments.get("path").and_then(|value| value.as_str()) {
+                summary.push_str(&format!(" · {}", truncate_for_tool_log(path, 36)));
+            } else if let Some(command) = arguments.get("cmd").and_then(|value| value.as_str()) {
+                summary.push_str(&format!(" · {}", truncate_for_tool_log(command, 36)));
+            }
+        }
+        _ => {}
+    }
+    summary
+}
+
+fn summarize_task_tool_end(tool_name: &str, result: &Result<ToolOutput, String>) -> String {
+    match result {
+        Ok(output) => {
+            let status = if output.is_success() {
+                "ok"
+            } else {
+                "needs attention"
+            };
+            format!("{tool_name} · {status}")
+        }
+        Err(error) => format!(
+            "{tool_name} · failed · {}",
+            truncate_for_tool_log(error, 40)
+        ),
+    }
+}
+
+fn truncate_for_tool_log(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let mut truncated = text
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    truncated.push('…');
+    truncated
 }
 
 fn format_orchestrator_result(
@@ -2888,7 +3231,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        append_to_last_tool_group_cell, format_orchestrator_result, should_hide_tool_failure,
+        append_to_last_tool_group_cell, build_plan_revision_prompt, format_orchestrator_result,
+        should_hide_tool_failure,
     };
     use crate::internal::{
         ai::{
@@ -3043,6 +3387,20 @@ mod tests {
             &Ok(ToolOutput::success("ok"))
         ));
     }
+
+    #[test]
+    fn plan_revision_prompt_uses_current_spec_as_baseline() {
+        let prompt = build_plan_revision_prompt(
+            "{\n  \"kind\": \"IntentSpec\"\n}",
+            "add an integration gate for cargo test",
+        );
+
+        assert!(prompt.contains("You are revising an existing IntentSpec."));
+        assert!(prompt.contains("Current IntentSpec:"));
+        assert!(prompt.contains("\"kind\": \"IntentSpec\""));
+        assert!(prompt.contains("Requested changes:\nadd an integration gate for cargo test"));
+        assert!(prompt.contains("submit_intent_draft exactly once"));
+    }
 }
 
 fn summarize_retry_error(error: &str) -> String {
@@ -3183,6 +3541,18 @@ After receiving user choice, analyze the repository and then call submit_intent_
 If required information is missing, call request_user_input again for focused follow-up questions.\n\
 Do not output a plain-text plan; finalize by submitting the draft tool call.\n\n\
 User request:\n{request}"
+    )
+}
+
+fn build_plan_revision_prompt(spec_json: &str, request: &str) -> String {
+    format!(
+        "You are revising an existing IntentSpec.\n\
+First, you MUST call request_user_input with exactly one question id=risk_profile, header=Risk, and options Low/Medium/High.\n\
+Use the current IntentSpec as the baseline, apply only the user's requested changes, and then call submit_intent_draft exactly once.\n\
+If required information is missing, call request_user_input again for focused follow-up questions.\n\
+Do not output a plain-text plan; finalize by submitting the draft tool call.\n\n\
+Current IntentSpec:\n```json\n{spec_json}\n```\n\n\
+Requested changes:\n{request}"
     )
 }
 
