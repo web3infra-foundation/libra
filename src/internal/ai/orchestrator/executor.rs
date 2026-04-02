@@ -36,7 +36,6 @@ use crate::{
         sandbox::{SandboxPermissions, SandboxPolicy, ToolRuntimeContext, ToolSandboxContext},
         tools::{ToolOutput, registry::ToolRegistry},
     },
-    utils::util,
 };
 
 /// Configuration for task execution.
@@ -513,8 +512,8 @@ fn clone_tool_loop_config_for_workdir(
     cloned
 }
 
-fn should_use_task_worktree(task: &TaskSpec, worktree_parallelism: bool) -> bool {
-    worktree_parallelism && task.kind == TaskKind::Implementation
+fn should_use_task_worktree(task: &TaskSpec) -> bool {
+    task.kind == TaskKind::Implementation
 }
 
 async fn execute_task_in_task_worktree<M: CompletionModel>(
@@ -663,7 +662,6 @@ struct TaskDagrsAction<M: CompletionModel + 'static> {
     parallelism: Arc<Semaphore>,
     cost_budget_serial: Arc<tokio::sync::Mutex<()>>,
     workspace_sync_serial: Arc<tokio::sync::Mutex<()>>,
-    worktree_parallelism: bool,
 }
 
 #[derive(Clone)]
@@ -673,7 +671,6 @@ struct DagrsBuildContext {
     parallelism: Arc<Semaphore>,
     cost_budget_serial: Arc<tokio::sync::Mutex<()>>,
     workspace_sync_serial: Arc<tokio::sync::Mutex<()>>,
-    worktree_parallelism: bool,
 }
 
 #[derive(Clone)]
@@ -809,7 +806,7 @@ impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
             observer.on_task_started(&self.task);
         }
 
-        let use_task_worktree = should_use_task_worktree(&self.task, self.worktree_parallelism);
+        let use_task_worktree = should_use_task_worktree(&self.task);
         if !use_task_worktree
             && self.task.kind != TaskKind::Gate
             && let Some(observer) = &self.config.observer
@@ -889,7 +886,6 @@ fn build_dagrs_graph<M: CompletionModel + 'static>(
             parallelism: Arc::clone(&context.parallelism),
             cost_budget_serial: Arc::clone(&context.cost_budget_serial),
             workspace_sync_serial: Arc::clone(&context.workspace_sync_serial),
-            worktree_parallelism: context.worktree_parallelism,
         };
         let dagrs_node =
             DefaultNode::with_action(task_spec.id().to_string(), action, &mut node_table);
@@ -1038,15 +1034,12 @@ pub async fn execute_dag<M: CompletionModel + 'static>(
     let parallelism = Arc::new(Semaphore::new(initial_parallel));
     let cost_budget_serial = Arc::new(tokio::sync::Mutex::new(()));
     let workspace_sync_serial = Arc::new(tokio::sync::Mutex::new(()));
-    let worktree_parallelism = plan_spec.max_parallel > 1
-        && util::try_get_storage_path(Some(config.working_dir.clone())).is_ok();
     let graph_context = DagrsBuildContext {
         run_state: run_state_snapshot,
         metered_task_ids,
         parallelism,
         cost_budget_serial,
         workspace_sync_serial,
-        worktree_parallelism,
     };
     let mut graph = tokio::task::spawn_blocking(move || {
         build_dagrs_graph(
@@ -1530,6 +1523,7 @@ mod tests {
     };
 
     use git_internal::internal::object::{task::Task as GitTask, types::ActorRef};
+    use serial_test::serial;
 
     use super::*;
     use crate::{
@@ -1668,6 +1662,44 @@ mod tests {
                     function: Function {
                         name: "apply_patch".to_string(),
                         arguments: serde_json::json!({ "input": patch }),
+                    },
+                })],
+                raw_response: (),
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct PatchThenFailModel;
+
+    impl CompletionModel for PatchThenFailModel {
+        type Response = ();
+
+        async fn completion(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+            let has_tool_result = request.chat_history.iter().any(|message| match message {
+                Message::User { content } => content
+                    .iter()
+                    .any(|item| matches!(item, UserContent::ToolResult(_))),
+                _ => false,
+            });
+            if has_tool_result {
+                return Err(CompletionError::ResponseError(
+                    "intentional failure after patch".to_string(),
+                ));
+            }
+
+            Ok(CompletionResponse {
+                content: vec![AssistantContent::ToolCall(ToolCall {
+                    id: "call_fail".to_string(),
+                    name: "apply_patch".to_string(),
+                    function: Function {
+                        name: "apply_patch".to_string(),
+                        arguments: serde_json::json!({
+                            "input": "*** Begin Patch\n*** Update File: task_a.txt\n@@\n-base\n+task-a\n*** End Patch"
+                        }),
                     },
                 })],
                 raw_response: (),
@@ -2007,6 +2039,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn execute_task_runs_gate_checks_in_isolated_worktree() {
         let repo = tempfile::tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
@@ -2056,8 +2089,8 @@ mod tests {
         let model = MockModel {
             final_text: "done".into(),
         };
-        let registry = Arc::new(ToolRegistry::new());
         let dir = tempfile::tempdir().unwrap();
+        let registry = Arc::new(ToolRegistry::with_working_dir(dir.path().to_path_buf()));
         let config = ExecutorConfig {
             tool_loop_config: ToolLoopConfig::default(),
             max_retries: 1,
@@ -2075,6 +2108,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn execute_dag_replays_parallel_task_worktrees_back_to_main_workspace() {
         let repo = tempfile::tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
@@ -2121,6 +2155,44 @@ mod tests {
                 .ordered_task_results()
                 .iter()
                 .all(|result| result.status == TaskNodeStatus::Completed)
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn execute_dag_keeps_main_workspace_clean_when_serial_task_fails() {
+        let repo = tempfile::tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        std::fs::write(repo.path().join("task_a.txt"), "base\n").unwrap();
+
+        let mut registry = ToolRegistry::with_working_dir(repo.path().to_path_buf());
+        registry.register("apply_patch", Arc::new(ApplyPatchHandler));
+        let registry = Arc::new(registry);
+
+        let config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig::default(),
+            max_retries: 0,
+            backoff_seconds: 0,
+            working_dir: repo.path().to_path_buf(),
+            spec: spec(),
+            reviewer_preamble: None,
+            dagrs_resume_checkpoint_id: None,
+            observer: None,
+        };
+
+        let plan = plan_for_tasks(vec![scoped_implementation_task("Task A", "task_a.txt")], 1);
+
+        let run_state = execute_dag(&plan, &PatchThenFailModel, &registry, &config)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("task_a.txt")).unwrap(),
+            "base\n"
+        );
+        assert_eq!(
+            run_state.ordered_task_results()[0].status,
+            TaskNodeStatus::Failed
         );
     }
 
