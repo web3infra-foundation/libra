@@ -38,7 +38,7 @@ impl BuiltinCommand {
             Self::Model => "Show current model info",
             Self::Status => "Show current status",
             Self::Plan => "Generate validated IntentSpec from a request",
-            Self::Intent => "IntentSpec utilities (e.g. /intent show)",
+            Self::Intent => "IntentSpec utilities (show latest or execute it)",
             Self::Quit => "Quit the application",
         }
     }
@@ -97,6 +97,10 @@ mod tests {
         assert_eq!(
             parse_builtin("/intent show"),
             Some((BuiltinCommand::Intent, "show"))
+        );
+        assert_eq!(
+            parse_builtin("/intent execute"),
+            Some((BuiltinCommand::Intent, "execute"))
         );
         assert_eq!(
             parse_builtin("/model gemini"),

@@ -2302,9 +2302,19 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     .add_cell(Box::new(AssistantHistoryCell::new(rendered)));
                 self.schedule_draw();
             }
+            "execute" => {
+                let Some(spec_json) = self.load_latest_intentspec_json().await else {
+                    self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                        "No IntentSpec found. Run `/plan <requirement>` first.".to_string(),
+                    )));
+                    self.schedule_draw();
+                    return;
+                };
+                self.start_execute_workflow(&spec_json).await;
+            }
             _ => {
                 self.widget.add_cell(Box::new(AssistantHistoryCell::new(
-                    "Usage: /intent show".to_string(),
+                    "Usage: /intent show|execute".to_string(),
                 )));
                 self.schedule_draw();
             }
