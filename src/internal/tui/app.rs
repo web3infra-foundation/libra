@@ -2659,22 +2659,34 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
     async fn handle_intent_command(&mut self, args: &str) {
         match args.trim() {
             "show" => {
-                let rendered = self.load_latest_intentspec_json().await.unwrap_or_else(|| {
-                    "No IntentSpec found. Run `/plan <requirement>` first.".to_string()
-                });
+                let rendered = match self.load_latest_intentspec_json().await {
+                    LatestIntentSpecLoad::Found(json) => json,
+                    LatestIntentSpecLoad::Missing => {
+                        "No IntentSpec found. Run `/plan <requirement>` first.".to_string()
+                    }
+                    LatestIntentSpecLoad::BindingMismatch(message) => message,
+                };
                 self.widget
                     .add_cell(Box::new(AssistantHistoryCell::new(rendered)));
                 self.schedule_draw();
             }
             "execute" => {
-                let Some(spec_json) = self.load_latest_intentspec_json().await else {
-                    self.widget.add_cell(Box::new(AssistantHistoryCell::new(
-                        "No IntentSpec found. Run `/plan <requirement>` first.".to_string(),
-                    )));
-                    self.schedule_draw();
-                    return;
-                };
-                self.start_execute_workflow(&spec_json).await;
+                match self.load_latest_intentspec_json().await {
+                    LatestIntentSpecLoad::Found(spec_json) => {
+                        self.start_execute_workflow(&spec_json).await;
+                    }
+                    LatestIntentSpecLoad::Missing => {
+                        self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                            "No IntentSpec found. Run `/plan <requirement>` first.".to_string(),
+                        )));
+                        self.schedule_draw();
+                    }
+                    LatestIntentSpecLoad::BindingMismatch(message) => {
+                        self.widget
+                            .add_cell(Box::new(AssistantHistoryCell::new(message)));
+                        self.schedule_draw();
+                    }
+                }
             }
             _ => {
                 self.widget.add_cell(Box::new(AssistantHistoryCell::new(
@@ -2685,11 +2697,16 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         }
     }
 
-    async fn load_latest_intentspec_json(&self) -> Option<String> {
+    async fn load_latest_intentspec_json(&self) -> LatestIntentSpecLoad {
         let binding = current_intentspec_binding(self.registry.working_dir());
         let binding_matches = latest_intentspec_binding_matches(&self.session.metadata, &binding);
         if !binding_matches {
-            return None;
+            return LatestIntentSpecLoad::BindingMismatch(
+                latest_intentspec_binding_mismatch_message(&self.session.metadata, &binding)
+                    .unwrap_or_else(|| {
+                        "Latest IntentSpec belongs to a different workspace or HEAD.".to_string()
+                    }),
+            );
         }
 
         if let Some(json_text) = self
@@ -2699,24 +2716,48 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             .and_then(|v| v.as_str())
             && let Ok(spec) =
                 serde_json::from_str::<crate::internal::ai::intentspec::IntentSpec>(json_text)
-            && intentspec_matches_workspace(&spec, &binding.workspace_key, &binding.base_ref)
         {
-            return Some(json_text.to_string());
+            if intentspec_matches_workspace(&spec, &binding.workspace_key, &binding.base_ref) {
+                return LatestIntentSpecLoad::Found(json_text.to_string());
+            }
+            return LatestIntentSpecLoad::BindingMismatch(format_intentspec_target_mismatch(
+                spec.metadata.target.repo.locator.as_str(),
+                &spec.metadata.target.base_ref,
+                self.session
+                    .metadata
+                    .get(LATEST_INTENTSPEC_BRANCH_LABEL)
+                    .and_then(|value| value.as_str()),
+                &binding,
+            ));
         }
 
-        let mcp = self.mcp_server.clone()?;
+        let Some(mcp) = self.mcp_server.clone() else {
+            return LatestIntentSpecLoad::Missing;
+        };
         if let Some(id) = self
             .session
             .metadata
             .get(LATEST_INTENTSPEC_INTENT_ID)
             .and_then(|v| v.as_str())
             && let Some(spec) = fetch_intentspec_from_object_id(&mcp, id).await
-            && intentspec_matches_workspace(&spec, &binding.workspace_key, &binding.base_ref)
         {
-            return serde_json::to_string_pretty(&spec).ok();
+            if intentspec_matches_workspace(&spec, &binding.workspace_key, &binding.base_ref) {
+                return serde_json::to_string_pretty(&spec)
+                    .map(LatestIntentSpecLoad::Found)
+                    .unwrap_or(LatestIntentSpecLoad::Missing);
+            }
+            return LatestIntentSpecLoad::BindingMismatch(format_intentspec_target_mismatch(
+                spec.metadata.target.repo.locator.as_str(),
+                &spec.metadata.target.base_ref,
+                self.session
+                    .metadata
+                    .get(LATEST_INTENTSPEC_BRANCH_LABEL)
+                    .and_then(|value| value.as_str()),
+                &binding,
+            ));
         }
 
-        None
+        LatestIntentSpecLoad::Missing
     }
 
     fn interrupt_agent_task(&mut self) {
@@ -3303,8 +3344,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        append_to_last_tool_group_cell, build_plan_revision_prompt, format_orchestrator_result,
-        parse_pending_plan_revision_command, pending_plan_revision_help_message,
+        append_to_last_tool_group_cell, build_plan_revision_prompt, format_intentspec_target_mismatch,
+        format_orchestrator_result, parse_pending_plan_revision_command,
+        pending_plan_revision_help_message,
         should_hide_tool_failure, PendingPlanRevisionCommand,
     };
     use crate::internal::{
@@ -3500,6 +3542,24 @@ mod tests {
         let help = pending_plan_revision_help_message();
         assert!(help.contains("/plan modify <changes>"));
         assert!(help.contains("/plan cancel"));
+    }
+
+    #[test]
+    fn intent_mismatch_message_mentions_current_and_stored_bindings() {
+        let message = format_intentspec_target_mismatch(
+            "/tmp/other",
+            "1234567890abcdef",
+            Some("feature/spec"),
+            &super::IntentSpecBinding {
+                workspace_key: "/tmp/current".into(),
+                base_ref: "fedcba0987654321".into(),
+                branch_label: Some("main".into()),
+            },
+        );
+
+        assert!(message.contains("current · /tmp/current @ fedcba098765 (main)"));
+        assert!(message.contains("stored · /tmp/other @ 1234567890ab (feature/spec)"));
+        assert!(message.contains("different workspace or HEAD"));
     }
 }
 
@@ -3708,6 +3768,12 @@ struct IntentSpecBinding {
     branch_label: Option<String>,
 }
 
+enum LatestIntentSpecLoad {
+    Found(String),
+    Missing,
+    BindingMismatch(String),
+}
+
 fn canonical_working_dir_label(working_dir: &std::path::Path) -> String {
     std::fs::canonicalize(working_dir)
         .unwrap_or_else(|_| working_dir.to_path_buf())
@@ -3739,6 +3805,56 @@ fn latest_intentspec_binding_matches(
             .get(LATEST_INTENTSPEC_BRANCH_LABEL)
             .and_then(|value| value.as_str())
             == binding.branch_label.as_deref()
+}
+
+fn latest_intentspec_binding_mismatch_message(
+    metadata: &HashMap<String, serde_json::Value>,
+    binding: &IntentSpecBinding,
+) -> Option<String> {
+    let workspace = metadata
+        .get(LATEST_INTENTSPEC_WORKSPACE_KEY)
+        .and_then(|value| value.as_str())?;
+    let base_ref = metadata
+        .get(LATEST_INTENTSPEC_BASE_REF)
+        .and_then(|value| value.as_str())?;
+    let branch = metadata
+        .get(LATEST_INTENTSPEC_BRANCH_LABEL)
+        .and_then(|value| value.as_str());
+    Some(format_intentspec_target_mismatch(
+        workspace, base_ref, branch, binding,
+    ))
+}
+
+fn format_intentspec_target_mismatch(
+    stored_workspace: &str,
+    stored_base_ref: &str,
+    stored_branch: Option<&str>,
+    binding: &IntentSpecBinding,
+) -> String {
+    format!(
+        "Latest IntentSpec belongs to a different workspace or HEAD.\ncurrent · {} @ {}{}\nstored · {} @ {}{}\nRun `/plan <requirement>` in this worktree/head, or switch back to the matching checkout.",
+        binding.workspace_key,
+        shorten_binding_ref(&binding.base_ref),
+        format_binding_branch(binding.branch_label.as_deref()),
+        stored_workspace,
+        shorten_binding_ref(stored_base_ref),
+        format_binding_branch(stored_branch),
+    )
+}
+
+fn shorten_binding_ref(raw: &str) -> String {
+    const MAX_LEN: usize = 12;
+    if raw.len() <= MAX_LEN {
+        raw.to_string()
+    } else {
+        raw[..MAX_LEN].to_string()
+    }
+}
+
+fn format_binding_branch(branch: Option<&str>) -> String {
+    branch
+        .map(|branch| format!(" ({branch})"))
+        .unwrap_or_default()
 }
 
 fn intentspec_matches_workspace(
