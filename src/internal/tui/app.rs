@@ -3018,7 +3018,15 @@ fn should_hide_tool_failure(tool_name: &str, result: &Result<ToolOutput, String>
 fn summarize_task_tool_begin(tool_name: &str, arguments: &serde_json::Value) -> String {
     let mut summary = tool_name.to_string();
     match tool_name {
-        "read_file" | "list_dir" | "grep_files" | "apply_patch" | "shell" => {
+        "shell" => {
+            if let Some(command) = arguments.get("command").and_then(|value| value.as_str()) {
+                summary.push_str(&format!(" · {}", truncate_for_tool_log(command, 36)));
+            }
+            if let Some(workdir) = arguments.get("workdir").and_then(|value| value.as_str()) {
+                summary.push_str(&format!(" @ {}", truncate_for_tool_log(workdir, 20)));
+            }
+        }
+        "read_file" | "list_dir" | "grep_files" | "apply_patch" => {
             if let Some(path) = arguments.get("path").and_then(|value| value.as_str()) {
                 summary.push_str(&format!(" · {}", truncate_for_tool_log(path, 36)));
             } else if let Some(command) = arguments.get("cmd").and_then(|value| value.as_str()) {
@@ -3502,6 +3510,20 @@ mod tests {
             "read_file",
             &Ok(ToolOutput::success("ok"))
         ));
+    }
+
+    #[test]
+    fn shell_tool_summary_includes_command_and_workdir() {
+        let summary = super::summarize_task_tool_begin(
+            "shell",
+            &json!({
+                "command": "cargo test --lib",
+                "workdir": "/tmp/workspace"
+            }),
+        );
+
+        assert!(summary.contains("cargo test --lib"));
+        assert!(summary.contains("/tmp/workspace"));
     }
 
     #[test]
