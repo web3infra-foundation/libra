@@ -179,67 +179,93 @@ enum ResetError {
 
     #[error("pathspec '{0}' did not match any file(s) known to libra")]
     PathspecNotMatched(String),
+
+    #[error("{primary}; rollback failed: {rollback}")]
+    Rollback {
+        primary: Box<ResetError>,
+        rollback: Box<ResetError>,
+    },
+}
+
+impl ResetError {
+    fn stable_code(&self) -> StableErrorCode {
+        match self {
+            Self::NotInRepo => StableErrorCode::RepoNotFound,
+            Self::InvalidRevision(_) => StableErrorCode::CliInvalidTarget,
+            Self::HeadUnborn => StableErrorCode::RepoStateInvalid,
+            Self::HeadRead(_) => StableErrorCode::IoReadFailed,
+            Self::HeadCorrupt(_) => StableErrorCode::RepoCorrupt,
+            Self::ObjectLoad { .. } => StableErrorCode::RepoCorrupt,
+            Self::IndexLoad(_) => StableErrorCode::RepoCorrupt,
+            Self::IndexSave(_) => StableErrorCode::IoWriteFailed,
+            Self::HeadUpdate(_) => StableErrorCode::IoWriteFailed,
+            Self::WorktreeRead(_) => StableErrorCode::IoReadFailed,
+            Self::WorktreeRestore(_) => StableErrorCode::IoWriteFailed,
+            Self::InvalidPathspecEncoding(_) => StableErrorCode::CliInvalidArguments,
+            Self::PathspecWithSoft(_) => StableErrorCode::CliInvalidArguments,
+            Self::PathspecWithHard => StableErrorCode::CliInvalidArguments,
+            Self::PathspecNotMatched(_) => StableErrorCode::CliInvalidTarget,
+            Self::Rollback { primary, .. } => primary.stable_code(),
+        }
+    }
+
+    fn hint(&self) -> Option<&'static str> {
+        match self {
+            Self::NotInRepo => {
+                Some("run 'libra init' to create a repository in the current directory.")
+            }
+            Self::InvalidRevision(_) => Some("check the revision name and try again."),
+            Self::HeadUnborn => Some("create a commit first before resetting HEAD."),
+            Self::HeadRead(_) => Some("check whether the repository database is readable."),
+            Self::HeadCorrupt(_) => Some("the HEAD reference or branch metadata may be corrupted."),
+            Self::ObjectLoad { .. } => Some("the object store may be corrupted."),
+            Self::IndexLoad(_) => Some("the index file may be corrupted."),
+            Self::InvalidPathspecEncoding(_) => {
+                Some("rename the path or invoke libra from a path representable as UTF-8.")
+            }
+            Self::PathspecWithSoft(_) => {
+                Some("--soft only moves HEAD; use --mixed to reset index for specific paths.")
+            }
+            Self::PathspecWithHard => Some(
+                "--hard updates the working tree; omit pathspecs or use --mixed for specific paths.",
+            ),
+            Self::PathspecNotMatched(_) => Some("check the path and try again."),
+            Self::IndexSave(_)
+            | Self::HeadUpdate(_)
+            | Self::WorktreeRead(_)
+            | Self::WorktreeRestore(_) => None,
+            Self::Rollback { primary, .. } => primary.hint(),
+        }
+    }
+
+    fn is_command_usage(&self) -> bool {
+        match self {
+            Self::PathspecWithSoft(_) | Self::PathspecWithHard => true,
+            Self::Rollback { primary, .. } => primary.is_command_usage(),
+            _ => false,
+        }
+    }
 }
 
 impl From<ResetError> for CliError {
     fn from(error: ResetError) -> Self {
         match error {
             ResetError::NotInRepo => CliError::repo_not_found(),
-            ResetError::InvalidRevision(message) => CliError::fatal(message)
-                .with_stable_code(StableErrorCode::CliInvalidTarget)
-                .with_hint("check the revision name and try again."),
-            ResetError::HeadUnborn => CliError::fatal(error.to_string())
-                .with_stable_code(StableErrorCode::RepoStateInvalid)
-                .with_hint("create a commit first before resetting HEAD."),
-            ResetError::HeadRead(_) => CliError::fatal(error.to_string())
-                .with_stable_code(StableErrorCode::IoReadFailed)
-                .with_hint("check whether the repository database is readable."),
-            ResetError::HeadCorrupt(_) => CliError::fatal(error.to_string())
-                .with_stable_code(StableErrorCode::RepoCorrupt)
-                .with_hint("the HEAD reference or branch metadata may be corrupted."),
-            ResetError::ObjectLoad { .. } => CliError::fatal(error.to_string())
-                .with_stable_code(StableErrorCode::RepoCorrupt)
-                .with_hint("the object store may be corrupted."),
-            ResetError::IndexLoad(_) => CliError::fatal(error.to_string())
-                .with_stable_code(StableErrorCode::RepoCorrupt)
-                .with_hint("the index file may be corrupted."),
-            ResetError::IndexSave(_) => {
-                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
-            }
-            ResetError::HeadUpdate(_) => {
-                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
-            }
-            ResetError::WorktreeRead(_) => {
-                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
-            }
-            ResetError::WorktreeRestore(_) => {
-                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
-            }
-            ResetError::InvalidPathspecEncoding(path) => CliError::fatal(format!(
-                "path contains invalid UTF-8: {path}"
-            ))
-            .with_stable_code(StableErrorCode::CliInvalidArguments)
-            .with_hint(
-                "rename the path or invoke libra from a path representable as UTF-8.",
-            ),
-            ResetError::PathspecWithSoft(pathspec) => CliError::command_usage(format!(
-                "pathspec '{pathspec}' is not compatible with --soft reset"
-            ))
-            .with_stable_code(StableErrorCode::CliInvalidArguments)
-            .with_hint("--soft only moves HEAD; use --mixed to reset index for specific paths."),
-            ResetError::PathspecWithHard => {
-                CliError::command_usage("Cannot do hard reset with paths.")
-                    .with_stable_code(StableErrorCode::CliInvalidArguments)
-                    .with_hint(
-                        "--hard updates the working tree; omit pathspecs or use --mixed for specific paths.",
-                    )
-            }
-            ResetError::PathspecNotMatched(pathspec) => {
-                CliError::fatal(format!(
-                    "pathspec '{pathspec}' did not match any file(s) known to libra"
-                ))
-                .with_stable_code(StableErrorCode::CliInvalidTarget)
-                .with_hint("check the path and try again.")
+            other => {
+                let message = other.to_string();
+                let stable_code = other.stable_code();
+                let mut cli = if other.is_command_usage() {
+                    CliError::command_usage(message)
+                } else {
+                    CliError::fatal(message)
+                }
+                .with_stable_code(stable_code);
+
+                if let Some(hint) = other.hint() {
+                    cli = cli.with_hint(hint);
+                }
+
+                cli
             }
         }
     }
@@ -526,27 +552,9 @@ async fn update_reset_reference(
 fn merge_reset_failure(error: ResetError, rollback: Result<(), ResetError>) -> ResetError {
     match rollback {
         Ok(()) => error,
-        Err(rollback_error) => match error {
-            ResetError::IndexSave(detail) => {
-                ResetError::IndexSave(format!("{detail}; rollback failed: {rollback_error}"))
-            }
-            ResetError::HeadUpdate(detail) => {
-                ResetError::HeadUpdate(format!("{detail}; rollback failed: {rollback_error}"))
-            }
-            ResetError::WorktreeRead(detail) => {
-                ResetError::WorktreeRead(format!("{detail}; rollback failed: {rollback_error}"))
-            }
-            ResetError::WorktreeRestore(detail) => {
-                ResetError::WorktreeRestore(format!("{detail}; rollback failed: {rollback_error}"))
-            }
-            other => {
-                tracing::error!(
-                    "rollback after reset failed: {} (primary error: {})",
-                    rollback_error,
-                    other
-                );
-                other
-            }
+        Err(rollback_error) => ResetError::Rollback {
+            primary: Box::new(error),
+            rollback: Box::new(rollback_error),
         },
     }
 }
@@ -999,8 +1007,14 @@ mod tests {
             )),
         );
 
-        assert!(matches!(merged, ResetError::ObjectLoad { .. }));
+        assert!(matches!(merged, ResetError::Rollback { .. }));
         let cli_error = CliError::from(merged);
         assert_eq!(cli_error.stable_code(), StableErrorCode::RepoCorrupt);
+        assert!(cli_error.message().contains("rollback failed"));
+        assert!(
+            cli_error
+                .message()
+                .contains("failed to restore working tree")
+        );
     }
 }

@@ -97,6 +97,7 @@ fn show_ref_branch_store_error(context: &str, error: BranchStoreError) -> CliErr
 }
 
 fn show_ref_tag_list_error(error: anyhow::Error) -> CliError {
+    // TODO: Remove this DbErr-chain heuristic once tag::list() returns a typed error.
     let stable_code = if error
         .chain()
         .any(|cause| cause.downcast_ref::<DbErr>().is_some())

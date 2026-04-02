@@ -57,6 +57,7 @@ pub struct LocalClient {
 struct RepoCurrentDirGuard {
     original_dir: PathBuf,
     restored: bool,
+    restore_failure_logged: bool,
 }
 
 impl RepoCurrentDirGuard {
@@ -66,6 +67,7 @@ impl RepoCurrentDirGuard {
         Ok(Self {
             original_dir,
             restored: false,
+            restore_failure_logged: false,
         })
     }
 
@@ -73,6 +75,10 @@ impl RepoCurrentDirGuard {
         env::set_current_dir(&self.original_dir)?;
         self.restored = true;
         Ok(())
+    }
+
+    fn mark_restore_failure_logged(&mut self) {
+        self.restore_failure_logged = true;
     }
 }
 
@@ -83,6 +89,11 @@ impl Drop for RepoCurrentDirGuard {
         }
 
         if let Err(error) = env::set_current_dir(&self.original_dir) {
+            if self.restore_failure_logged {
+                return;
+            }
+
+            self.restore_failure_logged = true;
             tracing::error!(
                 restore_dir = %self.original_dir.display(),
                 error = %error,
@@ -127,6 +138,7 @@ impl LocalClient {
             Err(restore_error) => match result {
                 Ok(_) => Err(E::from(restore_error)),
                 Err(error) => {
+                    guard.mark_restore_failure_logged();
                     tracing::error!(
                         repo_path = %self.repo_path.display(),
                         restore_dir = %guard.original_dir.display(),

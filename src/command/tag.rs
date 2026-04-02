@@ -1,6 +1,10 @@
 //! Manages tags by resolving target commits, creating lightweight or annotated tag objects, storing refs, and listing existing tags.
 
+use std::io;
+
 use clap::Parser;
+use git_internal::errors::GitError;
+use sea_orm::DbErr;
 use serde::Serialize;
 
 use crate::{
@@ -110,30 +114,58 @@ enum TagError {
     #[error("Cannot create tag: HEAD does not point to a commit")]
     HeadUnborn,
 
-    #[error("failed to read existing tags before creating '{name}': {detail}")]
-    CheckExistingFailed { name: String, detail: String },
+    #[error("failed to read existing tags before creating '{name}': {source}")]
+    CheckExistingFailed {
+        name: String,
+        #[source]
+        source: DbErr,
+    },
 
     #[error("failed to serialize annotated tag object: {0}")]
-    SerializeAnnotatedTag(String),
+    SerializeAnnotatedTag(#[source] GitError),
 
     #[error("failed to store annotated tag object: {0}")]
-    StoreObjectFailed(String),
+    StoreObjectFailed(#[source] io::Error),
 
-    #[error("failed to persist tag reference '{name}': {detail}")]
-    PersistReferenceFailed { name: String, detail: String },
+    #[error("failed to persist tag reference '{name}': {source}")]
+    PersistReferenceFailed {
+        name: String,
+        #[source]
+        source: DbErr,
+    },
 
-    #[error("failed to delete tag '{name}': {detail}")]
-    DeleteFailed { name: String, detail: String },
+    #[error("failed to delete tag '{name}': {source}")]
+    DeleteFailed {
+        name: String,
+        #[source]
+        source: anyhow::Error,
+    },
 
-    #[error("failed to load tag '{name}': {detail}")]
-    LoadFailed { name: String, detail: String },
+    #[error("failed to load tag '{name}': {source}")]
+    LoadFailed {
+        name: String,
+        #[source]
+        source: anyhow::Error,
+    },
 
     #[error("failed to list tags: {0}")]
-    ListFailed(String),
+    ListFailed(#[source] anyhow::Error),
+}
+
+fn classify_tag_read_error(error: &anyhow::Error) -> StableErrorCode {
+    if error
+        .chain()
+        .any(|cause| cause.downcast_ref::<DbErr>().is_some())
+    {
+        StableErrorCode::IoReadFailed
+    } else {
+        StableErrorCode::RepoCorrupt
+    }
 }
 
 impl From<TagError> for CliError {
     fn from(error: TagError) -> Self {
+        let message = error.to_string();
         match error {
             TagError::NotInRepo => CliError::repo_not_found(),
             TagError::AlreadyExists(name) => {
@@ -149,28 +181,29 @@ impl From<TagError> for CliError {
                 .with_stable_code(StableErrorCode::CliInvalidArguments)
                 .with_hint("use 'libra tag <name>' to create or update a tag")
                 .with_hint("use 'libra tag -l' to list existing tags"),
-            TagError::HeadUnborn => CliError::fatal(error.to_string())
+            TagError::HeadUnborn => CliError::fatal(message)
                 .with_stable_code(StableErrorCode::RepoStateInvalid)
                 .with_hint("create a commit first before tagging HEAD."),
             TagError::CheckExistingFailed { .. } => {
-                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::RepoCorrupt)
+                CliError::fatal(message).with_stable_code(StableErrorCode::IoReadFailed)
             }
-            TagError::SerializeAnnotatedTag(_) => CliError::fatal(error.to_string())
-                .with_stable_code(StableErrorCode::InternalInvariant),
+            TagError::SerializeAnnotatedTag(_) => {
+                CliError::fatal(message).with_stable_code(StableErrorCode::InternalInvariant)
+            }
             TagError::StoreObjectFailed(_) => {
-                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
+                CliError::fatal(message).with_stable_code(StableErrorCode::IoWriteFailed)
             }
             TagError::PersistReferenceFailed { .. } => {
-                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
+                CliError::fatal(message).with_stable_code(StableErrorCode::IoWriteFailed)
             }
             TagError::DeleteFailed { .. } => {
-                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
+                CliError::fatal(message).with_stable_code(StableErrorCode::IoWriteFailed)
             }
-            TagError::LoadFailed { .. } => {
-                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::RepoCorrupt)
+            TagError::LoadFailed { source, .. } => {
+                CliError::fatal(message).with_stable_code(classify_tag_read_error(&source))
             }
-            TagError::ListFailed(_) => {
-                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::RepoCorrupt)
+            TagError::ListFailed(source) => {
+                CliError::fatal(message).with_stable_code(classify_tag_read_error(&source))
             }
         }
     }
@@ -222,15 +255,13 @@ fn map_create_tag_error(tag_name: &str, error: tag::CreateTagError) -> TagError 
         tag::CreateTagError::HeadUnborn => TagError::HeadUnborn,
         tag::CreateTagError::CheckExisting(source) => TagError::CheckExistingFailed {
             name: tag_name.to_string(),
-            detail: source.to_string(),
+            source,
         },
-        tag::CreateTagError::SerializeTag(source) => {
-            TagError::SerializeAnnotatedTag(source.to_string())
-        }
-        tag::CreateTagError::StoreObject(source) => TagError::StoreObjectFailed(source.to_string()),
+        tag::CreateTagError::SerializeTag(source) => TagError::SerializeAnnotatedTag(source),
+        tag::CreateTagError::StoreObject(source) => TagError::StoreObjectFailed(source),
         tag::CreateTagError::PersistReference(source) => TagError::PersistReferenceFailed {
             name: tag_name.to_string(),
-            detail: source.to_string(),
+            source,
         },
     }
 }
@@ -292,7 +323,7 @@ fn render_tag_output(result: &TagOutput, output: &OutputConfig) -> CliResult<()>
 pub async fn render_tags(show_lines: usize) -> Result<String, anyhow::Error> {
     let tags = collect_tags(show_lines)
         .await
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        .map_err(anyhow::Error::from)?;
     Ok(format_tag_entries(&tags))
 }
 
@@ -332,9 +363,9 @@ async fn run_delete_tag(tag_name: &str) -> Result<TagOutput, TagError> {
     let snapshot = resolve_tag_ref_for_delete(tag_name).await?;
     tag::delete(tag_name)
         .await
-        .map_err(|e| TagError::DeleteFailed {
+        .map_err(|source| TagError::DeleteFailed {
             name: tag_name.to_string(),
-            detail: e.to_string(),
+            source,
         })?;
     Ok(TagOutput::Delete {
         name: tag_name.to_string(),
@@ -343,9 +374,7 @@ async fn run_delete_tag(tag_name: &str) -> Result<TagOutput, TagError> {
 }
 
 async fn collect_tags(show_lines: usize) -> Result<Vec<TagListEntry>, TagError> {
-    let tags = tag::list()
-        .await
-        .map_err(|e| TagError::ListFailed(e.to_string()))?;
+    let tags = tag::list().await.map_err(TagError::ListFailed)?;
     let mut entries = Vec::with_capacity(tags.len());
     for tag in tags {
         entries.push(tag_to_list_entry(tag, show_lines));
@@ -361,9 +390,9 @@ async fn lookup_tag(tag_name: &str, show_lines: usize) -> Result<TagListEntry, T
             show_lines,
         )),
         Ok(None) => Err(TagError::NotFound(tag_name.to_string())),
-        Err(e) => Err(TagError::LoadFailed {
+        Err(source) => Err(TagError::LoadFailed {
             name: tag_name.to_string(),
-            detail: e.to_string(),
+            source: source.into(),
         }),
     }
 }
@@ -446,9 +475,9 @@ async fn resolve_tag_ref_for_delete(tag_name: &str) -> Result<tag::TagReference,
     match tag::find_tag_ref(tag_name).await {
         Ok(Some(reference)) => Ok(reference),
         Ok(None) => Err(TagError::NotFound(tag_name.to_string())),
-        Err(e) => Err(TagError::LoadFailed {
+        Err(source) => Err(TagError::LoadFailed {
             name: tag_name.to_string(),
-            detail: format!("failed to query tag ref: {e}"),
+            source: source.into(),
         }),
     }
 }
@@ -458,6 +487,7 @@ mod tests {
     use std::fs;
 
     use git_internal::internal::object::types::ObjectType;
+    use sea_orm::DbErr;
     use serial_test::serial;
     use tempfile::tempdir;
 
@@ -600,5 +630,33 @@ mod tests {
         delete_tag("v1.0").await;
         let tags = tag::list().await.unwrap();
         assert!(tags.is_empty());
+    }
+
+    #[test]
+    fn test_tag_check_existing_db_error_maps_as_io_read() {
+        let cli_error = CliError::from(TagError::CheckExistingFailed {
+            name: "v1.0".to_string(),
+            source: DbErr::Custom("database is locked".to_string()),
+        });
+
+        assert_eq!(cli_error.stable_code(), StableErrorCode::IoReadFailed);
+    }
+
+    #[test]
+    fn test_tag_list_db_error_maps_as_io_read() {
+        let cli_error = CliError::from(TagError::ListFailed(anyhow::Error::new(DbErr::Custom(
+            "database is locked".to_string(),
+        ))));
+
+        assert_eq!(cli_error.stable_code(), StableErrorCode::IoReadFailed);
+    }
+
+    #[test]
+    fn test_tag_list_object_error_maps_as_repo_corrupt() {
+        let cli_error = CliError::from(TagError::ListFailed(anyhow::anyhow!(
+            "Invalid ObjectHash: not-a-valid-hash"
+        )));
+
+        assert_eq!(cli_error.stable_code(), StableErrorCode::RepoCorrupt);
     }
 }
