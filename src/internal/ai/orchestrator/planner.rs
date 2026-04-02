@@ -13,7 +13,7 @@ use super::types::{
 use crate::internal::ai::{
     intentspec::types::{
         ChangeType, ConflictResolution, DecompositionMode, DependencyPolicy, IntentSpec,
-        LibraBinding, NetworkPolicy, ObjectiveKind, PlanGenerationConfig, RiskLevel, TouchHints,
+        NetworkPolicy, ObjectiveKind, PlanGenerationConfig, RiskLevel, TouchHints,
     },
     workflow_objects::planner_actor,
 };
@@ -33,7 +33,7 @@ struct TaskSpecMeta {
 pub fn compile_execution_plan_spec(
     spec: &IntentSpec,
 ) -> Result<ExecutionPlanSpec, OrchestratorError> {
-    let plan_config = effective_plan_generation(spec.libra.as_ref());
+    let plan_config = effective_plan_generation(spec);
     let max_parallel = effective_max_parallel(spec);
     let common_constraints = build_common_constraints(spec);
     let common_contract = build_common_contract(spec);
@@ -202,10 +202,35 @@ pub fn compile_execution_plan_spec(
     })
 }
 
-fn effective_plan_generation(libra: Option<&LibraBinding>) -> PlanGenerationConfig {
-    libra
+fn effective_plan_generation(spec: &IntentSpec) -> PlanGenerationConfig {
+    let mut plan_generation = spec
+        .libra
+        .as_ref()
         .and_then(|binding| binding.plan_generation.clone())
-        .unwrap_or_default()
+        .unwrap_or_default();
+
+    let plan_generation_is_explicit = spec
+        .libra
+        .as_ref()
+        .and_then(|binding| binding.plan_generation.as_ref())
+        .is_some();
+    if !plan_generation_is_explicit && should_auto_use_per_file_cluster(spec) {
+        plan_generation.decomposition_mode = DecompositionMode::PerFileCluster;
+    }
+
+    plan_generation
+}
+
+fn should_auto_use_per_file_cluster(spec: &IntentSpec) -> bool {
+    spec.intent
+        .touch_hints
+        .as_ref()
+        .is_some_and(|hints| !hints.files.is_empty())
+        && spec
+            .intent
+            .objectives
+            .iter()
+            .all(|objective| objective.kind == ObjectiveKind::Implementation)
 }
 
 fn effective_max_parallel(spec: &IntentSpec) -> u8 {
@@ -587,22 +612,71 @@ fn apply_conflict_resolution(
 
 fn find_overlaps(nodes: &[TaskSpec]) -> Vec<String> {
     let mut seen: HashMap<&str, usize> = HashMap::new();
-    let mut overlaps = Vec::new();
-
-    for node in nodes
+    let mut overlaps = BTreeSet::new();
+    let implementation_nodes = nodes
         .iter()
         .filter(|node| node.kind == TaskKind::Implementation)
-    {
+        .collect::<Vec<_>>();
+
+    for node in &implementation_nodes {
         for path in &node.contract.touch_files {
             let count = seen.entry(path.as_str()).or_default();
             *count += 1;
             if *count == 2 {
-                overlaps.push(path.clone());
+                overlaps.insert(path.clone());
             }
         }
     }
 
-    overlaps
+    for (idx, left) in implementation_nodes.iter().enumerate() {
+        for right in implementation_nodes.iter().skip(idx + 1) {
+            if !left.contract.touch_files.is_empty() && !right.contract.touch_files.is_empty() {
+                continue;
+            }
+
+            for left_scope in &left.scope_in {
+                for right_scope in &right.scope_in {
+                    if scope_patterns_overlap(left_scope, right_scope) {
+                        overlaps.insert(format!("scope:{}<->{}", left_scope, right_scope));
+                    }
+                }
+            }
+        }
+    }
+
+    overlaps.into_iter().collect()
+}
+
+fn scope_patterns_overlap(left: &str, right: &str) -> bool {
+    if matches!(left.trim(), "*" | "**") || matches!(right.trim(), "*" | "**") {
+        return true;
+    }
+
+    let left_root = scope_pattern_root(left);
+    let right_root = scope_pattern_root(right);
+
+    if left_root.is_empty() || right_root.is_empty() {
+        return true;
+    }
+
+    left_root == right_root
+        || left_root
+            .strip_prefix(&right_root)
+            .is_some_and(|rest| rest.starts_with('/'))
+        || right_root
+            .strip_prefix(&left_root)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+fn scope_pattern_root(pattern: &str) -> String {
+    let normalized = pattern.trim().replace('\\', "/");
+    let trimmed = normalized.trim_start_matches("./");
+    let prefix = trimmed
+        .find('*')
+        .map(|index| &trimmed[..index])
+        .unwrap_or(trimmed)
+        .trim_end_matches('/');
+    prefix.to_string()
 }
 
 fn make_sequential(nodes: &mut [TaskSpec]) {
@@ -956,6 +1030,28 @@ mod tests {
     }
 
     #[test]
+    fn test_compile_execution_plan_auto_uses_file_clusters_for_default_specs() {
+        let mut spec = minimal_spec();
+        spec.libra = None;
+
+        let plan = compile_execution_plan_spec(&spec).unwrap();
+        let implementation_tasks = plan
+            .tasks
+            .iter()
+            .filter(|task| task.kind == TaskKind::Implementation)
+            .collect::<Vec<_>>();
+
+        assert_eq!(implementation_tasks.len(), 2);
+        assert!(implementation_tasks.iter().all(|task| task.contract.touch_files.len() == 1));
+        assert!(implementation_tasks.iter().any(
+            |task| task.contract.touch_files == vec!["src/auth/login.rs".to_string()]
+        ));
+        assert!(implementation_tasks.iter().any(
+            |task| task.contract.touch_files == vec!["src/auth/logout.rs".to_string()]
+        ));
+    }
+
+    #[test]
     fn test_compile_execution_plan_fail_fast_overlap() {
         let mut spec = minimal_spec();
         spec.intent.touch_hints = Some(TouchHints {
@@ -1014,6 +1110,31 @@ mod tests {
             plan.tasks
                 .iter()
                 .map(|task| format!("{:?}", task.kind))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_compile_execution_plan_serializes_overlapping_scopes_without_touch_hints() {
+        let mut spec = minimal_spec();
+        spec.intent.touch_hints = None;
+
+        let plan = compile_execution_plan_spec(&spec).unwrap();
+        let implementation_tasks = plan
+            .tasks
+            .iter()
+            .filter(|task| task.kind == TaskKind::Implementation)
+            .collect::<Vec<_>>();
+
+        assert_eq!(implementation_tasks.len(), 2);
+        assert!(
+            implementation_tasks[1]
+                .dependencies()
+                .contains(&implementation_tasks[0].id()),
+            "{:?}",
+            implementation_tasks
+                .iter()
+                .map(|task| (task.title().to_string(), task.dependencies().to_vec()))
                 .collect::<Vec<_>>()
         );
     }
