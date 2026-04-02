@@ -53,6 +53,41 @@ impl Head {
         message.contains("database is locked") || message.contains("database schema is locked")
     }
 
+    async fn query_local_head_result_with_conn<C>(
+        db: &C,
+    ) -> Result<reference::Model, BranchStoreError>
+    where
+        C: ConnectionTrait,
+    {
+        for attempt in 0..=Self::SQLITE_BUSY_MAX_RETRIES {
+            match reference::Entity::find()
+                .filter(reference::Column::Kind.eq(reference::ConfigKind::Head))
+                .filter(reference::Column::Remote.is_null())
+                .one(db)
+                .await
+            {
+                Ok(Some(model)) => return Ok(model),
+                Ok(None) => {
+                    return Err(BranchStoreError::Corrupt {
+                        name: "HEAD".to_string(),
+                        detail: "HEAD reference is missing from storage".to_string(),
+                    });
+                }
+                Err(err)
+                    if Self::is_sqlite_busy(&err) && attempt < Self::SQLITE_BUSY_MAX_RETRIES =>
+                {
+                    sleep(Duration::from_millis(
+                        Self::SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                    ))
+                    .await;
+                }
+                Err(err) => return Err(BranchStoreError::Query(err.to_string())),
+            }
+        }
+
+        unreachable!("sqlite retry loop must return")
+    }
+
     async fn query_local_head_with_conn<C>(db: &C) -> reference::Model
     where
         C: ConnectionTrait,
@@ -161,11 +196,24 @@ impl Head {
     where
         C: ConnectionTrait,
     {
-        match Self::current_with_conn(db).await {
-            Head::Detached(commit_hash) => Ok(Some(commit_hash)),
-            Head::Branch(name) => Ok(Branch::find_branch_result_with_conn(db, &name, None)
+        let head = Self::query_local_head_result_with_conn(db).await?;
+        match head.name {
+            Some(name) => Ok(Branch::find_branch_result_with_conn(db, &name, None)
                 .await?
                 .map(|branch| branch.commit)),
+            None => {
+                let commit_hash = head.commit.ok_or_else(|| BranchStoreError::Corrupt {
+                    name: "HEAD".to_string(),
+                    detail: "detached HEAD is missing commit hash".to_string(),
+                })?;
+                let commit_hash = ObjectHash::from_str(commit_hash.as_str()).map_err(|error| {
+                    BranchStoreError::Corrupt {
+                        name: "HEAD".to_string(),
+                        detail: format!("invalid detached HEAD commit hash: {error}"),
+                    }
+                })?;
+                Ok(Some(commit_hash))
+            }
         }
     }
 
@@ -273,5 +321,72 @@ impl Head {
     pub async fn update(new_head: Self, remote: Option<&str>) {
         let db_conn = get_db_conn_instance().await;
         Self::update_with_conn(&db_conn, new_head, remote).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    use serial_test::serial;
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::utils::test::{self, ChangeDirGuard};
+
+    #[tokio::test]
+    #[serial]
+    async fn current_commit_result_with_conn_returns_corrupt_when_head_row_missing() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = ChangeDirGuard::new(repo.path());
+
+        let db = get_db_conn_instance().await;
+        reference::Entity::delete_many()
+            .filter(reference::Column::Kind.eq(reference::ConfigKind::Head))
+            .filter(reference::Column::Remote.is_null())
+            .exec(&db)
+            .await
+            .unwrap();
+
+        let error = Head::current_commit_result_with_conn(&db)
+            .await
+            .expect_err("missing HEAD row should surface as corruption");
+        assert!(matches!(error, BranchStoreError::Corrupt { .. }));
+        assert!(
+            error.to_string().contains("HEAD reference is missing"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn current_commit_result_with_conn_returns_corrupt_for_invalid_detached_hash() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = ChangeDirGuard::new(repo.path());
+
+        let db = get_db_conn_instance().await;
+        let head = reference::Entity::find()
+            .filter(reference::Column::Kind.eq(reference::ConfigKind::Head))
+            .filter(reference::Column::Remote.is_null())
+            .one(&db)
+            .await
+            .unwrap()
+            .expect("expected HEAD row");
+        let mut head: reference::ActiveModel = head.into();
+        head.name = Set(None);
+        head.commit = Set(Some("not-a-valid-hash".to_string()));
+        head.update(&db).await.unwrap();
+
+        let error = Head::current_commit_result_with_conn(&db)
+            .await
+            .expect_err("invalid detached HEAD hash should surface as corruption");
+        assert!(matches!(error, BranchStoreError::Corrupt { .. }));
+        assert!(
+            error
+                .to_string()
+                .contains("invalid detached HEAD commit hash"),
+            "unexpected error: {error}"
+        );
     }
 }

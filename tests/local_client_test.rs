@@ -31,7 +31,7 @@ async fn discovery_reference_restores_current_dir_after_error() {
             .unwrap();
     }
 
-    env::set_current_dir(caller_dir.path()).unwrap();
+    let _caller_guard = ChangeDirGuard::new(caller_dir.path());
     let original_dir = env::current_dir().unwrap();
 
     let client = LocalClient::from_path(repo_dir.path()).unwrap();

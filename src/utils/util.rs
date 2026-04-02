@@ -500,6 +500,31 @@ impl CommitBaseError {
     }
 }
 
+async fn resolve_branch_commit_typed(
+    branch_name: &str,
+    remote: Option<&str>,
+    display_name: &str,
+) -> Result<Option<ObjectHash>, CommitBaseError> {
+    let context = match remote {
+        Some(remote_name) => {
+            format!("failed to resolve branch '{display_name}' on remote '{remote_name}'")
+        }
+        None => format!("failed to resolve branch '{display_name}'"),
+    };
+
+    match Branch::find_branch_result(branch_name, remote).await {
+        Ok(Some(branch)) => Ok(Some(branch.commit)),
+        Ok(None) => match Branch::exists_result(branch_name, remote).await {
+            Ok(true) => Err(CommitBaseError::InvalidReference(format!(
+                "branch '{display_name}' does not point to a commit"
+            ))),
+            Ok(false) => Ok(None),
+            Err(error) => Err(CommitBaseError::from_branch_store_error(context, error)),
+        },
+        Err(error) => Err(CommitBaseError::from_branch_store_error(context, error)),
+    }
+}
+
 pub async fn get_commit_base_typed(name: &str) -> Result<ObjectHash, CommitBaseError> {
     // 1. Check for HEAD
     if name.eq_ignore_ascii_case("HEAD") {
@@ -514,15 +539,8 @@ pub async fn get_commit_base_typed(name: &str) -> Result<ObjectHash, CommitBaseE
     }
 
     // 2. Check for a local branch
-    match Branch::find_branch_result(name, None).await {
-        Ok(Some(branch)) => return Ok(branch.commit),
-        Ok(None) => {}
-        Err(error) => {
-            return Err(CommitBaseError::from_branch_store_error(
-                format!("failed to resolve branch '{name}'"),
-                error,
-            ));
-        }
+    if let Some(commit) = resolve_branch_commit_typed(name, None, name).await? {
+        return Ok(commit);
     }
 
     // Support both short remote branches (`main` with `remote = origin`) and
@@ -532,34 +550,18 @@ pub async fn get_commit_base_typed(name: &str) -> Result<ObjectHash, CommitBaseE
         && !remote.is_empty()
         && !branch_name.is_empty()
     {
-        let remote_lookup_context =
-            format!("failed to resolve remote branch '{remote}/{branch_name}'");
-
-        match Branch::find_branch_result(
+        if let Some(commit) = resolve_branch_commit_typed(
             &format!("refs/remotes/{remote}/{branch_name}"),
             Some(remote),
+            name,
         )
-        .await
+        .await?
         {
-            Ok(Some(branch)) => return Ok(branch.commit),
-            Ok(None) => {}
-            Err(error) => {
-                return Err(CommitBaseError::from_branch_store_error(
-                    remote_lookup_context.clone(),
-                    error,
-                ));
-            }
+            return Ok(commit);
         }
 
-        match Branch::find_branch_result(branch_name, Some(remote)).await {
-            Ok(Some(branch)) => return Ok(branch.commit),
-            Ok(None) => {}
-            Err(error) => {
-                return Err(CommitBaseError::from_branch_store_error(
-                    remote_lookup_context,
-                    error,
-                ));
-            }
+        if let Some(commit) = resolve_branch_commit_typed(branch_name, Some(remote), name).await? {
+            return Ok(commit);
         }
     }
 
@@ -784,11 +786,19 @@ pub fn get_min_unique_hash_length(commits: &[Commit]) -> usize {
 mod test {
     use std::{env, path::PathBuf};
 
+    use sea_orm::{ActiveModelTrait, Set};
     use serial_test::serial;
     use tempfile::tempdir;
 
     use super::*;
-    use crate::utils::test;
+    use crate::{
+        command::{
+            add::{self, AddArgs},
+            commit::{self, CommitArgs},
+        },
+        internal::{db::get_db_conn_instance, head::Head, model::reference},
+        utils::test,
+    };
 
     #[test]
     ///Test get current directory success.
@@ -838,6 +848,62 @@ mod test {
     fn test_to_relative() {
         assert_eq!(to_relative("src/main.rs", "src"), PathBuf::from("main.rs"));
         assert_eq!(to_relative(".", "src"), PathBuf::from(".."));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn get_commit_base_typed_rejects_unborn_branch_before_hash_fallback() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+
+        test::ensure_file("tracked.txt", Some("tracked\n"));
+        add::execute(AddArgs {
+            pathspec: vec!["tracked.txt".into()],
+            all: false,
+            update: false,
+            refresh: false,
+            verbose: false,
+            force: false,
+            dry_run: false,
+            ignore_errors: false,
+        })
+        .await;
+        commit::execute(CommitArgs {
+            message: Some("base".into()),
+            disable_pre: true,
+            no_verify: true,
+            ..Default::default()
+        })
+        .await;
+
+        let head_commit = Head::current_commit()
+            .await
+            .expect("expected committed HEAD");
+        let branch_name = head_commit.to_string()[..7].to_string();
+
+        let db = get_db_conn_instance().await;
+        reference::ActiveModel {
+            name: Set(Some(branch_name.clone())),
+            kind: Set(reference::ConfigKind::Branch),
+            commit: Set(None),
+            remote: Set(None),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("failed to insert unborn branch");
+
+        let error = get_commit_base_typed(&branch_name)
+            .await
+            .expect_err("unborn branch must not fall back to hash prefix resolution");
+        assert!(matches!(error, CommitBaseError::InvalidReference(_)));
+        assert!(
+            error.to_string().contains(&format!(
+                "branch '{branch_name}' does not point to a commit"
+            )),
+            "unexpected error: {error}"
+        );
     }
 
     #[tokio::test]
