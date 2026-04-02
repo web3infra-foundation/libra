@@ -1,5 +1,7 @@
 //! Common helpers for formatting commit messages, parsing embedded GPG signatures, and validating Conventional Commit styles.
 
+use std::sync::LazyLock;
+
 use regex::Regex;
 
 /// Format commit message with GPG signature<br>
@@ -21,10 +23,17 @@ pub fn format_commit_msg(msg: &str, gpg_sig: Option<&str>) -> String {
 pub fn parse_commit_msg(msg_gpg: &str) -> (&str, Option<&str>) {
     const SIG_PATTERN: &str = r"^gpgsig (-----BEGIN (?:PGP|SSH) SIGNATURE-----[\s\S]*?-----END (?:PGP|SSH) SIGNATURE-----)";
     const GPGSIG_PREFIX_LEN: usize = 7; // length of "gpgsig "
+    static SIG_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+        // INVARIANT: SIG_PATTERN is a validated regex literal checked in tests.
+        Regex::new(SIG_PATTERN).expect("SIG_PATTERN must compile")
+    });
 
-    let sig_regex = Regex::new(SIG_PATTERN).unwrap();
-    if let Some(caps) = sig_regex.captures(msg_gpg) {
-        let signature = caps.get(1).unwrap().as_str();
+    if let Some(caps) = SIG_REGEX.captures(msg_gpg) {
+        // INVARIANT: SIG_PATTERN defines capture group 1 for the full signature body.
+        let signature = caps
+            .get(1)
+            .expect("SIG_PATTERN must capture the signature body")
+            .as_str();
 
         let msg = &msg_gpg[signature.len() + GPGSIG_PREFIX_LEN..].trim_start();
         (msg, Some(signature))
@@ -46,7 +55,8 @@ pub fn check_conventional_commits_message(msg: &str) -> bool {
         r"^(?P<type>[\p{{L}}\p{{N}}_-]+)(?:\((?P<scope>[{unicode_pattern}]+)\))?!?: (?P<description>[{unicode_pattern}]+)$",
     );
 
-    let re = Regex::new(&regex_str).unwrap();
+    // INVARIANT: regex_str is assembled from static, validated fragments.
+    let re = Regex::new(&regex_str).expect("conventional commit regex must compile");
     const RECOMMENDED_TYPES: [&str; 8] = [
         "build", "chore", "ci", "docs", "feat", "fix", "perf", "refactor",
     ];
@@ -60,7 +70,9 @@ pub fn check_conventional_commits_message(msg: &str) -> bool {
             return false;
         }
 
-        let commit_type = commit_type.unwrap();
+        let Some(commit_type) = commit_type else {
+            return false;
+        };
         let _is_recommended = RECOMMENDED_TYPES.contains(&commit_type.to_lowercase().as_str());
 
         // println!("{}({}): {}\n{}", commit_type, scope.unwrap_or("None".to_string()), description.unwrap(), body_footer);

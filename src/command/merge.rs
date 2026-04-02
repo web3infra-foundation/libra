@@ -39,6 +39,8 @@ pub struct MergeArgs {
 #[derive(Debug, Clone)]
 pub(crate) struct PullMergeSummary {
     pub strategy: String,
+    /// The previous HEAD commit before merge (None for root commits).
+    pub old_commit: Option<String>,
     pub commit: Option<String>,
     pub files_changed: usize,
     pub up_to_date: bool,
@@ -137,6 +139,7 @@ pub(crate) async fn run_merge_for_pull(
         apply_fast_forward_merge(target_commit.clone(), upstream, output).await?;
         return Ok(PullMergeSummary {
             strategy: "fast-forward".to_string(),
+            old_commit: None,
             commit: Some(target_commit.id.to_string()),
             files_changed,
             up_to_date: false,
@@ -162,6 +165,7 @@ pub(crate) async fn run_merge_for_pull(
     if lca.id == target_commit.id {
         return Ok(PullMergeSummary {
             strategy: "already-up-to-date".to_string(),
+            old_commit: Some(current_commit_id.to_string()),
             commit: None,
             files_changed: 0,
             up_to_date: true,
@@ -173,6 +177,7 @@ pub(crate) async fn run_merge_for_pull(
         apply_fast_forward_merge(target_commit.clone(), upstream, output).await?;
         return Ok(PullMergeSummary {
             strategy: "fast-forward".to_string(),
+            old_commit: Some(current_commit_id.to_string()),
             commit: Some(target_commit.id.to_string()),
             files_changed,
             up_to_date: false,

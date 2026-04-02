@@ -20,16 +20,16 @@ Fast-forward:
 
 ```text
 From git@github.com:user/repo.git
-   abc1234..def5678  main -> origin/main
+   abc1234..def5678  origin/main
 Updating abc1234..def5678
 Fast-forward
- src/lib.rs | 5 +++++
  3 files changed
 ```
 
 Already up-to-date:
 
 ```text
+From git@github.com:user/repo.git
 Already up to date.
 ```
 
@@ -65,6 +65,7 @@ Example (fast-forward):
       "objects_fetched": 12
     },
     "merge": {
+      "old_commit": "abc1234...",
       "strategy": "fast-forward",
       "commit": "def5678...",
       "files_changed": 3,
@@ -90,6 +91,7 @@ Already up-to-date:
       "objects_fetched": 0
     },
     "merge": {
+      "old_commit": "def5678...",
       "strategy": "already-up-to-date",
       "commit": null,
       "files_changed": 0,
@@ -104,6 +106,7 @@ Already up-to-date:
 - `branch` is the current local branch being updated
 - `upstream` is the remote tracking branch name (e.g. `"origin/main"`)
 - `fetch.refs_updated` lists remote refs that changed during fetch
+- `merge.old_commit` is the pre-merge `HEAD`; it is `null` on the first pull into an empty local branch
 - `merge.strategy` is `"fast-forward"` or `"already-up-to-date"`
 - `merge.commit` is the new HEAD commit after merge; `null` when up-to-date
 - `merge.files_changed` is the number of files modified by the merge
@@ -123,8 +126,10 @@ sub-errors are transparently forwarded with a `phase` detail for diagnostics.
 | Fetch: protocol error | `LBR-NET-002` | 128 | "the remote did not respond correctly" |
 | Fetch: timeout | `LBR-NET-001` | 128 | "check network connectivity and retry" |
 | Manual merge required | `LBR-CONFLICT-002` | 128 | "automatic merge is not possible; resolve conflicts manually" |
-| Merge: conflict | `LBR-CONFLICT-001` | 128 | "resolve conflicts and commit" |
-| Merge: internal error | `LBR-INTERNAL-001` | 128 | Issues URL |
+| Merge: invalid target | `LBR-CLI-003` | 129 | "verify the upstream ref and try again" |
+| Merge: repository state error | `LBR-REPO-003` | 128 | "the repository state blocks an automatic pull merge" |
+| Merge: repository corruption | `LBR-REPO-002` | 128 | "inspect repository state and object integrity" |
+| Merge: write failure | `LBR-IO-002` | 128 | "check filesystem permissions and retry" |
 
 ### Phase Detail
 
