@@ -61,23 +61,10 @@ pub fn evaluate_tool_call(
     }
 
     if tool_name == "shell" {
-        if shell_requests_escalation(arguments)
-            && spec.constraints.security.network_policy == NetworkPolicy::Deny
-        {
+        if shell_requests_escalation(arguments) {
             return Err(PolicyViolation {
                 code: "sandbox-escalation-deny".into(),
-                message:
-                    "shell escalation is blocked while constraints.security.networkPolicy=deny"
-                        .into(),
-                tool_name: Some(tool_name.to_string()),
-                path: None,
-            });
-        }
-
-        if shell_requests_escalation(arguments) && !shell_has_justification(arguments) {
-            return Err(PolicyViolation {
-                code: "sandbox-escalation-justification-required".into(),
-                message: "shell escalation requires a non-empty justification".into(),
+                message: "shell escalation is not allowed for orchestrator-managed tasks".into(),
                 tool_name: Some(tool_name.to_string()),
                 path: None,
             });
@@ -425,14 +412,6 @@ fn shell_requests_escalation(arguments: &Value) -> bool {
         .unwrap_or(false)
 }
 
-fn shell_has_justification(arguments: &Value) -> bool {
-    arguments
-        .get("justification")
-        .and_then(Value::as_str)
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
-}
-
 fn patch_metadata_looks_unsafe(metadata: &Value) -> bool {
     let diffs = metadata
         .get("diffs")
@@ -717,7 +696,7 @@ mod tests {
     }
 
     #[test]
-    fn test_shell_escalation_requires_justification_when_network_allowed() {
+    fn test_shell_escalation_is_rejected_even_without_justification() {
         let mut intent = spec();
         intent.constraints.security.network_policy = NetworkPolicy::Allow;
         let res = evaluate_tool_call(
@@ -732,12 +711,12 @@ mod tests {
         );
         assert!(matches!(
             res,
-            Err(PolicyViolation { code, .. }) if code == "sandbox-escalation-justification-required"
+            Err(PolicyViolation { code, .. }) if code == "sandbox-escalation-deny"
         ));
     }
 
     #[test]
-    fn test_shell_escalation_allowed_with_justification_when_network_allowed() {
+    fn test_shell_escalation_is_rejected_even_with_justification() {
         let mut intent = spec();
         intent.constraints.security.network_policy = NetworkPolicy::Allow;
         let res = evaluate_tool_call(
@@ -751,7 +730,10 @@ mod tests {
             }),
             Path::new("/tmp/work"),
         );
-        assert!(res.is_ok());
+        assert!(matches!(
+            res,
+            Err(PolicyViolation { code, .. }) if code == "sandbox-escalation-deny"
+        ));
     }
 
     #[test]
