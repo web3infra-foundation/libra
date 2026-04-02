@@ -166,7 +166,7 @@ pub async fn execute_task<M: CompletionModel>(
     config: &ExecutorConfig,
 ) -> TaskResult {
     if task.kind == TaskKind::Gate {
-        return execute_gate_task(
+        return execute_gate_task_in_task_worktree(
             task,
             &config.working_dir,
             &config.spec,
@@ -384,6 +384,56 @@ async fn execute_gate_task(
         policy_violations: Vec::new(),
         review: None,
     }
+}
+
+async fn execute_gate_task_in_task_worktree(
+    task: &TaskSpec,
+    working_dir: &Path,
+    spec: &IntentSpec,
+    inherited_runtime: Option<&ToolRuntimeContext>,
+    observer: Option<&Arc<dyn OrchestratorObserver>>,
+) -> TaskResult {
+    let prepared = match tokio::task::spawn_blocking({
+        let working_dir = working_dir.to_path_buf();
+        let task_id = task.id();
+        move || prepare_task_worktree(&working_dir, task_id)
+    })
+    .await
+    {
+        Ok(Ok(worktree)) => worktree,
+        Ok(Err(err)) => return task_workspace_failure(task, err),
+        Err(err) => {
+            return task_workspace_failure(
+                task,
+                io::Error::other(format!(
+                    "failed to prepare isolated worktree for verification: {err}"
+                )),
+            );
+        }
+    };
+
+    if let Some(observer) = observer {
+        observer.on_task_workspace_ready(task, &prepared.root, true);
+    }
+
+    let result = execute_gate_task(task, &prepared.root, spec, inherited_runtime, observer).await;
+
+    let cleanup_result = tokio::task::spawn_blocking({
+        let task_worktree_dir = prepared.root.clone();
+        move || cleanup_task_worktree(&task_worktree_dir)
+    })
+    .await;
+    match cleanup_result {
+        Err(err) => tracing::warn!("gate worktree cleanup worker failed: {}", err),
+        Ok(Err(err)) => tracing::warn!(
+            path = %prepared.root.display(),
+            "failed to clean up gate worktree: {}",
+            err
+        ),
+        Ok(Ok(())) => {}
+    }
+
+    result
 }
 
 async fn run_reviewer_pass<M: CompletionModel>(
@@ -756,7 +806,10 @@ impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
         }
 
         let use_task_worktree = should_use_task_worktree(&self.task, self.worktree_parallelism);
-        if !use_task_worktree && let Some(observer) = &self.config.observer {
+        if !use_task_worktree
+            && self.task.kind != TaskKind::Gate
+            && let Some(observer) = &self.config.observer
+        {
             observer.on_task_workspace_ready(&self.task, &self.config.working_dir, false);
         }
 
@@ -1947,6 +2000,51 @@ mod tests {
 
         assert_eq!(result.status, TaskNodeStatus::Completed);
         assert!(result.gate_report.unwrap().all_required_passed);
+    }
+
+    #[tokio::test]
+    async fn execute_task_runs_gate_checks_in_isolated_worktree() {
+        let repo = tempfile::tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        std::fs::write(repo.path().join("tracked.txt"), "base\n").unwrap();
+
+        let task = TaskSpec {
+            kind: TaskKind::Gate,
+            gate_stage: Some(super::super::types::GateStage::Fast),
+            checks: vec![Check {
+                id: "scratch".into(),
+                kind: CheckKind::Command,
+                command: Some("printf 'scratch\\n' > gate-output.txt".into()),
+                timeout_seconds: Some(10),
+                expected_exit_code: Some(0),
+                required: true,
+                artifacts_produced: vec![],
+            }],
+            ..implementation_task()
+        };
+        let config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig::default(),
+            max_retries: 0,
+            backoff_seconds: 0,
+            working_dir: repo.path().to_path_buf(),
+            spec: spec(),
+            reviewer_preamble: None,
+            dagrs_resume_checkpoint_id: None,
+            observer: None,
+        };
+        let registry = ToolRegistry::new();
+        let model = MockModel {
+            final_text: "unused".into(),
+        };
+
+        let result = execute_task(&task, &model, &registry, &config).await;
+
+        assert_eq!(result.status, TaskNodeStatus::Completed);
+        assert!(!repo.path().join("gate-output.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("tracked.txt")).unwrap(),
+            "base\n"
+        );
     }
 
     #[tokio::test]
