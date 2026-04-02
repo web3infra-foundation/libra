@@ -31,7 +31,6 @@
 //! | `ollama`    | Ollama (local)   | None                     | `http://localhost:11434/v1` |
 
 pub mod anthropic;
-pub mod claude_sdk;
 pub mod deepseek;
 pub mod gemini;
 pub mod ollama;

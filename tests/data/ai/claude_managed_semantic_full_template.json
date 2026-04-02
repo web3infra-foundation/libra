@@ -342,7 +342,7 @@
       ],
       "inScope": [
         "src/command/claude_sdk.rs",
-        "src/internal/ai/providers/claude_sdk/managed.rs"
+        "src/internal/ai/claudecode/managed_artifacts.rs"
       ],
       "outOfScope": [
         "scheduler objects"

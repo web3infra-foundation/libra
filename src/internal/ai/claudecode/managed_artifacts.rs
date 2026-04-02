@@ -1,4 +1,6 @@
-//! Claude Agent SDK managed-mode artifact parsing and bridge conversion.
+//! ClaudeCode-managed artifact parsing, normalization, and persistence.
+
+#![allow(dead_code)]
 
 use std::{
     collections::{HashMap, HashSet},
@@ -22,7 +24,7 @@ use crate::{
                 runtime::{AI_SESSION_SCHEMA, AI_SESSION_TYPE, build_ai_session_id},
             },
             intentspec::{
-                DraftAcceptance, DraftCheck, DraftIntent, DraftRisk, IntentDraft, RiskLevel,
+                DraftAcceptance, DraftIntent, DraftRisk, IntentDraft,
                 types::{ChangeType, Objective, ObjectiveKind, TouchHints},
             },
             session::SessionState,
@@ -47,6 +49,8 @@ pub struct ClaudeManagedArtifact {
     pub cwd: String,
     #[serde(default)]
     pub prompt: Option<String>,
+    #[serde(rename = "requestContext", default)]
+    pub request_context: Option<ClaudeManagedRequestContext>,
     #[serde(rename = "helperTimedOut", default)]
     pub helper_timed_out: bool,
     #[serde(rename = "helperError", default)]
@@ -100,6 +104,28 @@ pub struct ClaudeManagedResultMessage {
     pub fast_mode_state: Option<Value>,
     #[serde(default)]
     pub uuid: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ClaudeManagedRequestContext {
+    #[serde(rename = "interactiveApprovals", default)]
+    pub interactive_approvals: bool,
+    #[serde(rename = "enableFileCheckpointing", default)]
+    pub enable_file_checkpointing: bool,
+    #[serde(rename = "continue", default)]
+    pub continue_session: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume: Option<String>,
+    #[serde(rename = "forkSession", default)]
+    pub fork_session: bool,
+    #[serde(rename = "sessionId", default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(
+        rename = "resumeSessionAt",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub resume_session_at: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -325,6 +351,14 @@ pub struct ManagedSemanticRuntimeEvent {
 pub struct ManagedDraftExtractionReport {
     pub status: String,
     pub source: String,
+    #[serde(
+        rename = "planningSummary",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub planning_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plan: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -376,24 +410,63 @@ struct StructuredIntentExtractionOutput {
     in_scope: Vec<String>,
     #[serde(rename = "outOfScope", default)]
     out_of_scope: Vec<String>,
-    #[serde(rename = "touchHints", default)]
-    touch_hints: Option<TouchHints>,
+    #[serde(rename = "planningSummary", default)]
+    planning_summary: Option<String>,
+    #[serde(default)]
+    plan: Vec<StructuredPlanStep>,
     #[serde(rename = "successCriteria")]
     success_criteria: Vec<String>,
-    #[serde(rename = "fastChecks", default)]
-    fast_checks: Vec<DraftCheck>,
-    #[serde(rename = "integrationChecks", default)]
-    integration_checks: Vec<DraftCheck>,
-    #[serde(rename = "securityChecks", default)]
-    security_checks: Vec<DraftCheck>,
-    #[serde(rename = "releaseChecks", default)]
-    release_checks: Vec<DraftCheck>,
     #[serde(rename = "riskRationale")]
     risk_rationale: String,
-    #[serde(rename = "riskFactors", default)]
-    risk_factors: Vec<String>,
-    #[serde(rename = "riskLevel", default)]
-    risk_level: Option<RiskLevel>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum StructuredPlanStep {
+    Description(String),
+    Detailed(StructuredPlanStepEntry),
+}
+
+impl StructuredPlanStep {
+    pub(crate) fn description(&self) -> Option<&str> {
+        match self {
+            StructuredPlanStep::Description(text) => Some(text.as_str()),
+            StructuredPlanStep::Detailed(entry) => Some(entry.description.as_str()),
+        }
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    }
+}
+
+fn normalize_structured_plan_steps(plan: Vec<StructuredPlanStep>) -> Vec<String> {
+    plan.into_iter()
+        .filter_map(|step| step.description().map(ToString::to_string))
+        .collect()
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct StructuredPlanStepEntry {
+    pub(crate) description: String,
+}
+
+fn extract_structured_plan_descriptions_from_output(
+    structured_output: &Value,
+) -> Option<Vec<String>> {
+    structured_output
+        .get("plan")
+        .cloned()
+        .and_then(|plan| serde_json::from_value::<Vec<StructuredPlanStep>>(plan).ok())
+        .map(normalize_structured_plan_steps)
+        .filter(|steps| !steps.is_empty())
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn extract_structured_plan_descriptions(
+    result_message: Option<&ClaudeManagedResultMessage>,
+) -> Option<Vec<String>> {
+    result_message
+        .and_then(|message| message.structured_output.as_ref())
+        .and_then(extract_structured_plan_descriptions_from_output)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -451,11 +524,14 @@ struct ToolHookPair {
     transcript_path: Option<String>,
     saw_pre: bool,
     saw_post: bool,
+    saw_post_failure: bool,
 }
 
 #[derive(Debug, Clone)]
 struct IntentExtractionOutcome {
     extraction: Option<IntentDraft>,
+    planning_summary: Option<String>,
+    plan: Vec<String>,
     error: Option<String>,
 }
 
@@ -465,6 +541,14 @@ pub struct PersistedManagedIntentExtraction {
     #[serde(rename = "ai_session_id")]
     pub ai_session_id: String,
     pub source: String,
+    #[serde(
+        rename = "planningSummary",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub planning_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plan: Vec<String>,
     pub extraction: IntentDraft,
 }
 
@@ -472,8 +556,16 @@ pub fn ingest_managed_artifact(
     artifact: &ClaudeManagedArtifact,
 ) -> Result<ManagedArtifactIngestion> {
     let mut session = build_bridge_session(artifact)?;
-    let intent_extraction =
+    let tool_invocations = merge_tool_hook_events(&artifact.hook_events)
+        .into_iter()
+        .map(ManagedToolInvocation::from)
+        .collect::<Vec<_>>();
+    let touch_hints = collect_touch_hints(&tool_invocations, &session.working_dir);
+    let mut intent_extraction =
         extract_intent_extraction_from_result(artifact.result_message.as_ref())?;
+    if let Some(extraction) = intent_extraction.as_mut() {
+        apply_derived_intent_fields(extraction, &touch_hints);
+    }
     if intent_extraction.is_some() {
         session.metadata.insert(
             "intent_extraction_source".to_string(),
@@ -491,21 +583,31 @@ pub fn build_managed_audit_bundle(artifact: &ClaudeManagedArtifact) -> Result<Ma
     let system_init = extract_system_init(artifact)
         .context("managed artifact does not contain a valid system init message")?;
     let session = build_bridge_session(artifact)?;
-    let extraction_outcome = extract_intent_extraction_outcome(artifact.result_message.as_ref());
+    let mut extraction_outcome =
+        extract_intent_extraction_outcome(artifact.result_message.as_ref());
     let tool_invocations = merge_tool_hook_events(&artifact.hook_events)
         .into_iter()
         .map(ManagedToolInvocation::from)
         .collect::<Vec<_>>();
     let object_candidates = build_object_candidates(&session, &system_init, artifact)?;
     let touch_hints = collect_touch_hints(&tool_invocations, &system_init.cwd);
+    if let Some(extraction) = extraction_outcome.extraction.as_mut() {
+        apply_derived_intent_fields(extraction, &touch_hints);
+    }
     let ai_session = build_managed_ai_session_payload(&session);
-    let intent_extraction_artifact = extraction_outcome
-        .extraction
-        .clone()
-        .map(|extraction| PersistedManagedIntentExtraction::new(session.id.clone(), extraction));
+    let intent_extraction_artifact = extraction_outcome.extraction.clone().map(|extraction| {
+        PersistedManagedIntentExtraction::new(
+            session.id.clone(),
+            extraction,
+            extraction_outcome.planning_summary.clone(),
+            extraction_outcome.plan.clone(),
+        )
+    });
     let intent_extraction = ManagedDraftExtractionReport {
         status: extraction_outcome.status_label().to_string(),
         source: "result.structured_output".to_string(),
+        planning_summary: extraction_outcome.planning_summary.clone(),
+        plan: extraction_outcome.plan.clone(),
         error: extraction_outcome.error.clone(),
     };
     let field_provenance = build_field_provenance(
@@ -572,25 +674,21 @@ pub async fn persist_managed_artifact(
         .context("failed to serialize ai_session payload")?;
     let blob_hash = write_git_object(storage_path, "blob", &blob_data)
         .context("failed to write ai_session git blob")?;
-    let existing_object_hash = history_manager
+    let already_persisted = history_manager
         .get_object_hash(AI_SESSION_TYPE, &ai_session_id)
-        .await?;
-
-    let (ai_session_object_hash, already_persisted) = if let Some(existing) = existing_object_hash {
-        (existing.to_string(), true)
-    } else {
-        history_manager
-            .append(AI_SESSION_TYPE, &ai_session_id, blob_hash)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to append ai_session '{}' to '{}'",
-                    ai_session_id,
-                    history_manager.ref_name()
-                )
-            })?;
-        (blob_hash.to_string(), false)
-    };
+        .await?
+        .is_some();
+    history_manager
+        .append(AI_SESSION_TYPE, &ai_session_id, blob_hash)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to append ai_session '{}' to '{}'",
+                ai_session_id,
+                history_manager.ref_name()
+            )
+        })?;
+    let ai_session_object_hash = blob_hash.to_string();
 
     let raw_artifact_path = write_pretty_json_artifact(
         &storage_path.join(MANAGED_ARTIFACTS_DIR),
@@ -880,8 +978,9 @@ fn merge_tool_hook_events(hook_events: &[ClaudeManagedHookEvent]) -> Vec<ToolHoo
                     .and_then(Value::as_str)
                     .map(ToString::to_string);
             }
-            "PostToolUse" => {
+            "PostToolUse" | "PostToolUseFailure" => {
                 pair.saw_post = true;
+                pair.saw_post_failure = event.hook == "PostToolUseFailure";
                 if pair.tool_name.is_none() {
                     pair.tool_name = event
                         .input
@@ -1160,10 +1259,7 @@ fn build_decision_runtime_events(
     let mut events = Vec::new();
 
     for (index, hook_event) in artifact.hook_events.iter().enumerate() {
-        if !matches!(
-            hook_event.hook.as_str(),
-            "PermissionRequest" | "Elicitation" | "ElicitationResult" | "CanUseTool"
-        ) {
+        if !is_decision_runtime_hook(hook_event.hook.as_str()) {
             continue;
         }
 
@@ -1172,6 +1268,9 @@ fn build_decision_runtime_events(
                 .input
                 .get("tool_use_id")
                 .or_else(|| hook_event.input.get("elicitation_id"))
+                .or_else(|| hook_event.input.get("mode_change_id"))
+                .or_else(|| hook_event.input.get("permission_request_id"))
+                .or_else(|| hook_event.input.get("uuid"))
                 .and_then(Value::as_str)
                 .map(ToString::to_string)
                 .unwrap_or_else(|| format!("{run_id}::{}::{index}", hook_event.hook)),
@@ -1181,7 +1280,32 @@ fn build_decision_runtime_events(
             kind: hook_event.hook.to_string(),
             source: "hook".to_string(),
             at: observed_at.to_string(),
-            payload: hook_event.input.clone(),
+            payload: normalize_decision_runtime_payload(
+                hook_event.hook.as_str(),
+                &hook_event.input,
+            ),
+        });
+    }
+
+    for (index, message) in artifact.messages.iter().enumerate() {
+        let Some(kind) = decision_runtime_kind_from_message(message) else {
+            continue;
+        };
+        events.push(ManagedSemanticRuntimeEvent {
+            id: message
+                .get("uuid")
+                .or_else(|| message.get("mode_change_id"))
+                .or_else(|| message.get("tool_use_id"))
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+                .unwrap_or_else(|| format!("{run_id}::{kind}::{index}")),
+            run_id: run_id.to_string(),
+            thread_id: thread_id.to_string(),
+            semantic_object: "Decision".to_string(),
+            kind: kind.to_string(),
+            source: "stream".to_string(),
+            at: observed_at.to_string(),
+            payload: normalize_decision_runtime_payload(kind, message),
         });
     }
 
@@ -1206,6 +1330,148 @@ fn build_decision_runtime_events(
     }
 
     events
+}
+
+fn is_decision_runtime_hook(hook_name: &str) -> bool {
+    matches!(
+        hook_name,
+        "PermissionRequest"
+            | "Elicitation"
+            | "ElicitationResult"
+            | "CanUseTool"
+            | "PermissionModeChanged"
+            | "PermissionModeChange"
+    )
+}
+
+fn decision_runtime_kind_from_message(message: &Value) -> Option<&'static str> {
+    let message_type = message.get("type").and_then(Value::as_str)?;
+    let subtype = message.get("subtype").and_then(Value::as_str);
+    match (message_type, subtype) {
+        ("system", Some("permission_mode_changed" | "permission_mode_change")) => {
+            Some("PermissionModeChanged")
+        }
+        ("permission_mode_changed", _) | ("permission_mode_change", _) => {
+            Some("PermissionModeChanged")
+        }
+        _ => None,
+    }
+}
+
+fn normalize_decision_runtime_payload(kind: &str, payload: &Value) -> Value {
+    let mut normalized = payload.clone();
+    let Some(object) = normalized.as_object_mut() else {
+        return normalized;
+    };
+
+    if let Some(suggested_mode) = extract_suggested_mode(payload) {
+        object
+            .entry("suggested_mode".to_string())
+            .or_insert_with(|| json!(suggested_mode));
+    }
+    let suggestion_destinations = extract_suggestion_destinations(payload);
+    if !suggestion_destinations.is_empty() {
+        object
+            .entry("suggestion_destinations".to_string())
+            .or_insert_with(|| json!(suggestion_destinations));
+    }
+    let suggestion_count = extract_permission_suggestion_count(payload);
+    if suggestion_count > 0 {
+        object
+            .entry("permission_suggestion_count".to_string())
+            .or_insert_with(|| json!(suggestion_count));
+    }
+    let answer_keys = extract_answer_keys(payload);
+    if !answer_keys.is_empty() {
+        object
+            .entry("answer_keys".to_string())
+            .or_insert_with(|| json!(answer_keys));
+    }
+    if kind == "PermissionModeChanged" {
+        if let Some(previous_mode) = extract_previous_permission_mode(payload) {
+            object
+                .entry("previous_permission_mode".to_string())
+                .or_insert_with(|| json!(previous_mode));
+        }
+        if let Some(current_mode) = extract_current_permission_mode(payload) {
+            object
+                .entry("current_permission_mode".to_string())
+                .or_insert_with(|| json!(current_mode));
+        }
+    }
+
+    normalized
+}
+
+fn extract_suggested_mode(payload: &Value) -> Option<String> {
+    payload
+        .get("suggested_mode")
+        .or_else(|| payload.get("requested_mode"))
+        .or_else(|| payload.get("mode"))
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .or_else(|| {
+            payload
+                .get("permission_suggestions")
+                .or_else(|| payload.get("suggestions"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .find_map(|suggestion| {
+                    (suggestion.get("type").and_then(Value::as_str) == Some("setMode"))
+                        .then(|| suggestion.get("mode").and_then(Value::as_str))
+                        .flatten()
+                        .map(ToString::to_string)
+                })
+        })
+}
+
+fn extract_suggestion_destinations(payload: &Value) -> Vec<String> {
+    payload
+        .get("permission_suggestions")
+        .or_else(|| payload.get("suggestions"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|suggestion| suggestion.get("destination").and_then(Value::as_str))
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+}
+
+fn extract_permission_suggestion_count(payload: &Value) -> usize {
+    payload
+        .get("permission_suggestions")
+        .or_else(|| payload.get("suggestions"))
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0)
+}
+
+fn extract_answer_keys(payload: &Value) -> Vec<String> {
+    let mut keys = payload
+        .get("answers")
+        .and_then(Value::as_object)
+        .map(|answers| answers.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    keys.sort();
+    keys
+}
+
+fn extract_previous_permission_mode(payload: &Value) -> Option<String> {
+    payload
+        .get("previous_permission_mode")
+        .or_else(|| payload.get("previousMode"))
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+}
+
+fn extract_current_permission_mode(payload: &Value) -> Option<String> {
+    payload
+        .get("current_permission_mode")
+        .or_else(|| payload.get("currentMode"))
+        .or_else(|| payload.get("mode"))
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
 }
 
 fn build_context_runtime_events(
@@ -1586,12 +1852,29 @@ fn build_provider_runtime_metadata(
     let run_id = format!("{thread_id}::run");
     let observed_at = session.updated_at.to_rfc3339();
 
-    json!({
+    let mut metadata = json!({
         "providerInit": build_provider_init_snapshot(&thread_id, &run_id, &observed_at, system_init),
         "taskRuntimeEvents": build_task_runtime_events(&thread_id, &run_id, &observed_at, artifact),
         "decisionRuntimeEvents": build_decision_runtime_events(&thread_id, &run_id, &observed_at, artifact),
         "contextRuntimeEvents": build_context_runtime_events(&thread_id, &run_id, &observed_at, artifact),
-    })
+    });
+    if let Some(session_control) = &artifact.request_context
+        && let Some(object) = metadata.as_object_mut()
+    {
+        object.insert(
+            "sessionControl".to_string(),
+            json!({
+                "interactiveApprovals": session_control.interactive_approvals,
+                "enableFileCheckpointing": session_control.enable_file_checkpointing,
+                "continue": session_control.continue_session,
+                "resume": session_control.resume.clone(),
+                "forkSession": session_control.fork_session,
+                "sessionId": session_control.session_id.clone(),
+                "resumeSessionAt": session_control.resume_session_at.clone(),
+            }),
+        );
+    }
+    metadata
 }
 
 fn extract_intent_extraction_outcome(
@@ -1600,53 +1883,95 @@ fn extract_intent_extraction_outcome(
     let Some(result_message) = result_message else {
         return IntentExtractionOutcome {
             extraction: None,
+            planning_summary: None,
+            plan: Vec::new(),
             error: None,
         };
     };
     let Some(structured_output) = result_message.structured_output.clone() else {
         return IntentExtractionOutcome {
             extraction: None,
+            planning_summary: None,
+            plan: Vec::new(),
             error: None,
         };
     };
 
+    let extracted_plan =
+        extract_structured_plan_descriptions_from_output(&structured_output).unwrap_or_default();
+
     match serde_json::from_value::<StructuredIntentExtractionOutput>(structured_output) {
-        Ok(output) => IntentExtractionOutcome {
-            extraction: Some(IntentDraft {
-                intent: DraftIntent {
-                    summary: output.summary,
-                    problem_statement: output.problem_statement,
-                    change_type: output.change_type,
-                    objectives: output
-                        .objectives
-                        .into_iter()
-                        .map(StructuredObjective::into_objective)
-                        .collect(),
-                    in_scope: output.in_scope,
-                    out_of_scope: output.out_of_scope,
-                    touch_hints: output.touch_hints,
-                },
-                acceptance: DraftAcceptance {
-                    success_criteria: output.success_criteria,
-                    fast_checks: output.fast_checks,
-                    integration_checks: output.integration_checks,
-                    security_checks: output.security_checks,
-                    release_checks: output.release_checks,
-                },
-                risk: DraftRisk {
-                    rationale: output.risk_rationale,
-                    factors: output.risk_factors,
-                    level: output.risk_level,
-                },
-            }),
-            error: None,
-        },
+        Ok(output) => {
+            let StructuredIntentExtractionOutput {
+                summary,
+                problem_statement,
+                change_type,
+                objectives,
+                in_scope,
+                out_of_scope,
+                planning_summary,
+                plan,
+                success_criteria,
+                risk_rationale,
+            } = output;
+            let normalized_plan = if extracted_plan.is_empty() {
+                normalize_structured_plan_steps(plan)
+            } else {
+                extracted_plan
+            };
+            IntentExtractionOutcome {
+                extraction: Some(IntentDraft {
+                    intent: DraftIntent {
+                        summary,
+                        problem_statement,
+                        change_type,
+                        objectives: objectives
+                            .into_iter()
+                            .map(StructuredObjective::into_objective)
+                            .collect(),
+                        in_scope,
+                        out_of_scope,
+                        touch_hints: None,
+                    },
+                    acceptance: DraftAcceptance {
+                        success_criteria,
+                        fast_checks: Vec::new(),
+                        integration_checks: Vec::new(),
+                        security_checks: Vec::new(),
+                        release_checks: Vec::new(),
+                    },
+                    risk: DraftRisk {
+                        rationale: risk_rationale,
+                        factors: Vec::new(),
+                        level: None,
+                    },
+                }),
+                planning_summary,
+                plan: normalized_plan,
+                error: None,
+            }
+        }
         Err(err) => IntentExtractionOutcome {
             extraction: None,
+            planning_summary: None,
+            plan: extracted_plan,
             error: Some(format!(
                 "managed result structured_output does not match the intent extraction bridge schema: {err}"
             )),
         },
+    }
+}
+
+fn apply_derived_intent_fields(extraction: &mut IntentDraft, touch_hints: &[String]) {
+    if !touch_hints.is_empty() {
+        extraction.intent.in_scope = touch_hints.to_vec();
+    }
+    if extraction.intent.touch_hints.is_none() && !touch_hints.is_empty() {
+        extraction.intent.touch_hints = Some(TouchHints {
+            files: touch_hints.to_vec(),
+            symbols: Vec::new(),
+            apis: Vec::new(),
+        });
     }
 }
 
@@ -1714,7 +2039,7 @@ fn build_managed_ai_session_payload(session: &SessionState) -> Value {
         "ingest_meta": {
             "source": MANAGED_SOURCE_NAME,
             "provider": "claude",
-            "ingested_at": Utc::now().to_rfc3339(),
+            "ingested_at": session.updated_at.to_rfc3339(),
         }
     })
 }
@@ -1929,6 +2254,19 @@ fn build_field_provenance(
             None,
         );
     }
+    if let Some(session_control) = &artifact.request_context {
+        push_field_provenance(
+            &mut entries,
+            "runtime.sessionControl",
+            "helper_request",
+            "$.requestContext",
+            serde_json::to_value(session_control)
+                .context("failed to serialize managed session control provenance")?,
+            Some(
+                "Libra-selected Claude SDK continuity settings; these guide provider session reuse but do not define formal thread, plan, or scheduler semantics.".to_string(),
+            ),
+        );
+    }
 
     if let Some(result) = &artifact.result_message {
         if let Some(usage) = &result.usage {
@@ -2007,24 +2345,42 @@ fn build_field_provenance(
                 .context("failed to serialize managed objectives provenance")?,
             None,
         );
-        push_field_provenance(
-            &mut entries,
-            "intent.inScope",
-            "result.structured_output",
-            "$.resultMessage.structured_output.inScope",
-            serde_json::to_value(&extraction.intent.in_scope)
-                .context("failed to serialize managed inScope provenance")?,
-            None,
-        );
-        push_field_provenance(
-            &mut entries,
-            "intent.outOfScope",
-            "result.structured_output",
-            "$.resultMessage.structured_output.outOfScope",
-            serde_json::to_value(&extraction.intent.out_of_scope)
-                .context("failed to serialize managed outOfScope provenance")?,
-            None,
-        );
+        if !touch_hints.is_empty() && !extraction.intent.in_scope.is_empty() {
+            push_field_provenance(
+                &mut entries,
+                "intent.inScope",
+                "hooks+tool_evidence",
+                "$.hookEvents[*].input.tool_input.file_path | $.hookEvents[*].input.tool_response.file.filePath",
+                serde_json::to_value(&extraction.intent.in_scope)
+                    .context("failed to serialize managed derived inScope provenance")?,
+                Some(
+                    "Derived from repo-internal tool/path evidence; Libra owns this field instead of trusting provider-authored structured output.".to_string(),
+                ),
+            );
+        } else if !extraction.intent.in_scope.is_empty() {
+            push_field_provenance(
+                &mut entries,
+                "intent.inScope",
+                "result.structured_output",
+                "$.resultMessage.structured_output.inScope",
+                serde_json::to_value(&extraction.intent.in_scope)
+                    .context("failed to serialize managed legacy inScope provenance")?,
+                Some(
+                    "Legacy compatibility fallback when no repo-internal tool/path evidence was available.".to_string(),
+                ),
+            );
+        }
+        if !extraction.intent.out_of_scope.is_empty() {
+            push_field_provenance(
+                &mut entries,
+                "intent.outOfScope",
+                "result.structured_output",
+                "$.resultMessage.structured_output.outOfScope",
+                serde_json::to_value(&extraction.intent.out_of_scope)
+                    .context("failed to serialize managed outOfScope provenance")?,
+                None,
+            );
+        }
         push_field_provenance(
             &mut entries,
             "acceptance.successCriteria",
@@ -2042,25 +2398,29 @@ fn build_field_provenance(
             json!(extraction.risk.rationale),
             None,
         );
-        if !extraction.risk.factors.is_empty() {
+        if let Some(planning_summary) = &extraction_outcome.planning_summary {
             push_field_provenance(
                 &mut entries,
-                "risk.factors",
+                "intentExtraction.planningSummary",
                 "result.structured_output",
-                "$.resultMessage.structured_output.riskFactors",
-                serde_json::to_value(&extraction.risk.factors)
-                    .context("failed to serialize managed riskFactors provenance")?,
-                None,
+                "$.resultMessage.structured_output.planningSummary",
+                json!(planning_summary),
+                Some(
+                    "Provider-assisted planning metadata only; formal Plan objects prefer structured_output.plan and fall back to assistant numbered text when plan data is absent.".to_string(),
+                ),
             );
         }
-        if let Some(level) = &extraction.risk.level {
+        if !extraction_outcome.plan.is_empty() {
             push_field_provenance(
                 &mut entries,
-                "risk.level",
+                "intentExtraction.plan",
                 "result.structured_output",
-                "$.resultMessage.structured_output.riskLevel",
-                json!(level),
-                None,
+                "$.resultMessage.structured_output.plan",
+                serde_json::to_value(&extraction_outcome.plan)
+                    .context("failed to serialize managed structured plan provenance")?,
+                Some(
+                    "Schema-native formal plan carrier for Claude; raw assistant numbered text is used only as fallback when this field is absent.".to_string(),
+                ),
             );
         }
     }
@@ -2138,10 +2498,10 @@ fn build_field_provenance(
             &mut entries,
             "runtime.decisionEvents",
             "hooks+result",
-            "$.hookEvents[hook=PermissionRequest|CanUseTool|Elicitation|ElicitationResult] | $.resultMessage.permission_denials",
+            "$.hookEvents[hook=PermissionRequest|CanUseTool|Elicitation|ElicitationResult|PermissionModeChanged|PermissionModeChange] | $.messages[type=system,subtype=permission_mode_changed|permission_mode_change] | $.resultMessage.permission_denials",
             serde_json::to_value(&decision_runtime_events)
                 .context("failed to serialize managed decision runtime provenance")?,
-            Some("Provider-native runtime facts for permission/human-gate surfaces; they are pre-decision evidence, not formal Decision objects.".to_string()),
+            Some("Provider-native runtime facts for permission modes, approvals, and human-input surfaces; they are pre-decision evidence, not formal Decision objects.".to_string()),
         );
     }
 
@@ -2192,11 +2552,18 @@ impl IntentExtractionOutcome {
 }
 
 impl PersistedManagedIntentExtraction {
-    fn new(ai_session_id: String, extraction: IntentDraft) -> Self {
+    fn new(
+        ai_session_id: String,
+        extraction: IntentDraft,
+        planning_summary: Option<String>,
+        plan: Vec<String>,
+    ) -> Self {
         Self {
-            schema: "libra.intent_extraction.v1".to_string(),
+            schema: "libra.intent_extraction.v2".to_string(),
             ai_session_id,
             source: MANAGED_INTENT_EXTRACTION_SOURCE.to_string(),
+            planning_summary,
+            plan,
             extraction,
         }
     }
@@ -2332,7 +2699,9 @@ impl From<ToolHookPair> for ManagedToolInvocation {
 
 impl ManagedToolInvocationEvent {
     fn from_tool_hook_pair(thread_id: &str, run_id: &str, at: &str, value: ToolHookPair) -> Self {
-        let status = if value.saw_post {
+        let status = if value.saw_post_failure {
+            "error"
+        } else if value.saw_post {
             "completed"
         } else if value.saw_pre {
             "in_progress"
@@ -2366,6 +2735,11 @@ mod tests {
         let artifact: ClaudeManagedArtifact = serde_json::from_value(json!({
             "cwd": "/repo",
             "prompt": "Implement the managed mode bridge",
+            "requestContext": {
+                "resume": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "forkSession": true,
+                "sessionId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+            },
             "hookEvents": [
                 {
                     "hook": "UserPromptSubmit",
@@ -2448,16 +2822,22 @@ mod tests {
                 "modelUsage": {"claude-sonnet-4-5-20250929": {"inputTokens": 100, "outputTokens": 50}},
                 "permission_denials": [],
                 "structured_output": {
-                    "summary": "Build the managed mode bridge",
-                    "problemStatement": "Libra needs a stable SDK-managed ingestion bridge",
-                    "changeType": "feature",
-                    "objectives": ["Bridge SDK events", "Persist ai_session"],
-                    "inScope": ["src/internal/ai/providers/claude_sdk"],
-                    "outOfScope": ["UI redesign"],
-                    "successCriteria": ["Session is persisted", "Intent extraction is derived"],
-                    "riskRationale": "Low risk because the bridge is additive",
-                    "riskFactors": ["new adapter path"],
-                    "riskLevel": "low"
+                "summary": "Build the managed mode bridge",
+                "problemStatement": "Libra needs a stable SDK-managed ingestion bridge",
+                "changeType": "feature",
+                "objectives": ["Bridge SDK events", "Persist ai_session"],
+                "inScope": ["src/internal/ai/claudecode"],
+                "outOfScope": ["UI redesign"],
+                "planningSummary": "Use structured_output.plan as the canonical formal-plan source when present.",
+                "plan": [
+                    "Inspect the repository state",
+                    {"description": "Persist the formal plan from structured output"},
+                    "Verify the resulting bindings and audit bundle"
+                ],
+                "successCriteria": ["Session is persisted", "Intent extraction is derived"],
+                "riskRationale": "Low risk because the bridge is additive",
+                "riskFactors": ["new adapter path"],
+                "riskLevel": "low"
                 },
                 "fast_mode_state": null,
                 "uuid": "result-1"
@@ -2516,7 +2896,13 @@ mod tests {
         assert_eq!(extraction.intent.summary, "Build the managed mode bridge");
         assert_eq!(extraction.intent.change_type, ChangeType::Feature);
         assert_eq!(extraction.acceptance.success_criteria.len(), 2);
-        assert_eq!(extraction.risk.level, Some(RiskLevel::Low));
+        assert_eq!(extraction.intent.in_scope, vec!["src/lib.rs".to_string()]);
+        assert_eq!(
+            extraction.intent.out_of_scope,
+            vec!["UI redesign".to_string()]
+        );
+        assert!(extraction.acceptance.fast_checks.is_empty());
+        assert_eq!(extraction.risk.level, None);
     }
 
     #[test]
@@ -2587,13 +2973,249 @@ mod tests {
             .expect("extraction should exist");
 
         assert_eq!(extraction.intent.change_type, ChangeType::Security);
-        assert_eq!(extraction.acceptance.fast_checks.len(), 1);
-        assert_eq!(
-            extraction.acceptance.fast_checks[0].kind,
-            crate::internal::ai::intentspec::types::CheckKind::Command
-        );
+        assert!(extraction.acceptance.fast_checks.is_empty());
         assert!(extraction.intent.in_scope.is_empty());
         assert!(extraction.intent.out_of_scope.is_empty());
+    }
+
+    #[test]
+    fn structured_output_surfaces_optional_planning_summary_as_metadata() {
+        let result = ClaudeManagedResultMessage {
+            r#type: Some("result".to_string()),
+            subtype: Some("success".to_string()),
+            is_error: Some(false),
+            session_id: Some("sdk-session-3a".to_string()),
+            stop_reason: Some("end_turn".to_string()),
+            duration_ms: Some(10),
+            duration_api_ms: Some(8),
+            num_turns: Some(1),
+            result: Some("ok".to_string()),
+            total_cost_usd: Some(0.001),
+            usage: Some(json!({"input_tokens": 1, "output_tokens": 1})),
+            model_usage: None,
+            permission_denials: None,
+            structured_output: Some(json!({
+                "summary": "Plan-aware run",
+                "problemStatement": "Need to preserve planning metadata while keeping schema-native plans explicit",
+                "changeType": "refactor",
+                "objectives": ["Keep plan semantics layered correctly"],
+                "planningSummary": "Use structured_output.plan as the canonical formal-plan source when present.",
+                "successCriteria": ["Structured output remains semantic-only"],
+                "riskRationale": "Low risk because structured plan parsing is additive and raw text remains fallback-only"
+            })),
+            fast_mode_state: None,
+            uuid: None,
+        };
+
+        let outcome = extract_intent_extraction_outcome(Some(&result));
+        assert_eq!(
+            outcome.planning_summary.as_deref(),
+            Some("Use structured_output.plan as the canonical formal-plan source when present.")
+        );
+        assert!(outcome.extraction.is_some());
+    }
+
+    #[test]
+    fn structured_output_extracts_plan_steps_from_schema_native_plan() {
+        let result = ClaudeManagedResultMessage {
+            r#type: Some("result".to_string()),
+            subtype: Some("success".to_string()),
+            is_error: Some(false),
+            session_id: Some("sdk-session-plan".to_string()),
+            stop_reason: Some("end_turn".to_string()),
+            duration_ms: Some(10),
+            duration_api_ms: Some(8),
+            num_turns: Some(1),
+            result: Some("ok".to_string()),
+            total_cost_usd: Some(0.001),
+            usage: Some(json!({"input_tokens": 1, "output_tokens": 1})),
+            model_usage: None,
+            permission_denials: None,
+            structured_output: Some(json!({
+                "summary": "Plan-aware run",
+                "problemStatement": "Need a structured plan source",
+                "changeType": "refactor",
+                "objectives": ["Prefer structured plan"],
+                "successCriteria": ["Plan is parsed"],
+                "riskRationale": "Low risk",
+                "plan": [
+                    " Inspect source ",
+                    {"description": "Bridge plan objects"},
+                    {"description": "   "},
+                    "Verify persisted output"
+                ]
+            })),
+            fast_mode_state: None,
+            uuid: None,
+        };
+
+        assert_eq!(
+            extract_structured_plan_descriptions(Some(&result)),
+            Some(vec![
+                "Inspect source".to_string(),
+                "Bridge plan objects".to_string(),
+                "Verify persisted output".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn structured_plan_extraction_tolerates_partial_structured_output() {
+        let result = ClaudeManagedResultMessage {
+            r#type: Some("result".to_string()),
+            subtype: Some("success".to_string()),
+            is_error: Some(false),
+            session_id: Some("sdk-session-partial-plan".to_string()),
+            stop_reason: Some("end_turn".to_string()),
+            duration_ms: Some(10),
+            duration_api_ms: Some(8),
+            num_turns: Some(1),
+            result: Some("ok".to_string()),
+            total_cost_usd: Some(0.001),
+            usage: Some(json!({"input_tokens": 1, "output_tokens": 1})),
+            model_usage: None,
+            permission_denials: None,
+            structured_output: Some(json!({
+                "plan": [
+                    "Inspect source",
+                    {"description": "Bridge plan objects"},
+                    "Verify persisted output"
+                ]
+            })),
+            fast_mode_state: None,
+            uuid: None,
+        };
+
+        let expected_plan = vec![
+            "Inspect source".to_string(),
+            "Bridge plan objects".to_string(),
+            "Verify persisted output".to_string(),
+        ];
+
+        assert_eq!(
+            extract_structured_plan_descriptions(Some(&result)),
+            Some(expected_plan.clone())
+        );
+        let outcome = extract_intent_extraction_outcome(Some(&result));
+        assert!(outcome.error.is_some());
+        assert_eq!(outcome.plan, expected_plan);
+    }
+
+    #[test]
+    fn structured_output_extracts_plan_descriptions_when_present() {
+        let result = ClaudeManagedResultMessage {
+            r#type: Some("result".to_string()),
+            subtype: Some("success".to_string()),
+            is_error: Some(false),
+            session_id: Some("sdk-session-plan".to_string()),
+            stop_reason: Some("end_turn".to_string()),
+            duration_ms: Some(10),
+            duration_api_ms: Some(8),
+            num_turns: Some(1),
+            result: Some("ok".to_string()),
+            total_cost_usd: Some(0.001),
+            usage: Some(json!({"input_tokens": 1, "output_tokens": 1})),
+            model_usage: None,
+            permission_denials: None,
+            structured_output: Some(json!({
+                "summary": "Plan-aware run",
+                "problemStatement": "Need stable structured planning",
+                "changeType": "refactor",
+                "objectives": ["Prefer schema data", "Keep fallback behavior"],
+                "plan": [
+                    "Inspect the structured payload",
+                    {"description": "Persist the formal plan from schema"},
+                    {"description": "Verify fallback behavior remains intact"},
+                    {"description": "   "}
+                ],
+                "successCriteria": ["Structured plan is available"],
+                "riskRationale": "Low risk because plan parsing is additive"
+            })),
+            fast_mode_state: None,
+            uuid: None,
+        };
+
+        assert_eq!(
+            extract_structured_plan_descriptions(Some(&result)),
+            Some(vec![
+                "Inspect the structured payload".to_string(),
+                "Persist the formal plan from schema".to_string(),
+                "Verify fallback behavior remains intact".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn persisted_managed_intent_extraction_includes_plan_when_present() {
+        let artifact: ClaudeManagedArtifact = serde_json::from_value(json!({
+            "cwd": "/repo",
+            "prompt": "Implement the managed mode bridge",
+            "hookEvents": [
+                {
+                    "hook": "UserPromptSubmit",
+                    "input": {
+                        "session_id": "sdk-session-plan-artifact",
+                        "transcript_path": "/tmp/managed-transcript.jsonl",
+                        "cwd": "/repo",
+                        "permission_mode": "plan",
+                        "hook_event_name": "UserPromptSubmit",
+                        "prompt": "Implement the managed mode bridge"
+                    }
+                }
+            ],
+            "messages": [
+                {
+                    "type": "system",
+                    "subtype": "init",
+                    "cwd": "/repo",
+                    "session_id": "sdk-session-plan-artifact",
+                    "tools": ["Read", "StructuredOutput"],
+                    "model": "claude-sonnet-4-5-20250929",
+                    "permissionMode": "plan"
+                }
+            ],
+            "resultMessage": {
+                "type": "result",
+                "subtype": "success",
+                "is_error": false,
+                "session_id": "sdk-session-plan-artifact",
+                "stop_reason": "end_turn",
+                "duration_ms": 1200,
+                "duration_api_ms": 1000,
+                "num_turns": 1,
+                "result": "ok",
+                "usage": {"input_tokens": 100, "output_tokens": 50},
+                "structured_output": {
+                    "summary": "Build the managed mode bridge",
+                    "problemStatement": "Libra needs a stable SDK-managed ingestion bridge",
+                    "changeType": "feature",
+                    "objectives": ["Bridge SDK events", "Persist ai_session"],
+                    "plan": [
+                        "Inspect source files",
+                        {"description": "Persist schema-native plan data"},
+                        "Verify audit artifacts"
+                    ],
+                    "successCriteria": ["Session is persisted", "Intent extraction is derived"],
+                    "riskRationale": "Low risk because the bridge is additive"
+                }
+            }
+        }))
+        .expect("fixture should deserialize");
+
+        let bundle = build_managed_audit_bundle(&artifact).expect("bundle should build");
+        let persisted_extraction = bundle
+            .bridge
+            .intent_extraction_artifact
+            .expect("persisted extraction artifact should exist");
+
+        assert_eq!(
+            persisted_extraction.plan,
+            vec![
+                "Inspect source files".to_string(),
+                "Persist schema-native plan data".to_string(),
+                "Verify audit artifacts".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -2646,6 +3268,11 @@ mod tests {
         let artifact: ClaudeManagedArtifact = serde_json::from_value(json!({
             "cwd": "/repo",
             "prompt": "Implement the managed mode bridge",
+            "requestContext": {
+                "resume": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "forkSession": true,
+                "sessionId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+            },
             "hookEvents": [
                 {
                     "hook": "UserPromptSubmit",
@@ -2732,8 +3359,14 @@ mod tests {
                     "problemStatement": "Libra needs a stable SDK-managed ingestion bridge",
                     "changeType": "feature",
                     "objectives": ["Bridge SDK events", "Persist ai_session"],
-                    "inScope": ["src/internal/ai/providers/claude_sdk"],
+                    "inScope": ["src/internal/ai/claudecode"],
                     "outOfScope": ["UI redesign"],
+                    "planningSummary": "Use structured_output.plan as the canonical formal-plan source when present.",
+                    "plan": [
+                        "Inspect the repository state",
+                        {"description": "Persist the formal plan from structured output"},
+                        "Verify the resulting bindings and audit bundle"
+                    ],
                     "successCriteria": ["Session is persisted", "Intent extraction is derived"],
                     "riskRationale": "Low risk because the bridge is additive",
                     "riskFactors": ["new adapter path"],
@@ -2751,6 +3384,18 @@ mod tests {
         assert_eq!(bundle.ai_session_id, "claude__sdk-session-1");
         assert_eq!(bundle.provider_session_id, "sdk-session-1");
         assert_eq!(bundle.bridge.intent_extraction.status, "accepted");
+        assert_eq!(
+            bundle.bridge.intent_extraction.planning_summary.as_deref(),
+            Some("Use structured_output.plan as the canonical formal-plan source when present.")
+        );
+        assert_eq!(
+            bundle.bridge.intent_extraction.plan,
+            vec![
+                "Inspect the repository state".to_string(),
+                "Persist the formal plan from structured output".to_string(),
+                "Verify the resulting bindings and audit bundle".to_string(),
+            ]
+        );
         assert_eq!(bundle.bridge.touch_hints, vec!["src/lib.rs".to_string()]);
         assert_eq!(bundle.bridge.tool_invocations.len(), 1);
         assert_eq!(bundle.bridge.tool_invocations[0].tool_use_id, "tool-1");
@@ -2823,9 +3468,42 @@ mod tests {
                 .intent_extraction_artifact
                 .as_ref()
                 .map(|artifact| artifact.schema.as_str()),
-            Some("libra.intent_extraction.v1")
+            Some("libra.intent_extraction.v2")
+        );
+        assert_eq!(
+            bundle
+                .bridge
+                .intent_extraction_artifact
+                .as_ref()
+                .map(|artifact| artifact.plan.clone()),
+            Some(vec![
+                "Inspect the repository state".to_string(),
+                "Persist the formal plan from structured output".to_string(),
+                "Verify the resulting bindings and audit bundle".to_string(),
+            ])
+        );
+        assert_eq!(
+            bundle.bridge.object_candidates.provenance_snapshot.provider,
+            "claude"
+        );
+        assert_eq!(
+            bundle.bridge.session_state.metadata["provider_runtime"]["sessionControl"]["resume"],
+            json!("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
         );
         assert_eq!(bundle.bridge.ai_session["schema"], json!(AI_SESSION_SCHEMA));
+        assert!(
+            bundle.field_provenance.iter().any(|entry| {
+                entry.field_path == "intentExtraction.plan"
+                    && entry.source_layer == "result.structured_output"
+                    && entry.value
+                        == json!([
+                            "Inspect the repository state",
+                            "Persist the formal plan from structured output",
+                            "Verify the resulting bindings and audit bundle"
+                        ])
+            }),
+            "expected structured plan provenance from structured_output.plan"
+        );
         assert!(
             bundle.field_provenance.iter().any(|entry| {
                 entry.field_path == "intent.summary"
@@ -2840,6 +3518,13 @@ mod tests {
                     && entry.source_layer == "hooks+tool_evidence"
             }),
             "expected derived touchHints provenance"
+        );
+        assert!(
+            bundle.field_provenance.iter().any(|entry| {
+                entry.field_path == "runtime.sessionControl"
+                    && entry.source_layer == "helper_request"
+            }),
+            "expected session control provenance from helper request context"
         );
     }
 
@@ -3193,6 +3878,113 @@ mod tests {
                 .iter()
                 .any(|entry| entry.field_path == "runtime.contextEvents"),
             "expected context runtime provenance"
+        );
+    }
+
+    #[test]
+    fn build_decision_runtime_events_normalizes_permission_mode_and_user_input_metadata() {
+        let artifact: ClaudeManagedArtifact = serde_json::from_value(json!({
+            "cwd": "/repo",
+            "hookEvents": [
+                {
+                    "hook": "PermissionRequest",
+                    "input": {
+                        "session_id": "sdk-session-runtime",
+                        "tool_name": "Edit",
+                        "tool_use_id": "tool-edit-1",
+                        "tool_input": {"file_path": "/repo/src/lib.rs"},
+                        "permission_suggestions": [
+                            {
+                                "type": "setMode",
+                                "mode": "acceptEdits",
+                                "destination": "session"
+                            }
+                        ]
+                    }
+                },
+                {
+                    "hook": "CanUseTool",
+                    "input": {
+                        "tool_name": "AskUserQuestion",
+                        "tool_use_id": "tool-ask-1",
+                        "interaction_kind": "ask_user_question",
+                        "answers": {"Which stack should we use?": "Rust"},
+                        "question_count": 1,
+                        "answer_count": 1
+                    }
+                },
+                {
+                    "hook": "PermissionModeChanged",
+                    "input": {
+                        "mode_change_id": "mode-change-hook",
+                        "previous_permission_mode": "default",
+                        "current_permission_mode": "acceptEdits"
+                    }
+                }
+            ],
+            "messages": [
+                {
+                    "type": "system",
+                    "subtype": "permission_mode_changed",
+                    "uuid": "mode-change-stream",
+                    "previous_permission_mode": "default",
+                    "current_permission_mode": "acceptEdits"
+                }
+            ]
+        }))
+        .expect("fixture should deserialize");
+
+        let events =
+            build_decision_runtime_events("thread", "run", "2026-03-25T00:00:00Z", &artifact);
+        assert_eq!(events.len(), 4);
+
+        let permission_request = events
+            .iter()
+            .find(|event| event.kind == "PermissionRequest")
+            .expect("permission request event should exist");
+        assert_eq!(
+            permission_request.payload["suggested_mode"],
+            json!("acceptEdits")
+        );
+        assert_eq!(
+            permission_request.payload["permission_suggestion_count"],
+            json!(1)
+        );
+        assert_eq!(
+            permission_request.payload["suggestion_destinations"],
+            json!(["session"])
+        );
+
+        let ask_user_question = events
+            .iter()
+            .find(|event| event.id == "tool-ask-1")
+            .expect("ask user question event should exist");
+        assert_eq!(
+            ask_user_question.payload["interaction_kind"],
+            json!("ask_user_question")
+        );
+        assert_eq!(
+            ask_user_question.payload["answer_keys"],
+            json!(["Which stack should we use?"])
+        );
+        assert_eq!(
+            ask_user_question.payload["answers"]["Which stack should we use?"],
+            json!("Rust")
+        );
+
+        let stream_mode_change = events
+            .iter()
+            .find(|event| event.id == "mode-change-stream")
+            .expect("stream mode change event should exist");
+        assert_eq!(stream_mode_change.kind, "PermissionModeChanged");
+        assert_eq!(stream_mode_change.source, "stream");
+        assert_eq!(
+            stream_mode_change.payload["current_permission_mode"],
+            json!("acceptEdits")
+        );
+        assert_eq!(
+            stream_mode_change.payload["previous_permission_mode"],
+            json!("default")
         );
     }
 
