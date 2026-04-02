@@ -792,7 +792,7 @@ async fn ensure_streaming_formal_run_binding(
                     title: summary.clone(),
                     description: Some(description),
                     goal_type,
-                    constraints: Some(vec![format!("claude-sdk ai_session_id={ai_session_id}")]),
+                    constraints: Some(vec!["claudecode streaming bridge".to_string()]),
                     acceptance_criteria: None,
                     requested_by_kind: None,
                     requested_by_id: None,
@@ -801,9 +801,7 @@ async fn ensure_streaming_formal_run_binding(
                     parent_task_id: None,
                     origin_step_id: None,
                     status: Some(task_status_for_managed_run(&managed_run_status).to_string()),
-                    reason: Some(format!(
-                        "Claude Code streaming session {ai_session_id} bridged into formal task"
-                    )),
+                    reason: Some("Claude Code streaming bridge created a formal task".to_string()),
                     tags: None,
                     external_ids: None,
                     actor_kind: Some("system".to_string()),
@@ -829,16 +827,12 @@ async fn ensure_streaming_formal_run_binding(
                     metrics_json: Some(
                         json!({
                             "provider": "claude",
-                            "aiSessionId": ai_session_id,
-                            "providerSessionId": audit_bundle.provider_session_id,
                             "intentExtractionStatus": intent_extraction_status,
                             "provisional": true,
                         })
                         .to_string(),
                     ),
-                    reason: Some(format!(
-                        "Claude Code streaming session {ai_session_id} bridged into formal run"
-                    )),
+                    reason: Some("Claude Code streaming bridge created a formal run".to_string()),
                     orchestrator_version: None,
                     tags: None,
                     external_ids: None,
@@ -1084,14 +1078,23 @@ fn resolve_managed_cwd(cwd: Option<&PathBuf>) -> Result<PathBuf> {
         .unwrap_or_else(|| std::env::current_dir().context("failed to read current directory"))
 }
 
+fn resolve_managed_repo_paths(cwd: Option<&PathBuf>) -> Result<(PathBuf, PathBuf)> {
+    let cwd = resolve_managed_cwd(cwd)?;
+    let storage_path = util::try_get_storage_path(Some(cwd.clone())).with_context(|| {
+        format!(
+            "Claude Code managed commands require a Libra repository at '{}'",
+            cwd.display()
+        )
+    })?;
+    Ok((cwd, storage_path))
+}
+
 pub(crate) async fn prepare_managed_tui_driver(
     args: ChatManagedArgs,
     user_input_tx: UnboundedSender<UserInputRequest>,
     exec_approval_tx: UnboundedSender<ExecApprovalRequest>,
 ) -> Result<ManagedClaudecodeTuiDriver> {
-    let storage_path = util::try_get_storage_path(None)
-        .context("claudecode managed TUI requires running inside a Libra repository")?;
-    let cwd = resolve_managed_cwd(args.cwd.as_ref())?;
+    let (cwd, storage_path) = resolve_managed_repo_paths(args.cwd.as_ref())?;
     let project_bootstrap = prepare_claudecode_project_bootstrap(&storage_path).await?;
     emit_project_bootstrap_note(&project_bootstrap);
     let resolved_python_binary = resolve_helper_python_binary(&cwd, &args.python_binary);
@@ -1354,8 +1357,7 @@ fn streaming_render_mode(output: &OutputConfig) -> StreamingRenderMode {
 }
 
 pub(super) async fn run_managed(args: RunManagedArgs, output: &OutputConfig) -> Result<()> {
-    let storage_path = util::try_get_storage_path(None)
-        .context("Claude Code managed commands must be run inside a Libra repository")?;
+    let (cwd, storage_path) = resolve_managed_repo_paths(args.cwd.as_ref())?;
     let project_bootstrap = prepare_claudecode_project_bootstrap(&storage_path).await?;
     emit_project_bootstrap_note(&project_bootstrap);
     validate_run_managed_args(&args)?;
@@ -1369,9 +1371,7 @@ pub(super) async fn run_managed(args: RunManagedArgs, output: &OutputConfig) -> 
             "interactive Claude Code managed run supports only --json=ndjson; use --batch for pretty or compact JSON output"
         );
     }
-
     let prompt = resolve_prompt(&args)?;
-    let cwd = resolve_managed_cwd(args.cwd.as_ref())?;
     let python_binary = resolve_helper_python_binary(&cwd, &args.python_binary);
     ensure_helper_python_environment(args.helper_path.is_some(), &python_binary, &cwd).await?;
     let (_temp_helper_dir, helper_path) = materialize_helper(args.helper_path.as_deref()).await?;
@@ -1457,12 +1457,10 @@ pub(super) async fn run_managed(args: RunManagedArgs, output: &OutputConfig) -> 
 }
 
 pub(crate) async fn chat_managed(args: ChatManagedArgs, output: &OutputConfig) -> Result<()> {
-    let storage_path = util::try_get_storage_path(None)
-        .context("Claude Code managed commands must be run inside a Libra repository")?;
+    let (cwd, storage_path) = resolve_managed_repo_paths(args.cwd.as_ref())?;
     let project_bootstrap = prepare_claudecode_project_bootstrap(&storage_path).await?;
     emit_project_bootstrap_note(&project_bootstrap);
     validate_chat_managed_args(&args, output)?;
-    let cwd = resolve_managed_cwd(args.cwd.as_ref())?;
     let python_binary = resolve_helper_python_binary(&cwd, &args.python_binary);
     ensure_helper_python_environment(args.helper_path.is_some(), &python_binary, &cwd).await?;
     let (_temp_helper_dir, helper_path) = materialize_helper(args.helper_path.as_deref()).await?;
@@ -4084,12 +4082,7 @@ mod tests {
         tool_use_id: &str,
         file_path: &str,
     ) {
-        let session_id = artifact
-            .result_message
-            .as_ref()
-            .and_then(|result| result.session_id.as_deref())
-            .expect("result message session id should exist")
-            .to_string();
+        let session_id = "test-session".to_string();
         let transcript_path = artifact
             .hook_events
             .iter()
@@ -4196,12 +4189,24 @@ mod tests {
         storage_path: &Path,
         ai_session_id: &str,
     ) -> ClaudeToolInvocationBindingArtifact {
-        let binding_path = storage_path
-            .join(TOOL_INVOCATION_BINDINGS_DIR)
-            .join(format!("{ai_session_id}.json"));
-        read_json_artifact(&binding_path, "Claude tool invocation binding")
-            .await
-            .expect("tool invocation binding should deserialize")
+        let bindings_dir = storage_path.join(TOOL_INVOCATION_BINDINGS_DIR);
+        let mut entries = std::fs::read_dir(&bindings_dir)
+            .expect("tool invocation bindings directory should be readable");
+        while let Some(entry) = entries.next() {
+            let entry = entry.expect("tool invocation binding directory entry should be readable");
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            let binding: ClaudeToolInvocationBindingArtifact =
+                read_json_artifact(&path, "Claude tool invocation binding")
+                    .await
+                    .expect("tool invocation binding should deserialize");
+            if binding.ai_session_id == ai_session_id {
+                return binding;
+            }
+        }
+        panic!("expected Claude tool invocation binding for test session");
     }
 
     async fn read_provenance_for_run(storage_path: &Path, run_id: &str) -> Provenance {
@@ -4282,7 +4287,7 @@ mod tests {
         let event = json!({
             "event": "session_init",
             "message": {
-                "session_id": "11111111-2222-4333-8444-555555555555",
+                "session_id": "test-session",
                 "model": "claude-sonnet-4-6"
             }
         });
@@ -4290,7 +4295,7 @@ mod tests {
 
         assert!(rendered.contains("Claude session started (claude-sonnet-4-6)"));
         assert!(
-            !rendered.contains("11111111-2222-4333-8444-555555555555"),
+            !rendered.contains("test-session"),
             "session id should not be logged"
         );
     }

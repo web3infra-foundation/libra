@@ -1108,10 +1108,7 @@ pub(super) async fn bridge_run_internal(args: BridgeRunArgs) -> Result<BridgeRun
                     title: summary.clone(),
                     description: Some(description),
                     goal_type,
-                    constraints: Some(vec![format!(
-                        "claude-sdk ai_session_id={}",
-                        args.ai_session_id
-                    )]),
+                    constraints: Some(vec!["claudecode managed bridge".to_string()]),
                     acceptance_criteria: None,
                     requested_by_kind: None,
                     requested_by_id: None,
@@ -1120,10 +1117,7 @@ pub(super) async fn bridge_run_internal(args: BridgeRunArgs) -> Result<BridgeRun
                     parent_task_id: None,
                     origin_step_id: None,
                     status: Some(task_status_for_managed_run(&managed_run_status).to_string()),
-                    reason: Some(format!(
-                        "Claude Code managed session {} bridged into formal task",
-                        args.ai_session_id
-                    )),
+                    reason: Some("Claude Code managed bridge created a formal task".to_string()),
                     tags: None,
                     external_ids: None,
                     actor_kind: Some("system".to_string()),
@@ -1162,16 +1156,11 @@ pub(super) async fn bridge_run_internal(args: BridgeRunArgs) -> Result<BridgeRun
                     metrics_json: Some(
                         json!({
                             "provider": "claude",
-                            "aiSessionId": args.ai_session_id,
-                            "providerSessionId": audit_bundle.provider_session_id,
                             "intentExtractionStatus": intent_extraction_status,
                         })
                         .to_string(),
                     ),
-                    reason: Some(format!(
-                        "Claude Code managed session {} bridged into formal run",
-                        args.ai_session_id
-                    )),
+                    reason: Some("Claude Code managed bridge created a formal run".to_string()),
                     orchestrator_version: None,
                     tags: None,
                     external_ids: None,

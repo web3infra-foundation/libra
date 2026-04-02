@@ -151,14 +151,12 @@ where
     let hash = history
         .get_object_hash(object_type, object_id)
         .await
-        .unwrap_or_else(|err| {
-            panic!("failed to read object hash for '{object_type}:{object_id}': {err}")
-        })
-        .unwrap_or_else(|| panic!("missing AI object '{object_type}:{object_id}'"));
+        .unwrap_or_else(|err| panic!("failed to read object hash for '{object_type}': {err}"))
+        .unwrap_or_else(|| panic!("missing AI object for type '{object_type}'"));
     storage
         .get_json::<T>(&hash)
         .await
-        .unwrap_or_else(|err| panic!("failed to read '{object_type}' object '{object_id}': {err}"))
+        .unwrap_or_else(|err| panic!("failed to read '{object_type}' object body: {err}"))
 }
 
 fn first_assistant_message_mut(artifact: &mut Value) -> &mut Value {
