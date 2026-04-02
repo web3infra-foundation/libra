@@ -743,6 +743,81 @@ fn machine_checkout_existing_branch_suppresses_human_output() {
 }
 
 #[test]
+fn quiet_checkout_dirty_repo_suppresses_status_summary() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo_with_commit_via_cli(&repo);
+
+    let branch = run(&["branch", "foo"], &repo);
+    assert!(
+        branch.status.success(),
+        "branch foo: {}",
+        String::from_utf8_lossy(&branch.stderr)
+    );
+
+    fs::write(repo.join("f.txt"), "dirty").unwrap();
+
+    let output = run(&["--quiet", "checkout", "foo"], &repo);
+    assert_ne!(output.status.code(), Some(0));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.trim().is_empty(),
+        "quiet checkout should not print status summary, got: {stdout}"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("local changes would be overwritten by checkout"),
+        "quiet checkout should preserve checkout error wording, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("On branch") && !stderr.contains("Changes not staged"),
+        "quiet checkout must not leak human status text, got: {stderr}"
+    );
+}
+
+#[test]
+fn machine_checkout_dirty_repo_returns_only_json_error() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo_with_commit_via_cli(&repo);
+
+    let branch = run(&["branch", "foo"], &repo);
+    assert!(
+        branch.status.success(),
+        "branch foo: {}",
+        String::from_utf8_lossy(&branch.stderr)
+    );
+
+    fs::write(repo.join("f.txt"), "dirty").unwrap();
+
+    let output = run(&["--machine", "checkout", "foo"], &repo);
+    assert_ne!(output.status.code(), Some(0));
+    assert!(
+        output.stdout.is_empty(),
+        "machine checkout must keep stdout empty on error, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(stderr.trim())
+        .unwrap_or_else(|e| panic!("expected JSON error on stderr, got: {stderr}\nerror: {e}"));
+    assert_eq!(parsed["ok"], false);
+    assert!(
+        parsed["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("local changes would be overwritten by checkout"),
+        "machine checkout should preserve checkout error wording, got: {parsed}"
+    );
+    assert!(
+        !stderr.contains("On branch") && !stderr.contains("Changes not staged"),
+        "machine checkout must not leak human status text, got: {stderr}"
+    );
+}
+
+#[test]
 fn checkout_invalid_index_preserves_status_error() {
     let temp = tempdir().unwrap();
     let repo = temp.path().join("repo");

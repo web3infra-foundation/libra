@@ -20,9 +20,18 @@ use crate::{
     },
 };
 
+const CHECKOUT_EXAMPLES: &str = "\
+EXAMPLES:
+    libra checkout                         Show the current branch
+    libra checkout main                    Switch to an existing local branch
+    libra checkout feature-x               Switch to another branch
+    libra checkout -b feature-x            Create and switch to a new branch
+    libra checkout --quiet main            Switch without informational stdout";
+
 #[derive(Parser, Debug)]
+#[command(after_help = CHECKOUT_EXAMPLES)]
 pub struct CheckoutArgs {
-    /// Target branche name
+    /// Target branch name
     branch: Option<String>,
 
     /// Create and switch to a new branch with the same content as the current branch
@@ -66,20 +75,31 @@ pub async fn execute_safe(args: CheckoutArgs, output: &OutputConfig) -> CliResul
         return Ok(());
     }
 
-    match switch::ensure_clean_status(output).await {
+    let target_commit = if let Some(ref branch_name) = args.branch {
+        Branch::find_branch(branch_name, None)
+            .await
+            .map(|branch| branch.commit)
+    } else {
+        None
+    };
+
+    let clean_status = match target_commit {
+        Some(target_commit) => switch::ensure_clean_status_for_commit(target_commit, output).await,
+        None => switch::ensure_clean_status(output).await,
+    };
+
+    match clean_status {
         Ok(()) => {}
-        Err(err)
-            if matches!(
-                err.message(),
-                "unstaged changes, can't switch branch"
-                    | "uncommitted changes, can't switch branch"
-            ) =>
-        {
+        Err(
+            switch::SwitchError::DirtyUnstaged
+            | switch::SwitchError::DirtyUncommitted
+            | switch::SwitchError::UntrackedOverwrite(..),
+        ) => {
             return Err(CliError::failure(
                 "local changes would be overwritten by checkout",
             ));
         }
-        Err(err) => return Err(err),
+        Err(err) => return Err(CliError::from(err)),
     }
 
     match (args.branch, args.new_branch) {
