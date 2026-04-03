@@ -48,6 +48,42 @@ fn log_branch_store_error(context: &str, error: BranchStoreError) -> CliError {
     }
 }
 
+async fn resolve_log_head_commit() -> CliResult<(Option<String>, ObjectHash)> {
+    let head = Head::current_result()
+        .await
+        .map_err(|error| log_branch_store_error("resolve HEAD", error))?;
+    let branch_name = match head {
+        Head::Branch(name) => Some(name),
+        Head::Detached(_) => None,
+    };
+
+    if let Some(name) = &branch_name
+        && Branch::find_branch_result(name, None)
+            .await
+            .map_err(|error| log_branch_store_error("inspect the current branch", error))?
+            .is_none()
+    {
+        return Err(CliError::fatal(format!(
+            "your current branch '{name}' does not have any commits yet"
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid));
+    }
+
+    let current_head_commit = Head::current_commit_result()
+        .await
+        .map_err(|error| log_branch_store_error("resolve HEAD commit", error))?
+        .ok_or_else(|| match branch_name.as_deref() {
+            Some(name) => CliError::fatal(format!(
+                "your current branch '{name}' does not have any commits yet"
+            ))
+            .with_stable_code(StableErrorCode::RepoStateInvalid),
+            None => CliError::fatal("your current HEAD does not have any commits yet")
+                .with_stable_code(StableErrorCode::RepoStateInvalid),
+        })?;
+
+    Ok((branch_name, current_head_commit))
+}
+
 #[derive(Parser, Debug)]
 pub struct LogArgs {
     /// Limit the number of output
@@ -397,34 +433,8 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
 
     let mut pager = Pager::with_config(output)?;
 
-    let head = Head::current().await;
-    // check if the current branch has any commits
-    let branch_name = if let Head::Branch(n) = head.to_owned() {
-        Some(n)
-    } else {
-        None
-    };
-    if let Some(n) = &branch_name {
-        let branch = Branch::find_branch_result(n, None)
-            .await
-            .map_err(|error| log_branch_store_error("inspect the current branch", error))?;
-        if branch.is_none() {
-            return Err(CliError::fatal(format!(
-                "your current branch '{n}' does not have any commits yet"
-            )));
-        }
-    }
-
-    let commit_hash = Head::current_commit_result()
-        .await
-        .map_err(|error| log_branch_store_error("resolve HEAD commit", error))?
-        .ok_or_else(|| match branch_name.as_deref() {
-            Some(name) => CliError::fatal(format!(
-                "your current branch '{name}' does not have any commits yet"
-            )),
-            None => CliError::fatal("your current HEAD does not have any commits yet"),
-        })?
-        .to_string();
+    let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
+    let commit_hash = current_head_commit.to_string();
 
     let mut reachable_commits = get_reachable_commits(commit_hash.clone(), None).await?;
     // default sort with signature time
@@ -613,38 +623,7 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
     let path_filters: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
     let filter = CommitFilter::new(args.author.clone(), since, until, path_filters.clone());
 
-    let head = Head::current().await;
-    let branch_name = if let Head::Branch(name) = head.to_owned() {
-        Some(name)
-    } else {
-        None
-    };
-    if let Some(name) = &branch_name
-        && Branch::find_branch_result(name, None)
-            .await
-            .map_err(|error| log_branch_store_error("inspect the current branch", error))?
-            .is_none()
-    {
-        return Err(CliError::fatal(format!(
-            "your current branch '{name}' does not have any commits yet"
-        ))
-        .with_stable_code(StableErrorCode::RepoStateInvalid)
-        .with_hint("create a commit first with 'libra commit'."));
-    }
-
-    let current_head_commit = Head::current_commit_result()
-        .await
-        .map_err(|error| log_branch_store_error("resolve HEAD commit", error))?
-        .ok_or_else(|| match branch_name.as_deref() {
-            Some(name) => CliError::fatal(format!(
-                "your current branch '{name}' does not have any commits yet"
-            ))
-            .with_stable_code(StableErrorCode::RepoStateInvalid)
-            .with_hint("create a commit first with 'libra commit'."),
-            None => CliError::fatal("your current HEAD does not have any commits yet")
-                .with_stable_code(StableErrorCode::RepoStateInvalid)
-                .with_hint("create a commit first with 'libra commit'."),
-        })?;
+    let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
     let commit_hash = current_head_commit.to_string();
 
     let mut reachable_commits = get_reachable_commits(commit_hash, None).await?;

@@ -293,11 +293,19 @@ impl Branch {
         }
 
         while let Some(index) = branch_name_str.find('/') {
+            let (remote_segment, remainder) = branch_name_str.split_at(index);
+            let remainder =
+                remainder
+                    .strip_prefix('/')
+                    .ok_or_else(|| BranchStoreError::Corrupt {
+                        name: branch_name.to_string(),
+                        detail: format!("failed to split branch search path '{branch_name_str}'"),
+                    })?;
             if !remote.is_empty() {
                 remote += "/";
             }
-            remote += branch_name_str.get(..index).unwrap();
-            branch_name_str = branch_name_str.get(index + 1..).unwrap().to_string();
+            remote += remote_segment;
+            branch_name_str = remainder.to_string();
             if let Some(branch) =
                 Self::find_branch_result_with_conn(db, &branch_name_str, Some(&remote)).await?
             {

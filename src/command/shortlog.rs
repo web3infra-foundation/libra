@@ -134,9 +134,7 @@ pub async fn execute_to(args: ShortlogArgs, writer: &mut impl Write) -> CliResul
         None
     };
 
-    let commits = get_commits_for_shortlog(&args, since_ts, until_ts)
-        .await
-        .map_err(|e| CliError::fatal(e.message().to_string()))?;
+    let commits = get_commits_for_shortlog(&args, since_ts, until_ts).await?;
 
     let mut author_map: HashMap<String, AuthorStats> = HashMap::new();
 
@@ -255,12 +253,14 @@ async fn get_commits_for_shortlog(
 ) -> CliResult<Vec<Commit>> {
     use crate::command::log::get_reachable_commits;
 
-    let head = Head::current().await;
+    let head = Head::current_result()
+        .await
+        .map_err(|error| shortlog_branch_store_error("resolve HEAD", error))?;
     let commit_hash = match head {
         Head::Branch(name) => {
             let branch = crate::internal::branch::Branch::find_branch_result(&name, None)
                 .await
-                .map_err(shortlog_branch_store_error)?
+                .map_err(|error| shortlog_branch_store_error("resolve current branch", error))?
                 .map(|b| b.commit.to_string());
             match branch {
                 Some(h) => h,
@@ -283,13 +283,13 @@ async fn get_commits_for_shortlog(
     Ok(commits)
 }
 
-fn shortlog_branch_store_error(error: BranchStoreError) -> CliError {
+fn shortlog_branch_store_error(context: &str, error: BranchStoreError) -> CliError {
     match error {
         BranchStoreError::Query(detail) => {
-            CliError::fatal(format!("failed to read branch storage: {detail}"))
+            CliError::fatal(format!("failed to {context}: {detail}"))
                 .with_stable_code(StableErrorCode::IoReadFailed)
         }
-        other => CliError::fatal(format!("failed to resolve current branch: {other}"))
+        other => CliError::fatal(format!("failed to {context}: {other}"))
             .with_stable_code(StableErrorCode::RepoCorrupt),
     }
 }

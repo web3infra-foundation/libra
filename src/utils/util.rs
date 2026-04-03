@@ -18,6 +18,7 @@ use once_cell::sync::Lazy;
 use path_absolutize::*;
 
 use crate::{
+    command::load_object,
     internal::{
         branch::{Branch, BranchStoreError},
         head::Head,
@@ -525,7 +526,85 @@ async fn resolve_branch_commit_typed(
     }
 }
 
-pub async fn get_commit_base_typed(name: &str) -> Result<ObjectHash, CommitBaseError> {
+fn split_revision_navigation(name: &str) -> Option<(&str, &str)> {
+    name.char_indices()
+        .find(|(_, ch)| *ch == '~' || *ch == '^')
+        .map(|(index, _)| name.split_at(index))
+}
+
+fn nth_parent_commit_typed(
+    commit_id: &ObjectHash,
+    n: usize,
+    display_name: &str,
+) -> Result<ObjectHash, CommitBaseError> {
+    let commit: Commit = load_object(commit_id).map_err(|error| {
+        CommitBaseError::classify_storage_failure(format!(
+            "failed to load commit object while resolving '{display_name}': {error}"
+        ))
+    })?;
+
+    if n == 0 || n > commit.parent_commit_ids.len() {
+        return Err(CommitBaseError::InvalidReference(format!(
+            "invalid reference: {display_name}"
+        )));
+    }
+
+    Ok(commit.parent_commit_ids[n - 1])
+}
+
+fn navigate_commit_path_typed(
+    mut current: ObjectHash,
+    path: &str,
+    display_name: &str,
+) -> Result<ObjectHash, CommitBaseError> {
+    let mut chars = path.chars().peekable();
+
+    while let Some(symbol) = chars.next() {
+        if symbol != '^' && symbol != '~' {
+            return Err(CommitBaseError::InvalidReference(format!(
+                "invalid reference: {display_name}"
+            )));
+        }
+
+        let mut digits = String::new();
+        while let Some(ch) = chars.peek() {
+            if ch.is_ascii_digit() {
+                digits.push(*ch);
+                chars.next();
+            } else {
+                break;
+            }
+        }
+
+        let step = if digits.is_empty() {
+            1
+        } else {
+            digits.parse::<usize>().map_err(|_| {
+                CommitBaseError::InvalidReference(format!("invalid reference: {display_name}"))
+            })?
+        };
+
+        if step == 0 {
+            continue;
+        }
+
+        match symbol {
+            '^' => {
+                current = nth_parent_commit_typed(&current, step, display_name)?;
+            }
+            '~' => {
+                for _ in 0..step {
+                    current = nth_parent_commit_typed(&current, 1, display_name)?;
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    Ok(current)
+}
+
+async fn resolve_commit_base_atom_typed(name: &str) -> Result<ObjectHash, CommitBaseError> {
     // 1. Check for HEAD
     if name.eq_ignore_ascii_case("HEAD") {
         return match Head::current_commit_result().await {
@@ -612,6 +691,21 @@ pub async fn get_commit_base_typed(name: &str) -> Result<ObjectHash, CommitBaseE
             "reference is not a commit: {name}, is {object_type}"
         ))),
     }
+}
+
+pub async fn get_commit_base_typed(name: &str) -> Result<ObjectHash, CommitBaseError> {
+    if let Some((base_ref, path)) = split_revision_navigation(name) {
+        if base_ref.is_empty() {
+            return Err(CommitBaseError::InvalidReference(format!(
+                "invalid reference: {name}"
+            )));
+        }
+
+        let base_commit = resolve_commit_base_atom_typed(base_ref).await?;
+        return navigate_commit_path_typed(base_commit, path, name);
+    }
+
+    resolve_commit_base_atom_typed(name).await
 }
 
 /// Resolve a string to a commit [`ObjectHash`].
@@ -904,6 +998,19 @@ mod test {
             )),
             "unexpected error: {error}"
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn get_commit_base_typed_head_navigation_reports_unborn_head() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+
+        let error = get_commit_base_typed("HEAD~1")
+            .await
+            .expect_err("unborn HEAD navigation must not panic");
+        assert!(matches!(error, CommitBaseError::HeadUnborn));
     }
 
     #[tokio::test]

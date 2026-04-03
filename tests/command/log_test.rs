@@ -10,7 +10,12 @@ use git_internal::{
     hash::ObjectHash,
     internal::object::{blob::Blob, commit::Commit, tree::Tree},
 };
-use libra::utils::{object_ext::TreeExt, pager::LIBRA_PAGER_ENV, util};
+use libra::{
+    internal::{db::get_db_conn_instance, model::reference},
+    utils::{object_ext::TreeExt, pager::LIBRA_PAGER_ENV, util},
+};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+use serial_test::serial;
 
 use super::*;
 
@@ -44,6 +49,40 @@ fn test_log_cli_empty_repository_returns_fatal_128() {
     assert_eq!(
         stderr,
         "fatal: your current branch 'main' does not have any commits yet\nError-Code: LBR-REPO-003"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_log_corrupt_head_reference_returns_repo_corrupt() {
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+
+    let db = get_db_conn_instance().await;
+    let head = reference::Entity::find()
+        .filter(reference::Column::Kind.eq(reference::ConfigKind::Head))
+        .filter(reference::Column::Remote.is_null())
+        .one(&db)
+        .await
+        .unwrap()
+        .expect("expected HEAD row");
+    let mut head: reference::ActiveModel = head.into();
+    head.name = Set(None);
+    head.commit = Set(Some("not-a-valid-hash".to_string()));
+    head.update(&db).await.unwrap();
+
+    let output = run_libra_command(&["log", "--oneline"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-REPO-002");
+    assert!(
+        stderr.contains("failed to resolve HEAD"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("invalid detached HEAD commit hash"),
+        "unexpected stderr: {stderr}"
     );
 }
 

@@ -121,10 +121,18 @@ pub async fn execute_checked(args: RestoreArgs) -> io::Result<()> {
         Some(ref src) => {
             // ref: prevent moving `source`
             if src == HEAD {
-                // Default Source
-                Head::current_commit_result()
-                    .await
-                    .map_err(|error| io::Error::other(error.to_string()))?
+                Some(
+                    Head::current_commit_result()
+                        .await
+                        .map_err(|error| io::Error::other(error.to_string()))?
+                        .ok_or_else(|| io::Error::other("could not resolve HEAD"))?,
+                )
+            } else if src.contains('~') || src.contains('^') {
+                Some(
+                    util::get_commit_base_typed(src)
+                        .await
+                        .map_err(|error| io::Error::other(error.to_string()))?,
+                )
             } else {
                 resolve_source_commit(src, &storage)
                     .await

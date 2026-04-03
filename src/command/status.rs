@@ -249,8 +249,12 @@ async fn collect_status_data(args: &StatusArgs) -> CliResult<StatusData> {
             .with_hint("this command requires a working tree; bare repositories do not have one"));
     }
 
-    let head = Head::current().await;
-    let head_oid = Head::current_commit().await;
+    let head = Head::current_result()
+        .await
+        .map_err(|error| status_branch_store_error("resolve HEAD", error))?;
+    let head_oid = Head::current_commit_result()
+        .await
+        .map_err(|error| status_branch_store_error("resolve HEAD commit", error))?;
     let has_commits = head_oid.is_some();
 
     let staged = changes_to_be_committed_safe()

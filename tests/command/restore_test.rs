@@ -23,6 +23,28 @@ fn test_restore_cli_outside_repository_returns_fatal_128() {
     );
 }
 
+#[test]
+#[serial]
+fn test_restore_source_head_unborn_returns_error_without_falling_back() {
+    let repo = tempdir().expect("failed to create repository root");
+    init_repo_via_cli(repo.path());
+    std::fs::write(repo.path().join("tracked.txt"), "modified\n")
+        .expect("failed to write tracked file");
+
+    let output = run_libra_command(&["restore", "--source", "HEAD", "tracked.txt"], repo.path());
+    assert_eq!(output.status.code(), Some(128));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("fatal: could not resolve HEAD"),
+        "unexpected stderr: {stderr}"
+    );
+
+    let content = std::fs::read_to_string(repo.path().join("tracked.txt"))
+        .expect("failed to read tracked file");
+    assert_eq!(content, "modified\n");
+}
+
 #[tokio::test]
 #[serial]
 async fn test_restore_source_does_not_fall_back_from_unborn_branch_to_hash_prefix() {

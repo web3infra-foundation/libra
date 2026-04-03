@@ -169,6 +169,34 @@ impl Head {
         Self::current_with_conn(&db_conn).await
     }
 
+    pub async fn current_result_with_conn<C>(db: &C) -> Result<Head, BranchStoreError>
+    where
+        C: ConnectionTrait,
+    {
+        let head = Self::query_local_head_result_with_conn(db).await?;
+        match head.name {
+            Some(name) => Ok(Head::Branch(name)),
+            None => {
+                let commit_hash = head.commit.ok_or_else(|| BranchStoreError::Corrupt {
+                    name: "HEAD".to_string(),
+                    detail: "detached HEAD is missing commit hash".to_string(),
+                })?;
+                let commit_hash = ObjectHash::from_str(commit_hash.as_str()).map_err(|error| {
+                    BranchStoreError::Corrupt {
+                        name: "HEAD".to_string(),
+                        detail: format!("invalid detached HEAD commit hash: {error}"),
+                    }
+                })?;
+                Ok(Head::Detached(commit_hash))
+            }
+        }
+    }
+
+    pub async fn current_result() -> Result<Head, BranchStoreError> {
+        let db_conn = get_db_conn_instance().await;
+        Self::current_result_with_conn(&db_conn).await
+    }
+
     pub async fn remote_current_with_conn<C>(db: &C, remote: &str) -> Option<Head>
     where
         C: ConnectionTrait,
@@ -196,24 +224,11 @@ impl Head {
     where
         C: ConnectionTrait,
     {
-        let head = Self::query_local_head_result_with_conn(db).await?;
-        match head.name {
-            Some(name) => Ok(Branch::find_branch_result_with_conn(db, &name, None)
+        match Self::current_result_with_conn(db).await? {
+            Head::Branch(name) => Ok(Branch::find_branch_result_with_conn(db, &name, None)
                 .await?
                 .map(|branch| branch.commit)),
-            None => {
-                let commit_hash = head.commit.ok_or_else(|| BranchStoreError::Corrupt {
-                    name: "HEAD".to_string(),
-                    detail: "detached HEAD is missing commit hash".to_string(),
-                })?;
-                let commit_hash = ObjectHash::from_str(commit_hash.as_str()).map_err(|error| {
-                    BranchStoreError::Corrupt {
-                        name: "HEAD".to_string(),
-                        detail: format!("invalid detached HEAD commit hash: {error}"),
-                    }
-                })?;
-                Ok(Some(commit_hash))
-            }
+            Head::Detached(commit_hash) => Ok(Some(commit_hash)),
         }
     }
 
