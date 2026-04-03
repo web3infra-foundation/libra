@@ -38,16 +38,6 @@ impl ClaudeCredentialSource {
         }
     }
 
-    pub(crate) fn request_value(self) -> &'static str {
-        match self {
-            Self::LocalApiKeyHelper => "local_api_key_helper",
-            Self::LocalAuthToken => "local_env_auth_token",
-            Self::LocalApiKey => "local_env_api_key",
-            Self::ProcessAuthToken => "process_env_auth_token",
-            Self::ProcessApiKey => "process_env_api_key",
-        }
-    }
-
     fn uses_api_key(self) -> bool {
         matches!(self, Self::LocalApiKey | Self::ProcessApiKey)
     }

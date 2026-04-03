@@ -361,19 +361,13 @@ pub(super) struct ManagedHelperRequest {
         skip_serializing_if = "Option::is_none"
     )]
     pub(super) interactive_response_dir: Option<String>,
-    #[serde(
-        rename = "providerEnvOverrides",
-        skip_serializing_if = "BTreeMap::is_empty",
-        default
-    )]
+    /// Applied only via `apply_provider_env_to_command` on the child process.
+    /// Never serialised: avoids CodeQL / static analysis treating API keys as entering stdin/JSON.
+    #[serde(skip)]
     pub(super) provider_env_overrides: BTreeMap<String, String>,
-    #[serde(
-        rename = "providerEnvUnset",
-        skip_serializing_if = "Vec::is_empty",
-        default
-    )]
+    #[serde(skip)]
     pub(super) provider_env_unset: Vec<String>,
-    #[serde(rename = "credentialSource", skip_serializing_if = "Option::is_none")]
+    #[serde(skip)]
     pub(super) credential_source: Option<String>,
     #[serde(rename = "systemPrompt", skip_serializing_if = "Option::is_none")]
     pub(super) system_prompt: Option<ManagedSystemPrompt>,
@@ -1322,15 +1316,12 @@ fn tools_for_local_plan_mode(tools: Vec<String>) -> Vec<String> {
 }
 
 fn apply_project_bootstrap_to_helper_request(
-    request: &mut ManagedHelperRequest,
-    project_bootstrap: &ClaudecodeProjectBootstrap,
+    _request: &mut ManagedHelperRequest,
+    _project_bootstrap: &ClaudecodeProjectBootstrap,
 ) {
-    // Credential-bearing env overrides are applied directly on the child
-    // Command via `apply_provider_env_to_command` to keep secret values out of
-    // the serialised request body.  Only non-sensitive metadata is set here.
-    request.credential_source = project_bootstrap
-        .credential_source
-        .map(|source| source.request_value().to_string());
+    // Credentials and provider env are applied only on the child `Command` via
+    // `apply_provider_env_to_command`. The helper reads the effective env from
+    // `process.env` / `os.environ`; nothing credential-bearing is serialised.
 }
 
 fn emit_project_bootstrap_note(project_bootstrap: &ClaudecodeProjectBootstrap) {

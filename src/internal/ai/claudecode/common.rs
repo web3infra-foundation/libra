@@ -487,11 +487,37 @@ pub(super) fn apply_helper_session_controls_to_command(
 pub(super) fn redact_helper_request_session_controls(
     request: &ManagedHelperRequest,
 ) -> ManagedHelperRequest {
-    let mut redacted = request.clone();
-    redacted.resume = None;
-    redacted.session_id = None;
-    redacted.resume_session_at = None;
-    redacted
+    // Build explicitly instead of `request.clone()` so sensitive-field taint does not flow
+    // through a full struct copy into `serde_json::to_vec` (CodeQL cleartext-logging).
+    ManagedHelperRequest {
+        mode: request.mode,
+        prompt: request.prompt.clone(),
+        cwd: request.cwd.clone(),
+        model: request.model.clone(),
+        permission_mode: request.permission_mode.clone(),
+        timeout_seconds: request.timeout_seconds,
+        idle_timeout_seconds: request.idle_timeout_seconds,
+        tools: request.tools.clone(),
+        allowed_tools: request.allowed_tools.clone(),
+        auto_approve_tools: request.auto_approve_tools,
+        include_partial_messages: request.include_partial_messages,
+        prompt_suggestions: request.prompt_suggestions,
+        agent_progress_summaries: request.agent_progress_summaries,
+        interactive_approvals: request.interactive_approvals,
+        libra_plan_mode: request.libra_plan_mode,
+        enable_file_checkpointing: request.enable_file_checkpointing,
+        continue_session: request.continue_session,
+        resume: None,
+        fork_session: request.fork_session,
+        session_id: None,
+        resume_session_at: None,
+        interactive_response_dir: request.interactive_response_dir.clone(),
+        provider_env_overrides: BTreeMap::new(),
+        provider_env_unset: Vec::new(),
+        credential_source: None,
+        system_prompt: request.system_prompt.clone(),
+        output_schema: request.output_schema.clone(),
+    }
 }
 
 pub(super) async fn upsert_tracked_json_object<T>(

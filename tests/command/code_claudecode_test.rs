@@ -384,6 +384,7 @@ fn write_streaming_event_helper(
     request_path: &Path,
     events: &[Value],
     trailing_shell: &str,
+    env_audit_path: Option<&Path>,
 ) {
     let request_rendered = shell_single_quote(&request_path.to_string_lossy());
     let rendered_events = events
@@ -398,6 +399,12 @@ fn write_streaming_event_helper(
     let mut script = format!(
         "#!/bin/sh\nrequest_tmp=$(mktemp)\ncat > \"$request_tmp\"\npython3 - \"$request_tmp\" {request_rendered} <<'PY'\nimport json\nimport os\nimport sys\n\nsource_path, dest_path = sys.argv[1:3]\nwith open(source_path, 'r', encoding='utf-8') as handle:\n    request = json.load(handle)\nfor env_key, field in (\n    ('LIBRA_CLAUDE_HELPER_RESUME', 'resume'),\n    ('LIBRA_CLAUDE_HELPER_SESSION_ID', 'sessionId'),\n    ('LIBRA_CLAUDE_HELPER_RESUME_SESSION_AT', 'resumeSessionAt'),\n):\n    value = os.environ.get(env_key)\n    if value:\n        request[field] = value\nwith open(dest_path, 'w', encoding='utf-8') as handle:\n    json.dump(request, handle)\nPY\nrm -f \"$request_tmp\"\n"
     );
+    if let Some(env_path) = env_audit_path {
+        let env_rendered = shell_single_quote(&env_path.to_string_lossy());
+        script.push_str(&format!(
+            "python3 - {env_rendered} <<'PY'\nimport json\nimport os\nimport sys\n\npath = sys.argv[1]\nkeys = (\"ANTHROPIC_AUTH_TOKEN\", \"ANTHROPIC_API_KEY\", \"ANTHROPIC_BASE_URL\")\nout = {{k: os.environ.get(k) for k in keys}}\nwith open(path, 'w', encoding='utf-8') as handle:\n    json.dump(out, handle)\nPY\n",
+        ));
+    }
     if !rendered_events.is_empty() {
         script.push_str("printf '%s\\n' ");
         script.push_str(&rendered_events.join(" "));
@@ -413,6 +420,15 @@ fn write_streaming_event_helper(
 }
 
 fn write_streaming_request_capture_helper(path: &Path, artifact: &Value, request_path: &Path) {
+    write_streaming_request_capture_helper_with_env_audit(path, artifact, request_path, None);
+}
+
+fn write_streaming_request_capture_helper_with_env_audit(
+    path: &Path,
+    artifact: &Value,
+    request_path: &Path,
+    env_audit_path: Option<&Path>,
+) {
     write_streaming_event_helper(
         path,
         request_path,
@@ -427,6 +443,7 @@ fn write_streaming_request_capture_helper(path: &Path, artifact: &Value, request
             }),
         ],
         "",
+        env_audit_path,
     );
 }
 
@@ -1157,11 +1174,17 @@ async fn test_code_claudecode_bootstraps_project_settings_and_reports_process_en
     fs::write(&touched_file, "pub fn code_project_bootstrap() {}\n").expect("write source file");
 
     let request_path = repo.path().join("code-claudecode-bootstrap-request.json");
+    let helper_env_path = repo.path().join("code-claudecode-bootstrap-helper-env.json");
     let helper_path = repo
         .path()
         .join("capture-code-claudecode-bootstrap-helper.sh");
     let artifact = semantic_full_artifact(repo.path(), &touched_file);
-    write_streaming_request_capture_helper(&helper_path, &artifact, &request_path);
+    write_streaming_request_capture_helper_with_env_audit(
+        &helper_path,
+        &artifact,
+        &request_path,
+        Some(helper_env_path.as_path()),
+    );
 
     let output = run_libra_command_with_stdin_and_env(
         &[
@@ -1221,13 +1244,26 @@ async fn test_code_claudecode_bootstraps_project_settings_and_reports_process_en
     );
 
     let helper_request = read_json_file(&request_path);
-    assert_eq!(
-        helper_request["credentialSource"],
-        json!("process_env_auth_token")
+    assert!(
+        helper_request.get("credentialSource").is_none(),
+        "credentialSource must not be serialised on helper stdin (credentials / static analysis)"
     );
     assert!(
         helper_request.get("providerEnvOverrides").is_none(),
         "process-env credentials should not require local override injection"
+    );
+
+    let helper_env = read_json_file(&helper_env_path);
+    assert_eq!(
+        helper_env["ANTHROPIC_AUTH_TOKEN"],
+        json!("process-token"),
+        "child helper must receive ANTHROPIC_AUTH_TOKEN via inherited / Command env (not JSON stdin)"
+    );
+    assert!(
+        helper_env
+            .get("ANTHROPIC_API_KEY")
+            .is_none_or(|v| v.is_null()),
+        "this bootstrap scenario should not set ANTHROPIC_API_KEY on the child env"
     );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1349,6 +1385,7 @@ async fn test_code_claudecode_surfaces_nonzero_helper_exit() {
         &request_path,
         &[],
         "printf '%s\\n' 'helper exited unexpectedly' >&2\nexit 17\n",
+        None,
     );
 
     let output = run_libra_command_with_stdin(
@@ -1412,6 +1449,7 @@ async fn test_code_claudecode_rejects_malformed_final_artifact() {
             }
         })],
         "",
+        None,
     );
 
     let output = run_libra_command_with_stdin(
