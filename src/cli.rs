@@ -330,11 +330,14 @@ pub enum Bisect {
 
 /// The main function is the entry point of the Libra application.
 /// It parses the command-line arguments and executes the corresponding function.
-/// - Caution: This is a `synchronous` function, it's declared as `async` to be able to use `[tokio::main]`
 /// - `args`: parse from command line if it's `None`, otherwise parse from the given args
-#[tokio::main]
-pub async fn parse(args: Option<&[&str]>) -> CliResult<()> {
-    parse_async(args).await
+pub fn parse(args: Option<&[&str]>) -> CliResult<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| CliError::fatal(format!("failed to create tokio runtime: {e}")))?;
+
+    runtime.block_on(Box::pin(parse_async(args)))
 }
 
 // Rewrite `log -<n>` into `log -n <n>` only when `log` is the actual subcommand.

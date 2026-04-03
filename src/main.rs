@@ -19,7 +19,27 @@ fn main() {
             .try_init();
     }
 
-    if let Err(err) = cli::parse(None) {
+    const CLI_STACK_SIZE: usize = 32 * 1024 * 1024;
+    let handle = std::thread::Builder::new()
+        .name("libra-cli".to_string())
+        .stack_size(CLI_STACK_SIZE)
+        .spawn(|| cli::parse(None));
+
+    let result = match handle {
+        Ok(handle) => match handle.join() {
+            Ok(result) => result,
+            Err(_) => {
+                eprintln!("fatal: CLI thread panicked");
+                std::process::exit(1);
+            }
+        },
+        Err(err) => {
+            eprintln!("fatal: failed to spawn CLI thread: {err}");
+            std::process::exit(1);
+        }
+    };
+
+    if let Err(err) = result {
         // Best-effort JSON rendering: resolve the output flags directly from
         // argv so parse-time failures follow the same precedence rules as
         // successful dispatch.
