@@ -26,6 +26,12 @@ use crate::{
     },
 };
 
+#[derive(Debug)]
+enum GrepReadError {
+    Skippable(String),
+    Fatal(String),
+}
+
 /// Search for patterns in tracked files in the working tree, index, or commit trees.
 #[derive(Parser, Debug)]
 pub struct GrepArgs {
@@ -221,12 +227,20 @@ async fn run_grep(args: &GrepArgs) -> CliResult<GrepOutput> {
         let path_str = search_file.path.display().to_string();
         let content = match read_file_content(search_file).await {
             Ok(c) => c,
-            Err(e) => {
+            Err(GrepReadError::Skippable(message)) => {
                 warnings.push(GrepWarning {
                     path: path_str,
-                    message: e,
+                    message,
                 });
                 continue;
+            }
+            Err(GrepReadError::Fatal(message)) => {
+                return Err(CliError::fatal(format!(
+                    "failed to read search input '{}': {}",
+                    search_file.path.display(),
+                    message
+                ))
+                .with_stable_code(StableErrorCode::RepoCorrupt));
             }
         };
 
@@ -514,47 +528,52 @@ fn tracked_files_from_index(
 }
 
 /// Read file content from working tree or from a blob object.
-async fn read_file_content(search_file: &SearchFile) -> Result<Vec<u8>, String> {
+async fn read_file_content(search_file: &SearchFile) -> Result<Vec<u8>, GrepReadError> {
     let content = if let Some(blob_hash) = &search_file.blob_hash {
         ensure_blob_within_size_limit(blob_hash).await?;
 
         // Read from blob object (tree/index search)
-        let blob: git_internal::internal::object::blob::Blob =
-            load_object(blob_hash).map_err(|e| format!("failed to load blob: {}", e))?;
+        let blob: git_internal::internal::object::blob::Blob = load_object(blob_hash)
+            .map_err(|e| GrepReadError::Fatal(format!("failed to load blob: {}", e)))?;
         blob.data
     } else {
         // Read from working tree
         let abs_path = util::workdir_to_absolute(&search_file.path);
 
         let metadata = std::fs::symlink_metadata(&abs_path)
-            .map_err(|e| format!("failed to stat file: {}", e))?;
+            .map_err(|e| GrepReadError::Skippable(format!("failed to stat file: {}", e)))?;
 
         let file_type = metadata.file_type();
         if file_type.is_symlink() {
-            return Err("skipped symbolic link".to_string());
+            return Err(GrepReadError::Skippable(
+                "skipped symbolic link".to_string(),
+            ));
         }
         if !file_type.is_file() {
-            return Err("skipped non-regular file".to_string());
+            return Err(GrepReadError::Skippable(
+                "skipped non-regular file".to_string(),
+            ));
         }
 
         // Check file size before reading
         if metadata.len() > MAX_FILE_SIZE {
-            return Err(format!(
+            return Err(GrepReadError::Skippable(format!(
                 "file too large ({} bytes, max {} bytes)",
                 metadata.len(),
                 MAX_FILE_SIZE
-            ));
+            )));
         }
 
-        std::fs::read(&abs_path).map_err(|e| format!("failed to read file: {}", e))?
+        std::fs::read(&abs_path)
+            .map_err(|e| GrepReadError::Skippable(format!("failed to read file: {}", e)))?
     };
 
     if content.len() as u64 > MAX_FILE_SIZE {
-        return Err(format!(
+        return Err(GrepReadError::Skippable(format!(
             "file too large ({} bytes, max {} bytes)",
             content.len(),
             MAX_FILE_SIZE
-        ));
+        )));
     }
 
     Ok(content)
@@ -562,24 +581,24 @@ async fn read_file_content(search_file: &SearchFile) -> Result<Vec<u8>, String> 
 
 async fn ensure_blob_within_size_limit(
     blob_hash: &git_internal::hash::ObjectHash,
-) -> Result<(), String> {
+) -> Result<(), GrepReadError> {
     if let Some(size) = lookup_indexed_blob_size(blob_hash).await? {
         if size > MAX_FILE_SIZE {
-            return Err(format!(
+            return Err(GrepReadError::Skippable(format!(
                 "file too large ({} bytes, max {} bytes)",
                 size, MAX_FILE_SIZE
-            ));
+            )));
         }
         return Ok(());
     }
 
-    if let Some(size) = read_loose_blob_size(blob_hash)? {
-        if size > MAX_FILE_SIZE {
-            return Err(format!(
-                "file too large ({} bytes, max {} bytes)",
-                size, MAX_FILE_SIZE
-            ));
-        }
+    if let Some(size) = read_loose_blob_size(blob_hash)?
+        && size > MAX_FILE_SIZE
+    {
+        return Err(GrepReadError::Skippable(format!(
+            "file too large ({} bytes, max {} bytes)",
+            size, MAX_FILE_SIZE
+        )));
     }
 
     Ok(())
@@ -587,18 +606,20 @@ async fn ensure_blob_within_size_limit(
 
 async fn lookup_indexed_blob_size(
     blob_hash: &git_internal::hash::ObjectHash,
-) -> Result<Option<u64>, String> {
+) -> Result<Option<u64>, GrepReadError> {
     let db = db::get_db_conn_instance().await;
     object_index::Entity::find()
         .filter(object_index::Column::OId.eq(blob_hash.to_string()))
         .filter(object_index::Column::OType.eq("blob"))
         .one(&db)
         .await
-        .map_err(|e| format!("failed to query object index: {}", e))
+        .map_err(|e| GrepReadError::Fatal(format!("failed to query object index: {}", e)))
         .map(|record| record.map(|row| row.o_size as u64))
 }
 
-fn read_loose_blob_size(blob_hash: &git_internal::hash::ObjectHash) -> Result<Option<u64>, String> {
+fn read_loose_blob_size(
+    blob_hash: &git_internal::hash::ObjectHash,
+) -> Result<Option<u64>, GrepReadError> {
     let object_path = path::objects()
         .join(&blob_hash.to_string()[0..2])
         .join(&blob_hash.to_string()[2..]);
@@ -606,26 +627,27 @@ fn read_loose_blob_size(blob_hash: &git_internal::hash::ObjectHash) -> Result<Op
         return Ok(None);
     }
 
-    let raw = std::fs::read(&object_path).map_err(|e| format!("failed to read object: {}", e))?;
+    let raw = std::fs::read(&object_path)
+        .map_err(|e| GrepReadError::Fatal(format!("failed to read object: {}", e)))?;
     let decoder = ZlibDecoder::new(raw.as_slice());
     let mut reader = std::io::BufReader::new(decoder);
     let mut header = Vec::new();
     reader
         .read_until(0, &mut header)
-        .map_err(|e| format!("failed to read object header: {}", e))?;
+        .map_err(|e| GrepReadError::Fatal(format!("failed to read object header: {}", e)))?;
     let terminator = header
         .iter()
         .position(|&byte| byte == 0)
-        .ok_or_else(|| "invalid object header".to_string())?;
+        .ok_or_else(|| GrepReadError::Fatal("invalid object header".to_string()))?;
     let header_str = std::str::from_utf8(&header[..terminator])
-        .map_err(|e| format!("invalid object header: {}", e))?;
+        .map_err(|e| GrepReadError::Fatal(format!("invalid object header: {}", e)))?;
     let mut parts = header_str.splitn(2, ' ');
     let object_type = parts.next().unwrap_or_default();
     let size = parts
         .next()
-        .ok_or_else(|| "invalid object header".to_string())?
+        .ok_or_else(|| GrepReadError::Fatal("invalid object header".to_string()))?
         .parse::<u64>()
-        .map_err(|e| format!("invalid object size: {}", e))?;
+        .map_err(|e| GrepReadError::Fatal(format!("invalid object size: {}", e)))?;
 
     if object_type != "blob" {
         return Ok(None);
