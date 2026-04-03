@@ -287,29 +287,24 @@ impl HistoryManager {
     }
 
     pub async fn resolve_history_head(&self) -> Result<Option<ObjectHash>> {
-        let ref_model = {
-            let mut model = None;
-            for attempt in 0..=SQLITE_BUSY_MAX_RETRIES {
-                match reference::Entity::find()
-                    .filter(reference::Column::Name.eq(&self.ref_name))
-                    .filter(reference::Column::Kind.eq(ConfigKind::Branch))
-                    .one(&*self.db_conn)
-                    .await
-                {
-                    Ok(found) => {
-                        model = Some(found);
-                        break;
-                    }
-                    Err(err) if is_sqlite_busy(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
-                        sleep(Duration::from_millis(
-                            SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
-                        ))
-                        .await;
-                    }
-                    Err(err) => return Err(err).context("Failed to query history head"),
+        let mut attempt = 0;
+        let ref_model = loop {
+            match reference::Entity::find()
+                .filter(reference::Column::Name.eq(&self.ref_name))
+                .filter(reference::Column::Kind.eq(ConfigKind::Branch))
+                .one(&*self.db_conn)
+                .await
+            {
+                Ok(found) => break found,
+                Err(err) if is_sqlite_busy(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
+                    attempt += 1;
+                    sleep(Duration::from_millis(
+                        SQLITE_BUSY_RETRY_BASE_MS * attempt as u64,
+                    ))
+                    .await;
                 }
+                Err(err) => return Err(err).context("Failed to query history head"),
             }
-            model.expect("history head query loop must return or set a result")
         };
 
         match ref_model {
