@@ -124,7 +124,10 @@ impl HistoryManager {
             "Initialize AI history branch",
         );
 
-        let commit_hash = write_git_object(&self.repo_path, "commit", &commit.to_data().unwrap())?;
+        let commit_data = commit
+            .to_data()
+            .context("Failed to serialize AI history init commit")?;
+        let commit_hash = write_git_object(&self.repo_path, "commit", &commit_data)?;
         self.update_ref(&self.ref_name, commit_hash).await?;
 
         Ok(())
@@ -147,7 +150,7 @@ impl HistoryManager {
         let parent_commit_id = self.resolve_history_head().await?;
 
         let mut root_items = if let Some(parent_id) = parent_commit_id {
-            self.load_commit_tree(&parent_id).unwrap_or_default()
+            self.load_commit_tree(&parent_id)?
         } else {
             Vec::new()
         };
@@ -160,7 +163,7 @@ impl HistoryManager {
             .cloned();
 
         let mut type_items = if let Some(entry) = type_tree_entry {
-            self.load_tree(&entry.id).unwrap_or_default()
+            self.load_tree(&entry.id)?
         } else {
             Vec::new()
         };
@@ -208,7 +211,10 @@ impl HistoryManager {
         let commit = Commit::new(author, signature, root_tree_hash, parents, &message);
 
         // Serialize and write commit
-        let commit_hash = write_git_object(&self.repo_path, "commit", &commit.to_data().unwrap())?;
+        let commit_data = commit
+            .to_data()
+            .context("Failed to serialize AI history commit")?;
+        let commit_hash = write_git_object(&self.repo_path, "commit", &commit_data)?;
 
         // 4. Update Ref
         self.update_ref(&self.ref_name, commit_hash).await?;

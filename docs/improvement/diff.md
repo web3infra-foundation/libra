@@ -1,12 +1,12 @@
 ## Diff 命令改进详细计划
 
-> 最后编写时间：2026-03-30
+> 最后编写时间：2026-04-04
 
 同时落地 [Cross-Cutting Improvements A/B/F/G](README.md#全局层面改进贯穿所有命令)。
 
 ### 已完成前置条件与当前代码状态
 
-第一批全部 8 个命令的主改造已在当前代码库落地。`diff` 是第三批（历史查询命令）中 Agent 依赖最强的命令之一——Agent 需要 hunk 级别的结构化输出来决定代码修改策略。
+第一批全部 8 个命令的主改造已在当前代码库落地。`diff` 是第三批（历史查询命令）中 Agent 依赖最强的命令之一，当前工作区已经按本计划完成主改造；本文保留为对外契约和后续维护基线。
 
 **已确认落地的基线：**
 
@@ -19,28 +19,34 @@
 - `git_internal::Diff::diff()` 提供核心 diff 算法（histogram、myers、myersMinimal）
 - `--old` / `--new` / `--staged` / `--algorithm` / `--output` / pathspec 已实现
 - 彩色输出已实现（TTY 检测，bold/cyan/red/green）
+- `run_diff()` + `DiffOutput` 已落地，`--json` / `--machine` 可返回 hunk 级结构化 diff
+- `DiffError` typed enum 已落地，主要错误路径已显式映射到 `StableErrorCode`
+- `--name-only` / `--name-status` / `--numstat` / `--stat` 已落地，并与 JSON 契约解耦
+- `--quiet` 已收口为仅抑制 stdout；存在差异时返回 exit `1`，即使同时写入 `--output`
+- `--help` EXAMPLES 已落地；生产路径 `unwrap()` 和死代码 `similar_diff_result()` 已移除
 
-**基于当前代码的 Review 结论（diff 仍需改进的部分）：**
+**基于当前代码的 Review 结论（已改进部分 vs 后续维护重点）：**
 
-- **零 JSON / machine 输出**：`OutputConfig` 参数标记为 `_output` 完全未使用（`diff.rs:196`）
-- **零 `StableErrorCode`**：所有错误使用 `CliError::fatal()` 或 `eprintln!()` 无显式错误码
-- **大量 `unwrap()` 调用**：`diff.rs` 中有 7 处 `unwrap()`，任何一处失败都会 panic（lines 72, 80, 129, 148, 167, 204, 222）
-- **`execute_safe()` 不传播 `execute()` 的错误**：`execute_safe()` 调用 `execute()` 后总是返回 `Ok(())`（`diff.rs:196-199`），即使 `execute()` 内部发生了 `eprintln!()` 错误
-- **`execute()` 使用 `eprintln!()` + `return`**：非结构化错误输出，无法被上层捕获（`diff.rs:91-92, 118-119`）
-- **缺少 `--numstat` / `--name-only` / `--stat`**：审计报告指出的关键缺失
-- **死代码**：`similar_diff_result()` 标记为 `#[allow(dead_code)]`（`diff.rs:274`）
+已改进（当前代码已具备）：
+
+- `run_diff()` / `DiffOutput` 已把执行层与渲染层拆开，human / JSON / machine 共用一套数据层
+- `DiffError` 已替代散落的 `fatal()` / `eprintln!()`，主要错误路径均有显式 `StableErrorCode`
+- `--name-only` / `--name-status` / `--numstat` / `--stat` 已补齐，JSON 恒定返回完整结构，不受 human 视图标志影响
+- `--quiet` 契约已与用户习惯对齐：仅抑制 stdout，通过退出码表达“有无差异”
+- `--output` 在 JSON 模式下被忽略；human 模式下即使搭配 `--quiet` 也会保留文件写入副作用
+
+后续维护重点：
+
+- 继续用回归测试锁住 `--quiet`、`--output`、`--staged` 和 pathspec 组合行为
+- 大 diff / 二进制 diff 的性能与 pager 体验继续观察，但不阻塞第三批验收
 
 ### 目标与非目标
 
-**本批目标：**
-- 引入 `DiffError` typed error enum，替代 `unwrap()` 和 `eprintln!()` 散射
-- 所有 `DiffError → CliError` 映射使用显式 `StableErrorCode`
-- 拆分执行层与渲染层：新增 `run_diff(args) -> Result<DiffOutput, DiffError>` 纯执行入口
-- 实现 JSON 输出（hunk 级别结构化），包含文件变更、统计信息和可选 patch 内容
-- 新增 `--numstat` / `--name-only` / `--name-status` / `--stat` 输出格式
-- 消除所有生产路径中的 `unwrap()` 调用
-- 删除死代码 `similar_diff_result()`
-- 补齐 `--help` EXAMPLES 段
+**已完成目标：**
+- `DiffError`、`run_diff()` / `DiffOutput`、JSON / machine、human 多视图输出、`--quiet` exit code 和 `--help` EXAMPLES 已全部落地
+
+**后续维护目标：**
+- 继续把 review 回归（quiet / output / staged / invalid revision）锁进集成测试
 
 **本批非目标：**
 - **不改变 `git_internal::Diff::diff()` 核心算法**。diff 生成逻辑不变

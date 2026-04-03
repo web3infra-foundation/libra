@@ -86,6 +86,64 @@ fn test_diff_numstat_and_stat_flags_render_cli_output() {
 }
 
 #[test]
+fn test_diff_quiet_uses_exit_code_to_signal_changes() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nupdated\n").unwrap();
+
+    let output = run_libra_command(&["--quiet", "diff"], repo.path());
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        output.stdout.is_empty(),
+        "unexpected stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_diff_quiet_with_output_file_still_returns_exit_code_1() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nupdated\n").unwrap();
+    let output_file = repo.path().join("captured.diff");
+    let output_path = output_file.to_str().unwrap();
+
+    let output = run_libra_command(&["--quiet", "diff", "--output", output_path], repo.path());
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        output.stderr.is_empty(),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let written = fs::read_to_string(&output_file).unwrap();
+    assert!(
+        written.contains("diff --git"),
+        "expected diff output file to be written, got: {written}"
+    );
+}
+
+#[test]
+fn test_diff_json_ignores_output_file_flag() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nupdated\n").unwrap();
+    let output_file = repo.path().join("ignored.diff");
+    let output_path = output_file.to_str().unwrap();
+
+    let output = run_libra_command(&["--json", "diff", "--output", output_path], repo.path());
+    assert_cli_success(&output, "json diff with output flag");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "diff");
+    assert!(
+        !output_file.exists(),
+        "--output should be ignored in JSON mode, but {:?} was created",
+        output_file
+    );
+}
+
+#[test]
 fn test_diff_status_detection_ignores_patch_body_text() {
     let repo = create_committed_repo_via_cli();
     fs::write(

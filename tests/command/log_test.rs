@@ -2,7 +2,7 @@
 //!
 //! **Layer:** L1 — deterministic, no external dependencies.
 
-use std::{cmp::min, str::FromStr};
+use std::{cmp::min, path::Path, str::FromStr};
 
 use clap::Parser;
 use git_internal::{
@@ -18,6 +18,13 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use serial_test::serial;
 
 use super::*;
+
+fn loose_object_path(repo: &Path, hash: &str) -> std::path::PathBuf {
+    repo.join(util::ROOT_DIR)
+        .join("objects")
+        .join(&hash[..2])
+        .join(&hash[2..])
+}
 
 #[test]
 fn test_log_cli_outside_repository_returns_fatal_128() {
@@ -147,6 +154,81 @@ fn test_log_invalid_decorate_uses_command_usage_error() {
     assert_eq!(report.severity, "error");
     assert_eq!(report.message, "invalid --decorate option: bogus");
     assert_eq!(report.hints, vec!["valid options: no, short, full, auto"]);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_log_decorate_no_skips_corrupt_reference_map() {
+    let repo = create_committed_repo_via_cli();
+
+    let create_branch = run_libra_command(&["branch", "topic"], repo.path());
+    assert!(
+        create_branch.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&create_branch.stderr)
+    );
+
+    let _guard = ChangeDirGuard::new(repo.path());
+    let db = get_db_conn_instance().await;
+    let topic = reference::Entity::find()
+        .filter(reference::Column::Kind.eq(reference::ConfigKind::Branch))
+        .filter(reference::Column::Name.eq("topic"))
+        .filter(reference::Column::Remote.is_null())
+        .one(&db)
+        .await
+        .unwrap()
+        .expect("expected topic branch row");
+    let mut topic: reference::ActiveModel = topic.into();
+    topic.commit = Set(Some("not-a-valid-hash".to_string()));
+    topic.update(&db).await.unwrap();
+
+    let output = run_libra_command(&["log", "--decorate=no", "--oneline"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("base"),
+        "expected log output to remain available, got: {stdout}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_log_patch_fails_when_commit_blob_is_missing() {
+    let repo = create_committed_repo_via_cli();
+
+    let tracked_blob = {
+        let _guard = ChangeDirGuard::new(repo.path());
+        let head = Head::current_commit().await.expect("expected HEAD commit");
+        let commit: Commit = load_object(&head).expect("expected HEAD commit object");
+        let tree: Tree = load_object(&commit.tree_id).expect("expected HEAD tree");
+        tree.get_plain_items()
+            .into_iter()
+            .find(|(path, _)| path == &std::path::PathBuf::from("tracked.txt"))
+            .map(|(_, hash)| hash.to_string())
+            .expect("expected tracked.txt blob in HEAD tree")
+    };
+    std::fs::remove_file(loose_object_path(repo.path(), &tracked_blob))
+        .expect("failed to delete committed blob");
+    std::fs::write(
+        repo.path().join("tracked.txt"),
+        "mutated worktree fallback\n",
+    )
+    .expect("failed to mutate worktree file");
+
+    let output = run_libra_command(&["log", "-n", "1", "--patch"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-REPO-002");
+    assert!(
+        stderr.contains("failed to load blob object"),
+        "expected repo corruption error, got: {stderr}"
+    );
 }
 
 #[test]

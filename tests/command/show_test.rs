@@ -3,17 +3,30 @@
 //!
 //! **Layer:** L1 — deterministic, no external dependencies.
 
-use std::process::Command;
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+};
 
-use git_internal::internal::object::commit::Commit;
+use git_internal::internal::object::{commit::Commit, tree::Tree};
 use libra::{
     command::load_object,
-    internal::head::Head,
-    utils::{output::OutputConfig, test::ChangeDirGuard},
+    internal::{db::get_db_conn_instance, head::Head, model::reference},
+    utils::{object_ext::TreeExt, output::OutputConfig, test::ChangeDirGuard, util::ROOT_DIR},
 };
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use serial_test::serial;
 
-use super::{create_committed_repo_via_cli, parse_json_stdout, run_libra_command};
+use super::{
+    create_committed_repo_via_cli, parse_cli_error_stderr, parse_json_stdout, run_libra_command,
+};
+
+fn loose_object_path(repo: &Path, hash: &str) -> PathBuf {
+    repo.join(ROOT_DIR)
+        .join("objects")
+        .join(&hash[..2])
+        .join(&hash[2..])
+}
 
 /// Initialize a temporary repository using CLI.
 fn init_temp_repo() -> tempfile::TempDir {
@@ -162,6 +175,103 @@ fn test_show_json_commit_output_includes_type_and_files() {
     assert_eq!(json["data"]["type"], "commit");
     assert_eq!(json["data"]["subject"], "base");
     assert!(json["data"]["files"].as_array().is_some());
+}
+
+#[test]
+fn test_show_quiet_suppresses_human_output() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--quiet", "show", "HEAD"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "unexpected stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_show_json_commit_refs_are_best_effort_on_corrupt_branch_metadata() {
+    let repo = create_committed_repo_via_cli();
+
+    let create_branch = run_libra_command(&["branch", "topic"], repo.path());
+    assert!(
+        create_branch.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&create_branch.stderr)
+    );
+
+    let _guard = ChangeDirGuard::new(repo.path());
+    let db = get_db_conn_instance().await;
+    let topic = reference::Entity::find()
+        .filter(reference::Column::Kind.eq(reference::ConfigKind::Branch))
+        .filter(reference::Column::Name.eq("topic"))
+        .filter(reference::Column::Remote.is_null())
+        .one(&db)
+        .await
+        .unwrap()
+        .expect("expected topic branch row");
+    let mut topic: reference::ActiveModel = topic.into();
+    topic.commit = Set(Some("not-a-valid-hash".to_string()));
+    topic.update(&db).await.unwrap();
+
+    let output = run_libra_command(&["--json", "show", "HEAD"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "show");
+    assert_eq!(json["data"]["type"], "commit");
+    let refs = json["data"]["refs"]
+        .as_array()
+        .expect("refs should be an array");
+    assert!(
+        refs.iter().any(|value| value == "HEAD -> main"),
+        "expected HEAD ref to survive best-effort ref collection, got: {refs:?}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_show_patch_fails_when_commit_blob_is_missing() {
+    let repo = create_committed_repo_via_cli();
+
+    let tracked_blob = {
+        let _guard = ChangeDirGuard::new(repo.path());
+        let head = Head::current_commit().await.expect("expected HEAD commit");
+        let commit: Commit = load_object(&head).expect("expected HEAD commit object");
+        let tree: Tree = load_object(&commit.tree_id).expect("expected HEAD tree");
+        tree.get_plain_items()
+            .into_iter()
+            .find(|(path, _)| path == &PathBuf::from("tracked.txt"))
+            .map(|(_, hash)| hash.to_string())
+            .expect("expected tracked.txt blob in HEAD tree")
+    };
+    std::fs::remove_file(loose_object_path(repo.path(), &tracked_blob))
+        .expect("failed to delete committed blob");
+    std::fs::write(
+        repo.path().join("tracked.txt"),
+        "mutated worktree fallback\n",
+    )
+    .expect("failed to mutate worktree file");
+
+    let output = run_libra_command(&["show", "HEAD"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-REPO-002");
+    assert!(
+        stderr.contains("failed to load blob object"),
+        "expected repo corruption error, got: {stderr}"
+    );
 }
 
 #[test]

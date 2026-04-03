@@ -1,6 +1,7 @@
 # `libra log`
 
 Show commit history. Human mode preserves the current `--oneline`, `--graph`, `--pretty`, `--stat`, `--patch`, and related output styles.
+`--quiet` suppresses human output but still validates the requested history range.
 
 ## JSON Output
 
@@ -30,7 +31,7 @@ Show commit history. Human mode preserves the current `--oneline`, `--graph`, `-
         ]
       }
     ],
-    "total": null
+    "total": 1
   }
 }
 ```
@@ -38,10 +39,15 @@ Show commit history. Human mode preserves the current `--oneline`, `--graph`, `-
 Notes:
 
 - `-n` also applies in JSON mode
+- `total` is `null` only when `-n` truncates the result set; otherwise it reflects the filtered commit count
 - `--graph`, `--pretty`, and `--oneline` do not change the JSON schema
+- `--decorate` only affects human rendering; JSON always returns a `refs` array, and auxiliary ref metadata is collected best-effort
 - `files` is always a structured change summary and never includes patch text
 
 ## Errors
 
+- Outside a repository: `LBR-REPO-001`
 - Empty branch or empty `HEAD`: `LBR-REPO-003`
 - Invalid date argument: `LBR-CLI-002`
+- Invalid `--decorate` option: `LBR-CLI-002`
+- Failed to read historical tree/blob objects for `--patch` / `--stat`: `LBR-REPO-002`

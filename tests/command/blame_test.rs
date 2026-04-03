@@ -4,6 +4,7 @@
 
 use std::{fs, io::Write};
 
+use chrono::DateTime;
 use libra::{
     command::{
         add::{self, AddArgs},
@@ -99,6 +100,66 @@ fn test_blame_human_output_handles_long_unicode_author_names() {
         stdout.contains("..."),
         "expected truncated author marker in blame output, got: {stdout}"
     );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_blame_json_assigns_lines_to_introducing_commits() {
+    let repo = tempdir().unwrap();
+    let _guard = setup_repo_with_hash(&repo, "sha1").await;
+    let (first, second) = prepare_history().await;
+
+    let output = run_libra_command(&["--json", "blame", "foo.txt"], repo.path());
+    assert_cli_success(&output, "json blame foo.txt");
+
+    let json = parse_json_stdout(&output);
+    let lines = json["data"]["lines"]
+        .as_array()
+        .expect("blame lines should be an array");
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0]["line_number"], 1);
+    assert_eq!(lines[0]["hash"], first.to_string());
+    assert_eq!(lines[1]["line_number"], 2);
+    assert_eq!(lines[1]["hash"], second.to_string());
+    let date = lines[0]["date"]
+        .as_str()
+        .expect("blame date should be a string");
+    assert!(
+        DateTime::parse_from_rfc3339(date).is_ok(),
+        "expected RFC3339 blame date, got: {date}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_blame_json_line_range_filters_output() {
+    let repo = tempdir().unwrap();
+    let _guard = setup_repo_with_hash(&repo, "sha1").await;
+    let (_first, second) = prepare_history().await;
+
+    let output = run_libra_command(&["--json", "blame", "-L", "2,2", "foo.txt"], repo.path());
+    assert_cli_success(&output, "json blame with line range");
+
+    let json = parse_json_stdout(&output);
+    let lines = json["data"]["lines"]
+        .as_array()
+        .expect("blame lines should be an array");
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["line_number"], 2);
+    assert_eq!(lines[0]["hash"], second.to_string());
+    assert_eq!(lines[0]["content"], "line2-modified");
+}
+
+#[test]
+fn test_blame_invalid_line_range_uses_stable_cli_error() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["blame", "-L", "9,10", "tracked.txt"], repo.path());
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert_eq!(report.category, "cli");
 }
 
 async fn setup_repo_with_hash(

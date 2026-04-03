@@ -21,11 +21,7 @@ use crate::{
         log::{ChangeType, generate_diff, get_changed_files_for_commit},
     },
     common_utils::parse_commit_msg,
-    internal::{
-        branch::{Branch, BranchStoreError},
-        head::Head,
-        tag,
-    },
+    internal::{branch::Branch, head::Head, tag},
     utils::{
         client_storage::ClientStorage,
         error::{CliError, CliResult, StableErrorCode},
@@ -35,8 +31,17 @@ use crate::{
     },
 };
 
+const SHOW_EXAMPLES: &str = "\
+EXAMPLES:
+    libra show HEAD                         Show the latest commit and patch
+    libra show --no-patch v1.0.0            Show tag or commit metadata only
+    libra show HEAD:src/main.rs             Show a file from a specific revision
+    libra show --stat HEAD~1                Show only diff statistics
+    libra --json show HEAD                  Structured JSON output for agents";
+
 /// Shows commits, tags, trees, or blobs.
 #[derive(Parser, Debug)]
+#[command(after_help = SHOW_EXAMPLES)]
 pub struct ShowArgs {
     /// Object name (commit, tag, etc.) or `<object>:<path>`. Defaults to `HEAD`.
     #[clap(value_name = "OBJECT")]
@@ -145,6 +150,10 @@ pub async fn execute_safe(args: ShowArgs, output: &OutputConfig) -> CliResult<()
     if output.is_json() {
         let result = run_show(&args).await?;
         return emit_json_data("show", &result, output);
+    }
+
+    if output.quiet {
+        return run_show(&args).await.map(|_| ());
     }
 
     let object_ref = args.object.as_deref().unwrap_or("HEAD");
@@ -525,7 +534,7 @@ async fn collect_commit_output(
             .iter()
             .map(ToString::to_string)
             .collect(),
-        refs: collect_reference_names(commit.id).await?,
+        refs: collect_reference_names(commit.id).await,
         files: files
             .into_iter()
             .map(|file| ShowFileChange {
@@ -660,52 +669,56 @@ fn tree_item_mode_to_object_type(mode: TreeItemMode) -> &'static str {
     }
 }
 
-fn show_branch_store_error(context: &str, error: BranchStoreError) -> CliError {
-    match error {
-        BranchStoreError::Query(detail) => {
-            CliError::fatal(format!("failed to {context}: {detail}"))
-                .with_stable_code(StableErrorCode::IoReadFailed)
-        }
-        other => CliError::fatal(format!("failed to {context}: {other}"))
-            .with_stable_code(StableErrorCode::RepoCorrupt),
-    }
-}
-
-async fn collect_reference_names(commit_id: ObjectHash) -> CliResult<Vec<String>> {
+async fn collect_reference_names(commit_id: ObjectHash) -> Vec<String> {
     let mut refs = Vec::new();
-    let head_branch = match Head::current_commit_result().await {
-        Ok(Some(head_commit)) => match Head::current_result().await {
-            Ok(Head::Branch(name)) if head_commit == commit_id => Some(name),
-            Ok(_) => None,
-            Err(error) => {
-                return Err(show_branch_store_error(
-                    "resolve HEAD for show output",
-                    error,
-                ));
+    let mut head_branch = None;
+    let mut include_head_ref = false;
+
+    match Head::current_commit_result().await {
+        Ok(Some(head_commit)) if head_commit == commit_id => {
+            include_head_ref = true;
+            match Head::current_result().await {
+                Ok(Head::Branch(name)) => head_branch = Some(name),
+                Ok(_) => {}
+                Err(error) => tracing::warn!(
+                    error = %error,
+                    "failed to resolve HEAD while collecting show JSON refs"
+                ),
             }
-        },
-        Ok(None) => None,
-        Err(error) => {
-            return Err(show_branch_store_error(
-                "resolve HEAD for show output",
-                error,
-            ));
         }
-    };
+        Ok(_) => {}
+        Err(error) => tracing::warn!(
+            error = %error,
+            "failed to resolve HEAD commit while collecting show JSON refs"
+        ),
+    }
 
-    for branch in Branch::list_branches_result(None)
-        .await
-        .map_err(|error| show_branch_store_error("list branches for show output", error))?
-    {
-        if branch.commit != commit_id {
-            continue;
-        }
-
-        if head_branch.as_deref() == Some(branch.name.as_str()) {
-            refs.push(format!("HEAD -> {}", branch.name));
+    if include_head_ref {
+        if let Some(branch) = &head_branch {
+            refs.push(format!("HEAD -> {branch}"));
         } else {
-            refs.push(branch.name);
+            refs.push("HEAD".to_string());
         }
+    }
+
+    match Branch::list_branches_result(None).await {
+        Ok(branches) => {
+            for branch in branches {
+                if branch.commit != commit_id {
+                    continue;
+                }
+
+                if head_branch.as_deref() == Some(branch.name.as_str()) {
+                    continue;
+                }
+
+                refs.push(branch.name);
+            }
+        }
+        Err(error) => tracing::warn!(
+            error = %error,
+            "failed to list branches while collecting show JSON refs"
+        ),
     }
 
     match tag::list().await {
@@ -722,10 +735,11 @@ async fn collect_reference_names(commit_id: ObjectHash) -> CliResult<Vec<String>
             }
         }
         Err(err) => tracing::warn!("failed to collect tag refs for show JSON output: {err}"),
-    }
+    };
 
     refs.sort();
-    Ok(refs)
+    refs.dedup();
+    refs
 }
 
 #[cfg(test)]

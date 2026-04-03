@@ -1,9 +1,11 @@
 //! Log command rendering commit history with optional decorations, filtering, and custom formatting utilities.
 
 use std::{
+    cell::RefCell,
     cmp::min,
     collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
+    rc::Rc,
     str::FromStr,
 };
 
@@ -36,6 +38,15 @@ use crate::{
         util,
     },
 };
+
+const LOG_EXAMPLES: &str = "\
+EXAMPLES:
+    libra log -n 5                         Show the latest 5 commits
+    libra log --oneline --graph            Show a compact commit graph
+    libra log --author alice --since 2026-01-01
+                                          Filter commits by author and date
+    libra log --name-status src/           Show changed files under src/
+    libra --json log -n 1                  Structured JSON output for agents";
 
 fn log_branch_store_error(context: &str, error: BranchStoreError) -> CliError {
     match error {
@@ -86,7 +97,18 @@ async fn resolve_log_head_commit() -> CliResult<(Option<String>, ObjectHash)> {
     Ok((branch_name, current_head_commit))
 }
 
+fn log_invalid_object_error(object: &str) -> CliError {
+    CliError::fatal(format!("invalid object name: {object}"))
+        .with_stable_code(StableErrorCode::CliInvalidTarget)
+        .with_hint("check the revision name and try again")
+}
+
+fn log_repo_corrupt_error(message: impl Into<String>) -> CliError {
+    CliError::fatal(message.into()).with_stable_code(StableErrorCode::RepoCorrupt)
+}
+
 #[derive(Parser, Debug)]
+#[command(after_help = LOG_EXAMPLES)]
 pub struct LogArgs {
     /// Limit the number of output
     #[clap(short, long)]
@@ -345,8 +367,8 @@ pub async fn get_reachable_commits(
     let mut reachable_commits: Vec<Commit> = Vec::new();
 
     // Push the initial commit with depth 0
-    let initial_hash = ObjectHash::from_str(&commit_hash)
-        .map_err(|_| CliError::fatal(format!("invalid object name: {commit_hash}")))?;
+    let initial_hash =
+        ObjectHash::from_str(&commit_hash).map_err(|_| log_invalid_object_error(&commit_hash))?;
     queue.push_back((initial_hash, 0)); // (commit_id, current_depth)
 
     while let Some((commit_id, current_depth)) = queue.pop_front() {
@@ -355,8 +377,9 @@ pub async fn get_reachable_commits(
             continue;
         }
 
-        let commit = load_object::<Commit>(&commit_id)
-            .map_err(|e| CliError::fatal(format!("storage broken, object not found: {e}")))?;
+        let commit = load_object::<Commit>(&commit_id).map_err(|e| {
+            log_repo_corrupt_error(format!("storage broken, object not found: {e}"))
+        })?;
 
         // If depth is limited and the current depth exceeds the limit, skip further processing
         if let Some(max_depth) = depth
@@ -446,7 +469,11 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
         return Ok(());
     }
 
-    let ref_commits = create_reference_commit_map().await?;
+    let ref_commits = if decorate_option == DecorateOptions::No {
+        HashMap::new()
+    } else {
+        create_reference_commit_map().await
+    };
     let full_hash_len = commit_hash.len();
 
     let format_type = if args.oneline {
@@ -633,7 +660,7 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
 
     let max_output_number = min(args.number.unwrap_or(usize::MAX), reachable_commits.len());
     let include_total = args.number.is_none();
-    let ref_commits = create_reference_commit_map().await?;
+    let ref_commits = create_reference_commit_map().await;
     let mut commits = Vec::new();
     let mut total = 0usize;
 
@@ -742,6 +769,44 @@ fn collect_log_refs(
     refs
 }
 
+fn load_commit_blob_content(hash: &ObjectHash) -> Result<Vec<u8>, CliError> {
+    load_object::<Blob>(hash)
+        .map(|blob| blob.data)
+        .map_err(|e| log_repo_corrupt_error(format!("failed to load blob object {hash}: {e}")))
+}
+
+fn record_commit_diff_error(slot: &Rc<RefCell<Option<CliError>>>, error: CliError) {
+    let mut slot = slot.borrow_mut();
+    if slot.is_none() {
+        *slot = Some(error);
+    }
+}
+
+fn build_commit_diff_items(
+    old_blobs: Vec<(PathBuf, ObjectHash)>,
+    new_blobs: Vec<(PathBuf, ObjectHash)>,
+    paths: Vec<PathBuf>,
+) -> Result<Vec<git_internal::diff::DiffItem>, CliError> {
+    let load_error = Rc::new(RefCell::new(None::<CliError>));
+    let load_error_for_read = Rc::clone(&load_error);
+    let diffs = Diff::diff(
+        old_blobs,
+        new_blobs,
+        paths.into_iter().collect(),
+        move |_file, hash| match load_commit_blob_content(hash) {
+            Ok(blob) => blob,
+            Err(error) => {
+                record_commit_diff_error(&load_error_for_read, error);
+                Vec::new()
+            }
+        },
+    );
+    if let Some(error) = load_error.borrow_mut().take() {
+        return Err(error);
+    }
+    Ok(diffs)
+}
+
 async fn commit_touches_paths(commit: &Commit, filters: &[PathBuf]) -> Result<bool, CliError> {
     if filters.is_empty() {
         return Ok(true);
@@ -756,15 +821,15 @@ pub(crate) async fn get_changed_files_for_commit(
     paths: &[PathBuf],
 ) -> Result<Vec<FileChange>, CliError> {
     let tree = load_object::<Tree>(&commit.tree_id)
-        .map_err(|e| CliError::fatal(format!("failed to load tree object: {e}")))?;
+        .map_err(|e| log_repo_corrupt_error(format!("failed to load tree object: {e}")))?;
     let new_blobs: Vec<(PathBuf, ObjectHash)> = tree.get_plain_items();
 
     let old_blobs: Vec<(PathBuf, ObjectHash)> = if !commit.parent_commit_ids.is_empty() {
         let parent = &commit.parent_commit_ids[0];
         let parent_commit = load_object::<Commit>(parent)
-            .map_err(|e| CliError::fatal(format!("failed to load parent commit: {e}")))?;
+            .map_err(|e| log_repo_corrupt_error(format!("failed to load parent commit: {e}")))?;
         let parent_tree = load_object::<Tree>(&parent_commit.tree_id)
-            .map_err(|e| CliError::fatal(format!("failed to load parent tree: {e}")))?;
+            .map_err(|e| log_repo_corrupt_error(format!("failed to load parent tree: {e}")))?;
         parent_tree.get_plain_items()
     } else {
         Vec::new()
@@ -861,42 +926,21 @@ pub async fn compute_commit_stat(
     paths: Vec<PathBuf>,
 ) -> Result<Vec<FileStat>, CliError> {
     let tree = load_object::<Tree>(&commit.tree_id)
-        .map_err(|e| CliError::fatal(format!("failed to load tree object: {e}")))?;
+        .map_err(|e| log_repo_corrupt_error(format!("failed to load tree object: {e}")))?;
     let new_blobs: Vec<(PathBuf, ObjectHash)> = tree.get_plain_items();
 
     let old_blobs: Vec<(PathBuf, ObjectHash)> = if !commit.parent_commit_ids.is_empty() {
         let parent = &commit.parent_commit_ids[0];
         let parent_commit = load_object::<Commit>(parent)
-            .map_err(|e| CliError::fatal(format!("failed to load parent commit: {e}")))?;
+            .map_err(|e| log_repo_corrupt_error(format!("failed to load parent commit: {e}")))?;
         let parent_tree = load_object::<Tree>(&parent_commit.tree_id)
-            .map_err(|e| CliError::fatal(format!("failed to load parent tree: {e}")))?;
+            .map_err(|e| log_repo_corrupt_error(format!("failed to load parent tree: {e}")))?;
         parent_tree.get_plain_items()
     } else {
         Vec::new()
     };
 
-    let read_content = |file: &PathBuf, hash: &ObjectHash| match load_object::<Blob>(hash) {
-        Ok(blob) => blob.data,
-        Err(_) => {
-            let file = util::to_workdir_path(file);
-            std::fs::read(&file).unwrap_or_else(|e| {
-                eprintln!(
-                    "warning: failed to read blob {} for '{}': {}",
-                    hash,
-                    file.display(),
-                    e
-                );
-                Vec::new()
-            })
-        }
-    };
-
-    let diffs = Diff::diff(
-        old_blobs,
-        new_blobs,
-        paths.into_iter().collect(),
-        read_content,
-    );
+    let diffs = build_commit_diff_items(old_blobs, new_blobs, paths)?;
 
     let mut stats = Vec::new();
     for diff_item in diffs {
@@ -1058,12 +1102,19 @@ impl GraphState {
     }
 }
 
-async fn create_reference_commit_map() -> CliResult<HashMap<ObjectHash, Vec<Reference>>> {
+async fn create_reference_commit_map() -> HashMap<ObjectHash, Vec<Reference>> {
     let mut commit_to_refs: HashMap<ObjectHash, Vec<Reference>> = HashMap::new();
 
-    let all_branches = Branch::list_branches_result(None)
-        .await
-        .map_err(|error| log_branch_store_error("list branches for log decoration", error))?;
+    let all_branches = match Branch::list_branches_result(None).await {
+        Ok(branches) => branches,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "failed to list branches for log decoration; continuing without branch refs"
+            );
+            Vec::new()
+        }
+    };
     for branch in all_branches {
         commit_to_refs
             .entry(branch.commit)
@@ -1099,7 +1150,7 @@ async fn create_reference_commit_map() -> CliResult<HashMap<ObjectHash, Vec<Refe
             });
     }
 
-    Ok(commit_to_refs)
+    commit_to_refs
 }
 
 /// Generate unified diff between commit and its first parent (or empty tree)
@@ -1110,43 +1161,22 @@ pub(crate) async fn generate_diff(
     // prepare old and new blobs
     // new_blobs from commit tree
     let tree = load_object::<Tree>(&commit.tree_id)
-        .map_err(|e| CliError::fatal(format!("failed to load tree object: {e}")))?;
+        .map_err(|e| log_repo_corrupt_error(format!("failed to load tree object: {e}")))?;
     let new_blobs: Vec<(PathBuf, ObjectHash)> = tree.get_plain_items();
 
     // old_blobs from first parent if exists
     let old_blobs: Vec<(PathBuf, ObjectHash)> = if !commit.parent_commit_ids.is_empty() {
         let parent = &commit.parent_commit_ids[0];
         let parent_commit = load_object::<Commit>(parent)
-            .map_err(|e| CliError::fatal(format!("failed to load parent commit: {e}")))?;
+            .map_err(|e| log_repo_corrupt_error(format!("failed to load parent commit: {e}")))?;
         let parent_tree = load_object::<Tree>(&parent_commit.tree_id)
-            .map_err(|e| CliError::fatal(format!("failed to load parent tree: {e}")))?;
+            .map_err(|e| log_repo_corrupt_error(format!("failed to load parent tree: {e}")))?;
         parent_tree.get_plain_items()
     } else {
         Vec::new()
     };
 
-    let read_content = |file: &PathBuf, hash: &ObjectHash| match load_object::<Blob>(hash) {
-        Ok(blob) => blob.data,
-        Err(_) => {
-            let file = util::to_workdir_path(file);
-            std::fs::read(&file).unwrap_or_else(|e| {
-                eprintln!(
-                    "warning: failed to read blob {} for '{}': {}",
-                    hash,
-                    file.display(),
-                    e
-                );
-                Vec::new()
-            })
-        }
-    };
-
-    let diffs = Diff::diff(
-        old_blobs,
-        new_blobs,
-        paths.into_iter().collect(),
-        read_content,
-    );
+    let diffs = build_commit_diff_items(old_blobs, new_blobs, paths)?;
     let mut out = String::new();
     for d in diffs {
         out.push_str(&d.data);
