@@ -849,7 +849,11 @@ mod tests {
             .build()
             .unwrap();
         let colored = colorize_match(line, &matcher);
-        assert!(colored.contains("\u{1b}["));
+        let plain = regex::Regex::new(r"\x1b\[[0-9;]*m")
+            .unwrap()
+            .replace_all(&colored, "");
+        assert_eq!(plain, "Hello World HELLO");
+        assert_ne!(colored, line);
         colored::control::unset_override();
     }
 
