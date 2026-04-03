@@ -62,6 +62,8 @@ pub(crate) enum PullMergeError {
     ManualMergeRequired { upstream: String },
     #[error("failed to load tree '{tree_id}': {detail}")]
     TreeLoad { tree_id: String, detail: String },
+    #[error("failed to resolve HEAD state: {0}")]
+    HeadResolve(String),
     #[error("failed to update HEAD during merge: {0}")]
     HeadUpdate(String),
     #[error("failed to restore working tree after merge: {0}")]
@@ -82,6 +84,8 @@ impl From<PullMergeError> for CliError {
                 .with_stable_code(crate::utils::error::StableErrorCode::RepoStateInvalid),
             PullMergeError::ManualMergeRequired { .. } => CliError::failure(error.to_string())
                 .with_stable_code(crate::utils::error::StableErrorCode::ConflictOperationBlocked),
+            PullMergeError::HeadResolve(..) => CliError::fatal(error.to_string())
+                .with_stable_code(crate::utils::error::StableErrorCode::IoReadFailed),
             PullMergeError::HeadUpdate(..) | PullMergeError::Restore(..) => {
                 CliError::fatal(error.to_string())
                     .with_stable_code(crate::utils::error::StableErrorCode::IoWriteFailed)
@@ -237,8 +241,12 @@ async fn apply_fast_forward_merge(
 ) -> Result<(), PullMergeError> {
     let db = get_db_conn_instance().await;
 
-    let old_oid_opt = Head::current_commit_with_conn(&db).await;
-    let current_head_state = Head::current_with_conn(&db).await;
+    let old_oid_opt = Head::current_commit_result_with_conn(&db)
+        .await
+        .map_err(|e| PullMergeError::HeadResolve(e.to_string()))?;
+    let current_head_state = Head::current_result_with_conn(&db)
+        .await
+        .map_err(|e| PullMergeError::HeadResolve(e.to_string()))?;
 
     let action = ReflogAction::Merge {
         branch: target_branch_name.to_string(),

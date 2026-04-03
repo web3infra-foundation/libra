@@ -674,9 +674,15 @@ fn show_branch_store_error(context: &str, error: BranchStoreError) -> CliError {
 async fn collect_reference_names(commit_id: ObjectHash) -> CliResult<Vec<String>> {
     let mut refs = Vec::new();
     let head_branch = match Head::current_commit_result().await {
-        Ok(Some(head_commit)) => match Head::current().await {
-            Head::Branch(name) if head_commit == commit_id => Some(name),
-            _ => None,
+        Ok(Some(head_commit)) => match Head::current_result().await {
+            Ok(Head::Branch(name)) if head_commit == commit_id => Some(name),
+            Ok(_) => None,
+            Err(error) => {
+                return Err(show_branch_store_error(
+                    "resolve HEAD for show output",
+                    error,
+                ));
+            }
         },
         Ok(None) => None,
         Err(error) => {

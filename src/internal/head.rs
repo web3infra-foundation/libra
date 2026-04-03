@@ -237,6 +237,8 @@ impl Head {
         Self::current_commit_result_with_conn(&db_conn).await
     }
 
+    /// Lossy compatibility wrapper. Prefer `current_commit_result_with_conn`
+    /// in production paths so storage failures are not downgraded to `None`.
     pub async fn current_commit_with_conn<C>(db: &C) -> Option<ObjectHash>
     where
         C: ConnectionTrait,
@@ -250,7 +252,8 @@ impl Head {
         }
     }
 
-    /// get the commit hash of current head, return `None` if no commit
+    /// Lossy compatibility wrapper. Prefer `current_commit_result` in
+    /// production paths so storage failures are not downgraded to `None`.
     pub async fn current_commit() -> Option<ObjectHash> {
         let db_conn = get_db_conn_instance().await;
         Self::current_commit_with_conn(&db_conn).await

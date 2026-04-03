@@ -468,6 +468,9 @@ fn map_merge_error_to_cli(error: &merge::PullMergeError) -> CliError {
             "pull requires a non-fast-forward merge from '{upstream}', which is not yet supported"
         ))
         .with_stable_code(StableErrorCode::ConflictOperationBlocked),
+        merge::PullMergeError::HeadResolve(..) => {
+            CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
+        }
         merge::PullMergeError::HeadUpdate(..) | merge::PullMergeError::Restore(..) => {
             CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
         }
