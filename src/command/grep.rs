@@ -181,7 +181,39 @@ pub async fn execute_safe(args: GrepArgs, output: &OutputConfig) -> CliResult<()
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
     let result = run_grep(&args).await?;
-    render_grep_output(&args, &result, output)
+    let has_selected_results = has_selected_results(&args, &result);
+    render_grep_output(&args, &result, output)?;
+
+    if has_selected_results {
+        Ok(())
+    } else {
+        Err(CliError::failure("no matches found")
+            .with_stable_code(StableErrorCode::CliInvalidTarget))
+    }
+}
+
+fn has_selected_results(args: &GrepArgs, result: &GrepOutput) -> bool {
+    if args.files_with_matches {
+        result
+            .files_with_matches
+            .as_ref()
+            .is_some_and(|files| !files.is_empty())
+    } else if args.files_without_matches {
+        result
+            .files_without_matches
+            .as_ref()
+            .is_some_and(|files| !files.is_empty())
+    } else if args.count {
+        result
+            .counts
+            .as_ref()
+            .is_some_and(|counts| !counts.is_empty())
+    } else {
+        result
+            .matches
+            .as_ref()
+            .is_some_and(|matches| !matches.is_empty())
+    }
 }
 
 /// Maximum file size to search (512KB, matching Git's core.bigFileThreshold default).
