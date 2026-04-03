@@ -517,10 +517,18 @@ fn read_file_content(search_file: &SearchFile) -> Result<Vec<u8>, String> {
         // Read from working tree
         let abs_path = util::workdir_to_absolute(&search_file.path);
 
-        // Check file size before reading
-        let metadata =
-            std::fs::metadata(&abs_path).map_err(|e| format!("failed to stat file: {}", e))?;
+        let metadata = std::fs::symlink_metadata(&abs_path)
+            .map_err(|e| format!("failed to stat file: {}", e))?;
 
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
+            return Err("skipped symbolic link".to_string());
+        }
+        if !file_type.is_file() {
+            return Err("skipped non-regular file".to_string());
+        }
+
+        // Check file size before reading
         if metadata.len() > MAX_FILE_SIZE {
             return Err(format!(
                 "file too large ({} bytes, max {} bytes)",
