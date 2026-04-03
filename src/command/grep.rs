@@ -1,16 +1,23 @@
 //! Provides grep command logic for searching text patterns in working tree, index, or commit trees
 //! with regex support, pathspec filtering, and various output formatting options.
 
-use std::{fs, io::IsTerminal, path::PathBuf};
+use std::{
+    fs,
+    io::{BufRead, IsTerminal},
+    path::PathBuf,
+};
 
 use clap::Parser;
 use colored::Colorize;
+use flate2::read::ZlibDecoder;
 use git_internal::internal::index::Index;
 use regex::RegexBuilder;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde::Serialize;
 
 use crate::{
     command::load_object,
+    internal::{db, model::object_index},
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
@@ -212,7 +219,7 @@ async fn run_grep(args: &GrepArgs) -> CliResult<GrepOutput> {
 
     for search_file in &files {
         let path_str = search_file.path.display().to_string();
-        let content = match read_file_content(search_file) {
+        let content = match read_file_content(search_file).await {
             Ok(c) => c,
             Err(e) => {
                 warnings.push(GrepWarning {
@@ -507,8 +514,10 @@ fn tracked_files_from_index(
 }
 
 /// Read file content from working tree or from a blob object.
-fn read_file_content(search_file: &SearchFile) -> Result<Vec<u8>, String> {
+async fn read_file_content(search_file: &SearchFile) -> Result<Vec<u8>, String> {
     let content = if let Some(blob_hash) = &search_file.blob_hash {
+        ensure_blob_within_size_limit(blob_hash).await?;
+
         // Read from blob object (tree/index search)
         let blob: git_internal::internal::object::blob::Blob =
             load_object(blob_hash).map_err(|e| format!("failed to load blob: {}", e))?;
@@ -549,6 +558,80 @@ fn read_file_content(search_file: &SearchFile) -> Result<Vec<u8>, String> {
     }
 
     Ok(content)
+}
+
+async fn ensure_blob_within_size_limit(
+    blob_hash: &git_internal::hash::ObjectHash,
+) -> Result<(), String> {
+    if let Some(size) = lookup_indexed_blob_size(blob_hash).await? {
+        if size > MAX_FILE_SIZE {
+            return Err(format!(
+                "file too large ({} bytes, max {} bytes)",
+                size, MAX_FILE_SIZE
+            ));
+        }
+        return Ok(());
+    }
+
+    if let Some(size) = read_loose_blob_size(blob_hash)? {
+        if size > MAX_FILE_SIZE {
+            return Err(format!(
+                "file too large ({} bytes, max {} bytes)",
+                size, MAX_FILE_SIZE
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+async fn lookup_indexed_blob_size(
+    blob_hash: &git_internal::hash::ObjectHash,
+) -> Result<Option<u64>, String> {
+    let db = db::get_db_conn_instance().await;
+    object_index::Entity::find()
+        .filter(object_index::Column::OId.eq(blob_hash.to_string()))
+        .filter(object_index::Column::OType.eq("blob"))
+        .one(&db)
+        .await
+        .map_err(|e| format!("failed to query object index: {}", e))
+        .map(|record| record.map(|row| row.o_size as u64))
+}
+
+fn read_loose_blob_size(blob_hash: &git_internal::hash::ObjectHash) -> Result<Option<u64>, String> {
+    let object_path = path::objects()
+        .join(&blob_hash.to_string()[0..2])
+        .join(&blob_hash.to_string()[2..]);
+    if !object_path.exists() {
+        return Ok(None);
+    }
+
+    let raw = std::fs::read(&object_path).map_err(|e| format!("failed to read object: {}", e))?;
+    let decoder = ZlibDecoder::new(raw.as_slice());
+    let mut reader = std::io::BufReader::new(decoder);
+    let mut header = Vec::new();
+    reader
+        .read_until(0, &mut header)
+        .map_err(|e| format!("failed to read object header: {}", e))?;
+    let terminator = header
+        .iter()
+        .position(|&byte| byte == 0)
+        .ok_or_else(|| "invalid object header".to_string())?;
+    let header_str = std::str::from_utf8(&header[..terminator])
+        .map_err(|e| format!("invalid object header: {}", e))?;
+    let mut parts = header_str.splitn(2, ' ');
+    let object_type = parts.next().unwrap_or_default();
+    let size = parts
+        .next()
+        .ok_or_else(|| "invalid object header".to_string())?
+        .parse::<u64>()
+        .map_err(|e| format!("invalid object size: {}", e))?;
+
+    if object_type != "blob" {
+        return Ok(None);
+    }
+
+    Ok(Some(size))
 }
 
 /// Search for pattern matches in file content.

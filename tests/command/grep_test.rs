@@ -473,6 +473,34 @@ async fn test_grep_tree_large_blob_emits_warning_in_json() {
     assert!(warnings[0]["path"] == "large-warning.txt");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn test_grep_working_tree_symlink_emits_warning_and_skips_target() {
+    use std::os::unix::fs::symlink;
+
+    let repo = tempdir().expect("failed to create repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write("real.txt", "needle\n").expect("failed to write real file");
+    symlink("real.txt", "link.txt").expect("failed to create symlink");
+    add_and_commit(
+        "add symlink and target",
+        vec!["real.txt".to_string(), "link.txt".to_string()],
+    )
+    .await;
+
+    let output = run_libra_command(&["--json=compact", "grep", "needle"], repo.path());
+    assert_cli_success(&output, "grep should succeed while skipping symlink");
+
+    let json = parse_json_stdout(&output);
+    let warnings = json["data"]["warnings"]
+        .as_array()
+        .expect("expected warnings array");
+    assert!(warnings.iter().any(|warning| warning["path"] == "link.txt"));
+}
+
 #[tokio::test]
 #[serial]
 async fn test_grep_all_match_requires_all_patterns_in_same_file() {
