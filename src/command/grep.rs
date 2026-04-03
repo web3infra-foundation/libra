@@ -237,13 +237,7 @@ async fn run_grep(args: &GrepArgs) -> CliResult<GrepOutput> {
                 content
                     .split(|&byte| byte == b'\n')
                     .map(String::from_utf8_lossy)
-                    .any(|line| {
-                        if args.invert_match {
-                            !pattern_matcher.is_match(&line)
-                        } else {
-                            pattern_matcher.is_match(&line)
-                        }
-                    })
+                    .any(|line| pattern_matcher.is_match(&line))
             })
         });
         let match_count = if all_patterns_match {
@@ -590,12 +584,15 @@ fn render_grep_output(
     result: &GrepOutput,
     output: &OutputConfig,
 ) -> CliResult<()> {
+    for _warning in &result.warnings {
+        crate::utils::output::record_warning();
+    }
+
     if output.is_json() {
         return emit_json_data("grep", result, output);
     }
 
     for warning in &result.warnings {
-        crate::utils::output::record_warning();
         eprintln!("warning: {}: {}", warning.path, warning.message);
     }
 

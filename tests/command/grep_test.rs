@@ -512,3 +512,44 @@ async fn test_grep_all_match_requires_all_patterns_in_same_file() {
         .collect();
     assert!(paths.iter().all(|path| *path == "all-match.txt"));
 }
+
+#[tokio::test]
+#[serial]
+async fn test_grep_all_match_is_based_on_positive_pattern_presence_even_with_invert() {
+    let repo = tempdir().expect("failed to create repo dir");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write("both.txt", "alpha\nkeep\nbeta\n").expect("failed to write file");
+    fs::write("only-alpha.txt", "alpha\nkeep\n").expect("failed to write file");
+    add_and_commit(
+        "add invert all-match files",
+        vec!["both.txt".to_string(), "only-alpha.txt".to_string()],
+    )
+    .await;
+
+    let output = run_libra_command(
+        &[
+            "--json=compact",
+            "grep",
+            "-v",
+            "--all-match",
+            "-e",
+            "alpha",
+            "-e",
+            "beta",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&output, "grep -v --all-match should succeed");
+
+    let json = parse_json_stdout(&output);
+    let matches = json["data"]["matches"]
+        .as_array()
+        .expect("expected grep matches array");
+    let paths: Vec<&str> = matches
+        .iter()
+        .map(|entry| entry["path"].as_str().expect("expected match path"))
+        .collect();
+    assert!(paths.iter().all(|path| *path == "both.txt"));
+}
