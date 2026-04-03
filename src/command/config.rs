@@ -16,6 +16,7 @@ use crate::{
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::OutputConfig,
+        text::levenshtein,
     },
 };
 
@@ -2119,28 +2120,6 @@ fn get_scope(args: &ConfigArgs) -> ConfigScope {
 
 fn has_explicit_scope(args: &ConfigArgs) -> bool {
     args.local || args.global || args.system
-}
-
-/// Simple Levenshtein edit distance for spell correction suggestions.
-fn levenshtein(a: &str, b: &str) -> usize {
-    let m = a.len();
-    let n = b.len();
-    let mut dp = vec![vec![0usize; n + 1]; m + 1];
-    for (i, row) in dp.iter_mut().enumerate() {
-        row[0] = i;
-    }
-    for (j, val) in dp[0].iter_mut().enumerate() {
-        *val = j;
-    }
-    for (i, ca) in a.chars().enumerate() {
-        for (j, cb) in b.chars().enumerate() {
-            let cost = if ca == cb { 0 } else { 1 };
-            dp[i + 1][j + 1] = (dp[i][j + 1] + 1)
-                .min(dp[i + 1][j] + 1)
-                .min(dp[i][j] + cost);
-        }
-    }
-    dp[m][n]
 }
 
 fn emit_set_ack(

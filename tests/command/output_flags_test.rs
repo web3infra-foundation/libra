@@ -1142,4 +1142,40 @@ fn branch_help_documents_quiet_listing_deviation() {
         stdout.contains("This differs from `git branch --quiet`"),
         "branch help should document quiet-mode deviation, got: {stdout}"
     );
+    assert!(
+        stdout.contains("EXAMPLES:"),
+        "branch help should include examples, got: {stdout}"
+    );
+}
+
+#[test]
+fn reset_help_includes_examples_section() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo_via_cli(&repo);
+
+    let output = run(&["reset", "--help"], &repo);
+    assert_cli_success(&output, "reset --help");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("EXAMPLES:"),
+        "reset help should include examples, got: {stdout}"
+    );
+}
+
+#[test]
+fn tag_help_includes_examples_section() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo_via_cli(&repo);
+
+    let output = run(&["tag", "--help"], &repo);
+    assert_cli_success(&output, "tag --help");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("EXAMPLES:"),
+        "tag help should include examples, got: {stdout}"
+    );
 }

@@ -3,12 +3,17 @@
 use std::io::Write;
 
 use clap::Parser;
+use sea_orm::DbErr;
 use serde::Serialize;
 
 use crate::{
-    internal::{branch::Branch, head::Head, tag},
+    internal::{
+        branch::{Branch, BranchStoreError},
+        head::Head,
+        tag,
+    },
     utils::{
-        error::{CliError, CliResult},
+        error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
     },
 };
@@ -51,9 +56,7 @@ pub async fn execute(args: ShowRefArgs) -> Result<(), String> {
 /// errors and exiting. Lists all refs (branches, tags) with their object IDs.
 pub async fn execute_safe(args: ShowRefArgs, output: &OutputConfig) -> CliResult<()> {
     let hash_only = args.hash;
-    let entries = collect_show_ref_entries(&args)
-        .await
-        .map_err(CliError::failure)?;
+    let entries = collect_show_ref_entries(&args).await?;
 
     if output.is_json() {
         emit_json_data(
@@ -82,7 +85,32 @@ pub async fn execute_safe(args: ShowRefArgs, output: &OutputConfig) -> CliResult
     }
 }
 
-async fn collect_show_ref_entries(args: &ShowRefArgs) -> Result<Vec<ShowRefEntry>, String> {
+fn show_ref_branch_store_error(context: &str, error: BranchStoreError) -> CliError {
+    match error {
+        BranchStoreError::Query(detail) => {
+            CliError::fatal(format!("failed to {context}: {detail}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        }
+        other => CliError::fatal(format!("failed to {context}: {other}"))
+            .with_stable_code(StableErrorCode::RepoCorrupt),
+    }
+}
+
+fn show_ref_tag_list_error(error: anyhow::Error) -> CliError {
+    // TODO: Remove this DbErr-chain heuristic once tag::list() returns a typed error.
+    let stable_code = if error
+        .chain()
+        .any(|cause| cause.downcast_ref::<DbErr>().is_some())
+    {
+        StableErrorCode::IoReadFailed
+    } else {
+        StableErrorCode::RepoCorrupt
+    };
+
+    CliError::fatal(format!("failed to list tags: {error}")).with_stable_code(stable_code)
+}
+
+async fn collect_show_ref_entries(args: &ShowRefArgs) -> CliResult<Vec<ShowRefEntry>> {
     // When neither --heads nor --tags is specified, show both
     let show_heads = args.heads || !args.tags;
     let show_tags = args.tags || !args.heads;
@@ -91,7 +119,9 @@ async fn collect_show_ref_entries(args: &ShowRefArgs) -> Result<Vec<ShowRefEntry
 
     // Include HEAD if --head is specified
     if args.head
-        && let Some(hash) = Head::current_commit().await
+        && let Some(hash) = Head::current_commit_result()
+            .await
+            .map_err(|error| show_ref_branch_store_error("resolve HEAD", error))?
     {
         entries.push(ShowRefEntry {
             hash: hash.to_string(),
@@ -101,7 +131,9 @@ async fn collect_show_ref_entries(args: &ShowRefArgs) -> Result<Vec<ShowRefEntry
 
     // Collect local branches: refs/heads/<name>
     if show_heads {
-        let branches = Branch::list_branches(None).await;
+        let branches = Branch::list_branches_result(None)
+            .await
+            .map_err(|error| show_ref_branch_store_error("list branches", error))?;
         for branch in branches {
             entries.push(ShowRefEntry {
                 hash: branch.commit.to_string(),
@@ -114,7 +146,7 @@ async fn collect_show_ref_entries(args: &ShowRefArgs) -> Result<Vec<ShowRefEntry
 
     // Collect tags: refs/tags/<name>
     if show_tags {
-        let tag_list = tag::list().await.map_err(|e| e.to_string())?;
+        let tag_list = tag::list().await.map_err(show_ref_tag_list_error)?;
         for t in tag_list {
             // For annotated tags use the tag object hash; for lightweight use the commit hash.
             let hash = match &t.object {
@@ -142,7 +174,8 @@ async fn collect_show_ref_entries(args: &ShowRefArgs) -> Result<Vec<ShowRefEntry
     }
 
     if entries.is_empty() {
-        return Err("no matching refs found".to_string());
+        return Err(CliError::failure("no matching refs found")
+            .with_stable_code(StableErrorCode::CliInvalidTarget));
     }
 
     Ok(entries)
