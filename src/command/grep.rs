@@ -964,7 +964,11 @@ mod tests {
         let line = "hello world hello";
         let matcher = regex::Regex::new("hello").unwrap();
         let colored = colorize_match(line, &matcher);
-        assert!(colored.contains("\u{1b}[")); // Contains ANSI escape
+        let plain = regex::Regex::new(r"\x1b\[[0-9;]*m")
+            .unwrap()
+            .replace_all(&colored, "");
+        assert_eq!(plain, "hello world hello");
+        assert_ne!(colored, line);
         colored::control::unset_override();
     }
 
@@ -978,7 +982,7 @@ mod tests {
             .unwrap()
             .replace_all(&colored, "");
         assert_eq!(plain, "foo123bar baz");
-        assert!(colored.contains("\u{1b}["));
+        assert_ne!(colored, line);
         colored::control::unset_override();
     }
 
