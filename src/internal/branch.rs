@@ -139,7 +139,8 @@ impl Branch {
         Ok(resolved)
     }
 
-    //  `_with_conn` version for `list_branches`
+    /// Lossy compatibility wrapper. Prefer `list_branches_result_with_conn` in
+    /// production paths so storage failures are not downgraded to an empty list.
     pub async fn list_branches_with_conn<C>(db: &C, remote: Option<&str>) -> Vec<Self>
     where
         C: ConnectionTrait,
@@ -153,7 +154,8 @@ impl Branch {
         }
     }
 
-    /// list all remote branches
+    /// Lossy compatibility wrapper. Prefer `list_branches_result` in production
+    /// paths so storage failures are not downgraded to an empty list.
     pub async fn list_branches(remote: Option<&str>) -> Vec<Self> {
         let db_conn = get_db_conn_instance().await;
         Self::list_branches_with_conn(&db_conn, remote).await
@@ -164,7 +166,8 @@ impl Branch {
         Self::list_branches_result_with_conn(&db_conn, remote).await
     }
 
-    //  `_with_conn` version for `exists`
+    /// Lossy compatibility wrapper. Prefer `exists_result_with_conn` in
+    /// production paths so storage failures are not downgraded to `false`.
     pub async fn exists_with_conn<C>(db: &C, branch_name: &str) -> bool
     where
         C: ConnectionTrait,
@@ -173,7 +176,8 @@ impl Branch {
         branch.is_some()
     }
 
-    /// is the branch exists
+    /// Lossy compatibility wrapper. Prefer `exists_result` in production paths
+    /// so storage failures are not downgraded to `false`.
     pub async fn exists(branch_name: &str) -> bool {
         let db_conn = get_db_conn_instance().await;
         Self::exists_with_conn(&db_conn, branch_name).await
@@ -201,7 +205,8 @@ impl Branch {
         Self::exists_result_with_conn(&db_conn, branch_name, remote).await
     }
 
-    //  `_with_conn` version for `find_branch`
+    /// Lossy compatibility wrapper. Prefer `find_branch_result_with_conn` in
+    /// production paths so storage failures are not downgraded to `None`.
     pub async fn find_branch_with_conn<C>(
         db: &C,
         branch_name: &str,
@@ -228,7 +233,8 @@ impl Branch {
         }
     }
 
-    /// get the branch by name
+    /// Lossy compatibility wrapper. Prefer `find_branch_result` in production
+    /// paths so storage failures are not downgraded to `None`.
     pub async fn find_branch(branch_name: &str, remote: Option<&str>) -> Option<Self> {
         let db_conn = get_db_conn_instance().await;
         Self::find_branch_with_conn(&db_conn, branch_name, remote).await

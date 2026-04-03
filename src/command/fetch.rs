@@ -16,7 +16,7 @@ use git_internal::{
     internal::object::commit::Commit,
 };
 use indicatif::ProgressBar;
-use sea_orm::TransactionTrait;
+use sea_orm::{TransactionError, TransactionTrait};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_util::io::StreamReader;
 use url::Url;
@@ -37,7 +37,7 @@ use crate::{
             set_wire_hash_kind,
             ssh_client::{SshClient, is_ssh_spec},
         },
-        reflog::{HEAD, Reflog, ReflogAction, ReflogContext, ReflogError},
+        reflog::{HEAD, Reflog, ReflogAction, ReflogContext},
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
@@ -972,10 +972,18 @@ async fn update_references(
                     continue;
                 }
 
-                let old_oid =
-                    Branch::find_branch_with_conn(txn, &full_ref_name, Some(&remote_config.name))
-                        .await
-                        .map(|branch| branch.commit.to_string());
+                let old_oid = Branch::find_branch_result_with_conn(
+                    txn,
+                    &full_ref_name,
+                    Some(&remote_config.name),
+                )
+                .await
+                .map_err(|error| FetchError::UpdateRefs {
+                    message: format!(
+                        "failed to inspect existing remote-tracking ref '{full_ref_name}': {error}"
+                    ),
+                })?
+                .map(|branch| branch.commit.to_string());
 
                 if old_oid.as_deref() == Some(reference._hash.as_str()) {
                     continue;
@@ -988,7 +996,11 @@ async fn update_references(
                     Some(&remote_config.name),
                 )
                 .await
-                .map_err(ReflogError::from)?;
+                .map_err(|source| FetchError::UpdateRefs {
+                    message: format!(
+                        "failed to persist remote-tracking ref '{full_ref_name}': {source}"
+                    ),
+                })?;
 
                 let context = ReflogContext {
                     old_oid: old_oid
@@ -997,7 +1009,13 @@ async fn update_references(
                     new_oid: reference._hash.clone(),
                     action: ReflogAction::Fetch,
                 };
-                Reflog::insert_single_entry(txn, &context, &full_ref_name).await?;
+                Reflog::insert_single_entry(txn, &context, &full_ref_name)
+                    .await
+                    .map_err(|source| FetchError::UpdateRefs {
+                        message: format!(
+                            "failed to record reflog for remote-tracking ref '{full_ref_name}': {source}"
+                        ),
+                    })?;
                 updates.push(FetchRefUpdate {
                     remote_ref: full_ref_name,
                     old_oid,
@@ -1039,12 +1057,15 @@ async fn update_references(
                 tracing::debug!("remote HEAD does not point to a branch ref");
             }
 
-            Ok::<_, ReflogError>(updates)
+            Ok::<_, FetchError>(updates)
         })
     })
     .await
     .map_err(|source| FetchError::UpdateRefs {
-        message: source.to_string(),
+        message: match source {
+            TransactionError::Connection(error) => error.to_string(),
+            TransactionError::Transaction(error) => error.to_string(),
+        },
     })
 }
 
@@ -1165,7 +1186,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        SSH_KEY_TEMP_FILE_MAX_AGE, cleanup_expired_vault_ssh_temp_files_in,
+        FetchError, SSH_KEY_TEMP_FILE_MAX_AGE, cleanup_expired_vault_ssh_temp_files_in,
         ensure_vault_ssh_tmp_dir,
     };
     use crate::utils::test::ScopedEnvVar;
@@ -1218,5 +1239,25 @@ mod tests {
 
         assert_eq!(tmp_dir, temp_home.path().join(".libra").join("tmp"));
         assert!(tmp_dir.exists(), "tmp dir should exist");
+    }
+
+    #[test]
+    fn test_update_refs_branch_lookup_error_is_preserved_in_message() {
+        let error = FetchError::UpdateRefs {
+            message: format!(
+                "failed to inspect existing remote-tracking ref 'refs/remotes/origin/main': {}",
+                crate::internal::branch::BranchStoreError::Corrupt {
+                    name: "refs/remotes/origin/main".to_string(),
+                    detail: "invalid object id".to_string(),
+                }
+            ),
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("stored branch reference 'refs/remotes/origin/main' is corrupt"),
+            "unexpected fetch error: {error}"
+        );
     }
 }

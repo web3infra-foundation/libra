@@ -163,7 +163,13 @@ pub async fn execute_checked(args: RestoreArgs) -> io::Result<()> {
                 tree.get_plain_items()
             }
             (Some(src), None) => {
-                if storage.search(src).await.len() != 1 {
+                if storage
+                    .search_result(src)
+                    .await
+                    .map_err(|error| io::Error::other(error.to_string()))?
+                    .len()
+                    != 1
+                {
                     return Err(io::Error::other(format!("could not resolve {src}")));
                 } else {
                     return Err(io::Error::other(format!(
@@ -273,7 +279,10 @@ async fn resolve_source_commit(
         return Err(RestoreError::ResolveSource);
     }
 
-    let objs = storage.search(src).await;
+    let objs = storage
+        .search_result(src)
+        .await
+        .map_err(|_| RestoreError::ReadObject)?;
     if objs.len() != 1 {
         return Err(RestoreError::ResolveSource);
     }

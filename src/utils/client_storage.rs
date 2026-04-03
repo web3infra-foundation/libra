@@ -18,7 +18,7 @@ use git_internal::{
 };
 use once_cell::sync::Lazy;
 use regex::Regex;
-use sea_orm::{ActiveModelTrait, DatabaseConnection, Set};
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use tokio::{
     runtime::Runtime,
     sync::mpsc::{Sender, channel, error::TrySendError},
@@ -422,17 +422,28 @@ impl ClientStorage {
     }
 
     pub async fn search(&self, obj_id: &str) -> Vec<ObjectHash> {
+        match self.search_result(obj_id).await {
+            Ok(matches) => matches,
+            Err(error) => {
+                tracing::error!("failed to search objects for '{obj_id}': {error}");
+                Vec::new()
+            }
+        }
+    }
+
+    pub async fn search_result(&self, obj_id: &str) -> Result<Vec<ObjectHash>, GitError> {
         if obj_id == "HEAD" {
-            return vec![Head::current_commit().await.unwrap()];
+            return Ok(Head::current_commit_result()
+                .await
+                .map_err(|error| GitError::CustomError(format!("failed to resolve HEAD: {error}")))?
+                .into_iter()
+                .collect());
         }
 
-        let _re = Regex::new(r"(\^|~)(\d*)").unwrap();
         if obj_id.contains('~') || obj_id.contains('^') {
-            // Complex navigation - relies on sync methods (load_object)
-            // This runs in current thread/runtime.
-            // Calls to load_object will trigger self.get() which uses dedicated RUNTIME.
-            // Safe.
-
+            // Complex navigation relies on sync object loads. This stays on the
+            // current runtime thread and delegates object reads through `self.get()`,
+            // which already uses the dedicated background runtime.
             let mut split_pos = 0;
             let mut found_special = false;
             for (i, c) in obj_id.char_indices() {
@@ -447,38 +458,59 @@ impl ClientStorage {
                 let base_ref = &obj_id[..split_pos];
                 let path_part = &obj_id[split_pos..];
 
-                let base_commit = match base_ref {
-                    "HEAD" => Head::current_commit().await.unwrap(),
-                    _ => {
-                        if let Some(branch) = Branch::find_branch(base_ref, None).await {
-                            branch.commit
-                        } else {
-                            // Search by prefix
-                            let matches = self.storage.search(base_ref).await;
-                            let commits: Vec<ObjectHash> = matches
-                                .into_iter()
-                                .filter(|x| self.is_object_type(x, ObjectType::Commit))
-                                .collect();
+                let base_commit =
+                    match base_ref {
+                        "HEAD" => match Head::current_commit_result().await.map_err(|error| {
+                            GitError::CustomError(format!("failed to resolve HEAD: {error}"))
+                        })? {
+                            Some(commit) => commit,
+                            None => return Ok(Vec::new()),
+                        },
+                        _ => match Branch::find_branch_result(base_ref, None).await.map_err(
+                            |error| {
+                                GitError::CustomError(format!(
+                                    "failed to resolve branch '{base_ref}': {error}"
+                                ))
+                            },
+                        )? {
+                            Some(branch) => branch.commit,
+                            None => {
+                                if Branch::exists_result(base_ref, None)
+                                    .await
+                                    .map_err(|error| {
+                                        GitError::CustomError(format!(
+                                            "failed to resolve branch '{base_ref}': {error}"
+                                        ))
+                                    })?
+                                {
+                                    return Ok(Vec::new());
+                                }
 
-                            if commits.len() == 1 {
-                                commits[0]
-                            } else {
-                                return Vec::new();
+                                let matches = self.storage.search(base_ref).await;
+                                let commits: Vec<ObjectHash> = matches
+                                    .into_iter()
+                                    .filter(|x| self.is_object_type(x, ObjectType::Commit))
+                                    .collect();
+
+                                if commits.len() == 1 {
+                                    commits[0]
+                                } else {
+                                    return Ok(Vec::new());
+                                }
                             }
-                        }
-                    }
-                };
+                        },
+                    };
+
                 let target_commit = match self.navigate_commit_path(base_commit, path_part) {
                     Ok(commit) => commit,
-                    Err(_) => return Vec::new(),
+                    Err(_) => return Ok(Vec::new()),
                 };
 
-                return vec![target_commit];
+                return Ok(vec![target_commit]);
             }
         }
 
-        // Simple prefix search
-        self.storage.search(obj_id).await
+        Ok(self.storage.search(obj_id).await)
     }
 
     fn navigate_commit_path(
@@ -807,7 +839,7 @@ async fn update_object_index_once(
 
     // Check if object already exists
     // With multi-repo support, we must check (o_id, repo_id)
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    use sea_orm::{ActiveModelTrait, Set};
     let existing = object_index::Entity::find()
         .filter(object_index::Column::OId.eq(o_id))
         .filter(object_index::Column::RepoId.eq(&repo_id))
@@ -867,14 +899,18 @@ mod tests {
             pack::{encode::PackEncoder, entry::Entry},
         },
     };
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
     use serial_test::serial;
     use tempfile::tempdir;
     use tokio::sync::mpsc;
 
     use super::{ClientStorage, resolve_env_sync, update_object_index};
     use crate::{
-        internal::{config::ConfigKv, db, model::object_index},
+        internal::{
+            config::ConfigKv,
+            db,
+            model::{object_index, reference},
+        },
         utils::test::{ChangeDirGuard, ScopedEnvVar, setup_with_new_libra_in},
     };
 
@@ -1033,6 +1069,38 @@ mod tests {
         // Search by full hash should return it
         let objs = client_storage.search(&blob.id.to_string()).await;
         assert!(!objs.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_search_result_surfaces_corrupt_branch_storage() {
+        let repo = tempdir().unwrap();
+        setup_with_new_libra_in(repo.path()).await;
+        let _guard = ChangeDirGuard::new(repo.path());
+
+        let db_conn = db::get_db_conn_instance().await;
+        reference::ActiveModel {
+            name: Set(Some("main".to_string())),
+            kind: Set(reference::ConfigKind::Branch),
+            commit: Set(Some("not-a-valid-hash".to_string())),
+            remote: Set(None),
+            ..Default::default()
+        }
+        .insert(&db_conn)
+        .await
+        .unwrap();
+
+        let storage = ClientStorage::init(crate::utils::path::objects());
+        let error = storage
+            .search_result("main~1")
+            .await
+            .expect_err("corrupt branch storage should be surfaced");
+        assert!(
+            error
+                .to_string()
+                .contains("stored branch reference 'main' is corrupt"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

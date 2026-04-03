@@ -657,7 +657,11 @@ async fn resolve_commit_base_atom_typed(name: &str) -> Result<ObjectHash, Commit
 
     // 4. Check for a hash prefix
     let storage = objects_storage();
-    let commits = storage.search(name).await;
+    let commits = storage.search_result(name).await.map_err(|error| {
+        CommitBaseError::classify_storage_failure(format!(
+            "failed to search objects while resolving '{name}': {error}"
+        ))
+    })?;
     if commits.is_empty() {
         return Err(CommitBaseError::InvalidReference(format!(
             "invalid reference: {name}"

@@ -23,7 +23,7 @@ use git_internal::{
         pack::{encode::PackEncoder, entry::Entry},
     },
 };
-use sea_orm::TransactionTrait;
+use sea_orm::{TransactionError, TransactionTrait};
 use serde::Serialize;
 use tokio::sync::mpsc;
 use url::Url;
@@ -33,14 +33,14 @@ use crate::{
     git_protocol::{ServiceType::ReceivePack, add_pkt_line_string, read_pkt_line},
     info_println,
     internal::{
-        branch::Branch,
+        branch::{Branch, BranchStoreError},
         config::ConfigKv,
         db::get_db_conn_instance,
         head::Head,
         protocol::{
             ProtocolClient, get_wire_hash_kind, set_wire_hash_kind, ssh_client::is_ssh_spec,
         },
-        reflog::{Reflog, ReflogAction, ReflogContext, ReflogError},
+        reflog::{Reflog, ReflogAction, ReflogContext},
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode, emit_warning},
@@ -969,17 +969,24 @@ async fn update_remote_tracking(
     let remote_tracking_branch = remote_tracking_branch.to_string();
     let commit_hash = commit_hash.to_string();
     let remote_name = remote_name.to_string();
+    let remote_tracking_branch_for_error = remote_tracking_branch.clone();
 
     let db = get_db_conn_instance().await;
     let transaction_result = db
         .transaction(|txn| {
             Box::pin(async move {
-                let old_oid =
-                    Branch::find_branch_with_conn(txn, &remote_tracking_branch, Some(&remote_name))
-                        .await
-                        .map_or(ObjectHash::zero_str(get_hash_kind()).to_string(), |b| {
-                            b.commit.to_string()
-                        });
+                let old_oid = Branch::find_branch_result_with_conn(
+                    txn,
+                    &remote_tracking_branch,
+                    Some(&remote_name),
+                )
+                .await
+                .map_err(|error| {
+                    map_update_remote_tracking_branch_error(&remote_tracking_branch, error)
+                })?
+                .map_or(ObjectHash::zero_str(get_hash_kind()).to_string(), |b| {
+                    b.commit.to_string()
+                });
 
                 Branch::update_branch_with_conn(
                     txn,
@@ -988,26 +995,65 @@ async fn update_remote_tracking(
                     Some(&remote_name),
                 )
                 .await
-                .map_err(ReflogError::from)?;
+                .map_err(|source| {
+                    CliError::fatal(format!(
+                        "failed to update remote tracking branch '{remote_tracking_branch}': {source}"
+                    ))
+                    .with_stable_code(StableErrorCode::IoWriteFailed)
+                })?;
 
                 let context = ReflogContext {
                     old_oid,
                     new_oid: commit_hash.clone(),
                     action: ReflogAction::Push,
                 };
-                Reflog::insert_single_entry(txn, &context, &remote_tracking_branch).await?;
-                Ok::<_, ReflogError>(())
+                Reflog::insert_single_entry(txn, &context, &remote_tracking_branch)
+                    .await
+                    .map_err(|source| {
+                        CliError::fatal(format!(
+                            "failed to update remote tracking branch '{remote_tracking_branch}': {source}"
+                        ))
+                        .with_stable_code(StableErrorCode::IoWriteFailed)
+                    })?;
+                Ok::<_, CliError>(())
             })
         })
         .await;
 
-    if let Err(e) = transaction_result {
-        return Err(CliError::fatal(format!(
-            "failed to update remote tracking branch: {}",
-            e
-        )));
+    if let Err(error) = transaction_result {
+        return Err(match error {
+            TransactionError::Connection(source) => CliError::fatal(format!(
+                "failed to update remote tracking branch '{remote_tracking_branch_for_error}': {source}"
+            ))
+            .with_stable_code(StableErrorCode::IoWriteFailed),
+            TransactionError::Transaction(cli) => cli,
+        });
     }
     Ok(())
+}
+
+fn map_update_remote_tracking_branch_error(
+    remote_tracking_branch: &str,
+    error: BranchStoreError,
+) -> CliError {
+    match error {
+        BranchStoreError::Query(detail) => CliError::fatal(format!(
+            "failed to inspect remote tracking branch '{remote_tracking_branch}': {detail}"
+        ))
+        .with_stable_code(StableErrorCode::IoReadFailed),
+        BranchStoreError::Corrupt { .. } => CliError::fatal(format!(
+            "failed to inspect remote tracking branch '{remote_tracking_branch}': {error}"
+        ))
+        .with_stable_code(StableErrorCode::RepoCorrupt),
+        BranchStoreError::NotFound(_) => CliError::fatal(format!(
+            "failed to inspect remote tracking branch '{remote_tracking_branch}': {error}"
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid),
+        BranchStoreError::Delete { name, detail } => CliError::fatal(format!(
+            "failed to inspect remote tracking branch '{name}': {detail}"
+        ))
+        .with_stable_code(StableErrorCode::IoWriteFailed),
+    }
 }
 
 fn is_local_file_remote(spec: &str) -> bool {
@@ -1516,6 +1562,27 @@ mod test {
         let err: CliError = PushError::PackEncoding("test failure".to_string()).into();
         assert_eq!(err.stable_code(), StableErrorCode::InternalInvariant);
         assert!(err.hints().iter().any(|h| h.as_str().contains("issues")));
+    }
+
+    #[test]
+    fn test_map_update_remote_tracking_branch_error_query() {
+        let err = map_update_remote_tracking_branch_error(
+            "refs/remotes/origin/main",
+            BranchStoreError::Query("database is locked".to_string()),
+        );
+        assert_eq!(err.stable_code(), StableErrorCode::IoReadFailed);
+    }
+
+    #[test]
+    fn test_map_update_remote_tracking_branch_error_corrupt() {
+        let err = map_update_remote_tracking_branch_error(
+            "refs/remotes/origin/main",
+            BranchStoreError::Corrupt {
+                name: "refs/remotes/origin/main".to_string(),
+                detail: "invalid object id".to_string(),
+            },
+        );
+        assert_eq!(err.stable_code(), StableErrorCode::RepoCorrupt);
     }
 
     #[test]
