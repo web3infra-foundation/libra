@@ -1,8 +1,10 @@
 ## Tag 命令改进详细计划
 
-> 最后编写时间：2026-03-30
+> 最后编写时间：2026-04-01
 
 同时落地 [Cross-Cutting Improvements A/B/F/G](README.md#全局层面改进贯穿所有命令)。
+
+> 当前工作区实现已按本文范围落地一部分改动；以下内容改为记录已落地能力、剩余遗漏和后续收口项。
 
 ### 已完成前置条件与当前代码状态
 
@@ -14,33 +16,41 @@
 - `OutputConfig` + `emit_json_data()` + `info_println!()` 输出框架已可用
 - `StableErrorCode` 体系已有 18 个错误码
 - `CliError` 支持 `.with_hint()`、`.with_stable_code()`、`.with_detail()`
-- `execute()` / `execute_safe(args, _output)` 双入口已存在（`tag.rs:42/51`）
+- `execute()` / `execute_safe(args, output)` 双入口已存在
+- `run_tag()` + `TagOutput` 已实现 list / create / delete 的 JSON / machine 输出
 - `-l` / `-d` / `-m` / `-f` / `-n` 短标志已实现
-- `create_tag_safe()` 已有 `.with_hint()` 提供重复创建时的 hint（`tag.rs:87-96`）
+- 重复创建时的 hint 已在 `map_create_tag_error()` → `CliError` 映射中保留
 - `render_tags()` 支持 `-n` 控制注释行数显示
 - `internal::tag` 模块提供底层 tag API
-- 内部 tag API 已返回 `LBR-CONFLICT-002` 错误码（从 `tag_test.rs:157` 验证）
+- create / delete / find major error path 已在命令层映射显式 `StableErrorCode`
+- quiet delete、malformed ref delete 和 JSON schema 已有回归测试覆盖
 
-**基于当前代码的 Review 结论（tag 仍需改进的部分）：**
+**基于当前代码的 Review 结论（已改进部分 vs 仍需改进部分）：**
 
-- **零 JSON / machine 输出**：`OutputConfig` 参数标记为 `_output` 完全未使用（`tag.rs:51`）
-- **零 `StableErrorCode` 在命令层**：虽然内部 tag API 返回 `LBR-CONFLICT-002`，但命令层的 `CliError::fatal()` 无显式错误码
-- **无 `TagError` typed enum**：错误散落在 `execute_safe()`、`create_tag_safe()`、`delete_tag_safe()`、`show_tag_safe()` 中
-- **退出码不对齐**：重复创建时退出码应为明确的非零值（当前通过 `CliError::fatal()` 返回 128，但无 stable code）
-- **删除不存在 tag 时退出码不对齐**：应返回 exit `1` 或 `129`
-- **测试注释有全角括号**：`tag_test.rs` 中有 `（lightweight tag）` 等全角括号应改为半角
+已改进（当前代码已具备）：
+
+- **结构化输出已落地**：`run_tag()` + `TagOutput` 已覆盖 list / create / delete 三类操作，`--json` / `--machine` 可直接使用
+- **主要命令层错误已带显式 `StableErrorCode`**：重复创建、HEAD unborn、tag not found、delete I/O 失败、repo read failure 等路径已有稳定错误码
+- **`TagError` typed enum 已落地**：create / list / delete / load 路径已统一收口到命令层 typed error
+- **统一 `run_tag()` / `render_tag_output()` 分层已落地**：human / JSON / machine 已走同一执行层和渲染层
+- **重复创建 hint 已落地**：`map_create_tag_error()` 已保留删除旧 tag 或更换 tag 名的提示
+- **human 成功反馈已统一**：lightweight / annotated create 与 delete 都已输出单行确认消息
+- **`--help` EXAMPLES 已落地**
+- **quiet / malformed ref delete 回归已覆盖**：当前测试已覆盖 quiet delete、删除损坏 tag ref、JSON delete `hash = null` 等边界
+
+仍需改进：
+
+- **legacy 说明尚未完全清理**：本文后文仍有少量历史设计叙述，需要继续收口为“现状 + follow-up”格式
+- **human / JSON 双契约需持续维护**：lightweight tag 当前保持 `message: null` 的 machine 契约，同时 human `-n` 列表仍显示 commit message；后续需要继续用回归测试锁住这一行为
 
 ### 目标与非目标
 
-**本批目标：**
-- 引入 `TagError` typed error enum，覆盖 tag 层面的错误场景
-- 所有 `TagError → CliError` 映射使用显式 `StableErrorCode`
-- 拆分执行层与渲染层：新增 `run_tag(args) -> Result<TagOutput, TagError>` 纯执行入口
-- 实现 JSON 输出（tag 操作结果 + tag 列表结构化）
-- 重复创建时保留 hint（已有）并补齐 `StableErrorCode`
-- 删除不存在 tag 时返回 exit `129` + hint
-- 修复测试注释中的全角括号
-- 补齐 `--help` EXAMPLES 段
+**已完成目标：**
+- `TagError` typed error enum、显式 `StableErrorCode`、统一 `run_tag()` / `render_tag_output()` 分层、human 成功确认消息、create 失败来源结构化映射和 `--help` EXAMPLES 已落地
+
+**后续收口目标：**
+- 继续维护 lightweight tag 的 human / machine 双契约和边界回归测试
+- 持续清理本文残留的历史设计说明，使计划文档完全反映当前实现
 
 **本批非目标：**
 - **不重写 `internal::tag` 底层业务语义**。允许做类型收紧和错误建模调整（例如 `create()` 返回 `CreateTagError`），但不改变 tag 创建/删除/查询的语义行为
@@ -50,10 +60,11 @@
 
 ### 设计原则
 
-1. **执行路径与渲染职责拆分**：`execute_safe()` 根据 `OutputConfig` 分流 human / JSON 路径，JSON 路径返回结构化 `TagOutput`
+1. **执行层与渲染层拆分**：`execute_safe()` 调用 `run_tag()` 收集结构化 `TagOutput` 结果，再根据 `OutputConfig` 通过 `render_tag_output()` 渲染 human / JSON / machine，消除当前 human 路径与 JSON 路径分治的架构
 2. **JSON 覆盖 list、create、delete 三种操作**：通过 `action` 字段区分
 3. **错误码显式映射**：每个 `TagError` 变体都有确定的 `StableErrorCode`
 4. **保留现有 hint**：重复创建时的 hint 保持一致
+5. **typed enum 自身携带错误分类信息**：不能依赖 `TagError` 变体外的来源注释再决定 `StableErrorCode`
 
 ### 特性 1：TagError typed error enum
 
@@ -74,8 +85,20 @@ pub enum TagError {
     #[error("tag name is required")]
     MissingName,
 
-    #[error("failed to create tag '{name}': {detail}")]
-    CreateFailed { name: String, detail: String },
+    #[error("cannot create tag: HEAD does not point to a commit")]
+    HeadUnborn,
+
+    #[error("failed to read existing tags before creating '{name}': {detail}")]
+    CheckExistingFailed { name: String, detail: String },
+
+    #[error("failed to serialize annotated tag object: {0}")]
+    SerializeAnnotatedTag(String),
+
+    #[error("failed to store annotated tag object: {0}")]
+    StoreObjectFailed(String),
+
+    #[error("failed to persist tag reference '{name}': {detail}")]
+    PersistReferenceFailed { name: String, detail: String },
 
     #[error("failed to delete tag '{name}': {detail}")]
     DeleteFailed { name: String, detail: String },
@@ -88,6 +111,8 @@ pub enum TagError {
 }
 ```
 
+> **与 `internal::tag::CreateTagError` 的关系**：`CreateTagError` 是底层业务模块定义的错误类型（含 `AlreadyExists`、`HeadUnborn`、`CheckExisting`、`SerializeTag`、`StoreObject`、`PersistReference`）。`TagError` 是命令层 typed enum，当前代码通过 `map_create_tag_error()` 完成收口映射：`CheckExisting` → `CheckExistingFailed`，`SerializeTag` → `SerializeAnnotatedTag`，`StoreObject` → `StoreObjectFailed`，`PersistReference` → `PersistReferenceFailed`。
+
 **`TagError → CliError` 显式映射：**
 
 | TagError 变体 | StableErrorCode | 退出码 | hint |
@@ -96,64 +121,67 @@ pub enum TagError {
 | `AlreadyExists` | `ConflictOperationBlocked` | 128 | `delete it first with 'libra tag -d {name}'` + `or choose a different tag name` |
 | `NotFound` | `CliInvalidTarget` | 129 | `use 'libra tag -l' to list available tags` |
 | `MissingName` | `CliInvalidArguments` | 129 | `provide a tag name` |
-| `CreateFailed` | `IoWriteFailed` | 128 | 无 |
+| `HeadUnborn` | `RepoStateInvalid` | 128 | `create a commit first before tagging HEAD` |
+| `CheckExistingFailed` | `RepoCorrupt` | 128 | 无 |
+| `SerializeAnnotatedTag` | `InternalInvariant` | 128 | 附带 Issues URL |
+| `StoreObjectFailed` | `IoWriteFailed` | 128 | 无 |
+| `PersistReferenceFailed` | `IoWriteFailed` | 128 | 无 |
 | `DeleteFailed` | `IoWriteFailed` | 128 | 无 |
 | `LoadFailed` | `RepoCorrupt` | 128 | 无 |
-| `ListFailed` | `IoReadFailed` | 128 | 无 |
+| `ListFailed` | `RepoCorrupt` | 128 | 无 |
+
+**与当前代码中 inline 错误的对应关系：**
+
+| 当前代码位置 | 当前 inline 错误 | 对应 TagError 变体 |
+|-------------|-----------------|---------------------|
+| `execute_safe:75` | `validate_named_tag_action()` | `MissingName`（delete/force 缺少 tag 名） |
+| `execute_safe:89` | `CliError::fatal(e.to_string())` render_tags 失败 | `ListFailed` |
+| `create_tag_safe:148-151` | `map_create_tag_error()` → `AlreadyExists` | `AlreadyExists` |
+| `map_create_tag_error:162-165` | `CreateTagError::HeadUnborn` | `HeadUnborn` |
+| `map_create_tag_error:167-171` | `CreateTagError::CheckExisting` | `CheckExistingFailed` |
+| `map_create_tag_error:172-175` | `CreateTagError::SerializeTag` | `SerializeAnnotatedTag` |
+| `map_create_tag_error:176-178` | `CreateTagError::StoreObject` | `StoreObjectFailed` |
+| `map_create_tag_error:180-184` | `CreateTagError::PersistReference` | `PersistReferenceFailed` |
+| `delete_tag_safe:242-246` | `tag::delete().map_err(...)` | `DeleteFailed` |
+| `lookup_tag:357-365` | `Ok(None)` tag not found | `NotFound` |
+| `lookup_tag:357-365` | `Err(e)` repo corrupt | `LoadFailed` |
+| `collect_tags:346-350` | `tag::list().map_err(...)` | `ListFailed` |
+| `lookup_tag:332-334` | `Ok(None)` tag not found | `NotFound` |
+| `lookup_tag:335-337` | `Err(e)` repo corrupt | `LoadFailed` |
 
 ### 特性 2：执行层与渲染层拆分
 
-**方案：**
+**已落地部分（保持不变）：** `TagOutput` enum（含 `List`/`Create`/`Delete` 三变体）、`TagListEntry` 结构体均已存在于 `tag.rs:41-63`，JSON schema 已稳定。
+
+**本批变更：统一 `run_tag()` / `render_tag_output()` 分层**
+
+当前架构已经统一：`execute_safe()` 调用 `run_tag()` 收集结构化结果，再由 `render_tag_output()` 统一渲染 human / JSON / machine。list / create / delete 三类路径已经合流。
+
+目标架构：
 
 ```rust
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "action")]
-pub enum TagOutput {
-    #[serde(rename = "list")]
-    List(TagListOutput),
-    #[serde(rename = "create")]
-    Create(TagCreateOutput),
-    #[serde(rename = "delete")]
-    Delete(TagDeleteOutput),
-}
+/// 纯执行入口——收集结构化结果，不输出
+async fn run_tag(args: &TagArgs) -> Result<TagOutput, TagError>
 
-#[derive(Debug, Clone, Serialize)]
-pub struct TagListOutput {
-    pub tags: Vec<TagListEntry>,
-}
+/// 渲染层——根据 OutputConfig 决定 human/JSON/machine/quiet 输出
+fn render_tag_output(result: &TagOutput, output: &OutputConfig) -> CliResult<()>
 
-#[derive(Debug, Clone, Serialize)]
-pub struct TagListEntry {
-    pub name: String,
-    pub hash: String,
-    /// "lightweight" or "annotated"
-    pub tag_type: String,
-    /// Annotation message (first N lines, None for lightweight)
-    pub message: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct TagCreateOutput {
-    pub name: String,
-    pub hash: String,
-    pub tag_type: String,
-    pub message: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct TagDeleteOutput {
-    pub name: String,
-    pub hash: Option<String>,
+/// execute_safe 调用链
+pub async fn execute_safe(args: TagArgs, output: &OutputConfig) -> CliResult<()> {
+    let result = run_tag(&args).await.map_err(CliError::from)?;
+    render_tag_output(&result, output)
 }
 ```
+
+历史上的 `run_tag_json()` 已合并入 `run_tag()`；`render_tags()` 当前主要保留给测试和辅助调用，实际 CLI human 列表渲染已在 `render_tag_output()` 中统一处理。
 
 **渲染规则：**
 
 | 模式 | stdout | stderr |
 |------|--------|--------|
 | human list | tag 名称列表（可选 `-n` 注释行数） | 无 |
-| human create | 保留现有创建路径输出（lightweight create 后展示 tag/commit 信息；annotated create 无额外确认消息） | 无 |
-| human delete | 确认消息（如 `Deleted tag 'v1.0' (was abc1234)`） | 无 |
+| human create | 统一确认消息：`Created lightweight tag 'v1.0' at abc1234` 或 `Created annotated tag 'v1.0' at abc1234` | 无 |
+| human delete | 确认消息：`Deleted tag 'v1.0' (was abc1234)`；target 丢失时退化为 `Deleted tag 'v1.0'` | 无 |
 | human + `--quiet` | 无 | 无 |
 | `--json` / `--machine` | JSON envelope（含 `action` 字段区分操作类型） | 无 |
 
@@ -227,10 +255,10 @@ When deleting malformed refs that have no stored target, `hash` is `null`.
 
 | ID | 改进 | tag 中的具体落地 |
 |----|------|-----------------|
-| **A** | 退出码 `0/128/129` | 参数错误（缺少 tag 名、不存在的 tag 名）→ exit `129`；运行时错误（重复创建、I/O 失败）→ exit `128`；成功 → exit `0` |
+| **A** | 退出码 `0/128/129` | 参数错误（缺少 tag 名、不存在的 tag 名）→ exit `129`；运行时错误（重复创建、HEAD unborn、I/O 失败）→ exit `128`；成功 → exit `0` |
 | **B** | `--help` EXAMPLES | 见下方 EXAMPLES 段 |
 | **F** | 拼写纠错 | **不适用**——tag 名是用户自定义值，无 enum 可做 fuzzy match |
-| **G** | Issues URL | 仅在 `LoadFailed` / `ListFailed` 错误时输出 Issues URL |
+| **G** | Issues URL | 与 switch 保持一致——仅在映射为 `InternalInvariant` 的内部不变式错误时输出。当前仅 `SerializeAnnotatedTag` 属于此类；`RepoCorrupt`/`IoWriteFailed` 是数据或 I/O 问题，不附带 Issues URL |
 
 ### `--help` EXAMPLES 段
 
@@ -252,9 +280,11 @@ EXAMPLES:
 
 - **（已有）** 重复 tag 错误码、basic creation、annotated tag、force tag、list、delete、annotation lines
 - **（新增）`TagError` 变体覆盖**：
-  - `NotFound`：删除不存在 tag 返回 exit `129`
-  - `MissingName`：无 tag 名返回 exit `129`
+  - `NotFound`：删除不存在 tag 返回 exit `129` + `LBR-CLI-003`
+  - `MissingName`：无 tag 名返回 exit `129` + `LBR-CLI-002`
+  - `HeadUnborn`：空仓库创建 tag 返回 exit `128` + `LBR-REPO-003`
 - **（新增）quiet / delete 输出约束**：`--quiet tag -d` 不应污染 stdout；human delete 保持确认消息
+- **（新增）human create 输出统一**：lightweight / annotated create 均输出单行确认消息，不再依赖 `show_tag_safe()` 打印详情
 - **（新增）force 失败路径回归**：`-f` 遇到对象存储失败时必须保留原有 ref，不得丢 tag
 - **（修复）全角括号**：将 `（lightweight tag）` 等改为 `(lightweight tag)`
 
@@ -280,5 +310,5 @@ EXAMPLES:
 
 | 文件 | 改动类型 | 说明 |
 |------|---------|------|
-| `src/command/tag.rs` | **重构** | 新增 `TagError` typed enum；新增 `TagOutput` / `TagListOutput` / `TagCreateOutput` / `TagDeleteOutput` 结构体；命令层 `TagError → CliError` 显式 `StableErrorCode` 映射；JSON 输出；quiet/delete 输出约束；补齐 `--help` EXAMPLES |
-| `tests/command/tag_test.rs` | **扩展** | 新增 `TagError` 变体覆盖、JSON schema 回归、force 失败路径保护、修复全角括号 |
+| `src/command/tag.rs` | **维护** | 保持已落地的 `TagOutput` / `TagError` / `run_tag()` / `render_tag_output()` / create hint / human 确认消息 / `--help` EXAMPLES 不回退；后续仅维护双契约与边界回归 |
+| `tests/command/tag_test.rs` | **维护** | 在现有 JSON / quiet / malformed ref delete / lightweight-human-vs-machine 契约回归基础上，继续维护 `TagError` 变体覆盖与成功反馈一致性校验 |

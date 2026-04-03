@@ -10,11 +10,11 @@ use crate::{
         switch,
     },
     internal::{
-        branch::{Branch, INTENT_BRANCH},
+        branch::{Branch, BranchStoreError, INTENT_BRANCH},
         head::Head,
     },
     utils::{
-        error::{CliError, CliResult},
+        error::{CliError, CliResult, StableErrorCode},
         output::OutputConfig,
         util,
     },
@@ -76,8 +76,9 @@ pub async fn execute_safe(args: CheckoutArgs, output: &OutputConfig) -> CliResul
     }
 
     let target_commit = if let Some(ref branch_name) = args.branch {
-        Branch::find_branch(branch_name, None)
+        Branch::find_branch_result(branch_name, None)
             .await
+            .map_err(|error| checkout_branch_store_error("resolve checkout target", error))?
             .map(|branch| branch.commit)
     } else {
         None
@@ -110,6 +111,17 @@ pub async fn execute_safe(args: CheckoutArgs, output: &OutputConfig) -> CliResul
     Ok(())
 }
 
+fn checkout_branch_store_error(context: &str, error: BranchStoreError) -> CliError {
+    match error {
+        BranchStoreError::Query(detail) => {
+            CliError::fatal(format!("failed to {context}: {detail}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        }
+        other => CliError::fatal(format!("failed to {context}: {other}"))
+            .with_stable_code(StableErrorCode::RepoCorrupt),
+    }
+}
+
 pub async fn get_current_branch() -> Option<String> {
     match Head::current().await {
         Head::Detached(_) => None,
@@ -139,8 +151,9 @@ async fn switch_branch_with_output(branch_name: &str, output: &OutputConfig) -> 
             INTENT_BRANCH
         )));
     }
-    let target_branch = Branch::find_branch(branch_name, None)
+    let target_branch = Branch::find_branch_result(branch_name, None)
         .await
+        .map_err(|error| checkout_branch_store_error("resolve branch", error))?
         .ok_or_else(|| CliError::fatal(format!("branch '{}' not found", branch_name)))?;
     restore_to_commit(target_branch.commit, output).await?;
     let head = Head::Branch(branch_name.to_string());
@@ -182,10 +195,16 @@ async fn check_branch_with_output(
         return Ok(None);
     }
 
-    let target_branch: Option<Branch> = Branch::find_branch(branch_name, None).await;
+    let target_branch: Option<Branch> = Branch::find_branch_result(branch_name, None)
+        .await
+        .map_err(|error| checkout_branch_store_error("resolve branch", error))?;
     if target_branch.is_none() {
         let remote_branch_name: String = format!("origin/{branch_name}");
-        if !Branch::search_branch(&remote_branch_name).await.is_empty() {
+        if !Branch::search_branch_result(&remote_branch_name)
+            .await
+            .map_err(|error| checkout_branch_store_error("search remote tracking branches", error))?
+            .is_empty()
+        {
             crate::info_println!(
                 output,
                 "branch '{branch_name}' set up to track '{remote_branch_name}'."

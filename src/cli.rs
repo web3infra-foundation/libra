@@ -581,6 +581,9 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
             _ => return Err(classify_parse_error(&argv, &err)),
         },
     };
+    if let Commands::Tag(tag_args) = &args.command {
+        command::tag::validate_cli_args(tag_args)?;
+    }
     match &args.command {
         Commands::Init(_) | Commands::Clone(_) => {}
         // Config global/system scopes don't require a repository

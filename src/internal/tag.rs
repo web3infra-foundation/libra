@@ -19,7 +19,10 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, DbErr, EntityTrait, QueryFilter, Se
 
 use crate::{
     command::load_object,
-    internal::{config::ConfigKv, db::get_db_conn_instance, head::Head, model::reference},
+    internal::{
+        branch::BranchStoreError, config::ConfigKv, db::get_db_conn_instance, head::Head,
+        model::reference,
+    },
     utils::{client_storage::ClientStorage, path},
 };
 
@@ -79,6 +82,8 @@ pub struct TagReference {
 pub enum CreateTagError {
     #[error("Cannot create tag: HEAD does not point to a commit")]
     HeadUnborn,
+    #[error("failed to resolve HEAD commit: {0}")]
+    ResolveHead(#[source] BranchStoreError),
     #[error("Tag '{0}' already exists")]
     AlreadyExists(String),
     #[error("failed to query existing tag refs: {0}")]
@@ -91,6 +96,14 @@ pub enum CreateTagError {
     PersistReference(#[source] DbErr),
 }
 
+#[derive(Debug, Clone)]
+pub struct CreateTagResult {
+    pub name: String,
+    pub target: ObjectHash,
+    pub annotated: bool,
+    pub message: Option<String>,
+}
+
 /// Creates a new tag, either lightweight or annotated, pointing to the current HEAD commit.
 ///
 /// * `name` - The name of the tag.
@@ -99,10 +112,12 @@ pub async fn create(
     name: &str,
     message: Option<String>,
     force: bool,
-) -> Result<(), CreateTagError> {
-    let head_commit_id = Head::current_commit()
-        .await
-        .ok_or(CreateTagError::HeadUnborn)?;
+) -> Result<CreateTagResult, CreateTagError> {
+    let head_commit_id = match Head::current_commit_result().await {
+        Ok(Some(head_commit_id)) => head_commit_id,
+        Ok(None) => return Err(CreateTagError::HeadUnborn),
+        Err(source) => return Err(CreateTagError::ResolveHead(source)),
+    };
 
     let db = get_db_conn_instance().await;
     let exists = reference::Entity::find()
@@ -117,6 +132,7 @@ pub async fn create(
     }
 
     let ref_target_id: ObjectHash;
+    let create_message = message.clone();
     if let Some(msg) = message {
         // Create an annotated tag object
         let user_name = ConfigKv::get("user.name")
@@ -181,7 +197,12 @@ pub async fn create(
         }
     }
 
-    Ok(())
+    Ok(CreateTagResult {
+        name: name.to_string(),
+        target: ref_target_id,
+        annotated: create_message.is_some(),
+        message: create_message,
+    })
 }
 
 /// Lists all tags available in the repository.

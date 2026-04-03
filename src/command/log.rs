@@ -20,7 +20,7 @@ use crate::{
     command::load_object,
     common_utils::parse_commit_msg,
     internal::{
-        branch::Branch,
+        branch::{Branch, BranchStoreError},
         config::ConfigKv,
         head::Head,
         log::{
@@ -36,6 +36,55 @@ use crate::{
         util,
     },
 };
+
+fn log_branch_store_error(context: &str, error: BranchStoreError) -> CliError {
+    match error {
+        BranchStoreError::Query(detail) => {
+            CliError::fatal(format!("failed to {context}: {detail}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        }
+        other => CliError::fatal(format!("failed to {context}: {other}"))
+            .with_stable_code(StableErrorCode::RepoCorrupt),
+    }
+}
+
+fn log_no_commits_error(branch_name: Option<&str>) -> CliError {
+    let error = match branch_name {
+        Some(name) => CliError::fatal(format!(
+            "your current branch '{name}' does not have any commits yet"
+        )),
+        None => CliError::fatal("your current HEAD does not have any commits yet"),
+    }
+    .with_stable_code(StableErrorCode::RepoStateInvalid);
+
+    error.with_hint("create a commit first before running 'libra log'.")
+}
+
+async fn resolve_log_head_commit() -> CliResult<(Option<String>, ObjectHash)> {
+    let head = Head::current_result()
+        .await
+        .map_err(|error| log_branch_store_error("resolve HEAD", error))?;
+    let branch_name = match head {
+        Head::Branch(name) => Some(name),
+        Head::Detached(_) => None,
+    };
+
+    if let Some(name) = &branch_name
+        && Branch::find_branch_result(name, None)
+            .await
+            .map_err(|error| log_branch_store_error("inspect the current branch", error))?
+            .is_none()
+    {
+        return Err(log_no_commits_error(Some(name)));
+    }
+
+    let current_head_commit = Head::current_commit_result()
+        .await
+        .map_err(|error| log_branch_store_error("resolve HEAD commit", error))?
+        .ok_or_else(|| log_no_commits_error(branch_name.as_deref()))?;
+
+    Ok((branch_name, current_head_commit))
+}
 
 #[derive(Parser, Debug)]
 pub struct LogArgs {
@@ -386,31 +435,8 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
 
     let mut pager = Pager::with_config(output)?;
 
-    let head = Head::current().await;
-    // check if the current branch has any commits
-    let branch_name = if let Head::Branch(n) = head.to_owned() {
-        Some(n)
-    } else {
-        None
-    };
-    if let Some(n) = &branch_name {
-        let branch = Branch::find_branch(n, None).await;
-        if branch.is_none() {
-            return Err(CliError::fatal(format!(
-                "your current branch '{n}' does not have any commits yet"
-            )));
-        }
-    }
-
-    let commit_hash = Head::current_commit()
-        .await
-        .ok_or_else(|| match branch_name.as_deref() {
-            Some(name) => CliError::fatal(format!(
-                "your current branch '{name}' does not have any commits yet"
-            )),
-            None => CliError::fatal("your current HEAD does not have any commits yet"),
-        })?
-        .to_string();
+    let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
+    let commit_hash = current_head_commit.to_string();
 
     let mut reachable_commits = get_reachable_commits(commit_hash.clone(), None).await?;
     // default sort with signature time
@@ -420,7 +446,7 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
         return Ok(());
     }
 
-    let ref_commits = create_reference_commit_map().await;
+    let ref_commits = create_reference_commit_map().await?;
     let full_hash_len = commit_hash.len();
 
     let format_type = if args.oneline {
@@ -599,35 +625,7 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
     let path_filters: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
     let filter = CommitFilter::new(args.author.clone(), since, until, path_filters.clone());
 
-    let head = Head::current().await;
-    let branch_name = if let Head::Branch(name) = head.to_owned() {
-        Some(name)
-    } else {
-        None
-    };
-    if let Some(name) = &branch_name
-        && Branch::find_branch(name, None).await.is_none()
-    {
-        return Err(CliError::fatal(format!(
-            "your current branch '{name}' does not have any commits yet"
-        ))
-        .with_stable_code(StableErrorCode::RepoStateInvalid)
-        .with_hint("create a commit first with 'libra commit'."));
-    }
-
-    let current_head_commit =
-        Head::current_commit()
-            .await
-            .ok_or_else(|| match branch_name.as_deref() {
-                Some(name) => CliError::fatal(format!(
-                    "your current branch '{name}' does not have any commits yet"
-                ))
-                .with_stable_code(StableErrorCode::RepoStateInvalid)
-                .with_hint("create a commit first with 'libra commit'."),
-                None => CliError::fatal("your current HEAD does not have any commits yet")
-                    .with_stable_code(StableErrorCode::RepoStateInvalid)
-                    .with_hint("create a commit first with 'libra commit'."),
-            })?;
+    let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
     let commit_hash = current_head_commit.to_string();
 
     let mut reachable_commits = get_reachable_commits(commit_hash, None).await?;
@@ -635,7 +633,7 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
 
     let max_output_number = min(args.number.unwrap_or(usize::MAX), reachable_commits.len());
     let include_total = args.number.is_none();
-    let ref_commits = create_reference_commit_map().await;
+    let ref_commits = create_reference_commit_map().await?;
     let mut commits = Vec::new();
     let mut total = 0usize;
 
@@ -1060,10 +1058,12 @@ impl GraphState {
     }
 }
 
-async fn create_reference_commit_map() -> HashMap<ObjectHash, Vec<Reference>> {
+async fn create_reference_commit_map() -> CliResult<HashMap<ObjectHash, Vec<Reference>>> {
     let mut commit_to_refs: HashMap<ObjectHash, Vec<Reference>> = HashMap::new();
 
-    let all_branches = Branch::list_branches(None).await;
+    let all_branches = Branch::list_branches_result(None)
+        .await
+        .map_err(|error| log_branch_store_error("list branches for log decoration", error))?;
     for branch in all_branches {
         commit_to_refs
             .entry(branch.commit)
@@ -1099,7 +1099,7 @@ async fn create_reference_commit_map() -> HashMap<ObjectHash, Vec<Reference>> {
             });
     }
 
-    commit_to_refs
+    Ok(commit_to_refs)
 }
 
 /// Generate unified diff between commit and its first parent (or empty tree)

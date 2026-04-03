@@ -473,7 +473,9 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
         // We try to find the latest commit and checkout to it
 
         // Check if HEAD has a commit (either restored or existing)
-        let head_commit = crate::internal::head::Head::current_commit().await;
+        let head_commit = crate::internal::head::Head::current_commit_result()
+            .await
+            .map_err(|error| format!("failed to resolve HEAD commit: {error}"))?;
 
         if let Some(commit) = head_commit {
             println!("Restoring working directory to HEAD ({})", commit);
@@ -483,7 +485,9 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
 
             // Try to find 'main' branch in references
             // We look for 'main' branch in the reference table as a fallback
-            let main_branch = crate::internal::branch::Branch::find_branch("main", None).await;
+            let main_branch = crate::internal::branch::Branch::find_branch_result("main", None)
+                .await
+                .map_err(|error| format!("failed to resolve main branch: {error}"))?;
 
             if let Some(branch) = main_branch {
                 println!("Found main branch: {}", branch.commit);

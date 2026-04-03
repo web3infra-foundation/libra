@@ -1,8 +1,10 @@
 ## Reset 命令改进详细计划
 
-> 最后编写时间：2026-03-30
+> 最后编写时间：2026-04-01
 
 同时落地 [Cross-Cutting Improvements A/B/F/G](README.md#全局层面改进贯穿所有命令)。
+
+> 当前工作区实现已按本文范围落地一部分改动；以下内容改为记录已落地能力、剩余遗漏和后续收口项。
 
 ### 已完成前置条件与当前代码状态
 
@@ -14,33 +16,45 @@
 - `OutputConfig` + `emit_json_data()` + `info_println!()` 输出框架已可用
 - `StableErrorCode` 体系已有 18 个错误码
 - `CliError` 支持 `.with_hint()`、`.with_stable_code()`、`.with_detail()`
-- `execute()` / `execute_safe(args, _output)` 双入口已存在（`reset.rs:70/79`）
+- `execute()` / `execute_safe(args, output)` 双入口已存在
+- `run_reset()` + `render_reset_output()` 执行层/渲染层拆分已落地
+- `ResetOutput` 已定义，`--json` / `--machine` 已通过 `emit_json_data("reset", ...)` 输出结构化结果
 - `--soft` / `--mixed` / `--hard` 三种模式已实现
 - pathspec 支持已实现（reset 特定文件）
 - reflog 记录已集成（`ReflogContext` + `with_reflog()`）
 - `reset_index_to_commit()` / `reset_working_directory_to_commit()` 核心逻辑已实现
 - `rebuild_index_from_tree()` 和 `restore_working_directory_from_tree()` 已实现
 - 空目录清理 `remove_empty_directories()` 已实现
+- human 成功确认消息已落地：全量 reset 输出 `HEAD is now at <short-hash> <subject>`；pathspec reset 输出 `Unstaged changes after reset:`
+- pathspec 与 `--soft` / `--hard` 的冲突校验已接入显式 `StableErrorCode`
 
-**基于当前代码的 Review 结论（reset 仍需改进的部分）：**
+**基于当前代码的 Review 结论（已改进部分 vs 仍需改进部分）：**
 
-- **零 JSON / machine 输出**：`OutputConfig` 参数标记为 `_output` 完全未使用（`reset.rs:79`）
-- **零 `StableErrorCode`**：所有错误使用 `CliError::fatal()` 无显式错误码
-- **无 `ResetError` typed enum**：错误散落在多个函数中，内部函数使用 `Result<T, String>`
-- **成功时沉默**：审计报告核心发现——reset 完成后无任何输出告知用户 HEAD 移动到了哪里
-- **缺少 `"HEAD is now at <SHA> <msg>"` 输出**：Git 在 hard/mixed reset 后输出此行，libra 不输出
-- **内部函数使用 `Result<T, String>`**：`reset_index_to_commit()`、`reset_working_directory_to_commit()` 等返回 `String` 错误，无类型信息
-- **`cli_error!` 宏直接打印**：`reset.rs` 中有 `cli_error!()` 直接写 stderr 而非通过 `CliError` 返回
+已改进（当前代码已具备）：
+
+- **结构化输出已落地**：`ResetOutput` + `render_reset_output()` 已覆盖 human / `--json` / `--machine` / `--quiet`
+- **执行层与渲染层已拆分**：`execute_safe()` 调用 `run_reset()` 收集结构化结果，再统一渲染
+- **成功确认消息已落地**：全量 reset 会输出 `HEAD is now at ...`，pathspec reset 会输出 unstaged 文件列表
+- **主要错误已带显式 `StableErrorCode`**：invalid revision、pathspec/mode 冲突、repo corrupt、I/O 失败等路径都已显式映射
+- **`ResetError` typed enum 已落地**：object load、index、HEAD、worktree、pathspec 等路径都已统一收口到 typed error
+- **运行时 helper 已完成 typed 化**：`perform_reset()`、pathspec 查找、目录清理等路径已移除关键词匹配分类
+- **warning 管线已落地**：目录清理 warning 已改走共享 `emit_warning()` / warning tracker，不再直写 stderr
+- **`--help` EXAMPLES 已落地**
+- **JSON 回归测试已存在**：`tests/command/reset_test.rs` 已覆盖 `--json` schema、`--hard HEAD` restore 计数和 pathspec usage error
+
+仍需改进：
+
+- **rollback 边界需要继续回归保护**：reset 失败后 rollback 再失败时，必须保持主错误分类不变，避免把 repo corruption 误报成 worktree/I/O 错误
+- **Cross-Cutting `G` 仍可继续增强**：如果后续引入真正的 internal-invariant 类兜底错误，可再统一附带 Issues URL
 
 ### 目标与非目标
 
-**本批目标：**
-- 引入 `ResetError` typed error enum，覆盖 reset 层面的错误场景
-- 所有 `ResetError → CliError` 映射使用显式 `StableErrorCode`
-- 拆分执行层与渲染层：新增 `run_reset(args) -> Result<ResetOutput, ResetError>` 纯执行入口
-- 实现 JSON 输出（reset 结果结构化）
-- 添加 "HEAD is now at \<SHA\> \<msg\>" 成功确认消息
-- 补齐 `--help` EXAMPLES 段
+**已完成目标：**
+- `ResetError` typed error enum、typed helper、pathspec typed error、warning 管线、`run_reset()` / `render_reset_output()` 分层与 `--help` EXAMPLES 已落地
+
+**后续收口目标：**
+- 继续用回归测试锁住 rollback / warning / pathspec corruption 这些边界行为
+- 如后续增加 internal invariant 兜底错误，再统一接入 Issues URL
 
 **本批非目标：**
 - **不改变 soft/mixed/hard reset 核心逻辑**。索引重建和工作树恢复行为不变
@@ -54,6 +68,7 @@
 2. **成功时必须确认**：human 模式下输出 `HEAD is now at <short-hash> <subject>`
 3. **错误码显式映射**：每个 `ResetError` 变体都有确定的 `StableErrorCode`
 4. **内部函数错误类型升级**：从 `Result<T, String>` 升级到 `Result<T, ResetError>`
+5. **warning 不进入 `ResetOutput` schema**：cleanup warning 通过共享 warning 管线输出并参与 `--exit-code-on-warning`，不新增 JSON 字段污染已稳定的 success schema
 
 ### 特性 1：ResetError typed error enum
 
@@ -67,6 +82,9 @@ pub enum ResetError {
 
     #[error("invalid revision: '{0}'")]
     InvalidRevision(String),
+
+    #[error("HEAD is unborn — no commits in this repository")]
+    HeadUnborn,
 
     #[error("failed to load commit '{commit_id}': {detail}")]
     CommitLoad { commit_id: String, detail: String },
@@ -86,8 +104,17 @@ pub enum ResetError {
     #[error("failed to restore working tree: {0}")]
     WorktreeRestore(String),
 
+    #[error("path contains invalid UTF-8: {0}")]
+    InvalidPathspecEncoding(String),
+
     #[error("pathspec '{0}' is not compatible with --soft reset")]
     PathspecWithSoft(String),
+
+    #[error("cannot do hard reset with paths")]
+    PathspecWithHard,
+
+    #[error("pathspec '{0}' did not match any file(s) known to libra")]
+    PathspecNotMatched(String),
 }
 ```
 
@@ -97,48 +124,88 @@ pub enum ResetError {
 |----------------|-----------------|--------|------|
 | `NotInRepo` | `RepoNotFound` | 128 | `run 'libra init' to create a repository` |
 | `InvalidRevision` | `CliInvalidTarget` | 129 | `check the revision name and try again` |
+| `HeadUnborn` | `RepoStateInvalid` | 128 | `create a commit first` |
 | `CommitLoad` | `RepoCorrupt` | 128 | `the object store may be corrupted` |
 | `TreeLoad` | `RepoCorrupt` | 128 | `the object store may be corrupted` |
 | `IndexLoad` | `RepoCorrupt` | 128 | `the index file may be corrupted` |
 | `IndexSave` | `IoWriteFailed` | 128 | 无 |
 | `HeadUpdate` | `IoWriteFailed` | 128 | 无 |
 | `WorktreeRestore` | `IoWriteFailed` | 128 | 无 |
+| `InvalidPathspecEncoding` | `CliInvalidArguments` | 129 | `rename the path or invoke libra from a path representable as UTF-8` |
 | `PathspecWithSoft` | `CliInvalidArguments` | 129 | `--soft only moves HEAD; use --mixed to reset index for specific paths` |
+| `PathspecWithHard` | `CliInvalidArguments` | 129 | `--hard updates the working tree; omit pathspecs or use --mixed for specific paths` |
+| `PathspecNotMatched` | `CliInvalidTarget` | 129 | `check the path and try again` |
+
+**与当前代码中 inline 错误的对应关系：**
+
+| 当前代码位置 | 当前 inline 错误 | 对应 ResetError 变体 |
+|-------------|-----------------|---------------------|
+| `run_reset:113` | `util::require_repo().map_err(...)` | `NotInRepo` |
+| `run_reset:126-131` | `command_usage("pathspec ... is not compatible with --soft reset")` | `PathspecWithSoft` |
+| `run_reset:133-138` | `command_usage("Cannot do hard reset with paths.")` | `PathspecWithHard` |
+| `run_reset:141-143` | `resolve_commit().map_err(map_reset_invalid_revision)` | `InvalidRevision` |
+| `run_reset:159-161` | `resolve_commit().map_err(map_reset_invalid_revision)` | `InvalidRevision` |
+| `run_reset:163-165` | `perform_reset().map_err(map_reset_runtime_error)` | 见下方 `map_reset_runtime_error` 分拆 |
+| `reset_pathspecs:206-212` | `path contains invalid UTF-8` | `InvalidPathspecEncoding` |
+| `reset_pathspecs:236-240` | `pathspec ... did not match any file(s) known to libra` | `PathspecNotMatched` |
+| `map_reset_runtime_error:740-741` | `message.contains("HEAD is unborn")` | `HeadUnborn` |
+| `map_reset_runtime_error:742-749` | `message.contains("load commit/tree/index/blob")` | `CommitLoad` / `TreeLoad` / `IndexLoad` |
+| `map_reset_runtime_error:734-739` | `message.contains("save index/write file/update HEAD")` | `IndexSave` / `HeadUpdate` / `WorktreeRestore` |
+| `remove_empty_directories:600-605,617-621` | `eprintln!("warning: failed to remove empty directory")` | 改为收集 warning 字符串，经 `emit_warning()` / warning tracker 输出（非致命，不映射为 ResetError） |
 
 ### 特性 2：执行层与渲染层拆分
 
-**方案：**
+**已落地部分（无需变更）：** `ResetOutput` 结构体、`render_reset_output()` 渲染函数、`execute_safe()` → `run_reset()` → `render_reset_output()` 调用链均已存在。
+
+**本批变更：`run_reset()` 返回内部执行结果，显式携带 warning**
+
+为避免把 cleanup warning 塞进已稳定的 `ResetOutput` JSON schema，本批引入一个**仅命令内部使用**的包装结果：
 
 ```rust
-#[derive(Debug, Clone, Serialize)]
-pub struct ResetOutput {
-    /// Reset mode: "soft", "mixed", "hard"
-    pub mode: String,
-    /// Target commit hash (full)
-    pub commit: String,
-    /// Target commit short hash
-    pub short_commit: String,
-    /// Target commit subject line
-    pub subject: String,
-    /// Previous HEAD commit hash
-    pub previous_commit: Option<String>,
-    /// Files unstaged (mixed/hard only)
-    pub files_unstaged: usize,
-    /// Files restored in working tree (hard only)
-    pub files_restored: usize,
-    /// Pathspecs that were reset (empty for full reset)
-    pub pathspecs: Vec<String>,
+struct ResetExecution {
+    output: ResetOutput,
+    warnings: Vec<String>,
 }
 ```
 
-**渲染规则：**
+当前签名：
+```rust
+async fn run_reset(args: ResetArgs) -> CliResult<ResetOutput>
+```
+
+目标签名：
+```rust
+async fn run_reset(args: ResetArgs) -> Result<ResetExecution, ResetError>
+```
+
+`execute_safe()` 调用层转换：
+```rust
+pub async fn execute_safe(args: ResetArgs, output: &OutputConfig) -> CliResult<()> {
+    let result = run_reset(args).await.map_err(CliError::from)?;
+    render_reset_output(&result.output, output)?;
+    for warning in &result.warnings {
+        emit_warning(warning);
+    }
+    Ok(())
+}
+```
+
+辅助函数签名同步变更：
+```rust
+async fn perform_reset(target: ObjectHash, mode: ResetMode, target_name: &str) -> Result<ResetStats, ResetError>
+fn remove_empty_directories(workdir: &Path) -> Result<Vec<String>, ResetError>
+// 注：warning 统一经 execute_safe() 调用 emit_warning() 输出，
+// quiet 模式不抑制 warning；--exit-code-on-warning 继续生效
+```
+
+**渲染规则（已落地，无需变更）：**
 
 | 模式 | stdout | stderr |
 |------|--------|--------|
-| human（默认） | `HEAD is now at <short-hash> <subject>` | 无 |
-| human + pathspec | `Unstaged changes after reset:` + 文件列表 | 无 |
-| human + `--quiet` | 无 | 无 |
-| `--json` / `--machine` | JSON envelope | 无 |
+| human（默认） | `HEAD is now at <short-hash> <subject>` | warning 经 `emit_warning()` 输出 |
+| human + pathspec | `Unstaged changes after reset:` + 文件列表 | warning 经 `emit_warning()` 输出 |
+| human + `--quiet` | 无 | warning 经 `emit_warning()` 输出 |
+| `--json` / `--machine` | JSON envelope | warning 经 `emit_warning()` 输出 |
 
 **human 模式确认消息：**
 
@@ -214,10 +281,10 @@ M       src/lib.rs
 
 | ID | 改进 | reset 中的具体落地 |
 |----|------|-----------------|
-| **A** | 退出码 `0/128/129` | 参数错误（无效 revision、pathspec + soft 冲突）→ exit `129`；运行时错误（object 损坏、I/O 失败）→ exit `128`；成功 → exit `0` |
+| **A** | 退出码 `0/128/129` | 参数错误（无效 revision、pathspec + soft/hard 冲突）→ exit `129`；运行时错误（object 损坏、HEAD unborn、I/O 失败）→ exit `128`；成功 → exit `0` |
 | **B** | `--help` EXAMPLES | 见下方 EXAMPLES 段 |
 | **F** | 拼写纠错 | **不适用**——reset 的参数是 revision 和 pathspec，无 enum 值可做 fuzzy match |
-| **G** | Issues URL | 仅在 `CommitLoad` / `TreeLoad` / `IndexLoad` 错误时输出 Issues URL |
+| **G** | Issues URL | 与 switch 保持一致——仅在映射为 `InternalInvariant` 的内部不变式错误时输出。当前 `reset` 计划内没有 `InternalInvariant` 变体，`RepoCorrupt` 是数据问题而非代码 bug，不附带 Issues URL |
 
 ### `--help` EXAMPLES 段
 
@@ -237,13 +304,16 @@ EXAMPLES:
 
 - **（已有）** 仓库外执行、soft/mixed/hard reset、HEAD~ 引用、分支上 reset
 - **（新增）`ResetError` 变体覆盖**：
-  - `InvalidRevision`：无效 revision 返回 exit `129`
-  - `PathspecWithSoft`：`--soft` + pathspec 返回 exit `129`
-  - `PathspecWithHard`：`--hard` + pathspec 返回 exit `129`
+  - `InvalidRevision`：无效 revision 返回 exit `129` + `LBR-CLI-003`
+  - `PathspecWithSoft`：`--soft` + pathspec 返回 exit `129` + `LBR-CLI-002`
+  - `PathspecWithHard`：`--hard` + pathspec 返回 exit `129` + `LBR-CLI-002`
+  - `HeadUnborn`：空仓库 reset 返回 exit `128` + `LBR-REPO-003`
 - **（新增）成功确认消息**：human 模式下 stdout 包含 `HEAD is now at`
 - **（新增）pathspec reset 输出**：mixed 模式 + pathspec 后 stdout 包含 unstaged 文件列表
+- **（新增）warning 管线**：目录清理 warning 不再直写 stderr，统一经 `emit_warning()` 输出并触发 warning tracker
+- **（新增）`--exit-code-on-warning` 回归**：成功 reset 伴随 cleanup warning 时返回 exit `9`，且 JSON schema 不新增 `warnings` 字段
 
-#### `tests/command/reset_json_test.rs`（JSON schema 稳定性，新增文件）
+#### `tests/command/reset_json_test.rs`（JSON schema 稳定性，可选拆分文件）
 
 - **schema 完整性**：验证 `--json` 输出中每个字段的类型和存在性
 - **`--hard --json`**：`mode == "hard"`，`files_restored` 反映实际被恢复的 tracked 文件数；dirty 工作区时 `> 0`，clean repo 上对 `HEAD` 执行时可为 `0`
@@ -266,7 +336,6 @@ EXAMPLES:
 
 | 文件 | 改动类型 | 说明 |
 |------|---------|------|
-| `src/command/reset.rs` | **重构** | 新增 `ResetError` typed enum；新增 `ResetOutput` 结构体；新增 `run_reset()` 纯执行入口；内部函数从 `Result<T, String>` 升级到 `Result<T, ResetError>`；`ResetError → CliError` 显式 `StableErrorCode` 映射；JSON 输出；添加 "HEAD is now at" 成功确认消息；消除 `cli_error!()` 直接打印；补齐 `--help` EXAMPLES |
-| `tests/command/reset_test.rs` | **扩展** | 新增 `ResetError` 变体覆盖、成功消息验证 |
-| `tests/command/reset_json_test.rs` | **新增** | JSON schema 完整性和稳定性验证 |
-| `tests/command/mod.rs` | **修改** | 注册新增的测试文件 |
+| `src/command/reset.rs` | **维护** | 保持已落地的 `ResetOutput` / `ResetError` / `run_reset()` / `render_reset_output()` / warning 管线 / JSON / human 确认消息 / `--help` EXAMPLES 不回退；后续仅维护 rollback 与边界回归 |
+| `tests/command/reset_test.rs` | **扩展** | 在现有 JSON / human 输出回归基础上，补齐 typed error、warning 路径与 help EXAMPLES 回归 |
+| `tests/command/reset_json_test.rs` | **可选拆分** | 若 `reset_test.rs` 中的 JSON 覆盖继续膨胀，可再拆出独立 schema 稳定性文件；当前不是阻断项 |

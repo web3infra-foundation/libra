@@ -443,7 +443,11 @@ async fn resolve_object_safe(object_ref: &str, storage: &ClientStorage) -> CliRe
         return Ok(hash);
     }
 
-    let results = storage.search(object_ref).await;
+    let results = storage.search_result(object_ref).await.map_err(|error| {
+        CliError::fatal(format!(
+            "failed to search objects while resolving '{object_ref}': {error}"
+        ))
+    })?;
     if results.len() == 1 {
         return Ok(results[0]);
     }
@@ -688,7 +692,13 @@ async fn resolve_object(object_ref: &str, storage: &ClientStorage) -> ObjectHash
     }
 
     // Try abbreviated hash via storage search
-    let results = storage.search(object_ref).await;
+    let results = match storage.search_result(object_ref).await {
+        Ok(results) => results,
+        Err(error) => cat_file_exit(format!(
+            "fatal: failed to search objects while resolving '{}': {}",
+            object_ref, error
+        )),
+    };
     if results.len() == 1 {
         return results[0];
     } else if results.len() > 1 {
