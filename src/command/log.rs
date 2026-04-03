@@ -147,6 +147,10 @@ pub struct LogArgs {
     /// Files to limit diff output (used with -p, --name-only, or --stat)
     #[clap(value_name = "PATHS", num_args = 0..)]
     pathspec: Vec<String>,
+
+    /// Filter commits by message content (case-sensitive substring match)
+    #[clap(long)]
+    pub grep: Option<String>,
 }
 
 #[derive(PartialEq, Debug)]
@@ -441,6 +445,16 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     let mut reachable_commits = get_reachable_commits(commit_hash.clone(), None).await?;
     // default sort with signature time
     reachable_commits.sort_by_key(|b| std::cmp::Reverse(b.committer.timestamp));
+
+    // Apply grep filtering
+    if let Some(pattern) = &args.grep {
+        if !pattern.is_empty() {
+            reachable_commits = reachable_commits
+                .into_iter()
+                .filter(|commit| commit.message.contains(pattern))
+                .collect();
+        }
+    }
 
     if output.quiet {
         return Ok(());
@@ -1304,5 +1318,47 @@ mod tests {
 
         assert!(name_status);
         assert!(!patch);
+    }
+
+    // Test grep parameter parsing
+    #[test]
+    fn test_log_args_grep() {
+        let args = LogArgs::parse_from(["libra", "log", "--grep", "fix"]);
+        assert_eq!(args.grep, Some("fix".to_string()));
+
+        let args = LogArgs::parse_from(["libra", "log"]);
+        assert_eq!(args.grep, None);
+    }
+
+    // Test grep combined with other arguments
+    #[test]
+    fn test_grep_with_other_args() {
+        let args =
+            LogArgs::parse_from(["libra", "log", "--grep", "feature", "--oneline", "-n", "5"]);
+        assert_eq!(args.grep, Some("feature".to_string()));
+        assert!(args.oneline);
+        assert_eq!(args.number, Some(5));
+    }
+
+    // Test case-sensitive matching
+    #[test]
+    fn test_grep_case_sensitive() {
+        let args = LogArgs::parse_from(["libra", "log", "--grep", "FIX"]);
+        assert_eq!(args.grep, Some("FIX".to_string()));
+    }
+
+    // Test empty string grep
+    #[test]
+    fn test_grep_empty_string() {
+        let args = LogArgs::parse_from(["libra", "log", "--grep", ""]);
+        assert_eq!(args.grep, Some("".to_string()));
+    }
+
+    // Test graph with grep combination
+    #[test]
+    fn test_graph_with_grep() {
+        let args = LogArgs::parse_from(["libra", "log", "--graph", "--grep", "fix"]);
+        assert!(args.graph);
+        assert_eq!(args.grep, Some("fix".to_string()));
     }
 }
