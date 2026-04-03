@@ -218,6 +218,17 @@ impl Head {
         Self::remote_current_with_conn(&db_conn, remote).await
     }
 
+    /// Resolve HEAD to its current commit hash.
+    ///
+    /// Returns `Ok(None)` when HEAD is an **unborn branch** — i.e. HEAD points
+    /// to a branch name that has no row in the reference table yet.  This is the
+    /// normal state after `libra init` before the first commit, and mirrors
+    /// Git's semantics (HEAD → refs/heads/main, but the ref file does not
+    /// exist).  It is **not** corruption; callers should treat `None` as
+    /// "no commits yet" (e.g. use a zero OID for reflog entries).
+    ///
+    /// Actual storage failures (DB query errors, corrupt data) are surfaced as
+    /// `Err(BranchStoreError)`.
     pub async fn current_commit_result_with_conn<C>(
         db: &C,
     ) -> Result<Option<ObjectHash>, BranchStoreError>

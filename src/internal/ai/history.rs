@@ -1,4 +1,4 @@
-use std::{path::PathBuf, str::FromStr, sync::Arc};
+use std::{path::PathBuf, str::FromStr, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
 use git_internal::{
@@ -11,9 +11,10 @@ use git_internal::{
     },
 };
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, DatabaseTransaction, DbErr, EntityTrait,
     QueryFilter, Set, TransactionTrait,
 };
+use tokio::time::sleep;
 
 use crate::{
     internal::model::reference::{self, ConfigKind},
@@ -34,6 +35,13 @@ use crate::{
 ///
 /// In the database, this is stored with kind='Branch' and name='libra/intent'.
 pub const AI_REF: &str = "libra/intent";
+const SQLITE_BUSY_MAX_RETRIES: usize = 15;
+const SQLITE_BUSY_RETRY_BASE_MS: u64 = 100;
+
+fn is_sqlite_busy(err: &DbErr) -> bool {
+    let message = err.to_string();
+    message.contains("database is locked") || message.contains("database schema is locked")
+}
 
 /// Manages object history using an orphan branch and Git Tree structure.
 ///
@@ -279,12 +287,30 @@ impl HistoryManager {
     }
 
     pub async fn resolve_history_head(&self) -> Result<Option<ObjectHash>> {
-        let ref_model = reference::Entity::find()
-            .filter(reference::Column::Name.eq(&self.ref_name))
-            .filter(reference::Column::Kind.eq(ConfigKind::Branch))
-            .one(&*self.db_conn)
-            .await
-            .context("Failed to query history head")?;
+        let ref_model = {
+            let mut model = None;
+            for attempt in 0..=SQLITE_BUSY_MAX_RETRIES {
+                match reference::Entity::find()
+                    .filter(reference::Column::Name.eq(&self.ref_name))
+                    .filter(reference::Column::Kind.eq(ConfigKind::Branch))
+                    .one(&*self.db_conn)
+                    .await
+                {
+                    Ok(found) => {
+                        model = Some(found);
+                        break;
+                    }
+                    Err(err) if is_sqlite_busy(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
+                        sleep(Duration::from_millis(
+                            SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                        ))
+                        .await;
+                    }
+                    Err(err) => return Err(err).context("Failed to query history head"),
+                }
+            }
+            model.expect("history head query loop must return or set a result")
+        };
 
         match ref_model {
             Some(model) => match model.commit {
@@ -345,44 +371,86 @@ impl HistoryManager {
     }
 
     async fn update_ref(&self, ref_name: &str, hash: ObjectHash) -> Result<()> {
-        let txn: DatabaseTransaction = self
-            .db_conn
-            .begin()
-            .await
-            .context("Failed to begin transaction")?;
-
-        // Try to find existing reference
-        let existing = reference::Entity::find()
-            .filter(reference::Column::Name.eq(ref_name))
-            .filter(reference::Column::Kind.eq(ConfigKind::Branch))
-            .one(&txn)
-            .await
-            .context("Failed to query reference")?;
-
-        if let Some(model) = existing {
-            let mut active: reference::ActiveModel = model.into();
-            active.commit = Set(Some(hash.to_string()));
-            active
-                .update(&txn)
-                .await
-                .context("Failed to update reference")?;
-        } else {
-            let new_ref = reference::ActiveModel {
-                name: Set(Some(ref_name.to_string())),
-                kind: Set(ConfigKind::Branch),
-                commit: Set(Some(hash.to_string())),
-                remote: Set(None),
-                ..Default::default()
+        for attempt in 0..=SQLITE_BUSY_MAX_RETRIES {
+            let txn: DatabaseTransaction = match self.db_conn.begin().await {
+                Ok(txn) => txn,
+                Err(err) if is_sqlite_busy(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
+                    sleep(Duration::from_millis(
+                        SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                    ))
+                    .await;
+                    continue;
+                }
+                Err(err) => return Err(err).context("Failed to begin transaction"),
             };
-            new_ref
-                .insert(&txn)
+
+            let existing = match reference::Entity::find()
+                .filter(reference::Column::Name.eq(ref_name))
+                .filter(reference::Column::Kind.eq(ConfigKind::Branch))
+                .one(&txn)
                 .await
-                .context("Failed to insert reference")?;
+            {
+                Ok(existing) => existing,
+                Err(err) if is_sqlite_busy(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
+                    let _ = txn.rollback().await;
+                    sleep(Duration::from_millis(
+                        SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                    ))
+                    .await;
+                    continue;
+                }
+                Err(err) => return Err(err).context("Failed to query reference"),
+            };
+
+            let had_existing = existing.is_some();
+            let write_result = if let Some(model) = existing {
+                let mut active: reference::ActiveModel = model.into();
+                active.commit = Set(Some(hash.to_string()));
+                active.update(&txn).await.map(|_| ())
+            } else {
+                let new_ref = reference::ActiveModel {
+                    name: Set(Some(ref_name.to_string())),
+                    kind: Set(ConfigKind::Branch),
+                    commit: Set(Some(hash.to_string())),
+                    remote: Set(None),
+                    ..Default::default()
+                };
+                new_ref.insert(&txn).await.map(|_| ())
+            };
+
+            match write_result {
+                Ok(()) => {}
+                Err(err) if is_sqlite_busy(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
+                    let _ = txn.rollback().await;
+                    sleep(Duration::from_millis(
+                        SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                    ))
+                    .await;
+                    continue;
+                }
+                Err(err) => {
+                    let context = if had_existing {
+                        "Failed to update reference"
+                    } else {
+                        "Failed to insert reference"
+                    };
+                    return Err(err).context(context);
+                }
+            }
+
+            match txn.commit().await {
+                Ok(()) => return Ok(()),
+                Err(err) if is_sqlite_busy(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
+                    sleep(Duration::from_millis(
+                        SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                    ))
+                    .await;
+                }
+                Err(err) => return Err(err).context("Failed to commit transaction"),
+            }
         }
 
-        txn.commit().await.context("Failed to commit transaction")?;
-
-        Ok(())
+        unreachable!("sqlite busy retry loop must return on success or terminal error")
     }
 
     #[cfg(test)]
@@ -393,11 +461,12 @@ impl HistoryManager {
 
 #[cfg(test)]
 mod tests {
-    use sea_orm::{ConnectionTrait, Database, Schema};
+    use sea_orm::{ConnectionTrait, Database, Schema, Statement};
     use tempfile::tempdir;
+    use tokio::time::sleep;
 
     use super::*;
-    use crate::utils::storage::local::LocalStorage;
+    use crate::{internal::db, utils::storage::local::LocalStorage};
 
     async fn setup_test_db() -> DatabaseConnection {
         let db = Database::connect("sqlite::memory:").await.unwrap();
@@ -510,5 +579,61 @@ mod tests {
 
         let types = manager.list_object_types().await.unwrap();
         assert_eq!(types, vec!["patchset".to_string(), "run_event".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_update_ref_retries_when_sqlite_is_locked() {
+        let dir = tempdir().unwrap();
+        let repo_path = dir.path().join(".libra");
+        std::fs::create_dir(&repo_path).unwrap();
+        let objects_dir = repo_path.join("objects");
+        std::fs::create_dir(&objects_dir).unwrap();
+        let db_path = repo_path.join("libra.db");
+
+        let db_conn = Arc::new(
+            db::create_database(db_path.to_str().unwrap())
+                .await
+                .expect("failed to create sqlite database"),
+        );
+        let storage = Arc::new(LocalStorage::new(objects_dir));
+        let manager = HistoryManager::new(storage, repo_path.clone(), db_conn.clone());
+
+        let locker = db::establish_connection_with_busy_timeout(
+            db_path.to_str().unwrap(),
+            Duration::from_millis(50),
+        )
+        .await
+        .expect("failed to open lock holder connection");
+        let backend = locker.get_database_backend();
+        locker
+            .execute(Statement::from_string(backend, "BEGIN EXCLUSIVE"))
+            .await
+            .expect("failed to acquire sqlite exclusive lock");
+
+        let release = {
+            let locker = locker.clone();
+            tokio::spawn(async move {
+                sleep(Duration::from_millis(250)).await;
+                let backend = locker.get_database_backend();
+                locker
+                    .execute(Statement::from_string(backend, "COMMIT"))
+                    .await
+                    .expect("failed to release sqlite exclusive lock");
+            })
+        };
+
+        let hash = ObjectHash::from_str("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391").unwrap();
+        manager
+            .update_ref(AI_REF, hash)
+            .await
+            .expect("update_ref should retry through a transient sqlite lock");
+        release.await.unwrap();
+
+        let resolved = manager
+            .resolve_history_head()
+            .await
+            .expect("history head should be readable after retry")
+            .expect("history head should exist");
+        assert_eq!(resolved, hash);
     }
 }
