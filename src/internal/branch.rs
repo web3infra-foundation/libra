@@ -176,8 +176,10 @@ impl Branch {
         branch.is_some()
     }
 
-    /// Lossy compatibility wrapper. Prefer `exists_result` in production paths
-    /// so storage failures are not downgraded to `false`.
+    /// Lossy compatibility wrapper that only checks **local** branches
+    /// (hardcodes `remote = None`). Prefer `exists_result` in production paths
+    /// so storage failures are not downgraded to `false` and a remote scope can
+    /// be specified.
     pub async fn exists(branch_name: &str) -> bool {
         let db_conn = get_db_conn_instance().await;
         Self::exists_with_conn(&db_conn, branch_name).await

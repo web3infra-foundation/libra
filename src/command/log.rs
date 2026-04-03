@@ -48,6 +48,18 @@ fn log_branch_store_error(context: &str, error: BranchStoreError) -> CliError {
     }
 }
 
+fn log_no_commits_error(branch_name: Option<&str>) -> CliError {
+    let error = match branch_name {
+        Some(name) => CliError::fatal(format!(
+            "your current branch '{name}' does not have any commits yet"
+        )),
+        None => CliError::fatal("your current HEAD does not have any commits yet"),
+    }
+    .with_stable_code(StableErrorCode::RepoStateInvalid);
+
+    error.with_hint("create a commit first before running 'libra log'.")
+}
+
 async fn resolve_log_head_commit() -> CliResult<(Option<String>, ObjectHash)> {
     let head = Head::current_result()
         .await
@@ -63,23 +75,13 @@ async fn resolve_log_head_commit() -> CliResult<(Option<String>, ObjectHash)> {
             .map_err(|error| log_branch_store_error("inspect the current branch", error))?
             .is_none()
     {
-        return Err(CliError::fatal(format!(
-            "your current branch '{name}' does not have any commits yet"
-        ))
-        .with_stable_code(StableErrorCode::RepoStateInvalid));
+        return Err(log_no_commits_error(Some(name)));
     }
 
     let current_head_commit = Head::current_commit_result()
         .await
         .map_err(|error| log_branch_store_error("resolve HEAD commit", error))?
-        .ok_or_else(|| match branch_name.as_deref() {
-            Some(name) => CliError::fatal(format!(
-                "your current branch '{name}' does not have any commits yet"
-            ))
-            .with_stable_code(StableErrorCode::RepoStateInvalid),
-            None => CliError::fatal("your current HEAD does not have any commits yet")
-                .with_stable_code(StableErrorCode::RepoStateInvalid),
-        })?;
+        .ok_or_else(|| log_no_commits_error(branch_name.as_deref()))?;
 
     Ok((branch_name, current_head_commit))
 }

@@ -46,9 +46,17 @@ fn test_log_cli_empty_repository_returns_fatal_128() {
         report.message,
         "your current branch 'main' does not have any commits yet"
     );
+    assert!(
+        report
+            .hints
+            .iter()
+            .any(|hint| hint == "create a commit first before running 'libra log'."),
+        "missing log hint: {:?}",
+        report.hints
+    );
     assert_eq!(
         stderr,
-        "fatal: your current branch 'main' does not have any commits yet\nError-Code: LBR-REPO-003"
+        "fatal: your current branch 'main' does not have any commits yet\nError-Code: LBR-REPO-003\nHint: create a commit first before running 'libra log'."
     );
 }
 

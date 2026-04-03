@@ -585,6 +585,10 @@ fn navigate_commit_path_typed(
         };
 
         if step == 0 {
+            // `~0` is identity. `^0` is also identity here because
+            // `resolve_commit_base_atom_typed()` already peels named tags and
+            // direct tag-object hashes to their referenced object before
+            // navigation runs.
             continue;
         }
 
@@ -894,7 +898,7 @@ mod test {
             add::{self, AddArgs},
             commit::{self, CommitArgs},
         },
-        internal::{db::get_db_conn_instance, head::Head, model::reference},
+        internal::{db::get_db_conn_instance, head::Head, model::reference, tag as internal_tag},
         utils::test,
     };
 
@@ -1015,6 +1019,46 @@ mod test {
             .await
             .expect_err("unborn HEAD navigation must not panic");
         assert!(matches!(error, CommitBaseError::HeadUnborn));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn get_commit_base_typed_tag_object_hash_with_caret_zero_resolves_commit() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+
+        test::ensure_file("tracked.txt", Some("tracked\n"));
+        add::execute(AddArgs {
+            pathspec: vec!["tracked.txt".into()],
+            all: false,
+            update: false,
+            refresh: false,
+            verbose: false,
+            force: false,
+            dry_run: false,
+            ignore_errors: false,
+        })
+        .await;
+        commit::execute(CommitArgs {
+            message: Some("base".into()),
+            disable_pre: true,
+            no_verify: true,
+            ..Default::default()
+        })
+        .await;
+
+        let head_commit = Head::current_commit()
+            .await
+            .expect("expected committed HEAD");
+        let created = internal_tag::create("v1.0.0", Some("release".into()), false)
+            .await
+            .expect("failed to create annotated tag");
+
+        let resolved = get_commit_base_typed(&format!("{}^0", created.target))
+            .await
+            .expect("tag object hash ^0 should resolve to the tagged commit");
+        assert_eq!(resolved, head_commit);
     }
 
     #[tokio::test]

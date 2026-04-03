@@ -458,6 +458,12 @@ impl ClientStorage {
                 let base_ref = &obj_id[..split_pos];
                 let path_part = &obj_id[split_pos..];
 
+                // Reject empty base_ref (e.g. user passes "~1" or "^2") to avoid
+                // a degenerate prefix search for "" which would list all objects.
+                if base_ref.is_empty() {
+                    return Ok(Vec::new());
+                }
+
                 let base_commit =
                     match base_ref {
                         "HEAD" => match Head::current_commit_result().await.map_err(|error| {
@@ -1100,6 +1106,30 @@ mod tests {
                 .to_string()
                 .contains("stored branch reference 'main' is corrupt"),
             "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_search_result_rejects_empty_base_ref_navigation() {
+        let repo = tempdir().unwrap();
+        setup_with_new_libra_in(repo.path()).await;
+        let _guard = ChangeDirGuard::new(repo.path());
+
+        let storage = ClientStorage::init(crate::utils::path::objects());
+        assert!(
+            storage
+                .search_result("~1")
+                .await
+                .expect("empty-base ~ navigation should not error")
+                .is_empty()
+        );
+        assert!(
+            storage
+                .search_result("^2")
+                .await
+                .expect("empty-base ^ navigation should not error")
+                .is_empty()
         );
     }
 

@@ -783,6 +783,12 @@ fn restore_working_directory_from_tree_counted_typed(
 /// Remove empty directories from the working directory.
 /// Recursively traverses the directory tree and removes any empty directories,
 /// except for the .libra directory and the working directory root.
+///
+/// This is a backward-compatible shim for callers (e.g. `stash.rs`) that do
+/// not have a warning pipeline.  Non-fatal directory-removal warnings are
+/// intentionally dropped here; the typed reset path collects them via
+/// [`remove_empty_directories_with_warnings`] and routes them through
+/// `emit_warning()`.
 pub(crate) fn remove_empty_directories(workdir: &Path) -> Result<(), String> {
     remove_empty_directories_with_warnings(workdir)
         .map(|_| ())
