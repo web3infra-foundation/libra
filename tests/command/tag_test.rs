@@ -6,8 +6,6 @@ use std::collections::HashSet;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
-#[cfg(unix)]
-use libra::utils::path;
 use libra::{
     command::tag::{self, TagArgs},
     internal::{
