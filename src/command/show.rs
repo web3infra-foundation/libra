@@ -849,24 +849,14 @@ async fn collect_reference_names(commit_id: ObjectHash) -> Vec<String> {
         }
     }
 
-    match Branch::list_branches_result(None).await {
-        Ok(branches) => {
-            for branch in branches {
-                if branch.commit != commit_id {
-                    continue;
-                }
-
-                if head_branch.as_deref() == Some(branch.name.as_str()) {
-                    continue;
-                }
-
-                refs.push(branch.name);
-            }
+    for branch in Branch::list_branches_best_effort(None).await {
+        if branch.commit != commit_id {
+            continue;
         }
-        Err(error) => tracing::warn!(
-            error = %error,
-            "failed to list branches while collecting show JSON refs"
-        ),
+        if head_branch.as_deref() == Some(branch.name.as_str()) {
+            continue;
+        }
+        refs.push(branch.name);
     }
 
     match tag::list().await {

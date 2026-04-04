@@ -1172,18 +1172,7 @@ impl GraphState {
 async fn create_reference_commit_map() -> HashMap<ObjectHash, Vec<Reference>> {
     let mut commit_to_refs: HashMap<ObjectHash, Vec<Reference>> = HashMap::new();
 
-    let all_branches = match Branch::list_branches_result(None).await {
-        Ok(branches) => branches,
-        Err(error) => {
-            // Decoration is auxiliary metadata in the third-batch contract, so
-            // ref-store failures must not block primary history output.
-            tracing::warn!(
-                error = %error,
-                "failed to list branches for log decoration; continuing without branch refs"
-            );
-            Vec::new()
-        }
-    };
+    let all_branches = Branch::list_branches_best_effort(None).await;
     for branch in all_branches {
         commit_to_refs
             .entry(branch.commit)
