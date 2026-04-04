@@ -22,11 +22,13 @@ use libra::{
         test,
     },
 };
+use serial_test::serial;
 use tempfile::tempdir;
 use uuid::Uuid;
 
 /// Integration test for the full AI storage flow using LocalStorage
 #[tokio::test]
+#[serial]
 async fn test_ai_flow_local() {
     // 1. Setup Storage and Repo Environment
     let dir = tempdir().unwrap();
@@ -159,6 +161,7 @@ async fn test_ai_flow_local() {
 /// - Artifacts are correctly stored in R2
 /// - Connectivity to the remote storage provider works as expected
 #[tokio::test]
+#[serial]
 async fn test_ai_flow_r2() {
     if std::env::var("R2_ENDPOINT").map_or(true, |v| v.is_empty()) {
         eprintln!("skipped (R2_ENDPOINT not set)");

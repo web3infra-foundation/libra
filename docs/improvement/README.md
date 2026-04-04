@@ -150,7 +150,7 @@
 
 **不纳入改进计划的模块：**
 - `web_assets.rs`（11 行）：纯资源嵌入模块，无命令逻辑
-- `claude_sdk.rs`（3,576 行）：Claude Agent SDK managed-mode 命令面，属于独立子系统，改进节奏由 SDK 自身演进决定
+- `claudecode/`（模块）：Claude Code managed runtime，属于独立子系统，改进节奏由 Claude Code 自身演进决定
 - `code.rs`（1,153 行）：`libra code` TUI/Web/MCP 入口，已有 StableErrorCode，改进节奏由 AI Agent 子系统自身演进决定
 
 ### 全局层面改进（贯穿所有命令）

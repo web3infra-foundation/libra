@@ -2,8 +2,9 @@
 
 use std::{
     fs,
+    io::Write,
     path::Path,
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
 };
 
 use git_internal::{
@@ -54,12 +55,13 @@ pub(crate) struct CliErrorReport {
 }
 
 /// Run the Libra binary with an isolated HOME so host config never leaks into tests.
-fn run_libra_command(args: &[&str], cwd: &Path) -> Output {
+fn base_libra_command(args: &[&str], cwd: &Path) -> Command {
     let home = cwd.join(".libra-test-home");
     let config_home = home.join(".config");
     fs::create_dir_all(&config_home).expect("failed to create isolated config directory");
 
-    Command::new(env!("CARGO_BIN_EXE_libra"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_libra"));
+    command
         .args(args)
         .current_dir(cwd)
         .env_clear()
@@ -69,9 +71,63 @@ fn run_libra_command(args: &[&str], cwd: &Path) -> Output {
         .env("XDG_CONFIG_HOME", &config_home)
         .env("LANG", "C")
         .env("LC_ALL", "C")
-        .env(LIBRA_TEST_ENV, "1")
+        .env(LIBRA_TEST_ENV, "1");
+    command
+}
+
+/// Run the Libra binary with an isolated HOME so host config never leaks into tests.
+fn run_libra_command(args: &[&str], cwd: &Path) -> Output {
+    base_libra_command(args, cwd)
         .output()
         .expect("failed to execute libra binary")
+}
+
+fn run_libra_command_with_stdin(args: &[&str], cwd: &Path, stdin_body: &str) -> Output {
+    let mut child = base_libra_command(args, cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to execute libra binary");
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(stdin_body.as_bytes())
+            .expect("failed to write stdin to libra process");
+    }
+
+    child
+        .wait_with_output()
+        .expect("failed to collect libra command output")
+}
+
+fn run_libra_command_with_stdin_and_env(
+    args: &[&str],
+    cwd: &Path,
+    stdin_body: &str,
+    extra_env: &[(&str, &str)],
+) -> Output {
+    let mut command = base_libra_command(args, cwd);
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to execute libra binary");
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(stdin_body.as_bytes())
+            .expect("failed to write stdin to libra process");
+    }
+
+    child
+        .wait_with_output()
+        .expect("failed to collect libra command output")
 }
 
 /// Assert that a CLI command succeeded and include stderr in the failure output.
@@ -166,13 +222,13 @@ mod branch_test;
 mod cat_file_test;
 mod checkout_test;
 mod cherry_pick_test;
-#[cfg(unix)]
-mod claude_sdk_test;
 mod clean_test;
 mod cli_error_test;
 mod clone_cli_test;
 mod clone_test;
 mod cloud_test;
+#[cfg(unix)]
+mod code_claudecode_test;
 mod commit_error_test;
 mod commit_json_test;
 mod commit_test;

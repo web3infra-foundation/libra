@@ -34,6 +34,16 @@ pub fn repair_intentspec(spec: &mut IntentSpec, _issues: &[ValidationIssue]) {
         });
     }
 
+    if spec.intent.in_scope.is_empty() {
+        if let Some(touch_hints) = spec.intent.touch_hints.as_ref()
+            && !touch_hints.files.is_empty()
+        {
+            spec.intent.in_scope = touch_hints.files.clone();
+        } else {
+            spec.intent.in_scope.push(".".to_string());
+        }
+    }
+
     spec.lifecycle.status = LifecycleStatus::Active;
     spec.lifecycle.change_log.clear();
 
