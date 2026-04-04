@@ -1,12 +1,12 @@
 ## Blame 命令改进详细计划
 
-> 最后编写时间：2026-03-30
+> 最后编写时间：2026-04-04
 
 同时落地 [Cross-Cutting Improvements A/B/F/G](README.md#全局层面改进贯穿所有命令)。
 
 ### 已完成前置条件与当前代码状态
 
-第一批全部 8 个命令的主改造已在当前代码库落地。`blame` 是第三批（历史查询命令）中用于追溯代码行归属的命令。
+第一批全部 8 个命令的主改造已在当前代码库落地。`blame` 是第三批（历史查询命令）中用于追溯代码行归属的命令，当前工作区已经按本计划完成主改造；本文保留为对外契约和后续维护基线。
 
 **已确认落地的基线：**
 
@@ -20,24 +20,32 @@
 - `-L, --line-range` 已实现，支持 "10"、"10,20"、"10,+5" 格式
 - 基于内容相等性的 blame 算法已实现（BFS 历史回溯，`blame.rs:94-146`）
 - SHA-1 和 SHA-256 双格式支持已测试
+- `run_blame()` + `BlameOutput` 已落地，`--json` / `--machine` 可返回逐行结构化结果
+- `BlameError` typed enum 已落地，主要错误路径已显式映射到 `StableErrorCode`
+- JSON `date` 已统一为 RFC3339；human / JSON 都复用同一份逐行归属数据
+- `--help` EXAMPLES 已落地；`tests/command/blame_test.rs` 已补 blame 归属、`-L` 过滤和错误路径回归
 
-**基于当前代码的 Review 结论（blame 仍需改进的部分）：**
+**基于当前代码的 Review 结论（已改进部分 vs 后续维护重点）：**
 
-- **JSON 输出被明确拒绝**：`execute_safe()` 在 `out_config.is_json()` 时返回 `CliError::command_usage("`blame` does not yet support --json or --machine output")`（`blame.rs:57-60`）
-- **零 `StableErrorCode`**：所有错误使用 `CliError::fatal()` 或 `CliError::command_usage()` 无显式错误码
-- **无 `BlameError` typed enum**：错误分散在 `execute_safe()` 内部
-- **测试覆盖不足**：仅有 5 个测试，无 blame 归属正确性验证、无行范围过滤测试、无格式化测试
-- **`LineBlame` 结构为私有**：无法被外部结构化消费
+已改进（当前代码已具备）：
+
+- `run_blame()` / `BlameOutput` 已把 blame 算法和 human / JSON 渲染拆开
+- `BlameError` 已统一 revision、object、missing file、line range 等错误，并接入稳定错误码
+- `--json` / `--machine` 已可返回逐行归属结果，`-L` 会在执行层生效
+- SHA-1 / SHA-256、长作者名、逐行归属、范围过滤和错误路径都已有回归测试
+
+后续维护重点：
+
+- 继续观察 blame 算法在更长提交链和重复内容场景下的归属正确性
+- 如后续要对齐 Git porcelain blame，再在本计划之外新增独立 schema，而不是修改当前 JSON 契约
 
 ### 目标与非目标
 
-**本批目标：**
-- 引入 `BlameError` typed error enum，覆盖 blame 层面的错误场景
-- 所有 `BlameError → CliError` 映射使用显式 `StableErrorCode`
-- 拆分执行层与渲染层：新增 `run_blame(args) -> Result<BlameOutput, BlameError>` 纯执行入口
-- 实现 JSON 输出（逐行归属结构化）
-- 补齐测试覆盖（blame 归属正确性、行范围过滤、错误场景）
-- 补齐 `--help` EXAMPLES 段
+**已完成目标：**
+- `BlameError`、`run_blame()` / `BlameOutput`、JSON / machine、`-L` 结构化输出、回归测试和 `--help` EXAMPLES 已全部落地
+
+**后续维护目标：**
+- 继续维护 blame 归属正确性、范围过滤和格式化稳定性回归
 
 **本批非目标：**
 - **不改变 blame 归属算法**。基于内容相等性的 BFS 回溯逻辑不变

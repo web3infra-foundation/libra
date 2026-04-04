@@ -1,12 +1,14 @@
 ## Log 命令改进详细计划
 
-> 最后编写时间：2026-03-30
+> 最后编写时间：2026-04-04
 
 同时落地 [Cross-Cutting Improvements A/B/F/G](README.md#全局层面改进贯穿所有命令)。
 
 ### 已完成前置条件与当前代码状态
 
 第一批全部 8 个命令（config、init、clone、add、status、commit、push、pull）的主改造已在当前代码库落地。`log` 是第三批（历史查询命令）中最关键的命令，AI Agent / MCP 场景依赖结构化提交列表。
+
+> 当前工作区实现已按本文范围落地一部分改动；以下内容改为记录已落地能力、剩余遗漏和后续收口项。
 
 **已确认落地的基线：**
 
@@ -22,26 +24,36 @@
 - `GraphState` 支持 ASCII 图形渲染（`log.rs:805-876`）
 - `--stat` / `--name-only` / `--name-status` / `--patch` 输出模式已实现
 - `--decorate` 支持 no/short/full/auto（从 `log.decorate` 配置读取默认值）
+- `run_log()` + `LogOutput` 已落地，`--json` / `--machine` 已可返回结构化提交列表
+- 空仓库 / 空分支、无效日期参数、无效 `--decorate` 参数等主要错误路径已接入 `StableErrorCode`
+- `--help` EXAMPLES 已落地
+- `--decorate=no` / 非 TTY 默认无 decoration 时，已不再强依赖 ref-map 构建
+- patch / stat 路径在历史 blob 缺失时已改为显式 `RepoCorrupt` 失败，不再错误回退到工作区内容
+- `tests/command/log_test.rs` 已覆盖 JSON schema、author 过滤统计、无效日期 / decorate 参数和坏 ref 元数据回归
 
-**基于当前代码的 Review 结论（log 仍需改进的部分）：**
+**基于当前代码的 Review 结论（已改进部分 vs 仍需改进部分）：**
 
-- **JSON 输出被明确拒绝**：`execute_safe()` 在 `output.is_json()` 时返回 `CliError::command_usage("`log` does not yet support --json or --machine output")`（`log.rs:323-326`）。这是 MCP 维度最关键的改进
-- **无 `StableErrorCode`**：所有错误使用 `CliError::fatal()` 无显式错误码
-- **无 `LogError` typed enum**：错误散落在 `execute_safe()` 内部，无法被调用方结构化匹配
-- **`--quiet` 已实现**（`log.rs:385-387`）但无 JSON 模式下的行为定义
-- **过滤结果无结构化**：author/date/path 过滤只影响 human 输出，无法让 Agent 获取过滤后的结构化提交列表
-- **graph 输出无结构化**：`--graph` 仅影响 human 输出，不适用于 JSON
+已改进（当前代码已具备）：
+
+- **JSON / machine 输出已落地**：`run_log()` + `LogOutput` 已提供结构化提交列表，author/date/path 过滤会直接反映到 JSON 结果
+- **主要参数错误已带显式错误码**：空分支、无效日期、无效 `--decorate` 选项都已接入 `StableErrorCode`
+- **执行层与渲染层已开始拆分**：human 路径仍保留现有 formatter / pager / graph 行为，JSON 走独立结构化执行层
+- **`--decorate=no` 回归已修复**：禁用 decoration 时不再因为无关 branch ref 损坏而阻塞普通 `log` 输出
+- **命令文档已与现状对齐**：`docs/commands/log.md` 已记录 JSON schema 和错误码约定
+
+仍需改进：
+
+- **尚未引入统一 `LogError` + human render split**：这属于内部统一重构，已从第三批用户契约中拆出，留待后续跨命令 error/render 收口统一处理
+- **第三批计划文档需要继续收口**：本文后续章节仍保留完整设计稿写法，后续可继续压缩为“现状 + follow-up”格式，但不阻塞第三批验收
 
 ### 目标与非目标
 
-**本批目标：**
-- 引入 `LogError` typed error enum，覆盖 log 层面的错误场景
-- 所有 `LogError → CliError` 映射使用显式 `StableErrorCode`
-- 拆分执行层与渲染层：新增 `run_log(args) -> Result<LogOutput, LogError>` 纯执行入口
-- 实现 JSON 输出（结构化提交列表），替代当前的 `command_usage` 拒绝
-- JSON 输出包含过滤后的完整提交元数据（hash、author、date、subject、body、refs、parents、files_changed）
-- 保持 `--oneline` / `--graph` / `--pretty` / `--stat` / `--patch` / `--name-only` / `--name-status` 等 human 模式输出不变
-- 补齐 `--help` EXAMPLES 段
+**已完成目标：**
+- `run_log()` / `LogOutput`、`--json` / `--machine` 结构化提交列表、主要参数错误码、refs best-effort、历史 blob 损坏显式失败和 `--help` EXAMPLES 已落地
+
+**后续收口目标：**
+- 统一 `LogError` / human render split 到后续跨命令 error/render 收口项
+- 继续维护 refs best-effort、patch/stat strict failure 和 JSON 契约的回归测试
 
 **本批非目标：**
 - **不改变 commit walking 算法**。`get_reachable_commits()` 保持现有拓扑排序逻辑

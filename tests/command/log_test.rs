@@ -12,7 +12,7 @@ use git_internal::{
 };
 use libra::{
     internal::{db::get_db_conn_instance, model::reference},
-    utils::{object_ext::TreeExt, pager::LIBRA_PAGER_ENV, util},
+    utils::{object_ext::TreeExt, output::OutputConfig, pager::LIBRA_PAGER_ENV, util},
 };
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use serial_test::serial;
@@ -111,6 +111,32 @@ fn test_log_json_output_includes_commit_list() {
     assert!(json["data"]["commits"][0]["files"].as_array().is_some());
 }
 
+#[tokio::test]
+#[serial]
+async fn test_log_quiet_does_not_initialize_pager() {
+    if cfg!(windows) {
+        return;
+    }
+
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+    let missing_bin_dir = tempdir().unwrap();
+    let _path = test::ScopedEnvVar::set("PATH", missing_bin_dir.path());
+    let _pager = test::ScopedEnvVar::set(LIBRA_PAGER_ENV, "always");
+
+    let args = LogArgs::try_parse_from(["libra", "--oneline"]).unwrap();
+    let output = OutputConfig {
+        quiet: true,
+        ..OutputConfig::default()
+    };
+
+    let result = libra::command::log::execute_safe(args, &output).await;
+    assert!(
+        result.is_ok(),
+        "quiet log should not initialize pager: {result:?}"
+    );
+}
+
 #[test]
 fn test_log_invalid_since_uses_command_usage_error() {
     let repo = create_committed_repo_via_cli();
@@ -147,6 +173,190 @@ fn test_log_invalid_decorate_uses_command_usage_error() {
     assert_eq!(report.severity, "error");
     assert_eq!(report.message, "invalid --decorate option: bogus");
     assert_eq!(report.hints, vec!["valid options: no, short, full, auto"]);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_log_decorate_no_skips_corrupt_reference_map() {
+    let repo = create_committed_repo_via_cli();
+
+    let create_branch = run_libra_command(&["branch", "topic"], repo.path());
+    assert!(
+        create_branch.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&create_branch.stderr)
+    );
+
+    let _guard = ChangeDirGuard::new(repo.path());
+    let db = get_db_conn_instance().await;
+    let topic = reference::Entity::find()
+        .filter(reference::Column::Kind.eq(reference::ConfigKind::Branch))
+        .filter(reference::Column::Name.eq("topic"))
+        .filter(reference::Column::Remote.is_null())
+        .one(&db)
+        .await
+        .unwrap()
+        .expect("expected topic branch row");
+    let mut topic: reference::ActiveModel = topic.into();
+    topic.commit = Set(Some("not-a-valid-hash".to_string()));
+    topic.update(&db).await.unwrap();
+
+    let output = run_libra_command(&["log", "--decorate=no", "--oneline"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("base"),
+        "expected log output to remain available, got: {stdout}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_log_patch_fails_when_commit_blob_is_missing() {
+    let repo = create_committed_repo_via_cli();
+
+    let tracked_blob = {
+        let _guard = ChangeDirGuard::new(repo.path());
+        let head = Head::current_commit().await.expect("expected HEAD commit");
+        let commit: Commit = load_object(&head).expect("expected HEAD commit object");
+        let tree: Tree = load_object(&commit.tree_id).expect("expected HEAD tree");
+        tree.get_plain_items()
+            .into_iter()
+            .find(|(path, _)| path == &std::path::PathBuf::from("tracked.txt"))
+            .map(|(_, hash)| hash.to_string())
+            .expect("expected tracked.txt blob in HEAD tree")
+    };
+    std::fs::remove_file(loose_object_path(repo.path(), &tracked_blob))
+        .expect("failed to delete committed blob");
+    std::fs::write(
+        repo.path().join("tracked.txt"),
+        "mutated worktree fallback\n",
+    )
+    .expect("failed to mutate worktree file");
+
+    let output = run_libra_command(&["log", "-n", "1", "--patch"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-REPO-002");
+    assert!(
+        stderr.contains("failed to load blob object"),
+        "expected repo corruption error, got: {stderr}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_log_quiet_patch_fails_when_commit_blob_is_missing() {
+    let repo = create_committed_repo_via_cli();
+
+    let tracked_blob = {
+        let _guard = ChangeDirGuard::new(repo.path());
+        let head = Head::current_commit().await.expect("expected HEAD commit");
+        let commit: Commit = load_object(&head).expect("expected HEAD commit object");
+        let tree: Tree = load_object(&commit.tree_id).expect("expected HEAD tree");
+        tree.get_plain_items()
+            .into_iter()
+            .find(|(path, _)| path == &std::path::PathBuf::from("tracked.txt"))
+            .map(|(_, hash)| hash.to_string())
+            .expect("expected tracked.txt blob in HEAD tree")
+    };
+    std::fs::remove_file(loose_object_path(repo.path(), &tracked_blob))
+        .expect("failed to delete committed blob");
+    std::fs::write(
+        repo.path().join("tracked.txt"),
+        "mutated worktree fallback\n",
+    )
+    .expect("failed to mutate worktree file");
+
+    let output = run_libra_command(&["--quiet", "log", "-n", "1", "--patch"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-REPO-002");
+    assert!(
+        stderr.contains("failed to load blob object"),
+        "expected repo corruption error, got: {stderr}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_log_quiet_stat_respects_selected_history_range() {
+    let repo = create_committed_repo_via_cli();
+
+    std::fs::write(repo.path().join("tracked.txt"), "tracked\nsecond\n").unwrap();
+    let add_second = run_libra_command(&["add", "tracked.txt"], repo.path());
+    assert!(
+        add_second.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&add_second.stderr)
+    );
+    let commit_second = run_libra_command(&["commit", "-m", "second", "--no-verify"], repo.path());
+    assert!(
+        commit_second.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&commit_second.stderr)
+    );
+
+    std::fs::write(repo.path().join("tracked.txt"), "tracked\nthird\n").unwrap();
+    let add_third = run_libra_command(&["add", "tracked.txt"], repo.path());
+    assert!(
+        add_third.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&add_third.stderr)
+    );
+    let commit_third = run_libra_command(&["commit", "-m", "third", "--no-verify"], repo.path());
+    assert!(
+        commit_third.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&commit_third.stderr)
+    );
+
+    let oldest_blob = {
+        let _guard = ChangeDirGuard::new(repo.path());
+        let head = Head::current_commit().await.expect("expected HEAD commit");
+        let latest: Commit = load_object(&head).expect("expected latest commit");
+        let middle_id = latest.parent_commit_ids[0];
+        let middle: Commit = load_object(&middle_id).expect("expected middle commit");
+        let oldest_id = middle.parent_commit_ids[0];
+        let oldest: Commit = load_object(&oldest_id).expect("expected oldest commit");
+        let tree: Tree = load_object(&oldest.tree_id).expect("expected oldest tree");
+        tree.get_plain_items()
+            .into_iter()
+            .find(|(path, _)| path == &std::path::PathBuf::from("tracked.txt"))
+            .map(|(_, hash)| hash.to_string())
+            .expect("expected tracked.txt blob in oldest tree")
+    };
+    std::fs::remove_file(loose_object_path(repo.path(), &oldest_blob))
+        .expect("failed to delete oldest committed blob");
+    std::fs::write(
+        repo.path().join("tracked.txt"),
+        "mutated worktree fallback\n",
+    )
+    .expect("failed to mutate worktree file");
+
+    let top_only = run_libra_command(&["--quiet", "log", "-n", "1", "--stat"], repo.path());
+    assert!(
+        top_only.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&top_only.stderr)
+    );
+
+    let output = run_libra_command(&["--quiet", "log", "-n", "2", "--stat"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-REPO-002");
+    assert!(
+        stderr.contains("failed to load blob object"),
+        "expected repo corruption error, got: {stderr}"
+    );
 }
 
 #[test]
@@ -1251,4 +1461,116 @@ async fn test_log_short_number_flag_with_double_dash_before_subcommand() {
     let (status, out, err) = run_libra_cmd(&["--", "log", "-2"], temp_path.path());
     assert!(status.success(), "libra -- log -2 failed: {err}");
     assert_eq!(count_commit_lines(&out), 2);
+}
+
+#[test]
+fn test_log_machine_output_is_single_line_json() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--machine", "log", "-n", "1"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let non_empty_lines: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(
+        non_empty_lines.len(),
+        1,
+        "machine output should be exactly one non-empty line, got: {stdout}"
+    );
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(non_empty_lines[0]).expect("machine output should be valid JSON");
+    assert_eq!(parsed["command"], "log");
+    assert!(parsed["data"]["commits"].as_array().is_some());
+}
+
+#[test]
+fn test_log_json_root_commit_has_empty_parents_and_added_files() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--json", "log", "-n", "1"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    let commit = &json["data"]["commits"][0];
+
+    // Root commit has no parents.
+    let parents = commit["parents"]
+        .as_array()
+        .expect("parents should be an array");
+    assert!(parents.is_empty(), "root commit should have no parents");
+
+    // Root commit files should all be "added".
+    let files = commit["files"]
+        .as_array()
+        .expect("files should be an array");
+    assert!(
+        !files.is_empty(),
+        "root commit should have at least one file"
+    );
+    for file in files {
+        assert_eq!(
+            file["status"], "added",
+            "root commit files should all be 'added', got: {}",
+            file["status"]
+        );
+    }
+}
+
+#[test]
+fn test_log_json_since_filter_restricts_results() {
+    let repo = create_committed_repo_via_cli();
+
+    // The committed repo has one commit. Querying with --since far in the future
+    // should return zero commits.
+    let output = run_libra_command(&["--json", "log", "--since", "2099-01-01"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    let commits = json["data"]["commits"]
+        .as_array()
+        .expect("commits should be an array");
+    assert!(
+        commits.is_empty(),
+        "no commits should match a future --since date"
+    );
+}
+
+#[test]
+fn test_log_json_oneline_flag_does_not_alter_schema() {
+    let repo = create_committed_repo_via_cli();
+
+    let plain = run_libra_command(&["--json", "log", "-n", "1"], repo.path());
+    let with_oneline = run_libra_command(&["--json", "log", "-n", "1", "--oneline"], repo.path());
+    assert!(plain.status.success());
+    assert!(with_oneline.status.success());
+
+    let plain_json = parse_json_stdout(&plain);
+    let oneline_json = parse_json_stdout(&with_oneline);
+
+    // JSON schema should be identical regardless of --oneline.
+    assert_eq!(
+        plain_json["data"]["commits"][0]["hash"],
+        oneline_json["data"]["commits"][0]["hash"]
+    );
+    assert_eq!(
+        plain_json["data"]["commits"][0]["subject"],
+        oneline_json["data"]["commits"][0]["subject"]
+    );
+    assert_eq!(
+        plain_json["data"]["commits"][0]["author_name"],
+        oneline_json["data"]["commits"][0]["author_name"]
+    );
 }
