@@ -471,7 +471,11 @@ async fn test_grep_working_tree_symlink_emits_warning_and_skips_target() {
 
     fs::write("real.txt", "needle\n").expect("failed to write real file");
     symlink("real.txt", "link.txt").expect("failed to create symlink");
-    add_and_commit("add target", vec!["real.txt".to_string()]).await;
+    add_and_commit(
+        "add target and tracked symlink",
+        vec!["real.txt".to_string(), "link.txt".to_string()],
+    )
+    .await;
 
     let output = run_libra_command(&["--json=compact", "grep", "needle"], repo.path());
     assert_cli_success(&output, "grep should succeed while skipping symlink");
