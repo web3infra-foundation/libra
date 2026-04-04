@@ -18,7 +18,7 @@ use serde::Serialize;
 use crate::{
     command::{
         load_object,
-        log::{ChangeType, generate_diff, get_changed_files_for_commit},
+        log::{ChangeType, compute_commit_stat, generate_diff, get_changed_files_for_commit},
     },
     common_utils::parse_commit_msg,
     internal::{branch::Branch, head::Head, tag},
@@ -325,7 +325,9 @@ async fn validate_commit_output(commit_hash: &ObjectHash, args: &ShowArgs) -> Cl
     }
 
     let paths: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
-    if args.stat || args.name_only {
+    if args.stat {
+        let _ = compute_commit_stat(&commit, paths).await?;
+    } else if args.name_only {
         let _ = get_changed_files_for_commit(&commit, &paths).await?;
     } else {
         let _ = generate_diff(&commit, paths).await?;

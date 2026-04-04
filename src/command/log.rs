@@ -191,6 +191,12 @@ pub struct FileChange {
     pub status: ChangeType,
 }
 
+#[derive(Debug)]
+struct SelectedLogCommit {
+    commit: Commit,
+    cached_changes: Option<Vec<FileChange>>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct LogFileChange {
     pub path: String,
@@ -462,9 +468,29 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     let mut reachable_commits = get_reachable_commits(commit_hash.clone(), None).await?;
     // default sort with signature time
     reachable_commits.sort_by_key(|b| std::cmp::Reverse(b.committer.timestamp));
+    let default_abbrev = util::get_min_unique_hash_length(&reachable_commits).max(7);
+
+    let max_output_number = min(args.number.unwrap_or(usize::MAX), reachable_commits.len());
+    let reuse_changed_files = name_only || name_status;
+    let selected_commits = select_log_commits(
+        reachable_commits,
+        &filter,
+        &path_filters,
+        max_output_number,
+        reuse_changed_files,
+    )
+    .await?;
 
     if output.quiet {
-        return Ok(());
+        return validate_selected_log_commits(
+            &selected_commits,
+            &path_filters,
+            name_only,
+            name_status,
+            patch,
+            args.stat,
+        )
+        .await;
     }
 
     let mut pager = Pager::with_config(output)?;
@@ -485,15 +511,12 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     };
     let formatter = CommitFormatter::new(format_type);
 
-    let max_output_number = min(args.number.unwrap_or(usize::MAX), reachable_commits.len());
-    let mut output_number = 0;
     let mut graph_state = if args.graph {
         Some(GraphState::new())
     } else {
         None
     };
     // Decide abbreviated hash length
-    let default_abbrev = util::get_min_unique_hash_length(&reachable_commits).max(7);
     let abbrev_len = if args.no_abbrev_commit {
         full_hash_len
     } else if let Some(n) = args.abbrev {
@@ -503,29 +526,14 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     } else {
         full_hash_len
     };
-    for commit in reachable_commits {
-        if output_number >= max_output_number {
-            break;
-        }
-        if !filter.passes_non_path_filters(&commit) {
-            continue;
-        }
-
-        let mut cached_changes = if filter.paths.is_empty() && !name_only && !name_status {
-            None
-        } else {
-            Some(get_changed_files_for_commit(&commit, &path_filters).await?)
-        };
-
-        if !filter.matches(&commit, cached_changes.as_deref()).await? {
-            continue;
-        }
-
-        output_number += 1;
-
+    for (index, selected) in selected_commits.into_iter().enumerate() {
+        let SelectedLogCommit {
+            commit,
+            mut cached_changes,
+        } = selected;
         let ref_msg = if decorate_option != DecorateOptions::No {
             let mut ref_msgs: Vec<String> = vec![];
-            if output_number == 1 {
+            if index == 0 {
                 ref_msgs.push(if let Some(b_name) = &branch_name {
                     format!(
                         "{} -> {}{}",
@@ -730,6 +738,65 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
         commits,
         total: include_total.then_some(total),
     })
+}
+
+async fn select_log_commits(
+    reachable_commits: Vec<Commit>,
+    filter: &CommitFilter,
+    path_filters: &[PathBuf],
+    max_output_number: usize,
+    keep_changed_files: bool,
+) -> Result<Vec<SelectedLogCommit>, CliError> {
+    let mut selected = Vec::new();
+
+    for commit in reachable_commits {
+        if selected.len() >= max_output_number {
+            break;
+        }
+        if !filter.passes_non_path_filters(&commit) {
+            continue;
+        }
+
+        let cached_changes = if filter.paths.is_empty() && !keep_changed_files {
+            None
+        } else {
+            Some(get_changed_files_for_commit(&commit, path_filters).await?)
+        };
+
+        if !filter.matches(&commit, cached_changes.as_deref()).await? {
+            continue;
+        }
+
+        selected.push(SelectedLogCommit {
+            commit,
+            cached_changes,
+        });
+    }
+
+    Ok(selected)
+}
+
+async fn validate_selected_log_commits(
+    selected_commits: &[SelectedLogCommit],
+    path_filters: &[PathBuf],
+    name_only: bool,
+    name_status: bool,
+    patch: bool,
+    stat: bool,
+) -> CliResult<()> {
+    for selected in selected_commits {
+        if name_only || name_status {
+            if selected.cached_changes.is_none() {
+                let _ = get_changed_files_for_commit(&selected.commit, path_filters).await?;
+            }
+        } else if patch {
+            let _ = generate_diff(&selected.commit, path_filters.to_vec()).await?;
+        } else if stat {
+            let _ = compute_commit_stat(&selected.commit, path_filters.to_vec()).await?;
+        }
+    }
+
+    Ok(())
 }
 
 fn format_log_timestamp(timestamp: i64) -> String {
