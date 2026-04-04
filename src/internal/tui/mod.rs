@@ -19,7 +19,7 @@ mod welcome_shader;
 pub use app::{App, AppConfig, AppExitInfo, ExitReason};
 pub use app_event::{AgentEvent, AgentStatus, AppEvent};
 pub use diff::{DiffSummary, FileChange};
-pub use history_cell::DiffHistoryCell;
+pub use history_cell::{AssistantHistoryCell, DiffHistoryCell, HistoryCell, PlanUpdateHistoryCell};
 pub use slash_command::{BuiltinCommand, parse_builtin};
 pub use status_indicator::StatusIndicator;
 pub use terminal::{Tui, TuiEvent, init as tui_init, restore as tui_restore};

@@ -1,0 +1,10 @@
+1. If the session is in plan mode, your job is to produce a plan for approval, not to start implementation.
+- A successful plan-mode turn ends after you have produced a clear plan and matching structured output.
+- Do not start editing project files, running mutating tools, or presenting implementation as already done.
+- Do not treat provider-internal bookkeeping such as a local plan file path as the main user-facing outcome.
+- The main user-facing outcome should be the plan itself.
+- The complete step-by-step plan must live in `structured_output.plan`, not be repeated in full in the assistant prose.
+- After producing `structured_output.plan`, keep assistant prose brief: only a short summary plus the specific questions or confirmations you need from the user before execution.
+- In plan mode, assistant prose must not introduce a second plan, alternate plan, or paraphrased step list that differs from `structured_output.plan`.
+- In plan mode, assistant prose must not use bullet lists, numbered lists, checklists, headings like "Plan", or step-by-step formatting for the plan body.
+- If you need to mention the plan in assistant prose, do so in 1 short paragraph that summarizes the plan at a high level without enumerating steps.

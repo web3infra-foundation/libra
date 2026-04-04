@@ -1,19 +1,33 @@
 //! Manages tags by resolving target commits, creating lightweight or annotated tag objects, storing refs, and listing existing tags.
 
+use std::io;
+
 use clap::Parser;
-use sea_orm::sqlx::types::chrono;
+use git_internal::errors::GitError;
+use sea_orm::DbErr;
 use serde::Serialize;
 
 use crate::{
-    internal::{tag, tag::TagObject},
+    internal::{branch, tag, tag::TagObject},
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
+        text::short_display_hash,
+        util,
     },
 };
 
+const TAG_EXAMPLES: &str = "\
+EXAMPLES:
+    libra tag v1.0                        Create a lightweight tag at HEAD
+    libra tag -m \"Release v1.1\" v1.1    Create an annotated tag
+    libra tag -l -n 2                     List tags with up to 2 annotation lines
+    libra tag -d v1.0                     Delete a tag
+    libra tag --json v1.0                 Structured JSON output for agents";
+
 #[derive(Parser, Debug)]
 #[command(about = "Create, list, delete, or verify a tag object")]
+#[command(after_help = TAG_EXAMPLES)]
 pub struct TagArgs {
     /// The name of the tag to create, show, or delete
     #[clap(required = false)]
@@ -61,6 +75,8 @@ pub struct TagListEntry {
     pub hash: String,
     pub tag_type: String,
     pub message: Option<String>,
+    #[serde(skip_serializing)]
+    pub display_message: Option<String>,
 }
 
 pub async fn execute(args: TagArgs) {
@@ -73,47 +89,137 @@ pub async fn execute(args: TagArgs) {
 /// errors and exiting. Lists, creates, or deletes tags depending on the
 /// provided arguments.
 pub async fn execute_safe(args: TagArgs, output: &OutputConfig) -> CliResult<()> {
-    validate_named_tag_action(&args)?;
-
-    if output.is_json() {
-        let result = run_tag_json(&args).await?;
-        return emit_json_data("tag", &result, output);
-    }
-
-    if args.list || args.n_lines.is_some() {
-        let show_lines = args.n_lines.unwrap_or(0);
-        if output.quiet {
-            return Ok(());
-        }
-        let rendered = render_tags(show_lines)
-            .await
-            .map_err(|e| CliError::fatal(e.to_string()))?;
-        print!("{}", rendered);
-        return Ok(());
-    }
-
-    if let Some(name) = args.name {
-        if args.delete {
-            delete_tag_safe(&name, output).await?;
-        } else if args.message.is_some() {
-            create_tag_safe(&name, args.message, args.force).await?;
-        } else {
-            create_tag_safe(&name, None, args.force).await?;
-            show_tag_safe(&name, output).await?;
-        }
-    } else {
-        if output.quiet {
-            return Ok(());
-        }
-        let rendered = render_tags(0)
-            .await
-            .map_err(|e| CliError::fatal(e.to_string()))?;
-        print!("{}", rendered);
-    }
-    Ok(())
+    let result = run_tag(&args).await.map_err(CliError::from)?;
+    render_tag_output(&result, output)
 }
 
-fn validate_named_tag_action(args: &TagArgs) -> CliResult<()> {
+pub(crate) fn validate_cli_args(args: &TagArgs) -> CliResult<()> {
+    validate_named_tag_action(args).map_err(CliError::from)
+}
+
+#[derive(Debug, thiserror::Error)]
+enum TagError {
+    #[error("not a libra repository")]
+    NotInRepo,
+
+    #[error("tag '{0}' already exists")]
+    AlreadyExists(String),
+
+    #[error("tag '{0}' not found")]
+    NotFound(String),
+
+    #[error("{0}")]
+    MissingName(String),
+
+    #[error("Cannot create tag: HEAD does not point to a commit")]
+    HeadUnborn,
+
+    #[error("failed to resolve HEAD commit: {0}")]
+    ResolveHead(#[source] branch::BranchStoreError),
+
+    #[error("failed to read existing tags before creating '{name}': {source}")]
+    CheckExistingFailed {
+        name: String,
+        #[source]
+        source: DbErr,
+    },
+
+    #[error("failed to serialize annotated tag object: {0}")]
+    SerializeAnnotatedTag(#[source] GitError),
+
+    #[error("failed to store annotated tag object: {0}")]
+    StoreObjectFailed(#[source] io::Error),
+
+    #[error("failed to persist tag reference '{name}': {source}")]
+    PersistReferenceFailed {
+        name: String,
+        #[source]
+        source: DbErr,
+    },
+
+    #[error("failed to delete tag '{name}': {source}")]
+    DeleteFailed {
+        name: String,
+        #[source]
+        source: anyhow::Error,
+    },
+
+    #[error("failed to load tag '{name}': {source}")]
+    LoadFailed {
+        name: String,
+        #[source]
+        source: anyhow::Error,
+    },
+
+    #[error("failed to list tags: {0}")]
+    ListFailed(#[source] anyhow::Error),
+}
+
+fn classify_tag_read_error(error: &anyhow::Error) -> StableErrorCode {
+    if error
+        .chain()
+        .any(|cause| cause.downcast_ref::<DbErr>().is_some())
+    {
+        StableErrorCode::IoReadFailed
+    } else {
+        StableErrorCode::RepoCorrupt
+    }
+}
+
+impl From<TagError> for CliError {
+    fn from(error: TagError) -> Self {
+        let message = error.to_string();
+        match error {
+            TagError::NotInRepo => CliError::repo_not_found(),
+            TagError::AlreadyExists(name) => {
+                CliError::fatal(format!("tag '{name}' already exists"))
+                    .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+                    .with_hint(format!("delete it first with 'libra tag -d {name}'."))
+                    .with_hint("or choose a different tag name.")
+            }
+            TagError::NotFound(name) => CliError::fatal(format!("tag '{name}' not found"))
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint("use 'libra tag -l' to list available tags."),
+            TagError::MissingName(message) => CliError::command_usage(message)
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint("use 'libra tag <name>' to create or update a tag")
+                .with_hint("use 'libra tag -l' to list existing tags"),
+            TagError::HeadUnborn => CliError::fatal(message)
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_hint("create a commit first before tagging HEAD."),
+            TagError::ResolveHead(source) => {
+                let stable_code = match source {
+                    branch::BranchStoreError::Query(_) => StableErrorCode::IoReadFailed,
+                    _ => StableErrorCode::RepoCorrupt,
+                };
+                CliError::fatal(message).with_stable_code(stable_code)
+            }
+            TagError::CheckExistingFailed { .. } => {
+                CliError::fatal(message).with_stable_code(StableErrorCode::IoReadFailed)
+            }
+            TagError::SerializeAnnotatedTag(_) => {
+                CliError::fatal(message).with_stable_code(StableErrorCode::InternalInvariant)
+            }
+            TagError::StoreObjectFailed(_) => {
+                CliError::fatal(message).with_stable_code(StableErrorCode::IoWriteFailed)
+            }
+            TagError::PersistReferenceFailed { .. } => {
+                CliError::fatal(message).with_stable_code(StableErrorCode::IoWriteFailed)
+            }
+            TagError::DeleteFailed { .. } => {
+                CliError::fatal(message).with_stable_code(StableErrorCode::IoWriteFailed)
+            }
+            TagError::LoadFailed { source, .. } => {
+                CliError::fatal(message).with_stable_code(classify_tag_read_error(&source))
+            }
+            TagError::ListFailed(source) => {
+                CliError::fatal(message).with_stable_code(classify_tag_read_error(&source))
+            }
+        }
+    }
+}
+
+fn validate_named_tag_action(args: &TagArgs) -> Result<(), TagError> {
     if args.name.is_some() {
         return Ok(());
     }
@@ -129,9 +235,7 @@ fn validate_named_tag_action(args: &TagArgs) -> CliResult<()> {
     };
 
     if let Some(message) = message {
-        return Err(CliError::command_usage(message)
-            .with_hint("use 'libra tag <name>' to create or update a tag")
-            .with_hint("use 'libra tag -l' to list existing tags"));
+        return Err(TagError::MissingName(message.to_string()));
     }
 
     Ok(())
@@ -144,144 +248,38 @@ async fn create_tag(tag_name: &str, message: Option<String>, force: bool) {
     }
 }
 
+#[cfg(test)]
 async fn create_tag_safe(tag_name: &str, message: Option<String>, force: bool) -> CliResult<()> {
-    tag::create(tag_name, message, force)
+    run_create_tag(tag_name, message, force)
         .await
-        .map_err(|error| map_create_tag_error(tag_name, error))?;
+        .map(|_| ())
+        .map_err(CliError::from)?;
     Ok(())
 }
 
-fn map_create_tag_error(tag_name: &str, error: tag::CreateTagError) -> CliError {
+fn map_create_tag_error(tag_name: &str, error: tag::CreateTagError) -> TagError {
     match error {
         tag::CreateTagError::AlreadyExists(existing_tag_name) => {
-            CliError::fatal(format!("tag '{existing_tag_name}' already exists"))
-                .with_stable_code(StableErrorCode::ConflictOperationBlocked)
-                .with_hint(format!("delete it first with 'libra tag -d {}'.", tag_name))
-                .with_hint("or choose a different tag name.")
+            TagError::AlreadyExists(existing_tag_name)
         }
-        tag::CreateTagError::HeadUnborn => {
-            CliError::fatal("Cannot create tag: HEAD does not point to a commit")
-                .with_stable_code(StableErrorCode::RepoStateInvalid)
-                .with_hint("create a commit first before tagging HEAD.")
-        }
-        tag::CreateTagError::CheckExisting(source) => CliError::fatal(format!(
-            "failed to read existing tags before creating '{}': {source}",
-            tag_name
-        ))
-        .with_stable_code(StableErrorCode::RepoCorrupt),
-        tag::CreateTagError::SerializeTag(source) => CliError::fatal(format!(
-            "failed to serialize annotated tag object: {source}"
-        ))
-        .with_stable_code(StableErrorCode::InternalInvariant),
-        tag::CreateTagError::StoreObject(source) => {
-            CliError::fatal(format!("failed to store annotated tag object: {source}"))
-                .with_stable_code(StableErrorCode::IoWriteFailed)
-        }
-        tag::CreateTagError::PersistReference(source) => CliError::fatal(format!(
-            "failed to persist tag reference '{}': {source}",
-            tag_name
-        ))
-        .with_stable_code(StableErrorCode::IoWriteFailed),
+        tag::CreateTagError::HeadUnborn => TagError::HeadUnborn,
+        tag::CreateTagError::ResolveHead(source) => TagError::ResolveHead(source),
+        tag::CreateTagError::CheckExisting(source) => TagError::CheckExistingFailed {
+            name: tag_name.to_string(),
+            source,
+        },
+        tag::CreateTagError::SerializeTag(source) => TagError::SerializeAnnotatedTag(source),
+        tag::CreateTagError::StoreObject(source) => TagError::StoreObjectFailed(source),
+        tag::CreateTagError::PersistReference(source) => TagError::PersistReferenceFailed {
+            name: tag_name.to_string(),
+            source,
+        },
     }
 }
 
-pub async fn render_tags(show_lines: usize) -> Result<String, anyhow::Error> {
-    let tags = tag::list().await?;
-    let mut output = String::new();
-    let extract_message = |msg: &str| {
-        msg.trim()
-            .lines()
-            .map(|line| line.trim())
-            .filter(|line| !line.is_empty())
-            .take(show_lines)
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-
-    for tag in tags {
-        if show_lines == 0 {
-            output.push_str(&format!("{}\n", tag.name));
-            continue;
-        }
-
-        let show_message = match &tag.object {
-            TagObject::Tag(git_internal) => extract_message(&git_internal.message),
-            TagObject::Commit(commit) => extract_message(&commit.message),
-            _ => String::new(),
-        };
-
-        let lines: Vec<&str> = show_message.lines().collect();
-
-        if lines.is_empty() {
-            // lightweight tag
-            output.push_str(&format!("{:<20}\n", tag.name));
-        } else {
-            for (i, line) in lines.iter().enumerate() {
-                if i == 0 {
-                    // print first line
-                    output.push_str(&format!("{:<20} {}\n", tag.name, line));
-                } else {
-                    // print subsequent lines: use empty string with 20 characters width alignment to match the indentation
-                    output.push_str(&format!("{:<20} {}\n", "", line));
-                }
-            }
-        }
-    }
-
-    Ok(output)
-}
-
-#[cfg(test)]
-async fn delete_tag(tag_name: &str) {
-    if let Err(err) = delete_tag_safe(tag_name, &OutputConfig::default()).await {
-        err.print_stderr();
-    }
-}
-
-async fn delete_tag_safe(tag_name: &str, output: &OutputConfig) -> CliResult<()> {
-    resolve_tag_ref_for_delete(tag_name).await?;
-
-    tag::delete(tag_name).await.map_err(|e| {
-        CliError::fatal(e.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
-    })?;
-    if !output.quiet {
-        println!("Deleted tag '{}'", tag_name);
-    }
-    Ok(())
-}
-
-async fn show_tag_safe(tag_name: &str, output: &OutputConfig) -> CliResult<()> {
-    match tag::find_tag_and_commit(tag_name).await {
-        Ok(Some((object, commit))) => {
-            if output.quiet {
-                return Ok(());
-            }
-            if let tag::TagObject::Tag(tag_object) = &object {
-                println!("tag {}", tag_object.tag_name);
-                println!("Tagger: {}", tag_object.tagger.to_string().trim());
-                println!("\n{}", tag_object.message);
-            }
-
-            println!("\ncommit {}", commit.id);
-            println!("Author: {}", commit.author.to_string().trim());
-            let commit_date =
-                chrono::DateTime::from_timestamp(commit.committer.timestamp as i64, 0)
-                    .unwrap_or(chrono::DateTime::UNIX_EPOCH);
-            println!("Date:   {}", commit_date.to_rfc2822());
-            println!("\n    {}", commit.message.trim());
-            Ok(())
-        }
-        Ok(None) => Err(CliError::fatal(format!("tag '{}' not found", tag_name))
-            .with_stable_code(StableErrorCode::CliInvalidTarget)
-            .with_hint("use 'libra tag -l' to list available tags.")),
-        Err(e) => {
-            Err(CliError::fatal(e.to_string()).with_stable_code(StableErrorCode::RepoCorrupt))
-        }
-    }
-}
-
-async fn run_tag_json(args: &TagArgs) -> CliResult<TagOutput> {
+async fn run_tag(args: &TagArgs) -> Result<TagOutput, TagError> {
     validate_named_tag_action(args)?;
+    util::require_repo().map_err(|_| TagError::NotInRepo)?;
 
     if args.list || args.n_lines.is_some() || args.name.is_none() {
         return Ok(TagOutput::List {
@@ -291,30 +289,105 @@ async fn run_tag_json(args: &TagArgs) -> CliResult<TagOutput> {
 
     let name = args.name.as_deref().unwrap_or_default();
     if args.delete {
-        let snapshot = resolve_tag_ref_for_delete(name).await?;
-        tag::delete(name).await.map_err(|e| {
-            CliError::fatal(e.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
-        })?;
-        return Ok(TagOutput::Delete {
-            name: name.to_string(),
-            hash: snapshot.target,
-        });
+        return run_delete_tag(name).await;
     }
 
-    create_tag_safe(name, args.message.clone(), args.force).await?;
-    let snapshot = lookup_tag(name, usize::MAX).await?;
+    run_create_tag(name, args.message.clone(), args.force).await
+}
+
+fn render_tag_output(result: &TagOutput, output: &OutputConfig) -> CliResult<()> {
+    if output.is_json() {
+        return emit_json_data("tag", result, output);
+    }
+
+    if output.quiet {
+        return Ok(());
+    }
+
+    match result {
+        TagOutput::List { tags } => {
+            print!("{}", format_tag_entries(tags));
+        }
+        TagOutput::Create {
+            name,
+            hash,
+            tag_type,
+            ..
+        } => {
+            println!(
+                "Created {tag_type} tag '{name}' at {}",
+                short_display_hash(hash)
+            );
+        }
+        TagOutput::Delete { name, hash } => {
+            if let Some(hash) = hash {
+                println!("Deleted tag '{name}' (was {})", short_display_hash(hash));
+            } else {
+                println!("Deleted tag '{name}'");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn render_tags(show_lines: usize) -> Result<String, anyhow::Error> {
+    let tags = collect_tags(show_lines)
+        .await
+        .map_err(anyhow::Error::from)?;
+    Ok(format_tag_entries(&tags))
+}
+
+#[cfg(test)]
+async fn delete_tag(tag_name: &str) {
+    if let Err(err) = delete_tag_safe(tag_name, &OutputConfig::default()).await {
+        err.print_stderr();
+    }
+}
+
+#[cfg(test)]
+async fn delete_tag_safe(tag_name: &str, output: &OutputConfig) -> CliResult<()> {
+    let result = run_delete_tag(tag_name).await.map_err(CliError::from)?;
+    render_tag_output(&result, output)?;
+    Ok(())
+}
+
+async fn run_create_tag(
+    tag_name: &str,
+    message: Option<String>,
+    force: bool,
+) -> Result<TagOutput, TagError> {
+    let created = tag::create(tag_name, message, force)
+        .await
+        .map_err(|error| map_create_tag_error(tag_name, error))?;
     Ok(TagOutput::Create {
-        name: snapshot.name,
-        hash: snapshot.hash,
-        tag_type: snapshot.tag_type,
-        message: snapshot.message,
+        name: created.name,
+        hash: created.target.to_string(),
+        tag_type: if created.annotated {
+            "annotated".to_string()
+        } else {
+            "lightweight".to_string()
+        },
+        message: created.message,
     })
 }
 
-async fn collect_tags(show_lines: usize) -> CliResult<Vec<TagListEntry>> {
-    let tags = tag::list().await.map_err(|e| {
-        CliError::fatal(e.to_string()).with_stable_code(StableErrorCode::RepoCorrupt)
-    })?;
+async fn run_delete_tag(tag_name: &str) -> Result<TagOutput, TagError> {
+    let snapshot = resolve_tag_ref_for_delete(tag_name).await?;
+    tag::delete(tag_name)
+        .await
+        .map_err(|source| TagError::DeleteFailed {
+            name: tag_name.to_string(),
+            source,
+        })?;
+    Ok(TagOutput::Delete {
+        name: tag_name.to_string(),
+        hash: snapshot.target,
+    })
+}
+
+async fn collect_tags(show_lines: usize) -> Result<Vec<TagListEntry>, TagError> {
+    let tags = tag::list().await.map_err(TagError::ListFailed)?;
     let mut entries = Vec::with_capacity(tags.len());
     for tag in tags {
         entries.push(tag_to_list_entry(tag, show_lines));
@@ -322,24 +395,9 @@ async fn collect_tags(show_lines: usize) -> CliResult<Vec<TagListEntry>> {
     Ok(entries)
 }
 
-async fn lookup_tag(tag_name: &str, show_lines: usize) -> CliResult<TagListEntry> {
-    match tag::find_tag_and_commit(tag_name).await {
-        Ok(Some((object, _commit))) => Ok(tag_object_to_list_entry(
-            tag_name.to_string(),
-            object,
-            show_lines,
-        )),
-        Ok(None) => Err(CliError::fatal(format!("tag '{}' not found", tag_name))
-            .with_stable_code(StableErrorCode::CliInvalidTarget)
-            .with_hint("use 'libra tag -l' to list available tags.")),
-        Err(e) => {
-            Err(CliError::fatal(e.to_string()).with_stable_code(StableErrorCode::RepoCorrupt))
-        }
-    }
-}
-
 fn tag_to_list_entry(tag: tag::Tag, show_lines: usize) -> TagListEntry {
-    tag_object_to_list_entry(tag.name, tag.object, show_lines)
+    let tag::Tag { name, object } = tag;
+    tag_object_to_list_entry(name, object, show_lines)
 }
 
 fn tag_object_to_list_entry(
@@ -353,13 +411,17 @@ fn tag_object_to_list_entry(
         TagObject::Tree(tree) => tree.id.to_string(),
         TagObject::Blob(blob) => blob.id.to_string(),
     };
-    let (tag_type, message) = match &object {
-        TagObject::Tag(tag_object) => (
-            "annotated".to_string(),
-            trim_tag_message(&tag_object.message, show_lines),
+    let (tag_type, message, display_message) = match &object {
+        TagObject::Tag(tag_object) => {
+            let message = trim_tag_message(&tag_object.message, show_lines);
+            ("annotated".to_string(), message.clone(), message)
+        }
+        TagObject::Commit(commit) => (
+            "lightweight".to_string(),
+            None,
+            trim_tag_message(&commit.message, show_lines),
         ),
-        TagObject::Commit(_) => ("lightweight".to_string(), None),
-        _ => ("lightweight".to_string(), None),
+        _ => ("lightweight".to_string(), None, None),
     };
 
     TagListEntry {
@@ -367,6 +429,7 @@ fn tag_object_to_list_entry(
         hash,
         tag_type,
         message,
+        display_message,
     }
 }
 
@@ -387,14 +450,33 @@ fn trim_tag_message(message: &str, show_lines: usize) -> Option<String> {
     if value.is_empty() { None } else { Some(value) }
 }
 
-async fn resolve_tag_ref_for_delete(tag_name: &str) -> CliResult<tag::TagReference> {
+fn format_tag_entries(tags: &[TagListEntry]) -> String {
+    let mut output = String::new();
+    for tag in tags {
+        match tag.display_message.as_ref().or(tag.message.as_ref()) {
+            Some(message) => {
+                for (index, line) in message.lines().enumerate() {
+                    if index == 0 {
+                        output.push_str(&format!("{:<20} {}\n", tag.name, line));
+                    } else {
+                        output.push_str(&format!("{:<20} {}\n", "", line));
+                    }
+                }
+            }
+            None => output.push_str(&format!("{}\n", tag.name)),
+        }
+    }
+    output
+}
+
+async fn resolve_tag_ref_for_delete(tag_name: &str) -> Result<tag::TagReference, TagError> {
     match tag::find_tag_ref(tag_name).await {
         Ok(Some(reference)) => Ok(reference),
-        Ok(None) => Err(CliError::fatal(format!("tag '{}' not found", tag_name))
-            .with_stable_code(StableErrorCode::CliInvalidTarget)
-            .with_hint("use 'libra tag -l' to list available tags.")),
-        Err(e) => Err(CliError::fatal(format!("failed to query tag ref: {e}"))
-            .with_stable_code(StableErrorCode::RepoCorrupt)),
+        Ok(None) => Err(TagError::NotFound(tag_name.to_string())),
+        Err(source) => Err(TagError::LoadFailed {
+            name: tag_name.to_string(),
+            source: source.into(),
+        }),
     }
 }
 
@@ -403,6 +485,7 @@ mod tests {
     use std::fs;
 
     use git_internal::internal::object::types::ObjectType;
+    use sea_orm::DbErr;
     use serial_test::serial;
     use tempfile::tempdir;
 
@@ -545,5 +628,33 @@ mod tests {
         delete_tag("v1.0").await;
         let tags = tag::list().await.unwrap();
         assert!(tags.is_empty());
+    }
+
+    #[test]
+    fn test_tag_check_existing_db_error_maps_as_io_read() {
+        let cli_error = CliError::from(TagError::CheckExistingFailed {
+            name: "v1.0".to_string(),
+            source: DbErr::Custom("database is locked".to_string()),
+        });
+
+        assert_eq!(cli_error.stable_code(), StableErrorCode::IoReadFailed);
+    }
+
+    #[test]
+    fn test_tag_list_db_error_maps_as_io_read() {
+        let cli_error = CliError::from(TagError::ListFailed(anyhow::Error::new(DbErr::Custom(
+            "database is locked".to_string(),
+        ))));
+
+        assert_eq!(cli_error.stable_code(), StableErrorCode::IoReadFailed);
+    }
+
+    #[test]
+    fn test_tag_list_object_error_maps_as_repo_corrupt() {
+        let cli_error = CliError::from(TagError::ListFailed(anyhow::anyhow!(
+            "Invalid ObjectHash: not-a-valid-hash"
+        )));
+
+        assert_eq!(cli_error.stable_code(), StableErrorCode::RepoCorrupt);
     }
 }

@@ -39,6 +39,7 @@ use crate::{
         agent::{
             ToolLoopConfig, profile::AgentProfileRouter, run_tool_loop_with_history_and_observer,
         },
+        claudecode::{self, ClaudecodeTuiRuntime},
         commands::CommandDispatcher,
         completion::{
             CompletionModel, CompletionRetryEvent, CompletionRetryObserver, CompletionRetryPolicy,
@@ -196,7 +197,9 @@ pub struct AppConfig {
     pub agent_router: AgentProfileRouter,
     pub session: SessionState,
     pub session_store: SessionStore,
+    pub user_input_tx: UnboundedSender<UserInputRequest>,
     pub user_input_rx: UnboundedReceiver<UserInputRequest>,
+    pub exec_approval_tx: UnboundedSender<ExecApprovalRequest>,
     pub exec_approval_rx: UnboundedReceiver<ExecApprovalRequest>,
     /// Display name of the active model (e.g. "gemini-2.5-flash").
     pub model_name: String,
@@ -204,6 +207,8 @@ pub struct AppConfig {
     pub provider_name: String,
     /// MCP server instance for workflow tracking.
     pub mcp_server: Option<Arc<LibraMcpServer>>,
+    /// Optional managed Claude runtime for `claudecode`.
+    pub(crate) managed_claudecode: Option<ClaudecodeTuiRuntime>,
 }
 
 /// The main application struct.
@@ -247,8 +252,10 @@ pub struct App<M: CompletionModel> {
     /// Session store for saving/loading.
     session_store: SessionStore,
     /// Receiver for user-input requests from the `request_user_input` tool handler.
+    user_input_tx: UnboundedSender<UserInputRequest>,
     user_input_rx: UnboundedReceiver<UserInputRequest>,
     /// Receiver for exec-approval requests from sandbox-governed handlers.
+    exec_approval_tx: UnboundedSender<ExecApprovalRequest>,
     exec_approval_rx: UnboundedReceiver<ExecApprovalRequest>,
     /// Currently pending user-input interaction, if any.
     pending_user_input: Option<PendingUserInput>,
@@ -278,6 +285,8 @@ pub struct App<M: CompletionModel> {
     running_tool_calls: usize,
     /// Shared run-id slot for the active turn, backfilled by MCP tracking.
     active_turn_run_id: Option<Arc<Mutex<Option<String>>>>,
+    /// Optional managed runtime state for the active provider.
+    managed_claudecode: Option<ClaudecodeTuiRuntime>,
 }
 
 impl<M: CompletionModel + Clone + 'static> App<M> {
@@ -358,7 +367,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             agent_router: app_config.agent_router,
             session: app_config.session,
             session_store: app_config.session_store,
+            user_input_tx: app_config.user_input_tx,
             user_input_rx: app_config.user_input_rx,
+            exec_approval_tx: app_config.exec_approval_tx,
             exec_approval_rx: app_config.exec_approval_rx,
             pending_user_input: None,
             pending_exec_approval: None,
@@ -374,6 +385,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             active_turn_signal,
             running_tool_calls: 0,
             active_turn_run_id: None,
+            managed_claudecode: app_config.managed_claudecode,
         }
     }
 
@@ -438,11 +450,13 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
                 // Handle user-input requests from the tool handler
                 Some(request) = self.user_input_rx.recv() => {
+                    self.drain_pending_app_events().await?;
                     self.handle_user_input_request(request);
                 }
 
                 // Handle exec-approval requests from sandbox-governed handlers.
                 Some(request) = self.exec_approval_rx.recv() => {
+                    self.drain_pending_app_events().await?;
                     self.handle_exec_approval_request(request);
                 }
 
@@ -1041,7 +1055,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 {
                     *slot = None;
                 }
-                if let Some(mcp_server) = self.mcp_server.clone() {
+                if should_start_mcp_turn_tracking(self.managed_claudecode.is_some())
+                    && let Some(mcp_server) = self.mcp_server.clone()
+                {
                     let tx = self.app_event_tx.clone();
                     let working_dir = self.registry.working_dir().to_path_buf();
                     let plan_id = self.mcp_plan_id.clone();
@@ -1064,6 +1080,38 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                             }
                         }
                     });
+                }
+
+                if let Some(runtime) = self.managed_claudecode.as_ref() {
+                    self.history.push(Message::user(text.clone()));
+                    let tx = self.app_event_tx.clone();
+                    let user_input_tx = self.user_input_tx.clone();
+                    let exec_approval_tx = self.exec_approval_tx.clone();
+                    let runtime = runtime.clone();
+                    let prompt = text.clone();
+
+                    let handle = tokio::spawn(async move {
+                        if let Err(error) = claudecode::run_tui_turn(
+                            runtime,
+                            turn_id,
+                            tx.clone(),
+                            user_input_tx,
+                            exec_approval_tx,
+                            prompt,
+                        )
+                        .await
+                        {
+                            let _ = tx.send(AppEvent::AgentEvent {
+                                turn_id,
+                                event: AgentEvent::Error {
+                                    message: error.to_string(),
+                                },
+                            });
+                        }
+                    });
+
+                    self.agent_task = Some(handle);
+                    return Ok(());
                 }
 
                 // Prepare components for background task
@@ -1263,6 +1311,24 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         self.complete_streaming_assistant_cell(format!("Error: {}", message));
                         self.set_idle_and_draw();
                     }
+                    AgentEvent::ResponseDelta { delta } => {
+                        self.append_streaming_assistant_delta(&delta);
+                        self.schedule_draw();
+                    }
+                    AgentEvent::ManagedResponseComplete {
+                        text,
+                        provider_session_id: _provider_session_id,
+                    } => {
+                        self.enqueue_mcp_turn_decision(
+                            "checkpoint",
+                            "Turn completed successfully".to_string(),
+                        );
+                        self.finish_turn_state();
+                        self.history.push(Message::assistant(text.clone()));
+                        self.session.add_assistant_message(&text);
+                        self.complete_streaming_assistant_cell(text);
+                        self.set_idle_and_draw();
+                    }
                     AgentEvent::Retrying {
                         attempt,
                         total_attempts,
@@ -1339,6 +1405,15 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 cell,
             } => {
                 self.insert_before_streaming_assistant(cell);
+                self.schedule_draw();
+            }
+            AppEvent::ManagedInfoNote {
+                turn_id: _turn_id,
+                message,
+            } => {
+                self.insert_before_streaming_assistant(Box::new(AssistantHistoryCell::new(
+                    format!("info> {message}"),
+                )));
                 self.schedule_draw();
             }
             AppEvent::DagGraphBegin {
@@ -1555,6 +1630,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 self.session = SessionState::new(&self.registry.working_dir().to_string_lossy());
                 self.mcp_plan_id = None;
                 self.mcp_run_id = None;
+                reset_managed_claudecode_session(self.managed_claudecode.as_mut());
             }
             BuiltinCommand::Model => {
                 let info = format!(
@@ -1575,6 +1651,14 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     .add_cell(Box::new(AssistantHistoryCell::new(status)));
             }
             BuiltinCommand::Plan => {
+                if self.managed_claudecode.is_some() {
+                    self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                        "The /plan workflow is not available in the Claude managed runtime yet."
+                            .to_string(),
+                    )));
+                    self.schedule_draw();
+                    return;
+                }
                 self.start_plan_workflow(args).await;
             }
             BuiltinCommand::Intent => {
@@ -1618,6 +1702,13 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
     fn clear_mcp_run_id(&mut self) {
         self.mcp_run_id = None;
+    }
+
+    async fn drain_pending_app_events(&mut self) -> anyhow::Result<()> {
+        while let Ok(event) = self.app_event_rx.try_recv() {
+            self.handle_app_event(event).await?;
+        }
+        Ok(())
     }
 
     fn finish_turn_state(&mut self) {
@@ -2445,6 +2536,20 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             .add_cell(Box::new(AssistantHistoryCell::new(content)));
     }
 
+    fn append_streaming_assistant_delta(&mut self, delta: &str) {
+        for cell in self.widget.cells.iter_mut().rev() {
+            if let Some(assistant_cell) = cell.as_any_mut().downcast_mut::<AssistantHistoryCell>()
+                && assistant_cell.is_streaming
+            {
+                assistant_cell.content.push_str(delta);
+                return;
+            }
+        }
+        let mut cell = AssistantHistoryCell::streaming();
+        cell.content.push_str(delta);
+        self.widget.add_cell(Box::new(cell));
+    }
+
     fn replace_streaming_assistant_cell(&mut self, replacement: Box<dyn HistoryCell>) {
         for idx in (0..self.widget.cells.len()).rev() {
             if let Some(assistant_cell) = self.widget.cells[idx]
@@ -2854,6 +2959,7 @@ mod tests {
 
     use super::{
         append_to_last_tool_group_cell, format_orchestrator_result, should_hide_tool_failure,
+        should_start_mcp_turn_tracking,
     };
     use crate::internal::{
         ai::{
@@ -2971,6 +3077,12 @@ mod tests {
             "list_dir",
             json!({"dir_path":"src"}),
         ));
+    }
+
+    #[test]
+    fn managed_claudecode_disables_background_mcp_turn_tracking() {
+        assert!(!should_start_mcp_turn_tracking(true));
+        assert!(should_start_mcp_turn_tracking(false));
     }
 
     #[test]
@@ -3233,6 +3345,16 @@ async fn current_head_sha_async(working_dir: std::path::PathBuf) -> String {
     tokio::task::spawn_blocking(move || current_head_sha(&working_dir))
         .await
         .unwrap_or_else(|_| "HEAD".to_string())
+}
+
+fn should_start_mcp_turn_tracking(has_managed_claudecode: bool) -> bool {
+    !has_managed_claudecode
+}
+
+fn reset_managed_claudecode_session(runtime: Option<&mut ClaudecodeTuiRuntime>) {
+    if let Some(runtime) = runtime {
+        runtime.reset_for_new_conversation();
+    }
 }
 
 #[derive(Debug, Clone, Default)]

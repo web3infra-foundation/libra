@@ -73,11 +73,11 @@
 
 | 顺序 | 命令 | 当前状态 | 改进重点 |
 |------|------|--------|--------|
-| **9** | `switch` | 有 JSON + 确认消息 | `SwitchError` typed enum + 显式 `StableErrorCode`；`run_switch()` 返回 `Result<SwitchOutput, SwitchError>`；Levenshtein 模糊匹配；`--help` EXAMPLES（详见 [switch.md](switch.md)） |
-| **9a** | `checkout`（兼容收口） | 依赖 `switch::ensure_clean_status()` | 随 `switch` 联动：`err.message()` 字符串匹配改为 `SwitchError` 变体匹配；`--help` EXAMPLES。**不是完整现代化**——JSON / `CheckoutError` / render split 仍留第六批（详见 [checkout.md](checkout.md)） |
-| **10** | `reset` | 有确认消息，无 JSON | 输出 "HEAD is now at \<SHA\> \<msg\>"；JSON 输出；错误码 |
-| **11** | `tag` | 有短标志 -l/-d/-m/-a | 补齐 JSON 输出；重复创建时 hint；退出码对齐 exit 1 |
-| **12** | `branch` | 有 JSON | 补齐 StableErrorCode；退出码对齐（删除不存在分支 exit 1） |
+| **9** | `switch` | ✅ 已落地 | 第二批主改造已落地；后续仅维护回归测试、文档同步与大仓库切换性能观察（详见 [switch.md](switch.md)） |
+| **9a** | `checkout`（兼容收口） | ✅ 第二批兼容收口已落地 | 已完成 `SwitchError` 变体匹配适配与 `--help` EXAMPLES；**不是完整现代化**——`CheckoutError` / JSON / render split 仍留第六批（详见 [checkout.md](checkout.md)） |
+| **10** | `reset` | ✅ 主改造已落地：已有确认消息、JSON/machine、显式 `StableErrorCode`、`ResetError`、warning 管线、`run_reset()` / `render_reset_output()` | 后续仅维护 rollback / warning / pathspec corruption 边界回归与文档示例（详见 [reset.md](reset.md)） |
+| **11** | `tag` | ✅ 主改造已落地：已有 JSON/machine、显式 `StableErrorCode`、`TagError`、run/render 分层、重复创建 hint 与统一 human 确认消息 | 后续仅维护 lightweight tag 的 human / machine 双契约、边界回归与文档同步（详见 [tag.md](tag.md)） |
+| **12** | `branch` | 主改造已落地：JSON 已覆盖 list/create/delete/rename/set-upstream/show-current，`BranchError` typed enum、run/render 分层、确认消息、fuzzy suggestion 与 `--help` EXAMPLES 已就绪 | 继续把旧调用点迁移到 `internal::branch::*_result` fallible API，减少 legacy best-effort 查询路径（详见 [branch.md](branch.md)） |
 
 **理由：** 这些命令改变仓库状态，必须告知用户发生了什么。`checkout` 的兼容收口随 `switch` 一起落地，因为 `switch` 的 `ensure_clean_status()` 签名变更强制要求 `checkout` 同步适配。
 
@@ -150,7 +150,7 @@
 
 **不纳入改进计划的模块：**
 - `web_assets.rs`（11 行）：纯资源嵌入模块，无命令逻辑
-- `claude_sdk.rs`（3,576 行）：Claude Agent SDK managed-mode 命令面，属于独立子系统，改进节奏由 SDK 自身演进决定
+- `claudecode/`（模块）：Claude Code managed runtime，属于独立子系统，改进节奏由 Claude Code 自身演进决定
 - `code.rs`（1,153 行）：`libra code` TUI/Web/MCP 入口，已有 StableErrorCode，改进节奏由 AI Agent 子系统自身演进决定
 
 ### 全局层面改进（贯穿所有命令）
@@ -180,8 +180,8 @@
 - [Commit 命令改进详细计划](commit.md) ✅ 已落地
 - [Push 命令改进详细计划](push.md) ✅ 已落地
 - [Pull 命令改进详细计划](pull.md) ✅ 已落地
-- [Switch 命令改进详细计划](switch.md)
-- [Checkout 命令改进详细计划（第二批兼容收口）](checkout.md)
+- [Switch 命令改进详细计划](switch.md) ✅ 已落地
+- [Checkout 命令改进详细计划（第二批兼容收口）](checkout.md) ✅ 已落地（完整现代化留第六批）
 - [Reset 命令改进详细计划](reset.md)
 - [Tag 命令改进详细计划](tag.md)
 - [Branch 命令改进详细计划](branch.md)

@@ -26,7 +26,7 @@ use crate::{
         restore::{RestoreArgs, RestoreError},
     },
     internal::{
-        branch::Branch,
+        branch::{self, Branch},
         config::{ConfigKv, RemoteConfig},
         head::Head,
         reflog::{ReflogAction, ReflogContext, with_reflog},
@@ -142,6 +142,8 @@ pub enum CloneError {
     InitializeRepository { source: InitError },
     #[error("remote branch {branch} not found in upstream origin")]
     RemoteBranchNotFound { branch: String },
+    #[error("failed to inspect local branch state after fetch: {source}")]
+    LocalBranchState { source: branch::BranchStoreError },
     #[error("fetch failed: {source}")]
     FetchFailed { source: fetch::FetchError },
     #[error("failed to checkout working tree")]
@@ -194,6 +196,8 @@ impl From<CloneError> for CliError {
             .with_hint(
                 "use `-b <branch>` to specify an existing branch, or omit to use remote HEAD",
             ),
+            CloneError::LocalBranchState { source } => map_local_branch_state_error(source)
+                .with_hint("run 'libra status' to verify the local repository state"),
             CloneError::FetchFailed { source } => map_fetch_error(source),
             CloneError::CheckoutFailed { source } => map_checkout_error(source),
             CloneError::SetupFailed { .. } => CliError::fatal(error.to_string())
@@ -300,6 +304,33 @@ fn map_checkout_error(source: RestoreError) -> CliError {
                 .with_stable_code(StableErrorCode::NetworkUnavailable)
                 .with_hint("checkout required downloading LFS content, but the transfer failed")
         }
+    }
+}
+
+fn map_local_branch_state_error(source: branch::BranchStoreError) -> CliError {
+    match source {
+        branch::BranchStoreError::Query(detail) => {
+            CliError::fatal(format!(
+                "failed to inspect local branch state after fetch: {detail}"
+            ))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+        }
+        branch::BranchStoreError::Corrupt { .. } => {
+            CliError::fatal(format!(
+                "failed to inspect local branch state after fetch: {source}"
+            ))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+        }
+        branch::BranchStoreError::NotFound(name) => {
+            CliError::fatal(format!(
+                "failed to inspect local branch state after fetch: branch '{name}' not found"
+            ))
+            .with_stable_code(StableErrorCode::RepoStateInvalid)
+        }
+        branch::BranchStoreError::Delete { name, detail } => CliError::fatal(format!(
+            "failed to inspect local branch state after fetch: failed to delete branch '{name}': {detail}"
+        ))
+        .with_stable_code(StableErrorCode::IoWriteFailed),
     }
 }
 
@@ -742,12 +773,16 @@ pub(crate) async fn setup_repository(
 
     if let Some(branch_name) = branch_to_checkout {
         let remote_tracking_ref = format!("refs/remotes/{}/{}", remote_config.name, branch_name);
-        let origin_branch =
-            Branch::find_branch_with_conn(&db, &remote_tracking_ref, Some(&remote_config.name))
-                .await
-                .ok_or_else(|| CloneError::RemoteBranchNotFound {
-                    branch: branch_name.clone(),
-                })?;
+        let origin_branch = Branch::find_branch_result_with_conn(
+            &db,
+            &remote_tracking_ref,
+            Some(&remote_config.name),
+        )
+        .await
+        .map_err(|source| CloneError::LocalBranchState { source })?
+        .ok_or_else(|| CloneError::RemoteBranchNotFound {
+            branch: branch_name.clone(),
+        })?;
 
         let action = ReflogAction::Clone {
             from: remote_config.url.clone(),
@@ -928,6 +963,27 @@ mod tests {
         let cli = map_checkout_error(RestoreError::WriteWorktree);
 
         assert_eq!(cli.stable_code(), StableErrorCode::IoWriteFailed);
+        assert_eq!(cli.exit_code(), 128);
+    }
+
+    #[test]
+    fn local_branch_state_query_maps_to_io_read_failed() {
+        let cli = map_local_branch_state_error(branch::BranchStoreError::Query(
+            "database is locked".into(),
+        ));
+
+        assert_eq!(cli.stable_code(), StableErrorCode::IoReadFailed);
+        assert_eq!(cli.exit_code(), 128);
+    }
+
+    #[test]
+    fn local_branch_state_corrupt_maps_to_repo_corrupt() {
+        let cli = map_local_branch_state_error(branch::BranchStoreError::Corrupt {
+            name: "refs/remotes/origin/main".into(),
+            detail: "invalid object id".into(),
+        });
+
+        assert_eq!(cli.stable_code(), StableErrorCode::RepoCorrupt);
         assert_eq!(cli.exit_code(), 128);
     }
 }
