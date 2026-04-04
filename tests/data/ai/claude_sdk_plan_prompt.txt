@@ -1,4 +1,4 @@
-Audit the Claude SDK to Libra semantic-agent bridge and produce a structured intent extraction.
+Audit the Claude Code to Libra semantic-agent bridge and produce a structured intent extraction.
 
 Requirements:
 - Start by giving a concise 3-step plan.

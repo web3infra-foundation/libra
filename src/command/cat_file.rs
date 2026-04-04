@@ -114,6 +114,8 @@ const AI_OBJECT_TYPES: &[&str] = &[
     "approval_request",
     "context_frame",
     "context_snapshot",
+    "claude_decision_input",
+    "claude_managed_evidence_input",
     "decision",
     "event",
     "evidence",

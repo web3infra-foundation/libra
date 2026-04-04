@@ -124,33 +124,76 @@ Update your `claude_desktop_config.json` as follows:
 > **Note**: The `cwd` (current working directory) must be set to the root of a valid Libra repository.
 > If `libra code` is launched outside of a repository, it will exit with an error.
 
-#### AI Hook Forwarding
+#### Managed Claude Runtime
 
-Libra can import Claude Agent SDK managed sessions and provider-side replay
-artifacts through the `claude-sdk` command group.
+`libra code --provider claudecode` uses Libra's managed Claude runtime path.
+This is separate from the direct `anthropic` provider, which still uses the
+regular Anthropic chat-completions client. The managed `claudecode` runtime
+still uses the official Python Claude Agent SDK helper under the hood, so the
+active `python3` in your shell should already have `claude-agent-sdk`
+installed.
 
-Run a managed session through the bundled helper:
-
-```bash
-libra claude-sdk run --prompt "Inspect src/lib.rs and summarize the bridge state"
-```
-
-Sync Claude provider session metadata into Libra snapshots:
+Recommended setup with `uv`:
 
 ```bash
-libra claude-sdk sync-sessions
-libra claude-sdk hydrate-session --provider-session-id session-a
-libra claude-sdk build-evidence-input --provider-session-id session-a
+uv venv .venv --python 3.11
+uv pip install --python .venv/bin/python -U claude-agent-sdk
+source .venv/bin/activate
 ```
 
-The `--cwd` flag controls which project directory Claude SDK queries, but all
-artifacts and history are persisted into the current Libra repository.
+If you prefer not to activate the virtualenv, pass the helper interpreter
+explicitly when launching Claude managed sessions:
 
-Persisted provider session and evidence artifacts are inspectable with:
+```bash
+libra code --provider claudecode \
+  --model claude-sonnet-4-6 \
+  --python-binary .venv/bin/python
+```
+
+Authentication comes from environment variables:
+
+- Official Anthropic path: `ANTHROPIC_API_KEY`
+- Custom gateway path: `ANTHROPIC_BASE_URL`
+- For gateways that expect bearer auth for Claude Code / Python SDK traffic,
+  use `ANTHROPIC_AUTH_TOKEN`
+
+Example:
+
+```bash
+export ANTHROPIC_BASE_URL=https://your-gateway.example.com/anthropic
+export ANTHROPIC_AUTH_TOKEN=<token>
+unset ANTHROPIC_API_KEY
+```
+
+Start an interactive managed Claude session:
+
+```bash
+libra code --provider claudecode \
+  --model claude-sonnet-4-6
+```
+
+Resume Claude provider sessions explicitly:
+
+```bash
+libra code --provider claudecode --resume
+libra code --provider claudecode --resume-session <provider-session-uuid>
+libra code --provider claudecode --resume-session <provider-session-uuid> --fork-session
+libra code --provider claudecode --resume-session <provider-session-uuid> --resume-at <assistant-message-uuid>
+```
+
+The `--cwd` flag controls which project directory Claude reads and writes, but
+all managed artifacts and AI history are persisted into the current Libra
+repository.
+
+Useful inspection commands:
 
 ```bash
 libra cat-file --ai-list ai_session
-libra cat-file --ai <ai_session_id>
+libra cat-file --ai-list run
+libra cat-file --ai-list task
+libra cat-file --ai-list tool_invocation_event
+libra cat-file --ai-list patchset_snapshot
+libra --json=pretty cat-file --ai ai_session:<ai_session_id>
 ```
 
 ### AI Provider Selection
@@ -165,8 +208,11 @@ libra code --provider gemini --model gemini-2.5-flash
 # OpenAI
 libra code --provider openai --model gpt-4o
 
-# Anthropic
-libra code --provider anthropic --model claude-3-5-sonnet-latest
+# Anthropic (direct chat completions)
+libra code --provider anthropic --model claude-sonnet-4-6
+
+# Claude Code managed runtime
+libra code --provider claudecode --model claude-sonnet-4-6
 
 # DeepSeek
 libra code --provider deepseek
@@ -184,11 +230,12 @@ libra code --provider ollama --model llama3.2 --api-base http://remote-host:1143
 
 > **Note**: The `--api-base` CLI flag is only honored for the `ollama` provider. Other providers accept custom base URLs through their respective environment variables (e.g. `OPENAI_BASE_URL`).
 
-| Provider | Default Model | API Key Env Variable | Base URL Override |
-|----------|--------------|---------------------|-------------------|
+| Provider | Default Model | Auth Env Variable | Base URL Override |
+|----------|--------------|-------------------|-------------------|
 | `gemini` | `gemini-2.5-flash` | `GEMINI_API_KEY` | — |
 | `openai` | `gpt-4o-mini` | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
-| `anthropic` | `claude-3-5-sonnet-latest` | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
+| `anthropic` | `claude-sonnet-4-6` | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
+| `claudecode` | `claude-sonnet-4-6` | `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
 | `deepseek` | `deepseek-chat` | `DEEPSEEK_API_KEY` | *(programmatic only)* |
 | `zhipu` | `glm-5` | `ZHIPU_API_KEY` | `ZHIPU_BASE_URL` |
 | `ollama` | *(requires `--model`)* | — | `OLLAMA_BASE_URL` or `--api-base` |

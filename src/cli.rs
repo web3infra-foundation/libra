@@ -154,11 +154,6 @@ enum Commands {
     Init(command::init::InitArgs),
     #[command(about = "Clone a repository into a new directory")]
     Clone(command::clone::CloneArgs),
-    #[command(
-        name = "claude-sdk",
-        about = "Run or import Claude Agent SDK managed sessions"
-    )]
-    ClaudeSdk(command::claude_sdk::ClaudeSdkArgs),
     #[command(about = "Start Libra Code interactive TUI (with background web server)")]
     Code(command::code::CodeArgs),
     // The rest of the commands require a repository to be present
@@ -632,10 +627,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
             })?;
         }
         Commands::Clone(cmd_args) => command::clone::execute_safe(cmd_args, &output).await?,
-        Commands::ClaudeSdk(cmd_args) => command::claude_sdk::execute(cmd_args)
-            .await
-            .map_err(|e| CliError::fatal(e.to_string()))?,
-        Commands::Code(cmd_args) => command::code::execute(cmd_args).await?,
+        Commands::Code(cmd_args) => command::code::execute(cmd_args, &output).await?,
         Commands::Add(cmd_args) => command::add::execute_safe(cmd_args, &output).await?,
         Commands::Rm(cmd_args) => command::remove::execute_safe(cmd_args, &output).await?,
         Commands::Restore(cmd_args) => command::restore::execute_safe(cmd_args, &output).await?,

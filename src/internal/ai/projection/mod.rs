@@ -7,6 +7,7 @@
 //! scheduler view, and denormalized lookup rows needed by the runtime and UI.
 
 pub mod index;
+pub mod rebuild;
 pub mod scheduler;
 pub mod thread;
 
@@ -14,6 +15,7 @@ pub use index::{
     IntentContextFrameIndexRow, IntentPlanIndexRow, IntentTaskIndexRow, PlanStepTaskIndexRow,
     RunEventIndexRow, RunPatchSetIndexRow, TaskRunIndexRow,
 };
+pub use rebuild::{MaterializedProjection, ProjectionRebuilder};
 pub use scheduler::{
     LiveContextFrameRef, LiveContextPinKind, LiveContextSourceKind, PlanHeadRef, SchedulerState,
 };
