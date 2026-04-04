@@ -65,6 +65,28 @@ fn test_blame_json_output_includes_lines() {
 }
 
 #[test]
+fn test_blame_machine_output_is_single_line_json() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--machine", "blame", "tracked.txt"], repo.path());
+    assert_cli_success(&output, "machine blame tracked.txt");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let non_empty_lines: Vec<&str> = stdout.lines().filter(|line| !line.is_empty()).collect();
+    assert_eq!(
+        non_empty_lines.len(),
+        1,
+        "machine output should be exactly one non-empty line, got: {stdout}"
+    );
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(non_empty_lines[0]).expect("machine output should be valid JSON");
+    assert_eq!(parsed["command"], "blame");
+    assert_eq!(parsed["data"]["file"], "tracked.txt");
+    assert!(parsed["data"]["lines"].as_array().is_some());
+}
+
+#[test]
 fn test_blame_human_output_handles_long_unicode_author_names() {
     let repo = create_committed_repo_via_cli();
 

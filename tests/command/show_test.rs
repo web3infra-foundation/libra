@@ -152,11 +152,25 @@ fn test_show_cli_badref_returns_cli_exit_code() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert_eq!(output.status.code(), Some(129));
-    assert!(stderr.contains(
-        "fatal: ambiguous argument 'badref': unknown revision or path not in the working tree."
-    ));
+    assert!(stderr.contains("fatal: bad revision 'badref'"));
     assert!(stderr.contains("Error-Code: LBR-CLI-003"));
-    assert!(stderr.contains("Hint: use '--' to separate paths from revisions"));
+    assert!(stderr.contains("Hint: use 'libra log --oneline' to see available commits"));
+}
+
+#[test]
+fn test_show_cli_outside_repository_returns_repo_not_found() {
+    let temp = tempfile::tempdir().expect("failed to create tempdir");
+
+    let output = run_libra_command(&["show", "HEAD"], temp.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-REPO-001");
+    assert_eq!(report.category, "repo");
+    assert!(
+        stderr.contains("fatal: not a libra repository"),
+        "unexpected stderr: {stderr}"
+    );
 }
 
 #[test]
@@ -675,4 +689,95 @@ async fn test_show_execute_safe_bad_rev_path_returns_cli_error() {
     };
     let result = execute_safe(args, &OutputConfig::default()).await;
     assert!(result.is_err(), "execute_safe should fail for bad rev:path");
+}
+
+#[test]
+fn test_show_machine_output_is_single_line_json() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--machine", "show", "HEAD"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let non_empty_lines: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(
+        non_empty_lines.len(),
+        1,
+        "machine output should be exactly one non-empty line, got: {stdout}"
+    );
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(non_empty_lines[0]).expect("machine output should be valid JSON");
+    assert_eq!(parsed["command"], "show");
+    assert_eq!(parsed["data"]["type"], "commit");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_show_json_blob_output_includes_content() {
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+    let head = Head::current_commit().await.unwrap();
+    let commit: Commit = load_object(&head).unwrap();
+    let tree: Tree = load_object(&commit.tree_id).unwrap();
+    let blob_hash = tree
+        .get_plain_items()
+        .into_iter()
+        .find(|(path, _)| path == &PathBuf::from("tracked.txt"))
+        .map(|(_, hash)| hash.to_string())
+        .expect("expected tracked.txt blob");
+
+    let output = run_libra_command(&["--json", "show", &blob_hash], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "show");
+    assert_eq!(json["data"]["type"], "blob");
+    assert!(!json["data"]["is_binary"].as_bool().unwrap());
+    assert!(
+        json["data"]["content"].as_str().is_some(),
+        "text blob should have content"
+    );
+    assert!(json["data"]["size"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn test_show_json_bad_revision_returns_error() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--json", "show", "nonexistent_ref"], repo.path());
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(129));
+
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert_eq!(report.exit_code, 129);
+    assert!(report.message.contains("bad revision"));
+}
+
+#[test]
+fn test_show_json_lightweight_tag_resolves_to_commit() {
+    let repo = init_temp_repo();
+    configure_user_identity(repo.path());
+    create_commit(repo.path(), "file.txt", "content\n", "Initial commit");
+    create_lightweight_tag(repo.path(), "v0.1");
+
+    let output = run_libra_command(&["--json", "show", "v0.1"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["type"], "commit");
+    assert_eq!(json["data"]["subject"], "Initial commit");
 }

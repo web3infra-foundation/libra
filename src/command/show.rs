@@ -147,6 +147,8 @@ pub async fn execute(args: ShowArgs) {
 /// errors and exiting. Resolves a revision (commit, tag, tree, blob, or
 /// `<rev>:<path>`) and prints its contents with diff formatting.
 pub async fn execute_safe(args: ShowArgs, output: &OutputConfig) -> CliResult<()> {
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
+
     if output.is_json() {
         let result = run_show(&args).await?;
         return emit_json_data("show", &result, output);
@@ -441,12 +443,9 @@ async fn show_diffstat(commit: &Commit, paths: Vec<PathBuf>) -> CliResult<()> {
 }
 
 fn show_bad_revision_error(object_ref: &str) -> CliError {
-    CliError::fatal(format!(
-        "ambiguous argument '{}': unknown revision or path not in the working tree.",
-        object_ref
-    ))
-    .with_stable_code(StableErrorCode::CliInvalidTarget)
-    .with_hint("use '--' to separate paths from revisions, for example 'libra show -- <file>'.")
+    CliError::fatal(format!("bad revision '{}'", object_ref))
+        .with_stable_code(StableErrorCode::CliInvalidTarget)
+        .with_hint("use 'libra log --oneline' to see available commits, or 'libra tag -l' to see available tags.")
 }
 
 async fn run_show(args: &ShowArgs) -> CliResult<ShowOutput> {

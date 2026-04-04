@@ -1334,3 +1334,115 @@ async fn test_log_short_number_flag_with_double_dash_before_subcommand() {
     assert!(status.success(), "libra -- log -2 failed: {err}");
     assert_eq!(count_commit_lines(&out), 2);
 }
+
+#[test]
+fn test_log_machine_output_is_single_line_json() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--machine", "log", "-n", "1"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let non_empty_lines: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(
+        non_empty_lines.len(),
+        1,
+        "machine output should be exactly one non-empty line, got: {stdout}"
+    );
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(non_empty_lines[0]).expect("machine output should be valid JSON");
+    assert_eq!(parsed["command"], "log");
+    assert!(parsed["data"]["commits"].as_array().is_some());
+}
+
+#[test]
+fn test_log_json_root_commit_has_empty_parents_and_added_files() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--json", "log", "-n", "1"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    let commit = &json["data"]["commits"][0];
+
+    // Root commit has no parents.
+    let parents = commit["parents"]
+        .as_array()
+        .expect("parents should be an array");
+    assert!(parents.is_empty(), "root commit should have no parents");
+
+    // Root commit files should all be "added".
+    let files = commit["files"]
+        .as_array()
+        .expect("files should be an array");
+    assert!(
+        !files.is_empty(),
+        "root commit should have at least one file"
+    );
+    for file in files {
+        assert_eq!(
+            file["status"], "added",
+            "root commit files should all be 'added', got: {}",
+            file["status"]
+        );
+    }
+}
+
+#[test]
+fn test_log_json_since_filter_restricts_results() {
+    let repo = create_committed_repo_via_cli();
+
+    // The committed repo has one commit. Querying with --since far in the future
+    // should return zero commits.
+    let output = run_libra_command(&["--json", "log", "--since", "2099-01-01"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    let commits = json["data"]["commits"]
+        .as_array()
+        .expect("commits should be an array");
+    assert!(
+        commits.is_empty(),
+        "no commits should match a future --since date"
+    );
+}
+
+#[test]
+fn test_log_json_oneline_flag_does_not_alter_schema() {
+    let repo = create_committed_repo_via_cli();
+
+    let plain = run_libra_command(&["--json", "log", "-n", "1"], repo.path());
+    let with_oneline = run_libra_command(&["--json", "log", "-n", "1", "--oneline"], repo.path());
+    assert!(plain.status.success());
+    assert!(with_oneline.status.success());
+
+    let plain_json = parse_json_stdout(&plain);
+    let oneline_json = parse_json_stdout(&with_oneline);
+
+    // JSON schema should be identical regardless of --oneline.
+    assert_eq!(
+        plain_json["data"]["commits"][0]["hash"],
+        oneline_json["data"]["commits"][0]["hash"]
+    );
+    assert_eq!(
+        plain_json["data"]["commits"][0]["subject"],
+        oneline_json["data"]["commits"][0]["subject"]
+    );
+    assert_eq!(
+        plain_json["data"]["commits"][0]["author_name"],
+        oneline_json["data"]["commits"][0]["author_name"]
+    );
+}

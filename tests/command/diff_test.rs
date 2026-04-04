@@ -41,6 +41,28 @@ fn test_diff_json_output_includes_file_stats() {
 }
 
 #[test]
+fn test_diff_machine_output_is_single_line_json() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nupdated\n").unwrap();
+
+    let output = run_libra_command(&["--machine", "diff"], repo.path());
+    assert_cli_success(&output, "machine diff");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let non_empty_lines: Vec<&str> = stdout.lines().filter(|line| !line.is_empty()).collect();
+    assert_eq!(
+        non_empty_lines.len(),
+        1,
+        "machine output should be exactly one non-empty line, got: {stdout}"
+    );
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(non_empty_lines[0]).expect("machine output should be valid JSON");
+    assert_eq!(parsed["command"], "diff");
+    assert_eq!(parsed["data"]["files_changed"], 1);
+}
+
+#[test]
 fn test_diff_name_only_and_name_status_flags_render_cli_output() {
     let repo = create_committed_repo_via_cli();
     fs::write(repo.path().join("tracked.txt"), "tracked\nupdated\n").unwrap();

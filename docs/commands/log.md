@@ -39,7 +39,7 @@ Show commit history. Human mode preserves the current `--oneline`, `--graph`, `-
 Notes:
 
 - `-n` also applies in JSON mode
-- `total` is `null` only when `-n` truncates the result set; otherwise it reflects the filtered commit count
+- `total` reflects the filtered commit count only when `-n` is not supplied; with `-n`, it is always `null`
 - `--graph`, `--pretty`, and `--oneline` do not change the JSON schema
 - `--decorate` only affects human rendering; JSON always returns a `refs` array, and auxiliary ref metadata is collected best-effort
 - `files` is always a structured change summary and never includes patch text
