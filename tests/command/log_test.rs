@@ -2,7 +2,7 @@
 //!
 //! **Layer:** L1 — deterministic, no external dependencies.
 
-use std::{cmp::min, path::Path, str::FromStr};
+use std::{cmp::min, str::FromStr};
 
 use clap::Parser;
 use git_internal::{
@@ -18,13 +18,6 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use serial_test::serial;
 
 use super::*;
-
-fn loose_object_path(repo: &Path, hash: &str) -> std::path::PathBuf {
-    repo.join(util::ROOT_DIR)
-        .join("objects")
-        .join(&hash[..2])
-        .join(&hash[2..])
-}
 
 #[test]
 fn test_log_cli_outside_repository_returns_fatal_128() {

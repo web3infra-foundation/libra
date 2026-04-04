@@ -3,30 +3,21 @@
 //!
 //! **Layer:** L1 — deterministic, no external dependencies.
 
-use std::{
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::{path::PathBuf, process::Command};
 
 use git_internal::internal::object::{commit::Commit, tree::Tree};
 use libra::{
     command::load_object,
     internal::{db::get_db_conn_instance, head::Head, model::reference},
-    utils::{object_ext::TreeExt, output::OutputConfig, test::ChangeDirGuard, util::ROOT_DIR},
+    utils::{object_ext::TreeExt, output::OutputConfig, test::ChangeDirGuard},
 };
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use serial_test::serial;
 
 use super::{
-    create_committed_repo_via_cli, parse_cli_error_stderr, parse_json_stdout, run_libra_command,
+    create_committed_repo_via_cli, loose_object_path, parse_cli_error_stderr, parse_json_stdout,
+    run_libra_command,
 };
-
-fn loose_object_path(repo: &Path, hash: &str) -> PathBuf {
-    repo.join(ROOT_DIR)
-        .join("objects")
-        .join(&hash[..2])
-        .join(&hash[2..])
-}
 
 /// Initialize a temporary repository using CLI.
 fn init_temp_repo() -> tempfile::TempDir {

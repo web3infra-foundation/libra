@@ -546,16 +546,30 @@ async fn collect_commit_output(
 
 async fn collect_tag_output(hash: &ObjectHash, paths: &[PathBuf]) -> CliResult<ShowOutput> {
     match tag::load_object_trait(hash).await {
-        Ok(tag::TagObject::Tag(tag_obj)) => Ok(ShowOutput::Tag(ShowTagData {
-            tag_name: tag_obj.tag_name,
-            tagger_name: Some(tag_obj.tagger.name.trim().to_string()),
-            tagger_email: Some(tag_obj.tagger.email.trim().to_string()),
-            tagger_date: chrono::DateTime::from_timestamp(tag_obj.tagger.timestamp as i64, 0)
-                .map(|date| date.to_rfc3339()),
-            message: tag_obj.message.trim().to_string(),
-            target_hash: tag_obj.object_hash.to_string(),
-            target_type: format!("{:?}", tag_obj.object_type).to_lowercase(),
-        })),
+        Ok(tag::TagObject::Tag(tag_obj)) => {
+            // Validate the target object is accessible so that quiet / JSON
+            // paths fail consistently with the human path, which dereferences
+            // the tagged object via show_object_by_hash().
+            let storage = ClientStorage::init(path::objects());
+            let _ = storage.get_object_type(&tag_obj.object_hash).map_err(|e| {
+                CliError::fatal(format!(
+                    "could not read target object {}: {}",
+                    tag_obj.object_hash, e
+                ))
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+            })?;
+
+            Ok(ShowOutput::Tag(ShowTagData {
+                tag_name: tag_obj.tag_name,
+                tagger_name: Some(tag_obj.tagger.name.trim().to_string()),
+                tagger_email: Some(tag_obj.tagger.email.trim().to_string()),
+                tagger_date: chrono::DateTime::from_timestamp(tag_obj.tagger.timestamp as i64, 0)
+                    .map(|date| date.to_rfc3339()),
+                message: tag_obj.message.trim().to_string(),
+                target_hash: tag_obj.object_hash.to_string(),
+                target_type: format!("{:?}", tag_obj.object_type).to_lowercase(),
+            }))
+        }
         Ok(tag::TagObject::Commit(commit)) => collect_commit_output(&commit.id, paths).await,
         Ok(_) => Err(CliError::fatal("tag points to unsupported object type")
             .with_stable_code(StableErrorCode::CliInvalidTarget)),

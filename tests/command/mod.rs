@@ -106,6 +106,15 @@ fn parse_json_stdout(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).expect("expected stdout to be valid JSON")
 }
 
+/// Build the on-disk path to a loose object given the repository root and full
+/// hex hash. Used by tests that need to corrupt or delete individual objects.
+fn loose_object_path(repo: &Path, hash: &str) -> std::path::PathBuf {
+    repo.join(libra::utils::util::ROOT_DIR)
+        .join("objects")
+        .join(&hash[..2])
+        .join(&hash[2..])
+}
+
 /// Initialize a repository through the CLI to exercise the real process entrypoint.
 fn init_repo_via_cli(repo: &Path) {
     fs::create_dir_all(repo).expect("failed to create repository directory");
