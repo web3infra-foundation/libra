@@ -155,7 +155,7 @@ pub async fn execute_safe(args: ShowArgs, output: &OutputConfig) -> CliResult<()
     }
 
     if output.quiet {
-        return run_show(&args).await.map(|_| ());
+        return validate_show_quiet(&args).await;
     }
 
     let object_ref = args.object.as_deref().unwrap_or("HEAD");
@@ -194,6 +194,36 @@ pub async fn execute_safe(args: ShowArgs, output: &OutputConfig) -> CliResult<()
     Err(show_bad_revision_error(object_ref))
 }
 
+async fn validate_show_quiet(args: &ShowArgs) -> CliResult<()> {
+    let object_ref = args.object.as_deref().unwrap_or("HEAD");
+
+    if let Some((rev, path)) = object_ref.split_once(':') {
+        return validate_commit_file(rev, path).await;
+    }
+
+    if let Some(hash) = resolve_existing_object_hash(object_ref) {
+        return validate_object_by_hash(&hash, args).await;
+    }
+
+    if let Ok(commit_hash) = util::get_commit_base(object_ref).await {
+        match tag::find_tag_and_commit(object_ref).await {
+            Ok(Some((object, _))) if object.get_type() == ObjectType::Tag => {
+                let tag_hash = if let tag::TagObject::Tag(tag_obj) = &object {
+                    tag_obj.id
+                } else {
+                    commit_hash
+                };
+                return validate_tag_by_hash(&tag_hash, args).await;
+            }
+            _ => {
+                return validate_commit_output(&commit_hash, args).await;
+            }
+        }
+    }
+
+    Err(show_bad_revision_error(object_ref))
+}
+
 /// Shows an object by hash after resolving its object type.
 fn show_object_by_hash<'a>(
     hash: &'a ObjectHash,
@@ -212,6 +242,31 @@ fn show_object_by_hash<'a>(
             ObjectType::Tag => show_tag_by_hash(hash, args).await,
             ObjectType::Tree => show_tree(hash).await,
             ObjectType::Blob => show_blob(hash).await,
+            _ => Err(
+                CliError::fatal(format!("unsupported object type for {}", hash))
+                    .with_stable_code(StableErrorCode::CliInvalidTarget),
+            ),
+        }
+    })
+}
+
+fn validate_object_by_hash<'a>(
+    hash: &'a ObjectHash,
+    args: &'a ShowArgs,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = CliResult<()>> + 'a>> {
+    Box::pin(async move {
+        let storage = ClientStorage::init(path::objects());
+
+        let obj_type = storage.get_object_type(hash).map_err(|e| {
+            CliError::fatal(format!("could not read object {}: {}", hash, e))
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+        })?;
+
+        match obj_type {
+            ObjectType::Commit => validate_commit_output(hash, args).await,
+            ObjectType::Tag => validate_tag_by_hash(hash, args).await,
+            ObjectType::Tree => validate_tree(hash),
+            ObjectType::Blob => validate_blob(hash),
             _ => Err(
                 CliError::fatal(format!("unsupported object type for {}", hash))
                     .with_stable_code(StableErrorCode::CliInvalidTarget),
@@ -259,6 +314,26 @@ async fn show_commit(commit_hash: &ObjectHash, args: &ShowArgs) -> CliResult<()>
     Ok(())
 }
 
+async fn validate_commit_output(commit_hash: &ObjectHash, args: &ShowArgs) -> CliResult<()> {
+    let commit = load_object::<Commit>(commit_hash).map_err(|e| {
+        CliError::fatal(format!("could not load commit {}: {}", commit_hash, e))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+    })?;
+
+    if args.no_patch {
+        return Ok(());
+    }
+
+    let paths: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
+    if args.stat || args.name_only {
+        let _ = get_changed_files_for_commit(&commit, &paths).await?;
+    } else {
+        let _ = generate_diff(&commit, paths).await?;
+    }
+
+    Ok(())
+}
+
 /// Shows an annotated or lightweight tag.
 async fn show_tag_by_hash(hash: &ObjectHash, args: &ShowArgs) -> CliResult<()> {
     match tag::load_object_trait(hash).await {
@@ -298,6 +373,20 @@ async fn show_tag_by_hash(hash: &ObjectHash, args: &ShowArgs) -> CliResult<()> {
     Ok(())
 }
 
+async fn validate_tag_by_hash(hash: &ObjectHash, args: &ShowArgs) -> CliResult<()> {
+    match tag::load_object_trait(hash).await {
+        Ok(tag::TagObject::Tag(tag_obj)) => {
+            validate_object_by_hash(&tag_obj.object_hash, args).await
+        }
+        Ok(tag::TagObject::Commit(commit)) => validate_commit_output(&commit.id, args).await,
+        Ok(_) => Err(CliError::fatal("tag points to unsupported object type")
+            .with_stable_code(StableErrorCode::CliInvalidTarget)),
+        Err(e) => {
+            Err(CliError::fatal(e.to_string()).with_stable_code(StableErrorCode::RepoCorrupt))
+        }
+    }
+}
+
 /// Shows a tree object.
 async fn show_tree(hash: &ObjectHash) -> CliResult<()> {
     let tree = load_object::<Tree>(hash).map_err(|e| {
@@ -319,6 +408,14 @@ async fn show_tree(hash: &ObjectHash) -> CliResult<()> {
     Ok(())
 }
 
+fn validate_tree(hash: &ObjectHash) -> CliResult<()> {
+    load_object::<Tree>(hash).map_err(|e| {
+        CliError::fatal(format!("could not load tree {}: {}", hash, e))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+    })?;
+    Ok(())
+}
+
 /// Shows a blob as text when possible.
 async fn show_blob(hash: &ObjectHash) -> CliResult<()> {
     let blob = load_object::<Blob>(hash).map_err(|e| {
@@ -333,6 +430,14 @@ async fn show_blob(hash: &ObjectHash) -> CliResult<()> {
             println!("Binary file (size: {} bytes)", blob.data.len());
         }
     }
+    Ok(())
+}
+
+fn validate_blob(hash: &ObjectHash) -> CliResult<()> {
+    load_object::<Blob>(hash).map_err(|e| {
+        CliError::fatal(format!("could not load blob {}: {}", hash, e))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+    })?;
     Ok(())
 }
 
@@ -367,6 +472,34 @@ async fn show_commit_file(rev: &str, file_path: &str, _args: &ShowArgs) -> CliRe
         );
     }
     Ok(())
+}
+
+async fn validate_commit_file(rev: &str, file_path: &str) -> CliResult<()> {
+    let commit_hash = util::get_commit_base(rev)
+        .await
+        .map_err(|_| show_bad_revision_error(rev))?;
+
+    let commit = load_object::<Commit>(&commit_hash).map_err(|e| {
+        CliError::fatal(format!("could not load commit {}: {}", commit_hash, e))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+    })?;
+
+    let tree = load_object::<Tree>(&commit.tree_id).map_err(|e| {
+        CliError::fatal(format!("could not load tree {}: {}", commit.tree_id, e))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+    })?;
+
+    let items = tree.get_plain_items();
+    let target_path = PathBuf::from(file_path);
+
+    if let Some((_, blob_hash)) = items.iter().find(|(path, _)| path == &target_path) {
+        validate_blob(blob_hash)
+    } else {
+        Err(
+            CliError::fatal(format!("path '{}' does not exist in '{}'", file_path, rev))
+                .with_stable_code(StableErrorCode::CliInvalidTarget),
+        )
+    }
 }
 
 /// Renders the commit header using the selected format.

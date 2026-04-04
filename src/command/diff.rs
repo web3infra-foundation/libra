@@ -446,10 +446,10 @@ fn render_diff_output(
         return Ok(());
     }
 
-    let mut pager = Pager::with_config(output)?;
     if rendered.is_empty() {
         return Ok(());
     }
+    let mut pager = Pager::with_config(output)?;
     let rendered = if args.name_only || args.name_status || args.numstat || args.stat {
         rendered
     } else {

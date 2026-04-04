@@ -12,7 +12,7 @@ use git_internal::{
 };
 use libra::{
     internal::{db::get_db_conn_instance, model::reference},
-    utils::{object_ext::TreeExt, pager::LIBRA_PAGER_ENV, util},
+    utils::{object_ext::TreeExt, output::OutputConfig, pager::LIBRA_PAGER_ENV, util},
 };
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use serial_test::serial;
@@ -109,6 +109,32 @@ fn test_log_json_output_includes_commit_list() {
     assert_eq!(json["command"], "log");
     assert_eq!(json["data"]["commits"][0]["subject"], "base");
     assert!(json["data"]["commits"][0]["files"].as_array().is_some());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_log_quiet_does_not_initialize_pager() {
+    if cfg!(windows) {
+        return;
+    }
+
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+    let missing_bin_dir = tempdir().unwrap();
+    let _path = test::ScopedEnvVar::set("PATH", missing_bin_dir.path());
+    let _pager = test::ScopedEnvVar::set(LIBRA_PAGER_ENV, "always");
+
+    let args = LogArgs::try_parse_from(["libra", "--oneline"]).unwrap();
+    let output = OutputConfig {
+        quiet: true,
+        ..OutputConfig::default()
+    };
+
+    let result = libra::command::log::execute_safe(args, &output).await;
+    assert!(
+        result.is_ok(),
+        "quiet log should not initialize pager: {result:?}"
+    );
 }
 
 #[test]

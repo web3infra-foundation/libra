@@ -9,7 +9,9 @@ use git_internal::internal::object::{commit::Commit, tree::Tree};
 use libra::{
     command::load_object,
     internal::{db::get_db_conn_instance, head::Head, model::reference},
-    utils::{object_ext::TreeExt, output::OutputConfig, test::ChangeDirGuard},
+    utils::{
+        error::StableErrorCode, object_ext::TreeExt, output::OutputConfig, test::ChangeDirGuard,
+    },
 };
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use serial_test::serial;
@@ -196,6 +198,57 @@ fn test_show_quiet_suppresses_human_output() {
         output.stdout.is_empty(),
         "unexpected stdout: {}",
         String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_show_quiet_still_validates_patch_generation() {
+    use libra::command::show::{ShowArgs, execute_safe};
+
+    let repo = create_committed_repo_via_cli();
+
+    let tracked_blob = {
+        let _guard = ChangeDirGuard::new(repo.path());
+        let head = Head::current_commit().await.expect("expected HEAD commit");
+        let commit: Commit = load_object(&head).expect("expected HEAD commit object");
+        let tree: Tree = load_object(&commit.tree_id).expect("expected HEAD tree");
+        tree.get_plain_items()
+            .into_iter()
+            .find(|(path, _)| path == &PathBuf::from("tracked.txt"))
+            .map(|(_, hash)| hash.to_string())
+            .expect("expected tracked.txt blob in HEAD tree")
+    };
+    std::fs::remove_file(loose_object_path(repo.path(), &tracked_blob))
+        .expect("failed to delete committed blob");
+    std::fs::write(
+        repo.path().join("tracked.txt"),
+        "mutated worktree fallback\n",
+    )
+    .expect("failed to mutate worktree file");
+
+    let _guard = ChangeDirGuard::new(repo.path());
+    let args = ShowArgs {
+        object: Some("HEAD".to_string()),
+        no_patch: false,
+        oneline: false,
+        name_only: false,
+        stat: false,
+        pathspec: vec![],
+    };
+    let output = OutputConfig {
+        quiet: true,
+        ..OutputConfig::default()
+    };
+
+    let err = execute_safe(args, &output)
+        .await
+        .expect_err("quiet show should still validate patch generation");
+    assert_eq!(err.stable_code(), StableErrorCode::RepoCorrupt);
+    assert!(
+        err.message().contains("failed to load blob object"),
+        "unexpected error: {}",
+        err.message()
     );
 }
 

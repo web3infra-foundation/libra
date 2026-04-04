@@ -456,8 +456,6 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     let path_filters: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
     let filter = CommitFilter::new(args.author.clone(), since, until, path_filters.clone());
 
-    let mut pager = Pager::with_config(output)?;
-
     let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
     let commit_hash = current_head_commit.to_string();
 
@@ -468,6 +466,8 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     if output.quiet {
         return Ok(());
     }
+
+    let mut pager = Pager::with_config(output)?;
 
     let ref_commits = if decorate_option == DecorateOptions::No {
         HashMap::new()
@@ -1108,6 +1108,8 @@ async fn create_reference_commit_map() -> HashMap<ObjectHash, Vec<Reference>> {
     let all_branches = match Branch::list_branches_result(None).await {
         Ok(branches) => branches,
         Err(error) => {
+            // Decoration is auxiliary metadata in the third-batch contract, so
+            // ref-store failures must not block primary history output.
             tracing::warn!(
                 error = %error,
                 "failed to list branches for log decoration; continuing without branch refs"

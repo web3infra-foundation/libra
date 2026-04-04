@@ -5,7 +5,10 @@
 use std::{fs, io::Write};
 
 use clap::Parser;
-use libra::command::diff::{self, DiffArgs};
+use libra::{
+    command::diff::{self, DiffArgs},
+    utils::{output::OutputConfig, pager::LIBRA_PAGER_ENV},
+};
 
 use super::*;
 
@@ -60,6 +63,27 @@ fn test_diff_machine_output_is_single_line_json() {
         serde_json::from_str(non_empty_lines[0]).expect("machine output should be valid JSON");
     assert_eq!(parsed["command"], "diff");
     assert_eq!(parsed["data"]["files_changed"], 1);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_diff_empty_output_does_not_initialize_pager() {
+    if cfg!(windows) {
+        return;
+    }
+
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+    let missing_bin_dir = tempdir().unwrap();
+    let _path = test::ScopedEnvVar::set("PATH", missing_bin_dir.path());
+    let _pager = test::ScopedEnvVar::set(LIBRA_PAGER_ENV, "always");
+
+    let args = DiffArgs::try_parse_from(["libra"]).unwrap();
+    let result = diff::execute_safe(args, &OutputConfig::default()).await;
+    assert!(
+        result.is_ok(),
+        "empty diff should not initialize pager: {result:?}"
+    );
 }
 
 #[test]
