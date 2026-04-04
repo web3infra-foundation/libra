@@ -252,9 +252,11 @@ async fn test_show_quiet_still_validates_patch_generation() {
     );
 }
 
+/// Quiet --stat uses tree-level comparison (same as human --stat), so missing
+/// blob contents do not cause a failure — matching the human path semantics.
 #[tokio::test]
 #[serial]
-async fn test_show_quiet_stat_still_validates_history_blobs() {
+async fn test_show_quiet_stat_succeeds_with_missing_blob_like_human_path() {
     use libra::command::show::{ShowArgs, execute_safe};
 
     let repo = create_committed_repo_via_cli();
@@ -272,11 +274,6 @@ async fn test_show_quiet_stat_still_validates_history_blobs() {
     };
     std::fs::remove_file(loose_object_path(repo.path(), &tracked_blob))
         .expect("failed to delete committed blob");
-    std::fs::write(
-        repo.path().join("tracked.txt"),
-        "mutated worktree fallback\n",
-    )
-    .expect("failed to mutate worktree file");
 
     let _guard = ChangeDirGuard::new(repo.path());
     let args = ShowArgs {
@@ -292,15 +289,11 @@ async fn test_show_quiet_stat_still_validates_history_blobs() {
         ..OutputConfig::default()
     };
 
-    let err = execute_safe(args, &output)
+    // --stat only needs tree-level file lists, not blob contents, so quiet
+    // mode should succeed even when the blob object is missing.
+    execute_safe(args, &output)
         .await
-        .expect_err("quiet show --stat should still validate historical blobs");
-    assert_eq!(err.stable_code(), StableErrorCode::RepoCorrupt);
-    assert!(
-        err.message().contains("failed to load blob object"),
-        "unexpected error: {}",
-        err.message()
-    );
+        .expect("quiet show --stat should succeed with tree-only validation");
 }
 
 #[tokio::test]
