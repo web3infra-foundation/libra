@@ -744,18 +744,6 @@ mod test {
     }
 
     #[test]
-    /// Tests the functionality of the `similar_diff_result` function.
-    /// Verifies that it correctly generates a diff between two text inputs.
-    fn test_similar_diff_result() {
-        let old = "Hello World\nThis is the second line.\nThis is the third.";
-        let new = "Hallo Welt\nThis is the second line.\nThis is life.\nMoar and more";
-        let mut buf = Vec::new();
-        similar_diff_result(old, new, &mut buf);
-        let result = String::from_utf8(buf).unwrap();
-        println!("{result}");
-    }
-
-    #[test]
     #[serial]
     fn test_maybe_colorize_diff_respects_flag() {
         let diff = "diff --git a/file.txt b/file.txt\n--- /dev/null\n+++ b/file.txt\n+line\n";
