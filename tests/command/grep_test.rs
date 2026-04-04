@@ -470,12 +470,14 @@ async fn test_grep_working_tree_symlink_emits_warning_and_skips_target() {
     let _guard = test::ChangeDirGuard::new(repo.path());
 
     fs::write("real.txt", "needle\n").expect("failed to write real file");
-    symlink("real.txt", "link.txt").expect("failed to create symlink");
+    fs::write("link.txt", "needle\n").expect("failed to write tracked file");
     add_and_commit(
-        "add target and tracked symlink",
+        "add target and tracked path",
         vec!["real.txt".to_string(), "link.txt".to_string()],
     )
     .await;
+    fs::remove_file("link.txt").expect("failed to remove tracked file");
+    symlink("real.txt", "link.txt").expect("failed to create symlink");
 
     let output = run_libra_command(&["--json=compact", "grep", "needle"], repo.path());
     assert_cli_success(&output, "grep should succeed while skipping symlink");
