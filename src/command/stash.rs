@@ -16,7 +16,7 @@ use git_internal::{
     internal::{
         index::{Index, Time},
         object::{
-            ObjectTrait,
+            ObjectTrait, ObjectType,
             commit::Commit,
             signature::Signature,
             tree::{Tree, TreeItem, TreeItemMode},
@@ -200,13 +200,9 @@ async fn run_push(message: Option<String>) -> Result<StashOutput, StashError> {
     let index_path = git_dir.join("index");
     let index = Index::load(&index_path).unwrap_or_else(|_| Index::new());
 
-    if Head::current_commit().await.is_none() {
-        return Err(StashError::NoInitialCommit);
-    }
-
     let head_commit_hash = Head::current_commit()
         .await
-        .ok_or_else(|| StashError::ReadObject("could not get HEAD commit hash".into()))?;
+        .ok_or(StashError::NoInitialCommit)?;
     let head_commit_hash_str = head_commit_hash.to_string();
 
     let index_tree =
@@ -299,7 +295,11 @@ async fn run_pop(stash: Option<String>) -> Result<StashOutput, StashError> {
             stash_id,
             branch,
         } => (index, stash_id, branch),
-        _ => unreachable!(),
+        other => {
+            return Err(StashError::Other(format!(
+                "internal error: expected stash apply to return StashOutput::Apply, got {other:?}",
+            )));
+        }
     };
 
     // Drop after successful apply
@@ -460,8 +460,12 @@ async fn do_apply(stash: Option<String>) -> Result<StashOutput, StashError> {
     let merged_tree = merge_trees(&base_tree, &head_tree, &stash_tree, &git_dir)
         .map_err(StashError::MergeConflict)?;
 
-    // INVARIANT: git_dir is always a child of workdir (e.g. "<repo>/.libra")
-    let workdir = git_dir.parent().unwrap();
+    let workdir = git_dir.parent().ok_or_else(|| {
+        StashError::Other(format!(
+            "internal error: storage path '{}' has no parent",
+            git_dir.display()
+        ))
+    })?;
     let index_path = git_dir.join("index");
     let mut new_index = Index::new();
 
@@ -586,10 +590,7 @@ async fn has_changes() -> bool {
             };
             commit.tree_id
         }
-        None => {
-            // INVARIANT: well-known empty tree hash is a valid hex string.
-            ObjectHash::from_str("4b825dc642cb6eb9a060e54bf8d69288fbee4904").unwrap()
-        }
+        None => ObjectHash::from_type_and_data(ObjectType::Tree, &[]),
     };
 
     let index_path = git_dir.join("index");
@@ -605,8 +606,9 @@ async fn has_changes() -> bool {
         return true;
     }
 
-    // INVARIANT: git_dir is always a child of workdir (e.g. "<repo>/.libra")
-    let workdir = git_dir.parent().unwrap();
+    let Some(workdir) = git_dir.parent() else {
+        return false;
+    };
     for entry in index.tracked_entries(0) {
         let file_path = workdir.join(&entry.name);
 
@@ -784,11 +786,16 @@ fn create_tree_from_workdir(workdir: &Path, git_dir: &Path, index: &Index) -> Re
         for entry in entries {
             let entry = entry.map_err(|e| e.to_string())?;
             let path = entry.path();
-            // INVARIANT: `read_dir` entries always have a file name component.
-            let file_name = path.file_name().unwrap().to_str().unwrap().to_string();
+            let file_name = path
+                .file_name()
+                .ok_or_else(|| format!("entry has no file name: {}", path.display()))?
+                .to_str()
+                .ok_or_else(|| format!("invalid path encoding: {}", path.display()))?
+                .to_string();
 
-            // Skip .libra and other hidden directories/files
-            if file_name.starts_with('.') {
+            // Skip only Libra's metadata directory. User-managed dotfiles such
+            // as `.gitignore`, `.env`, or `.config/*` must remain stashed.
+            if path == git_dir {
                 continue;
             }
 
@@ -804,10 +811,15 @@ fn create_tree_from_workdir(workdir: &Path, git_dir: &Path, index: &Index) -> Re
                 items.push(TreeItem::new(TreeItemMode::Tree, subtree_hash, file_name));
             } else if path.is_file() {
                 let metadata = fs::metadata(&path).map_err(|e| e.to_string())?;
-                // INVARIANT: `path` is obtained by traversing `workdir`, so
-                // `strip_prefix` always succeeds.
-                let relative_path = path.strip_prefix(workdir).unwrap();
-                let relative_path_str = relative_path.to_str().unwrap();
+                let relative_path = path.strip_prefix(workdir).map_err(|e| {
+                    format!(
+                        "failed to strip workdir prefix from {}: {e}",
+                        path.display()
+                    )
+                })?;
+                let relative_path_str = relative_path
+                    .to_str()
+                    .ok_or_else(|| format!("invalid path encoding: {}", relative_path.display()))?;
 
                 if let Some(entry) = index.get(relative_path_str, 0) {
                     let mtime = Time::from_system_time(
@@ -859,6 +871,8 @@ fn merge_trees(base: &Tree, head: &Tree, stash: &Tree, git_dir: &Path) -> Result
     let stash_items = tree::get_tree_files_recursive(stash, git_dir, &PathBuf::new())?;
     let mut conflicts = Vec::new();
 
+    // Replay only paths changed by the stash snapshot. If HEAD diverged from
+    // the stash base in a different way, stop instead of overwriting newer work.
     for (path, stash_item) in stash_items.iter() {
         let base_item = base_items.get(path);
         let head_item = head_items.get(path);

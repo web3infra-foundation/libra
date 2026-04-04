@@ -289,6 +289,13 @@ fn map_checkout_error(source: RestoreError) -> CliError {
                 .with_stable_code(StableErrorCode::RepoStateInvalid)
                 .with_hint("working tree checkout target could not be resolved")
         }
+        RestoreError::PathspecNotMatched(_) => {
+            CliError::fatal("working tree checkout referenced a path that was not present")
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+                .with_hint(
+                    "the fetched tree is inconsistent; retry the clone or inspect the remote",
+                )
+        }
         RestoreError::ReadIndex | RestoreError::ReadObject | RestoreError::InvalidPathEncoding => {
             CliError::fatal("failed to read repository state while checking out the working tree")
                 .with_stable_code(StableErrorCode::IoReadFailed)

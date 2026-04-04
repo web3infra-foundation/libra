@@ -362,6 +362,37 @@ async fn test_revert_root_commit() {
     println!("Root commit revert test passed");
 }
 
+#[test]
+#[serial]
+fn test_revert_json_output_reports_files_changed() {
+    let repo = create_committed_repo_via_cli();
+    let tracked_path = repo.path().join("tracked.txt");
+
+    fs::write(&tracked_path, "updated\n").unwrap();
+    let output = run_libra_command(&["add", "tracked.txt"], repo.path());
+    assert_cli_success(&output, "failed to stage modified tracked.txt");
+    let output = run_libra_command(
+        &["commit", "-m", "update tracked", "--no-verify"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "failed to commit modified tracked.txt");
+
+    let output = run_libra_command(&["revert", "--json", "HEAD"], repo.path());
+    assert_cli_success(&output, "revert --json should succeed");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "revert");
+    assert_eq!(json["data"]["no_commit"], false);
+    assert_eq!(json["data"]["files_changed"], 1);
+    assert!(json["data"]["reverted_commit"].as_str().is_some());
+    assert!(json["data"]["new_commit"].as_str().is_some());
+    assert_eq!(
+        fs::read_to_string(&tracked_path).unwrap(),
+        "tracked\n",
+        "revert should restore the previous file content"
+    );
+}
+
 /// Test error cases for revert command
 /// This ensures the command handles invalid input gracefully
 #[tokio::test]

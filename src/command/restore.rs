@@ -54,6 +54,8 @@ pub enum RestoreError {
     ResolveSource,
     #[error("reference is not a commit")]
     ReferenceNotCommit,
+    #[error("pathspec '{0}' did not match any files")]
+    PathspecNotMatched(String),
     #[error("failed to read index")]
     ReadIndex,
     #[error("failed to read object")]
@@ -69,11 +71,9 @@ pub enum RestoreError {
 impl RestoreError {
     fn stable_code(&self) -> StableErrorCode {
         match self {
-            // ResolveSource / ReferenceNotCommit are runtime failures (the ref
-            // doesn't exist at this moment), not CLI-usage errors, so they map
-            // to IO/Repo codes that produce exit-128 rather than exit-129.
-            Self::ResolveSource => StableErrorCode::IoReadFailed,
-            Self::ReferenceNotCommit => StableErrorCode::IoReadFailed,
+            Self::ResolveSource => StableErrorCode::CliInvalidTarget,
+            Self::ReferenceNotCommit => StableErrorCode::CliInvalidTarget,
+            Self::PathspecNotMatched(_) => StableErrorCode::CliInvalidTarget,
             Self::ReadIndex => StableErrorCode::IoReadFailed,
             Self::ReadObject => StableErrorCode::IoReadFailed,
             Self::InvalidPathEncoding => StableErrorCode::CliInvalidArguments,
@@ -90,10 +90,15 @@ impl From<RestoreError> for CliError {
         match error {
             RestoreError::ResolveSource => CliError::fatal(message)
                 .with_stable_code(stable_code)
+                .with_exit_code(128)
                 .with_hint("check that the source ref exists with 'libra log'"),
             RestoreError::ReferenceNotCommit => CliError::fatal(message)
                 .with_stable_code(stable_code)
+                .with_exit_code(128)
                 .with_hint("only commit references can be used as restore source"),
+            RestoreError::PathspecNotMatched(_) => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_hint("check the path and try again"),
             RestoreError::LfsDownload => CliError::fatal(message)
                 .with_stable_code(stable_code)
                 .with_hint("check LFS server availability"),
@@ -182,14 +187,16 @@ async fn run_restore(args: RestoreArgs) -> Result<RestoreOutput, RestoreError> {
     }
     if staged {
         let (restored, deleted) = restore_index_tracked(&paths, &target_blobs)?;
-        // Merge without duplicating
+        let mut restored_seen: HashSet<String> = restored_files.iter().cloned().collect();
+        let mut deleted_seen: HashSet<String> = deleted_files.iter().cloned().collect();
+
         for f in restored {
-            if !restored_files.contains(&f) {
+            if restored_seen.insert(f.clone()) {
                 restored_files.push(f);
             }
         }
         for f in deleted {
-            if !deleted_files.contains(&f) {
+            if deleted_seen.insert(f.clone()) {
                 deleted_files.push(f);
             }
         }
@@ -283,7 +290,7 @@ async fn restore_worktree_tracked(
                 .iter()
                 .any(|(p, _)| util::is_sub_path(p.workdir_to_absolute(), path))
         {
-            return Err(RestoreError::ResolveSource);
+            return Err(pathspec_not_matched(path));
         }
     }
 
@@ -302,7 +309,7 @@ async fn restore_worktree_tracked(
                 restore_to_file_typed(&target_map[path_wd], path_wd).await?;
                 restored.push(path_wd.display().to_string());
             } else {
-                return Err(RestoreError::ResolveSource);
+                return Err(pathspec_not_matched(path_wd));
             }
         } else {
             let path_wd_str = path_to_utf8_typed(path_wd)?;
@@ -356,7 +363,7 @@ fn restore_index_tracked(
                 ));
                 restored.push(path.display().to_string());
             } else {
-                return Err(RestoreError::ResolveSource);
+                return Err(pathspec_not_matched(path));
             }
         } else if target_map.contains_key(path) {
             let hash = target_map[path];
@@ -635,6 +642,10 @@ fn path_to_utf8_typed(path: &Path) -> Result<&str, RestoreError> {
     path.to_str().ok_or(RestoreError::InvalidPathEncoding)
 }
 
+fn pathspec_not_matched(path: &Path) -> RestoreError {
+    RestoreError::PathspecNotMatched(path.display().to_string())
+}
+
 async fn restore_to_file_typed(hash: &ObjectHash, path: &PathBuf) -> Result<(), RestoreError> {
     let blob = load_object::<Blob>(hash).map_err(|_| RestoreError::ReadObject)?;
     let path_abs = util::workdir_to_absolute(path);
@@ -743,7 +754,10 @@ pub async fn restore_worktree(
             if target_blobs.contains_key(path_wd) {
                 restore_to_file(&target_blobs[path_wd], path_wd).await?;
             } else {
-                unreachable!("It should be checked before");
+                return Err(io::Error::other(format!(
+                    "pathspec '{}' did not match any files",
+                    path_wd.display()
+                )));
             }
         } else {
             let path_wd_str = path_to_utf8(path_wd)?;
@@ -775,7 +789,7 @@ async fn restore_worktree_legacy_typed(
                 .iter()
                 .any(|(p, _)| util::is_sub_path(p.workdir_to_absolute(), path))
         {
-            return Err(RestoreError::ResolveSource);
+            return Err(pathspec_not_matched(path));
         }
     }
 
@@ -790,7 +804,7 @@ async fn restore_worktree_legacy_typed(
             if target_blobs.contains_key(path_wd) {
                 restore_to_file_typed(&target_blobs[path_wd], path_wd).await?;
             } else {
-                return Err(RestoreError::ResolveSource);
+                return Err(pathspec_not_matched(path_wd));
             }
         } else {
             let path_wd_str = path_to_utf8_typed(path_wd)?;
@@ -884,7 +898,7 @@ fn restore_index_legacy_typed(
                     blob.data.len() as u32,
                 ));
             } else {
-                return Err(RestoreError::ResolveSource);
+                return Err(pathspec_not_matched(path));
             }
         } else if target_blobs.contains_key(path) {
             let hash = target_blobs[path];

@@ -1,12 +1,12 @@
-# Restore 命令���进详细计划
+# Restore 命令改进详细计划
 
 ## 所属批次
 
-第四批：暂存与撤���命令（P1 ��致性修复）
+第四批：暂存与撤销命令（P1 一致性修复）
 
-## 已完成前置���件与当前代码状态
+## 已完成前置条件与当前代码状态
 
-### 当前代码已���备
+### 当前代码已具备
 - `RestoreError` typed enum（7 变体）：`ResolveSource`、`ReferenceNotCommit`、`ReadIndex`、`ReadObject`、`InvalidPathEncoding`、`WriteWorktree`、`LfsDownload`
 - `execute_checked()` + `execute_checked_typed()` 双路径实现
 - pathspec 过滤、LFS 支持、worktree/staged 目标
@@ -71,6 +71,6 @@ human 模式输出确认消息：`"Updated N paths from {source}"`
 ## 验证方式
 
 1. `cargo +nightly fmt --all --check` 无格式差异
-2. `cargo clippy --all-targets --all-features -- -D warnings` 无警��
+2. `cargo clippy --all-targets --all-features -- -D warnings` 无警告
 3. `cargo test restore_test` 全部通过
 4. `libra restore --json --source HEAD file.txt` 输出合法 JSON

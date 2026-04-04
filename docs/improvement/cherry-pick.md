@@ -1,8 +1,8 @@
-# Cherry-Pick 命令改���详细计划
+# Cherry-Pick 命令改进详细计划
 
-## ��属批次
+## 所属批次
 
-第四批：���存与撤销命令（P1 一致性修复）
+第四批：暂存与撤销命令（P1 一致性修复）
 
 ## 已完成前置条件与当前代码状态
 
@@ -39,12 +39,12 @@
 | `SaveFailed(String)` | 对象/索引保存失败 | `IoWriteFailed` |
 | `UpdateHead(String)` | HEAD 更新失败 | `IoWriteFailed` |
 
-### 特��� 2：`run_cherry_pick()` + `render_cherry_pick_output()` 分层
+### 特性 2：`run_cherry_pick()` + `render_cherry_pick_output()` 分层
 
 - `run_cherry_pick(args) -> Result<CherryPickOutput, CherryPickError>`
 - `render_cherry_pick_output(result, output) -> CliResult<()>`
 
-### 特性 3：`CherryPickOutput` 结构化���出
+### 特性 3：`CherryPickOutput` 结构化输出
 
 ```rust
 #[derive(Debug, Clone, Serialize)]

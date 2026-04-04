@@ -149,6 +149,81 @@ async fn test_stash_push_and_pop() {
 
 #[tokio::test]
 #[serial]
+async fn test_stash_push_and_pop_preserves_dotfiles() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    fs::create_dir_all(".config").unwrap();
+    fs::write(".gitignore", "target/\n").unwrap();
+    fs::write(".config/tool.toml", "mode = \"base\"\n").unwrap();
+
+    add::execute(AddArgs {
+        pathspec: vec![".gitignore".to_string(), ".config/tool.toml".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Track dotfiles".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await;
+
+    fs::write(".gitignore", "target/\n.env\n").unwrap();
+    fs::write(".config/tool.toml", "mode = \"stashed\"\n").unwrap();
+
+    let output = run_libra_command(&["stash", "push"], temp_path.path());
+    assert!(
+        output.status.success(),
+        "stash push failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(".gitignore").unwrap(),
+        "target/\n",
+        "dotfile should be restored after stash push"
+    );
+    assert_eq!(
+        fs::read_to_string(".config/tool.toml").unwrap(),
+        "mode = \"base\"\n",
+        "dot-directory content should be restored after stash push"
+    );
+
+    let output = run_libra_command(&["stash", "pop"], temp_path.path());
+    assert!(
+        output.status.success(),
+        "stash pop failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(".gitignore").unwrap(),
+        "target/\n.env\n",
+        "dotfile change should round-trip through stash"
+    );
+    assert_eq!(
+        fs::read_to_string(".config/tool.toml").unwrap(),
+        "mode = \"stashed\"\n",
+        "dot-directory change should round-trip through stash"
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_stash_list() {
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;

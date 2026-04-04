@@ -1,12 +1,12 @@
-# Revert 命令改���详细计划
+# Revert 命令改进详细计划
 
 ## 所属批次
 
 第四批：暂存与撤销命令（P1 一致性修复）
 
-## 已完��前置条件与当前代��状态
+## 已完成前置条件与当前代码状态
 
-### 当前��码已具备
+### 当前代码已具备
 - 基本 revert 逻辑：三方合并、反向补丁、root commit 处理
 - `--no-commit` 标志
 - 确认消息（"Revert commit ..."）
@@ -23,7 +23,7 @@
 
 ## 改进内容
 
-### ��性 1：`RevertError` typed enum + `StableErrorCode` 映射
+### 特性 1：`RevertError` typed enum + `StableErrorCode` 映射
 
 | 变体 | 触发条件 | StableErrorCode |
 |------|---------|-----------------|

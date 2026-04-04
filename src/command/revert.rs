@@ -1,6 +1,10 @@
 //! Implements the revert command by parsing targets, reversing commit changes into the index/worktree, and optionally creating a new commit.
 
-use std::{collections::HashSet, fs, path::PathBuf};
+use std::{
+    collections::HashSet,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use clap::Parser;
 use git_internal::{
@@ -61,6 +65,9 @@ enum RevertError {
     #[error("failed to save object: {0}")]
     SaveObject(String),
 
+    #[error("failed to write worktree: {0}")]
+    WriteWorktree(String),
+
     #[error("failed to save index: {0}")]
     IndexSave(String),
 
@@ -78,6 +85,7 @@ impl RevertError {
             Self::Conflict { .. } => StableErrorCode::ConflictUnresolved,
             Self::LoadObject(_) => StableErrorCode::IoReadFailed,
             Self::SaveObject(_) => StableErrorCode::IoWriteFailed,
+            Self::WriteWorktree(_) => StableErrorCode::IoWriteFailed,
             Self::IndexSave(_) => StableErrorCode::IoWriteFailed,
             Self::UpdateHead(_) => StableErrorCode::IoWriteFailed,
         }
@@ -248,6 +256,8 @@ async fn revert_single_commit(
             continue;
         }
 
+        // Only revert paths that still match the commit being reverted; later
+        // edits would be clobbered otherwise, so surface them as conflicts.
         if current_files.get(path) != Some(&reverted_hash) && current_files.contains_key(path) {
             return Err(RevertError::Conflict {
                 path: path.display().to_string(),
@@ -304,11 +314,17 @@ async fn build_tree_from_map(
                 if relative_path.components().count() == 1 {
                     tree_items.push(git_internal::internal::object::tree::TreeItem {
                         mode: git_internal::internal::object::tree::TreeItemMode::Blob,
-                        name: relative_path.to_str().unwrap().to_string(),
+                        name: path_to_utf8(relative_path)?.to_string(),
                         id: *hash,
                     });
                 } else {
-                    let subdir = current_dir.join(relative_path.components().next().unwrap());
+                    let subdir_component = relative_path.components().next().ok_or_else(|| {
+                        RevertError::LoadObject(format!(
+                            "missing path component for {}",
+                            path.display()
+                        ))
+                    })?;
+                    let subdir = current_dir.join(subdir_component);
                     subdirs
                         .entry(subdir)
                         .or_insert_with(Vec::new)
@@ -320,7 +336,7 @@ async fn build_tree_from_map(
             let subdir_tree = build_subtree(&subdir_files.into_iter().collect(), &subdir)?;
             tree_items.push(git_internal::internal::object::tree::TreeItem {
                 mode: git_internal::internal::object::tree::TreeItemMode::Tree,
-                name: subdir.file_name().unwrap().to_str().unwrap().to_string(),
+                name: file_name_to_utf8(&subdir)?,
                 id: subdir_tree.id,
             });
         }
@@ -401,25 +417,54 @@ fn reset_workdir_safely(current_index: &Index, new_index: &Index) -> Result<(), 
         if !new_tracked_paths.contains(&path_buf) {
             let full_path = workdir.join(path_buf);
             if full_path.exists() {
-                fs::remove_file(&full_path).map_err(|e| RevertError::SaveObject(e.to_string()))?;
+                fs::remove_file(&full_path).map_err(|e| {
+                    RevertError::WriteWorktree(format!(
+                        "failed to remove '{}': {e}",
+                        full_path.display()
+                    ))
+                })?;
             }
         }
     }
 
     for path_buf in new_index.tracked_files() {
-        let path_str = path_buf.to_str().unwrap();
+        let path_str = path_to_utf8(&path_buf)?;
         if let Some(entry) = new_index.get(path_str, 0) {
             let blob = git_internal::internal::object::blob::Blob::load(&entry.hash);
             let target_path = workdir.join(path_str);
             if let Some(parent) = target_path.parent() {
-                fs::create_dir_all(parent).map_err(|e| RevertError::SaveObject(e.to_string()))?;
+                fs::create_dir_all(parent).map_err(|e| {
+                    RevertError::WriteWorktree(format!(
+                        "failed to create directory '{}': {e}",
+                        parent.display()
+                    ))
+                })?;
             }
-            fs::write(&target_path, &blob.data)
-                .map_err(|e| RevertError::SaveObject(e.to_string()))?;
+            fs::write(&target_path, &blob.data).map_err(|e| {
+                RevertError::WriteWorktree(format!(
+                    "failed to write '{}': {e}",
+                    target_path.display()
+                ))
+            })?;
         }
     }
 
     Ok(())
+}
+
+fn path_to_utf8(path: &Path) -> Result<&str, RevertError> {
+    path.to_str().ok_or_else(|| {
+        RevertError::LoadObject(format!("invalid path encoding: {}", path.display()))
+    })
+}
+
+fn file_name_to_utf8(path: &Path) -> Result<String, RevertError> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            RevertError::LoadObject(format!("invalid file name encoding: {}", path.display()))
+        })
 }
 
 async fn create_revert_commit(

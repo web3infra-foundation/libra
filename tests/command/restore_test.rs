@@ -34,12 +34,34 @@ fn test_restore_source_head_unborn_returns_error_without_falling_back() {
     let output = run_libra_command(&["restore", "--source", "HEAD", "tracked.txt"], repo.path());
     assert_eq!(output.status.code(), Some(128));
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("fatal:"), "unexpected stderr: {stderr}");
+    let (human, report) = parse_cli_error_stderr(&output.stderr);
+    assert!(
+        human.contains("fatal: failed to resolve checkout source"),
+        "unexpected stderr: {human}"
+    );
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert_eq!(report.exit_code, 128);
 
     let content = std::fs::read_to_string(repo.path().join("tracked.txt"))
         .expect("failed to read tracked file");
     assert_eq!(content, "modified\n");
+}
+
+#[test]
+#[serial]
+fn test_restore_missing_pathspec_returns_cli_invalid_target() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["restore", "missing.txt"], repo.path());
+    assert_eq!(output.status.code(), Some(129));
+
+    let (human, report) = parse_cli_error_stderr(&output.stderr);
+    assert!(
+        human.contains("fatal: pathspec 'missing.txt' did not match any files"),
+        "unexpected stderr: {human}"
+    );
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert_eq!(report.exit_code, 129);
 }
 
 #[tokio::test]
