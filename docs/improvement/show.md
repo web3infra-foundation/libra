@@ -1,12 +1,14 @@
 ## Show 命令改进详细计划
 
-> 最后编写时间：2026-03-30
+> 最后编写时间：2026-04-04
 
 同时落地 [Cross-Cutting Improvements A/B/F/G](README.md#全局层面改进贯穿所有命令)。
 
 ### 已完成前置条件与当前代码状态
 
 第一批全部 8 个命令的主改造已在当前代码库落地。`show` 是第三批（历史查询命令）中展示任意 Git 对象的通用命令。
+
+> 当前工作区实现已按本文范围落地一部分改动；以下内容改为记录已落地能力、剩余遗漏和后续收口项。
 
 **已确认落地的基线：**
 
@@ -18,24 +20,36 @@
 - `--no-patch` / `--oneline` / `--name-only` / `--stat` / pathspec 已实现
 - show 支持 commit、tag（annotated + lightweight）、tree、blob 四种对象类型
 - 复用 `log.rs` 的 `generate_diff()` 和 `get_changed_files_for_commit()` 函数
-- `show_bad_revision_error()` 已有 `.with_hint()` 但**缺少** `.with_stable_code()`（`show.rs:333`）
+- `run_show()` + `ShowOutput` 已落地，`--json` / `--machine` 已可返回 commit/tag/tree/blob 四类结构化结果
+- `show_bad_revision_error()` 已补齐 `.with_stable_code(StableErrorCode::CliInvalidTarget)`
+- `--quiet` 已接入执行层：quiet 模式会保留校验/失败语义，但不输出 human 内容
+- commit JSON 中的 refs 已改为 best-effort 收集：无关 branch/tag 元数据损坏不会再阻塞 `show`
+- commit patch / stat 路径在历史 blob 缺失时已改为显式 `RepoCorrupt` 失败，不再错误回退到工作区内容
+- `--help` EXAMPLES 已落地，`tests/command/show_test.rs` 已覆盖 bad ref 错误码、JSON schema、quiet 和 refs 回归
 
-**基于当前代码的 Review 结论（show 仍需改进的部分）：**
+**基于当前代码的 Review 结论（已改进部分 vs 仍需改进部分）：**
 
-- **零 JSON / machine 输出**：`OutputConfig` 参数标记为 `_output` 完全未使用（`show.rs:66`）
-- **零 `StableErrorCode`**：所有错误使用 `CliError::fatal()` 无显式错误码；`show_bad_revision_error()` 有 hint 但无 stable code
-- **无 `ShowError` typed enum**：错误散落在多个 `show_*` 函数内部
-- **测试期望 `LBR-CLI-003` 但代码未赋值**：`show_test.rs:140` 和 `show_test.rs:352` 期望 stable code `LBR-CLI-003`（`CliInvalidTarget`），但 `show_bad_revision_error()` 未调用 `.with_stable_code()`
+已改进（当前代码已具备）：
+
+- **JSON / machine 输出已落地**：`run_show()` + `ShowOutput` 已覆盖 commit/tag/tree/blob 四类对象
+- **主要错误码已显式映射**：bad revision、path not found、object load failure 等路径已带 `StableErrorCode`
+- **`--quiet` 契约已补齐**：quiet 模式不会再继续走 human 渲染分支
+- **refs 查询已改为 best-effort**：无关 HEAD/branch/tag 元数据错误不再导致 `show <commit>` 整体失败
+- **命令文档已与实现对齐**：`docs/commands/show.md` 已记录对象类型 schema 与错误码
+
+仍需改进：
+
+- **尚未引入统一 `ShowError` + human render split**：这属于内部统一重构，已从第三批用户契约中拆出，留待后续跨命令 error/render 收口统一处理
+- **计划文档后文仍保留完整设计稿写法**：后续可继续收口为“现状 + follow-up”格式，但不阻塞第三批验收
 
 ### 目标与非目标
 
-**本批目标：**
-- 引入 `ShowError` typed error enum，覆盖所有对象类型的展示错误
-- 所有 `ShowError → CliError` 映射使用显式 `StableErrorCode`
-- 拆分执行层与渲染层：新增 `run_show(args) -> Result<ShowOutput, ShowError>` 纯执行入口
-- 实现 JSON 输出，根据对象类型返回不同结构（commit、tag、tree、blob）
-- 修复 `show_bad_revision_error()` 缺失的 `.with_stable_code(StableErrorCode::CliInvalidTarget)`
-- 补齐 `--help` EXAMPLES 段
+**已完成目标：**
+- `run_show()` / `ShowOutput`、JSON / machine 输出、`show_bad_revision_error()` 的稳定错误码、`--quiet`、refs best-effort、历史 blob 损坏显式失败和 `--help` EXAMPLES 已落地
+
+**后续收口目标：**
+- 统一 `ShowError` / human render split 到后续跨命令 error/render 收口项
+- 继续用回归测试锁住 refs best-effort、pathspec JSON、tree/blob schema 和 patch/stat strict failure 等对外契约
 
 **本批非目标：**
 - **不引入 `--pretty` 格式支持**。log 的 `--pretty` 自定义模板在 show 中不适用（show 面向多种对象类型）

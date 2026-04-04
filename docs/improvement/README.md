@@ -14,8 +14,8 @@
 - `add` 命令主改造已落地：`run_add()` → `AddOutput` 执行层/渲染层拆分、JSON/machine 输出、显式 `StableErrorCode`、warning 接入共享 tracker
 - `status` 命令主改造已落地：`StatusData` 共享数据层、upstream tracking、`--exit-code` 标志、显式 `StableErrorCode`
 
-**已有 JSON 输出的命令（面向终端用户的高层命令）：** commit, status, branch, config, init, clone, add, push, pull, switch（底层命令如 `cat-file`、`show-ref` 也已支持 JSON，但未纳入本优先级列表）
-**已用 StableErrorCode 的命令：** init, clone, add, status, commit, push, pull, switch, shortlog, lfs, code（共 11 个）
+**已有 JSON 输出的命令（面向终端用户的高层命令）：** commit, status, branch, config, init, clone, add, push, pull, switch, reset, tag，以及第三批已落地的 `log` / `diff` / `show` / `blame`（底层命令如 `cat-file`、`show-ref` 也已支持 JSON，但未纳入本优先级列表）
+**主要错误路径已接入 StableErrorCode 的命令：** init, clone, add, status, commit, push, pull, switch, reset, tag, branch, show, log, diff, blame, shortlog, lfs, code
 
 ---
 
@@ -87,12 +87,19 @@
 
 | 顺序 | 命令 | 当前状态 | 改进重点 |
 |------|------|--------|--------|
-| **13** | `log` | 明确拒绝 --json | 实现 JSON 输出（结构化提交列表）；保持 --oneline/--graph |
-| **14** | `diff` | 无 JSON | JSON 输出（hunk 级别结构化）；--numstat/--name-only |
-| **15** | `show` | 有 --oneline/-s | JSON 输出；错误码 |
-| **16** | `blame` | 与 Git 一致 | JSON 输出 |
+| **13** | `log` | ✅ 第三批用户契约已落地：JSON / machine、稳定错误码、`run_log()`、`--help` EXAMPLES、decorate refs best-effort、历史 blob 损坏显式失败 | 后续仅维护回归测试和文档同步；完整 `LogError` / human render split 归入后续跨命令 error/render 收口，不再阻塞第三批验收 |
+| **14** | `diff` | ✅ 主改造已落地：`DiffError`、`run_diff()` / render split、JSON / machine、`--name-only` / `--name-status` / `--numstat` / `--stat`、`--quiet` exit code、`--help` EXAMPLES | 后续仅维护大 diff 性能回归和 pager / TTY 细节 |
+| **15** | `show` | ✅ 第三批用户契约已落地：JSON / machine、稳定错误码、`run_show()`、`--quiet` 契约、refs best-effort、历史 blob 损坏显式失败 | 后续仅维护回归测试和文档同步；完整 `ShowError` / human render split 归入后续跨命令 error/render 收口，不再阻塞第三批验收 |
+| **16** | `blame` | ✅ 主改造已落地：`BlameError`、`run_blame()`、JSON / machine、`-L` 结构化输出、`--help` EXAMPLES | 后续仅维护 blame 归属正确性、范围过滤和边界回归 |
 
 **理由：** Agent 需要从历史/差异中提取结构化信息来决策。log --json 是 MCP 维度最关键的改进。
+
+**第三批基于 Review 的计划修订：**
+
+- `diff` 负责 hunk / patch 级结构化输出；`log` / `show` 的 JSON 只保留提交元数据和文件变更摘要，避免 schema 重叠、重复计算和用户认知冲突。
+- `log` / `show` 中的 refs / decoration 元数据属于辅助信息，按用户习惯改为 best-effort；commit / tree / blob 主体对象读取保持 strict，历史对象损坏必须显式失败，禁止回退到工作区内容。
+- `--quiet` 对历史查询命令统一解释为“只抑制 human stdout，不跳过校验和退出语义”；`diff --quiet` 仍以 exit `1` 表示存在差异，即使同时写入 `--output` 文件。
+- 第三批验收以“对外契约完整、测试覆盖到 review 回归、命令文档与实现一致”为准；`LogError` / `ShowError` 这类内部统一重构保留为后续跨命令 error/render 收口项，不再与第三批用户契约绑定。
 
 ### 第四批：暂存与撤销命令（P1 一致性修复）
 
@@ -182,13 +189,13 @@
 - [Pull 命令改进详细计划](pull.md) ✅ 已落地
 - [Switch 命令改进详细计划](switch.md) ✅ 已落地
 - [Checkout 命令改进详细计划（第二批兼容收口）](checkout.md) ✅ 已落地（完整现代化留第六批）
-- [Reset 命令改进详细计划](reset.md)
-- [Tag 命令改进详细计划](tag.md)
-- [Branch 命令改进详细计划](branch.md)
-- [Log 命令改进详细计划](log.md)
-- [Diff 命令改进详细计划](diff.md)
-- [Show 命令改进详细计划](show.md)
-- [Blame 命令改进详细计划](blame.md)
+- [Reset 命令改进详细计划](reset.md) ✅ 已落地
+- [Tag 命令改进详细计划](tag.md) ✅ 已落地
+- [Branch 命令改进详细计划](branch.md) ✅ 已落地（仍有少量 legacy wrapper 待继续迁移）
+- [Log 命令改进详细计划](log.md) ✅ 已落地（内部统一重构留后续全局收口）
+- [Diff 命令改进详细计划](diff.md) ✅ 已落地
+- [Show 命令改进详细计划](show.md) ✅ 已落地（内部统一重构留后续全局收口）
+- [Blame 命令改进详细计划](blame.md) ✅ 已落地
 
 ## 命令改进实施记录
 

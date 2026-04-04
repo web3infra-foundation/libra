@@ -10,6 +10,8 @@ Human mode remains:
 abc12345 (Author Name     2026-03-30 10:00:00 +0800 1) line content
 ```
 
+`--quiet` validates the revision / file / line range but suppresses human output.
+
 `-L` supports:
 
 - `10`
@@ -31,7 +33,7 @@ abc12345 (Author Name     2026-03-30 10:00:00 +0800 1) line content
         "short_hash": "abc12345",
         "hash": "abc123...",
         "author": "Test User",
-        "date": "1711766400",
+        "date": "2026-03-30T10:00:00+08:00",
         "content": "tracked"
       }
     ]
@@ -41,6 +43,7 @@ abc12345 (Author Name     2026-03-30 10:00:00 +0800 1) line content
 
 ## Errors
 
+- Outside a repository: `LBR-REPO-001`
 - Invalid revision or missing file: `LBR-CLI-003`
 - Invalid `-L` range: `LBR-CLI-002`
 - Failed to read the commit or object: `LBR-REPO-002`

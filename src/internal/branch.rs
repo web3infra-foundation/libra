@@ -139,6 +139,46 @@ impl Branch {
         Ok(resolved)
     }
 
+    /// Best-effort branch listing that skips corrupt rows instead of failing
+    /// the entire query. Useful for decoration metadata (log/show refs) where
+    /// partial results are more valuable than an empty set.
+    pub async fn list_branches_best_effort(remote: Option<&str>) -> Vec<Self> {
+        let db_conn = get_db_conn_instance().await;
+        let branches = match reference::Entity::find()
+            .filter(reference::Column::Kind.eq(reference::ConfigKind::Branch))
+            .filter(match remote {
+                Some(r) => reference::Column::Remote.eq(r),
+                None => reference::Column::Remote.is_null(),
+            })
+            .all(&db_conn)
+            .await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "failed to query branches for decoration"
+                );
+                return Vec::new();
+            }
+        };
+
+        let mut resolved = Vec::new();
+        for branch in branches {
+            match branch_from_model(branch) {
+                Ok(Some(branch)) => resolved.push(branch),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "skipping corrupt branch row in decoration"
+                    );
+                }
+            }
+        }
+        resolved
+    }
+
     /// Lossy compatibility wrapper. Prefer `list_branches_result_with_conn` in
     /// production paths so storage failures are not downgraded to an empty list.
     pub async fn list_branches_with_conn<C>(db: &C, remote: Option<&str>) -> Vec<Self>
