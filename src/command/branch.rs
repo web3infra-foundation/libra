@@ -889,15 +889,26 @@ mod tests {
     use std::str::FromStr;
 
     use git_internal::hash::{ObjectHash, get_hash_kind};
+    use serial_test::serial;
 
     use super::{Branch, format_branch_name};
+
+    struct ColorOverrideReset;
+
+    impl Drop for ColorOverrideReset {
+        fn drop(&mut self) {
+            colored::control::unset_override();
+        }
+    }
 
     fn any_hash() -> ObjectHash {
         ObjectHash::from_str(&ObjectHash::zero_str(get_hash_kind())).unwrap()
     }
 
     #[test]
+    #[serial]
     fn test_format_branch_name_with_full_remote_ref() {
+        let _guard = ColorOverrideReset;
         colored::control::set_override(false);
         let branch = Branch {
             name: "refs/remotes/origin/main".to_string(),
@@ -909,7 +920,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_format_branch_name_with_short_remote_ref() {
+        let _guard = ColorOverrideReset;
         colored::control::set_override(false);
         let branch = Branch {
             name: "main".to_string(),

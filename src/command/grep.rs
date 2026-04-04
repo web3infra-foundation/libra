@@ -811,7 +811,19 @@ fn colorize_match(line: &str, matcher: &regex::Regex) -> String {
 }
 
 #[cfg(test)]
+struct ColorOverrideReset;
+
+#[cfg(test)]
+impl Drop for ColorOverrideReset {
+    fn drop(&mut self) {
+        colored::control::unset_override();
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    use serial_test::serial;
+
     use super::*;
 
     #[test]
@@ -959,7 +971,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_colorize_match_basic() {
+        let _guard = ColorOverrideReset;
         colored::control::set_override(true);
         let line = "hello world hello";
         let matcher = regex::Regex::new("hello").unwrap();
@@ -968,12 +982,13 @@ mod tests {
             .unwrap()
             .replace_all(&colored, "");
         assert_eq!(plain, "hello world hello");
-        assert_ne!(colored, line);
-        colored::control::unset_override();
+        assert!(colored.contains("\u{1b}["));
     }
 
     #[test]
+    #[serial]
     fn test_colorize_match_regex_highlights_full_match() {
+        let _guard = ColorOverrideReset;
         colored::control::set_override(true);
         let line = "foo123bar baz";
         let matcher = regex::Regex::new(r"foo\d+bar").unwrap();
@@ -982,12 +997,13 @@ mod tests {
             .unwrap()
             .replace_all(&colored, "");
         assert_eq!(plain, "foo123bar baz");
-        assert_ne!(colored, line);
-        colored::control::unset_override();
+        assert!(colored.contains("\u{1b}["));
     }
 
     #[test]
+    #[serial]
     fn test_colorize_match_case_insensitive() {
+        let _guard = ColorOverrideReset;
         colored::control::set_override(true);
         let line = "Hello World HELLO";
         let matcher = regex::RegexBuilder::new("hello")
@@ -999,8 +1015,7 @@ mod tests {
             .unwrap()
             .replace_all(&colored, "");
         assert_eq!(plain, "Hello World HELLO");
-        assert_ne!(colored, line);
-        colored::control::unset_override();
+        assert!(colored.contains("\u{1b}["));
     }
 
     #[test]

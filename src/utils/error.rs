@@ -126,6 +126,8 @@ pub enum StableErrorCode {
     WarningEmitted,
     /// All pathspecs matched ignored files; nothing was staged.
     AddNothingStaged,
+    /// Feature or operation is not yet supported.
+    Unsupported,
 }
 
 impl Serialize for StableErrorCode {
@@ -157,6 +159,7 @@ impl StableErrorCode {
             Self::InternalInvariant => "LBR-INTERNAL-001",
             Self::WarningEmitted => "LBR-WARN-001",
             Self::AddNothingStaged => "LBR-ADD-001",
+            Self::Unsupported => "LBR-UNSUPPORTED-001",
         }
     }
 
@@ -172,7 +175,7 @@ impl StableErrorCode {
             Self::NetworkUnavailable | Self::NetworkProtocol => CliErrorCategory::Network,
             Self::AuthMissingCredentials | Self::AuthPermissionDenied => CliErrorCategory::Auth,
             Self::IoReadFailed | Self::IoWriteFailed => CliErrorCategory::Io,
-            Self::InternalInvariant => CliErrorCategory::Internal,
+            Self::InternalInvariant | Self::Unsupported => CliErrorCategory::Internal,
             Self::WarningEmitted => CliErrorCategory::Warning,
             Self::AddNothingStaged => CliErrorCategory::Cli,
         }
@@ -244,6 +247,7 @@ impl StableErrorCode {
                 "Command completed successfully but emitted warnings (--exit-code-on-warning)."
             }
             Self::AddNothingStaged => "All specified paths are ignored; nothing was staged.",
+            Self::Unsupported => "Feature or operation is not yet supported.",
         }
     }
 }
