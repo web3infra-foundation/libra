@@ -375,6 +375,82 @@ pub(super) struct ManagedHelperRequest {
     pub(super) output_schema: Option<Value>,
 }
 
+#[derive(Debug, Serialize)]
+pub(super) struct ManagedHelperWireRequest {
+    pub(super) mode: &'static str,
+    pub(super) prompt: String,
+    pub(super) cwd: String,
+    pub(super) model: String,
+    #[serde(rename = "permissionMode")]
+    pub(super) permission_mode: String,
+    #[serde(rename = "timeoutSeconds", skip_serializing_if = "Option::is_none")]
+    pub(super) timeout_seconds: Option<u64>,
+    #[serde(rename = "idleTimeoutSeconds", skip_serializing_if = "Option::is_none")]
+    pub(super) idle_timeout_seconds: Option<u64>,
+    pub(super) tools: Vec<String>,
+    #[serde(rename = "allowedTools", skip_serializing_if = "Vec::is_empty")]
+    pub(super) allowed_tools: Vec<String>,
+    #[serde(rename = "autoApproveTools")]
+    pub(super) auto_approve_tools: bool,
+    #[serde(rename = "includePartialMessages")]
+    pub(super) include_partial_messages: bool,
+    #[serde(rename = "promptSuggestions")]
+    pub(super) prompt_suggestions: bool,
+    #[serde(rename = "agentProgressSummaries")]
+    pub(super) agent_progress_summaries: bool,
+    #[serde(rename = "interactiveApprovals", skip_serializing_if = "is_false")]
+    pub(super) interactive_approvals: bool,
+    #[serde(rename = "libraPlanMode", skip_serializing_if = "is_false")]
+    pub(super) libra_plan_mode: bool,
+    #[serde(rename = "enableFileCheckpointing", skip_serializing_if = "is_false")]
+    pub(super) enable_file_checkpointing: bool,
+    #[serde(rename = "continue", skip_serializing_if = "is_false")]
+    pub(super) continue_session: bool,
+    #[serde(rename = "forkSession", skip_serializing_if = "is_false")]
+    pub(super) fork_session: bool,
+    #[serde(
+        rename = "interactiveResponseDir",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(super) interactive_response_dir: Option<String>,
+    #[serde(rename = "systemPrompt", skip_serializing_if = "Option::is_none")]
+    pub(super) system_prompt: Option<ManagedSystemPrompt>,
+    #[serde(rename = "outputSchema", skip_serializing_if = "Option::is_none")]
+    pub(super) output_schema: Option<Value>,
+}
+
+impl From<&ManagedHelperRequest> for ManagedHelperWireRequest {
+    fn from(request: &ManagedHelperRequest) -> Self {
+        Self {
+            mode: request.mode,
+            prompt: request.prompt.clone(),
+            cwd: request.cwd.clone(),
+            model: request.model.clone(),
+            permission_mode: request.permission_mode.clone(),
+            timeout_seconds: request.timeout_seconds,
+            idle_timeout_seconds: request.idle_timeout_seconds,
+            tools: request.tools.clone(),
+            allowed_tools: request.allowed_tools.clone(),
+            auto_approve_tools: request.auto_approve_tools,
+            include_partial_messages: request.include_partial_messages,
+            prompt_suggestions: request.prompt_suggestions,
+            agent_progress_summaries: request.agent_progress_summaries,
+            interactive_approvals: request.interactive_approvals,
+            libra_plan_mode: request.libra_plan_mode,
+            enable_file_checkpointing: request.enable_file_checkpointing,
+            continue_session: request.continue_session,
+            fork_session: request.fork_session,
+            interactive_response_dir: request.interactive_response_dir.clone(),
+            system_prompt: request.system_prompt.clone(),
+            output_schema: request.output_schema.clone(),
+        }
+    }
+}
+
+fn build_helper_wire_request(request: &ManagedHelperRequest) -> ManagedHelperWireRequest {
+    ManagedHelperWireRequest::from(request)
+}
+
 #[derive(Debug, Serialize, Clone)]
 pub(super) struct ManagedSystemPrompt {
     #[serde(rename = "type")]
@@ -869,9 +945,7 @@ async fn sync_streaming_tool_invocations(
     run_binding_path: &Path,
     run_binding: &ClaudeFormalRunBindingArtifact,
 ) -> Result<()> {
-    let binding_path = storage_path
-        .join(TOOL_INVOCATION_BINDINGS_DIR)
-        .join(format!("{}.json", run_binding.ai_session_id));
+    let binding_path = tool_invocation_binding_path(storage_path, &run_binding.ai_session_id);
     let mut binding = if binding_path.exists() {
         let existing = read_json_artifact::<ClaudeToolInvocationBindingArtifact>(
             &binding_path,
@@ -1085,8 +1159,9 @@ pub(crate) async fn prepare_managed_tui_driver(
     exec_approval_tx: UnboundedSender<ExecApprovalRequest>,
 ) -> Result<ManagedClaudecodeTuiDriver> {
     let (cwd, storage_path) = resolve_managed_repo_paths(args.cwd.as_ref())?;
-    let project_bootstrap = prepare_claudecode_project_bootstrap(&storage_path).await?;
-    emit_project_bootstrap_note(&project_bootstrap);
+    let (project_bootstrap, project_bootstrap_notice) =
+        prepare_claudecode_project_bootstrap(&storage_path).await?;
+    emit_project_bootstrap_note(&project_bootstrap_notice);
     let resolved_python_binary = resolve_helper_python_binary(&cwd, &args.python_binary);
     ensure_helper_python_environment(args.helper_path.is_some(), &resolved_python_binary, &cwd)
         .await?;
@@ -1203,8 +1278,6 @@ pub(crate) fn build_test_tui_driver(args: ChatManagedArgs) -> ManagedClaudecodeT
         project_bootstrap: ClaudecodeProjectBootstrap {
             provider_env_overrides: BTreeMap::new(),
             provider_env_unset: Vec::new(),
-            credential_source: None,
-            startup_note: String::new(),
         },
         custom_helper: false,
         temp_helper_dir: None,
@@ -1315,6 +1388,12 @@ fn tools_for_local_plan_mode(tools: Vec<String>) -> Vec<String> {
     }
 }
 
+fn tool_invocation_binding_path(storage_path: &Path, ai_session_id: &str) -> PathBuf {
+    storage_path
+        .join(TOOL_INVOCATION_BINDINGS_DIR)
+        .join(format!("{ai_session_id}.json"))
+}
+
 fn apply_project_bootstrap_to_helper_request(
     _request: &mut ManagedHelperRequest,
     _project_bootstrap: &ClaudecodeProjectBootstrap,
@@ -1324,8 +1403,10 @@ fn apply_project_bootstrap_to_helper_request(
     // `process.env` / `os.environ`; nothing credential-bearing is serialised.
 }
 
-fn emit_project_bootstrap_note(project_bootstrap: &ClaudecodeProjectBootstrap) {
-    eprintln!("{}", project_bootstrap.startup_note);
+fn emit_project_bootstrap_note(project_bootstrap_notice: &ClaudecodeProjectBootstrapNotice) {
+    for line in project_bootstrap_notice.lines() {
+        eprintln!("{line}");
+    }
 }
 
 fn should_use_fullscreen_chat_tui(args: &ChatManagedArgs, stdout_is_terminal: bool) -> bool {
@@ -1347,8 +1428,9 @@ fn streaming_render_mode(output: &OutputConfig) -> StreamingRenderMode {
 
 pub(super) async fn run_managed(args: RunManagedArgs, output: &OutputConfig) -> Result<()> {
     let (cwd, storage_path) = resolve_managed_repo_paths(args.cwd.as_ref())?;
-    let project_bootstrap = prepare_claudecode_project_bootstrap(&storage_path).await?;
-    emit_project_bootstrap_note(&project_bootstrap);
+    let (project_bootstrap, project_bootstrap_notice) =
+        prepare_claudecode_project_bootstrap(&storage_path).await?;
+    emit_project_bootstrap_note(&project_bootstrap_notice);
     validate_run_managed_args(&args)?;
     if !args.batch
         && matches!(
@@ -1456,8 +1538,9 @@ pub(super) async fn run_managed(args: RunManagedArgs, output: &OutputConfig) -> 
 
 pub(crate) async fn chat_managed(args: ChatManagedArgs, output: &OutputConfig) -> Result<()> {
     let (cwd, storage_path) = resolve_managed_repo_paths(args.cwd.as_ref())?;
-    let project_bootstrap = prepare_claudecode_project_bootstrap(&storage_path).await?;
-    emit_project_bootstrap_note(&project_bootstrap);
+    let (project_bootstrap, project_bootstrap_notice) =
+        prepare_claudecode_project_bootstrap(&storage_path).await?;
+    emit_project_bootstrap_note(&project_bootstrap_notice);
     validate_chat_managed_args(&args, output)?;
     let python_binary = resolve_helper_python_binary(&cwd, &args.python_binary);
     ensure_helper_python_environment(args.helper_path.is_some(), &python_binary, &cwd).await?;
@@ -2108,8 +2191,8 @@ async fn execute_managed_tui_turn<F>(
 where
     F: FnMut(ClaudecodeTuiEvent) + Send,
 {
-    let redacted_request = redact_helper_request_session_controls(helper_request);
-    let serialized_request = serde_json::to_vec(&redacted_request)
+    let wire_request = build_helper_wire_request(helper_request);
+    let serialized_request = serde_json::to_vec(&wire_request)
         .context("failed to serialize Claude Code helper TUI request")?;
     let helper_timeout = helper_timeout_window(helper_request);
     let executable = if custom_helper {
@@ -2905,8 +2988,8 @@ async fn execute_managed_streaming_turn(
     render_mode: StreamingRenderMode,
     ui_event_tx: Option<UnboundedSender<ChatTurnUiEvent>>,
 ) -> Result<ManagedStreamingTurnOutcome> {
-    let redacted_request = redact_helper_request_session_controls(helper_request);
-    let serialized_request = serde_json::to_vec(&redacted_request)
+    let wire_request = build_helper_wire_request(helper_request);
+    let serialized_request = serde_json::to_vec(&wire_request)
         .context("failed to serialize Claude Code helper streaming request")?;
     let helper_timeout = helper_timeout_window(helper_request);
     let executable = if custom_helper {
@@ -4202,24 +4285,10 @@ mod tests {
         storage_path: &Path,
         ai_session_id: &str,
     ) -> ClaudeToolInvocationBindingArtifact {
-        let bindings_dir = storage_path.join(TOOL_INVOCATION_BINDINGS_DIR);
-        let entries = std::fs::read_dir(&bindings_dir)
-            .expect("tool invocation bindings directory should be readable");
-        for entry in entries {
-            let entry = entry.expect("tool invocation binding directory entry should be readable");
-            let path = entry.path();
-            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
-                continue;
-            }
-            let binding: ClaudeToolInvocationBindingArtifact =
-                read_json_artifact(&path, "Claude tool invocation binding")
-                    .await
-                    .expect("tool invocation binding should deserialize");
-            if binding.ai_session_id == ai_session_id {
-                return binding;
-            }
-        }
-        panic!("expected Claude tool invocation binding for test session");
+        let binding_path = tool_invocation_binding_path(storage_path, ai_session_id);
+        let bytes = std::fs::read(binding_path)
+            .unwrap_or_else(|_| panic!("expected Claude tool invocation binding fixture"));
+        serde_json::from_slice(&bytes).expect("tool invocation binding should deserialize")
     }
 
     async fn read_provenance_for_run(storage_path: &Path, run_id: &str) -> Provenance {
@@ -4244,7 +4313,7 @@ mod tests {
                 return provenance;
             }
         }
-        panic!("expected provenance for run '{run_id}'");
+        panic!("expected provenance for the test run");
     }
 
     #[test]
@@ -4743,7 +4812,14 @@ mod tests {
 
         let tool_binding =
             read_tool_invocation_binding(&storage_path, &second_outcome.ai_session_id).await;
-        assert_eq!(tool_binding.run_id, refreshed_binding.run_id);
+        assert!(
+            tool_binding.ai_session_id == second_outcome.ai_session_id,
+            "tool invocation binding should belong to the later execution turn"
+        );
+        assert!(
+            tool_binding.run_id == refreshed_binding.run_id,
+            "tool invocation binding should point at the refreshed run"
+        );
         assert!(
             tool_binding
                 .invocations
@@ -5011,9 +5087,8 @@ mod tests {
                 .and_then(Value::as_str),
             Some("acceptEdits")
         );
-        assert_eq!(
-            refreshed_binding.ai_session_id.as_str(),
-            first_outcome.ai_session_id.as_str(),
+        assert!(
+            refreshed_binding.ai_session_id == first_outcome.ai_session_id,
             "finalized binding should stay on the same ai_session"
         );
     }

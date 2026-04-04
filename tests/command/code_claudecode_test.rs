@@ -1174,7 +1174,9 @@ async fn test_code_claudecode_bootstraps_project_settings_and_reports_process_en
     fs::write(&touched_file, "pub fn code_project_bootstrap() {}\n").expect("write source file");
 
     let request_path = repo.path().join("code-claudecode-bootstrap-request.json");
-    let helper_env_path = repo.path().join("code-claudecode-bootstrap-helper-env.json");
+    let helper_env_path = repo
+        .path()
+        .join("code-claudecode-bootstrap-helper-env.json");
     let helper_path = repo
         .path()
         .join("capture-code-claudecode-bootstrap-helper.sh");

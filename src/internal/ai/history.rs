@@ -1,4 +1,4 @@
-use std::{path::PathBuf, str::FromStr, sync::Arc};
+use std::{path::PathBuf, str::FromStr, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
 use git_internal::{
@@ -11,9 +11,10 @@ use git_internal::{
     },
 };
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, DatabaseTransaction, DbErr, EntityTrait,
     QueryFilter, Set, TransactionTrait,
 };
+use tokio::time::sleep;
 
 use crate::{
     internal::model::reference::{self, ConfigKind},
@@ -34,6 +35,14 @@ use crate::{
 ///
 /// In the database, this is stored with kind='Branch' and name='libra/intent'.
 pub const AI_REF: &str = "libra/intent";
+
+const SQLITE_BUSY_MAX_RETRIES: usize = 15;
+const SQLITE_BUSY_RETRY_BASE_MS: u64 = 100;
+
+fn is_sqlite_busy(err: &DbErr) -> bool {
+    let message = err.to_string();
+    message.contains("database is locked") || message.contains("database schema is locked")
+}
 
 /// Manages object history using an orphan branch and Git Tree structure.
 ///
@@ -279,22 +288,33 @@ impl HistoryManager {
     }
 
     pub async fn resolve_history_head(&self) -> Result<Option<ObjectHash>> {
-        let ref_model = reference::Entity::find()
-            .filter(reference::Column::Name.eq(&self.ref_name))
-            .filter(reference::Column::Kind.eq(ConfigKind::Branch))
-            .one(&*self.db_conn)
-            .await
-            .context("Failed to query history head")?;
-
-        match ref_model {
-            Some(model) => match model.commit {
-                Some(commit_hash) => ObjectHash::from_str(&commit_hash)
-                    .map(Some)
-                    .map_err(|e| anyhow!("Invalid commit hash in DB: {}", e)),
-                None => Ok(None),
-            },
-            None => Ok(None),
+        for attempt in 0..=SQLITE_BUSY_MAX_RETRIES {
+            match reference::Entity::find()
+                .filter(reference::Column::Name.eq(&self.ref_name))
+                .filter(reference::Column::Kind.eq(ConfigKind::Branch))
+                .one(&*self.db_conn)
+                .await
+            {
+                Ok(Some(model)) => {
+                    return match model.commit {
+                        Some(commit_hash) => ObjectHash::from_str(&commit_hash)
+                            .map(Some)
+                            .map_err(|e| anyhow!("Invalid commit hash in DB: {}", e)),
+                        None => Ok(None),
+                    };
+                }
+                Ok(None) => return Ok(None),
+                Err(err) if is_sqlite_busy(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
+                    sleep(Duration::from_millis(
+                        SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                    ))
+                    .await;
+                }
+                Err(err) => return Err(err).context("Failed to query history head"),
+            }
         }
+
+        unreachable!("sqlite retry loop must return")
     }
 
     fn load_commit_tree(&self, commit_id: &ObjectHash) -> Result<Vec<TreeItem>> {
@@ -345,44 +365,87 @@ impl HistoryManager {
     }
 
     async fn update_ref(&self, ref_name: &str, hash: ObjectHash) -> Result<()> {
-        let txn: DatabaseTransaction = self
-            .db_conn
-            .begin()
-            .await
-            .context("Failed to begin transaction")?;
-
-        // Try to find existing reference
-        let existing = reference::Entity::find()
-            .filter(reference::Column::Name.eq(ref_name))
-            .filter(reference::Column::Kind.eq(ConfigKind::Branch))
-            .one(&txn)
-            .await
-            .context("Failed to query reference")?;
-
-        if let Some(model) = existing {
-            let mut active: reference::ActiveModel = model.into();
-            active.commit = Set(Some(hash.to_string()));
-            active
-                .update(&txn)
-                .await
-                .context("Failed to update reference")?;
-        } else {
-            let new_ref = reference::ActiveModel {
-                name: Set(Some(ref_name.to_string())),
-                kind: Set(ConfigKind::Branch),
-                commit: Set(Some(hash.to_string())),
-                remote: Set(None),
-                ..Default::default()
+        for attempt in 0..=SQLITE_BUSY_MAX_RETRIES {
+            let txn: DatabaseTransaction = match self.db_conn.begin().await {
+                Ok(txn) => txn,
+                Err(err) if is_sqlite_busy(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
+                    sleep(Duration::from_millis(
+                        SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                    ))
+                    .await;
+                    continue;
+                }
+                Err(err) => return Err(err).context("Failed to begin transaction"),
             };
-            new_ref
-                .insert(&txn)
+
+            let existing = match reference::Entity::find()
+                .filter(reference::Column::Name.eq(ref_name))
+                .filter(reference::Column::Kind.eq(ConfigKind::Branch))
+                .one(&txn)
                 .await
-                .context("Failed to insert reference")?;
+            {
+                Ok(existing) => existing,
+                Err(err) if is_sqlite_busy(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
+                    let _ = txn.rollback().await;
+                    sleep(Duration::from_millis(
+                        SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                    ))
+                    .await;
+                    continue;
+                }
+                Err(err) => return Err(err).context("Failed to query reference"),
+            };
+
+            if let Some(model) = existing {
+                let mut active: reference::ActiveModel = model.into();
+                active.commit = Set(Some(hash.to_string()));
+                match active.update(&txn).await {
+                    Ok(_) => {}
+                    Err(err) if is_sqlite_busy(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
+                        let _ = txn.rollback().await;
+                        sleep(Duration::from_millis(
+                            SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                        ))
+                        .await;
+                        continue;
+                    }
+                    Err(err) => return Err(err).context("Failed to update reference"),
+                }
+            } else {
+                let new_ref = reference::ActiveModel {
+                    name: Set(Some(ref_name.to_string())),
+                    kind: Set(ConfigKind::Branch),
+                    commit: Set(Some(hash.to_string())),
+                    remote: Set(None),
+                    ..Default::default()
+                };
+                match new_ref.insert(&txn).await {
+                    Ok(_) => {}
+                    Err(err) if is_sqlite_busy(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
+                        let _ = txn.rollback().await;
+                        sleep(Duration::from_millis(
+                            SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                        ))
+                        .await;
+                        continue;
+                    }
+                    Err(err) => return Err(err).context("Failed to insert reference"),
+                }
+            }
+
+            match txn.commit().await {
+                Ok(_) => return Ok(()),
+                Err(err) if is_sqlite_busy(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
+                    sleep(Duration::from_millis(
+                        SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                    ))
+                    .await;
+                }
+                Err(err) => return Err(err).context("Failed to commit transaction"),
+            }
         }
 
-        txn.commit().await.context("Failed to commit transaction")?;
-
-        Ok(())
+        unreachable!("sqlite retry loop must return")
     }
 
     #[cfg(test)]

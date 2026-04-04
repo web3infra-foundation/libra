@@ -94,8 +94,27 @@ pub(crate) struct ClaudecodeProjectResolvedSettings {
 pub(crate) struct ClaudecodeProjectBootstrap {
     pub(crate) provider_env_overrides: BTreeMap<String, String>,
     pub(crate) provider_env_unset: Vec<String>,
-    pub(crate) credential_source: Option<ClaudeCredentialSource>,
-    pub(crate) startup_note: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClaudecodeProjectBootstrapNotice {
+    bootstrap_status: ClaudeProjectBootstrapStatus,
+    credential_source: ClaudeCredentialSource,
+    show_gateway_api_key_warning: bool,
+}
+
+impl ClaudecodeProjectBootstrapNotice {
+    pub(crate) fn lines(&self) -> Vec<String> {
+        let mut lines = vec![format!(
+            "Claude project settings: {}; credentials: {}",
+            self.bootstrap_status.status_line(),
+            self.credential_source.label()
+        )];
+        if self.show_gateway_api_key_warning {
+            lines.push(GATEWAY_API_KEY_WARNING.to_string());
+        }
+        lines
+    }
 }
 
 pub(crate) fn is_auth_error(error: &anyhow::Error) -> bool {
@@ -108,33 +127,27 @@ pub(crate) fn is_auth_error(error: &anyhow::Error) -> bool {
 
 pub(crate) async fn prepare_claudecode_project_bootstrap(
     storage_path: &Path,
-) -> Result<ClaudecodeProjectBootstrap> {
+) -> Result<(ClaudecodeProjectBootstrap, ClaudecodeProjectBootstrapNotice)> {
     let project_root = resolve_project_root(storage_path)?;
     let bootstrap = bootstrap_claude_project_settings(&project_root).await?;
     let process_env = std::env::vars().collect::<BTreeMap<_, _>>();
     let resolved = resolve_claude_project_settings(&project_root, &process_env).await?;
     let (provider_env_overrides, provider_env_unset) = build_provider_env_instructions(&resolved)?;
-
-    let mut startup_lines = vec![format!(
-        "Claude project settings: {}; credentials: {}",
-        bootstrap.status_line(),
-        resolved.credential_source.label()
-    )];
-    if resolved
-        .base_url
-        .as_ref()
-        .filter(|_| resolved.credential_source.uses_api_key())
-        .is_some()
-    {
-        startup_lines.push(GATEWAY_API_KEY_WARNING.to_string());
-    }
-
-    Ok(ClaudecodeProjectBootstrap {
+    let notice = ClaudecodeProjectBootstrapNotice {
+        bootstrap_status: bootstrap,
+        credential_source: resolved.credential_source,
+        show_gateway_api_key_warning: resolved
+            .base_url
+            .as_ref()
+            .filter(|_| resolved.credential_source.uses_api_key())
+            .is_some(),
+    };
+    let bootstrap = ClaudecodeProjectBootstrap {
         provider_env_overrides,
         provider_env_unset,
-        credential_source: Some(resolved.credential_source),
-        startup_note: startup_lines.join("\n"),
-    })
+    };
+
+    Ok((bootstrap, notice))
 }
 
 async fn bootstrap_claude_project_settings(cwd: &Path) -> Result<ClaudeProjectBootstrapStatus> {
