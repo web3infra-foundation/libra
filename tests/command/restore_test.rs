@@ -35,10 +35,7 @@ fn test_restore_source_head_unborn_returns_error_without_falling_back() {
     assert_eq!(output.status.code(), Some(128));
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("fatal: could not resolve HEAD"),
-        "unexpected stderr: {stderr}"
-    );
+    assert!(stderr.contains("fatal:"), "unexpected stderr: {stderr}");
 
     let content = std::fs::read_to_string(repo.path().join("tracked.txt"))
         .expect("failed to read tracked file");

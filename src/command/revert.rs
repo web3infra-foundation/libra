@@ -13,22 +13,119 @@ use git_internal::{
         },
     },
 };
+use serde::Serialize;
 
 use crate::{
     command::{load_object, save_object},
     common_utils::format_commit_msg,
     internal::{branch::Branch, head::Head},
     utils::{
-        error::{CliError, CliResult},
+        error::{CliError, CliResult, StableErrorCode},
         object_ext::{BlobExt, TreeExt},
-        output::OutputConfig,
-        path, util,
+        output::{OutputConfig, emit_json_data},
+        path,
+        text::short_display_hash,
+        util,
     },
 };
+
+const REVERT_EXAMPLES: &str = "\
+EXAMPLES:
+    libra revert HEAD                     Revert the most recent commit
+    libra revert abc1234                  Revert a specific commit
+    libra revert -n HEAD                  Revert without auto-committing
+    libra revert --json HEAD              Structured JSON output for agents";
+
+// ── Typed error ──────────────────────────────────────────────────────
+
+#[derive(Debug, thiserror::Error)]
+enum RevertError {
+    #[error("not a libra repository")]
+    NotInRepo,
+
+    #[error("you are in a 'detached HEAD' state; reverting is not allowed")]
+    DetachedHead,
+
+    #[error("failed to resolve commit reference '{0}'")]
+    InvalidCommit(String),
+
+    #[error("reverting merge commits is not yet supported")]
+    MergeCommitUnsupported,
+
+    #[error("conflict: file '{path}' was modified in a later commit")]
+    Conflict { path: String },
+
+    #[error("failed to load object: {0}")]
+    LoadObject(String),
+
+    #[error("failed to save object: {0}")]
+    SaveObject(String),
+
+    #[error("failed to save index: {0}")]
+    IndexSave(String),
+
+    #[error("failed to update HEAD: {0}")]
+    UpdateHead(String),
+}
+
+impl RevertError {
+    fn stable_code(&self) -> StableErrorCode {
+        match self {
+            Self::NotInRepo => StableErrorCode::RepoNotFound,
+            Self::DetachedHead => StableErrorCode::RepoStateInvalid,
+            Self::InvalidCommit(_) => StableErrorCode::CliInvalidTarget,
+            Self::MergeCommitUnsupported => StableErrorCode::CliInvalidArguments,
+            Self::Conflict { .. } => StableErrorCode::ConflictUnresolved,
+            Self::LoadObject(_) => StableErrorCode::IoReadFailed,
+            Self::SaveObject(_) => StableErrorCode::IoWriteFailed,
+            Self::IndexSave(_) => StableErrorCode::IoWriteFailed,
+            Self::UpdateHead(_) => StableErrorCode::IoWriteFailed,
+        }
+    }
+}
+
+impl From<RevertError> for CliError {
+    fn from(error: RevertError) -> Self {
+        let stable_code = error.stable_code();
+        let message = error.to_string();
+        match error {
+            RevertError::NotInRepo => CliError::repo_not_found(),
+            RevertError::DetachedHead => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_hint("switch to a branch first with 'libra switch <branch>'"),
+            RevertError::InvalidCommit(_) => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_hint("use 'libra log' to find valid commit references"),
+            RevertError::MergeCommitUnsupported => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_hint("merge commit revert support is planned for a future release"),
+            RevertError::Conflict { .. } => CliError::failure(message)
+                .with_stable_code(stable_code)
+                .with_hint("resolve conflicts manually, then use 'libra commit'"),
+            _ => CliError::fatal(message).with_stable_code(stable_code),
+        }
+    }
+}
+
+// ── Structured output ────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RevertOutput {
+    pub reverted_commit: String,
+    pub short_reverted: String,
+    pub new_commit: Option<String>,
+    pub short_new: Option<String>,
+    pub no_commit: bool,
+    pub files_changed: usize,
+}
+
+// ── Entry points ─────────────────────────────────────────────────────
 
 /// Arguments for the revert command.
 /// Reverts the specified commit by creating a new commit that undoes the changes.
 #[derive(Parser, Debug)]
+#[command(about = "Revert some existing commits")]
+#[command(after_help = REVERT_EXAMPLES)]
 pub struct RevertArgs {
     /// Commit to revert (can be commit hash, branch name, or HEAD)
     #[clap(required = true)]
@@ -39,9 +136,6 @@ pub struct RevertArgs {
     pub no_commit: bool,
 }
 
-/// Execute the revert command
-/// This function reverts a specified commit by applying the inverse changes
-/// and creating a new commit that undoes the original commit
 pub async fn execute(args: RevertArgs) {
     if let Err(e) = execute_safe(args, &OutputConfig::default()).await {
         e.print_stderr();
@@ -51,61 +145,69 @@ pub async fn execute(args: RevertArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Reverses one or more commits by replaying their inverse
 /// changes into the index/worktree and optionally creating new commits.
-pub async fn execute_safe(args: RevertArgs, _output: &OutputConfig) -> CliResult<()> {
-    util::require_repo().map_err(|_| CliError::repo_not_found())?;
+pub async fn execute_safe(args: RevertArgs, output: &OutputConfig) -> CliResult<()> {
+    let result = run_revert(args).await.map_err(CliError::from)?;
+    render_revert_output(&result, output)
+}
 
-    // Ensure we're on a branch, not in detached HEAD state
-    // Todo: For now, we do not handle the case when the repository is in a detached HEAD state.
-    let current_head = Head::current().await;
-    if let Head::Detached(_) = current_head {
-        return Err(CliError::fatal(
-            "You are in a 'detached HEAD' state.\nReverting is not allowed in this state as it does not update any branch.",
-        ));
+// ── Core execution ───────────────────────────────────────────────────
+
+async fn run_revert(args: RevertArgs) -> Result<RevertOutput, RevertError> {
+    util::require_repo().map_err(|_| RevertError::NotInRepo)?;
+
+    if let Head::Detached(_) = Head::current().await {
+        return Err(RevertError::DetachedHead);
     }
 
-    // Resolve the commit reference to an ObjectHash.
-    // `resolve_commit` returns legacy `"fatal: ..."` prefixed strings, so
-    // `from_legacy_string` strips the prefix before wrapping in `CliError`
-    // to avoid a double `"fatal: fatal: ..."` message in rendered output.
     let commit_id = resolve_commit(&args.commit)
         .await
-        .map_err(CliError::from_legacy_string)?;
+        .map_err(|_| RevertError::InvalidCommit(args.commit.clone()))?;
 
-    // Perform the actual revert operation
-    match revert_single_commit(&commit_id, &args).await {
-        Ok(revert_commit_id) => {
-            if let Some(id) = revert_commit_id {
-                println!(
-                    "[{}] Revert commit {}",
-                    &id.to_string()[..7],
-                    &commit_id.to_string()[..7],
-                );
-            } else {
-                println!("Changes staged for revert. Use 'libra commit' to finalize.");
-            }
-        }
-        Err(e) => {
-            return Err(CliError::failure(format!(
-                "on conflict: {e}\nerror: could not revert {}",
-                &commit_id.to_string()[..7]
-            )));
-        }
+    let (revert_commit_id, files_changed) = revert_single_commit(&commit_id, &args).await?;
+
+    let commit_str = commit_id.to_string();
+    Ok(RevertOutput {
+        reverted_commit: commit_str.clone(),
+        short_reverted: short_display_hash(&commit_str).to_string(),
+        new_commit: revert_commit_id.as_ref().map(|id| id.to_string()),
+        short_new: revert_commit_id
+            .as_ref()
+            .map(|id| short_display_hash(&id.to_string()).to_string()),
+        no_commit: args.no_commit,
+        files_changed,
+    })
+}
+
+// ── Rendering ────────────────────────────────────────────────────────
+
+fn render_revert_output(result: &RevertOutput, output: &OutputConfig) -> CliResult<()> {
+    if output.is_json() {
+        return emit_json_data("revert", result, output);
+    }
+
+    if output.quiet {
+        return Ok(());
+    }
+
+    if let Some(short_new) = &result.short_new {
+        println!("[{}] Revert commit {}", short_new, result.short_reverted,);
+    } else {
+        println!("Changes staged for revert. Use 'libra commit' to finalize.");
     }
     Ok(())
 }
 
-/// Revert a single commit by applying its parent's state
-/// This function handles the core logic of reverting a commit
+// ── Internal logic (unchanged algorithm) ─────────────────────────────
+
 async fn revert_single_commit(
     commit_id: &ObjectHash,
     args: &RevertArgs,
-) -> Result<Option<ObjectHash>, String> {
-    // Load the commit object to be reverted
+) -> Result<(Option<ObjectHash>, usize), RevertError> {
     let reverted_commit: Commit =
-        load_object(commit_id).map_err(|e| format!("failed to load commit: {e}"))?;
+        load_object(commit_id).map_err(|e| RevertError::LoadObject(e.to_string()))?;
 
     if reverted_commit.parent_commit_ids.len() > 1 {
-        return Err("Reverting merge commits is not yet supported.".to_string());
+        return Err(RevertError::MergeCommitUnsupported);
     }
 
     let parent_commit_id = if let Some(id) = reverted_commit.parent_commit_ids.first() {
@@ -115,23 +217,21 @@ async fn revert_single_commit(
     };
 
     let parent_commit: Commit =
-        load_object(&parent_commit_id).map_err(|e| format!("failed to load parent commit: {e}"))?;
+        load_object(&parent_commit_id).map_err(|e| RevertError::LoadObject(e.to_string()))?;
 
-    // Get the current HEAD commit to apply the revert patch
-    // We need to apply the reverse changes to the current state, not just restore parent state
     let current_head_commit_id = Head::current_commit()
         .await
-        .ok_or("Could not get current HEAD commit")?;
-    let current_commit: Commit = load_object(&current_head_commit_id).map_err(|e| e.to_string())?;
+        .ok_or_else(|| RevertError::LoadObject("could not get current HEAD commit".into()))?;
+    let current_commit: Commit =
+        load_object(&current_head_commit_id).map_err(|e| RevertError::LoadObject(e.to_string()))?;
 
-    let current_tree: Tree = load_object(&current_commit.tree_id).map_err(|e| e.to_string())?;
-    let reverted_tree: Tree = load_object(&reverted_commit.tree_id).map_err(|e| e.to_string())?;
-    let parent_tree: Tree = load_object(&parent_commit.tree_id).map_err(|e| e.to_string())?;
+    let current_tree: Tree =
+        load_object(&current_commit.tree_id).map_err(|e| RevertError::LoadObject(e.to_string()))?;
+    let reverted_tree: Tree = load_object(&reverted_commit.tree_id)
+        .map_err(|e| RevertError::LoadObject(e.to_string()))?;
+    let parent_tree: Tree =
+        load_object(&parent_commit.tree_id).map_err(|e| RevertError::LoadObject(e.to_string()))?;
 
-    // Convert trees to hash maps for easier manipulation
-    // current_files: the state we want to modify (HEAD)
-    // reverted_files: the commit we want to undo
-    // parent_files: the state before the commit we're reverting
     let mut current_files: std::collections::HashMap<_, _> =
         current_tree.get_plain_items().into_iter().collect();
     let reverted_files: std::collections::HashMap<_, _> =
@@ -139,86 +239,75 @@ async fn revert_single_commit(
     let parent_files: std::collections::HashMap<_, _> =
         parent_tree.get_plain_items().into_iter().collect();
 
-    // Apply reverse patch: for each file changed in the reverted commit,
-    // undo that change in the current state
+    let mut files_changed: usize = 0;
+
     for (path, &reverted_hash) in &reverted_files {
         let parent_hash = parent_files.get(path);
 
         if Some(&reverted_hash) == parent_hash {
-            continue; // File unchanged in the reverted commit, skip
+            continue;
         }
 
-        // Check for conflicts: if current file state differs from reverted commit state,
-        // it means there were modifications after the commit we're reverting.
-        // This is a simplified conflict detection.
-        // TODO: This is a simplified version.
-        // Conflict resolution and merge handling are intentionally omitted for now.
         if current_files.get(path) != Some(&reverted_hash) && current_files.contains_key(path) {
-            return Err(format!(
-                "conflict: file '{}' was modified in a later commit",
-                path.display()
-            ));
+            return Err(RevertError::Conflict {
+                path: path.display().to_string(),
+            });
         }
 
         if let Some(parent_hash) = parent_hash {
-            // File was modified or deleted -> restore to parent version
             current_files.insert(path.clone(), *parent_hash);
         } else {
-            // File was newly added -> remove it
             current_files.remove(path);
         }
+        files_changed += 1;
     }
-    // Handle files that were deleted in the reverted commit
+
     for (path, &parent_hash) in &parent_files {
         if !reverted_files.contains_key(path) {
             current_files.insert(path.clone(), parent_hash);
+            files_changed += 1;
         }
     }
 
-    // Build new tree and index from the final file list
-    // Note: This requires a helper function to build Tree from HashMap<PathBuf, ObjectHash>
-    // This is a complex operation, simplified here by rebuilding the index directly
     let final_tree_id = build_tree_from_map(current_files).await?;
-    let final_tree: Tree = load_object(&final_tree_id).map_err(|e| e.to_string())?;
+    let final_tree: Tree =
+        load_object(&final_tree_id).map_err(|e| RevertError::LoadObject(e.to_string()))?;
 
     let mut new_index = Index::new();
     rebuild_index_from_tree(&final_tree, &mut new_index, "")?;
     let current_index = Index::load(path::index()).unwrap_or_else(|_| Index::new());
     reset_workdir_safely(&current_index, &new_index)?;
-    new_index.save(path::index()).map_err(|e| e.to_string())?;
+    new_index
+        .save(path::index())
+        .map_err(|e| RevertError::IndexSave(e.to_string()))?;
 
     if args.no_commit {
-        Ok(None)
+        Ok((None, files_changed))
     } else {
         let revert_commit_id =
             create_revert_commit(commit_id, &current_head_commit_id, &final_tree_id).await?;
-        Ok(Some(revert_commit_id))
+        Ok((Some(revert_commit_id), files_changed))
     }
 }
 
-/// Helper function: Build a Tree object from a file mapping
-/// This is a simplified implementation that creates a temporary index and builds a tree from it
 async fn build_tree_from_map(
     files: std::collections::HashMap<PathBuf, ObjectHash>,
-) -> Result<ObjectHash, String> {
-    // Helper function to recursively build subtrees
+) -> Result<ObjectHash, RevertError> {
     fn build_subtree(
         paths: &std::collections::HashMap<PathBuf, ObjectHash>,
         current_dir: &PathBuf,
-    ) -> Result<Tree, String> {
+    ) -> Result<Tree, RevertError> {
         let mut tree_items = Vec::new();
         let mut subdirs = std::collections::HashMap::new();
         for (path, hash) in paths {
             if let Ok(relative_path) = path.strip_prefix(current_dir) {
                 if relative_path.components().count() == 1 {
-                    // File directly in the current directory
                     tree_items.push(git_internal::internal::object::tree::TreeItem {
                         mode: git_internal::internal::object::tree::TreeItemMode::Blob,
                         name: relative_path.to_str().unwrap().to_string(),
                         id: *hash,
                     });
                 } else {
-                    // File in a subdirectory
                     let subdir = current_dir.join(relative_path.components().next().unwrap());
                     subdirs
                         .entry(subdir)
@@ -235,42 +324,41 @@ async fn build_tree_from_map(
                 id: subdir_tree.id,
             });
         }
-        Tree::from_tree_items(tree_items).map_err(|e| e.to_string())
+        Tree::from_tree_items(tree_items).map_err(|e| RevertError::SaveObject(e.to_string()))
     }
-    // Start building the tree from the root directory
+
     let root_dir = PathBuf::new();
     let root_tree = build_subtree(&files, &root_dir)?;
-    save_object(&root_tree, &root_tree.id).map_err(|e| e.to_string())?;
+    save_object(&root_tree, &root_tree.id).map_err(|e| RevertError::SaveObject(e.to_string()))?;
     Ok(root_tree.id)
 }
 
-/// Handle reverting the root commit (initial commit)
-/// Root commits have no parents, so reverting them means creating an empty repository state
-async fn revert_root_commit(args: &RevertArgs) -> Result<Option<ObjectHash>, String> {
-    let new_index = Index::new(); // Create an empty index
-
+async fn revert_root_commit(args: &RevertArgs) -> Result<(Option<ObjectHash>, usize), RevertError> {
+    let new_index = Index::new();
     let current_index = Index::load(path::index()).unwrap_or_else(|_| Index::new());
+    let files_changed = current_index.tracked_files().len();
     reset_workdir_safely(&current_index, &new_index)?;
 
     new_index
         .save(path::index())
-        .map_err(|e| format!("failed to save index: {e}"))?;
+        .map_err(|e| RevertError::IndexSave(e.to_string()))?;
 
     if args.no_commit {
-        Ok(None)
+        Ok((None, files_changed))
     } else {
-        // Create a commit that represents the empty repository state
         let current_head = Head::current_commit()
             .await
-            .ok_or("failed to resolve current HEAD")?;
+            .ok_or_else(|| RevertError::LoadObject("failed to resolve current HEAD".into()))?;
         let revert_commit_id = create_empty_revert_commit(&current_head).await?;
-        Ok(Some(revert_commit_id))
+        Ok((Some(revert_commit_id), files_changed))
     }
 }
 
-/// Rebuild the index from a tree object
-/// This function recursively traverses the tree and adds all files to the index
-fn rebuild_index_from_tree(tree: &Tree, index: &mut Index, prefix: &str) -> Result<(), String> {
+fn rebuild_index_from_tree(
+    tree: &Tree,
+    index: &mut Index,
+    prefix: &str,
+) -> Result<(), RevertError> {
     for item in &tree.tree_items {
         let full_path = if prefix.is_empty() {
             PathBuf::from(&item.name)
@@ -279,19 +367,22 @@ fn rebuild_index_from_tree(tree: &Tree, index: &mut Index, prefix: &str) -> Resu
         };
 
         if let TreeItemMode::Tree = item.mode {
-            // Recursively handle subdirectories
             let subtree: Tree =
-                load_object(&item.id).map_err(|e| format!("failed to load subtree: {e}"))?;
-            let full_path_str = full_path
-                .to_str()
-                .ok_or_else(|| format!("failed to convert path to UTF-8: {full_path:?}"))?;
+                load_object(&item.id).map_err(|e| RevertError::LoadObject(e.to_string()))?;
+            let full_path_str = full_path.to_str().ok_or_else(|| {
+                RevertError::LoadObject(format!("failed to convert path to UTF-8: {full_path:?}"))
+            })?;
             rebuild_index_from_tree(&subtree, index, full_path_str)?;
         } else {
             let blob = git_internal::internal::object::blob::Blob::load(&item.id);
             let entry = IndexEntry::new_from_blob(
                 full_path
                     .to_str()
-                    .ok_or_else(|| format!("failed to convert path to UTF-8: {full_path:?}"))?
+                    .ok_or_else(|| {
+                        RevertError::LoadObject(format!(
+                            "failed to convert path to UTF-8: {full_path:?}"
+                        ))
+                    })?
                     .to_string(),
                 item.id,
                 blob.data.len() as u32,
@@ -302,109 +393,86 @@ fn rebuild_index_from_tree(tree: &Tree, index: &mut Index, prefix: &str) -> Resu
     Ok(())
 }
 
-/// Safely resets the working directory to match the new index state.
-/// This function does NOT touch untracked files to avoid data loss.
-fn reset_workdir_safely(current_index: &Index, new_index: &Index) -> Result<(), String> {
+fn reset_workdir_safely(current_index: &Index, new_index: &Index) -> Result<(), RevertError> {
     let workdir = util::working_dir();
-
     let new_tracked_paths: HashSet<_> = new_index.tracked_files().into_iter().collect();
 
-    // Step 1: Clean up - Remove files that are in the current index but not in the new one
     for path_buf in current_index.tracked_files() {
         if !new_tracked_paths.contains(&path_buf) {
             let full_path = workdir.join(path_buf);
             if full_path.exists() {
-                fs::remove_file(&full_path).map_err(|e| e.to_string())?;
+                fs::remove_file(&full_path).map_err(|e| RevertError::SaveObject(e.to_string()))?;
             }
         }
     }
 
-    // Step 2: Restore - Create/update files that are in the new index
     for path_buf in new_index.tracked_files() {
         let path_str = path_buf.to_str().unwrap();
         if let Some(entry) = new_index.get(path_str, 0) {
             let blob = git_internal::internal::object::blob::Blob::load(&entry.hash);
             let target_path = workdir.join(path_str);
-
-            // Create parent directories if they don't exist
             if let Some(parent) = target_path.parent() {
-                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                fs::create_dir_all(parent).map_err(|e| RevertError::SaveObject(e.to_string()))?;
             }
-            fs::write(&target_path, &blob.data).map_err(|e| e.to_string())?;
+            fs::write(&target_path, &blob.data)
+                .map_err(|e| RevertError::SaveObject(e.to_string()))?;
         }
     }
 
     Ok(())
 }
 
-/// Create a revert commit that undoes the changes of the specified commit
-/// The new commit will have a tree that represents the reverted state
 async fn create_revert_commit(
     reverted_commit_id: &ObjectHash,
     parent_id: &ObjectHash,
     tree_id: &ObjectHash,
-) -> Result<ObjectHash, String> {
-    let reverted_commit: Commit = load_object(reverted_commit_id)
-        .map_err(|e| format!("failed to load reverted commit: {e}"))?;
+) -> Result<ObjectHash, RevertError> {
+    let reverted_commit: Commit =
+        load_object(reverted_commit_id).map_err(|e| RevertError::LoadObject(e.to_string()))?;
 
-    // Create a descriptive commit message
     let revert_message = format!(
         "Revert \"{}\"\n\nThis reverts commit {}.",
         reverted_commit.message.lines().next().unwrap_or(""),
         reverted_commit_id
     );
 
-    // Create the revert commit with the calculated tree
     let commit = Commit::from_tree_id(
         *tree_id,
         vec![*parent_id],
         &format_commit_msg(&revert_message, None),
     );
 
-    // Save the commit object and update HEAD
-    save_object(&commit, &commit.id).map_err(|e| format!("failed to save commit: {e}"))?;
+    save_object(&commit, &commit.id).map_err(|e| RevertError::SaveObject(e.to_string()))?;
     update_head(&commit.id.to_string()).await?;
     Ok(commit.id)
 }
 
-/// Create a commit that reverts the root commit (creates empty repository state)
-async fn create_empty_revert_commit(parent_id: &ObjectHash) -> Result<ObjectHash, String> {
-    // Create an empty tree for the revert commit
-    let empty_tree = create_empty_tree()?;
-    let revert_message = "Revert root commit\n\nThis reverts the initial commit.";
+async fn create_empty_revert_commit(parent_id: &ObjectHash) -> Result<ObjectHash, RevertError> {
+    let empty_tree =
+        Tree::from_tree_items(Vec::new()).map_err(|e| RevertError::SaveObject(e.to_string()))?;
+    save_object(&empty_tree, &empty_tree.id).map_err(|e| RevertError::SaveObject(e.to_string()))?;
 
-    // Create commit with empty tree
+    let revert_message = "Revert root commit\n\nThis reverts the initial commit.";
     let commit = Commit::from_tree_id(
         empty_tree.id,
         vec![*parent_id],
         &format_commit_msg(revert_message, None),
     );
 
-    // Save commit and update HEAD
-    save_object(&commit, &commit.id).map_err(|e| format!("failed to save commit: {e}"))?;
+    save_object(&commit, &commit.id).map_err(|e| RevertError::SaveObject(e.to_string()))?;
     update_head(&commit.id.to_string()).await?;
     Ok(commit.id)
 }
 
-/// Create an empty tree object (used for root commit reverts)
-fn create_empty_tree() -> Result<Tree, String> {
-    let tree = Tree::from_tree_items(Vec::new())
-        .map_err(|e| format!("failed to create empty tree: {e}"))?;
-    save_object(&tree, &tree.id).map_err(|e| e.to_string())?;
-    Ok(tree)
-}
-
-/// Resolve a commit reference (hash, branch name, or HEAD) to a ObjectHash
 async fn resolve_commit(reference: &str) -> Result<ObjectHash, String> {
     util::get_commit_base(reference).await
 }
 
-/// Update the HEAD reference to point to the new commit
-async fn update_head(commit_id: &str) -> Result<(), String> {
+async fn update_head(commit_id: &str) -> Result<(), RevertError> {
     if let Head::Branch(name) = Head::current().await {
         Branch::update_branch(&name, commit_id, None)
             .await
-            .map_err(|e| format!("failed to update branch '{name}': {e}"))?;
+            .map_err(|e| RevertError::UpdateHead(e.to_string()))?;
     }
     Ok(())
 }
