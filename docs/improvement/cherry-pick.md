@@ -6,70 +6,35 @@
 
 ## 已完成前置条件与当前代码状态
 
-### 当前代码已具备
-- 三方合并 cherry-pick 逻辑
-- `--no-commit` 标志
-- 多 commit cherry-pick
-- reflog 集成（`with_reflog`）
-- 确认消息（"Cherry-picking commit ...", "Finished cherry-pick ..."）
-- detached HEAD 检测
-- 测试覆盖：basic、with-commit、multiple-commits、errors、sha256-handling
+### 已确认落地的基线
+- `CherryPickError` typed enum 已落地，detached HEAD / invalid commit / multi-commit + `--no-commit` / conflict / object / index / HEAD 更新失败均有显式 `StableErrorCode`
+- `run_cherry_pick()` + `render_cherry_pick_output()` 已完成执行层/渲染层拆分
+- `CherryPickOutput` 已覆盖多 commit 结果列表和 `no_commit` 状态
+- `docs/commands/cherry-pick.md` 已记录 JSON schema、错误码和常用示例
+- `tests/command/cherry_pick_test.rs` 已覆盖单提交、多提交、`--no-commit`、错误路径和 JSON 输出
 
-### 当前代码缺失
-- **无 `CherryPickError` typed enum**：全部 `Result<_, String>` 返回
-- **无 `StableErrorCode` 映射**
-- **无 JSON/machine 输出**：`OutputConfig` 参数被忽略
-- **无 `run_cherry_pick()` / `render_cherry_pick_output()` 分层**
-- **无 `CherryPickOutput` 结构化输出类型**
-- **无 `--help` EXAMPLES**
+### 基于当前代码的 Review 结论
+- 第四批对外契约已落地，`cherry-pick` 与 `revert` 在成功确认、错误码和 JSON 结构上保持一致
+- 当前实现与命令文档、测试保持同步，没有发现跨命令冲突或重复实现带来的用户层面歧义
+- 本轮 Review 的修订重点是把这份计划文档更新到当前实现状态，作为后续批次的可信基线
 
-## 改进内容
+## 目标与非目标
 
-### 特性 1：`CherryPickError` typed enum + `StableErrorCode` 映射
+**已完成目标：**
+- typed error、显式错误码、JSON / machine、run/render 分层、`--help` EXAMPLES 和集成测试已全部落地
 
-| 变体 | 触发条件 | StableErrorCode |
-|------|---------|-----------------|
-| `NotInRepo` | require_repo 失败 | `RepoNotFound` |
-| `DetachedHead` | detached HEAD 状态 | `RepoStateInvalid` |
-| `InvalidCommit(String)` | 无法解析提交引用 | `CliInvalidTarget` |
-| `MergeCommitUnsupported` | cherry-pick merge commit | `CliInvalidArguments` |
-| `MultipleWithNoCommit` | 多 commit + --no-commit | `CliInvalidArguments` |
-| `Conflict(String)` | cherry-pick 冲突 | `ConflictUnresolved` |
-| `LoadObject(String)` | 对象读取失败 | `IoReadFailed` |
-| `SaveFailed(String)` | 对象/索引保存失败 | `IoWriteFailed` |
-| `UpdateHead(String)` | HEAD 更新失败 | `IoWriteFailed` |
+**后续维护目标：**
+- 继续维护多 commit 顺序、冲突和 `--no-commit` 的回归测试
+- 如未来增加 merge commit cherry-pick 支持，应新增明确参数和向后兼容字段
 
-### 特性 2：`run_cherry_pick()` + `render_cherry_pick_output()` 分层
-
-- `run_cherry_pick(args) -> Result<CherryPickOutput, CherryPickError>`
-- `render_cherry_pick_output(result, output) -> CliResult<()>`
-
-### 特性 3：`CherryPickOutput` 结构化输出
-
-```rust
-#[derive(Debug, Clone, Serialize)]
-pub struct CherryPickOutput {
-    pub picked: Vec<CherryPickEntry>,
-    pub no_commit: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct CherryPickEntry {
-    pub source_commit: String,
-    pub new_commit: Option<String>,
-}
-```
-
-### 特性 4：`--help` EXAMPLES
-
-### 特性 5：JSON 输出测试
-
-- `test_cherry_pick_json_output`
-- `test_cherry_pick_cli_error_codes`
+**本批非目标：**
+- 不支持 merge commit cherry-pick
+- 不引入交互式提交选择或冲突解决 UI
+- 不改变现有三方合并算法
 
 ## 验证方式
 
-1. `cargo +nightly fmt --all --check` 无格式差异
-2. `cargo clippy --all-targets --all-features -- -D warnings` 无警告
-3. `cargo test cherry_pick_test` 全部通过
-4. `libra cherry-pick --json <commit>` 输出合法 JSON
+1. `cargo +nightly fmt --all --check`
+2. `cargo clippy --all-targets --all-features -- -D warnings`
+3. `cargo test cherry_pick_test`
+4. `docs/commands/cherry-pick.md` 与命令实际输出保持一致
