@@ -773,6 +773,8 @@ fn render_fetch_output(result: &FetchOutput, output: &OutputConfig) -> CliResult
                 .map_err(|error| CliError::io(format!("failed to write fetch output: {error}")))?;
         }
 
+        // `remote.url` is already credential-redacted at construction time in
+        // `fetch_repository_with_result`, so no additional redaction needed here.
         writeln!(writer, "From {}", remote.url)
             .map_err(|error| CliError::io(format!("failed to write fetch output: {error}")))?;
 

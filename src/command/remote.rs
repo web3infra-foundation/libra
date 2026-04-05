@@ -168,6 +168,9 @@ enum RemoteError {
     #[error("failed to list remote-tracking branches: {detail}")]
     BranchList { detail: String },
 
+    #[error("corrupt remote-tracking branch '{name}': {detail}")]
+    BranchCorrupt { name: String, detail: String },
+
     #[error("failed to prune remote-tracking branch '{name}': {detail}")]
     BranchDelete { name: String, detail: String },
 
@@ -210,6 +213,10 @@ impl From<RemoteError> for CliError {
             RemoteError::BranchList { detail } => {
                 CliError::fatal(format!("failed to list remote-tracking branches: {detail}"))
                     .with_stable_code(StableErrorCode::IoReadFailed)
+            }
+            RemoteError::BranchCorrupt { name, detail } => {
+                CliError::fatal(format!("corrupt remote-tracking branch '{name}': {detail}"))
+                    .with_stable_code(StableErrorCode::RepoCorrupt)
             }
             RemoteError::ConfigWrite { detail } => {
                 CliError::fatal(format!("failed to update remote configuration: {detail}"))
@@ -379,9 +386,11 @@ async fn list_remote_names() -> Result<Vec<String>, RemoteError> {
             })?;
     let mut names = HashSet::new();
     for entry in entries {
-        // key format: "remote.<name>.<subkey>"
+        // key format: "remote.<name>.<subkey>" — use `rsplit_once` so that
+        // dotted remote names (e.g. "remote.corp.prod.url") are parsed as
+        // name="corp.prod", matching `ConfigKv::all_remote_configs`.
         if let Some(rest) = entry.key.strip_prefix("remote.")
-            && let Some((name, _subkey)) = rest.split_once('.')
+            && let Some((name, _subkey)) = rest.rsplit_once('.')
             && !name.is_empty()
         {
             names.insert(name.to_owned());
@@ -552,7 +561,10 @@ async fn run_prune_remote(name: String, dry_run: bool) -> Result<RemoteOutput, R
             .await
             .map_err(|error| match error {
                 BranchStoreError::Query(detail) => RemoteError::BranchList { detail },
-                other => RemoteError::ConfigRead {
+                BranchStoreError::Corrupt { name, detail } => {
+                    RemoteError::BranchCorrupt { name, detail }
+                }
+                other => RemoteError::BranchList {
                     detail: other.to_string(),
                 },
             })?;
@@ -581,6 +593,9 @@ async fn run_prune_remote(name: String, dry_run: bool) -> Result<RemoteOutput, R
                     BranchStoreError::Delete { name, detail } => {
                         RemoteError::BranchDelete { name, detail }
                     }
+                    BranchStoreError::Corrupt { name, detail } => {
+                        RemoteError::BranchCorrupt { name, detail }
+                    }
                     BranchStoreError::Query(detail) => RemoteError::BranchList { detail },
                     other => RemoteError::ConfigWrite {
                         detail: other.to_string(),
@@ -605,6 +620,10 @@ async fn run_prune_remote(name: String, dry_run: bool) -> Result<RemoteOutput, R
 /// present, not only `remote.<name>.url`.  This handles the edge case where
 /// `set-url --delete` removed the last fetch URL but other keys (e.g.
 /// `pushurl`, vault SSH keys) still remain.
+///
+/// Uses `rsplit_once('.')` name extraction to avoid prefix collisions with
+/// dotted remote names (e.g. querying "corp" must not match a key belonging
+/// to remote "corp.prod").
 async fn remote_exists(name: &str) -> Result<bool, RemoteError> {
     let prefix = format!("remote.{name}.");
     let entries =
@@ -613,7 +632,14 @@ async fn remote_exists(name: &str) -> Result<bool, RemoteError> {
             .map_err(|error| RemoteError::ConfigRead {
                 detail: error.to_string(),
             })?;
-    Ok(!entries.is_empty())
+    // Verify that at least one entry actually parses as belonging to this
+    // exact remote name, not a longer dotted name that shares the prefix.
+    Ok(entries.iter().any(|e| {
+        e.key
+            .strip_prefix("remote.")
+            .and_then(|rest| rest.rsplit_once('.'))
+            .is_some_and(|(parsed_name, _)| parsed_name == name)
+    }))
 }
 
 async fn ensure_remote_exists(name: &str) -> Result<(), RemoteError> {
