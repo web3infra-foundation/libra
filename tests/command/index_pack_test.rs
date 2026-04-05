@@ -26,7 +26,10 @@ use sha1::{Digest, Sha1};
 use tempfile::tempdir;
 use tokio::sync::mpsc;
 
-use super::{init_repo_via_cli, parse_cli_error_stderr, run_libra_command};
+use super::{
+    assert_cli_success, init_repo_via_cli, parse_cli_error_stderr, parse_json_stdout,
+    run_libra_command,
+};
 
 /// Expected pack contents for validation
 #[derive(Debug)]
@@ -176,6 +179,36 @@ fn test_index_pack_cli_missing_file_returns_fatal_128() {
             "fatal: could not open '{}' for reading: No such file or directory\nError-Code: LBR-IO-001",
             missing_pack.display()
         )
+    );
+}
+
+#[test]
+#[serial]
+fn test_index_pack_json_output_reports_generated_index() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+
+    let (_pack_dir, pack_path) = copy_pack_to_temp("small-sha1").expect("failed to stage pack");
+    let output = run_libra_command(
+        &["index-pack", pack_path.to_str().unwrap(), "--json"],
+        repo.path(),
+    );
+
+    assert_cli_success(&output, "index-pack --json should succeed");
+    let json = parse_json_stdout(&output);
+    let index_file = json["data"]["index_file"]
+        .as_str()
+        .expect("index_file should be present");
+
+    assert_eq!(json["command"], "index-pack");
+    assert_eq!(
+        json["data"]["pack_file"],
+        pack_path.to_string_lossy().as_ref()
+    );
+    assert_eq!(json["data"]["index_version"], 1);
+    assert!(
+        Path::new(index_file).exists(),
+        "generated index file should exist"
     );
 }
 

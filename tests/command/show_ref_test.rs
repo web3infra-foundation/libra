@@ -90,6 +90,33 @@ async fn test_show_ref_lists_branch() {
 
 #[tokio::test]
 #[serial]
+async fn test_show_ref_json_lists_refs() {
+    let temp = tempdir().unwrap();
+    let _guard = setup_repo_with_commit(&temp).await;
+
+    let output = run_libra_command(&["show-ref", "--json", "--head", "--heads"], temp.path());
+    assert_cli_success(&output, "show-ref --json should succeed");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "show-ref");
+    assert_eq!(json["data"]["hash_only"], false);
+    let entries = json["data"]["entries"]
+        .as_array()
+        .expect("entries should be an array");
+    assert!(
+        entries.iter().any(|entry| entry["refname"] == "HEAD"),
+        "expected HEAD entry in JSON output"
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["refname"] == "refs/heads/main"),
+        "expected branch entry in JSON output"
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_show_ref_surfaces_corrupt_branch_storage() {
     let temp = tempdir().unwrap();
     let _guard = setup_repo_with_commit(&temp).await;

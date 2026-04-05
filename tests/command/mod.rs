@@ -242,6 +242,7 @@ mod commit_error_test;
 mod commit_json_test;
 mod commit_test;
 mod config_test;
+mod describe_test;
 mod diff_test;
 mod fetch_test;
 mod grep_test;

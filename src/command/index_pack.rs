@@ -4,7 +4,7 @@ use std::{
     collections::BTreeMap,
     io::Write,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -23,14 +23,23 @@ use git_internal::{
         },
     },
 };
+use serde::Serialize;
 use sha1::{Digest, Sha1};
 
 use crate::utils::{
-    error::{CliError, CliResult},
-    output::OutputConfig,
+    error::{CliError, CliResult, StableErrorCode},
+    output::{OutputConfig, emit_json_data},
 };
 
+const INDEX_PACK_EXAMPLES: &str = "\
+EXAMPLES:
+  libra index-pack pack-123.pack
+  libra index-pack pack-123.pack -o pack-123.idx
+  libra index-pack pack-123.pack --json
+";
+
 #[derive(Parser, Debug)]
+#[command(after_help = INDEX_PACK_EXAMPLES)]
 pub struct IndexPackArgs {
     /// Pack file path
     pub pack_file: String,
@@ -46,27 +55,36 @@ pub struct IndexPackArgs {
     pub index_version: Option<u8>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct IndexPackOutput {
+    pack_file: String,
+    index_file: String,
+    index_version: u8,
+}
+
 pub fn execute(args: IndexPackArgs) {
     if let Err(err) = execute_safe(args, &OutputConfig::default()) {
         err.print_stderr();
     }
 }
 
-pub fn execute_safe(args: IndexPackArgs, _output: &OutputConfig) -> CliResult<()> {
+pub fn execute_safe(args: IndexPackArgs, output: &OutputConfig) -> CliResult<()> {
     let pack_file = args.pack_file;
     let index_file = match args.index_file {
         Some(index_file) => index_file,
         None => {
             if !pack_file.ends_with(".pack") {
-                return Err(CliError::fatal("pack-file does not end with '.pack'"));
+                return Err(CliError::fatal("pack-file does not end with '.pack'")
+                    .with_stable_code(StableErrorCode::CliInvalidArguments));
             }
             pack_file.replace(".pack", ".idx")
         }
     };
     if index_file == pack_file {
-        return Err(CliError::fatal(
-            "pack-file and index-file are the same file",
-        ));
+        return Err(
+            CliError::fatal("pack-file and index-file are the same file")
+                .with_stable_code(StableErrorCode::CliInvalidArguments),
+        );
     }
 
     std::fs::File::open(&pack_file).map_err(|e| {
@@ -75,23 +93,61 @@ pub fn execute_safe(args: IndexPackArgs, _output: &OutputConfig) -> CliResult<()
             pack_file,
             format_io_error(&e)
         ))
+        .with_stable_code(StableErrorCode::IoReadFailed)
     })?;
 
-    if let Some(version) = args.index_version {
+    let index_version = if let Some(version) = args.index_version {
         match version {
-            1 => build_index_v1(&pack_file, &index_file).map_err(index_pack_error)?,
-            2 => build_index_v2(&pack_file, &index_file).map_err(index_pack_error)?,
-            _ => return Err(CliError::fatal("unsupported index version")),
+            1 => {
+                build_index_v1(&pack_file, &index_file).map_err(index_pack_error)?;
+                1
+            }
+            2 => {
+                build_index_v2(&pack_file, &index_file).map_err(index_pack_error)?;
+                2
+            }
+            _ => {
+                return Err(CliError::fatal("unsupported index version")
+                    .with_stable_code(StableErrorCode::CliInvalidArguments));
+            }
         }
     } else {
         // default version = 1
         build_index_v1(&pack_file, &index_file).map_err(index_pack_error)?;
+        1
+    };
+
+    let result = IndexPackOutput {
+        pack_file,
+        index_file,
+        index_version,
+    };
+
+    if output.is_json() {
+        emit_json_data("index-pack", &result, output)?;
+    } else if !output.quiet {
+        println!("{}", result.index_file);
     }
+
     Ok(())
 }
 
 fn index_pack_error(err: GitError) -> CliError {
-    CliError::fatal(format!("failed to build pack index: {err}"))
+    let stable_code = match err {
+        GitError::IOError(_) => StableErrorCode::IoWriteFailed,
+        GitError::InvalidArgument(_) => StableErrorCode::CliInvalidArguments,
+        GitError::InvalidPackFile(_)
+        | GitError::InvalidPackHeader(_)
+        | GitError::InvalidIdxFile(_)
+        | GitError::ConversionError(_)
+        | GitError::DeltaObjectError(_)
+        | GitError::InvalidHashValue(_)
+        | GitError::InvalidObjectInfo(_)
+        | GitError::ObjectNotFound(_) => StableErrorCode::RepoCorrupt,
+        _ => StableErrorCode::InternalInvariant,
+    };
+
+    CliError::fatal(format!("failed to build pack index: {err}")).with_stable_code(stable_code)
 }
 
 fn format_io_error(err: &std::io::Error) -> String {
@@ -99,6 +155,29 @@ fn format_io_error(err: &std::io::Error) -> String {
         std::io::ErrorKind::NotFound => "No such file or directory".to_string(),
         std::io::ErrorKind::PermissionDenied => "Permission denied".to_string(),
         _ => err.to_string(),
+    }
+}
+
+fn lock_state<'a, T>(mutex: &'a Mutex<T>, label: &str) -> Result<MutexGuard<'a, T>, GitError> {
+    mutex
+        .lock()
+        .map_err(|_| GitError::PackEncodeError(format!("{label} mutex poisoned")))
+}
+
+fn take_arc_mutex<T>(arc: Arc<Mutex<T>>, label: &str) -> Result<T, GitError> {
+    let mutex = Arc::try_unwrap(arc).map_err(|_| {
+        GitError::PackEncodeError(format!("{label} still has outstanding references"))
+    })?;
+    mutex
+        .into_inner()
+        .map_err(|_| GitError::PackEncodeError(format!("{label} mutex poisoned")))
+}
+
+fn record_first_pack_error(slot: &Arc<Mutex<Option<GitError>>>, error: GitError) {
+    if let Ok(mut guard) = slot.lock()
+        && guard.is_none()
+    {
+        *guard = Some(error);
     }
 }
 
@@ -112,11 +191,15 @@ pub fn build_index_v1(pack_file: &str, index_file: &str) -> Result<(), GitError>
         ));
     }
     let pack_path = PathBuf::from(pack_file);
-    let tmp_path = pack_path.parent().unwrap();
+    let tmp_path = pack_path.parent().ok_or_else(|| {
+        GitError::InvalidArgument(format!("invalid pack file path: '{pack_file}'"))
+    })?;
     let pack_file = std::fs::File::open(pack_file)?;
     let mut pack_reader = std::io::BufReader::new(pack_file);
     let obj_map = Arc::new(Mutex::new(BTreeMap::new())); // sorted by hash
     let obj_map_c = obj_map.clone();
+    let err = Arc::new(Mutex::new(None));
+    let err_c = err.clone();
     let mut pack = Pack::new(
         Some(8),
         Some(1024 * 1024 * 1024),
@@ -128,11 +211,31 @@ pub fn build_index_v1(pack_file: &str, index_file: &str) -> Result<(), GitError>
         move |meta_entry: MetaAttached<Entry, EntryMeta>| {
             let entry = &meta_entry.inner;
             let hash_key = entry.hash;
-            let offset = meta_entry.meta.pack_offset.unwrap();
-            obj_map_c.lock().unwrap().insert(hash_key, offset);
+            let Some(offset) = meta_entry.meta.pack_offset else {
+                record_first_pack_error(
+                    &err_c,
+                    GitError::ConversionError(
+                        "missing pack offset while building version 1 index".to_string(),
+                    ),
+                );
+                return;
+            };
+
+            match obj_map_c.lock() {
+                Ok(mut guard) => {
+                    guard.insert(hash_key, offset);
+                }
+                Err(_) => record_first_pack_error(
+                    &err_c,
+                    GitError::PackEncodeError("index entry map mutex poisoned".to_string()),
+                ),
+            }
         },
         None::<fn(ObjectHash)>,
     )?;
+    if let Some(err) = lock_state(&err, "index-pack error slot")?.take() {
+        return Err(err);
+    }
 
     let mut index_hash = Sha1::new();
     let mut index_file = std::fs::File::create(index_file)?;
@@ -144,7 +247,7 @@ pub fn build_index_v1(pack_file: &str, index_file: &str) -> Result<(), GitError>
     let mut i: u8 = 0;
     let mut cnt: u32 = 0;
     let mut fan_out = Vec::with_capacity(256 * 4);
-    let obj_map = Arc::try_unwrap(obj_map).unwrap().into_inner().unwrap();
+    let obj_map = take_arc_mutex(obj_map, "index entry map")?;
     for (hash, _) in obj_map.iter() {
         // sorted
         let first_byte = hash.as_ref()[0];
@@ -274,23 +377,24 @@ pub fn build_index_v2(pack_file: &str, index_file: &str) -> Result<(), GitError>
         &mut pack_reader,
         move |meta_entry: MetaAttached<Entry, EntryMeta>| {
             match IndexEntry::try_from(&meta_entry) {
-                Ok(entry) => idx_entries_c.lock().unwrap().push(entry),
-                Err(e) => {
-                    let mut guard = err_c.lock().unwrap();
-                    if guard.is_none() {
-                        *guard = Some(e);
-                    }
-                }
+                Ok(entry) => match idx_entries_c.lock() {
+                    Ok(mut guard) => guard.push(entry),
+                    Err(_) => record_first_pack_error(
+                        &err_c,
+                        GitError::PackEncodeError("index entry buffer mutex poisoned".to_string()),
+                    ),
+                },
+                Err(e) => record_first_pack_error(&err_c, e),
             };
         },
         None::<fn(ObjectHash)>,
     )?;
 
-    if let Some(err) = err.lock().unwrap().take() {
+    if let Some(err) = lock_state(&err, "index-pack error slot")?.take() {
         return Err(err);
     }
 
-    let idx_entries = Arc::try_unwrap(idx_entries).unwrap().into_inner().unwrap();
+    let idx_entries = take_arc_mutex(idx_entries, "index entry buffer")?;
     if idx_entries.len() != pack.number {
         return Err(GitError::ConversionError(format!(
             "decoded entries count {} != pack number {}",

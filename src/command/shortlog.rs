@@ -57,16 +57,27 @@ use std::{
 
 use clap::Parser;
 use git_internal::internal::object::commit::Commit;
+use serde::Serialize;
 
 use crate::{
-    internal::{branch::BranchStoreError, head::Head, log::date_parser::parse_date},
+    internal::log::date_parser::parse_date,
     utils::{
         error::{CliError, CliResult, StableErrorCode},
-        output::OutputConfig,
+        output::{OutputConfig, emit_json_data},
+        util::{self, CommitBaseError},
     },
 };
 
+const SHORTLOG_EXAMPLES: &str = "\
+EXAMPLES:
+  libra shortlog
+  libra shortlog HEAD~5
+  libra shortlog -n -s
+  libra shortlog --json
+";
+
 #[derive(Parser, Debug)]
+#[command(after_help = SHORTLOG_EXAMPLES)]
 pub struct ShortlogArgs {
     /// Sort output according to the number of commits per author
     #[clap(short = 'n', long = "numbered")]
@@ -87,6 +98,9 @@ pub struct ShortlogArgs {
     /// Show commits older than a specific date
     #[clap(long = "until")]
     pub until: Option<String>,
+
+    /// Revision to summarize. Defaults to HEAD.
+    pub revision: Option<String>,
 }
 
 struct AuthorStats {
@@ -112,106 +126,29 @@ impl AuthorStats {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct ShortlogAuthor {
+    name: String,
+    email: Option<String>,
+    count: usize,
+    subjects: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ShortlogOutput {
+    revision: String,
+    numbered: bool,
+    summary: bool,
+    email: bool,
+    total_authors: usize,
+    total_commits: usize,
+    authors: Vec<ShortlogAuthor>,
+}
+
 pub async fn execute_to(args: ShortlogArgs, writer: &mut impl Write) -> CliResult<()> {
     crate::utils::util::require_repo().map_err(|_| CliError::repo_not_found())?;
-
-    // Validate date arguments before processing
-    let since_ts = if let Some(ref since_str) = args.since {
-        match parse_date(since_str) {
-            Ok(ts) => Some(ts),
-            Err(e) => return Err(CliError::fatal(e.to_string())),
-        }
-    } else {
-        None
-    };
-
-    let until_ts = if let Some(ref until_str) = args.until {
-        match parse_date(until_str) {
-            Ok(ts) => Some(ts),
-            Err(e) => return Err(CliError::fatal(e.to_string())),
-        }
-    } else {
-        None
-    };
-
-    let commits = get_commits_for_shortlog(&args, since_ts, until_ts).await?;
-
-    let mut author_map: HashMap<String, AuthorStats> = HashMap::new();
-
-    for commit in commits {
-        let author_name = commit.author.name.clone();
-        let author_email = commit.author.email.clone();
-
-        // If email is not requested, group by name only.
-        // If email is requested, group by name + email.
-        let key = if args.email {
-            format!("{} <{}>", author_name, author_email)
-        } else {
-            author_name.clone()
-        };
-
-        let subject = commit
-            .message
-            .trim()
-            .lines()
-            .next()
-            .unwrap_or("")
-            .to_string();
-
-        author_map
-            .entry(key)
-            .or_insert_with(|| AuthorStats::new(author_name.clone(), author_email.clone()))
-            .add_commit(subject);
-    }
-
-    let mut authors: Vec<(&String, &AuthorStats)> = author_map.iter().collect();
-
-    if args.numbered {
-        // Sort by commit count (descending) and then by author name (ascending) to ensure deterministic output
-        authors.sort_by_key(|a| (std::cmp::Reverse(a.1.count), a.1.name.to_lowercase()));
-    } else {
-        authors.sort_by_key(|a| a.1.name.to_lowercase());
-    }
-
-    // Determine the width needed for the commit count column.
-    // Use at least 4 characters to preserve the existing layout for small repositories.
-    let max_count = authors
-        .iter()
-        .map(|(_, stats)| stats.count)
-        .max()
-        .unwrap_or(0);
-    let width = std::cmp::max(4, max_count.to_string().len());
-
-    for (_key, stats) in authors {
-        if args.email {
-            if !write_shortlog_line(
-                writer,
-                format_args!(
-                    "{:>width$}  {} <{}>",
-                    stats.count,
-                    stats.name,
-                    stats.email,
-                    width = width
-                ),
-            )? {
-                return Ok(());
-            }
-        } else if !write_shortlog_line(
-            writer,
-            format_args!("{:>width$}  {}", stats.count, stats.name, width = width),
-        )? {
-            return Ok(());
-        }
-        if !args.summary {
-            for subject in &stats.subjects {
-                if !write_shortlog_line(writer, format_args!("      {}", subject))? {
-                    return Ok(());
-                }
-            }
-        }
-    }
-
-    Ok(())
+    let shortlog_output = run_shortlog(&args).await?;
+    render_shortlog_output(&shortlog_output, writer)
 }
 
 fn write_shortlog_line(writer: &mut impl Write, args: fmt::Arguments<'_>) -> CliResult<bool> {
@@ -242,35 +179,134 @@ pub async fn execute(args: ShortlogArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Summarises commit history by author, delegating to
 /// [`execute_to`] for formatted output.
-pub async fn execute_safe(args: ShortlogArgs, _output: &OutputConfig) -> CliResult<()> {
-    execute_to(args, &mut std::io::stdout()).await
+pub async fn execute_safe(args: ShortlogArgs, output: &OutputConfig) -> CliResult<()> {
+    let shortlog_output = run_shortlog(&args).await?;
+
+    if output.is_json() {
+        emit_json_data("shortlog", &shortlog_output, output)?;
+    } else if !output.quiet {
+        let mut stdout = std::io::stdout();
+        render_shortlog_output(&shortlog_output, &mut stdout)?;
+    }
+
+    Ok(())
+}
+
+async fn run_shortlog(args: &ShortlogArgs) -> CliResult<ShortlogOutput> {
+    let since_ts = parse_shortlog_date_arg(args.since.as_deref(), "--since")?;
+    let until_ts = parse_shortlog_date_arg(args.until.as_deref(), "--until")?;
+    let revision = args.revision.clone().unwrap_or_else(|| "HEAD".to_string());
+    let commits = get_commits_for_shortlog(args.revision.as_deref(), since_ts, until_ts).await?;
+
+    Ok(aggregate_shortlog(args, &revision, commits))
+}
+
+fn aggregate_shortlog(args: &ShortlogArgs, revision: &str, commits: Vec<Commit>) -> ShortlogOutput {
+    let total_commits = commits.len();
+    let mut author_map: HashMap<String, AuthorStats> = HashMap::new();
+
+    for commit in commits {
+        let author_name = commit.author.name.clone();
+        let author_email = commit.author.email.clone();
+        let key = if args.email {
+            format!("{} <{}>", author_name, author_email)
+        } else {
+            author_name.clone()
+        };
+
+        let subject = commit.format_message();
+
+        author_map
+            .entry(key)
+            .or_insert_with(|| AuthorStats::new(author_name.clone(), author_email.clone()))
+            .add_commit(subject);
+    }
+
+    let mut authors: Vec<ShortlogAuthor> = author_map
+        .into_values()
+        .map(|stats| ShortlogAuthor {
+            name: stats.name,
+            email: args.email.then_some(stats.email),
+            count: stats.count,
+            subjects: if args.summary {
+                Vec::new()
+            } else {
+                stats.subjects
+            },
+        })
+        .collect();
+
+    if args.numbered {
+        authors.sort_by_key(|stats| (std::cmp::Reverse(stats.count), stats.name.to_lowercase()));
+    } else {
+        authors.sort_by_key(|stats| stats.name.to_lowercase());
+    }
+
+    ShortlogOutput {
+        revision: revision.to_string(),
+        numbered: args.numbered,
+        summary: args.summary,
+        email: args.email,
+        total_authors: authors.len(),
+        total_commits,
+        authors,
+    }
+}
+
+fn render_shortlog_output(output: &ShortlogOutput, writer: &mut impl Write) -> CliResult<()> {
+    let max_count = output
+        .authors
+        .iter()
+        .map(|stats| stats.count)
+        .max()
+        .unwrap_or(0);
+    let width = std::cmp::max(4, max_count.to_string().len());
+
+    for stats in &output.authors {
+        if output.email {
+            if !write_shortlog_line(
+                writer,
+                format_args!(
+                    "{:>width$}  {} <{}>",
+                    stats.count,
+                    stats.name,
+                    stats.email.as_deref().unwrap_or(""),
+                    width = width
+                ),
+            )? {
+                return Ok(());
+            }
+        } else if !write_shortlog_line(
+            writer,
+            format_args!("{:>width$}  {}", stats.count, stats.name, width = width),
+        )? {
+            return Ok(());
+        }
+
+        if !output.summary {
+            for subject in &stats.subjects {
+                if !write_shortlog_line(writer, format_args!("      {}", subject))? {
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 async fn get_commits_for_shortlog(
-    _args: &ShortlogArgs,
+    revision: Option<&str>,
     since_ts: Option<i64>,
     until_ts: Option<i64>,
 ) -> CliResult<Vec<Commit>> {
     use crate::command::log::get_reachable_commits;
 
-    let head = Head::current_result()
+    let revision = revision.unwrap_or("HEAD");
+    let commit_hash = util::get_commit_base_typed(revision)
         .await
-        .map_err(|error| shortlog_branch_store_error("resolve HEAD", error))?;
-    let commit_hash = match head {
-        Head::Branch(name) => {
-            let branch = crate::internal::branch::Branch::find_branch_result(&name, None)
-                .await
-                .map_err(|error| shortlog_branch_store_error("resolve current branch", error))?
-                .map(|b| b.commit.to_string());
-            match branch {
-                Some(h) => h,
-                None => {
-                    return Err(CliError::fatal("current branch has no commits"));
-                }
-            }
-        }
-        Head::Detached(hash) => hash.to_string(),
-    };
+        .map_err(|error| shortlog_commit_base_error(revision, error))?
+        .to_string();
 
     let mut commits: Vec<Commit> = get_reachable_commits(commit_hash, None)
         .await?
@@ -281,17 +317,6 @@ async fn get_commits_for_shortlog(
     commits.sort_by_key(|b| std::cmp::Reverse(b.author.timestamp));
 
     Ok(commits)
-}
-
-fn shortlog_branch_store_error(context: &str, error: BranchStoreError) -> CliError {
-    match error {
-        BranchStoreError::Query(detail) => {
-            CliError::fatal(format!("failed to {context}: {detail}"))
-                .with_stable_code(StableErrorCode::IoReadFailed)
-        }
-        other => CliError::fatal(format!("failed to {context}: {other}"))
-            .with_stable_code(StableErrorCode::RepoCorrupt),
-    }
 }
 
 fn passes_filter(commit: &Commit, since_ts: Option<i64>, until_ts: Option<i64>) -> bool {
@@ -310,6 +335,32 @@ fn passes_filter(commit: &Commit, since_ts: Option<i64>, until_ts: Option<i64>) 
     }
 
     true
+}
+
+fn parse_shortlog_date_arg(value: Option<&str>, flag: &str) -> CliResult<Option<i64>> {
+    value.map(parse_date).transpose().map_err(|error| {
+        CliError::fatal(format!("invalid {flag} date: {error}"))
+            .with_stable_code(StableErrorCode::CliInvalidArguments)
+            .with_hint(r#"supported formats: YYYY-MM-DD, "N days ago", unix timestamp"#)
+    })
+}
+
+fn shortlog_commit_base_error(revision: &str, error: CommitBaseError) -> CliError {
+    match error {
+        CommitBaseError::HeadUnborn => CliError::fatal("HEAD does not point to a commit")
+            .with_stable_code(StableErrorCode::RepoStateInvalid)
+            .with_hint("create a commit before running 'libra shortlog'."),
+        CommitBaseError::InvalidReference(message) => CliError::fatal(format!(
+            "failed to resolve revision '{revision}': {message}"
+        ))
+        .with_stable_code(StableErrorCode::CliInvalidTarget),
+        CommitBaseError::ReadFailure(message) => {
+            CliError::fatal(message).with_stable_code(StableErrorCode::IoReadFailed)
+        }
+        CommitBaseError::CorruptReference(message) => {
+            CliError::fatal(message).with_stable_code(StableErrorCode::RepoCorrupt)
+        }
+    }
 }
 
 #[cfg(test)]

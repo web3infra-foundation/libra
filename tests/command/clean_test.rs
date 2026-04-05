@@ -377,3 +377,26 @@ async fn test_clean_force_permission_error_returns_io_exit_code() {
     perms.set_mode(0o755);
     fs::set_permissions("protected", perms).unwrap();
 }
+
+#[tokio::test]
+#[serial]
+async fn test_clean_json_dry_run_lists_candidates() {
+    let repo = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    fs::write(repo.path().join("alpha.txt"), "alpha").unwrap();
+    fs::write(repo.path().join("beta.txt"), "beta").unwrap();
+
+    let output = run_libra_command(&["clean", "-n", "--json"], repo.path());
+    assert_cli_success(&output, "clean --json dry-run should succeed");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "clean");
+    assert_eq!(json["data"]["dry_run"], true);
+
+    let removed = json["data"]["removed"]
+        .as_array()
+        .expect("removed should be an array");
+    assert!(removed.iter().any(|path| path == "alpha.txt"));
+    assert!(removed.iter().any(|path| path == "beta.txt"));
+}
