@@ -833,7 +833,7 @@ async fn restore_to_commit(
         source: Some(commit_id.to_string()),
         pathspec: vec![util::working_dir_string()],
     };
-    restore::execute_safe(restore_args, output).await?;
+    restore::execute_safe(restore_args, &output.child_output_config()).await?;
     Ok(())
 }
 

@@ -107,10 +107,10 @@
 
 | 顺序 | 命令 | 当前状态 | 改进重点 |
 |------|------|--------|--------|
-| **17** | `stash` | 有 -m，有子命令 | JSON 输出（stash list）；保存确认和 stash 编号 |
-| **18** | `restore` | 无确认/无 JSON | 确认消息；退出码对齐 exit 1；错误码 |
-| **19** | `revert` | 有确认消息，有 -n | 补齐 --no-edit；JSON 输出；错误码 |
-| **20** | `cherry-pick` | 与 Git 一致 | JSON 输出；错误码 |
+| **17** | `stash` | ✅ 已落地 | `StashError` typed enum、`run_stash()` / render split、JSON / machine、`--help` EXAMPLES、显式 `StableErrorCode`（详见 [stash.md](stash.md)） |
+| **18** | `restore` | ✅ 已落地 | `RestoreError` → `StableErrorCode` 映射、`run_restore()` / render split、JSON / machine、确认消息、`--help` EXAMPLES（详见 [restore.md](restore.md)） |
+| **19** | `revert` | ✅ 已落地 | `RevertError` typed enum、`run_revert()` / render split、JSON / machine、`--help` EXAMPLES、显式 `StableErrorCode`（详见 [revert.md](revert.md)） |
+| **20** | `cherry-pick` | ✅ 已落地 | `CherryPickError` typed enum、`run_cherry_pick()` / render split、JSON / machine、`--help` EXAMPLES、显式 `StableErrorCode`（详见 [cherry-pick.md](cherry-pick.md)） |
 
 **理由：** 撤销操作的错误反馈尤为重要，用户需要知道操作是否成功。
 
@@ -196,6 +196,10 @@
 - [Diff 命令改进详细计划](diff.md) ✅ 已落地
 - [Show 命令改进详细计划](show.md) ✅ 已落地（内部统一重构留后续全局收口）
 - [Blame 命令改进详细计划](blame.md) ✅ 已落地
+- [Stash 命令改进详细计划](stash.md) ✅ 已落地
+- [Restore 命令改进详细计划](restore.md) ✅ 已落地
+- [Revert 命令改进详细计划](revert.md) ✅ 已落地
+- [Cherry-Pick 命令改进详细计划](cherry-pick.md) ✅ 已落地
 
 ## 命令改进实施记录
 

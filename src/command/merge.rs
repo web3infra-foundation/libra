@@ -300,7 +300,7 @@ async fn apply_fast_forward_merge(
             source: None, // `restore` without source defaults to HEAD, which is now correct.
             pathspec: vec![util::working_dir_string()],
         },
-        output,
+        &output.child_output_config(),
     )
     .await
     .map_err(|error| PullMergeError::Restore(error.to_string()))?;

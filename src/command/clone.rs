@@ -33,7 +33,7 @@ use crate::{
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
-        output::{OutputConfig, ProgressMode, emit_json_data},
+        output::{OutputConfig, emit_json_data},
         util,
     },
 };
@@ -289,6 +289,13 @@ fn map_checkout_error(source: RestoreError) -> CliError {
                 .with_stable_code(StableErrorCode::RepoStateInvalid)
                 .with_hint("working tree checkout target could not be resolved")
         }
+        RestoreError::PathspecNotMatched(_) => {
+            CliError::fatal("working tree checkout referenced a path that was not present")
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+                .with_hint(
+                    "the fetched tree is inconsistent; retry the clone or inspect the remote",
+                )
+        }
         RestoreError::ReadIndex | RestoreError::ReadObject | RestoreError::InvalidPathEncoding => {
             CliError::fatal("failed to read repository state while checking out the working tree")
                 .with_stable_code(StableErrorCode::IoReadFailed)
@@ -366,21 +373,6 @@ fn display_home_relative(path: &str) -> String {
         return format!("~{rest}");
     }
     path.to_string()
-}
-
-/// Build a child `OutputConfig` that suppresses all output from nested
-/// operations (init, fetch) when the parent is in JSON or machine mode.
-fn child_output_config(output: &OutputConfig) -> OutputConfig {
-    if output.is_json() || output.quiet {
-        OutputConfig {
-            json_format: None,
-            quiet: true,
-            progress: ProgressMode::None,
-            ..output.clone()
-        }
-    } else {
-        output.clone()
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -687,7 +679,7 @@ async fn clone_into_destination(
         eprintln!("Fetching objects ...");
     }
 
-    let child_output = child_output_config(output);
+    let child_output = output.child_output_config();
     let remote_config = RemoteConfig {
         name: "origin".to_string(),
         url: remote_url.to_string(),
