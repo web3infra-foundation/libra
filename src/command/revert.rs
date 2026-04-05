@@ -265,17 +265,19 @@ async fn revert_single_commit(
         }
 
         if let Some(parent_hash) = parent_hash {
-            current_files.insert(path.clone(), *parent_hash);
-        } else {
-            current_files.remove(path);
+            if current_files.insert(path.clone(), *parent_hash) != Some(*parent_hash) {
+                files_changed += 1;
+            }
+        } else if current_files.remove(path).is_some() {
+            files_changed += 1;
         }
-        files_changed += 1;
     }
 
     for (path, &parent_hash) in &parent_files {
         if !reverted_files.contains_key(path) {
-            current_files.insert(path.clone(), parent_hash);
-            files_changed += 1;
+            if current_files.insert(path.clone(), parent_hash) != Some(parent_hash) {
+                files_changed += 1;
+            }
         }
     }
 

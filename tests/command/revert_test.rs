@@ -393,6 +393,60 @@ fn test_revert_json_output_reports_files_changed() {
     );
 }
 
+#[tokio::test]
+#[serial]
+async fn test_revert_json_output_skips_noop_paths_in_files_changed() {
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+
+    fs::write("added.txt", "temporary\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "added.txt"], repo.path()),
+        "failed to stage added.txt",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "-m", "add temporary", "--no-verify"],
+            repo.path(),
+        ),
+        "failed to commit added.txt",
+    );
+    let added_commit = Head::current_commit()
+        .await
+        .expect("expected added.txt commit");
+
+    fs::remove_file("added.txt").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "-A"], repo.path()),
+        "failed to stage added.txt removal",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "-m", "remove temporary", "--no-verify"],
+            repo.path(),
+        ),
+        "failed to commit added.txt removal",
+    );
+
+    let output = run_libra_command(
+        &["revert", "--json", &added_commit.to_string()],
+        repo.path(),
+    );
+    assert_cli_success(
+        &output,
+        "revert of already-removed add commit should succeed",
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "revert");
+    assert_eq!(json["data"]["files_changed"], 0);
+    assert!(json["data"]["new_commit"].as_str().is_some());
+    assert!(
+        !repo.path().join("added.txt").exists(),
+        "reverting an already-undone add should keep the file absent"
+    );
+}
+
 /// Test error cases for revert command
 /// This ensures the command handles invalid input gracefully
 #[tokio::test]

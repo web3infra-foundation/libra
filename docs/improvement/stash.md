@@ -34,7 +34,6 @@
 | 变体 | 触发条件 | StableErrorCode |
 |------|---------|-----------------|
 | `NotInRepo` | `require_repo()` 失败 | `RepoNotFound` |
-| `NoLocalChanges` | push 时无修改 | （非错误，正常路径） |
 | `NoInitialCommit` | push 时无 HEAD | `RepoStateInvalid` |
 | `NoStashFound` | apply/pop/drop 时无 stash | `CliInvalidTarget` |
 | `InvalidStashRef(String)` | stash 引用格式错误 | `CliInvalidArguments` |
@@ -59,6 +58,7 @@
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "action")]
 pub enum StashOutput {
+    Noop { message: String },
     Push { message: String, stash_id: String },
     Pop { index: usize, stash_id: String },
     Apply { index: usize, stash_id: String, branch: String },

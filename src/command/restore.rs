@@ -88,6 +88,8 @@ impl From<RestoreError> for CliError {
         let stable_code = error.stable_code();
         let message = error.to_string();
         match error {
+            // Ref resolution keeps Git-compatible exit 128 semantics even though
+            // the stable code stays target-oriented for machine classification.
             RestoreError::ResolveSource => CliError::fatal(message)
                 .with_stable_code(stable_code)
                 .with_exit_code(128)

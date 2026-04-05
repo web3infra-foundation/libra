@@ -64,13 +64,58 @@ async fn test_stash_push_no_changes() {
     })
     .await;
 
-    // stash push with no changes should print "no local changes"
+    // stash push with no changes should remain a successful no-op
     let output = run_libra_command(&["stash", "push"], temp_path.path());
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_cli_success(&output, "stash push should be a no-op success");
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stderr.contains("no local changes"),
-        "expected 'no local changes' in stderr, got: {stderr}"
+        stdout.contains("No local changes to save"),
+        "expected no-op message in stdout, got: {stdout}"
     );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_stash_push_no_changes_json_output() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    fs::write("base.txt", "base").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["base.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Initial commit".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await;
+
+    let output = run_libra_command(&["stash", "push", "--json"], temp_path.path());
+    assert_cli_success(&output, "stash push --json should be a no-op success");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "stash");
+    assert_eq!(json["data"]["action"], "noop");
+    assert_eq!(json["data"]["message"], "No local changes to save");
+    assert!(json["data"].get("stash_id").is_none());
 }
 
 #[tokio::test]
@@ -344,6 +389,61 @@ async fn test_stash_drop() {
         stdout.trim().is_empty(),
         "stash list should be empty after drop"
     );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_stash_drop_missing_reflog_returns_no_stash_found() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    fs::write("base.txt", "base").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["base.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Initial commit".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await;
+
+    fs::write("base.txt", "modified").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["stash", "push"], temp_path.path()),
+        "stash push before reflog removal",
+    );
+
+    fs::remove_file(temp_path.path().join(".libra/logs/refs/stash"))
+        .expect("failed to remove stash reflog");
+
+    let output = run_libra_command(&["stash", "drop"], temp_path.path());
+    assert_eq!(output.status.code(), Some(129));
+
+    let (human, report) = parse_cli_error_stderr(&output.stderr);
+    assert!(
+        human.contains("fatal: no stash found"),
+        "unexpected stderr: {human}"
+    );
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert_eq!(report.exit_code, 129);
 }
 
 #[tokio::test]

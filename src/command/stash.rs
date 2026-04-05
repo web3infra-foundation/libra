@@ -16,10 +16,11 @@ use git_internal::{
     internal::{
         index::{Index, Time},
         object::{
-            ObjectTrait, ObjectType,
+            ObjectTrait,
             commit::Commit,
             signature::Signature,
             tree::{Tree, TreeItem, TreeItemMode},
+            types::ObjectType,
         },
     },
 };
@@ -47,9 +48,6 @@ use crate::{
 enum StashError {
     #[error("not a libra repository")]
     NotInRepo,
-
-    #[error("no local changes to save")]
-    NoLocalChanges,
 
     #[error("you do not have the initial commit yet")]
     NoInitialCommit,
@@ -86,7 +84,6 @@ impl StashError {
     fn stable_code(&self) -> StableErrorCode {
         match self {
             Self::NotInRepo => StableErrorCode::RepoNotFound,
-            Self::NoLocalChanges => StableErrorCode::RepoStateInvalid,
             Self::NoInitialCommit => StableErrorCode::RepoStateInvalid,
             Self::NoStashFound => StableErrorCode::CliInvalidTarget,
             Self::InvalidStashRef(_) => StableErrorCode::CliInvalidArguments,
@@ -107,7 +104,6 @@ impl From<StashError> for CliError {
         let message = error.to_string();
         match error {
             StashError::NotInRepo => CliError::repo_not_found(),
-            StashError::NoLocalChanges => CliError::fatal(message).with_stable_code(stable_code),
             StashError::NoInitialCommit => CliError::fatal(message)
                 .with_stable_code(stable_code)
                 .with_hint("create an initial commit first"),
@@ -133,6 +129,8 @@ impl From<StashError> for CliError {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "action")]
 pub enum StashOutput {
+    #[serde(rename = "noop")]
+    Noop { message: String },
     #[serde(rename = "push")]
     Push { message: String, stash_id: String },
     #[serde(rename = "pop")]
@@ -192,7 +190,9 @@ async fn run_stash(stash_cmd: Stash) -> Result<StashOutput, StashError> {
 
 async fn run_push(message: Option<String>) -> Result<StashOutput, StashError> {
     if !has_changes().await {
-        return Err(StashError::NoLocalChanges);
+        return Ok(StashOutput::Noop {
+            message: "No local changes to save".to_string(),
+        });
     }
 
     let git_dir =
@@ -379,6 +379,9 @@ fn render_stash_output(result: &StashOutput, output: &OutputConfig) -> CliResult
     }
 
     match result {
+        StashOutput::Noop { message } => {
+            println!("{message}");
+        }
         StashOutput::Push { message, .. } => {
             println!("Saved working directory and index state {message}");
         }
@@ -512,6 +515,9 @@ fn do_drop(stash: Option<String>) -> Result<StashOutput, StashError> {
         util::try_get_storage_path(None).map_err(|e| StashError::ReadObject(e.to_string()))?;
     let stash_ref_path = git_dir.join("refs/stash");
     let stash_log_path = git_dir.join("logs/refs/stash");
+    if !stash_log_path.exists() {
+        return Err(StashError::NoStashFound);
+    }
 
     let file =
         std::fs::File::open(&stash_log_path).map_err(|e| StashError::ReadObject(e.to_string()))?;
@@ -520,6 +526,9 @@ fn do_drop(stash: Option<String>) -> Result<StashOutput, StashError> {
         .lines()
         .collect::<Result<_, _>>()
         .map_err(|e| StashError::ReadObject(e.to_string()))?;
+    if lines.is_empty() {
+        return Err(StashError::NoStashFound);
+    }
 
     let index_to_drop = match stash {
         None => 0,
@@ -859,6 +868,11 @@ fn create_tree_from_workdir(workdir: &Path, git_dir: &Path, index: &Index) -> Re
         }
 
         items.sort_by(|a, b| a.name.cmp(&b.name));
+        if items.is_empty() {
+            let empty_id = ObjectHash::from_type_and_data(ObjectType::Tree, &[]);
+            return Tree::from_bytes(&[], empty_id).map_err(|e| e.to_string());
+        }
+
         Tree::from_tree_items(items).map_err(|e| e.to_string())
     }
 

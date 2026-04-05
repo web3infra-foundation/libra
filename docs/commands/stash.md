@@ -14,7 +14,7 @@ libra stash drop [<stash>]
 
 ## Description
 
-`libra stash` saves your local modifications to a new stash entry and reverts the working directory to match HEAD. The modifications can be restored later with `libra stash pop` or `libra stash apply`.
+`libra stash` saves your local modifications to a new stash entry and reverts the working directory to match HEAD. The modifications can be restored later with `libra stash pop` or `libra stash apply`. If `stash push` is run on a clean working tree, it exits successfully as a no-op and reports that there are no local changes to save.
 
 ## Subcommands
 
@@ -72,7 +72,16 @@ When `--json` is passed, all subcommands produce a JSON envelope:
 }
 ```
 
-The `data.action` field is one of: `push`, `pop`, `apply`, `drop`, `list`.
+On a clean working tree, `stash push --json` returns:
+
+```json
+{
+  "command": "stash",
+  "data": { "action": "noop", "message": "No local changes to save" }
+}
+```
+
+The `data.action` field is one of: `noop`, `push`, `pop`, `apply`, `drop`, `list`.
 
 ### list JSON schema
 
@@ -93,7 +102,7 @@ The `data.action` field is one of: `push`, `pop`, `apply`, `drop`, `list`.
 | Code | Condition |
 |------|-----------|
 | `LBR-REPO-001` | Not a libra repository |
-| `LBR-REPO-003` | No local changes to save / no initial commit |
+| `LBR-REPO-003` | No initial commit |
 | `LBR-CLI-002` | Invalid stash reference syntax |
 | `LBR-CLI-003` | Stash does not exist |
 | `LBR-CONFLICT-001` | Merge conflict during stash apply |
