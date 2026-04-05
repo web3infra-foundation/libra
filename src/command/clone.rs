@@ -33,7 +33,7 @@ use crate::{
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
-        output::{OutputConfig, ProgressMode, emit_json_data},
+        output::{OutputConfig, emit_json_data},
         util,
     },
 };
@@ -375,21 +375,6 @@ fn display_home_relative(path: &str) -> String {
     path.to_string()
 }
 
-/// Build a child `OutputConfig` that suppresses all output from nested
-/// operations (init, fetch) when the parent is in JSON or machine mode.
-fn child_output_config(output: &OutputConfig) -> OutputConfig {
-    if output.is_json() || output.quiet {
-        OutputConfig {
-            json_format: None,
-            quiet: true,
-            progress: ProgressMode::None,
-            ..output.clone()
-        }
-    } else {
-        output.clone()
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Cleanup
 // ---------------------------------------------------------------------------
@@ -694,7 +679,7 @@ async fn clone_into_destination(
         eprintln!("Fetching objects ...");
     }
 
-    let child_output = child_output_config(output);
+    let child_output = output.child_output_config();
     let remote_config = RemoteConfig {
         name: "origin".to_string(),
         url: remote_url.to_string(),

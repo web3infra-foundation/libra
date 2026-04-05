@@ -25,7 +25,7 @@ use crate::{
     utils::{
         error::{CliError, CliResult},
         object_ext::TreeExt,
-        output::{OutputConfig, ProgressMode},
+        output::OutputConfig,
         util,
     },
 };
@@ -193,19 +193,6 @@ pub(crate) async fn run_merge_for_pull(
     })
 }
 
-fn child_output_config(output: &OutputConfig) -> OutputConfig {
-    if output.is_json() || output.quiet {
-        OutputConfig {
-            json_format: None,
-            quiet: true,
-            progress: ProgressMode::None,
-            ..output.clone()
-        }
-    } else {
-        output.clone()
-    }
-}
-
 async fn resolve_merge_target(target_ref: &str) -> Result<ObjectHash, Box<dyn std::error::Error>> {
     if let Some(remote) = target_ref.strip_prefix("refs/remotes/")
         && let Some((remote_name, _)) = remote.split_once('/')
@@ -313,7 +300,7 @@ async fn apply_fast_forward_merge(
             source: None, // `restore` without source defaults to HEAD, which is now correct.
             pathspec: vec![util::working_dir_string()],
         },
-        &child_output_config(output),
+        &output.child_output_config(),
     )
     .await
     .map_err(|error| PullMergeError::Restore(error.to_string()))?;

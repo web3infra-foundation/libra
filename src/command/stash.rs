@@ -327,26 +327,15 @@ async fn run_list() -> Result<StashOutput, StashError> {
             entries: Vec::new(),
         });
     }
-    let lines = read_stash_log_lines(&stash_log_path)?;
-    let mut entries = Vec::new();
-    for (index, line_content) in lines.iter().enumerate() {
-        let parts: Vec<&str> = line_content.splitn(2, '\t').collect();
-        let message = if parts.len() == 2 {
-            parts[1].to_string()
-        } else {
-            String::new()
-        };
-        let stash_id = line_content
-            .split(' ')
-            .nth(1)
-            .unwrap_or("unknown")
-            .to_string();
-        entries.push(StashListEntry {
+    let entries = parse_stash_log_entries(read_stash_log_lines(&stash_log_path)?)?
+        .into_iter()
+        .enumerate()
+        .map(|(index, entry)| StashListEntry {
             index,
-            message,
-            stash_id,
-        });
-    }
+            message: entry.message,
+            stash_id: entry.stash_id,
+        })
+        .collect();
 
     Ok(StashOutput::List { entries })
 }
@@ -511,8 +500,8 @@ fn do_drop(stash: Option<String>) -> Result<StashOutput, StashError> {
         return Err(StashError::NoStashFound);
     }
 
-    let mut lines = read_stash_log_lines(&stash_log_path)?;
-    if lines.is_empty() {
+    let mut entries = parse_stash_log_entries(read_stash_log_lines(&stash_log_path)?)?;
+    if entries.is_empty() {
         return Err(StashError::NoStashFound);
     }
 
@@ -521,17 +510,13 @@ fn do_drop(stash: Option<String>) -> Result<StashOutput, StashError> {
         Some(s) => parse_stash_index(&s)?,
     };
 
-    if index_to_drop >= lines.len() {
+    if index_to_drop >= entries.len() {
         return Err(StashError::StashNotExist(index_to_drop));
     }
-    let removed_line = lines.remove(index_to_drop);
-    let stash_commit_hash = removed_line
-        .split(' ')
-        .nth(1)
-        .unwrap_or("unknown")
-        .to_string();
+    let removed_entry = entries.remove(index_to_drop);
+    let stash_commit_hash = removed_entry.stash_id;
 
-    if lines.is_empty() {
+    if entries.is_empty() {
         std::fs::remove_file(&stash_log_path)
             .map_err(|e| StashError::WriteObject(e.to_string()))?;
         if stash_ref_path.exists() {
@@ -539,15 +524,19 @@ fn do_drop(stash: Option<String>) -> Result<StashOutput, StashError> {
                 .map_err(|e| StashError::WriteObject(e.to_string()))?;
         }
     } else {
-        let new_content = lines.join("\n") + "\n";
+        let new_content = entries
+            .iter()
+            .map(|entry| entry.raw_line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
         std::fs::write(&stash_log_path, new_content)
             .map_err(|e| StashError::WriteObject(e.to_string()))?;
 
         if index_to_drop == 0
-            && let Some(new_top_line) = lines.first()
-            && let Some(new_hash) = new_top_line.split(' ').nth(1)
+            && let Some(new_top_entry) = entries.first()
         {
-            std::fs::write(&stash_ref_path, format!("{new_hash}\n"))
+            std::fs::write(&stash_ref_path, format!("{}\n", new_top_entry.stash_id))
                 .map_err(|e| StashError::WriteObject(e.to_string()))?;
         }
     }
@@ -664,6 +653,49 @@ fn read_stash_log_lines(stash_log_path: &Path) -> Result<Vec<String>, StashError
     })
 }
 
+#[derive(Debug, Clone)]
+struct StashLogEntry {
+    raw_line: String,
+    stash_id: String,
+    message: String,
+}
+
+fn parse_stash_log_entries(lines: Vec<String>) -> Result<Vec<StashLogEntry>, StashError> {
+    let mut entries = Vec::new();
+
+    for (line_index, line) in lines.into_iter().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let stash_id = line.split_whitespace().nth(1).ok_or_else(|| {
+            StashError::ReadObject(format!(
+                "corrupted stash log entry at line {}: missing stash commit hash",
+                line_index + 1
+            ))
+        })?;
+        let stash_id = ObjectHash::from_str(stash_id).map_err(|_| {
+            StashError::ReadObject(format!(
+                "corrupted stash log entry at line {}: invalid stash commit hash '{}'",
+                line_index + 1,
+                stash_id
+            ))
+        })?;
+        let message = line
+            .split_once('\t')
+            .map(|(_, message)| message.to_string())
+            .unwrap_or_default();
+
+        entries.push(StashLogEntry {
+            raw_line: line,
+            stash_id: stash_id.to_string(),
+            message,
+        });
+    }
+
+    Ok(entries)
+}
+
 fn resolve_stash_to_commit_hash(stash_ref: Option<String>) -> Result<(usize, String), StashError> {
     if !has_stash() {
         return Err(StashError::NoStashFound);
@@ -676,24 +708,18 @@ fn resolve_stash_to_commit_hash(stash_ref: Option<String>) -> Result<(usize, Str
         return Err(StashError::NoStashFound);
     }
 
-    let lines = read_stash_log_lines(&stash_log_path)?;
+    let entries = parse_stash_log_entries(read_stash_log_lines(&stash_log_path)?)?;
 
     let index_to_resolve = match stash_ref {
         None => 0,
         Some(s) => parse_stash_index(&s)?,
     };
 
-    if index_to_resolve >= lines.len() {
+    if index_to_resolve >= entries.len() {
         return Err(StashError::StashNotExist(index_to_resolve));
     }
 
-    let line_content = &lines[index_to_resolve];
-    let commit_hash = line_content
-        .split(' ')
-        .nth(1)
-        .ok_or_else(|| StashError::ReadObject("corrupted stash log".into()))?;
-
-    Ok((index_to_resolve, commit_hash.to_string()))
+    Ok((index_to_resolve, entries[index_to_resolve].stash_id.clone()))
 }
 
 fn update_stash_ref(
@@ -888,50 +914,19 @@ fn build_tree_from_flat_items(
     files: &HashMap<String, TreeItem>,
     git_dir: &Path,
 ) -> Result<Tree, String> {
+    #[derive(Default)]
+    struct DirectoryEntries {
+        files: Vec<TreeItem>,
+        subdirs: HashSet<String>,
+    }
+
     fn build_dir(
         current_dir: &Path,
-        files: &HashMap<String, TreeItem>,
+        directories: &mut HashMap<PathBuf, DirectoryEntries>,
         git_dir: &Path,
     ) -> Result<Tree, String> {
-        let mut tree_items = Vec::new();
-        let mut subdirs = HashSet::new();
-
-        for (path_str, item) in files {
-            let path_buf = PathBuf::from(path_str);
-            let parent_dir = path_buf.parent().unwrap_or_else(|| Path::new(""));
-
-            if parent_dir == current_dir {
-                let file_name = path_buf
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .ok_or_else(|| format!("invalid merged stash path: {}", path_buf.display()))?
-                    .to_string();
-                let mut tree_item = item.clone();
-                tree_item.name = file_name;
-                tree_items.push(tree_item);
-                continue;
-            }
-
-            if parent_dir.starts_with(current_dir) {
-                let relative_parent = parent_dir
-                    .strip_prefix(current_dir)
-                    .map_err(|e| e.to_string())?;
-                if let Some(component) = relative_parent.components().next() {
-                    let subdir_name = component
-                        .as_os_str()
-                        .to_str()
-                        .ok_or_else(|| {
-                            format!("invalid merged stash path: {}", path_buf.display())
-                        })?
-                        .to_string();
-                    if !subdir_name.is_empty() {
-                        subdirs.insert(subdir_name);
-                    }
-                }
-            }
-        }
-
-        let mut subdirs: Vec<String> = subdirs.into_iter().collect();
+        let mut directory = directories.remove(current_dir).unwrap_or_default();
+        let mut subdirs: Vec<String> = directory.subdirs.into_iter().collect();
         subdirs.sort();
 
         for subdir_name in subdirs {
@@ -940,25 +935,70 @@ fn build_tree_from_flat_items(
             } else {
                 current_dir.join(&subdir_name)
             };
-            let subtree = build_dir(&subdir_path, files, git_dir)?;
+            let subtree = build_dir(&subdir_path, directories, git_dir)?;
             if subtree.tree_items.is_empty() {
                 continue;
             }
             let subtree_data = subtree.to_data().map_err(|e| e.to_string())?;
             let subtree_hash = object::write_git_object(git_dir, "tree", &subtree_data)
                 .map_err(|e| e.to_string())?;
-            tree_items.push(TreeItem::new(TreeItemMode::Tree, subtree_hash, subdir_name));
+            directory
+                .files
+                .push(TreeItem::new(TreeItemMode::Tree, subtree_hash, subdir_name));
         }
 
-        tree_items.sort_by(|a, b| a.name.cmp(&b.name));
-        if tree_items.is_empty() {
+        directory.files.sort_by(|a, b| a.name.cmp(&b.name));
+        if directory.files.is_empty() {
             empty_tree()
         } else {
-            Tree::from_tree_items(tree_items).map_err(|e| e.to_string())
+            Tree::from_tree_items(directory.files).map_err(|e| e.to_string())
         }
     }
 
-    build_dir(Path::new(""), files, git_dir)
+    let mut directories: HashMap<PathBuf, DirectoryEntries> = HashMap::new();
+    directories.entry(PathBuf::new()).or_default();
+
+    for (path_str, item) in files {
+        let path_buf = PathBuf::from(path_str);
+        let file_name = path_buf
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| format!("invalid merged stash path: {}", path_buf.display()))?
+            .to_string();
+        let parent_dir = path_buf
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .to_path_buf();
+
+        let mut tree_item = item.clone();
+        tree_item.name = file_name;
+        directories
+            .entry(parent_dir.clone())
+            .or_default()
+            .files
+            .push(tree_item);
+
+        let mut current_dir = PathBuf::new();
+        for component in parent_dir.components() {
+            let subdir_name = component
+                .as_os_str()
+                .to_str()
+                .ok_or_else(|| format!("invalid merged stash path: {}", path_buf.display()))?
+                .to_string();
+            if subdir_name.is_empty() {
+                continue;
+            }
+            directories
+                .entry(current_dir.clone())
+                .or_default()
+                .subdirs
+                .insert(subdir_name.clone());
+            current_dir.push(&subdir_name);
+            directories.entry(current_dir.clone()).or_default();
+        }
+    }
+
+    build_dir(Path::new(""), &mut directories, git_dir)
 }
 
 /// Performs a three-way merge of tree objects.
@@ -1034,11 +1074,10 @@ pub(crate) fn get_stash_num() -> Result<usize, String> {
     if !stash_log_path.exists() {
         return Ok(0);
     }
-    let count = read_stash_log_lines(&stash_log_path)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .filter(|line| !line.trim().is_empty())
-        .count();
+    let count =
+        parse_stash_log_entries(read_stash_log_lines(&stash_log_path).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?
+            .len();
 
     Ok(count)
 }

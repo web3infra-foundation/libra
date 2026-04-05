@@ -330,6 +330,63 @@ async fn test_stash_list() {
     );
 }
 
+#[test]
+fn test_stash_list_json_skips_blank_reflog_lines() {
+    let repo = create_committed_repo_via_cli();
+
+    fs::write(repo.path().join("tracked.txt"), "modified\n")
+        .expect("failed to modify tracked file");
+    assert_cli_success(
+        &run_libra_command(&["stash", "push"], repo.path()),
+        "stash push before reflog blank-line mutation",
+    );
+
+    let stash_log_path = repo.path().join(".libra/logs/refs/stash");
+    let original = fs::read_to_string(&stash_log_path).expect("failed to read stash reflog");
+    fs::write(&stash_log_path, format!("\n{original}\n\n"))
+        .expect("failed to inject blank lines into stash reflog");
+
+    let output = run_libra_command(&["stash", "list", "--json"], repo.path());
+    assert_cli_success(
+        &output,
+        "stash list --json should ignore blank reflog lines",
+    );
+
+    let json = parse_json_stdout(&output);
+    let entries = json["data"]["entries"]
+        .as_array()
+        .expect("expected stash list entries array");
+    assert_eq!(entries.len(), 1, "blank reflog lines should be ignored");
+    assert_eq!(entries[0]["index"], 0);
+}
+
+#[test]
+fn test_stash_list_malformed_reflog_entry_returns_io_error() {
+    let repo = create_committed_repo_via_cli();
+
+    fs::write(repo.path().join("tracked.txt"), "modified\n")
+        .expect("failed to modify tracked file");
+    assert_cli_success(
+        &run_libra_command(&["stash", "push"], repo.path()),
+        "stash push before reflog corruption",
+    );
+
+    let stash_log_path = repo.path().join(".libra/logs/refs/stash");
+    fs::write(&stash_log_path, "corrupted entry without hash\n")
+        .expect("failed to corrupt stash reflog");
+
+    let output = run_libra_command(&["stash", "list"], repo.path());
+    assert_eq!(output.status.code(), Some(128));
+
+    let (human, report) = parse_cli_error_stderr(&output.stderr);
+    assert!(
+        human.contains("corrupted stash log entry"),
+        "unexpected stderr: {human}"
+    );
+    assert_eq!(report.error_code, "LBR-IO-001");
+    assert_eq!(report.exit_code, 128);
+}
+
 #[tokio::test]
 #[serial]
 async fn test_stash_drop() {

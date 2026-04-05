@@ -15,7 +15,7 @@ use crate::{
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
-        output::{OutputConfig, ProgressMode},
+        output::OutputConfig,
         util,
     },
 };
@@ -119,19 +119,6 @@ fn checkout_branch_store_error(context: &str, error: BranchStoreError) -> CliErr
         }
         other => CliError::fatal(format!("failed to {context}: {other}"))
             .with_stable_code(StableErrorCode::RepoCorrupt),
-    }
-}
-
-fn child_output_config(output: &OutputConfig) -> OutputConfig {
-    if output.is_json() || output.quiet {
-        OutputConfig {
-            json_format: None,
-            quiet: true,
-            progress: ProgressMode::None,
-            ..output.clone()
-        }
-    } else {
-        output.clone()
     }
 }
 
@@ -251,7 +238,7 @@ async fn restore_to_commit(commit_id: ObjectHash, output: &OutputConfig) -> CliR
         source: Some(commit_id.to_string()),
         pathspec: vec![util::working_dir_string()],
     };
-    restore::execute_safe(restore_args, &child_output_config(output)).await
+    restore::execute_safe(restore_args, &output.child_output_config()).await
 }
 
 /// Unit tests for the checkout module
