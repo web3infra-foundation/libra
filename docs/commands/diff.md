@@ -11,8 +11,9 @@ Supported output:
 - `--name-status`
 - `--numstat`
 - `--stat`
+- `--quiet` suppresses stdout and uses exit `1` to signal that differences exist
 
-`--output <file>` writes human-readable output to a file; in `--json` mode this flag is ignored and output always goes to stdout.
+`--output <file>` writes human-readable output to a file. In `--quiet` mode the file is still written, but differences still return exit `1`. In `--json` mode this flag is ignored and output always goes to stdout.
 
 ## JSON Output
 
@@ -49,6 +50,7 @@ Supported output:
 
 ## Errors
 
+- Outside a repository: `LBR-REPO-001`
 - Invalid revision: `LBR-CLI-003`
 - Failed to read the index or object store: `LBR-REPO-002`
 - Failed to read a file: `LBR-IO-001`

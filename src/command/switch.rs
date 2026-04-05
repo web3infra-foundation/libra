@@ -23,7 +23,9 @@ use crate::{
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
-        path, util,
+        path,
+        text::levenshtein,
+        util,
         util::get_commit_base,
         worktree,
     },
@@ -216,26 +218,24 @@ impl From<SwitchError> for CliError {
     }
 }
 
-/// Compute the Levenshtein edit distance between two strings.
-fn levenshtein(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    let (a, b) = if a.len() > b.len() {
-        (&b, &a)
-    } else {
-        (&a, &b)
-    };
-    let mut prev: Vec<usize> = (0..=a.len()).collect();
-    let mut curr = vec![0; a.len() + 1];
-    for (i, cb) in b.iter().enumerate() {
-        curr[0] = i + 1;
-        for (j, ca) in a.iter().enumerate() {
-            let cost = usize::from(ca != cb);
-            curr[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(curr[j] + 1);
+fn map_branch_store_error(error: repo_branch::BranchStoreError) -> SwitchError {
+    match error {
+        repo_branch::BranchStoreError::Query(detail) => SwitchError::DelegatedCli(
+            CliError::fatal(format!("failed to read branch storage: {detail}"))
+                .with_stable_code(StableErrorCode::IoReadFailed),
+        ),
+        repo_branch::BranchStoreError::Corrupt { .. } => {
+            repo_corrupt_switch_error(error.to_string())
         }
-        std::mem::swap(&mut prev, &mut curr);
+        repo_branch::BranchStoreError::NotFound(name) => SwitchError::DelegatedCli(
+            CliError::fatal(format!("branch '{name}' not found"))
+                .with_stable_code(StableErrorCode::CliInvalidTarget),
+        ),
+        repo_branch::BranchStoreError::Delete { name, detail } => SwitchError::DelegatedCli(
+            CliError::fatal(format!("failed to delete branch '{name}': {detail}"))
+                .with_stable_code(StableErrorCode::IoWriteFailed),
+        ),
     }
-    prev[a.len()]
 }
 
 fn invalid_branch_name_error(branch_name: &str) -> CliError {
@@ -267,7 +267,11 @@ async fn validate_new_branch_request(
             new_branch_name.to_string(),
         ));
     }
-    if Branch::find_branch(new_branch_name, None).await.is_some() {
+    if Branch::find_branch_result(new_branch_name, None)
+        .await
+        .map_err(map_branch_store_error)?
+        .is_some()
+    {
         return Err(SwitchError::DelegatedCli(existing_branch_conflict_error(
             new_branch_name,
         )));
@@ -329,17 +333,26 @@ async fn resolve_switch_branch_target(
     if is_internal_switch_target(branch_name) {
         return Err(SwitchError::InternalBranchBlocked(branch_name.to_string()));
     }
-    if let Some(branch) = Branch::find_branch(branch_name, None).await {
+    if let Some(branch) = Branch::find_branch_result(branch_name, None)
+        .await
+        .map_err(map_branch_store_error)?
+    {
         return Ok(ResolvedSwitchBranch {
             name: branch.name,
             commit: branch.commit,
         });
     }
-    if !Branch::search_branch(branch_name).await.is_empty() {
+    if !Branch::search_branch_result(branch_name)
+        .await
+        .map_err(map_branch_store_error)?
+        .is_empty()
+    {
         return Err(SwitchError::GotRemoteBranch(branch_name.to_string()));
     }
 
-    let all_branches = Branch::list_branches(None).await;
+    let all_branches = Branch::list_branches_result(None)
+        .await
+        .map_err(map_branch_store_error)?;
     let similar = find_similar_branch_names(branch_name, &all_branches);
     Err(SwitchError::BranchNotFound {
         name: branch_name.to_string(),
@@ -372,20 +385,29 @@ async fn resolve_tracked_remote_target(
     }
 
     let remote_tracking_ref = format!("refs/remotes/{remote_name}/{remote_branch_name}");
-    let remote_tracking_branch =
-        if let Some(branch) = Branch::find_branch(&remote_tracking_ref, Some(&remote_name)).await {
-            Some(branch)
-        } else if let Some(branch) = Branch::find_branch(&remote_tracking_ref, None).await {
-            Some(branch)
-        } else {
-            Branch::find_branch(&remote_branch_name, Some(&remote_name)).await
-        }
-        .ok_or_else(|| SwitchError::RemoteBranchNotFound {
-            remote: remote_name.clone(),
-            branch: remote_branch_name.clone(),
-        })?;
-    if Branch::find_branch(&remote_branch_name, None)
+    let remote_tracking_branch = if let Some(branch) =
+        Branch::find_branch_result(&remote_tracking_ref, Some(&remote_name))
+            .await
+            .map_err(map_branch_store_error)?
+    {
+        Some(branch)
+    } else if let Some(branch) = Branch::find_branch_result(&remote_tracking_ref, None)
         .await
+        .map_err(map_branch_store_error)?
+    {
+        Some(branch)
+    } else {
+        Branch::find_branch_result(&remote_branch_name, Some(&remote_name))
+            .await
+            .map_err(map_branch_store_error)?
+    }
+    .ok_or_else(|| SwitchError::RemoteBranchNotFound {
+        remote: remote_name.clone(),
+        branch: remote_branch_name.clone(),
+    })?;
+    if Branch::find_branch_result(&remote_branch_name, None)
+        .await
+        .map_err(map_branch_store_error)?
         .is_some()
     {
         return Err(SwitchError::BranchAlreadyExists(remote_branch_name));
@@ -404,8 +426,9 @@ fn internal_switch_invariant(message: impl Into<String>) -> SwitchError {
 }
 
 async fn resolve_created_branch(branch_name: &str) -> Result<ResolvedSwitchBranch, SwitchError> {
-    let branch = Branch::find_branch(branch_name, None)
+    let branch = Branch::find_branch_result(branch_name, None)
         .await
+        .map_err(map_branch_store_error)?
         .ok_or_else(|| {
             internal_switch_invariant(format!(
                 "failed to resolve newly created branch '{}'",
@@ -427,7 +450,9 @@ async fn resolve_create_switch_target(
             .await
             .map(Some)
             .map_err(|_| SwitchError::DelegatedCli(invalid_branch_base_error(target))),
-        None => Ok(Head::current_commit().await),
+        None => Head::current_commit_result()
+            .await
+            .map_err(map_branch_store_error),
     }
 }
 
@@ -697,8 +722,9 @@ async fn switch_to_commit(
 ) -> Result<ObjectHash, SwitchError> {
     let db = get_db_conn_instance().await;
 
-    let old_oid = Head::current_commit_with_conn(&db)
+    let old_oid = Head::current_commit_result_with_conn(&db)
         .await
+        .map_err(map_branch_store_error)?
         .map(|oid| oid.to_string())
         .unwrap_or_else(|| ObjectHash::zero_str(get_hash_kind()).to_string());
 
@@ -748,8 +774,9 @@ async fn switch_to_resolved_branch(
     } = target_branch;
     let db = get_db_conn_instance().await;
 
-    let old_oid = Head::current_commit_with_conn(&db)
+    let old_oid = Head::current_commit_result_with_conn(&db)
         .await
+        .map_err(map_branch_store_error)?
         .map(|oid| oid.to_string())
         .unwrap_or_else(|| ObjectHash::zero_str(get_hash_kind()).to_string());
 
@@ -806,7 +833,7 @@ async fn restore_to_commit(
         source: Some(commit_id.to_string()),
         pathspec: vec![util::working_dir_string()],
     };
-    restore::execute_safe(restore_args, output).await?;
+    restore::execute_safe(restore_args, &output.child_output_config()).await?;
     Ok(())
 }
 
@@ -842,7 +869,13 @@ async fn current_switch_state() -> (Option<String>, Option<String>) {
         Head::Branch(name) => Some(name),
         Head::Detached(_) => None,
     };
-    let commit = Head::current_commit().await.map(|hash| hash.to_string());
+    let commit = match Head::current_commit_result().await {
+        Ok(commit) => commit.map(|hash| hash.to_string()),
+        Err(error) => {
+            tracing::error!("failed to resolve current switch state: {error}");
+            None
+        }
+    };
     (branch, commit)
 }
 

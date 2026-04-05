@@ -31,8 +31,17 @@ use crate::{
     },
 };
 
+const SHOW_EXAMPLES: &str = "\
+EXAMPLES:
+    libra show HEAD                         Show the latest commit and patch
+    libra show --no-patch v1.0.0            Show tag or commit metadata only
+    libra show HEAD:src/main.rs             Show a file from a specific revision
+    libra show --stat HEAD~1                Show only diff statistics
+    libra --json show HEAD                  Structured JSON output for agents";
+
 /// Shows commits, tags, trees, or blobs.
 #[derive(Parser, Debug)]
+#[command(after_help = SHOW_EXAMPLES)]
 pub struct ShowArgs {
     /// Object name (commit, tag, etc.) or `<object>:<path>`. Defaults to `HEAD`.
     #[clap(value_name = "OBJECT")]
@@ -138,9 +147,15 @@ pub async fn execute(args: ShowArgs) {
 /// errors and exiting. Resolves a revision (commit, tag, tree, blob, or
 /// `<rev>:<path>`) and prints its contents with diff formatting.
 pub async fn execute_safe(args: ShowArgs, output: &OutputConfig) -> CliResult<()> {
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
+
     if output.is_json() {
         let result = run_show(&args).await?;
         return emit_json_data("show", &result, output);
+    }
+
+    if output.quiet {
+        return validate_show_quiet(&args).await;
     }
 
     let object_ref = args.object.as_deref().unwrap_or("HEAD");
@@ -179,6 +194,36 @@ pub async fn execute_safe(args: ShowArgs, output: &OutputConfig) -> CliResult<()
     Err(show_bad_revision_error(object_ref))
 }
 
+async fn validate_show_quiet(args: &ShowArgs) -> CliResult<()> {
+    let object_ref = args.object.as_deref().unwrap_or("HEAD");
+
+    if let Some((rev, path)) = object_ref.split_once(':') {
+        return validate_commit_file(rev, path).await;
+    }
+
+    if let Some(hash) = resolve_existing_object_hash(object_ref) {
+        return validate_object_by_hash(&hash, args).await;
+    }
+
+    if let Ok(commit_hash) = util::get_commit_base(object_ref).await {
+        match tag::find_tag_and_commit(object_ref).await {
+            Ok(Some((object, _))) if object.get_type() == ObjectType::Tag => {
+                let tag_hash = if let tag::TagObject::Tag(tag_obj) = &object {
+                    tag_obj.id
+                } else {
+                    commit_hash
+                };
+                return validate_tag_by_hash(&tag_hash, args).await;
+            }
+            _ => {
+                return validate_commit_output(&commit_hash, args).await;
+            }
+        }
+    }
+
+    Err(show_bad_revision_error(object_ref))
+}
+
 /// Shows an object by hash after resolving its object type.
 fn show_object_by_hash<'a>(
     hash: &'a ObjectHash,
@@ -197,6 +242,31 @@ fn show_object_by_hash<'a>(
             ObjectType::Tag => show_tag_by_hash(hash, args).await,
             ObjectType::Tree => show_tree(hash).await,
             ObjectType::Blob => show_blob(hash).await,
+            _ => Err(
+                CliError::fatal(format!("unsupported object type for {}", hash))
+                    .with_stable_code(StableErrorCode::CliInvalidTarget),
+            ),
+        }
+    })
+}
+
+fn validate_object_by_hash<'a>(
+    hash: &'a ObjectHash,
+    args: &'a ShowArgs,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = CliResult<()>> + 'a>> {
+    Box::pin(async move {
+        let storage = ClientStorage::init(path::objects());
+
+        let obj_type = storage.get_object_type(hash).map_err(|e| {
+            CliError::fatal(format!("could not read object {}: {}", hash, e))
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+        })?;
+
+        match obj_type {
+            ObjectType::Commit => validate_commit_output(hash, args).await,
+            ObjectType::Tag => validate_tag_by_hash(hash, args).await,
+            ObjectType::Tree => validate_tree(hash),
+            ObjectType::Blob => validate_blob(hash),
             _ => Err(
                 CliError::fatal(format!("unsupported object type for {}", hash))
                     .with_stable_code(StableErrorCode::CliInvalidTarget),
@@ -244,6 +314,29 @@ async fn show_commit(commit_hash: &ObjectHash, args: &ShowArgs) -> CliResult<()>
     Ok(())
 }
 
+async fn validate_commit_output(commit_hash: &ObjectHash, args: &ShowArgs) -> CliResult<()> {
+    let commit = load_object::<Commit>(commit_hash).map_err(|e| {
+        CliError::fatal(format!("could not load commit {}: {}", commit_hash, e))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+    })?;
+
+    if args.no_patch {
+        return Ok(());
+    }
+
+    let paths: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
+    if args.stat || args.name_only {
+        // --stat and --name-only human paths only need tree-level file lists,
+        // not blob contents.  Use the same function so quiet mode has the same
+        // success/failure semantics as the visible rendering path.
+        let _ = get_changed_files_for_commit(&commit, &paths).await?;
+    } else {
+        let _ = generate_diff(&commit, paths).await?;
+    }
+
+    Ok(())
+}
+
 /// Shows an annotated or lightweight tag.
 async fn show_tag_by_hash(hash: &ObjectHash, args: &ShowArgs) -> CliResult<()> {
     match tag::load_object_trait(hash).await {
@@ -283,6 +376,20 @@ async fn show_tag_by_hash(hash: &ObjectHash, args: &ShowArgs) -> CliResult<()> {
     Ok(())
 }
 
+async fn validate_tag_by_hash(hash: &ObjectHash, args: &ShowArgs) -> CliResult<()> {
+    match tag::load_object_trait(hash).await {
+        Ok(tag::TagObject::Tag(tag_obj)) => {
+            validate_object_by_hash(&tag_obj.object_hash, args).await
+        }
+        Ok(tag::TagObject::Commit(commit)) => validate_commit_output(&commit.id, args).await,
+        Ok(_) => Err(CliError::fatal("tag points to unsupported object type")
+            .with_stable_code(StableErrorCode::CliInvalidTarget)),
+        Err(e) => {
+            Err(CliError::fatal(e.to_string()).with_stable_code(StableErrorCode::RepoCorrupt))
+        }
+    }
+}
+
 /// Shows a tree object.
 async fn show_tree(hash: &ObjectHash) -> CliResult<()> {
     let tree = load_object::<Tree>(hash).map_err(|e| {
@@ -304,6 +411,14 @@ async fn show_tree(hash: &ObjectHash) -> CliResult<()> {
     Ok(())
 }
 
+fn validate_tree(hash: &ObjectHash) -> CliResult<()> {
+    load_object::<Tree>(hash).map_err(|e| {
+        CliError::fatal(format!("could not load tree {}: {}", hash, e))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+    })?;
+    Ok(())
+}
+
 /// Shows a blob as text when possible.
 async fn show_blob(hash: &ObjectHash) -> CliResult<()> {
     let blob = load_object::<Blob>(hash).map_err(|e| {
@@ -318,6 +433,14 @@ async fn show_blob(hash: &ObjectHash) -> CliResult<()> {
             println!("Binary file (size: {} bytes)", blob.data.len());
         }
     }
+    Ok(())
+}
+
+fn validate_blob(hash: &ObjectHash) -> CliResult<()> {
+    load_object::<Blob>(hash).map_err(|e| {
+        CliError::fatal(format!("could not load blob {}: {}", hash, e))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+    })?;
     Ok(())
 }
 
@@ -352,6 +475,34 @@ async fn show_commit_file(rev: &str, file_path: &str, _args: &ShowArgs) -> CliRe
         );
     }
     Ok(())
+}
+
+async fn validate_commit_file(rev: &str, file_path: &str) -> CliResult<()> {
+    let commit_hash = util::get_commit_base(rev)
+        .await
+        .map_err(|_| show_bad_revision_error(rev))?;
+
+    let commit = load_object::<Commit>(&commit_hash).map_err(|e| {
+        CliError::fatal(format!("could not load commit {}: {}", commit_hash, e))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+    })?;
+
+    let tree = load_object::<Tree>(&commit.tree_id).map_err(|e| {
+        CliError::fatal(format!("could not load tree {}: {}", commit.tree_id, e))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+    })?;
+
+    let items = tree.get_plain_items();
+    let target_path = PathBuf::from(file_path);
+
+    if let Some((_, blob_hash)) = items.iter().find(|(path, _)| path == &target_path) {
+        validate_blob(blob_hash)
+    } else {
+        Err(
+            CliError::fatal(format!("path '{}' does not exist in '{}'", file_path, rev))
+                .with_stable_code(StableErrorCode::CliInvalidTarget),
+        )
+    }
 }
 
 /// Renders the commit header using the selected format.
@@ -428,12 +579,9 @@ async fn show_diffstat(commit: &Commit, paths: Vec<PathBuf>) -> CliResult<()> {
 }
 
 fn show_bad_revision_error(object_ref: &str) -> CliError {
-    CliError::fatal(format!(
-        "ambiguous argument '{}': unknown revision or path not in the working tree.",
-        object_ref
-    ))
-    .with_stable_code(StableErrorCode::CliInvalidTarget)
-    .with_hint("use '--' to separate paths from revisions, for example 'libra show -- <file>'.")
+    CliError::fatal(format!("bad revision '{}'", object_ref))
+        .with_stable_code(StableErrorCode::CliInvalidTarget)
+        .with_hint("use 'libra log --oneline' to see available commits, or 'libra tag -l' to see available tags.")
 }
 
 async fn run_show(args: &ShowArgs) -> CliResult<ShowOutput> {
@@ -534,16 +682,30 @@ async fn collect_commit_output(
 
 async fn collect_tag_output(hash: &ObjectHash, paths: &[PathBuf]) -> CliResult<ShowOutput> {
     match tag::load_object_trait(hash).await {
-        Ok(tag::TagObject::Tag(tag_obj)) => Ok(ShowOutput::Tag(ShowTagData {
-            tag_name: tag_obj.tag_name,
-            tagger_name: Some(tag_obj.tagger.name.trim().to_string()),
-            tagger_email: Some(tag_obj.tagger.email.trim().to_string()),
-            tagger_date: chrono::DateTime::from_timestamp(tag_obj.tagger.timestamp as i64, 0)
-                .map(|date| date.to_rfc3339()),
-            message: tag_obj.message.trim().to_string(),
-            target_hash: tag_obj.object_hash.to_string(),
-            target_type: format!("{:?}", tag_obj.object_type).to_lowercase(),
-        })),
+        Ok(tag::TagObject::Tag(tag_obj)) => {
+            // Validate the target object is accessible so that quiet / JSON
+            // paths fail consistently with the human path, which dereferences
+            // the tagged object via show_object_by_hash().
+            let storage = ClientStorage::init(path::objects());
+            let _ = storage.get_object_type(&tag_obj.object_hash).map_err(|e| {
+                CliError::fatal(format!(
+                    "could not read target object {}: {}",
+                    tag_obj.object_hash, e
+                ))
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+            })?;
+
+            Ok(ShowOutput::Tag(ShowTagData {
+                tag_name: tag_obj.tag_name,
+                tagger_name: Some(tag_obj.tagger.name.trim().to_string()),
+                tagger_email: Some(tag_obj.tagger.email.trim().to_string()),
+                tagger_date: chrono::DateTime::from_timestamp(tag_obj.tagger.timestamp as i64, 0)
+                    .map(|date| date.to_rfc3339()),
+                message: tag_obj.message.trim().to_string(),
+                target_hash: tag_obj.object_hash.to_string(),
+                target_type: format!("{:?}", tag_obj.object_type).to_lowercase(),
+            }))
+        }
         Ok(tag::TagObject::Commit(commit)) => collect_commit_output(&commit.id, paths).await,
         Ok(_) => Err(CliError::fatal("tag points to unsupported object type")
             .with_stable_code(StableErrorCode::CliInvalidTarget)),
@@ -658,21 +820,44 @@ fn tree_item_mode_to_object_type(mode: TreeItemMode) -> &'static str {
 
 async fn collect_reference_names(commit_id: ObjectHash) -> Vec<String> {
     let mut refs = Vec::new();
-    let head_branch = match (Head::current().await, Head::current_commit().await) {
-        (Head::Branch(name), Some(head_commit)) if head_commit == commit_id => Some(name),
-        _ => None,
-    };
+    let mut head_branch = None;
+    let mut include_head_ref = false;
 
-    for branch in Branch::list_branches(None).await {
+    match Head::current_commit_result().await {
+        Ok(Some(head_commit)) if head_commit == commit_id => {
+            include_head_ref = true;
+            match Head::current_result().await {
+                Ok(Head::Branch(name)) => head_branch = Some(name),
+                Ok(_) => {}
+                Err(error) => tracing::warn!(
+                    error = %error,
+                    "failed to resolve HEAD while collecting show JSON refs"
+                ),
+            }
+        }
+        Ok(_) => {}
+        Err(error) => tracing::warn!(
+            error = %error,
+            "failed to resolve HEAD commit while collecting show JSON refs"
+        ),
+    }
+
+    if include_head_ref {
+        if let Some(branch) = &head_branch {
+            refs.push(format!("HEAD -> {branch}"));
+        } else {
+            refs.push("HEAD".to_string());
+        }
+    }
+
+    for branch in Branch::list_branches_best_effort(None).await {
         if branch.commit != commit_id {
             continue;
         }
-
         if head_branch.as_deref() == Some(branch.name.as_str()) {
-            refs.push(format!("HEAD -> {}", branch.name));
-        } else {
-            refs.push(branch.name);
+            continue;
         }
+        refs.push(branch.name);
     }
 
     match tag::list().await {
@@ -689,9 +874,10 @@ async fn collect_reference_names(commit_id: ObjectHash) -> Vec<String> {
             }
         }
         Err(err) => tracing::warn!("failed to collect tag refs for show JSON output: {err}"),
-    }
+    };
 
     refs.sort();
+    refs.dedup();
     refs
 }
 

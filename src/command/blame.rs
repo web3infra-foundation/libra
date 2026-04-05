@@ -20,7 +20,16 @@ use crate::{
     },
 };
 
+const BLAME_EXAMPLES: &str = "\
+EXAMPLES:
+    libra blame src/main.rs                Blame a file at HEAD
+    libra blame src/main.rs abc1234        Blame a file at a specific commit
+    libra blame -L 10,20 src/main.rs       Blame lines 10-20
+    libra blame -L 10,+5 src/main.rs       Blame 5 lines starting at line 10
+    libra --json blame src/main.rs         Structured JSON output for agents";
+
 #[derive(Parser, Debug)]
+#[command(after_help = BLAME_EXAMPLES)]
 pub struct BlameArgs {
     /// The file to blame
     #[clap(value_name = "FILE")]
@@ -56,8 +65,51 @@ struct LineBlame {
     line_number: usize,
     commit_id: ObjectHash,
     author: String,
-    date: String,
+    timestamp: i64,
     content: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum BlameError {
+    #[error("not a libra repository")]
+    NotInRepo,
+
+    #[error("invalid revision: '{0}'")]
+    InvalidRevision(String),
+
+    #[error("failed to load {kind} '{object_id}': {detail}")]
+    ObjectLoad {
+        kind: &'static str,
+        object_id: String,
+        detail: String,
+    },
+
+    #[error("file '{path}' not found in revision '{revision}'")]
+    FileNotFound { path: String, revision: String },
+
+    #[error("invalid line range: {0}")]
+    InvalidLineRange(String),
+}
+
+impl From<BlameError> for CliError {
+    fn from(error: BlameError) -> Self {
+        let message = error.to_string();
+        match error {
+            BlameError::NotInRepo => CliError::repo_not_found(),
+            BlameError::InvalidRevision(_) => CliError::fatal(message)
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint("check the revision name and try again"),
+            BlameError::ObjectLoad { .. } => CliError::fatal(message)
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+                .with_hint("the object store may be corrupted"),
+            BlameError::FileNotFound { .. } => CliError::fatal(message)
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint("check the file path; use 'libra show <rev>:' to list available files"),
+            BlameError::InvalidLineRange(_) => CliError::command_usage(message)
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint(r#"supported formats: "10", "10,20", "10,+5""#),
+        }
+    }
 }
 
 pub async fn execute(args: BlameArgs) {
@@ -70,7 +122,7 @@ pub async fn execute(args: BlameArgs) {
 /// errors and exiting. Walks commit history for the target file, attributing
 /// each line to the commit that last changed it.
 pub async fn execute_safe(args: BlameArgs, out_config: &OutputConfig) -> CliResult<()> {
-    let result = run_blame(&args).await?;
+    let result = run_blame(&args).await.map_err(CliError::from)?;
 
     if out_config.is_json() {
         return emit_json_data("blame", &result, out_config);
@@ -95,15 +147,13 @@ pub async fn execute_safe(args: BlameArgs, out_config: &OutputConfig) -> CliResu
         };
         let date_formatted = blame
             .date
-            .parse::<i64>()
-            .ok()
-            .and_then(|timestamp| DateTime::from_timestamp(timestamp, 0))
+            .parse::<DateTime<chrono::FixedOffset>>()
             .map(|dt| {
                 dt.with_timezone(&chrono::Local)
                     .format("%Y-%m-%d %H:%M:%S %z")
                     .to_string()
             })
-            .unwrap_or_else(|| blame.date.clone());
+            .unwrap_or_else(|_| blame.date.clone());
 
         output.push_str(&format!(
             "{} ({:19} {} {}) {}\n",
@@ -117,19 +167,20 @@ pub async fn execute_safe(args: BlameArgs, out_config: &OutputConfig) -> CliResu
     Ok(())
 }
 
-async fn run_blame(args: &BlameArgs) -> CliResult<BlameOutput> {
-    util::require_repo().map_err(|_| CliError::repo_not_found())?;
+async fn run_blame(args: &BlameArgs) -> Result<BlameOutput, BlameError> {
+    util::require_repo().map_err(|_| BlameError::NotInRepo)?;
 
-    let commit_id = get_target_commit(&args.commit).await.map_err(|e| {
-        CliError::fatal(e.to_string()).with_stable_code(StableErrorCode::CliInvalidTarget)
+    let commit_id = get_target_commit(&args.commit)
+        .await
+        .map_err(|_| BlameError::InvalidRevision(args.commit.clone()))?;
+
+    let commit_obj = load_object::<Commit>(&commit_id).map_err(|e| BlameError::ObjectLoad {
+        kind: "commit",
+        object_id: commit_id.to_string(),
+        detail: e.to_string(),
     })?;
 
-    let commit_obj = load_object::<Commit>(&commit_id).map_err(|e| {
-        CliError::fatal(format!("failed to load commit: {e}"))
-            .with_stable_code(StableErrorCode::RepoCorrupt)
-    })?;
-
-    let target_lines = get_file_lines(&commit_obj, &args.file).map_err(map_blame_file_error)?;
+    let target_lines = get_file_lines(&commit_obj, &args.file, &args.commit)?;
 
     if target_lines.is_empty() {
         return Ok(BlameOutput {
@@ -146,7 +197,7 @@ async fn run_blame(args: &BlameArgs) -> CliResult<BlameOutput> {
             line_number: idx + 1,
             commit_id,
             author: commit_obj.author.name.clone(),
-            date: commit_obj.author.timestamp.to_string(),
+            timestamp: commit_obj.author.timestamp as i64,
             content: content.clone(),
         })
         .collect();
@@ -166,7 +217,8 @@ async fn run_blame(args: &BlameArgs) -> CliResult<BlameOutput> {
                 Err(_) => continue,
             };
 
-            let parent_lines = match get_file_lines(&parent_commit, &args.file) {
+            let parent_revision = parent_id.to_string();
+            let parent_lines = match get_file_lines(&parent_commit, &args.file, &parent_revision) {
                 Ok(lines) if !lines.is_empty() => lines,
                 _ => continue,
             };
@@ -185,7 +237,7 @@ async fn run_blame(args: &BlameArgs) -> CliResult<BlameOutput> {
                             if Some(&blame.content) == parent_content {
                                 blame.commit_id = *parent_id;
                                 blame.author = parent_commit.author.name.clone();
-                                blame.date = parent_commit.author.timestamp.to_string();
+                                blame.timestamp = parent_commit.author.timestamp as i64;
                             }
                         }
                     }
@@ -196,11 +248,8 @@ async fn run_blame(args: &BlameArgs) -> CliResult<BlameOutput> {
     }
 
     let filtered_lines = if let Some(ref range) = args.line_range {
-        let (start, end) = parse_line_range(range, blame_lines.len()).map_err(|e| {
-            CliError::command_usage(format!("invalid line range: {e}"))
-                .with_stable_code(StableErrorCode::CliInvalidArguments)
-                .with_hint(r#"supported formats: "10", "10,20", "10,+5""#)
-        })?;
+        let (start, end) =
+            parse_line_range(range, blame_lines.len()).map_err(BlameError::InvalidLineRange)?;
         blame_lines
             .into_iter()
             .filter(|b| b.line_number >= start && b.line_number <= end)
@@ -221,16 +270,23 @@ async fn run_blame(args: &BlameArgs) -> CliResult<BlameOutput> {
                     short_hash: hash.chars().take(8).collect(),
                     hash,
                     author: line.author,
-                    date: line.date,
+                    date: format_blame_timestamp(line.timestamp),
                     content: line.content,
                 }
             })
             .collect(),
     })
 }
-fn get_file_lines(commit: &Commit, file_path: &str) -> Result<Vec<String>, String> {
-    let tree =
-        load_object::<Tree>(&commit.tree_id).map_err(|e| format!("Failed to load tree: {}", e))?;
+fn get_file_lines(
+    commit: &Commit,
+    file_path: &str,
+    revision: &str,
+) -> Result<Vec<String>, BlameError> {
+    let tree = load_object::<Tree>(&commit.tree_id).map_err(|e| BlameError::ObjectLoad {
+        kind: "tree",
+        object_id: commit.tree_id.to_string(),
+        detail: e.to_string(),
+    })?;
 
     let plain_items = tree.get_plain_items();
     let target_path = util::to_workdir_path(file_path);
@@ -239,26 +295,25 @@ fn get_file_lines(commit: &Commit, file_path: &str) -> Result<Vec<String>, Strin
         .iter()
         .find(|(path, _)| path == &target_path)
         .map(|(_, hash)| hash)
-        .ok_or_else(|| format!("File '{}' not found in commit", file_path))?;
+        .ok_or_else(|| BlameError::FileNotFound {
+            path: file_path.to_string(),
+            revision: revision.to_string(),
+        })?;
 
-    let blob = load_object::<Blob>(blob_hash).map_err(|e| format!("Failed to load blob: {}", e))?;
+    let blob = load_object::<Blob>(blob_hash).map_err(|e| BlameError::ObjectLoad {
+        kind: "blob",
+        object_id: blob_hash.to_string(),
+        detail: e.to_string(),
+    })?;
 
     let content = String::from_utf8_lossy(&blob.data);
     Ok(content.lines().map(|s| s.to_string()).collect())
 }
 
-fn map_blame_file_error(message: String) -> CliError {
-    let normalized = message.to_ascii_lowercase();
-    let stable_code = if normalized.contains("failed to load tree")
-        || normalized.contains("failed to load blob")
-        || normalized.contains("failed to load object")
-    {
-        StableErrorCode::RepoCorrupt
-    } else {
-        StableErrorCode::CliInvalidTarget
-    };
-
-    CliError::fatal(message).with_stable_code(stable_code)
+fn format_blame_timestamp(timestamp: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp, 0)
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_else(|| timestamp.to_string())
 }
 
 /// Parse line range from string like "10", "10,20", "10,+5"
@@ -310,14 +365,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn map_blame_file_error_reports_repo_corrupt_for_storage_failures() {
-        let error = map_blame_file_error("Failed to load tree: corrupt object".to_string());
+    fn blame_error_mapping_reports_repo_corrupt_for_storage_failures() {
+        let error = CliError::from(BlameError::ObjectLoad {
+            kind: "tree",
+            object_id: "abc123".to_string(),
+            detail: "corrupt object".to_string(),
+        });
         assert_eq!(error.stable_code(), StableErrorCode::RepoCorrupt);
     }
 
     #[test]
-    fn map_blame_file_error_reports_invalid_target_for_missing_file() {
-        let error = map_blame_file_error("File 'tracked.txt' not found in commit".to_string());
+    fn blame_error_mapping_reports_invalid_target_for_missing_file() {
+        let error = CliError::from(BlameError::FileNotFound {
+            path: "tracked.txt".to_string(),
+            revision: "HEAD".to_string(),
+        });
         assert_eq!(error.stable_code(), StableErrorCode::CliInvalidTarget);
     }
 }

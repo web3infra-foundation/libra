@@ -55,7 +55,13 @@ pub async fn convert_from_git_repository(
             message: error.to_string(),
         })?;
 
-    let remote_branches = Branch::list_branches(Some(&remote.name)).await;
+    let remote_branches = Branch::list_branches_result(Some(&remote.name))
+        .await
+        .map_err(|error| crate::command::init::InitError::ConversionFailed {
+            repo: git_dir.clone(),
+            stage: "setup",
+            message: format!("failed to inspect fetched branches: {error}"),
+        })?;
     if remote_branches.is_empty() {
         return Err(crate::command::init::InitError::ConversionFailed {
             repo: git_dir.clone(),

@@ -41,6 +41,7 @@ Commands:
   pull         Fetch from and integrate with another repository or a local branch
   diff         Show changes between commits, commit and working tree, etc
   blame        Show author and history of each line of a file
+  bisect       Find the commit that introduced a bug by binary search
   revert       Revert some existing commits
   remote       Manage set of tracked repositories
   open         Open the repository in the browser
@@ -54,6 +55,33 @@ Commands:
 Options:
   -h, --help     Print help
   -V, --version  Print version
+```
+
+---
+
+## grep
+
+`grep` searches tracked working-tree files, the index (`--cached`), or committed trees (`--tree <revision>`) using regular expressions by default. It also supports fixed-string mode, multiple explicit patterns, pattern files, and requiring all patterns to match within the same file.
+
+```bash
+# Search tracked working-tree files with a regex
+libra grep "foo.*bar"
+
+# Search with multiple explicit patterns
+libra grep -e alpha -e beta
+
+# Require every pattern to appear in the same file
+libra grep --all-match -e alpha -e beta
+
+# Search the staged/index version of tracked files
+libra grep --cached "needle"
+
+# Search a specific revision or branch
+libra grep --tree HEAD "needle"
+libra grep --tree main "needle"
+
+# Read patterns from a file
+libra grep -f patterns.txt
 ```
 
 ---
@@ -124,33 +152,76 @@ Update your `claude_desktop_config.json` as follows:
 > **Note**: The `cwd` (current working directory) must be set to the root of a valid Libra repository.
 > If `libra code` is launched outside of a repository, it will exit with an error.
 
-#### AI Hook Forwarding
+#### Managed Claude Runtime
 
-Libra can import Claude Agent SDK managed sessions and provider-side replay
-artifacts through the `claude-sdk` command group.
+`libra code --provider claudecode` uses Libra's managed Claude runtime path.
+This is separate from the direct `anthropic` provider, which still uses the
+regular Anthropic chat-completions client. The managed `claudecode` runtime
+still uses the official Python Claude Agent SDK helper under the hood, so the
+active `python3` in your shell should already have `claude-agent-sdk`
+installed.
 
-Run a managed session through the bundled helper:
-
-```bash
-libra claude-sdk run --prompt "Inspect src/lib.rs and summarize the bridge state"
-```
-
-Sync Claude provider session metadata into Libra snapshots:
+Recommended setup with `uv`:
 
 ```bash
-libra claude-sdk sync-sessions
-libra claude-sdk hydrate-session --provider-session-id session-a
-libra claude-sdk build-evidence-input --provider-session-id session-a
+uv venv .venv --python 3.11
+uv pip install --python .venv/bin/python -U claude-agent-sdk
+source .venv/bin/activate
 ```
 
-The `--cwd` flag controls which project directory Claude SDK queries, but all
-artifacts and history are persisted into the current Libra repository.
+If you prefer not to activate the virtualenv, pass the helper interpreter
+explicitly when launching Claude managed sessions:
 
-Persisted provider session and evidence artifacts are inspectable with:
+```bash
+libra code --provider claudecode \
+  --model claude-sonnet-4-6 \
+  --python-binary .venv/bin/python
+```
+
+Authentication comes from environment variables:
+
+- Official Anthropic path: `ANTHROPIC_API_KEY`
+- Custom gateway path: `ANTHROPIC_BASE_URL`
+- For gateways that expect bearer auth for Claude Code / Python SDK traffic,
+  use `ANTHROPIC_AUTH_TOKEN`
+
+Example:
+
+```bash
+export ANTHROPIC_BASE_URL=https://your-gateway.example.com/anthropic
+export ANTHROPIC_AUTH_TOKEN=<token>
+unset ANTHROPIC_API_KEY
+```
+
+Start an interactive managed Claude session:
+
+```bash
+libra code --provider claudecode \
+  --model claude-sonnet-4-6
+```
+
+Resume Claude provider sessions explicitly:
+
+```bash
+libra code --provider claudecode --resume
+libra code --provider claudecode --resume-session <provider-session-uuid>
+libra code --provider claudecode --resume-session <provider-session-uuid> --fork-session
+libra code --provider claudecode --resume-session <provider-session-uuid> --resume-at <assistant-message-uuid>
+```
+
+The `--cwd` flag controls which project directory Claude reads and writes, but
+all managed artifacts and AI history are persisted into the current Libra
+repository.
+
+Useful inspection commands:
 
 ```bash
 libra cat-file --ai-list ai_session
-libra cat-file --ai <ai_session_id>
+libra cat-file --ai-list run
+libra cat-file --ai-list task
+libra cat-file --ai-list tool_invocation_event
+libra cat-file --ai-list patchset_snapshot
+libra --json=pretty cat-file --ai ai_session:<ai_session_id>
 ```
 
 ### AI Provider Selection
@@ -165,8 +236,11 @@ libra code --provider gemini --model gemini-2.5-flash
 # OpenAI
 libra code --provider openai --model gpt-4o
 
-# Anthropic
-libra code --provider anthropic --model claude-3-5-sonnet-latest
+# Anthropic (direct chat completions)
+libra code --provider anthropic --model claude-sonnet-4-6
+
+# Claude Code managed runtime
+libra code --provider claudecode --model claude-sonnet-4-6
 
 # DeepSeek
 libra code --provider deepseek
@@ -184,11 +258,12 @@ libra code --provider ollama --model llama3.2 --api-base http://remote-host:1143
 
 > **Note**: The `--api-base` CLI flag is only honored for the `ollama` provider. Other providers accept custom base URLs through their respective environment variables (e.g. `OPENAI_BASE_URL`).
 
-| Provider | Default Model | API Key Env Variable | Base URL Override |
-|----------|--------------|---------------------|-------------------|
+| Provider | Default Model | Auth Env Variable | Base URL Override |
+|----------|--------------|-------------------|-------------------|
 | `gemini` | `gemini-2.5-flash` | `GEMINI_API_KEY` | — |
 | `openai` | `gpt-4o-mini` | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
-| `anthropic` | `claude-3-5-sonnet-latest` | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
+| `anthropic` | `claude-sonnet-4-6` | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
+| `claudecode` | `claude-sonnet-4-6` | `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
 | `deepseek` | `deepseek-chat` | `DEEPSEEK_API_KEY` | *(programmatic only)* |
 | `zhipu` | `glm-5` | `ZHIPU_API_KEY` | `ZHIPU_BASE_URL` |
 | `ollama` | *(requires `--model`)* | — | `OLLAMA_BASE_URL` or `--api-base` |
@@ -321,6 +396,56 @@ Note:
 
 ---
 
+## Bisect - Binary Search for Bugs
+
+Libra implements a `bisect` subcommand that uses binary search to find the commit that introduced a bug. It is broadly compatible with `git bisect`.
+
+### Basic Usage
+
+```bash
+# Start a bisect session
+libra bisect start
+
+# Mark the current commit as bad (contains the bug)
+libra bisect bad
+
+# Mark a known-good commit
+libra bisect good <commit>
+
+# After marking, bisect will checkout commits for you to test
+# Continue marking commits as good/bad until the culprit is found
+
+# End the session and restore your original HEAD
+libra bisect reset
+```
+
+### Quick Start with Known Bounds
+
+```bash
+# Start with both bad and good commits specified
+libra bisect start HEAD~10 HEAD~20  # HEAD~10 is bad, HEAD~20 is good
+```
+
+### Subcommands
+
+- `libra bisect start [<bad> [<good>]]` – start a new bisect session
+- `libra bisect bad [<rev>]` – mark a commit as bad (contains the bug)
+- `libra bisect good [<rev>]` – mark a commit as good (bug-free)
+- `libra bisect skip [<rev>]` – skip the current commit (untestable)
+- `libra bisect reset [<rev>]` – end the session and restore original HEAD
+- `libra bisect log` – show the current bisect state
+
+### Safety Features
+
+Libra's bisect implementation includes several safety guards:
+
+- **Clean working tree required**: Bisect will not start if you have uncommitted changes (including ignored files like `.env`)
+- **Bare repository protection**: Bisect is blocked in bare repositories (no working tree)
+- **State preserved until reset**: After finding the culprit, bisect state is preserved so you can run `bisect reset` to restore your original branch
+- **Branch restoration**: `bisect reset` restores you to your original branch, not a detached HEAD
+
+---
+
 ## Worktree Management
 
 Libra implements a `worktree` subcommand that is broadly compatible with `git worktree`, allowing you to manage multiple working directories attached to the same repository storage.
@@ -423,8 +548,6 @@ The following Git top-level commands are currently **not implemented** in Libra 
 - `remote-show` – show detailed remote info
 - `remote-prune` – prune stale remote-tracking branches
 - `fetch-pack` / `push-pack` – low-level fetch/push operations
-- `grep` – search file contents with regex
-- `bisect` – binary search for a bad commit
 - `filter-branch` (or `git filter-repo`) – rewrite history
 - `notes` – attach arbitrary metadata to objects
 - `archive` – create tar/zip archives of tree snapshots

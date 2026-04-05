@@ -5,7 +5,10 @@
 use std::{fs, io::Write};
 
 use clap::Parser;
-use libra::command::diff::{self, DiffArgs};
+use libra::{
+    command::diff::{self, DiffArgs},
+    utils::{output::OutputConfig, pager::LIBRA_PAGER_ENV},
+};
 
 use super::*;
 
@@ -38,6 +41,49 @@ fn test_diff_json_output_includes_file_stats() {
     assert_eq!(json["data"]["files_changed"], 1);
     assert_eq!(json["data"]["files"][0]["path"], "tracked.txt");
     assert!(json["data"]["files"][0]["hunks"].as_array().is_some());
+}
+
+#[test]
+fn test_diff_machine_output_is_single_line_json() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nupdated\n").unwrap();
+
+    let output = run_libra_command(&["--machine", "diff"], repo.path());
+    assert_cli_success(&output, "machine diff");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let non_empty_lines: Vec<&str> = stdout.lines().filter(|line| !line.is_empty()).collect();
+    assert_eq!(
+        non_empty_lines.len(),
+        1,
+        "machine output should be exactly one non-empty line, got: {stdout}"
+    );
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(non_empty_lines[0]).expect("machine output should be valid JSON");
+    assert_eq!(parsed["command"], "diff");
+    assert_eq!(parsed["data"]["files_changed"], 1);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_diff_empty_output_does_not_initialize_pager() {
+    if cfg!(windows) {
+        return;
+    }
+
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+    let missing_bin_dir = tempdir().unwrap();
+    let _path = test::ScopedEnvVar::set("PATH", missing_bin_dir.path());
+    let _pager = test::ScopedEnvVar::set(LIBRA_PAGER_ENV, "always");
+
+    let args = DiffArgs::try_parse_from(["libra"]).unwrap();
+    let result = diff::execute_safe(args, &OutputConfig::default()).await;
+    assert!(
+        result.is_ok(),
+        "empty diff should not initialize pager: {result:?}"
+    );
 }
 
 #[test]
@@ -82,6 +128,64 @@ fn test_diff_numstat_and_stat_flags_render_cli_output() {
     assert!(
         stat_stdout.contains("1 file changed, 1 insertion(+), 0 deletions(-)"),
         "expected stat summary, got: {stat_stdout}"
+    );
+}
+
+#[test]
+fn test_diff_quiet_uses_exit_code_to_signal_changes() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nupdated\n").unwrap();
+
+    let output = run_libra_command(&["--quiet", "diff"], repo.path());
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        output.stdout.is_empty(),
+        "unexpected stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_diff_quiet_with_output_file_still_returns_exit_code_1() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nupdated\n").unwrap();
+    let output_file = repo.path().join("captured.diff");
+    let output_path = output_file.to_str().unwrap();
+
+    let output = run_libra_command(&["--quiet", "diff", "--output", output_path], repo.path());
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        output.stderr.is_empty(),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let written = fs::read_to_string(&output_file).unwrap();
+    assert!(
+        written.contains("diff --git"),
+        "expected diff output file to be written, got: {written}"
+    );
+}
+
+#[test]
+fn test_diff_json_ignores_output_file_flag() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("tracked.txt"), "tracked\nupdated\n").unwrap();
+    let output_file = repo.path().join("ignored.diff");
+    let output_path = output_file.to_str().unwrap();
+
+    let output = run_libra_command(&["--json", "diff", "--output", output_path], repo.path());
+    assert_cli_success(&output, "json diff with output flag");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "diff");
+    assert!(
+        !output_file.exists(),
+        "--output should be ignored in JSON mode, but {:?} was created",
+        output_file
     );
 }
 

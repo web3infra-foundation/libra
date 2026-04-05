@@ -25,6 +25,43 @@ pub struct Branch {
     pub remote: Option<String>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum BranchStoreError {
+    #[error("failed to query branch storage: {0}")]
+    Query(String),
+    #[error("stored branch reference '{name}' is corrupt: {detail}")]
+    Corrupt { name: String, detail: String },
+    #[error("branch '{0}' not found")]
+    NotFound(String),
+    #[error("failed to delete branch '{name}': {detail}")]
+    Delete { name: String, detail: String },
+}
+
+fn log_branch_store_error(context: &str, error: &BranchStoreError) {
+    tracing::error!("{context}: {error}");
+}
+
+fn branch_from_model(model: reference::Model) -> Result<Option<Branch>, BranchStoreError> {
+    let Some(name) = model.name.clone() else {
+        return Err(BranchStoreError::Corrupt {
+            name: "<unknown>".to_string(),
+            detail: "missing name field".to_string(),
+        });
+    };
+    let Some(commit_str) = model.commit.as_ref() else {
+        return Ok(None);
+    };
+    let commit = ObjectHash::from_str(commit_str).map_err(|e| BranchStoreError::Corrupt {
+        name: name.clone(),
+        detail: e.to_string(),
+    })?;
+    Ok(Some(Branch {
+        name,
+        commit,
+        remote: model.remote.clone(),
+    }))
+}
+
 //  `_with_conn` version of the helper function
 async fn query_reference_with_conn<C>(
     db: &C,
@@ -76,8 +113,10 @@ fn is_sqlite_busy(err: &DbErr) -> bool {
  * Incorrect Usage (in a transaction): `Branch::update_branch(...).await;` // DEADLOCK!
  */
 impl Branch {
-    //  `_with_conn` version for `list_branches`
-    pub async fn list_branches_with_conn<C>(db: &C, remote: Option<&str>) -> Vec<Self>
+    pub async fn list_branches_result_with_conn<C>(
+        db: &C,
+        remote: Option<&str>,
+    ) -> Result<Vec<Self>, BranchStoreError>
     where
         C: ConnectionTrait,
     {
@@ -89,29 +128,86 @@ impl Branch {
             })
             .all(db)
             .await
-            .unwrap();
+            .map_err(|err| BranchStoreError::Query(err.to_string()))?;
 
-        branches
-            .iter()
-            .filter_map(|branch| {
-                // Skip branches with no commit (unborn/placeholder)
-                let commit_str = branch.commit.as_ref()?;
-                Some(Branch {
-                    name: branch.name.as_ref().unwrap().clone(),
-                    commit: ObjectHash::from_str(commit_str).unwrap(),
-                    remote: branch.remote.clone(),
-                })
-            })
-            .collect()
+        let mut resolved = Vec::new();
+        for branch in branches {
+            if let Some(branch) = branch_from_model(branch)? {
+                resolved.push(branch);
+            }
+        }
+        Ok(resolved)
     }
 
-    /// list all remote branches
+    /// Best-effort branch listing that skips corrupt rows instead of failing
+    /// the entire query. Useful for decoration metadata (log/show refs) where
+    /// partial results are more valuable than an empty set.
+    pub async fn list_branches_best_effort(remote: Option<&str>) -> Vec<Self> {
+        let db_conn = get_db_conn_instance().await;
+        let branches = match reference::Entity::find()
+            .filter(reference::Column::Kind.eq(reference::ConfigKind::Branch))
+            .filter(match remote {
+                Some(r) => reference::Column::Remote.eq(r),
+                None => reference::Column::Remote.is_null(),
+            })
+            .all(&db_conn)
+            .await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "failed to query branches for decoration"
+                );
+                return Vec::new();
+            }
+        };
+
+        let mut resolved = Vec::new();
+        for branch in branches {
+            match branch_from_model(branch) {
+                Ok(Some(branch)) => resolved.push(branch),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "skipping corrupt branch row in decoration"
+                    );
+                }
+            }
+        }
+        resolved
+    }
+
+    /// Lossy compatibility wrapper. Prefer `list_branches_result_with_conn` in
+    /// production paths so storage failures are not downgraded to an empty list.
+    pub async fn list_branches_with_conn<C>(db: &C, remote: Option<&str>) -> Vec<Self>
+    where
+        C: ConnectionTrait,
+    {
+        match Self::list_branches_result_with_conn(db, remote).await {
+            Ok(branches) => branches,
+            Err(error) => {
+                log_branch_store_error("failed to list branches", &error);
+                Vec::new()
+            }
+        }
+    }
+
+    /// Lossy compatibility wrapper. Prefer `list_branches_result` in production
+    /// paths so storage failures are not downgraded to an empty list.
     pub async fn list_branches(remote: Option<&str>) -> Vec<Self> {
         let db_conn = get_db_conn_instance().await;
         Self::list_branches_with_conn(&db_conn, remote).await
     }
 
-    //  `_with_conn` version for `exists`
+    pub async fn list_branches_result(remote: Option<&str>) -> Result<Vec<Self>, BranchStoreError> {
+        let db_conn = get_db_conn_instance().await;
+        Self::list_branches_result_with_conn(&db_conn, remote).await
+    }
+
+    /// Lossy compatibility wrapper. Prefer `exists_result_with_conn` in
+    /// production paths so storage failures are not downgraded to `false`.
     pub async fn exists_with_conn<C>(db: &C, branch_name: &str) -> bool
     where
         C: ConnectionTrait,
@@ -120,13 +216,39 @@ impl Branch {
         branch.is_some()
     }
 
-    /// is the branch exists
+    /// Lossy compatibility wrapper that only checks **local** branches
+    /// (hardcodes `remote = None`). Prefer `exists_result` in production paths
+    /// so storage failures are not downgraded to `false` and a remote scope can
+    /// be specified.
     pub async fn exists(branch_name: &str) -> bool {
         let db_conn = get_db_conn_instance().await;
         Self::exists_with_conn(&db_conn, branch_name).await
     }
 
-    //  `_with_conn` version for `find_branch`
+    pub async fn exists_result_with_conn<C>(
+        db: &C,
+        branch_name: &str,
+        remote: Option<&str>,
+    ) -> Result<bool, BranchStoreError>
+    where
+        C: ConnectionTrait,
+    {
+        query_reference_with_conn(db, branch_name, remote)
+            .await
+            .map(|branch| branch.is_some())
+            .map_err(|err| BranchStoreError::Query(err.to_string()))
+    }
+
+    pub async fn exists_result(
+        branch_name: &str,
+        remote: Option<&str>,
+    ) -> Result<bool, BranchStoreError> {
+        let db_conn = get_db_conn_instance().await;
+        Self::exists_result_with_conn(&db_conn, branch_name, remote).await
+    }
+
+    /// Lossy compatibility wrapper. Prefer `find_branch_result_with_conn` in
+    /// production paths so storage failures are not downgraded to `None`.
     pub async fn find_branch_with_conn<C>(
         db: &C,
         branch_name: &str,
@@ -135,31 +257,54 @@ impl Branch {
     where
         C: ConnectionTrait,
     {
-        let branch = match query_reference_with_conn(db, branch_name, remote).await {
+        match Self::find_branch_result_with_conn(db, branch_name, remote).await {
             Ok(branch) => branch,
-            Err(err) => {
-                eprintln!("fatal: failed to query branch '{branch_name}': {err}");
-                return None;
+            Err(error) => {
+                log_branch_store_error(
+                    &format!(
+                        "failed to resolve branch lookup for '{}'{}",
+                        branch_name,
+                        remote
+                            .map(|name| format!(" on remote '{name}'"))
+                            .unwrap_or_default()
+                    ),
+                    &error,
+                );
+                None
             }
-        };
-        match branch {
-            Some(branch) => {
-                // Return None if commit is None (unborn/placeholder)
-                let commit_str = branch.commit.as_ref()?;
-                Some(Branch {
-                    name: branch.name.as_ref().unwrap().clone(),
-                    commit: ObjectHash::from_str(commit_str).unwrap(),
-                    remote: branch.remote.clone(),
-                })
-            }
-            None => None,
         }
     }
 
-    /// get the branch by name
+    /// Lossy compatibility wrapper. Prefer `find_branch_result` in production
+    /// paths so storage failures are not downgraded to `None`.
     pub async fn find_branch(branch_name: &str, remote: Option<&str>) -> Option<Self> {
         let db_conn = get_db_conn_instance().await;
         Self::find_branch_with_conn(&db_conn, branch_name, remote).await
+    }
+
+    pub async fn find_branch_result_with_conn<C>(
+        db: &C,
+        branch_name: &str,
+        remote: Option<&str>,
+    ) -> Result<Option<Self>, BranchStoreError>
+    where
+        C: ConnectionTrait,
+    {
+        let branch = query_reference_with_conn(db, branch_name, remote)
+            .await
+            .map_err(|err| BranchStoreError::Query(err.to_string()))?;
+        match branch {
+            Some(branch) => branch_from_model(branch),
+            None => Ok(None),
+        }
+    }
+
+    pub async fn find_branch_result(
+        branch_name: &str,
+        remote: Option<&str>,
+    ) -> Result<Option<Self>, BranchStoreError> {
+        let db_conn = get_db_conn_instance().await;
+        Self::find_branch_result_with_conn(&db_conn, branch_name, remote).await
     }
 
     //  `_with_conn` version for `search_branch`
@@ -167,27 +312,55 @@ impl Branch {
     where
         C: ConnectionTrait,
     {
+        match Self::search_branch_result_with_conn(db, branch_name).await {
+            Ok(branches) => branches,
+            Err(error) => {
+                log_branch_store_error(
+                    &format!("failed to search branches matching '{branch_name}'"),
+                    &error,
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    pub async fn search_branch_result_with_conn<C>(
+        db: &C,
+        branch_name: &str,
+    ) -> Result<Vec<Self>, BranchStoreError>
+    where
+        C: ConnectionTrait,
+    {
         let mut branch_name_str = branch_name.to_string();
         let mut remote = String::new();
 
         let mut branches = vec![];
-        if let Some(branch) = Self::find_branch_with_conn(db, &branch_name_str, None).await {
+        if let Some(branch) = Self::find_branch_result_with_conn(db, &branch_name_str, None).await?
+        {
             branches.push(branch)
         }
 
         while let Some(index) = branch_name_str.find('/') {
+            let (remote_segment, remainder) = branch_name_str.split_at(index);
+            let remainder =
+                remainder
+                    .strip_prefix('/')
+                    .ok_or_else(|| BranchStoreError::Corrupt {
+                        name: branch_name.to_string(),
+                        detail: format!("failed to split branch search path '{branch_name_str}'"),
+                    })?;
             if !remote.is_empty() {
                 remote += "/";
             }
-            remote += branch_name_str.get(..index).unwrap();
-            branch_name_str = branch_name_str.get(index + 1..).unwrap().to_string();
-            // Important: Call the `_with_conn` variant inside the loop
-            let branch = Self::find_branch_with_conn(db, &branch_name_str, Some(&remote)).await;
-            if let Some(branch) = branch {
+            remote += remote_segment;
+            branch_name_str = remainder.to_string();
+            if let Some(branch) =
+                Self::find_branch_result_with_conn(db, &branch_name_str, Some(&remote)).await?
+            {
                 branches.push(branch);
             }
         }
-        branches
+        Ok(branches)
     }
 
     /// search branch with full name, return vec of branches
@@ -196,6 +369,11 @@ impl Branch {
     pub async fn search_branch(branch_name: &str) -> Vec<Self> {
         let db_conn = get_db_conn_instance().await;
         Self::search_branch_with_conn(&db_conn, branch_name).await
+    }
+
+    pub async fn search_branch_result(branch_name: &str) -> Result<Vec<Self>, BranchStoreError> {
+        let db_conn = get_db_conn_instance().await;
+        Self::search_branch_result_with_conn(&db_conn, branch_name).await
     }
 
     //  `_with_conn` version for `update_branch`
@@ -267,26 +445,56 @@ impl Branch {
     where
         C: ConnectionTrait,
     {
-        let branch = match query_reference_with_conn(db, branch_name, remote).await {
-            Ok(branch) => branch,
-            Err(err) => {
-                eprintln!("fatal: failed to query branch '{branch_name}': {err}");
-                return;
-            }
-        };
-        let Some(branch) = branch else {
-            eprintln!("fatal: branch '{branch_name}' not found");
-            return;
-        };
-        let branch: reference::ActiveModel = branch.into();
-        if let Err(err) = branch.delete(db).await {
-            eprintln!("fatal: failed to delete branch '{branch_name}': {err}");
+        if let Err(error) = Self::delete_branch_result_with_conn(db, branch_name, remote).await {
+            log_branch_store_error(
+                &format!(
+                    "failed to delete branch '{}'{}",
+                    branch_name,
+                    remote
+                        .map(|name| format!(" on remote '{name}'"))
+                        .unwrap_or_default()
+                ),
+                &error,
+            );
         }
     }
 
     pub async fn delete_branch(branch_name: &str, remote: Option<&str>) {
         let db_conn = get_db_conn_instance().await;
         Self::delete_branch_with_conn(&db_conn, branch_name, remote).await
+    }
+
+    pub async fn delete_branch_result_with_conn<C>(
+        db: &C,
+        branch_name: &str,
+        remote: Option<&str>,
+    ) -> Result<(), BranchStoreError>
+    where
+        C: ConnectionTrait,
+    {
+        let branch = query_reference_with_conn(db, branch_name, remote)
+            .await
+            .map_err(|err| BranchStoreError::Query(err.to_string()))?;
+        let Some(branch) = branch else {
+            return Err(BranchStoreError::NotFound(branch_name.to_string()));
+        };
+        let branch: reference::ActiveModel = branch.into();
+        branch
+            .delete(db)
+            .await
+            .map(|_| ())
+            .map_err(|err| BranchStoreError::Delete {
+                name: branch_name.to_string(),
+                detail: err.to_string(),
+            })
+    }
+
+    pub async fn delete_branch_result(
+        branch_name: &str,
+        remote: Option<&str>,
+    ) -> Result<(), BranchStoreError> {
+        let db_conn = get_db_conn_instance().await;
+        Self::delete_branch_result_with_conn(&db_conn, branch_name, remote).await
     }
 }
 

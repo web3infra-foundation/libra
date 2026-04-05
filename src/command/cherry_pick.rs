@@ -12,12 +12,15 @@ use git_internal::{
     internal::{
         index::{Index, IndexEntry},
         object::{
+            ObjectTrait,
             commit::Commit,
             tree::{Tree, TreeItem, TreeItemMode},
+            types::ObjectType,
         },
     },
 };
 use sea_orm::ConnectionTrait;
+use serde::Serialize;
 
 use crate::{
     command::{load_object, save_object},
@@ -28,15 +31,127 @@ use crate::{
         reflog::{ReflogAction, ReflogContext, with_reflog},
     },
     utils::{
-        error::{CliError, CliResult},
+        error::{CliError, CliResult, StableErrorCode},
         object_ext::{BlobExt, TreeExt},
-        output::OutputConfig,
-        path, util, worktree,
+        output::{OutputConfig, emit_json_data},
+        path,
+        text::short_display_hash,
+        util, worktree,
     },
 };
 
+const CHERRY_PICK_EXAMPLES: &str = "\
+EXAMPLES:
+    libra cherry-pick abc1234              Apply a single commit
+    libra cherry-pick abc1234 def5678      Apply multiple commits in order
+    libra cherry-pick -n abc1234           Apply without auto-committing
+    libra cherry-pick --json abc1234       Structured JSON output for agents";
+
+// ── Typed error ──────────────────────────────────────────────────────
+
+#[derive(Debug, thiserror::Error)]
+enum CherryPickError {
+    #[error("not a libra repository")]
+    NotInRepo,
+
+    #[error("cannot cherry-pick on detached HEAD")]
+    DetachedHead,
+
+    #[error("failed to resolve commit reference '{0}'")]
+    InvalidCommit(String),
+
+    #[error("cannot cherry-pick multiple commits with --no-commit")]
+    MultipleWithNoCommit,
+
+    #[error("cherry-picking merge commits is not supported")]
+    MergeCommitUnsupported,
+
+    #[error("failed to cherry-pick {commit}: {reason}")]
+    Conflict { commit: String, reason: String },
+
+    #[error("failed to load cherry-pick state: {0}")]
+    LoadObject(String),
+
+    #[error("failed to update cherry-pick state: {0}")]
+    SaveFailed(String),
+}
+
+impl CherryPickError {
+    fn stable_code(&self) -> StableErrorCode {
+        match self {
+            Self::NotInRepo => StableErrorCode::RepoNotFound,
+            Self::DetachedHead => StableErrorCode::RepoStateInvalid,
+            Self::InvalidCommit(_) => StableErrorCode::CliInvalidTarget,
+            Self::MultipleWithNoCommit => StableErrorCode::CliInvalidArguments,
+            Self::MergeCommitUnsupported => StableErrorCode::CliInvalidArguments,
+            Self::Conflict { .. } => StableErrorCode::ConflictUnresolved,
+            Self::LoadObject(_) => StableErrorCode::IoReadFailed,
+            Self::SaveFailed(_) => StableErrorCode::IoWriteFailed,
+        }
+    }
+}
+
+impl From<CherryPickError> for CliError {
+    fn from(error: CherryPickError) -> Self {
+        let stable_code = error.stable_code();
+        let message = error.to_string();
+        match error {
+            CherryPickError::NotInRepo => CliError::repo_not_found(),
+            CherryPickError::DetachedHead => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_hint("switch to a branch first with 'libra switch <branch>'"),
+            CherryPickError::InvalidCommit(_) => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_hint("use 'libra log' to find valid commit references"),
+            CherryPickError::MultipleWithNoCommit => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_hint("use 'libra commit' to save the changes from the first cherry-pick"),
+            CherryPickError::MergeCommitUnsupported => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_hint("choose a non-merge commit or replay the merge manually"),
+            CherryPickError::Conflict { .. } => CliError::failure(message)
+                .with_stable_code(stable_code)
+                .with_hint("resolve conflicts manually, then use 'libra commit'"),
+            CherryPickError::LoadObject(_) => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_hint("check repository integrity and retry"),
+            CherryPickError::SaveFailed(_) => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_hint("check filesystem permissions and repository writability"),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum CherryPickSingleError {
+    MergeCommitUnsupported,
+    Conflict(String),
+    LoadObject(String),
+    SaveFailed(String),
+}
+
+// ── Structured output ────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CherryPickOutput {
+    pub picked: Vec<CherryPickEntry>,
+    pub no_commit: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CherryPickEntry {
+    pub source_commit: String,
+    pub short_source: String,
+    pub new_commit: Option<String>,
+    pub short_new: Option<String>,
+}
+
+// ── Entry points ─────────────────────────────────────────────────────
+
 /// Arguments for the cherry-pick command
 #[derive(Parser, Debug)]
+#[command(about = "Apply the changes introduced by some existing commits")]
+#[command(after_help = CHERRY_PICK_EXAMPLES)]
 pub struct CherryPickArgs {
     /// Commits to cherry-pick
     #[clap(required = true)]
@@ -47,17 +162,6 @@ pub struct CherryPickArgs {
     pub no_commit: bool,
 }
 
-/// Execute the cherry-pick command
-///
-/// Cherry-pick applies the changes introduced by some existing commits to the current branch.
-/// This is useful for selectively applying commits from one branch to another without merging.
-///
-/// The process involves:
-/// 1. Resolving commit references to ObjectHash hashes
-/// 2. For each commit, performing a three-way merge to apply changes
-/// 3. Creating new commits with the same changes and the current HEAD as the parent
-///    TODO: Now, it will apply the picked commits exactly as they are,
-///    without resolving any conflicts, and it will not take the state of the staging area into account.
 pub async fn execute(args: CherryPickArgs) {
     if let Err(e) = execute_safe(args, &OutputConfig::default()).await {
         e.print_stderr();
@@ -67,160 +171,176 @@ pub async fn execute(args: CherryPickArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Replays one or more commit changes onto the current
 /// branch, optionally creating new commits or leaving them staged.
-pub async fn execute_safe(args: CherryPickArgs, _output: &OutputConfig) -> CliResult<()> {
-    util::require_repo().map_err(|_| CliError::repo_not_found())?;
+pub async fn execute_safe(args: CherryPickArgs, output: &OutputConfig) -> CliResult<()> {
+    let result = run_cherry_pick(args).await.map_err(CliError::from)?;
+    render_cherry_pick_output(&result, output)
+}
+
+// ── Core execution ───────────────────────────────────────────────────
+
+async fn run_cherry_pick(args: CherryPickArgs) -> Result<CherryPickOutput, CherryPickError> {
+    util::require_repo().map_err(|_| CherryPickError::NotInRepo)?;
 
     if let Head::Detached(_) = Head::current().await {
-        return Err(CliError::fatal("cannot cherry-pick on detached HEAD"));
+        return Err(CherryPickError::DetachedHead);
     }
 
-    // To simplify the implementation, we currently disallow cherry-picking multiple commits with --no-commit.
-    // Unlike Git, which stages changes from all selected commits, this tool restricts the operation to a single commit.
-    // This limitation may be lifted in the future if multi-commit support is implemented.
     if args.no_commit && args.commits.len() > 1 {
-        return Err(
-            CliError::fatal("cannot cherry-pick multiple commits with --no-commit")
-                .with_hint("use 'libra commit' to save the changes from the first cherry-pick"),
-        );
+        return Err(CherryPickError::MultipleWithNoCommit);
     }
 
-    // Resolve each commit reference. `resolve_commit` returns legacy
-    // `"fatal: ..."` prefixed strings, so `from_legacy_string` strips the
-    // prefix before wrapping in `CliError` to avoid a double-prefix.
     let mut commit_ids = Vec::new();
     for commit_ref in &args.commits {
         let id = resolve_commit(commit_ref)
             .await
-            .map_err(CliError::from_legacy_string)?;
+            .map_err(|_| CherryPickError::InvalidCommit(commit_ref.clone()))?;
         commit_ids.push(id);
     }
 
+    let mut picked = Vec::new();
     for (i, commit_id) in commit_ids.iter().enumerate() {
-        println!("Cherry-picking commit {}...", &commit_id.to_string()[..7]);
         match cherry_pick_single_commit(commit_id, &args).await {
             Ok(new_commit_id) => {
-                if let Some(id) = new_commit_id {
-                    println!(
-                        "Finished cherry-pick for {} in new commit {}",
-                        &commit_id.to_string()[..7],
-                        &id.to_string()[..7]
-                    );
-                } else {
-                    println!("Changes staged for cherry-pick. Use 'libra commit' to finalize.");
-                }
+                let source_str = commit_id.to_string();
+                picked.push(CherryPickEntry {
+                    source_commit: source_str.clone(),
+                    short_source: short_display_hash(&source_str).to_string(),
+                    new_commit: new_commit_id.as_ref().map(|id| id.to_string()),
+                    short_new: new_commit_id
+                        .as_ref()
+                        .map(|id| short_display_hash(&id.to_string()).to_string()),
+                });
             }
-            Err(e) => {
-                // This simplified implementation does not handle conflicts or offer options to abort or skip.
-                return Err(CliError::failure(format!(
-                    "failed to cherry-pick {}: {}",
-                    &args.commits[i], e
-                )));
+            Err(CherryPickSingleError::MergeCommitUnsupported) => {
+                return Err(CherryPickError::MergeCommitUnsupported);
             }
+            Err(CherryPickSingleError::Conflict(reason)) => {
+                return Err(CherryPickError::Conflict {
+                    commit: args.commits[i].clone(),
+                    reason,
+                });
+            }
+            Err(CherryPickSingleError::LoadObject(reason)) => {
+                return Err(CherryPickError::LoadObject(reason));
+            }
+            Err(CherryPickSingleError::SaveFailed(reason)) => {
+                return Err(CherryPickError::SaveFailed(reason));
+            }
+        }
+    }
+
+    Ok(CherryPickOutput {
+        picked,
+        no_commit: args.no_commit,
+    })
+}
+
+// ── Rendering ────────────────────────────────────────────────────────
+
+fn render_cherry_pick_output(result: &CherryPickOutput, output: &OutputConfig) -> CliResult<()> {
+    if output.is_json() {
+        return emit_json_data("cherry-pick", result, output);
+    }
+
+    if output.quiet {
+        return Ok(());
+    }
+
+    for entry in &result.picked {
+        if let Some(short_new) = &entry.short_new {
+            println!("[{}] cherry-picked from {}", short_new, entry.short_source,);
+        } else {
+            println!(
+                "Changes from {} staged. Use 'libra commit' to finalize.",
+                entry.short_source,
+            );
         }
     }
     Ok(())
 }
 
-/// Cherry-pick a single commit onto the current branch
-///
-/// This function performs the core cherry-pick logic:
-/// 1. Loads the commit to be cherry-picked and its parent
-/// 2. Performs a three-way merge between:
-///    - Base: The parent of the commit being cherry-picked
-///    - Theirs: The commit being cherry-picked
-///    - Ours: The current HEAD state
-/// 3. Applies the resulting changes to the index and working directory
-/// 4. Optionally creates a new commit with the applied changes
-///
-/// Returns the ObjectHash of the new commit if created, or None if --no-commit was used
+// ── Internal logic (unchanged algorithm) ─────────────────────────────
+
 async fn cherry_pick_single_commit(
     commit_id: &ObjectHash,
     args: &CherryPickArgs,
-) -> Result<Option<ObjectHash>, String> {
+) -> Result<Option<ObjectHash>, CherryPickSingleError> {
     let commit_to_pick: Commit =
-        load_object(commit_id).map_err(|e| format!("failed to load commit: {e}"))?;
+        load_object(commit_id).map_err(|e| CherryPickSingleError::LoadObject(e.to_string()))?;
 
     if commit_to_pick.parent_commit_ids.len() > 1 {
-        return Err("cherry-picking merge commits is not supported".to_string());
+        return Err(CherryPickSingleError::MergeCommitUnsupported);
     }
 
-    // Three-way merge key points:
-    // Base: Parent commit of the commit to cherry-pick
-    // Theirs: The commit to cherry-pick
-    // Ours: Current HEAD
     let parent_tree = if commit_to_pick.parent_commit_ids.is_empty() {
-        Tree::from_tree_items(vec![]).unwrap() // Root commit, base is an empty tree
+        let empty_id = ObjectHash::from_type_and_data(ObjectType::Tree, &[]);
+        Tree::from_bytes(&[], empty_id).map_err(|e| {
+            CherryPickSingleError::SaveFailed(format!(
+                "failed to create empty tree for root commit: {e}",
+            ))
+        })?
     } else {
-        let parent_commit: Commit = load_object(&commit_to_pick.parent_commit_ids[0])
-            .map_err(|e| format!("failed to load parent commit: {e}"))?;
-        load_object(&parent_commit.tree_id)
-            .map_err(|e| format!("failed to load parent tree: {e}"))?
+        let parent_commit: Commit =
+            load_object(&commit_to_pick.parent_commit_ids[0]).map_err(|e| {
+                CherryPickSingleError::LoadObject(format!("failed to load parent commit: {e}"))
+            })?;
+        load_object(&parent_commit.tree_id).map_err(|e| {
+            CherryPickSingleError::LoadObject(format!("failed to load parent tree: {e}"))
+        })?
     };
 
-    let their_tree: Tree = load_object(&commit_to_pick.tree_id)
-        .map_err(|e| format!("failed to load commit tree: {e}"))?;
+    let their_tree: Tree = load_object(&commit_to_pick.tree_id).map_err(|e| {
+        CherryPickSingleError::LoadObject(format!("failed to load commit tree: {e}"))
+    })?;
 
     let index_file = path::index();
-    let current_index =
-        Index::load(&index_file).map_err(|e| format!("failed to load current index: {e}"))?;
-    let mut index =
-        Index::load(&index_file).map_err(|e| format!("failed to load current index: {e}"))?;
+    let current_index = Index::load(&index_file).map_err(|e| {
+        CherryPickSingleError::LoadObject(format!("failed to load current index: {e}"))
+    })?;
+    let mut index = Index::load(&index_file).map_err(|e| {
+        CherryPickSingleError::LoadObject(format!("failed to load current index: {e}"))
+    })?;
 
-    // Apply patch to current index
-    // 1. Get diff (theirs vs base)
     let diff = diff_trees(&their_tree, &parent_tree);
 
-    // 2. Apply diff to current index (simplified merge)
     for (path, their_hash, base_hash) in diff {
         match (their_hash, base_hash) {
             (Some(th), Some(_bh)) => {
-                // Modified file
-                update_index_entry(&mut index, &path, th);
+                update_index_entry(&mut index, &path, th)?;
             }
             (Some(th), None) => {
-                // New file
-                update_index_entry(&mut index, &path, th);
+                update_index_entry(&mut index, &path, th)?;
             }
             (None, Some(_bh)) => {
-                // Deleted file
-                index.remove(path.to_str().unwrap(), 0);
+                index.remove(path_to_utf8(&path)?, 0);
             }
-            (None, None) => unreachable!(),
+            (None, None) => continue,
         }
     }
 
-    // 3. Save updated index and sync working directory
     index
         .save(&index_file)
-        .map_err(|e| format!("failed to save index: {e}"))?;
+        .map_err(|e| CherryPickSingleError::SaveFailed(format!("failed to save index: {e}")))?;
     reset_workdir_tracked_only(&current_index, &index)?;
 
     if args.no_commit {
         Ok(None)
     } else {
-        let current_head = Head::current_commit()
-            .await
-            .ok_or("failed to resolve current HEAD")?;
+        let current_head = Head::current_commit().await.ok_or_else(|| {
+            CherryPickSingleError::LoadObject("failed to resolve current HEAD".to_string())
+        })?;
         let cherry_pick_commit_id =
             create_cherry_pick_commit(&commit_to_pick, &current_head).await?;
         Ok(Some(cherry_pick_commit_id))
     }
 }
 
-/// Create a new commit representing the cherry-picked changes
-///
-/// This function:
-/// 1. Creates a tree object from the current index state
-/// 2. Generates a commit message indicating the original commit
-/// 3. Creates a new commit object with the current HEAD as parent
-/// 4. Updates the HEAD reference to point to the new commit
 async fn create_cherry_pick_commit(
     original_commit: &Commit,
     parent_id: &ObjectHash,
-) -> Result<ObjectHash, String> {
-    let index = Index::load(path::index()).map_err(|e| format!("failed to load index: {e}"))?;
-
-    // Create tree from current index state
+) -> Result<ObjectHash, CherryPickSingleError> {
+    let index = Index::load(path::index())
+        .map_err(|e| CherryPickSingleError::LoadObject(format!("failed to load index: {e}")))?;
     let tree_id = create_tree_from_index(&index)?;
 
     let cherry_pick_message = format!(
@@ -235,9 +355,9 @@ async fn create_cherry_pick_commit(
         &format_commit_msg(&cherry_pick_message, None),
     );
 
-    save_object(&commit, &commit.id).map_err(|e| format!("failed to save commit: {e}"))?;
+    save_object(&commit, &commit.id)
+        .map_err(|e| CherryPickSingleError::SaveFailed(format!("failed to save commit: {e}")))?;
 
-    // let reflog extract the subject of message.
     let action = ReflogAction::CherryPick {
         source_message: original_commit.message.clone(),
     };
@@ -258,19 +378,12 @@ async fn create_cherry_pick_commit(
         true,
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| {
+        CherryPickSingleError::SaveFailed(format!("failed to update branch and reflog: {e}"))
+    })?;
     Ok(commit.id)
 }
 
-/// Calculate differences between two trees to generate a patch
-///
-/// This function compares two tree objects and returns a list of differences.
-/// Each difference is represented as a tuple containing:
-/// - PathBuf: The file path
-/// - Option<ObjectHash>: The hash in the "theirs" tree (None if deleted)
-/// - Option<ObjectHash>: The hash in the "base" tree (None if newly added)
-///
-/// This is used to determine what changes need to be applied when cherry-picking.
 fn diff_trees(
     theirs: &Tree,
     base: &Tree,
@@ -291,50 +404,40 @@ fn diff_trees(
     diffs
 }
 
-/// Add or update a file entry in the index
-///
-/// This function:
-/// 1. Loads the blob object from the given hash
-/// 2. Creates a new IndexEntry with the file path, hash, and size
-/// 3. Adds the entry to the index (overwriting any existing entry with the same path)
-///
-/// This is used when applying cherry-pick changes to update the index state.
-fn update_index_entry(index: &mut Index, path: &Path, hash: ObjectHash) {
+fn update_index_entry(
+    index: &mut Index,
+    path: &Path,
+    hash: ObjectHash,
+) -> Result<(), CherryPickSingleError> {
     let blob = git_internal::internal::object::blob::Blob::load(&hash);
     let entry = IndexEntry::new_from_blob(
-        path.to_str().unwrap().to_string(),
+        path_to_utf8(path)?.to_string(),
         hash,
         blob.data.len() as u32,
     );
-    index.add(entry); // add() will overwrite entries with the same name
+    index.add(entry);
+    Ok(())
 }
 
-/// Create a tree object from the current index state
-///
-/// This function builds a complete tree structure representing the current index:
-/// 1. Groups index entries by their parent directories
-/// 2. Recursively builds tree objects starting from the root
-/// 3. Each directory becomes a tree object containing its files and subdirectories
-///
-/// This is a reusable utility function that can be used in commit.rs and revert.rs
-/// as well, since creating trees from index state is a common operation.
-///
-/// Returns the ObjectHash hash of the root tree object.
-fn create_tree_from_index(index: &Index) -> Result<ObjectHash, String> {
-    // Path -> TreeItem mapping
+fn create_tree_from_index(index: &Index) -> Result<ObjectHash, CherryPickSingleError> {
     let mut entries_map: HashMap<PathBuf, Vec<TreeItem>> = HashMap::new();
     for path_buf in index.tracked_files() {
-        let path_str = path_buf.to_str().unwrap();
+        let path_str = path_to_utf8(&path_buf)?;
         if let Some(entry) = index.get(path_str, 0) {
             let item = TreeItem {
                 mode: match entry.mode {
-                    0o100644 => TreeItemMode::Blob,           // Regular file
-                    0o100755 => TreeItemMode::BlobExecutable, // Executable file
-                    0o120000 => TreeItemMode::Link,           // Symbolic link
-                    0o040000 => TreeItemMode::Tree,           // Directory
-                    _ => return Err(format!("Unsupported file mode: {:#o}", entry.mode)),
+                    0o100644 => TreeItemMode::Blob,
+                    0o100755 => TreeItemMode::BlobExecutable,
+                    0o120000 => TreeItemMode::Link,
+                    0o040000 => TreeItemMode::Tree,
+                    _ => {
+                        return Err(CherryPickSingleError::SaveFailed(format!(
+                            "unsupported file mode: {:#o}",
+                            entry.mode
+                        )));
+                    }
                 },
-                name: path_buf.file_name().unwrap().to_str().unwrap().to_string(),
+                name: file_name_to_utf8(&path_buf)?,
                 id: entry.hash,
             };
             let parent_dir = path_buf
@@ -345,27 +448,15 @@ fn create_tree_from_index(index: &Index) -> Result<ObjectHash, String> {
         }
     }
 
-    // Build recursively
     build_tree_recursively(Path::new(""), &mut entries_map)
 }
 
-/// Recursively build tree objects from a directory structure map
-///
-/// This helper function:
-/// 1. Takes the current directory path and the remaining entries map
-/// 2. Creates tree items for all files in the current directory
-/// 3. Recursively processes subdirectories to create subtree objects
-/// 4. Combines everything into a single tree object for the current directory
-///
-/// The recursion builds the tree structure bottom-up, creating leaf trees first
-/// and then combining them into parent trees.
 fn build_tree_recursively(
     current_path: &Path,
     entries_map: &mut HashMap<PathBuf, Vec<TreeItem>>,
-) -> Result<ObjectHash, String> {
+) -> Result<ObjectHash, CherryPickSingleError> {
     let mut current_items = entries_map.remove(current_path).unwrap_or_default();
 
-    // Find all subdirectories and build them recursively
     let subdirs: Vec<_> = entries_map
         .keys()
         .filter(|p| p.parent() == Some(current_path))
@@ -373,12 +464,7 @@ fn build_tree_recursively(
         .collect();
 
     for subdir_path in subdirs {
-        let subdir_name = subdir_path
-            .file_name()
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_string();
+        let subdir_name = file_name_to_utf8(&subdir_path)?;
         let subtree_hash = build_tree_recursively(&subdir_path, entries_map)?;
         current_items.push(TreeItem {
             mode: TreeItemMode::Tree,
@@ -387,21 +473,25 @@ fn build_tree_recursively(
         });
     }
 
-    let tree =
-        Tree::from_tree_items(current_items).map_err(|e| format!("failed to create tree: {e}"))?;
-    save_object(&tree, &tree.id).map_err(|e| e.to_string())?;
+    let tree = Tree::from_tree_items(current_items)
+        .map_err(|e| CherryPickSingleError::SaveFailed(format!("failed to create tree: {e}")))?;
+    save_object(&tree, &tree.id).map_err(|e| CherryPickSingleError::SaveFailed(e.to_string()))?;
     Ok(tree.id)
 }
 
-/// Reset the working directory to match the new index state without overwriting untracked files.
-fn reset_workdir_tracked_only(current_index: &Index, new_index: &Index) -> Result<(), String> {
+fn reset_workdir_tracked_only(
+    current_index: &Index,
+    new_index: &Index,
+) -> Result<(), CherryPickSingleError> {
     let workdir = util::working_dir();
-    let untracked_paths = worktree::untracked_workdir_paths(current_index)?;
+    let untracked_paths = worktree::untracked_workdir_paths(current_index).map_err(|e| {
+        CherryPickSingleError::LoadObject(format!("failed to inspect untracked files: {e}"))
+    })?;
     if let Some(conflict) = worktree::untracked_overwrite_path(&untracked_paths, new_index) {
-        return Err(format!(
+        return Err(CherryPickSingleError::Conflict(format!(
             "untracked working tree file would be overwritten: {}",
             conflict.display()
-        ));
+        )));
     }
     let new_tracked_paths: HashSet<_> = new_index.tracked_files().into_iter().collect();
 
@@ -409,42 +499,62 @@ fn reset_workdir_tracked_only(current_index: &Index, new_index: &Index) -> Resul
         if !new_tracked_paths.contains(&path_buf) {
             let full_path = workdir.join(path_buf);
             if full_path.exists() {
-                fs::remove_file(&full_path).map_err(|e| e.to_string())?;
+                fs::remove_file(&full_path).map_err(|e| {
+                    CherryPickSingleError::SaveFailed(format!(
+                        "failed to remove file '{}': {e}",
+                        full_path.display()
+                    ))
+                })?;
             }
         }
     }
 
     for path_buf in new_index.tracked_files() {
-        let path_str = path_buf.to_str().unwrap();
+        let path_str = path_to_utf8(&path_buf)?;
         if let Some(entry) = new_index.get(path_str, 0) {
             let blob = git_internal::internal::object::blob::Blob::load(&entry.hash);
             let target_path = workdir.join(path_str);
             if let Some(parent) = target_path.parent() {
-                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                fs::create_dir_all(parent).map_err(|e| {
+                    CherryPickSingleError::SaveFailed(format!(
+                        "failed to create parent directory '{}': {e}",
+                        parent.display()
+                    ))
+                })?;
             }
-            fs::write(&target_path, &blob.data).map_err(|e| e.to_string())?;
+            fs::write(&target_path, &blob.data).map_err(|e| {
+                CherryPickSingleError::SaveFailed(format!(
+                    "failed to write file '{}': {e}",
+                    target_path.display()
+                ))
+            })?;
         }
     }
     Ok(())
 }
 
-/// Resolve a commit reference (like "HEAD", branch name, or ObjectHash) to a ObjectHash hash
-///
-/// This function uses the utility function to convert various commit references
-/// into their corresponding ObjectHash hashes. It supports:
-/// - Full ObjectHash hashes
-/// - Abbreviated ObjectHash hashes  
-/// - Branch names
-/// - Special references like "HEAD"
+fn path_to_utf8(path: &Path) -> Result<&str, CherryPickSingleError> {
+    path.to_str().ok_or_else(|| {
+        CherryPickSingleError::LoadObject(format!("invalid path encoding: {}", path.display()))
+    })
+}
+
+fn file_name_to_utf8(path: &Path) -> Result<String, CherryPickSingleError> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            CherryPickSingleError::LoadObject(format!(
+                "invalid file name encoding: {}",
+                path.display()
+            ))
+        })
+}
+
 async fn resolve_commit(reference: &str) -> Result<ObjectHash, String> {
     util::get_commit_base(reference).await
 }
 
-/// Update the HEAD reference to point to a new commit
-///
-/// This function updates the current branch to point to the specified commit.
-/// It only works when HEAD is pointing to a branch (not in detached HEAD state).
-/// The branch reference is updated to the new commit ID.
 async fn update_head<C: ConnectionTrait>(db: &C, commit_id: &str) -> Result<(), sea_orm::DbErr> {
     if let Head::Branch(name) = Head::current_with_conn(db).await {
         Branch::update_branch_with_conn(db, &name, commit_id, None).await?;

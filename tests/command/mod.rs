@@ -2,8 +2,9 @@
 
 use std::{
     fs,
+    io::Write,
     path::Path,
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
 };
 
 use git_internal::{
@@ -54,12 +55,13 @@ pub(crate) struct CliErrorReport {
 }
 
 /// Run the Libra binary with an isolated HOME so host config never leaks into tests.
-fn run_libra_command(args: &[&str], cwd: &Path) -> Output {
+fn base_libra_command(args: &[&str], cwd: &Path) -> Command {
     let home = cwd.join(".libra-test-home");
     let config_home = home.join(".config");
     fs::create_dir_all(&config_home).expect("failed to create isolated config directory");
 
-    Command::new(env!("CARGO_BIN_EXE_libra"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_libra"));
+    command
         .args(args)
         .current_dir(cwd)
         .env_clear()
@@ -69,9 +71,63 @@ fn run_libra_command(args: &[&str], cwd: &Path) -> Output {
         .env("XDG_CONFIG_HOME", &config_home)
         .env("LANG", "C")
         .env("LC_ALL", "C")
-        .env(LIBRA_TEST_ENV, "1")
+        .env(LIBRA_TEST_ENV, "1");
+    command
+}
+
+/// Run the Libra binary with an isolated HOME so host config never leaks into tests.
+fn run_libra_command(args: &[&str], cwd: &Path) -> Output {
+    base_libra_command(args, cwd)
         .output()
         .expect("failed to execute libra binary")
+}
+
+fn run_libra_command_with_stdin(args: &[&str], cwd: &Path, stdin_body: &str) -> Output {
+    let mut child = base_libra_command(args, cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to execute libra binary");
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(stdin_body.as_bytes())
+            .expect("failed to write stdin to libra process");
+    }
+
+    child
+        .wait_with_output()
+        .expect("failed to collect libra command output")
+}
+
+fn run_libra_command_with_stdin_and_env(
+    args: &[&str],
+    cwd: &Path,
+    stdin_body: &str,
+    extra_env: &[(&str, &str)],
+) -> Output {
+    let mut command = base_libra_command(args, cwd);
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to execute libra binary");
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(stdin_body.as_bytes())
+            .expect("failed to write stdin to libra process");
+    }
+
+    child
+        .wait_with_output()
+        .expect("failed to collect libra command output")
 }
 
 /// Assert that a CLI command succeeded and include stderr in the failure output.
@@ -104,6 +160,15 @@ fn parse_cli_error_stderr(stderr: &[u8]) -> (String, CliErrorReport) {
 
 fn parse_json_stdout(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).expect("expected stdout to be valid JSON")
+}
+
+/// Build the on-disk path to a loose object given the repository root and full
+/// hex hash. Used by tests that need to corrupt or delete individual objects.
+fn loose_object_path(repo: &Path, hash: &str) -> std::path::PathBuf {
+    repo.join(libra::utils::util::ROOT_DIR)
+        .join("objects")
+        .join(&hash[..2])
+        .join(&hash[2..])
 }
 
 /// Initialize a repository through the CLI to exercise the real process entrypoint.
@@ -139,6 +204,24 @@ fn create_committed_repo_via_cli() -> tempfile::TempDir {
     repo
 }
 
+#[cfg(unix)]
+fn skip_permission_denied_test_if_root(test_name: &str) -> bool {
+    unsafe extern "C" {
+        fn geteuid() -> u32;
+    }
+
+    // SAFETY: On Unix targets libc exposes `geteuid()` with no arguments and a
+    // numeric return type compatible with `u32` on the platforms this suite runs on.
+    let is_root = unsafe { geteuid() == 0 };
+    if is_root {
+        eprintln!(
+            "skipping {test_name}: permission-based write failure injection is unreliable as root"
+        );
+    }
+
+    is_root
+}
+
 mod add_cli_test;
 mod add_json_test;
 mod add_test;
@@ -148,19 +231,20 @@ mod branch_test;
 mod cat_file_test;
 mod checkout_test;
 mod cherry_pick_test;
-#[cfg(unix)]
-mod claude_sdk_test;
 mod clean_test;
 mod cli_error_test;
 mod clone_cli_test;
 mod clone_test;
 mod cloud_test;
+#[cfg(unix)]
+mod code_claudecode_test;
 mod commit_error_test;
 mod commit_json_test;
 mod commit_test;
 mod config_test;
 mod diff_test;
 mod fetch_test;
+mod grep_test;
 mod index_pack_test;
 mod init_from_git_test;
 mod init_json_test;
@@ -187,6 +271,7 @@ mod revert_test;
 mod shortlog_test;
 mod show_ref_test;
 mod show_test;
+mod stash_test;
 mod status_error_test;
 mod status_json_test;
 mod status_test;

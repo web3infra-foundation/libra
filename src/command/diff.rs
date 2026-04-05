@@ -3,7 +3,6 @@
 use std::{
     cell::RefCell,
     collections::HashMap,
-    fmt,
     io::{self, IsTerminal},
     path::PathBuf,
     rc::Rc,
@@ -21,7 +20,6 @@ use git_internal::{
     },
 };
 use serde::Serialize;
-use similar;
 
 use crate::{
     command::{get_target_commit, load_object},
@@ -36,7 +34,16 @@ use crate::{
     },
 };
 
+const DIFF_EXAMPLES: &str = "\
+EXAMPLES:
+    libra diff                              Compare index against the working tree
+    libra diff --staged                     Compare HEAD against the index
+    libra diff --old HEAD~1 --new HEAD      Compare two revisions
+    libra diff --stat src/                  Show diff statistics under src/
+    libra --json diff --staged              Structured JSON output for agents";
+
 #[derive(Parser, Debug)]
+#[command(after_help = DIFF_EXAMPLES)]
 pub struct DiffArgs {
     /// Old commit, default is HEAD
     #[clap(long, value_name = "COMMIT")]
@@ -112,6 +119,61 @@ pub struct DiffOutput {
     pub files_changed: usize,
 }
 
+#[derive(Debug, thiserror::Error)]
+enum DiffError {
+    #[error("not a libra repository")]
+    NotInRepo,
+
+    #[error("invalid revision: '{0}'")]
+    InvalidRevision(String),
+
+    #[error("failed to load {kind} '{object_id}': {detail}")]
+    ObjectLoad {
+        kind: &'static str,
+        object_id: String,
+        detail: String,
+    },
+
+    #[error("failed to load index: {0}")]
+    IndexLoad(String),
+
+    #[error("failed to list working directory files: {0}")]
+    WorkdirList(String),
+
+    #[error("failed to read file '{path}': {detail}")]
+    FileRead { path: String, detail: String },
+
+    #[error("failed to write output file '{path}': {detail}")]
+    OutputWrite { path: String, detail: String },
+}
+
+impl From<DiffError> for CliError {
+    fn from(error: DiffError) -> Self {
+        let message = error.to_string();
+        match error {
+            DiffError::NotInRepo => CliError::repo_not_found(),
+            DiffError::InvalidRevision(_) => CliError::fatal(message)
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint("check the revision name and try again"),
+            DiffError::ObjectLoad { .. } => CliError::fatal(message)
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+                .with_hint("the object store may be corrupted; try 'libra status' to verify"),
+            DiffError::IndexLoad(_) => CliError::fatal(message)
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+                .with_hint("the index file may be corrupted"),
+            DiffError::WorkdirList(_) => {
+                CliError::fatal(message).with_stable_code(StableErrorCode::IoReadFailed)
+            }
+            DiffError::FileRead { .. } => {
+                CliError::fatal(message).with_stable_code(StableErrorCode::IoReadFailed)
+            }
+            DiffError::OutputWrite { .. } => {
+                CliError::fatal(message).with_stable_code(StableErrorCode::IoWriteFailed)
+            }
+        }
+    }
+}
+
 pub async fn execute(args: DiffArgs) {
     if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
         err.print_stderr();
@@ -119,17 +181,14 @@ pub async fn execute(args: DiffArgs) {
 }
 
 pub async fn execute_safe(args: DiffArgs, output: &OutputConfig) -> CliResult<()> {
-    let result = run_diff(&args).await?;
+    let result = run_diff(&args).await.map_err(CliError::from)?;
     render_diff_output(&args, &result, output)
 }
 
-async fn run_diff(args: &DiffArgs) -> CliResult<DiffOutput> {
-    util::require_repo().map_err(|_| CliError::repo_not_found())?;
+async fn run_diff(args: &DiffArgs) -> Result<DiffOutput, DiffError> {
+    util::require_repo().map_err(|_| DiffError::NotInRepo)?;
     tracing::debug!("diff args: {:?}", args);
-    let index = Index::load(path::index()).map_err(|e| {
-        CliError::fatal(format!("failed to load index: {e}"))
-            .with_stable_code(StableErrorCode::RepoCorrupt)
-    })?;
+    let index = Index::load(path::index()).map_err(|e| DiffError::IndexLoad(e.to_string()))?;
 
     let old_side = resolve_diff_side(&args.old, args.staged, false, &index).await?;
     let new_side = resolve_diff_side(&args.new, args.staged, true, &index).await?;
@@ -138,7 +197,7 @@ async fn run_diff(args: &DiffArgs) -> CliResult<DiffOutput> {
     let worktree_entries = new_side.worktree_entries.clone();
     let worktree_cache = RefCell::new(HashMap::<ObjectHash, Vec<u8>>::new());
     let repo_cache = RefCell::new(HashMap::<ObjectHash, Vec<u8>>::new());
-    let load_error = Rc::new(RefCell::new(None::<CliError>));
+    let load_error = Rc::new(RefCell::new(None::<DiffError>));
     let load_error_for_read = Rc::clone(&load_error);
     let diff_output = Diff::diff(old_side.blobs, new_side.blobs, paths, move |path, hash| {
         if worktree_entries.get(path) == Some(hash) {
@@ -205,15 +264,15 @@ fn get_files_blobs(
     files: &[PathBuf],
     index: &Index,
     policy: IgnorePolicy,
-) -> CliResult<Vec<(PathBuf, ObjectHash)>> {
+) -> Result<Vec<(PathBuf, ObjectHash)>, DiffError> {
     files
         .iter()
         .filter(|path| !ignore::should_ignore(path, policy, index))
         .map(|p| {
             let path = util::workdir_to_absolute(p);
-            let data = std::fs::read(&path).map_err(|e| {
-                CliError::fatal(format!("failed to read file '{}': {e}", path.display()))
-                    .with_stable_code(StableErrorCode::IoReadFailed)
+            let data = std::fs::read(&path).map_err(|e| DiffError::FileRead {
+                path: path.display().to_string(),
+                detail: e.to_string(),
             })?;
             Ok((p.to_owned(), calculate_object_hash(ObjectType::Blob, &data)))
         })
@@ -238,15 +297,11 @@ async fn resolve_diff_side(
     staged: bool,
     is_new: bool,
     index: &Index,
-) -> CliResult<DiffSide> {
+) -> Result<DiffSide, DiffError> {
     if let Some(source) = source {
-        let commit_hash = get_target_commit(source).await.map_err(|e| {
-            CliError::fatal(format!(
-                "{e}, can't use as diff {} source",
-                if is_new { "new" } else { "old" }
-            ))
-            .with_stable_code(StableErrorCode::CliInvalidTarget)
-        })?;
+        let commit_hash = get_target_commit(source)
+            .await
+            .map_err(|_| DiffError::InvalidRevision(source.clone()))?;
         return Ok(DiffSide {
             label: source.clone(),
             blobs: get_commit_blobs(&commit_hash).await?,
@@ -262,10 +317,8 @@ async fn resolve_diff_side(
                 worktree_entries: HashMap::new(),
             })
         } else {
-            let files = util::list_workdir_files().map_err(|e| {
-                CliError::fatal(format!("failed to list working directory files: {e}"))
-                    .with_stable_code(StableErrorCode::IoReadFailed)
-            })?;
+            let files =
+                util::list_workdir_files().map_err(|e| DiffError::WorkdirList(e.to_string()))?;
             let blobs = get_files_blobs(&files, index, IgnorePolicy::Respect)?;
             Ok(DiffSide {
                 label: "working tree".to_string(),
@@ -295,35 +348,40 @@ async fn resolve_diff_side(
     }
 }
 
-async fn get_commit_blobs(commit_hash: &ObjectHash) -> CliResult<Vec<(PathBuf, ObjectHash)>> {
-    let commit = load_object::<Commit>(commit_hash).map_err(|e| {
-        CliError::fatal(format!("failed to load commit {}: {e}", commit_hash))
-            .with_stable_code(StableErrorCode::RepoCorrupt)
+async fn get_commit_blobs(
+    commit_hash: &ObjectHash,
+) -> Result<Vec<(PathBuf, ObjectHash)>, DiffError> {
+    let commit = load_object::<Commit>(commit_hash).map_err(|e| DiffError::ObjectLoad {
+        kind: "commit",
+        object_id: commit_hash.to_string(),
+        detail: e.to_string(),
     })?;
-    let tree = load_object::<Tree>(&commit.tree_id).map_err(|e| {
-        CliError::fatal(format!("failed to load tree {}: {e}", commit.tree_id))
-            .with_stable_code(StableErrorCode::RepoCorrupt)
+    let tree = load_object::<Tree>(&commit.tree_id).map_err(|e| DiffError::ObjectLoad {
+        kind: "tree",
+        object_id: commit.tree_id.to_string(),
+        detail: e.to_string(),
     })?;
     Ok(tree.get_plain_items())
 }
 
-fn load_repo_blob_content(hash: &ObjectHash) -> CliResult<Vec<u8>> {
-    let blob = load_object::<Blob>(hash).map_err(|e| {
-        CliError::fatal(format!("failed to load blob '{}': {e}", hash))
-            .with_stable_code(StableErrorCode::RepoCorrupt)
+fn load_repo_blob_content(hash: &ObjectHash) -> Result<Vec<u8>, DiffError> {
+    let blob = load_object::<Blob>(hash).map_err(|e| DiffError::ObjectLoad {
+        kind: "blob",
+        object_id: hash.to_string(),
+        detail: e.to_string(),
     })?;
     Ok(blob.data)
 }
 
-fn read_worktree_blob_content(path_buf: &PathBuf) -> CliResult<Vec<u8>> {
+fn read_worktree_blob_content(path_buf: &PathBuf) -> Result<Vec<u8>, DiffError> {
     let absolute = util::workdir_to_absolute(path_buf);
-    std::fs::read(&absolute).map_err(|e| {
-        CliError::fatal(format!("failed to read file '{}': {e}", absolute.display()))
-            .with_stable_code(StableErrorCode::IoReadFailed)
+    std::fs::read(&absolute).map_err(|e| DiffError::FileRead {
+        path: absolute.display().to_string(),
+        detail: e.to_string(),
     })
 }
 
-fn record_diff_content_error(slot: &Rc<RefCell<Option<CliError>>>, error: CliError) {
+fn record_diff_content_error(slot: &Rc<RefCell<Option<DiffError>>>, error: DiffError) {
     let mut slot = slot.borrow_mut();
     if slot.is_none() {
         *slot = Some(error);
@@ -337,6 +395,14 @@ fn render_diff_output(
 ) -> CliResult<()> {
     if output.is_json() {
         return emit_json_data("diff", result, output);
+    }
+
+    if output.quiet && args.output.is_none() {
+        return if result.files_changed > 0 {
+            Err(CliError::silent_exit(1))
+        } else {
+            Ok(())
+        };
     }
 
     // --output writes are an explicit side-effect and must be honored even
@@ -369,21 +435,29 @@ fn render_diff_output(
     };
 
     if let Some(path) = &args.output {
-        std::fs::write(path, rendered.as_bytes()).map_err(|e| {
-            CliError::fatal(format!("failed to write output file '{}': {e}", path))
-                .with_stable_code(StableErrorCode::IoWriteFailed)
-        })?;
+        std::fs::write(path, rendered.as_bytes())
+            .map_err(|e| DiffError::OutputWrite {
+                path: path.clone(),
+                detail: e.to_string(),
+            })
+            .map_err(CliError::from)?;
+        if output.quiet && result.files_changed > 0 {
+            return Err(CliError::silent_exit(1));
+        }
         return Ok(());
     }
 
     if output.quiet {
+        if result.files_changed > 0 {
+            return Err(CliError::silent_exit(1));
+        }
         return Ok(());
     }
 
-    let mut pager = Pager::with_config(output)?;
     if rendered.is_empty() {
         return Ok(());
     }
+    let mut pager = Pager::with_config(output)?;
     let rendered = if args.name_only || args.name_status || args.numstat || args.stat {
         rendered
     } else {
@@ -593,48 +667,6 @@ fn colorize_diff(diff_text: &str) -> String {
     output
 }
 
-struct Line(Option<usize>);
-
-impl fmt::Display for Line {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self.0 {
-            None => write!(f, "    "),
-            Some(idx) => write!(f, "{:<4}", idx + 1),
-        }
-    }
-}
-
-#[allow(dead_code)]
-fn similar_diff_result(old: &str, new: &str, w: &mut dyn io::Write) {
-    let diff = similar::TextDiff::from_lines(old, new);
-    for (idx, group) in diff.grouped_ops(3).iter().enumerate() {
-        if idx > 0 {
-            println!("{:-^1$}", "-", 80);
-        }
-        for op in group {
-            for change in diff.iter_changes(op) {
-                let sign = match change.tag() {
-                    similar::ChangeTag::Delete => "-",
-                    similar::ChangeTag::Insert => "+",
-                    similar::ChangeTag::Equal => " ",
-                };
-                write!(
-                    w,
-                    "{}{} |{}",
-                    Line(change.old_index()),
-                    Line(change.new_index()),
-                    sign
-                )
-                .unwrap();
-                write!(w, "{}", change.value()).unwrap();
-                if change.missing_newline() {
-                    writeln!(w).unwrap();
-                }
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod test {
     use std::{fs, io::Write};
@@ -644,6 +676,14 @@ mod test {
 
     use super::*;
     use crate::utils::test;
+
+    struct ColorOverrideReset;
+
+    impl Drop for ColorOverrideReset {
+        fn drop(&mut self) {
+            colored::control::unset_override();
+        }
+    }
     #[test]
     /// Tests command line argument parsing for the diff command with various parameter combinations.
     /// Verifies parameter requirements, conflicts and default values are handled correctly.
@@ -704,20 +744,10 @@ mod test {
     }
 
     #[test]
-    /// Tests the functionality of the `similar_diff_result` function.
-    /// Verifies that it correctly generates a diff between two text inputs.
-    fn test_similar_diff_result() {
-        let old = "Hello World\nThis is the second line.\nThis is the third.";
-        let new = "Hallo Welt\nThis is the second line.\nThis is life.\nMoar and more";
-        let mut buf = Vec::new();
-        similar_diff_result(old, new, &mut buf);
-        let result = String::from_utf8(buf).unwrap();
-        println!("{result}");
-    }
-
-    #[test]
+    #[serial]
     fn test_maybe_colorize_diff_respects_flag() {
         let diff = "diff --git a/file.txt b/file.txt\n--- /dev/null\n+++ b/file.txt\n+line\n";
+        let _guard = ColorOverrideReset;
         colored::control::set_override(true);
 
         let plain = maybe_colorize_diff(diff, false);
@@ -731,8 +761,6 @@ mod test {
             colored.contains("\u{1b}["),
             "colored output should contain ANSI escapes"
         );
-
-        colored::control::unset_override();
     }
 
     #[tokio::test]

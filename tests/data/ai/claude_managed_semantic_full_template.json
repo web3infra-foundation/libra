@@ -333,7 +333,7 @@
       }
     ],
     "structured_output": {
-      "summary": "Persist the Claude SDK managed bridge",
+      "summary": "Persist the Claude Code managed bridge",
       "problemStatement": "Libra needs a stable SDK-first ingestion path for Claude sessions.",
       "changeType": "feature",
       "objectives": [
@@ -341,8 +341,8 @@
         "Emit raw artifact and audit bundle"
       ],
       "inScope": [
-        "src/command/claude_sdk.rs",
-        "src/internal/ai/providers/claude_sdk/managed.rs"
+        "src/command/code.rs",
+        "src/internal/ai/claudecode/managed_artifacts.rs"
       ],
       "outOfScope": [
         "scheduler objects"
@@ -362,7 +362,7 @@
         {
           "id": "managed-import",
           "kind": "command",
-          "command": "cargo test claude_sdk",
+          "command": "cargo test code_claudecode",
           "required": true,
           "artifactsProduced": [
             "test-log"

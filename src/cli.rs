@@ -154,11 +154,6 @@ enum Commands {
     Init(command::init::InitArgs),
     #[command(about = "Clone a repository into a new directory")]
     Clone(command::clone::CloneArgs),
-    #[command(
-        name = "claude-sdk",
-        about = "Run or import Claude Agent SDK managed sessions"
-    )]
-    ClaudeSdk(command::claude_sdk::ClaudeSdkArgs),
     #[command(about = "Start Libra Code interactive TUI (with background web server)")]
     Code(command::code::CodeArgs),
     // The rest of the commands require a repository to be present
@@ -225,6 +220,8 @@ enum Commands {
     Pull(command::pull::PullArgs),
     #[command(about = "Show changes between commits, commit and working tree, etc")]
     Diff(command::diff::DiffArgs),
+    #[command(about = "Search for patterns in tracked files")]
+    Grep(command::grep::GrepArgs),
     #[command(about = "Show author and history of each line of a file")]
     Blame(command::blame::BlameArgs),
     #[command(about = "Revert some existing commits")]
@@ -328,11 +325,14 @@ pub enum Bisect {
 
 /// The main function is the entry point of the Libra application.
 /// It parses the command-line arguments and executes the corresponding function.
-/// - Caution: This is a `synchronous` function, it's declared as `async` to be able to use `[tokio::main]`
 /// - `args`: parse from command line if it's `None`, otherwise parse from the given args
-#[tokio::main]
-pub async fn parse(args: Option<&[&str]>) -> CliResult<()> {
-    parse_async(args).await
+pub fn parse(args: Option<&[&str]>) -> CliResult<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| CliError::fatal(format!("failed to create tokio runtime: {e}")))?;
+
+    runtime.block_on(Box::pin(parse_async(args)))
 }
 
 // Rewrite `log -<n>` into `log -n <n>` only when `log` is the actual subcommand.
@@ -581,6 +581,9 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
             _ => return Err(classify_parse_error(&argv, &err)),
         },
     };
+    if let Commands::Tag(tag_args) = &args.command {
+        command::tag::validate_cli_args(tag_args)?;
+    }
     match &args.command {
         Commands::Init(_) | Commands::Clone(_) => {}
         // Config global/system scopes don't require a repository
@@ -629,10 +632,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
             })?;
         }
         Commands::Clone(cmd_args) => command::clone::execute_safe(cmd_args, &output).await?,
-        Commands::ClaudeSdk(cmd_args) => command::claude_sdk::execute(cmd_args)
-            .await
-            .map_err(|e| CliError::fatal(e.to_string()))?,
-        Commands::Code(cmd_args) => command::code::execute(cmd_args).await?,
+        Commands::Code(cmd_args) => command::code::execute(cmd_args, &output).await?,
         Commands::Add(cmd_args) => command::add::execute_safe(cmd_args, &output).await?,
         Commands::Rm(cmd_args) => command::remove::execute_safe(cmd_args, &output).await?,
         Commands::Restore(cmd_args) => command::restore::execute_safe(cmd_args, &output).await?,
@@ -661,6 +661,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::IndexPack(cmd_args) => command::index_pack::execute_safe(cmd_args, &output)?,
         Commands::Fetch(cmd_args) => command::fetch::execute_safe(cmd_args, &output).await?,
         Commands::Diff(cmd_args) => command::diff::execute_safe(cmd_args, &output).await?,
+        Commands::Grep(cmd_args) => command::grep::execute_safe(cmd_args, &output).await?,
         Commands::Blame(cmd_args) => command::blame::execute_safe(cmd_args, &output).await?,
         Commands::Revert(cmd_args) => command::revert::execute_safe(cmd_args, &output).await?,
         Commands::Remote(cmd) => command::remote::execute_safe(cmd, &output).await?,

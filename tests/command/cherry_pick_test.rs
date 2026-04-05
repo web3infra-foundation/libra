@@ -525,6 +525,93 @@ async fn test_cherry_pick_errors() {
     println!("Error handling test completed");
 }
 
+#[test]
+#[serial]
+fn test_cherry_pick_invalid_commit_returns_cli_invalid_target() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["cherry-pick", "nonexistent"], repo.path());
+    assert_eq!(output.status.code(), Some(129));
+
+    let (human, report) = parse_cli_error_stderr(&output.stderr);
+    assert!(
+        human.contains("fatal: failed to resolve commit reference 'nonexistent'"),
+        "unexpected stderr: {human}"
+    );
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert_eq!(report.exit_code, 129);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_cherry_pick_merge_commit_rejection_uses_invalid_arguments_code() {
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+
+    let head = Head::current_commit().await.expect("expected HEAD commit");
+    let head_commit: Commit = load_object(&head).expect("failed to load HEAD commit");
+    let merge_commit = Commit::from_tree_id(
+        head_commit.tree_id,
+        vec![head, head],
+        &format_commit_msg("synthetic merge commit", None),
+    );
+    save_object(&merge_commit, &merge_commit.id).expect("failed to save synthetic merge commit");
+
+    let output = run_libra_command(&["cherry-pick", &merge_commit.id.to_string()], repo.path());
+    assert_eq!(output.status.code(), Some(129));
+
+    let (human, report) = parse_cli_error_stderr(&output.stderr);
+    assert!(
+        human.contains("fatal: cherry-picking merge commits is not supported"),
+        "unexpected stderr: {human}"
+    );
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert_eq!(report.exit_code, 129);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_cherry_pick_json_output() {
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+
+    let output = run_libra_command(&["switch", "-c", "feature"], repo.path());
+    assert_cli_success(&output, "switch -c feature should succeed");
+
+    fs::write("feature.txt", "feature content\n").unwrap();
+    let output = run_libra_command(&["add", "feature.txt"], repo.path());
+    assert_cli_success(&output, "add feature.txt should succeed");
+
+    let output = run_libra_command(
+        &["commit", "-m", "Feature commit", "--no-verify"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "feature commit should succeed");
+
+    let feature_commit = Head::current_commit()
+        .await
+        .expect("expected feature commit");
+
+    let output = run_libra_command(&["switch", "main"], repo.path());
+    assert_cli_success(&output, "switch main should succeed");
+
+    let output = run_libra_command(
+        &["cherry-pick", "--json", &feature_commit.to_string()],
+        repo.path(),
+    );
+    assert_cli_success(&output, "cherry-pick --json should succeed");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "cherry-pick");
+    assert_eq!(json["data"]["no_commit"], false);
+    assert_eq!(json["data"]["picked"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        json["data"]["picked"][0]["source_commit"],
+        feature_commit.to_string()
+    );
+    assert!(json["data"]["picked"][0]["new_commit"].as_str().is_some());
+}
+
 #[tokio::test]
 #[serial]
 /// Verify cherry-pick behavior under SHA-256: accepts 64-hex commit ids, rejects SHA-1 length.
