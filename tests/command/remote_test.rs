@@ -68,7 +68,8 @@ async fn test_remote_add_duplicate_name_returns_error() {
     assert!(result.is_err(), "adding existing remote should fail");
     let err = result.unwrap_err();
     assert!(
-        err.render().contains("fatal: remote origin already exists"),
+        err.render()
+            .contains("fatal: remote 'origin' already exists"),
         "unexpected error: {}",
         err.render()
     );
@@ -352,6 +353,108 @@ async fn test_remote_set_url_all_replaces_all_fetch_urls() {
         name: "origin".into(),
     })
     .await;
+}
+
+#[test]
+fn test_remote_verbose_cli_lists_all_fetch_and_push_urls() {
+    let repo = tempdir().expect("failed to create repo");
+    init_repo_via_cli(repo.path());
+
+    let add_output = run_libra_command(
+        &["remote", "add", "origin", "https://one.example/repo.git"],
+        repo.path(),
+    );
+    assert_cli_success(&add_output, "remote add origin");
+
+    let add_fetch_url = run_libra_command(
+        &[
+            "remote",
+            "set-url",
+            "--add",
+            "origin",
+            "https://two.example/repo.git",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&add_fetch_url, "remote set-url --add origin");
+
+    let add_push_url = run_libra_command(
+        &[
+            "remote",
+            "set-url",
+            "--add",
+            "--push",
+            "origin",
+            "ssh://git@example.com/repo.git",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&add_push_url, "remote set-url --add --push origin");
+
+    let output = run_libra_command(&["remote", "-v"], repo.path());
+    assert_cli_success(&output, "remote -v");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("origin\thttps://one.example/repo.git (fetch)"),
+        "missing first fetch URL: {stdout}"
+    );
+    assert!(
+        stdout.contains("origin\thttps://two.example/repo.git (fetch)"),
+        "missing second fetch URL: {stdout}"
+    );
+    assert!(
+        stdout.contains("origin\tssh://git@example.com/repo.git (push)"),
+        "missing push URL: {stdout}"
+    );
+    assert!(
+        !stdout.contains("origin\thttps://one.example/repo.git (push)"),
+        "verbose output should prefer explicit pushurl entries: {stdout}"
+    );
+}
+
+#[test]
+fn test_remote_get_url_json_output_is_structured() {
+    let repo = tempdir().expect("failed to create repo");
+    init_repo_via_cli(repo.path());
+
+    let add_output = run_libra_command(
+        &["remote", "add", "origin", "https://one.example/repo.git"],
+        repo.path(),
+    );
+    assert_cli_success(&add_output, "remote add origin");
+
+    let add_fetch_url = run_libra_command(
+        &[
+            "remote",
+            "set-url",
+            "--add",
+            "origin",
+            "https://two.example/repo.git",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&add_fetch_url, "remote set-url --add origin");
+
+    let output = run_libra_command(
+        &["--json", "remote", "get-url", "--all", "origin"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "remote get-url --json");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "remote");
+    assert_eq!(json["data"]["action"], "urls");
+    assert_eq!(json["data"]["name"], "origin");
+    assert_eq!(json["data"]["push"], false);
+    assert_eq!(json["data"]["all"], true);
+    assert_eq!(
+        json["data"]["urls"],
+        serde_json::json!([
+            "https://one.example/repo.git",
+            "https://two.example/repo.git"
+        ])
+    );
 }
 
 #[tokio::test]
@@ -755,6 +858,27 @@ async fn test_remote_prune_nonexistent_remote_returns_error() {
     // We can't easily test stderr output, but we can verify it doesn't panic
 }
 
+#[test]
+fn test_remote_add_duplicate_name_returns_conflict_error_code() {
+    let repo = tempdir().expect("failed to create repo");
+    init_repo_via_cli(repo.path());
+
+    let first = run_libra_command(
+        &["remote", "add", "origin", "https://example.com/repo.git"],
+        repo.path(),
+    );
+    assert_cli_success(&first, "initial remote add");
+
+    let duplicate = run_libra_command(
+        &["remote", "add", "origin", "https://example.com/other.git"],
+        repo.path(),
+    );
+    let (_stderr, report) = parse_cli_error_stderr(&duplicate.stderr);
+    assert_eq!(duplicate.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-CONFLICT-002");
+    assert_eq!(report.message, "remote 'origin' already exists");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 #[serial]
@@ -886,7 +1010,7 @@ async fn test_remote_prune_does_not_report_success_when_delete_fails() {
         "prune should not report success when deletion fails: {stdout}"
     );
     assert!(
-        stderr.contains("failed to delete branch"),
+        stderr.contains("failed to prune remote-tracking branch"),
         "unexpected stderr: {stderr}"
     );
 }

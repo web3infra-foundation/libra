@@ -6,71 +6,36 @@
 
 ## 已完成前置条件与当前代码状态
 
-### 当前代码已具备
-- `RestoreError` typed enum（7 变体）：`ResolveSource`、`ReferenceNotCommit`、`ReadIndex`、`ReadObject`、`InvalidPathEncoding`、`WriteWorktree`、`LfsDownload`
-- `execute_checked()` + `execute_checked_typed()` 双路径实现
-- pathspec 过滤、LFS 支持、worktree/staged 目标
-- `checkout` 命令通过 `execute_checked_typed()` 复用 restore 逻辑
+### 已确认落地的基线
+- `RestoreError` 已完成到 `StableErrorCode` 的显式映射，source/pathspec/index/object/LFS 失败均可稳定分类
+- `run_restore()` + `render_restore_output()` 已完成执行层/渲染层拆分
+- `RestoreOutput` 已覆盖 `source`、`worktree`、`staged`、`restored_files`、`deleted_files`
+- `checkout` 兼容路径已复用 typed restore API，而不是继续走裸 `io::Error`
+- `docs/commands/restore.md` 已记录 JSON schema、错误码和常用示例
+- `tests/command/restore_test.rs` 已覆盖 worktree/staged restore、JSON 输出、确认消息和错误路径
 
-### 当前代码缺失
-- **无 `StableErrorCode` 映射**：`RestoreError` 通过 `CliError::fatal(e.to_string())` 兜底
-- **无 JSON/machine 输出**：`OutputConfig` 参数被忽略（`_output`）
-- **无确认消息**：操作完全静默
-- **无 `run_restore()` / `render_restore_output()` 分层**
-- **无 `RestoreOutput` 结构化输出类型**
-- **双路径代码重复**：`execute_checked()` 和 `execute_checked_typed()` 逻辑相似
-- **测试仅覆盖错误路径**：无正向 restore 操作测试
+### 基于当前代码的 Review 结论
+- 第四批对外契约已落地，restore 的 human/JSON 行为与命令文档保持一致
+- `checkout` 与 `restore` 的 typed 边界已经对齐，减少了跨命令委托时的错误信息丢失
+- 本轮 Review 的主要修订是把本计划文档从“待实施”状态更新为“已实施 + 后续维护点”，避免和当前代码冲突
 
-## 改进内容
+## 目标与非目标
 
-### 特性 1：`RestoreError` → `StableErrorCode` 映射 + `From<RestoreError> for CliError`
+**已完成目标：**
+- 显式错误码、JSON / machine、确认消息、run/render 分层和正向 restore 测试已全部落地
 
-**变更范围**：`src/command/restore.rs`
+**后续维护目标：**
+- 继续维护 worktree + staged 组合、pathspec 过滤和 LFS 下载失败的回归测试
+- 继续保持 `checkout` 兼容层与 `restore` 真实行为一致
 
-| RestoreError 变体 | StableErrorCode | hint |
-|-------------------|-----------------|------|
-| `ResolveSource` | `CliInvalidTarget` | "check that the source ref exists" |
-| `ReferenceNotCommit` | `CliInvalidTarget` | "only commit references can be used as restore source" |
-| `ReadIndex` | `IoReadFailed` | — |
-| `ReadObject` | `IoReadFailed` | — |
-| `InvalidPathEncoding` | `CliInvalidArguments` | — |
-| `WriteWorktree` | `IoWriteFailed` | — |
-| `LfsDownload` | `NetworkUnavailable` | "check LFS server availability" |
-
-### 特性 2：`run_restore()` + `render_restore_output()` 分层
-
-- `run_restore(args) -> Result<RestoreOutput, RestoreError>`：纯业务逻辑
-- `render_restore_output(result, output) -> CliResult<()>`：JSON/human/quiet 渲染
-- 消除 `execute_checked()` / `execute_checked_typed()` 重复
-
-### 特性 3：`RestoreOutput` 结构化输出 + 确认消息
-
-```rust
-#[derive(Debug, Clone, Serialize)]
-pub struct RestoreOutput {
-    pub source: Option<String>,
-    pub worktree: bool,
-    pub staged: bool,
-    pub restored_files: Vec<String>,
-    pub deleted_files: Vec<String>,
-}
-```
-
-human 模式输出确认消息：`"Updated N paths from {source}"`
-
-### 特性 4：`--help` EXAMPLES
-
-### 特性 5：补充测试
-
-新增正向 restore 测试：
-- `test_restore_worktree_from_index`
-- `test_restore_staged_from_head`
-- `test_restore_json_output`
-- `test_restore_confirm_message`
+**本批非目标：**
+- 不引入交互式 restore
+- 不改变底层 tree/index 恢复算法
+- 不为 `checkout` 提前承诺完整 JSON 契约（完整现代化仍留第六批）
 
 ## 验证方式
 
-1. `cargo +nightly fmt --all --check` 无格式差异
-2. `cargo clippy --all-targets --all-features -- -D warnings` 无警告
-3. `cargo test restore_test` 全部通过
-4. `libra restore --json --source HEAD file.txt` 输出合法 JSON
+1. `cargo +nightly fmt --all --check`
+2. `cargo clippy --all-targets --all-features -- -D warnings`
+3. `cargo test restore_test`
+4. `docs/commands/restore.md` 与命令输出、错误码保持一致
