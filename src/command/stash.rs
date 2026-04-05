@@ -3,7 +3,7 @@
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
@@ -936,8 +936,75 @@ fn merge_trees(base: &Tree, head: &Tree, stash: &Tree, git_dir: &Path) -> Result
         return Err(error_message);
     }
 
-    let final_items: Vec<TreeItem> = head_items.values().cloned().collect();
-    Tree::from_tree_items(final_items).map_err(|e| e.to_string())
+    build_tree_from_flat_items(&head_items, git_dir)
+}
+
+fn build_tree_from_flat_items(
+    files: &HashMap<String, TreeItem>,
+    git_dir: &Path,
+) -> Result<Tree, String> {
+    fn file_name_to_string(path: &Path) -> Result<String, String> {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| format!("invalid file name encoding: {}", path.display()))
+    }
+
+    fn build_tree_recursive(
+        current_path: &Path,
+        entries_map: &mut HashMap<PathBuf, Vec<TreeItem>>,
+        git_dir: &Path,
+    ) -> Result<Tree, String> {
+        let mut current_items = entries_map.remove(current_path).unwrap_or_default();
+        let subdirs: Vec<_> = entries_map
+            .keys()
+            .filter(|path| path.parent() == Some(current_path))
+            .cloned()
+            .collect();
+
+        for subdir_path in subdirs {
+            let subtree = build_tree_recursive(&subdir_path, entries_map, git_dir)?;
+            if subtree.tree_items.is_empty() {
+                continue;
+            }
+
+            let subtree_data = subtree.to_data().map_err(|e| e.to_string())?;
+            let subtree_hash = object::write_git_object(git_dir, "tree", &subtree_data)
+                .map_err(|e| e.to_string())?;
+            current_items.push(TreeItem::new(
+                TreeItemMode::Tree,
+                subtree_hash,
+                file_name_to_string(&subdir_path)?,
+            ));
+        }
+
+        current_items.sort_by(|a, b| a.name.cmp(&b.name));
+        if current_items.is_empty() {
+            let empty_id = ObjectHash::from_type_and_data(ObjectType::Tree, &[]);
+            return Tree::from_bytes(&[], empty_id).map_err(|e| e.to_string());
+        }
+
+        Tree::from_tree_items(current_items).map_err(|e| e.to_string())
+    }
+
+    let mut entries_map: HashMap<PathBuf, Vec<TreeItem>> = HashMap::new();
+    for (path, item) in files {
+        let path_buf = PathBuf::from(path);
+        let parent_dir = path_buf
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .to_path_buf();
+        entries_map
+            .entry(parent_dir)
+            .or_default()
+            .push(TreeItem::new(
+                item.mode,
+                item.id,
+                file_name_to_string(&path_buf)?,
+            ));
+    }
+
+    build_tree_recursive(Path::new(""), &mut entries_map, git_dir)
 }
 
 /// Get the number of stashes

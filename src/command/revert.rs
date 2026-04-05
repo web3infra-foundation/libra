@@ -274,10 +274,10 @@ async fn revert_single_commit(
     }
 
     for (path, &parent_hash) in &parent_files {
-        if !reverted_files.contains_key(path) {
-            if current_files.insert(path.clone(), parent_hash) != Some(parent_hash) {
-                files_changed += 1;
-            }
+        if !reverted_files.contains_key(path)
+            && current_files.insert(path.clone(), parent_hash) != Some(parent_hash)
+        {
+            files_changed += 1;
         }
     }
 

@@ -575,50 +575,25 @@ async fn test_cherry_pick_json_output() {
     let repo = create_committed_repo_via_cli();
     let _guard = ChangeDirGuard::new(repo.path());
 
-    switch::execute(SwitchArgs {
-        branch: None,
-        create: Some("feature".to_string()),
-        detach: false,
-        track: false,
-    })
-    .await;
+    let output = run_libra_command(&["switch", "-c", "feature"], repo.path());
+    assert_cli_success(&output, "switch -c feature should succeed");
+
     fs::write("feature.txt", "feature content\n").unwrap();
-    add::execute(AddArgs {
-        pathspec: vec!["feature.txt".to_string()],
-        all: false,
-        update: false,
-        verbose: false,
-        dry_run: false,
-        ignore_errors: false,
-        refresh: false,
-        force: false,
-    })
-    .await;
-    commit::execute(CommitArgs {
-        message: Some("Feature commit".to_string()),
-        file: None,
-        allow_empty: false,
-        conventional: false,
-        no_edit: false,
-        amend: false,
-        signoff: false,
-        disable_pre: false,
-        all: false,
-        no_verify: false,
-        author: None,
-    })
-    .await;
+    let output = run_libra_command(&["add", "feature.txt"], repo.path());
+    assert_cli_success(&output, "add feature.txt should succeed");
+
+    let output = run_libra_command(
+        &["commit", "-m", "Feature commit", "--no-verify"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "feature commit should succeed");
+
     let feature_commit = Head::current_commit()
         .await
         .expect("expected feature commit");
 
-    switch::execute(SwitchArgs {
-        branch: Some("main".to_string()),
-        create: None,
-        detach: false,
-        track: false,
-    })
-    .await;
+    let output = run_libra_command(&["switch", "main"], repo.path());
+    assert_cli_success(&output, "switch main should succeed");
 
     let output = run_libra_command(
         &["cherry-pick", "--json", &feature_commit.to_string()],

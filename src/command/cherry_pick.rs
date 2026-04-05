@@ -12,8 +12,10 @@ use git_internal::{
     internal::{
         index::{Index, IndexEntry},
         object::{
+            ObjectTrait,
             commit::Commit,
             tree::{Tree, TreeItem, TreeItemMode},
+            types::ObjectType,
         },
     },
 };
@@ -271,7 +273,8 @@ async fn cherry_pick_single_commit(
     }
 
     let parent_tree = if commit_to_pick.parent_commit_ids.is_empty() {
-        Tree::from_tree_items(Vec::new()).map_err(|e| {
+        let empty_id = ObjectHash::from_type_and_data(ObjectType::Tree, &[]);
+        Tree::from_bytes(&[], empty_id).map_err(|e| {
             CherryPickSingleError::SaveFailed(format!(
                 "failed to create empty tree for root commit: {e}",
             ))
