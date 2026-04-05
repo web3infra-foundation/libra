@@ -566,12 +566,13 @@ impl From<FetchError> for CliError {
             .with_hint("check network connectivity and retry"),
             FetchError::PacketRead { source } => {
                 if is_timeout_io_error(source) {
-                    return CliError::fatal(error.to_string())
+                    CliError::fatal(error.to_string())
                         .with_stable_code(StableErrorCode::NetworkUnavailable)
-                        .with_hint("check network connectivity and retry");
+                        .with_hint("check network connectivity and retry")
+                } else {
+                    CliError::fatal(error.to_string())
+                        .with_stable_code(StableErrorCode::NetworkProtocol)
                 }
-                CliError::fatal(error.to_string())
-                    .with_stable_code(StableErrorCode::NetworkProtocol)
             }
             FetchError::RemoteBranchNotFound { .. } => CliError::command_usage(error.to_string())
                 .with_stable_code(StableErrorCode::CliInvalidTarget)
@@ -626,6 +627,25 @@ fn map_fetch_io_error(
     }
 }
 
+/// Strip embedded credentials (userinfo) from a URL before printing it to
+/// the terminal.  Falls back to the original string if the URL cannot be
+/// parsed (e.g. SCP-style `git@host:path`).
+fn redact_url_credentials(raw: &str) -> String {
+    match Url::parse(raw) {
+        Ok(mut url) => {
+            if !url.username().is_empty() || url.password().is_some() {
+                // `set_username`/`set_password` return Err only for
+                // cannot-be-a-base URLs, which have no authority – safe to
+                // ignore.
+                let _ = url.set_username("");
+                let _ = url.set_password(None);
+            }
+            url.to_string()
+        }
+        Err(_) => raw.to_string(),
+    }
+}
+
 fn is_timeout_io_error(error: &std::io::Error) -> bool {
     if error.kind() == std::io::ErrorKind::TimedOut {
         return true;
@@ -651,7 +671,13 @@ pub async fn execute_safe(args: FetchArgs, output: &OutputConfig) -> CliResult<(
 async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOutput> {
     tracing::debug!("`fetch` args: {:?}", args);
 
-    if args.all {
+    let FetchArgs {
+        repository,
+        refspec,
+        all,
+    } = args;
+
+    if all {
         let remotes = ConfigKv::all_remote_configs().await.map_err(|error| {
             CliError::fatal(format!("failed to read remote configuration: {error}"))
                 .with_stable_code(StableErrorCode::IoReadFailed)
@@ -674,7 +700,7 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         });
     }
 
-    let remote = match args.repository.clone() {
+    let remote = match repository {
         Some(remote) => remote,
         None => match ConfigKv::get_current_remote().await {
             Ok(Some(remote)) => remote,
@@ -705,15 +731,14 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
                 .with_hint("use 'libra remote -v' to inspect configured remotes")
         })?;
 
-    let result =
-        fetch_repository_with_result(remote_config, args.refspec.clone(), false, None, output)
-            .await
-            .map_err(CliError::from)?;
+    let result = fetch_repository_with_result(remote_config, refspec.clone(), false, None, output)
+        .await
+        .map_err(CliError::from)?;
 
     Ok(FetchOutput {
         all: false,
         requested_remote: Some(remote),
-        refspec: args.refspec,
+        refspec,
         remotes: vec![result],
     })
 }
@@ -742,7 +767,7 @@ fn render_fetch_output(result: &FetchOutput, output: &OutputConfig) -> CliResult
                 .map_err(|error| CliError::io(format!("failed to write fetch output: {error}")))?;
         }
 
-        writeln!(writer, "From {}", remote.url)
+        writeln!(writer, "From {}", redact_url_credentials(&remote.url))
             .map_err(|error| CliError::io(format!("failed to write fetch output: {error}")))?;
 
         if remote.refs_updated.is_empty() {

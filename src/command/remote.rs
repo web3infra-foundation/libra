@@ -23,6 +23,42 @@ use crate::{
     },
 };
 
+/// Whether a URL entry targets the fetch or push side of a remote.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum UrlRole {
+    Fetch,
+    Push,
+}
+
+impl std::fmt::Display for UrlRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UrlRole::Fetch => f.write_str("fetch"),
+            UrlRole::Push => f.write_str("push"),
+        }
+    }
+}
+
+/// The mutation performed by `set-url`.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SetUrlMode {
+    Add,
+    Delete,
+    Set,
+}
+
+impl std::fmt::Display for SetUrlMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SetUrlMode::Add => f.write_str("add"),
+            SetUrlMode::Delete => f.write_str("delete"),
+            SetUrlMode::Set => f.write_str("set"),
+        }
+    }
+}
+
 #[derive(Subcommand, Debug)]
 pub enum RemoteCmds {
     /// Add a remote
@@ -119,7 +155,7 @@ enum RemoteError {
     #[error("no matching {role} URL found for remote '{name}': {pattern}")]
     UrlPatternNotMatched {
         name: String,
-        role: &'static str,
+        role: UrlRole,
         pattern: String,
     },
 
@@ -162,7 +198,7 @@ impl From<RemoteError> for CliError {
                 name,
                 role,
                 pattern,
-            } => CliError::command_usage(format!(
+            } => CliError::fatal(format!(
                 "no matching {role} URL found for remote '{name}': {pattern}"
             ))
             .with_stable_code(StableErrorCode::CliInvalidTarget)
@@ -231,8 +267,8 @@ pub enum RemoteOutput {
     },
     SetUrl {
         name: String,
-        role: &'static str,
-        mode: &'static str,
+        role: UrlRole,
+        mode: SetUrlMode,
         urls: Vec<String>,
         removed: usize,
     },
@@ -358,12 +394,15 @@ async fn run_set_url(
     push: bool,
     add: bool,
     delete: bool,
-    _all: bool,
+    // `--all` and default replace both perform unset-all-then-set, so the
+    // behavior is identical today.  We accept the flag for CLI compatibility
+    // with Git but do not branch on it.
+    #[allow(unused_variables)] all: bool,
 ) -> Result<RemoteOutput, RemoteError> {
     ensure_remote_exists(&name).await?;
 
     let key = if push { "pushurl" } else { "url" };
-    let role = if push { "push" } else { "fetch" };
+    let role = if push { UrlRole::Push } else { UrlRole::Fetch };
     let full_key = format!("remote.{name}.{key}");
 
     let mode = if add {
@@ -372,7 +411,7 @@ async fn run_set_url(
             .map_err(|error| RemoteError::ConfigWrite {
                 detail: error.to_string(),
             })?;
-        "add"
+        SetUrlMode::Add
     } else if delete {
         let entries =
             ConfigKv::get_all(&full_key)
@@ -412,7 +451,7 @@ async fn run_set_url(
         return Ok(RemoteOutput::SetUrl {
             name,
             role,
-            mode: "delete",
+            mode: SetUrlMode::Delete,
             urls,
             removed,
         });
@@ -427,7 +466,7 @@ async fn run_set_url(
             .map_err(|error| RemoteError::ConfigWrite {
                 detail: error.to_string(),
             })?;
-        "set"
+        SetUrlMode::Set
     };
 
     let urls = load_config_urls(&name, key).await?;
@@ -532,13 +571,19 @@ async fn run_prune_remote(name: String, dry_run: bool) -> Result<RemoteOutput, R
     })
 }
 
+/// A remote is considered to exist if **any** `remote.<name>.*` key is
+/// present, not only `remote.<name>.url`.  This handles the edge case where
+/// `set-url --delete` removed the last fetch URL but other keys (e.g.
+/// `pushurl`, vault SSH keys) still remain.
 async fn remote_exists(name: &str) -> Result<bool, RemoteError> {
-    Ok(ConfigKv::remote_config(name)
-        .await
-        .map_err(|error| RemoteError::ConfigRead {
-            detail: error.to_string(),
-        })?
-        .is_some())
+    let prefix = format!("remote.{name}.");
+    let entries =
+        ConfigKv::get_by_prefix(&prefix)
+            .await
+            .map_err(|error| RemoteError::ConfigRead {
+                detail: error.to_string(),
+            })?;
+    Ok(!entries.is_empty())
 }
 
 async fn ensure_remote_exists(name: &str) -> Result<(), RemoteError> {
@@ -652,19 +697,19 @@ fn render_remote_output(result: &RemoteOutput, output: &OutputConfig) -> CliResu
             mode,
             urls,
             removed,
-        } => match *mode {
-            "add" => writeln!(
+        } => match mode {
+            SetUrlMode::Add => writeln!(
                 writer,
                 "Added {role} URL for remote '{name}': {}",
                 urls.last().cloned().unwrap_or_default()
             )
             .map_err(write_err),
-            "delete" => writeln!(
+            SetUrlMode::Delete => writeln!(
                 writer,
                 "Removed {removed} {role} URL(s) from remote '{name}'"
             )
             .map_err(write_err),
-            _ => writeln!(
+            SetUrlMode::Set => writeln!(
                 writer,
                 "Set {role} URL for remote '{name}' to {}",
                 urls.first().cloned().unwrap_or_default()
