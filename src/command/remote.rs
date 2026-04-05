@@ -354,17 +354,11 @@ async fn run_rename_remote(old: String, new: String) -> Result<RemoteOutput, Rem
 }
 
 async fn run_list_remotes(verbose: bool) -> Result<RemoteOutput, RemoteError> {
-    let mut remotes =
-        ConfigKv::all_remote_configs()
-            .await
-            .map_err(|error| RemoteError::ConfigRead {
-                detail: error.to_string(),
-            })?;
-    remotes.sort_by(|left, right| left.name.cmp(&right.name));
+    let remote_names = list_remote_names().await?;
 
-    let mut entries = Vec::with_capacity(remotes.len());
-    for remote in remotes {
-        entries.push(load_remote_entry(&remote.name).await?);
+    let mut entries = Vec::with_capacity(remote_names.len());
+    for name in remote_names {
+        entries.push(load_remote_entry(&name).await?);
     }
 
     Ok(RemoteOutput::List {
@@ -373,9 +367,44 @@ async fn run_list_remotes(verbose: bool) -> Result<RemoteOutput, RemoteError> {
     })
 }
 
+/// Discover all remote names by scanning `remote.<name>.*` config keys.
+/// Unlike `ConfigKv::all_remote_configs()` (which only recognises remotes with
+/// a `.url` entry), this finds any remote that has *any* configuration key.
+async fn list_remote_names() -> Result<Vec<String>, RemoteError> {
+    let entries =
+        ConfigKv::get_by_prefix("remote.")
+            .await
+            .map_err(|error| RemoteError::ConfigRead {
+                detail: error.to_string(),
+            })?;
+    let mut names = HashSet::new();
+    for entry in entries {
+        // key format: "remote.<name>.<subkey>"
+        if let Some(rest) = entry.key.strip_prefix("remote.")
+            && let Some((name, _subkey)) = rest.split_once('.')
+            && !name.is_empty()
+        {
+            names.insert(name.to_owned());
+        }
+    }
+    let mut names: Vec<String> = names.into_iter().collect();
+    names.sort();
+    Ok(names)
+}
+
 async fn run_get_url(name: String, push: bool, all: bool) -> Result<RemoteOutput, RemoteError> {
-    let entry = load_remote_entry(&name).await?;
-    let urls = select_urls(&entry, push, all);
+    ensure_remote_exists(&name).await?;
+    let fetch_urls = load_config_urls(&name, "url").await?;
+    let configured_push_urls = load_config_urls(&name, "pushurl").await?;
+    let push_urls = effective_push_urls(&fetch_urls, &configured_push_urls);
+
+    let source = if push { &push_urls } else { &fetch_urls };
+    let urls: Vec<String> = if all {
+        source.clone()
+    } else {
+        source.iter().take(1).cloned().collect()
+    };
+
     if urls.is_empty() {
         return Err(RemoteError::NoUrlConfigured { name });
     }
@@ -480,12 +509,13 @@ async fn run_set_url(
 }
 
 async fn run_prune_remote(name: String, dry_run: bool) -> Result<RemoteOutput, RemoteError> {
+    ensure_remote_exists(&name).await?;
     let remote_config = ConfigKv::remote_config(&name)
         .await
         .map_err(|error| RemoteError::ConfigRead {
             detail: error.to_string(),
         })?
-        .ok_or_else(|| RemoteError::NotFound { name: name.clone() })?;
+        .ok_or_else(|| RemoteError::NoUrlConfigured { name: name.clone() })?;
 
     let (_remote_client, discovery) =
         fetch::discover_remote_with_name(&remote_config.url, Some(&remote_config.name)).await?;
@@ -596,15 +626,15 @@ async fn ensure_remote_exists(name: &str) -> Result<(), RemoteError> {
     }
 }
 
+/// Load a remote's URL configuration.  Tolerates missing fetch URLs so that
+/// remotes that only have `pushurl` (e.g. after `set-url --delete` removed the
+/// last fetch URL) are still visible in listings and accessible to `get-url
+/// --push`.
 async fn load_remote_entry(name: &str) -> Result<RemoteListEntry, RemoteError> {
     ensure_remote_exists(name).await?;
     let fetch_urls = load_config_urls(name, "url").await?;
-    if fetch_urls.is_empty() {
-        return Err(RemoteError::NoUrlConfigured {
-            name: name.to_string(),
-        });
-    }
-    let push_urls = effective_push_urls(&fetch_urls, &load_config_urls(name, "pushurl").await?);
+    let configured_push_urls = load_config_urls(name, "pushurl").await?;
+    let push_urls = effective_push_urls(&fetch_urls, &configured_push_urls);
 
     Ok(RemoteListEntry {
         name: name.to_string(),
@@ -630,20 +660,6 @@ fn effective_push_urls(fetch_urls: &[String], push_urls: &[String]) -> Vec<Strin
     }
 }
 
-fn select_urls(entry: &RemoteListEntry, push: bool, all: bool) -> Vec<String> {
-    let urls = if push {
-        entry.push_urls.clone()
-    } else {
-        entry.fetch_urls.clone()
-    };
-
-    if all {
-        urls
-    } else {
-        urls.into_iter().take(1).collect()
-    }
-}
-
 fn render_remote_output(result: &RemoteOutput, output: &OutputConfig) -> CliResult<()> {
     if output.is_json() {
         return emit_json_data("remote", result, output);
@@ -659,9 +675,12 @@ fn render_remote_output(result: &RemoteOutput, output: &OutputConfig) -> CliResu
         |error: io::Error| CliError::io(format!("failed to write remote output: {error}"));
 
     match result {
-        RemoteOutput::Add { name, url } => {
-            writeln!(writer, "Added remote '{name}' -> {url}").map_err(write_err)
-        }
+        RemoteOutput::Add { name, url } => writeln!(
+            writer,
+            "Added remote '{name}' -> {}",
+            fetch::redact_url_credentials(url)
+        )
+        .map_err(write_err),
         RemoteOutput::Remove { name } => {
             writeln!(writer, "Removed remote '{name}'").map_err(write_err)
         }
@@ -672,10 +691,22 @@ fn render_remote_output(result: &RemoteOutput, output: &OutputConfig) -> CliResu
             if *verbose {
                 for remote in remotes {
                     for url in &remote.fetch_urls {
-                        writeln!(writer, "{}\t{} (fetch)", remote.name, url).map_err(write_err)?;
+                        writeln!(
+                            writer,
+                            "{}\t{} (fetch)",
+                            remote.name,
+                            fetch::redact_url_credentials(url)
+                        )
+                        .map_err(write_err)?;
                     }
                     for url in &remote.push_urls {
-                        writeln!(writer, "{}\t{} (push)", remote.name, url).map_err(write_err)?;
+                        writeln!(
+                            writer,
+                            "{}\t{} (push)",
+                            remote.name,
+                            fetch::redact_url_credentials(url)
+                        )
+                        .map_err(write_err)?;
                     }
                 }
             } else {
@@ -687,7 +718,7 @@ fn render_remote_output(result: &RemoteOutput, output: &OutputConfig) -> CliResu
         }
         RemoteOutput::Urls { urls, .. } => {
             for url in urls {
-                writeln!(writer, "{url}").map_err(write_err)?;
+                writeln!(writer, "{}", fetch::redact_url_credentials(url)).map_err(write_err)?;
             }
             Ok(())
         }
@@ -701,7 +732,7 @@ fn render_remote_output(result: &RemoteOutput, output: &OutputConfig) -> CliResu
             SetUrlMode::Add => writeln!(
                 writer,
                 "Added {role} URL for remote '{name}': {}",
-                urls.last().cloned().unwrap_or_default()
+                fetch::redact_url_credentials(&urls.last().cloned().unwrap_or_default())
             )
             .map_err(write_err),
             SetUrlMode::Delete => writeln!(
@@ -712,7 +743,7 @@ fn render_remote_output(result: &RemoteOutput, output: &OutputConfig) -> CliResu
             SetUrlMode::Set => writeln!(
                 writer,
                 "Set {role} URL for remote '{name}' to {}",
-                urls.first().cloned().unwrap_or_default()
+                fetch::redact_url_credentials(&urls.first().cloned().unwrap_or_default())
             )
             .map_err(write_err),
         },

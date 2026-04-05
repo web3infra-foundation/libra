@@ -630,13 +630,19 @@ fn map_fetch_io_error(
 /// Strip embedded credentials (userinfo) from a URL before printing it to
 /// the terminal.  Falls back to the original string if the URL cannot be
 /// parsed (e.g. SCP-style `git@host:path`).
-fn redact_url_credentials(raw: &str) -> String {
+///
+/// For SSH URLs, a bare username without a password (e.g. `git@`) is the
+/// standard convention and is NOT redacted.  Only URLs that carry a password
+/// component or an HTTP(S) username (which is typically a token) are stripped.
+pub(crate) fn redact_url_credentials(raw: &str) -> String {
     match Url::parse(raw) {
         Ok(mut url) => {
-            if !url.username().is_empty() || url.password().is_some() {
-                // `set_username`/`set_password` return Err only for
-                // cannot-be-a-base URLs, which have no authority – safe to
-                // ignore.
+            let has_password = url.password().is_some();
+            let is_http = matches!(url.scheme(), "http" | "https");
+            // Redact when there is a password (always sensitive) or when the
+            // scheme is HTTP(S) and a username is present (likely a token).
+            // For SSH, a bare username like "git" is conventional and harmless.
+            if has_password || (is_http && !url.username().is_empty()) {
                 let _ = url.set_username("");
                 let _ = url.set_password(None);
             }
@@ -767,7 +773,7 @@ fn render_fetch_output(result: &FetchOutput, output: &OutputConfig) -> CliResult
                 .map_err(|error| CliError::io(format!("failed to write fetch output: {error}")))?;
         }
 
-        writeln!(writer, "From {}", redact_url_credentials(&remote.url))
+        writeln!(writer, "From {}", remote.url)
             .map_err(|error| CliError::io(format!("failed to write fetch output: {error}")))?;
 
         if remote.refs_updated.is_empty() {
@@ -932,7 +938,10 @@ pub(crate) async fn fetch_repository_with_result(
 ) -> Result<FetchRepositoryResult, FetchError> {
     let (remote_client, discovery) =
         discover_remote_with_name(&remote_config.url, Some(&remote_config.name)).await?;
-    let normalized_url = normalize_remote_url(&remote_config.url, &remote_client);
+    // Redact credentials from the URL before storing it in the result to
+    // prevent secret leakage in both human and JSON output.
+    let normalized_url =
+        redact_url_credentials(&normalize_remote_url(&remote_config.url, &remote_client));
     let local_kind = get_hash_kind();
     if discovery.hash_kind != local_kind {
         return Err(FetchError::ObjectFormatMismatch {

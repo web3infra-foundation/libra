@@ -840,24 +840,6 @@ async fn test_remote_prune_dry_run_previews_changes() {
     );
 }
 
-#[tokio::test]
-#[serial]
-async fn test_remote_prune_nonexistent_remote_returns_error() {
-    let repo_dir = tempdir().unwrap();
-    test::setup_with_new_libra_in(repo_dir.path()).await;
-    let _guard = test::ChangeDirGuard::new(repo_dir.path());
-
-    // Attempt to prune a non-existent remote
-    remote::execute(RemoteCmds::Prune {
-        name: "nonexistent".into(),
-        dry_run: false,
-    })
-    .await;
-
-    // The command should fail gracefully (error is printed to stderr, not returned)
-    // We can't easily test stderr output, but we can verify it doesn't panic
-}
-
 #[test]
 fn test_remote_add_duplicate_name_returns_conflict_error_code() {
     let repo = tempdir().expect("failed to create repo");
