@@ -59,6 +59,33 @@ Options:
 
 ---
 
+## grep
+
+`grep` searches tracked working-tree files, the index (`--cached`), or committed trees (`--tree <revision>`) using regular expressions by default. It also supports fixed-string mode, multiple explicit patterns, pattern files, and requiring all patterns to match within the same file.
+
+```bash
+# Search tracked working-tree files with a regex
+libra grep "foo.*bar"
+
+# Search with multiple explicit patterns
+libra grep -e alpha -e beta
+
+# Require every pattern to appear in the same file
+libra grep --all-match -e alpha -e beta
+
+# Search the staged/index version of tracked files
+libra grep --cached "needle"
+
+# Search a specific revision or branch
+libra grep --tree HEAD "needle"
+libra grep --tree main "needle"
+
+# Read patterns from a file
+libra grep -f patterns.txt
+```
+
+---
+
 ## Error Reporting
 
 CLI failures use stable exit codes and stable error codes. When `stderr` is not a TTY, Libra also appends a JSON stderr report for agents and wrappers. Set `LIBRA_ERROR_JSON=1` to force that structured report in interactive terminals.
@@ -521,7 +548,6 @@ The following Git top-level commands are currently **not implemented** in Libra 
 - `remote-show` – show detailed remote info
 - `remote-prune` – prune stale remote-tracking branches
 - `fetch-pack` / `push-pack` – low-level fetch/push operations
-- `grep` – search file contents with regex
 - `filter-branch` (or `git filter-repo`) – rewrite history
 - `notes` – attach arbitrary metadata to objects
 - `archive` – create tar/zip archives of tree snapshots

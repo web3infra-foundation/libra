@@ -676,6 +676,14 @@ mod test {
 
     use super::*;
     use crate::utils::test;
+
+    struct ColorOverrideReset;
+
+    impl Drop for ColorOverrideReset {
+        fn drop(&mut self) {
+            colored::control::unset_override();
+        }
+    }
     #[test]
     /// Tests command line argument parsing for the diff command with various parameter combinations.
     /// Verifies parameter requirements, conflicts and default values are handled correctly.
@@ -736,8 +744,10 @@ mod test {
     }
 
     #[test]
+    #[serial]
     fn test_maybe_colorize_diff_respects_flag() {
         let diff = "diff --git a/file.txt b/file.txt\n--- /dev/null\n+++ b/file.txt\n+line\n";
+        let _guard = ColorOverrideReset;
         colored::control::set_override(true);
 
         let plain = maybe_colorize_diff(diff, false);
@@ -751,8 +761,6 @@ mod test {
             colored.contains("\u{1b}["),
             "colored output should contain ANSI escapes"
         );
-
-        colored::control::unset_override();
     }
 
     #[tokio::test]

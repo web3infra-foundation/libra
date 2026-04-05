@@ -1038,6 +1038,7 @@ mod tests {
 
     use git_internal::hash::{ObjectHash, get_hash_kind};
     use sea_orm::Database;
+    use serial_test::serial;
 
     use super::{
         Branch, BranchError, format_branch_name, load_remote_branches_with_conn,
@@ -1045,12 +1046,22 @@ mod tests {
     };
     use crate::utils::error::{CliError, StableErrorCode};
 
+    struct ColorOverrideReset;
+
+    impl Drop for ColorOverrideReset {
+        fn drop(&mut self) {
+            colored::control::unset_override();
+        }
+    }
+
     fn any_hash() -> ObjectHash {
         ObjectHash::from_str(&ObjectHash::zero_str(get_hash_kind())).unwrap()
     }
 
     #[test]
+    #[serial]
     fn test_format_branch_name_with_full_remote_ref() {
+        let _guard = ColorOverrideReset;
         colored::control::set_override(false);
         let branch = Branch {
             name: "refs/remotes/origin/main".to_string(),
@@ -1062,7 +1073,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_format_branch_name_with_short_remote_ref() {
+        let _guard = ColorOverrideReset;
         colored::control::set_override(false);
         let branch = Branch {
             name: "main".to_string(),

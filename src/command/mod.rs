@@ -16,6 +16,7 @@ pub mod config;
 pub mod describe;
 pub mod diff;
 pub mod fetch;
+pub mod grep;
 pub mod index_pack;
 pub mod init;
 pub mod lfs;
