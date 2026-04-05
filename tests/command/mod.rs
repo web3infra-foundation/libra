@@ -270,6 +270,7 @@ mod revert_test;
 mod shortlog_test;
 mod show_ref_test;
 mod show_test;
+mod stash_test;
 mod status_error_test;
 mod status_json_test;
 mod status_test;

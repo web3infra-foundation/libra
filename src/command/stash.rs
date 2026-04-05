@@ -3,7 +3,7 @@
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
@@ -20,6 +20,7 @@ use git_internal::{
             commit::Commit,
             signature::Signature,
             tree::{Tree, TreeItem, TreeItemMode},
+            types::ObjectType,
         },
     },
 };
@@ -184,13 +185,7 @@ async fn list() -> Result<(), String> {
     if !stash_log_path.exists() {
         return Ok(());
     }
-    let file = std::fs::File::open(stash_log_path).map_err(|e| e.to_string())?;
-    let reader = BufReader::new(file);
-
-    let lines: Vec<String> = reader
-        .lines()
-        .collect::<Result<_, _>>()
-        .map_err(|e| e.to_string())?;
+    let lines = read_stash_log_lines(&stash_log_path)?;
     for (index, line_content) in lines.iter().enumerate() {
         // reflog format: <old_hash> <new_hash> Author <email> timestamp <tz>	message
         // We need the message part.
@@ -306,14 +301,12 @@ async fn drop_stash(stash: Option<String>) -> Result<(), String> {
     let git_dir = util::try_get_storage_path(None).map_err(|e| e.to_string())?;
     let stash_ref_path = git_dir.join("refs/stash");
     let stash_log_path = git_dir.join("logs/refs/stash");
+    if !stash_log_path.exists() {
+        return Err("No stash found".to_string());
+    }
 
     // Read all lines from the stash reflog
-    let file = std::fs::File::open(&stash_log_path).map_err(|e| e.to_string())?;
-    let reader = BufReader::new(file);
-    let mut lines: Vec<String> = reader
-        .lines()
-        .collect::<Result<_, _>>()
-        .map_err(|e| e.to_string())?;
+    let mut lines = read_stash_log_lines(&stash_log_path)?;
 
     // Determine which stash to drop
     let index_to_drop = match stash {
@@ -444,6 +437,29 @@ fn has_stash() -> bool {
         .unwrap_or(false)
 }
 
+fn empty_tree() -> Result<Tree, String> {
+    let empty_id = ObjectHash::from_type_and_data(ObjectType::Tree, &[]);
+    Tree::from_bytes(&[], empty_id).map_err(|e| e.to_string())
+}
+
+fn read_stash_log_lines(stash_log_path: &Path) -> Result<Vec<String>, String> {
+    let file = std::fs::File::open(stash_log_path).map_err(|e| {
+        format!(
+            "failed to open stash log '{}': {}",
+            stash_log_path.display(),
+            e
+        )
+    })?;
+    let reader = BufReader::new(file);
+    reader.lines().collect::<Result<Vec<_>, _>>().map_err(|e| {
+        format!(
+            "failed to read stash log '{}': {}",
+            stash_log_path.display(),
+            e
+        )
+    })
+}
+
 /// Resolves a stash reference (e.g., "stash@{1}") to its index and commit hash.
 /// If the reference is None, it resolves the latest stash (stash@{0}).
 fn resolve_stash_to_commit_hash(stash_ref: Option<String>) -> Result<(usize, String), String> {
@@ -457,9 +473,7 @@ fn resolve_stash_to_commit_hash(stash_ref: Option<String>) -> Result<(usize, Str
         return Err("No stash found".to_string());
     }
 
-    let file = std::fs::File::open(&stash_log_path).map_err(|e| e.to_string())?;
-    let reader = BufReader::new(file);
-    let lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
+    let lines = read_stash_log_lines(&stash_log_path)?;
 
     let index_to_resolve = match stash_ref {
         None => 0,
@@ -619,6 +633,9 @@ fn create_tree_from_workdir(workdir: &Path, git_dir: &Path, index: &Index) -> Re
 
             if path.is_dir() {
                 let subtree = build_tree_recursive(&path, git_dir, index, workdir)?;
+                if subtree.tree_items.is_empty() {
+                    continue;
+                }
                 let subtree_data = subtree.to_data().map_err(|e| e.to_string())?;
                 let subtree_hash = object::write_git_object(git_dir, "tree", &subtree_data)
                     .map_err(|e| e.to_string())?;
@@ -668,10 +685,91 @@ fn create_tree_from_workdir(workdir: &Path, git_dir: &Path, index: &Index) -> Re
         }
 
         items.sort_by(|a, b| a.name.cmp(&b.name));
-        Tree::from_tree_items(items).map_err(|e| e.to_string())
+        if items.is_empty() {
+            empty_tree()
+        } else {
+            Tree::from_tree_items(items).map_err(|e| e.to_string())
+        }
     }
 
     build_tree_recursive(workdir, git_dir, index, workdir)
+}
+
+fn build_tree_from_flat_items(
+    files: &HashMap<String, TreeItem>,
+    git_dir: &Path,
+) -> Result<Tree, String> {
+    fn build_dir(
+        current_dir: &Path,
+        files: &HashMap<String, TreeItem>,
+        git_dir: &Path,
+    ) -> Result<Tree, String> {
+        let mut tree_items = Vec::new();
+        let mut subdirs = HashSet::new();
+
+        for (path_str, item) in files {
+            let path_buf = PathBuf::from(path_str);
+            let parent_dir = path_buf.parent().unwrap_or_else(|| Path::new(""));
+
+            if parent_dir == current_dir {
+                let file_name = path_buf
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| format!("invalid merged stash path: {}", path_buf.display()))?
+                    .to_string();
+                let mut tree_item = item.clone();
+                tree_item.name = file_name;
+                tree_items.push(tree_item);
+                continue;
+            }
+
+            if parent_dir.starts_with(current_dir) {
+                let relative_parent = parent_dir
+                    .strip_prefix(current_dir)
+                    .map_err(|e| e.to_string())?;
+                if let Some(component) = relative_parent.components().next() {
+                    let subdir_name = component
+                        .as_os_str()
+                        .to_str()
+                        .ok_or_else(|| {
+                            format!("invalid merged stash path: {}", path_buf.display())
+                        })?
+                        .to_string();
+                    if !subdir_name.is_empty() {
+                        subdirs.insert(subdir_name);
+                    }
+                }
+            }
+        }
+
+        let mut subdirs: Vec<String> = subdirs.into_iter().collect();
+        subdirs.sort();
+
+        for subdir_name in subdirs {
+            let subdir_path = if current_dir.as_os_str().is_empty() {
+                PathBuf::from(&subdir_name)
+            } else {
+                current_dir.join(&subdir_name)
+            };
+            let subtree = build_dir(&subdir_path, files, git_dir)?;
+            if subtree.tree_items.is_empty() {
+                continue;
+            }
+            let subtree_data = subtree.to_data().map_err(|e| e.to_string())?;
+            let subtree_hash = object::write_git_object(git_dir, "tree", &subtree_data)
+                .map_err(|e| e.to_string())?;
+            tree_items.push(TreeItem::new(TreeItemMode::Tree, subtree_hash, subdir_name));
+        }
+
+        tree_items.sort_by(|a, b| a.name.cmp(&b.name));
+        if tree_items.is_empty() {
+            empty_tree()
+        } else {
+            Tree::from_tree_items(tree_items).map_err(|e| e.to_string())
+        }
+    }
+
+    build_dir(Path::new(""), files, git_dir)
 }
 
 /// Performs a three-way merge of tree objects.
@@ -744,8 +842,7 @@ fn merge_trees(base: &Tree, head: &Tree, stash: &Tree, git_dir: &Path) -> Result
         return Err(error_message);
     }
 
-    let final_items: Vec<TreeItem> = head_items.values().cloned().collect();
-    Tree::from_tree_items(final_items).map_err(|e| e.to_string())
+    build_tree_from_flat_items(&head_items, git_dir)
 }
 
 /// Get the number of stashes
@@ -759,13 +856,8 @@ pub(crate) fn get_stash_num() -> Result<usize, String> {
     if !stash_log_path.exists() {
         return Ok(0);
     }
-
-    let file = std::fs::File::open(stash_log_path).map_err(|e| e.to_string())?;
-    let reader = BufReader::new(file);
-
-    let count = reader
-        .lines()
-        .map_while(Result::ok)
+    let count = read_stash_log_lines(&stash_log_path)?
+        .into_iter()
         .filter(|line| !line.trim().is_empty())
         .count();
 
