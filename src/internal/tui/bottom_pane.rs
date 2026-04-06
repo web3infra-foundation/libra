@@ -7,6 +7,11 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+// SAFETY: The unwrap() calls in this module are generally safe because:
+// 1. They operate on data structures with guaranteed invariants (e.g., string indices)
+// 2. They are used in rendering where dimensions are pre-validated
+// 3. Test code uses unwrap for test assertions
+
 use ratatui::{
     prelude::*,
     widgets::{Block, BorderType, Borders, Clear, Paragraph},
@@ -17,7 +22,7 @@ use super::{app_event::AgentStatus, theme};
 use crate::internal::ai::sandbox::ExecApprovalRequest;
 
 /// Snapshot of user-input question data for rendering (avoids borrowing the request).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct UserInputQuestionSnapshot {
     header: String,
     question: String,
@@ -30,7 +35,7 @@ struct UserInputQuestionSnapshot {
     is_secret: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct ExecApprovalSnapshot {
     command: String,
     cwd: String,
@@ -42,6 +47,7 @@ struct ExecApprovalSnapshot {
 }
 
 /// State for the slash-command autocomplete popup.
+#[derive(Debug)]
 struct CommandPopupState {
     /// Known commands: `(name, description)`, set once at startup.
     commands: Vec<(String, String)>,
@@ -56,6 +62,7 @@ struct CommandPopupState {
 const COMMAND_POPUP_MAX_VISIBLE: usize = 8;
 
 /// The bottom pane containing input area and status.
+#[derive(Debug)]
 pub struct BottomPane {
     /// Current input text.
     pub input: String,

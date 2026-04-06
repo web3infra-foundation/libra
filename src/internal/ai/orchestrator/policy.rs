@@ -453,6 +453,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use git_internal::internal::object::{task::Task as GitTask, types::ActorRef};
+    use tempfile::tempdir;
 
     use super::*;
     use crate::internal::ai::{
@@ -663,6 +664,30 @@ mod tests {
             Path::new("/tmp/work"),
         );
         assert!(matches!(res, Err(PolicyViolation { code, .. }) if code == "scope-creep"));
+    }
+
+    #[test]
+    fn test_apply_patch_scope_preflight_uses_relative_path_inside_worktree() {
+        let temp = tempdir().unwrap();
+        let src_dir = temp.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let target = src_dir.join("lib.rs");
+
+        let res = evaluate_tool_call(
+            &spec(),
+            &task(),
+            "apply_patch",
+            &serde_json::json!({
+                "input": format!(
+                    "*** Begin Patch\n*** Add File: {}\n+pub fn demo() {{}}\n*** End Patch",
+                    target.display()
+                )
+            }),
+            temp.path(),
+        )
+        .expect("absolute path inside isolated worktree should stay in scope");
+
+        assert_eq!(res.record.paths_written, vec!["src/lib.rs".to_string()]);
     }
 
     #[test]

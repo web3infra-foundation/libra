@@ -1492,7 +1492,6 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 tool_name,
                 result,
             } => {
-                let should_hide_failure = should_hide_tool_failure(&tool_name, &result);
                 // For successful apply_patch, insert a visual diff cell.
                 if tool_name == "apply_patch"
                     && let Ok(ref output) = result
@@ -1525,12 +1524,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         if !tool_cell.contains_call_id(&call_id) {
                             continue;
                         }
-                        if should_hide_failure && tool_cell.hides_failed_calls() {
-                            tool_cell.remove_call(&call_id);
-                            if tool_cell.is_empty() {
-                                self.widget.cells.remove(idx);
-                            }
-                        } else if let Some(result) = pending_result.take() {
+                        if let Some(result) = pending_result.take() {
                             tool_cell.complete_call(&call_id, result);
                         }
                         break;
@@ -2884,13 +2878,6 @@ fn append_to_last_tool_group_cell(
     true
 }
 
-fn should_hide_tool_failure(tool_name: &str, result: &Result<ToolOutput, String>) -> bool {
-    matches!(
-        tool_name,
-        "read_file" | "list_dir" | "grep_files" | "apply_patch"
-    ) && !matches!(result, Ok(output) if output.is_success())
-}
-
 fn format_orchestrator_result(
     result: &crate::internal::ai::orchestrator::types::OrchestratorResult,
 ) -> String {
@@ -3180,15 +3167,11 @@ mod tests {
         PendingPlanRevisionCommand, append_to_last_tool_group_cell, build_plan_revision_prompt,
         format_intentspec_target_mismatch, format_orchestrator_result,
         parse_pending_plan_revision_command, pending_plan_revision_help_message,
-        should_hide_tool_failure,
     };
     use crate::internal::{
-        ai::{
-            orchestrator::types::{
-                DecisionOutcome, ExecutionPlanSpec, GateReport, OrchestratorResult, SystemReport,
-                TaskContract, TaskKind, TaskNodeStatus, TaskResult, TaskSpec,
-            },
-            tools::ToolOutput,
+        ai::orchestrator::types::{
+            DecisionOutcome, ExecutionPlanSpec, GateReport, OrchestratorResult, SystemReport,
+            TaskContract, TaskKind, TaskNodeStatus, TaskResult, TaskSpec,
         },
         tui::history_cell::{AssistantHistoryCell, HistoryCell, ToolCallHistoryCell},
     };
@@ -3313,27 +3296,25 @@ mod tests {
     }
 
     #[test]
-    fn hides_failed_explore_and_edit_calls() {
-        assert!(should_hide_tool_failure(
-            "read_file",
-            &Err("file not found".to_string())
-        ));
-        assert!(should_hide_tool_failure(
-            "apply_patch",
-            &Err("context mismatch".to_string())
-        ));
-    }
+    fn keeps_failed_tool_calls_visible() {
+        let mut cell = ToolCallHistoryCell::new(
+            "1".to_string(),
+            "read_file".to_string(),
+            json!({"file_path":"src/main.rs"}),
+        );
 
-    #[test]
-    fn keeps_failed_shell_calls_visible() {
-        assert!(!should_hide_tool_failure(
-            "shell",
-            &Err("command exited with status 1".to_string())
-        ));
-        assert!(!should_hide_tool_failure(
-            "read_file",
-            &Ok(ToolOutput::success("ok"))
-        ));
+        cell.complete_call("1", Err("file not found".to_string()));
+
+        let rendered = cell.display_lines(100);
+        let joined = rendered
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(joined.contains("Explore failed"));
+        assert!(joined.contains("Read src/main.rs"));
+        assert!(joined.contains("file not found"));
     }
 
     #[test]
@@ -3905,6 +3886,7 @@ fn summarize_turn_task_title(text: &str) -> String {
     format!("TUI: {title}")
 }
 
+#[cfg(test)]
 fn format_task_completion_note(
     title: &str,
     result: &crate::internal::ai::orchestrator::types::TaskResult,
@@ -3978,6 +3960,7 @@ fn format_task_workspace_note(
     )
 }
 
+#[cfg(test)]
 fn task_status_heading(
     status: &crate::internal::ai::orchestrator::types::TaskNodeStatus,
 ) -> &'static str {

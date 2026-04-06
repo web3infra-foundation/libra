@@ -12,6 +12,10 @@ pub mod types;
 pub mod verifier;
 mod workspace;
 
+// SAFETY: The unwrap() and expect() calls in this module are documented with safety
+// justifications where used. Test code uses unwrap for test assertions. Production code
+// uses unwrap/expect only when invariants are guaranteed by the code structure.
+
 use std::sync::Arc;
 
 use types::{OrchestratorConfig, OrchestratorError, OrchestratorResult};

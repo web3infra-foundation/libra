@@ -1,4 +1,5 @@
 use serde_json::Value;
+use wax::{Glob, Program};
 
 /// Verdict for a tool ACL check.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -311,32 +312,37 @@ pub fn check_scope(in_scope: &[String], out_of_scope: &[String], path: &str) -> 
     ScopeVerdict::OutOfScope(format!("path '{}' not in any in-scope pattern", path))
 }
 
-/// Simple glob matching: supports trailing `*` and prefix matching with `/`.
+/// Match repository-relative paths against scope patterns.
 fn glob_matches(pattern: &str, path: &str) -> bool {
+    let pattern = pattern.trim().replace('\\', "/");
+    let path = normalize_slash_path(path);
+
     if pattern == "*" || pattern == "**" {
         return true;
     }
 
     // "src/" matches "src/foo.rs" and "src/bar/baz.rs"
     if pattern.ends_with('/') {
-        return path.starts_with(pattern) || path == pattern.trim_end_matches('/');
+        let prefix = pattern.trim_end_matches('/');
+        return path == prefix
+            || path
+                .strip_prefix(prefix)
+                .is_some_and(|rest| rest.starts_with('/'));
     }
+
+    let pattern = normalize_slash_path(pattern);
 
     // "src/**" matches anything under src/
     if let Some(prefix) = pattern.strip_suffix("/**") {
-        return path.starts_with(prefix)
-            && path
-                .get(prefix.len()..)
-                .is_some_and(|r| r.starts_with('/') || r.is_empty());
+        return path == prefix
+            || path
+                .strip_prefix(prefix)
+                .is_some_and(|rest| rest.starts_with('/'));
     }
 
-    // "*.rs" matches "foo.rs"
-    if let Some(suffix) = pattern.strip_prefix('*') {
-        return path.ends_with(suffix);
-    }
-
-    // Exact match
-    pattern == path
+    Glob::new(&pattern)
+        .map(|glob| glob.is_match(path.as_str()))
+        .unwrap_or_else(|_| pattern == path)
 }
 
 #[cfg(test)]
@@ -568,6 +574,12 @@ mod tests {
     #[test]
     fn test_glob_star_star() {
         let verdict = check_scope(&["src/**".into()], &[], "src/foo/bar.rs");
+        assert_eq!(verdict, ScopeVerdict::InScope);
+    }
+
+    #[test]
+    fn test_glob_nested_pattern() {
+        let verdict = check_scope(&["src/**/*.rs".into()], &[], "src/foo/bar.rs");
         assert_eq!(verdict, ScopeVerdict::InScope);
     }
 

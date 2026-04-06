@@ -11,9 +11,12 @@ use super::types::{
     TaskSpec,
 };
 use crate::internal::ai::{
-    intentspec::types::{
-        ChangeType, ConflictResolution, DecompositionMode, DependencyPolicy, IntentSpec,
-        NetworkPolicy, ObjectiveKind, PlanGenerationConfig, RiskLevel, TouchHints,
+    intentspec::{
+        effective_forbidden_scope, effective_write_scope,
+        types::{
+            ChangeType, ConflictResolution, DecompositionMode, DependencyPolicy, IntentSpec,
+            NetworkPolicy, ObjectiveKind, PlanGenerationConfig, RiskLevel, TouchHints,
+        },
     },
     workflow_objects::planner_actor,
 };
@@ -159,8 +162,8 @@ pub fn compile_execution_plan_spec(
                     kind: TaskKind::Gate,
                     gate_stage: Some(stage.clone()),
                     owner_role: Some("verifier".to_string()),
-                    scope_in: spec.intent.in_scope.clone(),
-                    scope_out: spec.intent.out_of_scope.clone(),
+                    scope_in: common_contract.write_scope.clone(),
+                    scope_out: common_contract.forbidden_scope.clone(),
                     checks,
                     contract: common_contract.clone(),
                 },
@@ -262,8 +265,8 @@ fn build_common_contract(spec: &IntentSpec) -> TaskContract {
     });
 
     TaskContract {
-        write_scope: spec.intent.in_scope.clone(),
-        forbidden_scope: spec.intent.out_of_scope.clone(),
+        write_scope: effective_write_scope(&spec.intent),
+        forbidden_scope: effective_forbidden_scope(&spec.intent),
         touch_files: hints.files,
         touch_symbols: hints.symbols,
         touch_apis: hints.apis,
@@ -339,8 +342,8 @@ fn build_work_tasks(
                         kind: work_kind.clone(),
                         gate_stage: None,
                         owner_role: Some(owner_role_for_kind(&work_kind).to_string()),
-                        scope_in: spec.intent.in_scope.clone(),
-                        scope_out: spec.intent.out_of_scope.clone(),
+                        scope_in: common_contract.write_scope.clone(),
+                        scope_out: common_contract.forbidden_scope.clone(),
                         checks: Vec::new(),
                         contract: common_contract.clone(),
                     },
@@ -412,8 +415,8 @@ fn build_work_tasks(
                         owner_role: Some(
                             owner_role_for_kind(&TaskKind::Implementation).to_string(),
                         ),
-                        scope_in: spec.intent.in_scope.clone(),
-                        scope_out: spec.intent.out_of_scope.clone(),
+                        scope_in: common_contract.write_scope.clone(),
+                        scope_out: common_contract.forbidden_scope.clone(),
                         checks: Vec::new(),
                         contract,
                     },
@@ -1064,6 +1067,33 @@ mod tests {
                 .iter()
                 .any(|task| task.contract.touch_files == vec!["src/auth/logout.rs".to_string()])
         );
+    }
+
+    #[test]
+    fn test_compile_execution_plan_uses_file_scope_not_freeform_scope_text() {
+        let mut spec = minimal_spec();
+        spec.intent.in_scope = vec![
+            "Run and fix clippy warnings across the codebase".into(),
+            "Fix error handling anti-patterns (unwrap/expect)".into(),
+        ];
+        spec.intent.touch_hints = Some(TouchHints {
+            files: vec!["src/**/*.rs".into(), "tests/**/*.rs".into()],
+            symbols: vec![],
+            apis: vec![],
+        });
+        spec.libra = None;
+
+        let plan = compile_execution_plan_spec(&spec).unwrap();
+        let implementation_tasks = plan
+            .tasks
+            .iter()
+            .filter(|task| task.kind == TaskKind::Implementation)
+            .collect::<Vec<_>>();
+
+        assert!(!implementation_tasks.is_empty());
+        assert!(implementation_tasks.iter().all(|task| {
+            task.scope_in == vec!["src/**/*.rs".to_string(), "tests/**/*.rs".to_string()]
+        }));
     }
 
     #[test]

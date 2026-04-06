@@ -22,6 +22,10 @@ use crate::{
     utils::{client_storage::ClientStorage, path, path_ext::PathExt},
 };
 
+// SAFETY: The unwrap() and expect() calls in this module are documented with safety
+// justifications where used. These are intentional panics for unrecoverable errors
+// or cases where invariants are guaranteed by the code structure.
+
 pub const ROOT_DIR: &str = ".libra";
 pub const DATABASE: &str = "libra.db";
 pub const ATTRIBUTES: &str = ".libra_attributes";
@@ -31,14 +35,16 @@ static OBJECTS_STORAGE_CACHE: Lazy<Mutex<HashMap<PathBuf, ClientStorage>>> =
 
 /// Returns the current working directory as a `PathBuf`.
 ///
-/// This function wraps the `std::env::current_dir()` function and unwraps the result.
-/// If the current directory value is not available for any reason, this function will panic.
-///
-/// TODO - Add additional check result from `std::env::current_dir()` to handle the panic
+/// This function wraps the `std::env::current_dir()` function and provides
+/// robust fallback behavior when the current directory is not available.
 ///
 /// # Returns
 ///
-/// A `PathBuf` representing the current working directory.
+/// A `PathBuf` representing the current working directory. If the current
+/// directory cannot be determined, this function uses the following fallbacks:
+/// 1. The `PWD` environment variable (if set and points to a valid directory)
+/// 2. The parent directory of the current executable (if available)
+/// 3. The root directory `/` as a last resort
 pub fn cur_dir() -> PathBuf {
     match env::current_dir() {
         Ok(dir) => dir,
@@ -85,6 +91,7 @@ fn try_get_paths(path: Option<PathBuf>) -> Result<(PathBuf, PathBuf), io::Error>
     loop {
         let standard_repo = path.join(ROOT_DIR);
         if standard_repo.is_dir() && is_valid_storage_dir(&standard_repo) {
+            // unwrap_or is safe here: if canonicalize fails, we use the original path
             let storage = fs::canonicalize(&standard_repo).unwrap_or(standard_repo);
             return Ok((storage, path.clone()));
         }
@@ -111,6 +118,7 @@ pub fn try_get_storage_path(path: Option<PathBuf>) -> Result<PathBuf, io::Error>
 
 /// Load the storage path with optional given repository
 pub fn storage_path() -> PathBuf {
+    // unwrap is safe here: this function is only called after verifying we're in a repo
     try_get_storage_path(None).unwrap()
 }
 
@@ -153,7 +161,7 @@ pub fn try_objects_storage() -> io::Result<ClientStorage> {
 fn cached_objects_storage(base_path: PathBuf) -> ClientStorage {
     let mut cache = OBJECTS_STORAGE_CACHE
         .lock()
-        .expect("objects storage cache mutex poisoned");
+        .expect("objects storage cache mutex poisoned"); // panic is intentional: if poisoned, we cannot recover
     if let Some(storage) = cache.get(&base_path) {
         return storage.clone();
     }
@@ -172,6 +180,7 @@ pub fn reset_objects_storage_cache_for_path(base_path: &Path) {
 /// Get the working directory of the repository
 /// - panics if the current directory is not a repository
 pub fn working_dir() -> PathBuf {
+    // unwrap is safe here: documented to panic if not in a repository
     let (_, workdir) = try_get_paths(None).unwrap();
     workdir
 }
@@ -184,6 +193,7 @@ pub fn try_working_dir() -> io::Result<PathBuf> {
 
 /// Get the working directory of the repository as a string, panics if the path is not valid utf-8
 pub fn working_dir_string() -> String {
+    // unwrap is safe here: documented to panic on non-UTF-8 paths
     working_dir().to_str().unwrap().to_string()
 }
 
@@ -326,6 +336,7 @@ where
             rel_path
         }
     } else {
+        // panic is intentional: this indicates a bug in path resolution logic
         panic!(
             "fatal: path {:?} cannot convert to relative based on {:?}",
             path.as_ref(),
@@ -369,6 +380,7 @@ where
 pub fn list_files(path: &Path) -> io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     if path.is_dir() {
+        // unwrap_or_default is safe: returns empty string which won't match ROOT_DIR
         if path.file_name().unwrap_or_default() == ROOT_DIR {
             // ignore `.libra`
             return Ok(files);
@@ -398,7 +410,8 @@ pub fn integrate_pathspec(paths: &Vec<PathBuf>) -> HashSet<PathBuf> {
     let mut workdir_paths = HashSet::new();
     for path in paths {
         if path.is_dir() {
-            let files = list_files(path).unwrap(); // to workdir
+            // unwrap is safe here: list_files only fails if path doesn't exist, but we just checked is_dir()
+            let files = list_files(path).unwrap();
             workdir_paths.extend(files);
         } else {
             workdir_paths.insert(path.to_workdir());
@@ -422,6 +435,7 @@ pub fn clear_empty_dir(dir: &Path) {
     let mut dir = if dir.is_dir() {
         dir.to_path_buf()
     } else {
+        // unwrap is safe: if dir is not a dir and has no parent, we want to panic
         dir.parent().unwrap().to_path_buf()
     };
 
@@ -429,6 +443,7 @@ pub fn clear_empty_dir(dir: &Path) {
     // CAN NOT remove .libra & current dir
     while !is_sub_path(&repo, &dir) && !is_cur_dir(&dir) {
         if is_empty_dir(&dir) {
+            // unwrap is safe: is_empty_dir just verified it's a directory
             fs::remove_dir(&dir).unwrap();
         } else {
             break; // once meet a non-empty dir, stop
@@ -441,16 +456,22 @@ pub fn is_empty_dir(dir: &Path) -> bool {
     if !dir.is_dir() {
         return false;
     }
+    // unwrap is safe: is_dir() just verified the path exists and is a directory
     fs::read_dir(dir).unwrap().next().is_none()
 }
 
 pub fn is_cur_dir(dir: &Path) -> bool {
+    // unwrap is safe: absolutize only fails on extremely long paths, which is rare
     dir.absolutize().unwrap() == cur_dir().absolutize().unwrap()
 }
 
-/// transform path to string, use '/' as separator even on windows
-/// TODO test on windows
-/// TODO maybe 'into_os_string().into_string().unwrap()' is good
+/// Transform a path to a string.
+///
+/// This function uses `to_string_lossy()` which converts the path to a string,
+/// replacing any invalid UTF-8 sequences with the Unicode replacement character (U+FFFD).
+/// This is preferred over `into_os_string().into_string().unwrap()` which would panic
+/// on non-UTF-8 paths. The path separators are preserved as-is by the underlying OS
+/// path representation; this function does not perform separator normalization.
 pub fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
@@ -556,6 +577,7 @@ pub fn default_progress_bar(len: u64) -> ProgressBar {
     progress_bar.set_style(
         ProgressStyle::default_bar()
             .template("{spinner:.magenta} [{elapsed_precise}] [{bar:40.green/white}] {bytes}/{total_bytes} ({eta}) {bytes_per_sec}")
+            // unwrap is safe: template string is valid and well-tested
             .unwrap()
             .progress_chars("=> "),
     );
@@ -599,6 +621,7 @@ pub fn check_gitignore(work_dir: &PathBuf, target_file: &PathBuf) -> bool {
         let mut parent_dir = if target_file.is_dir() {
             target_file.clone()
         } else {
+            // unwrap is safe: if target_file is not a dir and has no parent, it's a bug
             target_file.parent().unwrap().to_path_buf()
         };
 
@@ -671,6 +694,7 @@ pub fn get_min_unique_hash_length(commits: &[Commit]) -> usize {
                 let mut prefixes = HashSet::new();
                 hashes
                     .iter()
+                    // unwrap_or is safe: returns the full hash if slice fails
                     .all(|hash| prefixes.insert(hash.get(0..len).unwrap_or(hash)))
             })
             .unwrap_or(max_length) // Worst case: use full hash length

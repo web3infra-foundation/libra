@@ -284,10 +284,6 @@ impl ToolCallGroup {
             Self::Other(_) => theme::text::subtle(),
         }
     }
-
-    fn hide_failed_calls(&self) -> bool {
-        matches!(self, Self::Explore | Self::Edit)
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -344,18 +340,6 @@ impl ToolCallHistoryCell {
 
     pub fn contains_call_id(&self, call_id: &str) -> bool {
         self.entries.iter().any(|entry| entry.call_id == call_id)
-    }
-
-    pub fn remove_call(&mut self, call_id: &str) {
-        self.entries.retain(|entry| entry.call_id != call_id);
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    pub fn hides_failed_calls(&self) -> bool {
-        self.group.hide_failed_calls()
     }
 
     /// Complete a single tool call inside the group.
@@ -2032,16 +2016,24 @@ mod tests {
     }
 
     #[test]
-    fn explore_cell_can_drop_failed_call_entries() {
+    fn explore_cell_keeps_failed_call_entries_visible() {
         let mut cell = ToolCallHistoryCell::new(
             "1".to_string(),
             "read_file".to_string(),
             json!({"file_path":"CONTRIBUTING.md"}),
         );
 
-        assert!(cell.hides_failed_calls());
-        cell.remove_call("1");
-        assert!(cell.is_empty());
+        cell.complete_call(
+            "1",
+            Err("Tool 'read_file' failed: outside working dir".to_string()),
+        );
+
+        let rendered = to_strings(cell.display_lines(100));
+        let joined = rendered.join("\n");
+
+        assert!(joined.contains("Explore failed"));
+        assert!(joined.contains("Read CONTRIBUTING.md"));
+        assert!(joined.contains("outside working dir"));
     }
 
     #[test]

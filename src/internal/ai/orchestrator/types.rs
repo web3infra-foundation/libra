@@ -530,8 +530,10 @@ fn default_execution_revision() -> u32 {
 pub struct OrchestratorConfig {
     pub working_dir: PathBuf,
     pub base_commit: Option<String>,
-    /// TODO: keep as a placeholder until checkpoint/resume is redesigned around
-    /// userspace-fs change tracking. dagrs-native resume remains disabled.
+    /// Placeholder for checkpoint/resume functionality.
+    ///
+    /// Note: This field is currently unused. The checkpoint/resume feature needs to be
+    /// redesigned around userspace-fs change tracking. dagrs-native resume remains disabled.
     pub dagrs_resume_checkpoint_id: Option<String>,
     /// System prompt injected into each task's tool loop (e.g. coder agent prompt).
     pub coder_preamble: Option<String>,

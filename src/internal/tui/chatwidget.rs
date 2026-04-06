@@ -19,12 +19,9 @@ use super::{
     history_cell::{AssistantHistoryCell, HistoryCell, ToolCallHistoryCell},
     theme,
 };
-use crate::internal::ai::{
-    orchestrator::types::{
-        ExecutionPlanSpec, TaskKind, TaskNodeStatus, TaskRuntimeEvent, TaskRuntimeNoteLevel,
-        TaskRuntimePhase,
-    },
-    tools::ToolOutput,
+use crate::internal::ai::orchestrator::types::{
+    ExecutionPlanSpec, TaskKind, TaskNodeStatus, TaskRuntimeEvent, TaskRuntimeNoteLevel,
+    TaskRuntimePhase,
 };
 
 #[derive(Debug, Clone)]
@@ -334,10 +331,9 @@ impl TaskMuxState {
             }
             TaskRuntimeEvent::ToolCallEnd {
                 call_id,
-                tool_name,
+                tool_name: _tool_name,
                 result,
             } => {
-                let should_hide_failure = should_hide_task_tool_failure(&tool_name, &result);
                 let mut pending_result = Some(result);
                 for idx in (0..task.transcript.len()).rev() {
                     let Some(TaskMuxTranscriptEntry::Tool(cell)) = task.transcript.get_mut(idx)
@@ -347,12 +343,7 @@ impl TaskMuxState {
                     if !cell.contains_call_id(&call_id) {
                         continue;
                     }
-                    if should_hide_failure && cell.hides_failed_calls() {
-                        cell.remove_call(&call_id);
-                        if cell.is_empty() {
-                            task.transcript.remove(idx);
-                        }
-                    } else if let Some(result) = pending_result.take() {
+                    if let Some(result) = pending_result.take() {
                         cell.complete_call(&call_id, result);
                     }
                     break;
@@ -1499,13 +1490,6 @@ fn task_phase_span(phase: &TaskRuntimePhase, ordinal: usize, width: u16) -> Span
         TaskRuntimePhase::Completed => Span::styled("complete", theme::status::success()),
         TaskRuntimePhase::Failed => Span::styled("failed", theme::status::danger()),
     }
-}
-
-fn should_hide_task_tool_failure(tool_name: &str, result: &Result<ToolOutput, String>) -> bool {
-    matches!(
-        tool_name,
-        "read_file" | "list_dir" | "grep_files" | "apply_patch"
-    ) && !matches!(result, Ok(output) if output.is_success())
 }
 
 fn wrap_mux_text(text: &str, prefix: &str, width: u16, style: Style) -> Vec<Line<'static>> {
