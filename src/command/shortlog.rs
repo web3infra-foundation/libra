@@ -145,6 +145,12 @@ struct ShortlogOutput {
     authors: Vec<ShortlogAuthor>,
 }
 
+/// Runs shortlog and writes **human-readable** output to the given writer.
+///
+/// This function always produces the human-formatted report regardless of
+/// `OutputConfig` or `--json`. It is used by tests and callers that need
+/// direct writer control. For the full CLI entry point that honours JSON /
+/// quiet modes, use [`execute_safe`].
 pub async fn execute_to(args: ShortlogArgs, writer: &mut impl Write) -> CliResult<()> {
     crate::utils::util::require_repo().map_err(|_| CliError::repo_not_found())?;
     let shortlog_output = run_shortlog(&args).await?;

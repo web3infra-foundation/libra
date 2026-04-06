@@ -50,6 +50,8 @@ enum OpenError {
     ConfigRead(String),
     #[error("no remote configured")]
     NoRemoteConfigured,
+    #[error("remote '{0}' is configured but has no URL")]
+    RemoteMissingUrl(String),
     #[error("calculated URL '{0}' is unsafe or invalid. Only http/https are supported.")]
     UnsafeUrl(String),
     #[error("failed to open browser: {0}")]
@@ -135,11 +137,23 @@ async fn resolve_open_target(args: OpenArgs, in_repo: bool) -> Result<OpenResolu
         .await
         .map_err(|error| OpenError::ConfigRead(error.to_string()))?
     {
-        let remote_url = load_remote_url(&current_remote).await?;
-        return Ok(OpenResolution {
-            remote: Some(current_remote),
-            remote_url,
-        });
+        // If the branch's configured remote has a valid URL, use it.
+        // Otherwise fall through to the origin / first-remote fallback so
+        // that stale branch.<name>.remote config doesn't block `libra open`.
+        match load_remote_url(&current_remote).await {
+            Ok(remote_url) => {
+                return Ok(OpenResolution {
+                    remote: Some(current_remote),
+                    remote_url,
+                });
+            }
+            Err(_) => {
+                tracing::debug!(
+                    "current remote '{}' has no usable URL, falling back",
+                    current_remote
+                );
+            }
+        }
     }
 
     let remotes = ConfigKv::all_remote_configs()
@@ -163,9 +177,13 @@ async fn resolve_open_target(args: OpenArgs, in_repo: bool) -> Result<OpenResolu
 
 async fn load_remote_url(remote: &str) -> Result<String, OpenError> {
     ConfigKv::get_remote_url(remote).await.map_err(|error| {
+        // ConfigKv::get_remote_url returns an anyhow error when the key is
+        // missing, so we must inspect the message. If the remote simply has
+        // no URL configured we surface a targeted error; everything else is
+        // an unexpected read failure.
         let message = error.to_string();
         if message.contains("No URL configured for remote") {
-            OpenError::NoRemoteConfigured
+            OpenError::RemoteMissingUrl(remote.to_string())
         } else {
             OpenError::ConfigRead(message)
         }
@@ -218,6 +236,10 @@ fn transform_url(remote: &str) -> String {
     }
 
     // Fallback: return as is, maybe it is already workable or user has weird config
+    tracing::debug!(
+        "transform_url: no pattern matched for '{}', returning as-is",
+        remote
+    );
     remote.to_string()
 }
 
@@ -231,6 +253,13 @@ fn open_cli_error(error: OpenError) -> CliError {
         OpenError::NoRemoteConfigured => CliError::fatal("no remote configured")
             .with_stable_code(StableErrorCode::RepoStateInvalid)
             .with_hint("add a remote first, for example: 'libra remote add origin <url>'."),
+        OpenError::RemoteMissingUrl(name) => {
+            CliError::fatal(format!("remote '{name}' is configured but has no URL"))
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+                .with_hint(format!(
+                    "configure the URL: 'libra config set remote.{name}.url <url>'."
+                ))
+        }
         OpenError::UnsafeUrl(url) => CliError::fatal(format!(
             "calculated URL '{url}' is unsafe or invalid. Only http/https are supported."
         ))

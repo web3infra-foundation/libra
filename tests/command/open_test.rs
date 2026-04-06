@@ -24,7 +24,15 @@ impl PathEnvGuard {
     fn prepend(dir: &Path) -> Self {
         let old_path = std::env::var("PATH").ok();
         let new_path = match &old_path {
-            Some(existing) if !existing.is_empty() => format!("{}:{}", dir.display(), existing),
+            Some(existing) if !existing.is_empty() => {
+                let paths: Vec<PathBuf> = std::iter::once(dir.to_path_buf())
+                    .chain(std::env::split_paths(existing))
+                    .collect();
+                std::env::join_paths(&paths)
+                    .unwrap_or_else(|_| dir.as_os_str().to_os_string())
+                    .into_string()
+                    .unwrap_or_else(|os| os.to_string_lossy().into_owned())
+            }
             _ => dir.display().to_string(),
         };
         unsafe {
@@ -140,10 +148,14 @@ fn test_open_json_output_uses_origin_remote() {
     assert_cli_success(&add_remote, "failed to add origin for open test");
 
     let mut command = base_libra_command(&["open", "--json"], repo.path());
-    command.env(
-        "PATH",
-        format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", browser_bin.display()),
-    );
+    let sys_paths: Vec<PathBuf> = vec![
+        browser_bin.clone(),
+        "/usr/bin".into(),
+        "/bin".into(),
+        "/usr/sbin".into(),
+        "/sbin".into(),
+    ];
+    command.env("PATH", std::env::join_paths(&sys_paths).unwrap());
     let output = command.output().expect("failed to execute open --json");
 
     assert_cli_success(&output, "open --json should succeed");
@@ -163,10 +175,14 @@ fn test_open_without_remote_reports_stable_error() {
 
     let browser_bin = install_browser_mock(repo.path());
     let mut command = base_libra_command(&["open"], repo.path());
-    command.env(
-        "PATH",
-        format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", browser_bin.display()),
-    );
+    let sys_paths: Vec<PathBuf> = vec![
+        browser_bin.clone(),
+        "/usr/bin".into(),
+        "/bin".into(),
+        "/usr/sbin".into(),
+        "/sbin".into(),
+    ];
+    command.env("PATH", std::env::join_paths(&sys_paths).unwrap());
     let output = command.output().expect("failed to execute open");
 
     let (_stderr, report) = parse_cli_error_stderr(&output.stderr);

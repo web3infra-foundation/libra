@@ -134,7 +134,12 @@ pub fn execute_safe(args: IndexPackArgs, output: &OutputConfig) -> CliResult<()>
 
 fn index_pack_error(err: GitError) -> CliError {
     let stable_code = match err {
-        GitError::IOError(_) => StableErrorCode::IoWriteFailed,
+        // IO errors during pack decoding are predominantly read failures (the
+        // explicit File::open check above already covers the initial open).
+        // Write-side IO errors from creating the .idx file also surface here,
+        // but we default to IoReadFailed to avoid misclassifying the more
+        // common read path.
+        GitError::IOError(_) => StableErrorCode::IoReadFailed,
         GitError::InvalidArgument(_) => StableErrorCode::CliInvalidArguments,
         GitError::InvalidPackFile(_)
         | GitError::InvalidPackHeader(_)
