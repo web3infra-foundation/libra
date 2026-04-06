@@ -610,7 +610,7 @@ fn navigate_commit_path_typed(
 
 async fn resolve_commit_base_atom_typed(name: &str) -> Result<ObjectHash, CommitBaseError> {
     // 1. Check for HEAD
-    if name.eq_ignore_ascii_case("HEAD") {
+    if name == "HEAD" {
         return match Head::current_commit_result().await {
             Ok(Some(commit_id)) => Ok(commit_id),
             Ok(None) => Err(CommitBaseError::HeadUnborn),

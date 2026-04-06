@@ -5,7 +5,7 @@
 
 use std::process::Command;
 
-use super::parse_cli_error_stderr;
+use super::{parse_cli_error_stderr, parse_json_stdout};
 
 /// Initialize a temporary repository using CLI.
 fn init_temp_repo() -> tempfile::TempDir {
@@ -124,6 +124,34 @@ async fn test_cat_file_size_commit() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let size: usize = stdout.trim().parse().expect("Expected a numeric size");
     assert!(size > 0, "Commit object size should be > 0, got {}", size);
+}
+
+/// Test `cat-file -t --json` returns the structured type contract.
+#[tokio::test]
+async fn test_cat_file_type_json_output() {
+    let temp_dir = init_temp_repo();
+    let temp_path = temp_dir.path();
+
+    configure_user_identity(temp_path);
+    create_commit(temp_path, "hello.txt", "hello world\n", "first commit");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["cat-file", "-t", "HEAD", "--json"])
+        .output()
+        .expect("Failed to execute cat-file");
+
+    assert!(
+        output.status.success(),
+        "cat-file -t --json failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "cat-file");
+    assert_eq!(json["data"]["mode"], "type");
+    assert_eq!(json["data"]["object"], "HEAD");
+    assert_eq!(json["data"]["object_type"], "commit");
 }
 
 /// Test `cat-file -p` pretty-prints a commit object.
