@@ -80,6 +80,55 @@ fn test_open_json_output_uses_origin_remote() {
         json["data"]["web_url"],
         "https://github.com/web3infra-foundation/libra"
     );
+    assert_eq!(json["data"]["launched"], false);
+}
+
+#[test]
+fn test_open_json_output_falls_back_to_origin_when_head_is_detached() {
+    let repo = create_committed_repo_via_cli();
+
+    let add_remote = run_libra_command(
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:web3infra-foundation/libra.git",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &add_remote,
+        "failed to add origin for detached-head open test",
+    );
+
+    let log_out = run_libra_command(&["log"], repo.path());
+    let stdout = String::from_utf8_lossy(&log_out.stdout);
+    let hash = stdout
+        .lines()
+        .find(|line| line.starts_with("commit "))
+        .and_then(|line| line.strip_prefix("commit "))
+        .map(str::trim)
+        .expect("expected commit hash in log output");
+
+    let switch_out = run_libra_command(&["switch", "--detach", hash], repo.path());
+    assert_cli_success(
+        &switch_out,
+        "failed to detach HEAD before running open --json",
+    );
+
+    let output = run_libra_command(&["open", "--json"], repo.path());
+    assert_cli_success(
+        &output,
+        "open --json should fall back to origin on detached HEAD",
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["remote"], "origin");
+    assert_eq!(
+        json["data"]["web_url"],
+        "https://github.com/web3infra-foundation/libra"
+    );
+    assert_eq!(json["data"]["launched"], false);
 }
 
 #[test]
@@ -126,6 +175,7 @@ fn test_open_json_output_transforms_explicit_ssh_url() {
         json["data"]["web_url"],
         "https://github.com/web3infra-foundation/libra"
     );
+    assert_eq!(json["data"]["launched"], false);
 }
 
 #[test]
@@ -155,4 +205,5 @@ fn test_open_json_output_keeps_explicit_https_url() {
         json["data"]["web_url"],
         "https://github.com/web3infra-foundation/libra"
     );
+    assert_eq!(json["data"]["launched"], false);
 }

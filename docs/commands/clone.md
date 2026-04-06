@@ -1,8 +1,86 @@
 # `libra clone`
 
+Clone a repository into a new directory.
+
+## Synopsis
+
+```
+libra clone [OPTIONS] <REMOTE_REPO> [LOCAL_PATH]
+```
+
+## Description
+
 `libra clone` creates a local copy of a remote repository by fetching objects, configuring
 `origin`, and checking out the working tree. It initializes a vault-backed repository and
 transparently reuses `run_init()` for the local metadata setup.
+
+Cloning fetches all objects and refs from the remote, creates a `.libra` directory with a
+SQLite-backed metadata store, sets up the `origin` remote, and checks out the default branch
+(or the branch specified with `-b`). Vault signing is always bootstrapped during clone,
+matching `libra init` defaults.
+
+For bare clones, no working tree checkout is performed and the repository directory itself
+becomes the object store.
+
+## Options
+
+### `<REMOTE_REPO>` (required)
+
+The remote repository URL to clone from. Supports SSH (`git@host:user/repo.git`) and
+HTTPS (`https://host/user/repo.git`) protocols, as well as local filesystem paths.
+
+```bash
+libra clone git@github.com:user/repo.git
+libra clone https://github.com/user/repo.git
+libra clone /path/to/local/repo
+```
+
+### `[LOCAL_PATH]`
+
+Optional destination directory. When omitted, Libra infers the directory name from the
+repository URL (e.g., `repo` from `repo.git`). If inference fails, an error is returned
+asking the user to specify the path explicitly.
+
+```bash
+libra clone git@github.com:user/repo.git my-dir
+```
+
+### `-b, --branch <NAME>`
+
+Check out `<NAME>` instead of the remote's HEAD. The branch must exist on the remote;
+otherwise a "remote branch not found" error is raised.
+
+```bash
+libra clone -b develop git@github.com:user/repo.git
+```
+
+### `--single-branch`
+
+Fetch only the history leading to the tip of a single branch (HEAD, or the branch given
+by `-b`). Reduces transfer size for large repositories when only one branch is needed.
+
+```bash
+libra clone --single-branch -b main git@github.com:user/repo.git
+```
+
+### `--bare`
+
+Create a bare repository without a working tree. The destination directory becomes the
+object store directly. Useful for central/server-side repositories.
+
+```bash
+libra clone --bare git@github.com:user/repo.git
+```
+
+### `--depth <N>`
+
+Create a shallow clone with history truncated to the specified number of commits.
+`N` must be a positive integer.
+
+```bash
+libra clone --depth 1 git@github.com:user/repo.git
+libra clone --depth 50 git@github.com:user/repo.git
+```
 
 ## Common Commands
 
@@ -32,7 +110,7 @@ Success output:
 
 ```text
 Cloned into 'repo'
-  remote: origin → git@github.com:user/repo.git
+  remote: origin -> git@github.com:user/repo.git
   branch: main
   signing: enabled
 
@@ -43,7 +121,7 @@ Bare clone:
 
 ```text
 Cloned into bare repository '/path/to/repo.git'
-  remote: origin → git@github.com:user/repo.git
+  remote: origin -> git@github.com:user/repo.git
   branch: main
   signing: enabled
 ```
@@ -52,7 +130,7 @@ Empty remote:
 
 ```text
 Cloned into 'empty'
-  remote: origin → git@github.com:user/empty.git
+  remote: origin -> git@github.com:user/empty.git
   signing: enabled
 
 warning: You appear to have cloned an empty repository.
@@ -120,9 +198,77 @@ Empty remote returns `"branch": null` and a warning:
 - `ref_format` and `converted_from` from init are intentionally excluded
 - `objects_fetched` / `bytes_received` are not exposed until the fetch improvement lands
 
+## Design Rationale
+
+### No `--recurse-submodules`
+
+Git's submodule system (`--recurse-submodules`) is a frequent source of developer friction:
+submodules require separate fetch/checkout cycles, create nested `.git` directories, and
+break many tools that assume a single worktree. Libra does not implement submodules. For
+monorepo workflows, all code lives in a single repository. For multi-repo composition, Libra
+encourages explicit dependency management (package managers, vendoring) rather than embedding
+repositories within repositories. This keeps the clone operation simple and predictable.
+
+### Vault bootstrapping during clone
+
+Libra initializes vault-backed signing during clone by reusing the same `run_init()` path
+as `libra init`. This means every cloned repository is immediately ready for signed commits
+without additional setup. Git requires users to manually configure GPG/SSH signing after
+cloning, which means most cloned repositories produce unsigned commits by default. By
+bootstrapping the vault at clone time, Libra ensures that the security posture of a cloned
+repository matches that of a freshly initialized one.
+
+### `--depth` for shallow clones
+
+Shallow clones are essential for CI/CD pipelines and large monorepos where full history is
+unnecessary. Libra supports `--depth N` with the same semantics as Git: the history is
+truncated to the specified number of commits. The depth value is validated at parse time
+(must be a positive integer) and propagated to the fetch protocol layer. Unlike Git, Libra
+does not yet support `--shallow-since` or `--shallow-exclude` for date-based or ref-based
+shallow boundaries, keeping the initial implementation focused and predictable.
+
+### `--single-branch` flag
+
+When combined with `--branch`, `--single-branch` reduces the data transferred during clone
+by fetching only the specified branch's history. This is particularly useful for large
+repositories with many long-lived branches where only one branch is needed for the current
+workflow (e.g., CI building a specific release branch). Git supports this as well; jj does
+not, because its operation-log model fetches all refs by design.
+
+## Parameter Comparison: Libra vs Git vs jj
+
+| Parameter / Flag | Git | jj | Libra |
+|---|---|---|---|
+| Remote URL (positional) | `git clone <url>` | `jj git clone <url>` | `libra clone <url>` |
+| Destination directory | `git clone <url> <dir>` | `jj git clone <url> <dir>` | `libra clone <url> <dir>` |
+| Specific branch | `-b` / `--branch` | `-b` / `--branch` (jj 0.17+) | `-b` / `--branch` |
+| Single branch | `--single-branch` | N/A | `--single-branch` |
+| Bare clone | `--bare` | N/A | `--bare` |
+| Shallow clone (depth) | `--depth <n>` | N/A | `--depth <n>` |
+| Shallow since date | `--shallow-since=<date>` | N/A | N/A |
+| Shallow exclude | `--shallow-exclude=<rev>` | N/A | N/A |
+| Mirror clone | `--mirror` | N/A | N/A |
+| Reference repository | `--reference <repo>` | N/A | N/A |
+| Dissociate from reference | `--dissociate` | N/A | N/A |
+| No hardlinks | `--no-hardlinks` | N/A | N/A |
+| Recurse submodules | `--recurse-submodules` | N/A | N/A (no submodules) |
+| Shallow submodules | `--shallow-submodules` | N/A | N/A |
+| Separate git dir | `--separate-git-dir=<dir>` | N/A | N/A (removed) |
+| Template directory | `--template=<dir>` | N/A | N/A (handled by init internally) |
+| Quiet mode | `-q` / `--quiet` | `--quiet` | `--quiet` (global flag) |
+| Verbose / progress | `--progress` / `--verbose` | N/A | Phased stderr progress (default) |
+| No checkout | `-n` / `--no-checkout` | N/A | N/A (bare implies no checkout) |
+| Sparse checkout | `--sparse` | N/A | N/A |
+| Filter (partial clone) | `--filter=<spec>` | N/A | N/A |
+| Bundle URI | `--bundle-uri=<uri>` | N/A | N/A |
+| Vault signing bootstrap | N/A | N/A | Always enabled (matches init) |
+| SSH key detection | N/A | N/A | Automatic detection + hint |
+| Structured JSON output | N/A | N/A | `--json` / `--machine` |
+| Error hints | Minimal messages | Minimal messages | Every error type has an actionable hint |
+
 ## Error Handling
 
-Every `CloneError` variant maps to an explicit `StableErrorCode` — no message substring inference.
+Every `CloneError` variant maps to an explicit `StableErrorCode` -- no message substring inference.
 
 | Scenario | Error Code | Exit | Hint |
 |----------|-----------|------|------|
@@ -143,7 +289,7 @@ Every `CloneError` variant maps to an explicit `StableErrorCode` — no message 
 | Checkout LFS download failure | `LBR-NET-001` | 128 | "LFS content transfer failed" |
 | Internal invariant | `LBR-INTERNAL-001` | 128 | Issues URL |
 
-Init errors are transparently forwarded through `InitError → CliError`.
+Init errors are transparently forwarded through `InitError -> CliError`.
 
 ### Cleanup Failure Visibility
 
@@ -154,7 +300,7 @@ surfaces in both human and JSON error output instead of being silently swallowed
 ### Non-Bare Checkout Is Required For Success
 
 `setup_repository()` uses `execute_checked_typed()` which returns typed `RestoreError` variants.
-If checkout fails, the clone reports failure — it does not silently succeed with a broken worktree.
+If checkout fails, the clone reports failure -- it does not silently succeed with a broken worktree.
 
 ## Vault And Identity
 
@@ -162,17 +308,10 @@ If checkout fails, the clone reports failure — it does not silently succeed wi
 - `vault_signing` and `ssh_key_detected` from init are transparently forwarded to `CloneOutput`
 - SSH key detection uses the isolated `HOME` from the init phase
 
-## Feature Comparison: Libra vs Git vs jj
+## Compatibility Notes
 
-| Use Case | Git | jj | Libra |
-|----------|-----|----|-------|
-| Basic clone | `git clone <url>` | `jj git clone <url>` | `libra clone <url>` |
-| Target directory | `git clone <url> <dir>` | `jj git clone <url> <dir>` | `libra clone <url> <dir>` |
-| Bare clone | `git clone --bare <url>` | No direct equivalent | `libra clone --bare <url>` |
-| Specific branch | `git clone -b <branch> <url>` | `jj git clone -b <branch> <url>` | `libra clone -b <branch> <url>` |
-| Shallow clone | `git clone --depth N <url>` | No direct equivalent | `libra clone --depth N <url>` |
-| Single branch | `git clone --single-branch <url>` | No direct equivalent | `libra clone --single-branch <url>` |
-| Real-time progress | Progress bar on stderr | Progress on stderr | Phased stderr progress + fetch progress bar |
-| Structured output | No | No | `--json` / `--machine` |
-| Auth guidance | No | No | SSH key detection + hint |
-| Error hints | Minimal | Minimal | Every error type has an actionable hint |
+- `--recurse-submodules` is not supported; Libra does not implement submodules
+- `--mirror` and `--reference` are not supported
+- Clone always bootstraps vault signing; use `libra config` to disable after cloning if needed
+- The `--depth` value must be a positive integer; zero or negative values are rejected at parse time
+- `--no-checkout` is not available as a separate flag; use `--bare` for repositories without a working tree

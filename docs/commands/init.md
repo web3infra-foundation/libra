@@ -1,7 +1,110 @@
 # `libra init`
 
+Create an empty Libra repository or reinitialize an existing one.
+
+## Synopsis
+
+```
+libra init [OPTIONS] [DIRECTORY]
+```
+
+## Description
+
 `libra init` creates a new Libra repository, seeds the SQLite-backed metadata in
 `.libra/libra.db`, configures `HEAD`, and optionally imports an existing local Git repository.
+
+Running `libra init` in an existing directory creates a `.libra` subdirectory with the
+object store, SQLite database, default configuration, HEAD pointing to the initial branch,
+and (by default) a vault-backed PGP signing key. If `DIRECTORY` is given and does not exist,
+it is created first.
+
+When `--from-git-repository` is supplied, objects and refs are imported from the source Git
+repository and `origin` is configured to point at the source branch layout.
+
+## Options
+
+### `[DIRECTORY]`
+
+Positional argument specifying the directory to initialize. Defaults to `.` (the current
+working directory) when omitted.
+
+```bash
+libra init my-project          # creates ./my-project/.libra
+libra init                     # creates ./.libra
+```
+
+### `--bare`
+
+Create a bare repository. Bare repositories have no working tree and are used as central
+remote targets. The repository directory itself becomes the object store.
+
+```bash
+libra init --bare my-repo.git
+```
+
+### `-b, --initial-branch <NAME>`
+
+Override the name of the initial branch. Defaults to `main`. The branch name is validated
+against the same rules as `git check-ref-format`: no spaces, no `..`, no ASCII control
+characters, maximum 255 characters.
+
+```bash
+libra init -b develop
+libra init --initial-branch trunk
+```
+
+### `--object-format <FORMAT>`
+
+Set the object hash algorithm. Accepted values are `sha1` (default) and `sha256`.
+
+```bash
+libra init --object-format sha256
+```
+
+### `--from-git-repository <PATH>`
+
+Import objects and refs from an existing local Git repository. The source must contain
+valid `HEAD`, `config`, and `objects` structures. An `origin` remote is configured pointing
+to the imported branch layout. Empty Git repositories (no refs) produce an error.
+
+```bash
+libra init --from-git-repository ../old-project
+```
+
+### `--vault <BOOL>`
+
+Enable or disable vault-backed PGP signing. Defaults to `true`. When enabled, Libra
+generates a PGP signing key during initialization and stores it in the vault. Set to
+`false` to skip vault setup entirely.
+
+```bash
+libra init --vault false
+```
+
+### `--template <PATH>`
+
+Path to a template directory whose contents are copied into the new `.libra` directory.
+
+```bash
+libra init --template /path/to/template
+```
+
+### `--shared <MODE>`
+
+Specify that the repository is to be shared amongst several users (mirrors the Git
+`--shared` flag for group permissions).
+
+### `--ref-format <FORMAT>`
+
+Set the reference storage format. Accepted values: `strict`, `filesystem`.
+
+### `-q, --quiet`
+
+Suppress progress and success output. Only errors are printed.
+
+```bash
+libra init -q my-project
+```
 
 ## Common Commands
 
@@ -67,6 +170,100 @@ Example:
 }
 ```
 
+## Design Rationale
+
+### SQLite instead of flat files for metadata
+
+Git stores configuration in flat `.git/config` (INI format), refs as individual files under
+`.git/refs/`, and reflogs as append-only text files. This approach suffers from race conditions
+on concurrent writes, requires directory-level locking (`*.lock` files), and makes atomic
+multi-ref updates impossible without the `packed-refs` mechanism.
+
+Libra stores all metadata (config, refs, reflogs, rebase state) in a single SQLite database
+at `.libra/libra.db`. SQLite provides ACID transactions, concurrent-reader/single-writer
+semantics via WAL mode, and efficient queries without scanning the filesystem. This design
+eliminates an entire class of corruption bugs that plague Git on networked filesystems (NFS,
+CIFS) and makes operations like "find all branches matching a pattern" O(log n) instead of
+a directory walk.
+
+### Vault signing enabled by default
+
+Modern development workflows increasingly require commit provenance (signed commits for
+supply-chain security, verified merges in CI). Git leaves signing as a manual opt-in
+requiring external GPG/SSH key management. Libra takes the opposite stance: vault-backed
+PGP signing is enabled at `init` time, generating a key automatically. Developers who do
+not need signing can opt out with `--vault false`, but the secure-by-default path means
+new repositories are immediately ready for verified workflows without additional setup.
+
+### No `--separate-git-dir` / `--separate-libra-dir`
+
+Git supports decoupling the `.git` directory from the worktree via `--separate-git-dir`,
+creating a `gitdir:` pointer file. This feature is rarely used, adds complexity to every
+path-resolution routine, and creates subtle breakage when the pointer file or target
+directory is moved independently. Libra removed this feature in favor of always co-locating
+`.libra/` with the worktree root, simplifying the repository discovery algorithm and
+eliminating a source of user confusion.
+
+### `--from-git-repository` instead of Git's lack of import
+
+Git has no built-in concept of importing from another VCS format into itself at init time;
+the closest equivalent is `git clone --local`. jj provides `jj git init --git-repo` for
+co-located operation with a Git backend. Libra's `--from-git-repository` provides a one-time,
+one-directional import that copies objects and refs from a local Git repository into a new
+standalone Libra repository. This is a deliberate design choice: rather than wrapping Git
+(as jj does), Libra creates a fully independent `.libra` store, making it a standalone VCS
+rather than a Git frontend.
+
+### Default branch is `main`, not `master`
+
+Following the industry-wide convention shift, Libra defaults to `main` as the initial
+branch name. This can be overridden with `-b` for organizations that use `trunk`, `develop`,
+or other naming conventions.
+
+### jj comparison
+
+jj (`jj git init`) wraps a Git backend and does not create its own object store; it stores
+jj-specific metadata (operation log, view) alongside the `.git` directory. Libra creates a
+fully independent `.libra` store with its own object format, making it a standalone VCS
+rather than a Git frontend. The `--from-git-repository` flag provides a one-time import path
+rather than ongoing cohabitation.
+
+## Parameter Comparison: Libra vs Git vs jj
+
+| Parameter / Flag | Git | jj | Libra |
+|---|---|---|---|
+| Initialize in current dir | `git init` | `jj git init` | `libra init` |
+| Initialize in named dir | `git init <dir>` | `jj git init <dir>` | `libra init <dir>` |
+| Bare repository | `git init --bare` | No direct equivalent | `libra init --bare` |
+| Initial branch name | `git init -b <name>` / `--initial-branch` | No direct flag (uses `trunk()` revset config) | `libra init -b <name>` / `--initial-branch` |
+| Object hash format | `git init --object-format=sha256` | Inherits from Git backend | `libra init --object-format sha256` |
+| Template directory | `git init --template=<dir>` | N/A | `libra init --template <dir>` |
+| Shared permissions | `git init --shared[=<mode>]` | N/A | `libra init --shared <mode>` |
+| Separate storage dir | `git init --separate-git-dir=<dir>` | `jj git init --colocate` | Removed |
+| Import from Git repo | N/A (use `git clone --local`) | `jj git init --git-repo <path>` | `libra init --from-git-repository <path>` |
+| Vault / signing bootstrap | N/A (manual GPG/SSH setup) | N/A | `libra init --vault <bool>` (default: true) |
+| Ref storage format | `git init --ref-format=<format>` (Git 2.45+) | N/A | `libra init --ref-format <format>` |
+| Quiet mode | `git init -q` / `--quiet` | N/A | `libra init -q` / `--quiet` |
+| Structured JSON output | N/A | N/A | `libra init --json` / `--machine` |
+| Recurse submodules | `git init` + `git submodule init` | N/A | N/A (submodules not supported) |
+
+## Error Handling
+
+Every `InitError` variant maps to an explicit `StableErrorCode`.
+
+| Scenario | Error Code | Exit | Hint |
+|----------|-----------|------|------|
+| Invalid argument (bad branch name, bad format) | `LBR-CLI-001` | 129 | varies by argument |
+| Repository already initialized | `LBR-REPO-003` | 128 | "remove .libra/ to reinitialize" |
+| Source Git repository not found | `LBR-IO-001` | 128 | -- |
+| Source is not a valid Git repository | `LBR-CLI-003` | 129 | "a valid Git repository must contain HEAD, config, and objects" |
+| Template directory not found | `LBR-IO-001` | 128 | -- |
+| Path is not valid UTF-8 | `LBR-IO-001` | 128 | -- |
+| Conversion from Git failed | `LBR-REPO-003` | 128 | -- |
+| Vault initialization failed | `LBR-INTERNAL-001` | 128 | Issues URL |
+| I/O error (permissions, disk) | `LBR-IO-001` | 128 | -- |
+| Database initialization failed | `LBR-INTERNAL-001` | 128 | Issues URL |
+
 ## Vault And Identity
 
 - Vault-backed signing is enabled by default
@@ -100,18 +297,3 @@ Migration for old separate-layout repositories:
 rm .libra
 mv /path/to/separate/storage .libra
 ```
-
-## Feature Comparison: Libra vs Git vs jj
-
-| Use Case | Git | jj | Libra |
-|----------|-----|----|-------|
-| Current directory init | `git init` | `jj git init` | `libra init` |
-| New directory init | `git init my-project` | `jj git init my-project` | `libra init my-project` |
-| Bare repo | `git init --bare repo.git` | No direct equivalent | `libra init --bare repo.git` |
-| Initial branch flag | `git init -b main` | No direct init flag | `libra init -b main` |
-| Object format flag | `git init --object-format=sha256` | No direct init flag | `libra init --object-format sha256` |
-| Import existing Git repo | No single command | `jj git init --git-repo <path>` | `libra init --from-git-repository <path>` |
-| Structured output | No | No | `--json` / `--machine` |
-| Signing bootstrap | No | No | Vault + PGP key by default |
-| SSH key behavior | Use system SSH config | Use system / Git config | Detect system key, do not generate during init |
-| Separate storage dir | `--separate-git-dir` | Different colocate model | Removed |

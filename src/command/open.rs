@@ -6,7 +6,7 @@ use regex::Regex;
 use serde::Serialize;
 
 use crate::{
-    internal::config::ConfigKv,
+    internal::{config::ConfigKv, head::Head},
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
@@ -90,13 +90,14 @@ pub async fn execute_safe(args: OpenArgs, output: &OutputConfig) -> CliResult<()
         return Err(open_cli_error(OpenError::UnsafeUrl(web_url)));
     }
 
-    open_browser(&web_url).map_err(|e| open_cli_error(OpenError::BrowserLaunch(e.to_string())))?;
+    let launched = open_browser(&web_url)
+        .map_err(|e| open_cli_error(OpenError::BrowserLaunch(e.to_string())))?;
 
     let open_output = OpenOutput {
         remote: resolution.remote,
         remote_url: resolution.remote_url,
         web_url: web_url.clone(),
-        launched: true,
+        launched,
     };
 
     if output.is_json() {
@@ -133,10 +134,15 @@ async fn resolve_open_target(args: OpenArgs, in_repo: bool) -> Result<OpenResolu
         return Err(OpenError::NotInRepo);
     }
 
-    if let Some(current_remote) = ConfigKv::get_current_remote()
-        .await
-        .map_err(|error| OpenError::ConfigRead(error.to_string()))?
-    {
+    let current_remote = match Head::current_result().await {
+        Ok(Head::Branch(branch_name)) => ConfigKv::get_remote(&branch_name)
+            .await
+            .map_err(|error| OpenError::ConfigRead(error.to_string()))?,
+        Ok(Head::Detached(_)) => None,
+        Err(error) => return Err(OpenError::ConfigRead(error.to_string())),
+    };
+
+    if let Some(current_remote) = current_remote {
         // If the branch's configured remote has a valid URL, use it.
         // Otherwise fall through to the origin / first-remote fallback so
         // that stale branch.<name>.remote config doesn't block `libra open`.
@@ -159,41 +165,43 @@ async fn resolve_open_target(args: OpenArgs, in_repo: bool) -> Result<OpenResolu
     let remotes = ConfigKv::all_remote_configs()
         .await
         .map_err(|error| OpenError::ConfigRead(error.to_string()))?;
-    if let Some(origin) = remotes.iter().find(|remote| remote.name == "origin") {
+    if let Some(origin) = remotes
+        .iter()
+        .find(|remote| remote.name == "origin" && !remote.url.trim().is_empty())
+    {
         return Ok(OpenResolution {
             remote: Some("origin".to_string()),
             remote_url: origin.url.clone(),
         });
     }
-    if let Some(first) = remotes.first() {
+    if let Some(first) = remotes.iter().find(|remote| !remote.url.trim().is_empty()) {
         return Ok(OpenResolution {
             remote: Some(first.name.clone()),
             remote_url: first.url.clone(),
         });
+    }
+    if let Some(first) = remotes.first() {
+        return Err(OpenError::RemoteMissingUrl(first.name.clone()));
     }
 
     Err(OpenError::NoRemoteConfigured)
 }
 
 async fn load_remote_url(remote: &str) -> Result<String, OpenError> {
-    ConfigKv::get_remote_url(remote).await.map_err(|error| {
-        // ConfigKv::get_remote_url returns an anyhow error when the key is
-        // missing, so we must inspect the message. If the remote simply has
-        // no URL configured we surface a targeted error; everything else is
-        // an unexpected read failure.
-        let message = error.to_string();
-        if message.contains("No URL configured for remote") {
-            OpenError::RemoteMissingUrl(remote.to_string())
-        } else {
-            OpenError::ConfigRead(message)
-        }
-    })
+    let configured_remote = ConfigKv::remote_config(remote)
+        .await
+        .map_err(|error| OpenError::ConfigRead(error.to_string()))?
+        .ok_or_else(|| OpenError::RemoteMissingUrl(remote.to_string()))?;
+    if configured_remote.url.trim().is_empty() {
+        return Err(OpenError::RemoteMissingUrl(remote.to_string()));
+    }
+    Ok(configured_remote.url)
 }
 
-fn open_browser(url: &str) -> std::io::Result<()> {
+fn open_browser(url: &str) -> std::io::Result<bool> {
     if std::env::var_os(crate::utils::pager::LIBRA_TEST_ENV).is_some() {
         // Keep integration tests side-effect free across all platforms.
-        return Ok(());
+        return Ok(false);
     }
 
     #[cfg(target_os = "windows")]
@@ -211,11 +219,13 @@ fn open_browser(url: &str) -> std::io::Result<()> {
     {
         Command::new("xdg-open").arg(url).spawn()?;
     }
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(any(target_os = "windows", test))]
 fn quote_windows_cmd_arg(url: &str) -> String {
+    // `is_safe_url()` relies on `url::Url::parse`, which rejects embedded
+    // double quotes. That makes wrapping sufficient for the current validation.
     format!("\"{url}\"")
 }
 

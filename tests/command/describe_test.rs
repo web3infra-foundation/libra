@@ -110,6 +110,31 @@ fn test_describe_always_abbrev_zero_returns_full_hash() {
 }
 
 #[test]
+fn test_describe_abbrev_zero_keeps_git_tag_only_output() {
+    let repo = create_committed_repo_via_cli();
+
+    let tag_output = run_libra_command(&["tag", "-m", "Release v1.0", "v1.0"], repo.path());
+    assert_cli_success(&tag_output, "failed to create tag for describe test");
+
+    std::fs::write(repo.path().join("tracked.txt"), "tracked\nnext\n")
+        .expect("failed to update tracked file");
+    let add_output = run_libra_command(&["add", "tracked.txt"], repo.path());
+    assert_cli_success(&add_output, "failed to stage updated tracked file");
+    let commit_output = run_libra_command(&["commit", "-m", "next", "--no-verify"], repo.path());
+    assert_cli_success(&commit_output, "failed to create second commit");
+
+    let output = run_libra_command(&["describe", "--abbrev=0", "--json"], repo.path());
+    assert_cli_success(&output, "describe --abbrev=0 --json should succeed");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["result"], "v1.0");
+    assert_eq!(json["data"]["tag"], "v1.0");
+    assert_eq!(json["data"]["distance"], 1);
+    assert!(json["data"]["abbreviated_commit"].is_null());
+    assert_eq!(json["data"]["used_always"], false);
+}
+
+#[test]
 fn test_describe_tags_prefers_annotated_tag_over_lightweight_tag() {
     let repo = create_committed_repo_via_cli();
 
