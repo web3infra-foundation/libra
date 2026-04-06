@@ -21,7 +21,7 @@ use std::sync::Arc;
 use types::{OrchestratorConfig, OrchestratorError, OrchestratorResult};
 
 use crate::internal::ai::{
-    completion::{CompletionModel, ThrottledCompletionModel},
+    completion::{CompletionModel, CompletionUsage, ThrottledCompletionModel},
     intentspec::{repair_intentspec, types::IntentSpec, validate_intentspec},
     tools::registry::ToolRegistry,
 };
@@ -40,6 +40,54 @@ pub struct Orchestrator<M: CompletionModel> {
     config: OrchestratorConfig,
 }
 
+struct FanoutObserver {
+    observers: Vec<Arc<dyn types::OrchestratorObserver>>,
+}
+
+impl types::OrchestratorObserver for FanoutObserver {
+    fn on_plan_compiled(&self, plan: &types::ExecutionPlanSpec) {
+        for observer in &self.observers {
+            observer.on_plan_compiled(plan);
+        }
+    }
+
+    fn on_task_runtime_event(&self, task: &types::TaskSpec, event: types::TaskRuntimeEvent) {
+        for observer in &self.observers {
+            observer.on_task_runtime_event(task, event.clone());
+        }
+    }
+
+    fn on_graph_progress(&self, completed: usize, total: usize) {
+        for observer in &self.observers {
+            observer.on_graph_progress(completed, total);
+        }
+    }
+
+    fn on_graph_checkpoint_saved(&self, checkpoint_id: &str, pc: usize, completed_nodes: usize) {
+        for observer in &self.observers {
+            observer.on_graph_checkpoint_saved(checkpoint_id, pc, completed_nodes);
+        }
+    }
+
+    fn on_graph_checkpoint_restored(&self, checkpoint_id: &str, pc: usize) {
+        for observer in &self.observers {
+            observer.on_graph_checkpoint_restored(checkpoint_id, pc);
+        }
+    }
+
+    fn on_replan(
+        &self,
+        current_revision: u32,
+        next_revision: u32,
+        reason: &str,
+        diff_summary: &str,
+    ) {
+        for observer in &self.observers {
+            observer.on_replan(current_revision, next_revision, reason, diff_summary);
+        }
+    }
+}
+
 impl<M: CompletionModel + 'static> Orchestrator<M> {
     pub fn new(model: M, registry: Arc<ToolRegistry>, config: OrchestratorConfig) -> Self {
         Self {
@@ -50,7 +98,10 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
     }
 
     /// Run the full orchestration pipeline.
-    pub async fn run(&self, mut spec: IntentSpec) -> Result<OrchestratorResult, OrchestratorError> {
+    pub async fn run(&self, mut spec: IntentSpec) -> Result<OrchestratorResult, OrchestratorError>
+    where
+        M::Response: CompletionUsage,
+    {
         // Phase 0: Validate and repair
         let issues = validate_intentspec(&spec);
         if !issues.is_empty() {
@@ -74,7 +125,35 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
         let max_replans = replan::max_replans(&spec);
         let mut replan_count = 0_u32;
         let mut plan_revision_specs = Vec::new();
-        let observer = self.config.observer.clone();
+        let downstream_observer = self.config.observer.clone();
+        let persistence_session = if let Some(ref mcp_server) = self.config.mcp_server {
+            Some(
+                persistence::ExecutionAuditSession::start(
+                    Arc::clone(mcp_server),
+                    &spec,
+                    &self.config.working_dir,
+                    self.config.persisted_intent_id.as_deref(),
+                    self.config.persisted_plan_id.as_deref(),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        let observer = match (
+            downstream_observer.clone(),
+            persistence_session
+                .as_ref()
+                .map(|session| session.observer()),
+        ) {
+            (Some(left), Some(right)) => Some(Arc::new(FanoutObserver {
+                observers: vec![left, right],
+            })
+                as Arc<dyn types::OrchestratorObserver>),
+            (Some(left), None) => Some(left),
+            (None, Some(right)) => Some(right),
+            (None, None) => None,
+        };
         let (execution_plan_spec, run_state, system_report, decision) = loop {
             // Phase 1: Compile execution plan
             let mut plan_spec = planner::compile_execution_plan_spec(&spec)?;
@@ -85,6 +164,9 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
                 .change_log
                 .last()
                 .map(|entry| entry.reason.clone());
+            if let Some(session) = persistence_session.as_ref() {
+                session.record_plan_compiled(&plan_spec).await?;
+            }
             if let Some(observer) = &observer {
                 observer.on_plan_compiled(&plan_spec);
             }
@@ -146,22 +228,20 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
         };
         let task_results = run_state.task_results.clone();
 
-        let persistence = if let Some(ref mcp_server) = self.config.mcp_server {
-            let persisted =
-                persistence::persist_execution(persistence::ExecutionPersistenceRequest {
-                    mcp_server,
-                    spec: &spec,
-                    execution_plan_spec: &execution_plan_spec,
-                    plan_revision_specs: &plan_revision_specs,
-                    run_state: &run_state,
-                    system_report: &system_report,
-                    decision: &decision,
-                    working_dir: &self.config.working_dir,
-                    base_commit: self.config.base_commit.as_deref(),
-                    model_name: std::any::type_name::<M>(),
-                })
+        let persistence = if let Some(session) = persistence_session {
+            let persisted = session
+                .finalize(
+                    &spec,
+                    &execution_plan_spec,
+                    &plan_revision_specs,
+                    &run_state,
+                    &system_report,
+                    &decision,
+                    &self.config.working_dir,
+                    std::any::type_name::<M>(),
+                )
                 .await?;
-            if let Some(observer) = &observer {
+            if let Some(observer) = &downstream_observer {
                 observer.on_persistence_complete(&persisted);
             }
             Some(persisted)
@@ -408,6 +488,8 @@ mod tests {
         let config = OrchestratorConfig {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
+            persisted_intent_id: None,
+            persisted_plan_id: None,
             dagrs_resume_checkpoint_id: None,
             coder_preamble: None,
             reviewer_preamble: None,
@@ -435,6 +517,8 @@ mod tests {
         let config = OrchestratorConfig {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
+            persisted_intent_id: None,
+            persisted_plan_id: None,
             dagrs_resume_checkpoint_id: None,
             coder_preamble: None,
             reviewer_preamble: None,
@@ -460,6 +544,8 @@ mod tests {
         let config = OrchestratorConfig {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
+            persisted_intent_id: None,
+            persisted_plan_id: None,
             dagrs_resume_checkpoint_id: None,
             coder_preamble: None,
             reviewer_preamble: None,
@@ -483,6 +569,8 @@ mod tests {
         let config = OrchestratorConfig {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
+            persisted_intent_id: None,
+            persisted_plan_id: None,
             dagrs_resume_checkpoint_id: None,
             coder_preamble: None,
             reviewer_preamble: None,
@@ -534,6 +622,8 @@ mod tests {
         let config = OrchestratorConfig {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
+            persisted_intent_id: None,
+            persisted_plan_id: None,
             dagrs_resume_checkpoint_id: None,
             coder_preamble: None,
             reviewer_preamble: None,
@@ -557,6 +647,8 @@ mod tests {
         let config = OrchestratorConfig {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
+            persisted_intent_id: None,
+            persisted_plan_id: None,
             dagrs_resume_checkpoint_id: None,
             coder_preamble: None,
             reviewer_preamble: None,

@@ -11,7 +11,6 @@ use std::{
 // 1. They operate on data structures with guaranteed invariants (e.g., string indices)
 // 2. They are used in rendering where dimensions are pre-validated
 // 3. Test code uses unwrap for test assertions
-
 use ratatui::{
     prelude::*,
     widgets::{Block, BorderType, Borders, Clear, Paragraph},

@@ -289,6 +289,14 @@ impl HistoryReader {
 
         let mut by_id: HashMap<String, ToolInvocation> = HashMap::new();
         for event in sorted {
+            let invocation_id = event
+                .payload
+                .get("invocation_id")
+                .or_else(|| event.payload.get("tool_use_id"))
+                .or_else(|| event.payload.get("toolUseId"))
+                .and_then(|value| value.as_str())
+                .map(ToString::to_string)
+                .unwrap_or_else(|| event.id.clone());
             let arguments = event
                 .payload
                 .get("arguments")
@@ -310,9 +318,9 @@ impl HistoryReader {
                 .and_then(|value| value.as_i64());
 
             let entry = by_id
-                .entry(event.id.clone())
+                .entry(invocation_id.clone())
                 .or_insert_with(|| ToolInvocation {
-                    id: event.id.clone(),
+                    id: invocation_id.clone(),
                     run_id: event.run_id.clone(),
                     thread_id: event.thread_id.clone(),
                     tool_name: event.tool.clone(),

@@ -1771,6 +1771,7 @@ mod tests {
                     retry_count: 0,
                     tool_calls: vec![],
                     policy_violations: vec![],
+                    model_usage: None,
                     review: None,
                 },
                 TaskResult {
@@ -1781,6 +1782,7 @@ mod tests {
                     retry_count: 2,
                     tool_calls: vec![],
                     policy_violations: vec![],
+                    model_usage: None,
                     review: None,
                 },
             ],

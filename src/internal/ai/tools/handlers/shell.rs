@@ -9,7 +9,6 @@ use async_trait::async_trait;
 
 // SAFETY: The unwrap() and expect() calls in test code are acceptable as test
 // failures are expected to panic on assertion failures.
-
 use super::parse_arguments;
 use crate::{
     internal::ai::{

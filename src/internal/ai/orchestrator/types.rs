@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use super::run_state::RunStateSnapshot;
 use crate::internal::ai::{
+    completion::CompletionUsageSummary,
     intentspec::types::{ChangeLogEntry, Check},
     mcp::server::LibraMcpServer,
     tools::ToolOutput,
@@ -363,6 +364,8 @@ pub struct TaskResult {
     #[serde(default)]
     pub policy_violations: Vec<PolicyViolation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_usage: Option<CompletionUsageSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<ReviewOutcome>,
 }
 
@@ -445,6 +448,8 @@ pub struct PersistedExecution {
     pub initial_snapshot_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_usage_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision_id: Option<String>,
     #[serde(default)]
@@ -530,6 +535,8 @@ fn default_execution_revision() -> u32 {
 pub struct OrchestratorConfig {
     pub working_dir: PathBuf,
     pub base_commit: Option<String>,
+    pub persisted_intent_id: Option<String>,
+    pub persisted_plan_id: Option<String>,
     /// Placeholder for checkpoint/resume functionality.
     ///
     /// Note: This field is currently unused. The checkpoint/resume feature needs to be
@@ -730,6 +737,7 @@ mod tests {
                 run_id: "run-1".into(),
                 initial_snapshot_id: Some("snapshot-1".into()),
                 provenance_id: Some("prov-1".into()),
+                run_usage_id: None,
                 decision_id: Some("decision-1".into()),
                 plan_ids: vec!["plan-1".into()],
                 checkpoints: vec![PersistedCheckpoint {

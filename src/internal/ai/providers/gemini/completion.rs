@@ -27,7 +27,8 @@ use crate::internal::ai::{
     client::Provider,
     completion::{
         AssistantContent, CompletionError, CompletionModel as CompletionModelTrait,
-        CompletionRequest, CompletionResponse, Function, Message, Text, ToolCall, UserContent,
+        CompletionRequest, CompletionResponse, CompletionUsage, CompletionUsageSummary, Function,
+        Message, Text, ToolCall, UserContent,
     },
     tools::ToolDefinition,
 };
@@ -210,6 +211,12 @@ impl CompletionModelTrait for CompletionModel {
             content,
             raw_response: api_resp,
         })
+    }
+}
+
+impl CompletionUsage for GenerateContentResponse {
+    fn usage_summary(&self) -> Option<CompletionUsageSummary> {
+        None
     }
 }
 

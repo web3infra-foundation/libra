@@ -2529,7 +2529,13 @@ fn claude_tool_writable_roots(tool_input: &Value, cwd: &Path) -> Vec<PathBuf> {
         .into_iter()
         .filter_map(|key| tool_input.get(key).and_then(Value::as_str))
         .map(PathBuf::from)
-        .map(|path| if path.is_absolute() { path } else { cwd.join(path) })
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                cwd.join(path)
+            }
+        })
         .collect()
 }
 
@@ -5142,26 +5148,27 @@ mod tests {
 
     #[test]
     fn edit_approval_requests_use_workspace_write_metadata() {
-        let (sandbox_label, network_access, writable_roots) =
-            infer_claude_approval_request_context(
-                "Edit",
-                &json!({ "file_path": "src/lib.rs" }),
-                Path::new("/repo"),
-            );
+        let (sandbox_label, network_access, writable_roots) = infer_claude_approval_request_context(
+            "Edit",
+            &json!({ "file_path": "src/lib.rs" }),
+            Path::new("/repo"),
+        );
 
         assert_eq!(sandbox_label, "workspace-write");
         assert!(!network_access);
-        assert_eq!(writable_roots, vec![std::path::PathBuf::from("/repo/src/lib.rs")]);
+        assert_eq!(
+            writable_roots,
+            vec![std::path::PathBuf::from("/repo/src/lib.rs")]
+        );
     }
 
     #[test]
     fn bash_approval_requests_use_external_command_metadata() {
-        let (sandbox_label, network_access, writable_roots) =
-            infer_claude_approval_request_context(
-                "Bash",
-                &json!({ "command": "cargo test" }),
-                Path::new("/repo"),
-            );
+        let (sandbox_label, network_access, writable_roots) = infer_claude_approval_request_context(
+            "Bash",
+            &json!({ "command": "cargo test" }),
+            Path::new("/repo"),
+        );
 
         assert_eq!(sandbox_label, "outside sandbox");
         assert!(network_access);

@@ -890,6 +890,7 @@ async fn run_tui_with_model<M>(
 ) -> CliResult<()>
 where
     M: crate::internal::ai::completion::CompletionModel + Clone + 'static,
+    M::Response: crate::internal::ai::completion::CompletionUsage,
 {
     let registry = params.registry;
     let hook_runner = {

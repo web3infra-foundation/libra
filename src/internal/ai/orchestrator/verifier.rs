@@ -471,6 +471,7 @@ mod tests {
                     diffs: vec![],
                 }],
                 policy_violations: vec![],
+                model_usage: None,
                 review: Some(ReviewOutcome {
                     approved: true,
                     summary: "looks good".into(),
@@ -497,6 +498,7 @@ mod tests {
                 retry_count: 0,
                 tool_calls: vec![],
                 policy_violations: vec![],
+                model_usage: None,
                 review: None,
             },
         ];
@@ -542,6 +544,7 @@ mod tests {
                     diffs: vec![],
                 }],
                 policy_violations: vec![],
+                model_usage: None,
                 review: Some(ReviewOutcome {
                     approved: true,
                     summary: "looks good".into(),
@@ -568,6 +571,7 @@ mod tests {
                 retry_count: 0,
                 tool_calls: vec![],
                 policy_violations: vec![],
+                model_usage: None,
                 review: None,
             },
         ];
@@ -621,6 +625,7 @@ mod tests {
                 retry_count: 0,
                 tool_calls: vec![],
                 policy_violations: vec![],
+                model_usage: None,
                 review: None,
             }],
             dagrs_runtime: Default::default(),
@@ -674,6 +679,7 @@ mod tests {
             retry_count: 0,
             tool_calls: vec![],
             policy_violations: vec![],
+            model_usage: None,
             review: Some(ReviewOutcome {
                 approved: true,
                 summary: "looks good".into(),

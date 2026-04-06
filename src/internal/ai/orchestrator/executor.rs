@@ -30,7 +30,7 @@ use super::{
 };
 use crate::internal::ai::{
     agent::{ToolLoopConfig, ToolLoopObserver, run_tool_loop_with_history_and_observer},
-    completion::{CompletionError, CompletionModel},
+    completion::{CompletionError, CompletionModel, CompletionUsage, CompletionUsageSummary},
     hooks::HookRunner,
     intentspec::types::{IntentSpec, NetworkPolicy},
     sandbox::{SandboxPermissions, SandboxPolicy, ToolRuntimeContext, ToolSandboxContext},
@@ -57,6 +57,7 @@ struct TaskExecutionObserver {
     in_flight: HashMap<String, ToolCallRecord>,
     tool_calls: Vec<ToolCallRecord>,
     violations: Vec<super::types::PolicyViolation>,
+    model_usage: CompletionUsageSummary,
     observer: Option<Arc<dyn OrchestratorObserver>>,
 }
 
@@ -74,12 +75,20 @@ impl TaskExecutionObserver {
             in_flight: HashMap::new(),
             tool_calls: Vec::new(),
             violations: Vec::new(),
+            model_usage: CompletionUsageSummary::default(),
             observer,
         }
     }
 
-    fn finish(self) -> (Vec<ToolCallRecord>, Vec<super::types::PolicyViolation>) {
-        (self.tool_calls, self.violations)
+    fn finish(
+        self,
+    ) -> (
+        Vec<ToolCallRecord>,
+        Vec<super::types::PolicyViolation>,
+        Option<CompletionUsageSummary>,
+    ) {
+        let usage = (!self.model_usage.is_zero()).then_some(self.model_usage);
+        (self.tool_calls, self.violations, usage)
     }
 }
 
@@ -100,6 +109,10 @@ impl ToolLoopObserver for TaskExecutionObserver {
                 TaskRuntimeEvent::AssistantMessage(text.to_string()),
             );
         }
+    }
+
+    fn on_model_usage(&mut self, usage: &CompletionUsageSummary) {
+        self.model_usage.merge(usage);
     }
 
     fn on_tool_call_begin(&mut self, call_id: &str, tool_name: &str, arguments: &Value) {
@@ -192,13 +205,23 @@ struct ReviewerDecision {
     issues: Vec<String>,
 }
 
+struct ReviewerPassArtifacts {
+    outcome: Result<Option<ReviewOutcome>, String>,
+    tool_calls: Vec<ToolCallRecord>,
+    policy_violations: Vec<super::types::PolicyViolation>,
+    model_usage: Option<CompletionUsageSummary>,
+}
+
 /// Execute a single task with retry logic.
 pub async fn execute_task<M: CompletionModel>(
     task: &TaskSpec,
     model: &M,
     registry: &ToolRegistry,
     config: &ExecutorConfig,
-) -> TaskResult {
+) -> TaskResult
+where
+    M::Response: CompletionUsage,
+{
     if task.kind == TaskKind::Gate {
         return execute_gate_task_in_task_worktree(
             task,
@@ -221,6 +244,7 @@ pub async fn execute_task<M: CompletionModel>(
     let mut retry_count: u8 = 0;
     let mut accumulated_tool_calls = Vec::new();
     let mut accumulated_policy_violations = Vec::new();
+    let mut accumulated_model_usage = CompletionUsageSummary::default();
     let mut last_review = None;
 
     loop {
@@ -244,13 +268,16 @@ pub async fn execute_task<M: CompletionModel>(
             &mut observer,
         )
         .await;
-        let (tool_calls, policy_violations) = observer.finish();
+        let (tool_calls, policy_violations, model_usage) = observer.finish();
         accumulated_tool_calls.extend(tool_calls.iter().cloned());
         accumulated_policy_violations.extend(policy_violations.iter().cloned());
+        if let Some(usage) = model_usage.as_ref() {
+            accumulated_model_usage.merge(usage);
+        }
 
         let retryable_failure = match agent_result {
             Ok(turn) if policy_violations.is_empty() => {
-                let review = match run_reviewer_pass(
+                let review_artifacts = run_reviewer_pass(
                     task,
                     &turn.final_text,
                     &accumulated_tool_calls,
@@ -258,8 +285,14 @@ pub async fn execute_task<M: CompletionModel>(
                     registry,
                     config,
                 )
-                .await
-                {
+                .await;
+                accumulated_tool_calls.extend(review_artifacts.tool_calls.iter().cloned());
+                accumulated_policy_violations
+                    .extend(review_artifacts.policy_violations.iter().cloned());
+                if let Some(usage) = review_artifacts.model_usage.as_ref() {
+                    accumulated_model_usage.merge(usage);
+                }
+                let review = match review_artifacts.outcome {
                     Ok(review) => review,
                     Err(message) => {
                         if let Some(observer) = &config.observer {
@@ -276,6 +309,8 @@ pub async fn execute_task<M: CompletionModel>(
                             retry_count,
                             tool_calls: accumulated_tool_calls,
                             policy_violations: accumulated_policy_violations,
+                            model_usage: (!accumulated_model_usage.is_zero())
+                                .then_some(accumulated_model_usage),
                             review: None,
                         };
                     }
@@ -300,6 +335,8 @@ pub async fn execute_task<M: CompletionModel>(
                         retry_count,
                         tool_calls: accumulated_tool_calls,
                         policy_violations: accumulated_policy_violations,
+                        model_usage: (!accumulated_model_usage.is_zero())
+                            .then_some(accumulated_model_usage),
                         review,
                     };
                 }
@@ -330,6 +367,8 @@ pub async fn execute_task<M: CompletionModel>(
                     retry_count,
                     tool_calls: accumulated_tool_calls,
                     policy_violations: accumulated_policy_violations,
+                    model_usage: (!accumulated_model_usage.is_zero())
+                        .then_some(accumulated_model_usage),
                     review: last_review,
                 };
             }
@@ -349,6 +388,8 @@ pub async fn execute_task<M: CompletionModel>(
                 retry_count,
                 tool_calls: accumulated_tool_calls,
                 policy_violations: accumulated_policy_violations,
+                model_usage: (!accumulated_model_usage.is_zero())
+                    .then_some(accumulated_model_usage),
                 review: last_review,
             };
         }
@@ -440,6 +481,7 @@ async fn execute_gate_task(
         retry_count: 0,
         tool_calls: Vec::new(),
         policy_violations: Vec::new(),
+        model_usage: None,
         review: None,
     }
 }
@@ -507,9 +549,17 @@ async fn run_reviewer_pass<M: CompletionModel>(
     model: &M,
     registry: &ToolRegistry,
     config: &ExecutorConfig,
-) -> Result<Option<ReviewOutcome>, String> {
+) -> ReviewerPassArtifacts
+where
+    M::Response: CompletionUsage,
+{
     let Some(reviewer_preamble) = config.reviewer_preamble.clone() else {
-        return Ok(None);
+        return ReviewerPassArtifacts {
+            outcome: Ok(None),
+            tool_calls: Vec::new(),
+            policy_violations: Vec::new(),
+            model_usage: None,
+        };
     };
 
     let allowed_tools = allowed_tools_for_reviewer(&config.spec);
@@ -547,10 +597,31 @@ async fn run_reviewer_pass<M: CompletionModel>(
         review_config,
         &mut observer,
     )
-    .await
-    .map_err(|err| format!("reviewer pass failed: {err}"))?;
+    .await;
+    let (tool_calls, policy_violations, model_usage) = observer.finish();
+    let turn = match turn {
+        Ok(turn) => turn,
+        Err(err) => {
+            return ReviewerPassArtifacts {
+                outcome: Err(format!("reviewer pass failed: {err}")),
+                tool_calls,
+                policy_violations,
+                model_usage,
+            };
+        }
+    };
 
-    let review = parse_reviewer_decision(&turn.final_text)?;
+    let review = match parse_reviewer_decision(&turn.final_text) {
+        Ok(review) => review,
+        Err(error) => {
+            return ReviewerPassArtifacts {
+                outcome: Err(error),
+                tool_calls,
+                policy_violations,
+                model_usage,
+            };
+        }
+    };
     let outcome = ReviewOutcome {
         approved: review.approved,
         summary: review.summary,
@@ -577,7 +648,12 @@ async fn run_reviewer_pass<M: CompletionModel>(
             },
         );
     }
-    Ok(Some(outcome))
+    ReviewerPassArtifacts {
+        outcome: Ok(Some(outcome)),
+        tool_calls,
+        policy_violations,
+        model_usage,
+    }
 }
 
 fn clone_tool_loop_config_for_workdir(
@@ -601,7 +677,10 @@ async fn execute_task_in_task_worktree<M: CompletionModel>(
     registry: &Arc<ToolRegistry>,
     config: &ExecutorConfig,
     workspace_sync: &Arc<tokio::sync::Mutex<()>>,
-) -> TaskResult {
+) -> TaskResult
+where
+    M::Response: CompletionUsage,
+{
     let prepared = match tokio::task::spawn_blocking({
         let working_dir = config.working_dir.clone();
         let task_id = task.id();
@@ -704,6 +783,7 @@ fn task_workspace_failure(task: &TaskSpec, err: io::Error) -> TaskResult {
         retry_count: 0,
         tool_calls: Vec::new(),
         policy_violations: Vec::new(),
+        model_usage: None,
         review: None,
     }
 }
@@ -721,6 +801,7 @@ fn terminal_task_result(
         retry_count: 0,
         tool_calls: Vec::new(),
         policy_violations: Vec::new(),
+        model_usage: None,
         review: None,
     }
 }
@@ -777,7 +858,10 @@ async fn broadcast_dependency_signal(out_channels: &mut OutChannels, success: bo
 }
 
 #[async_trait]
-impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
+impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M>
+where
+    M::Response: CompletionUsage,
+{
     async fn run(
         &self,
         in_channels: &mut InChannels,
@@ -998,7 +1082,10 @@ fn build_dagrs_graph<M: CompletionModel + 'static>(
     registry: &Arc<ToolRegistry>,
     config: &ExecutorConfig,
     context: DagrsBuildContext,
-) -> Result<Graph, OrchestratorError> {
+) -> Result<Graph, OrchestratorError>
+where
+    M::Response: CompletionUsage,
+{
     let mut graph = Graph::new();
     configure_graph_runtime(&mut graph, plan, config);
     let mut node_table = NodeTable::new();
@@ -1133,7 +1220,10 @@ pub async fn execute_dag<M: CompletionModel + 'static>(
     model: &M,
     registry: &Arc<ToolRegistry>,
     config: &ExecutorConfig,
-) -> Result<RunStateSnapshot, OrchestratorError> {
+) -> Result<RunStateSnapshot, OrchestratorError>
+where
+    M::Response: CompletionUsage,
+{
     if config.dagrs_resume_checkpoint_id.is_some() {
         return Err(OrchestratorError::ConfigError(
             "dagrs checkpoint resume is not supported yet; TODO: redesign resume semantics after userspace-fs checkpoint integration".to_string(),
