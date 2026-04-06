@@ -108,8 +108,10 @@ libvault = { version = "0.2.2", features = ["storage_sqlite"] }
 base64 = "0.22.1"
 
 [target.'cfg(unix)'.dependencies] # only on Unix
+libfuse-fs = "0.1.12"
 pager = "0.16.1"
 libc = "0.2"
+rfuse3 = { version = "0.0.7", features = ["tokio-runtime", "unprivileged"] }
 
 [dev-dependencies]
 serial_test = { version = "3.4.0", default-features = false, features = ["async"] }

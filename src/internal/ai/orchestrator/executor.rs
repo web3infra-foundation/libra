@@ -524,15 +524,12 @@ async fn execute_gate_task_in_task_worktree(
 
     let result = execute_gate_task(task, &prepared.root, spec, inherited_runtime, observer).await;
 
-    let cleanup_result = tokio::task::spawn_blocking({
-        let task_worktree_dir = prepared.root.clone();
-        move || cleanup_task_worktree(&task_worktree_dir)
-    })
-    .await;
+    let cleanup_root = prepared.root.clone();
+    let cleanup_result = tokio::task::spawn_blocking(move || cleanup_task_worktree(prepared)).await;
     match cleanup_result {
         Err(err) => tracing::warn!("gate worktree cleanup worker failed: {}", err),
         Ok(Err(err)) => tracing::warn!(
-            path = %prepared.root.display(),
+            path = %cleanup_root.display(),
             "failed to clean up gate worktree: {}",
             err
         ),
@@ -756,15 +753,12 @@ where
         }
     }
 
-    let cleanup_result = tokio::task::spawn_blocking({
-        let task_worktree_dir = prepared.root.clone();
-        move || cleanup_task_worktree(&task_worktree_dir)
-    })
-    .await;
+    let cleanup_root = prepared.root.clone();
+    let cleanup_result = tokio::task::spawn_blocking(move || cleanup_task_worktree(prepared)).await;
     match cleanup_result {
         Err(err) => tracing::warn!("task worktree cleanup worker failed: {}", err),
         Ok(Err(err)) => tracing::warn!(
-            path = %prepared.root.display(),
+            path = %cleanup_root.display(),
             "failed to clean up task worktree: {}",
             err
         ),
