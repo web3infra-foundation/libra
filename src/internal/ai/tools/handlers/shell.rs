@@ -10,21 +10,18 @@ use async_trait::async_trait;
 // SAFETY: The unwrap() and expect() calls in test code are acceptable as test
 // failures are expected to panic on assertion failures.
 use super::parse_arguments;
-use crate::{
-    internal::ai::{
-        tools::{
-            context::{ShellArgs, ToolInvocation, ToolKind, ToolOutput, ToolPayload},
-            error::{ToolError, ToolResult},
-            registry::ToolHandler,
-            spec::ToolSpec,
-            utils::validate_path,
-        },
-        workspace_snapshot::{
-            WorkspaceSnapshot, changed_paths_since_baseline as changed_workspace_paths,
-            snapshot_workspace,
-        },
+use crate::internal::ai::{
+    tools::{
+        context::{ShellArgs, ToolInvocation, ToolKind, ToolOutput, ToolPayload},
+        error::{ToolError, ToolResult},
+        registry::ToolHandler,
+        spec::ToolSpec,
+        utils::validate_path,
     },
-    utils::util,
+    workspace_snapshot::{
+        WorkspaceSnapshot, changed_paths_since_baseline as changed_workspace_paths,
+        snapshot_workspace,
+    },
 };
 
 /// Handler for executing shell commands.
@@ -190,15 +187,11 @@ fn resolve_workdir(requested_workdir: Option<&str>, working_dir: &Path) -> ToolR
 fn changed_paths_since_baseline(
     baseline: &WorkspaceSnapshot,
     current: &WorkspaceSnapshot,
-    root: &Path,
+    _root: &Path,
 ) -> Vec<String> {
     changed_workspace_paths(baseline, current)
         .into_iter()
-        .map(|path| {
-            util::workdir_to_relative(root.join(path), root)
-                .to_string_lossy()
-                .to_string()
-        })
+        .map(|path| path.to_string_lossy().to_string())
         .collect()
 }
 
@@ -208,6 +201,7 @@ fn changed_paths_since_baseline(
 mod tests {
     use std::time::Duration;
 
+    use serial_test::serial;
     use tempfile::TempDir;
 
     use super::*;
@@ -463,8 +457,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_shell_metadata_tracks_written_paths() {
         let temp = TempDir::new().unwrap();
+        let outside_repo = TempDir::new().unwrap();
+        let _cwd = crate::utils::test::ChangeDirGuard::new(outside_repo.path());
         let inv = make_invocation(
             serde_json::json!({ "command": "printf 'hello\\n' > touched.txt" }),
             temp.path().to_path_buf(),

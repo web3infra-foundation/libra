@@ -4,10 +4,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use git_internal::hash::ObjectHash;
+use git_internal::{hash::ObjectHash, internal::object::blob::Blob};
 use ignore::WalkBuilder;
 
-use crate::command::calc_file_blob_hash;
+use crate::utils::object_ext::BlobExt;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct WorkspaceSnapshot {
@@ -97,7 +97,11 @@ fn snapshot_entry(path: &Path, file_type: &fs::FileType) -> io::Result<Workspace
         return Ok(WorkspaceEntry::Symlink(fs::read_link(path)?));
     }
 
-    Ok(WorkspaceEntry::File(calc_file_blob_hash(path)?))
+    // Workspace snapshots are used only for change detection between two local
+    // filesystem states. They should not depend on repository-scoped LFS or
+    // attribute resolution, because isolated task workspaces and tests may run
+    // outside a Libra repository context.
+    Ok(WorkspaceEntry::File(Blob::from_file(path).id))
 }
 
 fn ignore_error_to_io(err: ignore::Error) -> io::Error {
