@@ -50,6 +50,7 @@ struct FuseTaskWorktreeBackend {
 struct TaskWorktreePaths {
     cleanup_root: PathBuf,
     workspace_root: PathBuf,
+    lower_root: PathBuf,
     upper_root: PathBuf,
 }
 
@@ -66,7 +67,7 @@ pub(crate) fn prepare_task_worktree(
     let baseline = snapshot_workspace(main_working_dir)?;
 
     #[cfg(unix)]
-    if let Some(backend) = prepare_fuse_task_worktree(main_working_dir, &paths)? {
+    if let Some(backend) = prepare_fuse_task_worktree(main_working_dir, &paths, &baseline)? {
         return Ok(TaskWorktree {
             root: paths.workspace_root,
             baseline,
@@ -91,6 +92,7 @@ fn task_worktree_paths(task_id: Uuid) -> TaskWorktreePaths {
     ));
     TaskWorktreePaths {
         workspace_root: cleanup_root.join("workspace"),
+        lower_root: cleanup_root.join("lower"),
         upper_root: cleanup_root.join("upper"),
         cleanup_root,
     }
@@ -117,13 +119,16 @@ fn prepare_copy_task_worktree(
 fn prepare_fuse_task_worktree(
     main_working_dir: &Path,
     paths: &TaskWorktreePaths,
+    baseline: &WorkspaceSnapshot,
 ) -> io::Result<Option<TaskWorktreeBackend>> {
     let Ok(runtime) = Handle::try_current() else {
         return Ok(None);
     };
 
     fs::create_dir_all(&paths.workspace_root)?;
+    fs::create_dir_all(&paths.lower_root)?;
     fs::create_dir_all(&paths.upper_root)?;
+    materialize_workspace(main_working_dir, &paths.lower_root, baseline)?;
 
     match util::try_get_storage_path(Some(main_working_dir.to_path_buf())) {
         Ok(storage) => {
@@ -134,16 +139,30 @@ fn prepare_fuse_task_worktree(
     }
 
     let mount_result = runtime.block_on(mount_fuse_task_worktree(
-        main_working_dir,
+        &paths.lower_root,
         &paths.workspace_root,
         &paths.upper_root,
     ));
 
     match mount_result {
-        Ok(mount_handle) => Ok(Some(TaskWorktreeBackend::Fuse(FuseTaskWorktreeBackend {
-            cleanup_root: paths.cleanup_root.clone(),
-            mount_handle,
-        }))),
+        Ok(mount_handle) => {
+            if let Err(err) = verify_fuse_task_worktree_mount(&paths.workspace_root) {
+                let _ = runtime.block_on(mount_handle.unmount());
+                let _ = remove_cleanup_root(&paths.cleanup_root);
+                warn!(
+                    path = %main_working_dir.display(),
+                    mount = %paths.workspace_root.display(),
+                    "mounted FUSE task worktree failed health check, falling back to copy backend: {}",
+                    err
+                );
+                return Ok(None);
+            }
+
+            Ok(Some(TaskWorktreeBackend::Fuse(FuseTaskWorktreeBackend {
+                cleanup_root: paths.cleanup_root.clone(),
+                mount_handle,
+            })))
+        }
         Err(err) => {
             let _ = remove_cleanup_root(&paths.cleanup_root);
             warn!(
@@ -158,14 +177,21 @@ fn prepare_fuse_task_worktree(
 }
 
 #[cfg(unix)]
+fn verify_fuse_task_worktree_mount(workspace_root: &Path) -> io::Result<()> {
+    fs::read_dir(workspace_root)?;
+    fs::symlink_metadata(workspace_root.join(util::ROOT_DIR))?;
+    Ok(())
+}
+
+#[cfg(unix)]
 async fn mount_fuse_task_worktree(
-    main_working_dir: &Path,
+    lower_root: &Path,
     workspace_root: &Path,
     upper_root: &Path,
 ) -> io::Result<rfuse3::raw::MountHandle> {
     let lower_layer = Arc::new(
         new_passthroughfs_layer(PassthroughArgs {
-            root_dir: main_working_dir,
+            root_dir: lower_root,
             mapping: None::<&str>,
         })
         .await?,
