@@ -3,6 +3,11 @@
 Show the current branch, switch to an existing branch, or create and switch to a new branch.
 Compatible with `git checkout` for common branch operations.
 
+This command is currently a compatibility surface over `switch` + `restore`.
+The second-batch compatibility fixes are already landed, but full modernized
+`checkout` JSON output and a dedicated typed error model remain scheduled for
+the sixth batch.
+
 ## Common Commands
 
 ```bash

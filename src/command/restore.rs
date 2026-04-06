@@ -690,14 +690,12 @@ pub async fn restore_to_file(hash: &ObjectHash, path: &PathBuf) -> io::Result<()
             let lfs_obj_path = lfs::lfs_object_path(&oid);
             if lfs_obj_path.exists() {
                 fs::copy(&lfs_obj_path, &path_abs)?;
-            } else {
-                if let Err(e) = LFSClient::get()
-                    .await
-                    .download_object(&oid, size, &path_abs, None)
-                    .await
-                {
-                    return Err(io::Error::other(e.to_string()));
-                }
+            } else if let Err(e) = LFSClient::get()
+                .await
+                .download_object(&oid, size, &path_abs, None)
+                .await
+            {
+                return Err(io::Error::other(e.to_string()));
             }
         }
         None => {

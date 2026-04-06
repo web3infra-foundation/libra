@@ -14,8 +14,8 @@
 - `add` 命令主改造已落地：`run_add()` → `AddOutput` 执行层/渲染层拆分、JSON/machine 输出、显式 `StableErrorCode`、warning 接入共享 tracker
 - `status` 命令主改造已落地：`StatusData` 共享数据层、upstream tracking、`--exit-code` 标志、显式 `StableErrorCode`
 
-**已有 JSON 输出的命令（面向终端用户的高层命令）：** commit, status, branch, config, init, clone, add, push, pull, switch, reset, tag，以及第三批已落地的 `log` / `diff` / `show` / `blame`（底层命令如 `cat-file`、`show-ref` 也已支持 JSON，但未纳入本优先级列表）
-**主要错误路径已接入 StableErrorCode 的命令：** init, clone, add, status, commit, push, pull, switch, reset, tag, branch, show, log, diff, blame, shortlog, lfs, code
+**已有 JSON 输出的命令（面向终端用户的高层命令）：** commit, status, branch, config, init, clone, add, push, pull, switch, reset, tag，第三批已落地的 `log` / `diff` / `show` / `blame`，第四批已落地的 `stash` / `restore` / `revert` / `cherry-pick`，以及第五批已落地的 `remote` / `fetch`（底层命令如 `cat-file`、`show-ref` 也已支持 JSON，但未纳入本优先级列表）
+**主要错误路径已接入 StableErrorCode 的命令：** init, clone, add, status, commit, push, pull, switch, reset, tag, branch, show, log, diff, blame, stash, restore, revert, cherry-pick, remote, fetch, shortlog, lfs, code
 
 ---
 
@@ -118,8 +118,14 @@
 
 | 顺序 | 命令 | 当前状态 | 改进重点 |
 |------|------|--------|--------|
-| **21** | `remote` | 有子命令，无 JSON | JSON 输出；退出码对齐（重复添加 exit 3 或 exit 1） |
-| **22** | `fetch` | 与 Git 一致 | JSON 进度事件；错误码 |
+| **21** | `remote` | ✅ 已落地 | `run_remote()` / render split；JSON / machine；显式 `StableErrorCode`；`remote -v` 多 URL 展示修复；prune 结构化输出（详见 [remote.md](remote.md)） |
+| **22** | `fetch` | ✅ 已落地 | `FetchOutput` 顶层结果；JSON / machine；显式 `StableErrorCode`；JSON progress 事件；human 摘要输出（详见 [fetch.md](fetch.md)） |
+
+**第五批基于 Review 的计划修订：**
+
+- `remote` 沿用当前 CLI 形态，只收口输出、错误码和 `remote -v` 多 URL 行为；`remote show` 的 Git 全量兼容语义单列为后续独立收口项，避免本批引入 breaking CLI 变更。
+- `fetch` 保持底层传输和 refs 更新 helper 不变，只在顶层命令补结构化结果、显式错误码和进度契约，避免影响 `pull` / `clone` / `convert` 对 `fetch_repository_with_result()` 的复用。
+- 本轮 Review 同步修正了第四批子计划文档的陈旧状态：`stash` / `restore` / `revert` / `cherry-pick` 改为记录“已落地基线 + 后续维护点”，不再与当前代码状态冲突。
 
 ### 第六批：辅助命令（P2 增强）
 
@@ -200,6 +206,8 @@
 - [Restore 命令改进详细计划](restore.md) ✅ 已落地
 - [Revert 命令改进详细计划](revert.md) ✅ 已落地
 - [Cherry-Pick 命令改进详细计划](cherry-pick.md) ✅ 已落地
+- [Remote 命令改进详细计划](remote.md) ✅ 已落地
+- [Fetch 命令改进详细计划](fetch.md) ✅ 已落地
 
 ## 命令改进实施记录
 

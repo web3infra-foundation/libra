@@ -1,12 +1,17 @@
-//! Manages remotes by listing, showing, adding, and updating URLs and associated fetch/push metadata.
+//! Manages remotes by listing, adding, removing, renaming, mutating URLs, and
+//! pruning stale remote-tracking branches.
 
-use std::collections::HashSet;
+use std::{
+    collections::HashSet,
+    io::{self, Write},
+};
 
 use clap::Subcommand;
 use git_internal::hash::get_hash_kind;
+use serde::Serialize;
 
 use crate::{
-    command::fetch::RemoteClient,
+    command::fetch,
     internal::{
         branch::{Branch, BranchStoreError},
         config::ConfigKv,
@@ -14,9 +19,45 @@ use crate::{
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
-        output::OutputConfig,
+        output::{OutputConfig, emit_json_data},
     },
 };
+
+/// Whether a URL entry targets the fetch or push side of a remote.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum UrlRole {
+    Fetch,
+    Push,
+}
+
+impl std::fmt::Display for UrlRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UrlRole::Fetch => f.write_str("fetch"),
+            UrlRole::Push => f.write_str("push"),
+        }
+    }
+}
+
+/// The mutation performed by `set-url`.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SetUrlMode {
+    Add,
+    Delete,
+    Set,
+}
+
+impl std::fmt::Display for SetUrlMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SetUrlMode::Add => f.write_str("add"),
+            SetUrlMode::Delete => f.write_str("delete"),
+            SetUrlMode::Set => f.write_str("set"),
+        }
+    }
+}
 
 #[derive(Subcommand, Debug)]
 pub enum RemoteCmds {
@@ -39,10 +80,10 @@ pub enum RemoteCmds {
         /// The new name of the remote
         new: String,
     },
-    /// List remotes
+    /// List remotes verbosely
     #[command(name = "-v")]
     List,
-    /// Show current remote repository
+    /// List configured remote names
     Show,
     /// Print URLs for the given remote
     ///
@@ -100,99 +141,172 @@ pub enum RemoteCmds {
     },
 }
 
+#[derive(Debug, thiserror::Error)]
+enum RemoteError {
+    #[error("remote '{name}' already exists")]
+    AlreadyExists { name: String },
+
+    #[error("no such remote: {name}")]
+    NotFound { name: String },
+
+    #[error("no URL configured for remote '{name}'")]
+    NoUrlConfigured { name: String },
+
+    #[error("no matching {role} URL found for remote '{name}': {pattern}")]
+    UrlPatternNotMatched {
+        name: String,
+        role: UrlRole,
+        pattern: String,
+    },
+
+    #[error("failed to read remote configuration: {detail}")]
+    ConfigRead { detail: String },
+
+    #[error("failed to update remote configuration: {detail}")]
+    ConfigWrite { detail: String },
+
+    #[error("failed to list remote-tracking branches: {detail}")]
+    BranchList { detail: String },
+
+    #[error("corrupt remote-tracking branch '{name}': {detail}")]
+    BranchCorrupt { name: String, detail: String },
+
+    #[error("failed to prune remote-tracking branch '{name}': {detail}")]
+    BranchDelete { name: String, detail: String },
+
+    #[error("remote object format '{remote}' does not match local '{local}'")]
+    ObjectFormatMismatch { remote: String, local: String },
+
+    #[error(transparent)]
+    Fetch(#[from] fetch::FetchError),
+}
+
+impl From<RemoteError> for CliError {
+    fn from(error: RemoteError) -> Self {
+        match error {
+            RemoteError::AlreadyExists { name } => {
+                CliError::fatal(format!("remote '{name}' already exists"))
+                    .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+                    .with_hint("use 'libra remote -v' to inspect configured remotes")
+            }
+            RemoteError::NotFound { name } => CliError::fatal(format!("no such remote: {name}"))
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint("use 'libra remote -v' to inspect configured remotes"),
+            RemoteError::NoUrlConfigured { name } => {
+                CliError::fatal(format!("no URL configured for remote '{name}'"))
+                    .with_stable_code(StableErrorCode::CliInvalidTarget)
+                    .with_hint("use 'libra remote get-url --all <name>' to inspect configured URLs")
+            }
+            RemoteError::UrlPatternNotMatched {
+                name,
+                role,
+                pattern,
+            } => CliError::fatal(format!(
+                "no matching {role} URL found for remote '{name}': {pattern}"
+            ))
+            .with_stable_code(StableErrorCode::CliInvalidTarget)
+            .with_hint("use 'libra remote get-url --all <name>' to inspect configured URLs"),
+            RemoteError::ConfigRead { detail } => {
+                CliError::fatal(format!("failed to read remote configuration: {detail}"))
+                    .with_stable_code(StableErrorCode::IoReadFailed)
+            }
+            RemoteError::BranchList { detail } => {
+                CliError::fatal(format!("failed to list remote-tracking branches: {detail}"))
+                    .with_stable_code(StableErrorCode::IoReadFailed)
+            }
+            RemoteError::BranchCorrupt { name, detail } => {
+                CliError::fatal(format!("corrupt remote-tracking branch '{name}': {detail}"))
+                    .with_stable_code(StableErrorCode::RepoCorrupt)
+            }
+            RemoteError::ConfigWrite { detail } => {
+                CliError::fatal(format!("failed to update remote configuration: {detail}"))
+                    .with_stable_code(StableErrorCode::IoWriteFailed)
+            }
+            RemoteError::BranchDelete { name, detail } => CliError::fatal(format!(
+                "failed to prune remote-tracking branch '{name}': {detail}"
+            ))
+            .with_stable_code(StableErrorCode::IoWriteFailed),
+            RemoteError::ObjectFormatMismatch { remote, local } => CliError::fatal(format!(
+                "remote object format '{remote}' does not match local '{local}'"
+            ))
+            .with_stable_code(StableErrorCode::RepoStateInvalid),
+            RemoteError::Fetch(source) => CliError::from(source),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RemoteListEntry {
+    pub name: String,
+    pub fetch_urls: Vec<String>,
+    pub push_urls: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RemotePruneEntry {
+    pub remote_ref: String,
+    pub branch: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "action", rename_all = "kebab-case")]
+pub enum RemoteOutput {
+    Add {
+        name: String,
+        url: String,
+    },
+    Remove {
+        name: String,
+    },
+    Rename {
+        old_name: String,
+        new_name: String,
+    },
+    List {
+        verbose: bool,
+        remotes: Vec<RemoteListEntry>,
+    },
+    Urls {
+        name: String,
+        push: bool,
+        all: bool,
+        urls: Vec<String>,
+    },
+    SetUrl {
+        name: String,
+        role: UrlRole,
+        mode: SetUrlMode,
+        urls: Vec<String>,
+        removed: usize,
+    },
+    Prune {
+        name: String,
+        dry_run: bool,
+        stale_branches: Vec<RemotePruneEntry>,
+    },
+}
+
 pub async fn execute(command: RemoteCmds) {
-    if let Err(e) = execute_safe(command, &OutputConfig::default()).await {
-        e.print_stderr();
+    if let Err(error) = execute_safe(command, &OutputConfig::default()).await {
+        error.print_stderr();
     }
 }
 
 /// Safe entry point that returns structured [`CliResult`] instead of printing
-/// errors and exiting. Dispatches to remote sub-commands (add, remove, rename,
-/// set-url, list, show).
-pub async fn execute_safe(command: RemoteCmds, _output: &OutputConfig) -> CliResult<()> {
-    match command {
-        RemoteCmds::Add { name, url } => {
-            if ConfigKv::remote_config(&name)
-                .await
-                .ok()
-                .flatten()
-                .is_some()
-            {
-                return Err(CliError::fatal(format!("remote {name} already exists")));
-            }
-            let _ = ConfigKv::set(&format!("remote.{name}.url"), &url, false).await;
-        }
-        RemoteCmds::Remove { name } => {
-            ConfigKv::remove_remote(&name)
-                .await
-                .map_err(|e| CliError::failure(e.to_string()))?;
-        }
-        RemoteCmds::Rename { old, new } => {
-            ConfigKv::rename_remote(&old, &new)
-                .await
-                .map_err(|e| CliError::failure(e.to_string()))?;
-        }
-        RemoteCmds::List => {
-            let remotes = ConfigKv::all_remote_configs().await.unwrap_or_default();
-            for remote in remotes {
-                show_remote_verbose(&remote.name).await?;
-            }
-        }
-        RemoteCmds::Show => {
-            let remotes = ConfigKv::all_remote_configs().await.unwrap_or_default();
-            for remote in remotes {
-                println!("{}", remote.name);
-            }
-        }
-        RemoteCmds::GetUrl { push, all, name } => {
-            if ConfigKv::remote_config(&name)
-                .await
-                .ok()
-                .flatten()
-                .is_none()
-            {
-                return Err(CliError::fatal(format!("no such remote: {name}")));
-            }
-            // If --push, prefer explicit pushurl entries; fall back to url if none.
-            if push {
-                let push_urls = ConfigKv::get_all(&format!("remote.{name}.pushurl"))
-                    .await
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|e| e.value)
-                    .collect::<Vec<_>>();
-                if !push_urls.is_empty() {
-                    if all {
-                        for u in push_urls {
-                            println!("{}", u);
-                        }
-                    } else if let Some(u) = push_urls.first() {
-                        println!("{}", u);
-                    }
-                    return Ok(());
-                }
-                // fall through to read regular url if no pushurl configured
-            }
+/// errors and exiting.
+pub async fn execute_safe(command: RemoteCmds, output: &OutputConfig) -> CliResult<()> {
+    let result = run_remote(command).await.map_err(CliError::from)?;
+    render_remote_output(&result, output)
+}
 
-            let urls = ConfigKv::get_all(&format!("remote.{name}.url"))
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .map(|e| e.value)
-                .collect::<Vec<_>>();
-            if urls.is_empty() {
-                return Err(CliError::fatal(format!(
-                    "no URL configured for remote '{name}'"
-                )));
-            } else if all || push {
-                // --all prints all URLs; --push with no pushurl also prints all regular urls
-                for url in urls {
-                    println!("{}", url);
-                }
-            } else if let Some(url) = urls.first() {
-                println!("{}", url);
-            }
-        }
+async fn run_remote(command: RemoteCmds) -> Result<RemoteOutput, RemoteError> {
+    match command {
+        RemoteCmds::Add { name, url } => run_add_remote(name, url).await,
+        RemoteCmds::Remove { name } => run_remove_remote(name).await,
+        RemoteCmds::Rename { old, new } => run_rename_remote(old, new).await,
+        RemoteCmds::List => run_list_remotes(true).await,
+        RemoteCmds::Show => run_list_remotes(false).await,
+        RemoteCmds::GetUrl { push, all, name } => run_get_url(name, push, all).await,
         RemoteCmds::SetUrl {
             add,
             delete,
@@ -200,189 +314,496 @@ pub async fn execute_safe(command: RemoteCmds, _output: &OutputConfig) -> CliRes
             all,
             name,
             value,
-        } => {
-            if ConfigKv::remote_config(&name)
-                .await
-                .ok()
-                .flatten()
-                .is_none()
-            {
-                return Err(CliError::fatal(format!("no such remote: {name}")));
-            }
-            // Determine which config key to operate on
-            let key = if push { "pushurl" } else { "url" };
-
-            if add {
-                // Insert a new URL entry
-                let _ = ConfigKv::add(&format!("remote.{name}.{key}"), &value, false).await;
-                return Ok(());
-            }
-
-            if delete {
-                // Delete only entries whose value contains the pattern
-                let full_key = format!("remote.{name}.{key}");
-                let entries = ConfigKv::get_all(&full_key).await.unwrap_or_default();
-                let remaining: Vec<_> = entries
-                    .into_iter()
-                    .filter(|e| !e.value.contains(&value))
-                    .collect();
-                let _ = ConfigKv::unset_all(&full_key).await;
-                for r in remaining {
-                    let _ = ConfigKv::add(&full_key, &r.value, r.encrypted).await;
-                }
-                return Ok(());
-            }
-
-            // Default: replace behavior
-            if all {
-                // Remove all existing entries for this key, then insert the new value once
-                let _ = ConfigKv::unset_all(&format!("remote.{name}.{key}")).await;
-                let _ = ConfigKv::set(&format!("remote.{name}.{key}"), &value, false).await;
-            } else {
-                // Replace first existing entry: remove all then set new value.
-                let _ = ConfigKv::unset_all(&format!("remote.{name}.{key}")).await;
-                let _ = ConfigKv::set(&format!("remote.{name}.{key}"), &value, false).await;
-            }
-        }
-        RemoteCmds::Prune { name, dry_run } => {
-            prune_remote(&name, dry_run).await?;
-        }
+        } => run_set_url(name, value, push, add, delete, all).await,
+        RemoteCmds::Prune { name, dry_run } => run_prune_remote(name, dry_run).await,
     }
-    Ok(())
 }
 
-async fn show_remote_verbose(remote: &str) -> CliResult<()> {
-    // There can be multiple URLs for a remote, like Gitee & GitHub
-    let urls = ConfigKv::get_all(&format!("remote.{remote}.url"))
+async fn run_add_remote(name: String, url: String) -> Result<RemoteOutput, RemoteError> {
+    if remote_exists(&name).await? {
+        return Err(RemoteError::AlreadyExists { name });
+    }
+
+    ConfigKv::set(&format!("remote.{name}.url"), &url, false)
         .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|e| e.value)
-        .collect::<Vec<_>>();
-    match urls.first() {
-        Some(url) => {
-            println!("{remote} {url} (fetch)");
-        }
-        None => {
-            return Err(CliError::fatal(format!(
-                "no URL configured for remote '{remote}'"
-            )));
-        }
-    }
-    for url in urls {
-        println!("{remote} {url} (push)");
-    }
-    Ok(())
+        .map_err(|error| RemoteError::ConfigWrite {
+            detail: error.to_string(),
+        })?;
+
+    Ok(RemoteOutput::Add { name, url })
 }
 
-fn remote_branch_store_error(context: &str, error: BranchStoreError) -> CliError {
-    match error {
-        BranchStoreError::Query(detail) => {
-            CliError::fatal(format!("failed to {context}: {detail}"))
-                .with_stable_code(StableErrorCode::IoReadFailed)
-        }
-        BranchStoreError::Delete { name, detail } => CliError::fatal(format!(
-            "failed to delete branch '{name}' while {context}: {detail}"
-        ))
-        .with_stable_code(StableErrorCode::IoWriteFailed),
-        other => CliError::fatal(format!("failed to {context}: {other}"))
-            .with_stable_code(StableErrorCode::RepoCorrupt),
-    }
+async fn run_remove_remote(name: String) -> Result<RemoteOutput, RemoteError> {
+    ensure_remote_exists(&name).await?;
+    ConfigKv::remove_remote(&name)
+        .await
+        .map_err(|error| RemoteError::ConfigWrite {
+            detail: error.to_string(),
+        })?;
+    Ok(RemoteOutput::Remove { name })
 }
 
-async fn prune_remote(name: &str, dry_run: bool) -> Result<(), CliError> {
-    // Check if the remote exists
-    let Some(remote_config) = ConfigKv::remote_config(name).await.ok().flatten() else {
-        return Err(CliError::fatal(format!("no such remote: {}", name)));
+async fn run_rename_remote(old: String, new: String) -> Result<RemoteOutput, RemoteError> {
+    ensure_remote_exists(&old).await?;
+    if remote_exists(&new).await? {
+        return Err(RemoteError::AlreadyExists { name: new });
+    }
+
+    ConfigKv::rename_remote(&old, &new)
+        .await
+        .map_err(|error| RemoteError::ConfigWrite {
+            detail: error.to_string(),
+        })?;
+    Ok(RemoteOutput::Rename {
+        old_name: old,
+        new_name: new,
+    })
+}
+
+async fn run_list_remotes(verbose: bool) -> Result<RemoteOutput, RemoteError> {
+    let remote_names = list_remote_names().await?;
+
+    let mut entries = Vec::with_capacity(remote_names.len());
+    for name in remote_names {
+        entries.push(load_remote_entry(&name).await?);
+    }
+
+    Ok(RemoteOutput::List {
+        verbose,
+        remotes: entries,
+    })
+}
+
+/// Discover all remote names by scanning `remote.<name>.*` config keys.
+/// Unlike `ConfigKv::all_remote_configs()` (which only recognises remotes with
+/// a `.url` entry), this finds any remote that has *any* configuration key.
+async fn list_remote_names() -> Result<Vec<String>, RemoteError> {
+    let entries =
+        ConfigKv::get_by_prefix("remote.")
+            .await
+            .map_err(|error| RemoteError::ConfigRead {
+                detail: error.to_string(),
+            })?;
+    let mut names = HashSet::new();
+    for entry in entries {
+        // key format: "remote.<name>.<subkey>" — use `rsplit_once` so that
+        // dotted remote names (e.g. "remote.corp.prod.url") are parsed as
+        // name="corp.prod", matching `ConfigKv::all_remote_configs`.
+        if let Some(rest) = entry.key.strip_prefix("remote.")
+            && let Some((name, _subkey)) = rest.rsplit_once('.')
+            && !name.is_empty()
+        {
+            names.insert(name.to_owned());
+        }
+    }
+    let mut names: Vec<String> = names.into_iter().collect();
+    names.sort();
+    Ok(names)
+}
+
+async fn run_get_url(name: String, push: bool, all: bool) -> Result<RemoteOutput, RemoteError> {
+    ensure_remote_exists(&name).await?;
+    let fetch_urls = load_config_urls(&name, "url").await?;
+    let configured_push_urls = load_config_urls(&name, "pushurl").await?;
+    let push_urls = effective_push_urls(&fetch_urls, &configured_push_urls);
+
+    let source = if push { &push_urls } else { &fetch_urls };
+    let urls: Vec<String> = if all {
+        source.clone()
+    } else {
+        source.iter().take(1).cloned().collect()
     };
 
-    // Get remote client
-    let remote_client = RemoteClient::from_spec_with_remote(&remote_config.url, Some(name))
-        .map_err(|e| {
-            CliError::fatal(format!(
-                "Failed to create remote client from '{}': {}",
-                remote_config.url, e
-            ))
-        })?;
+    if urls.is_empty() {
+        return Err(RemoteError::NoUrlConfigured { name });
+    }
 
-    // Discover remote references
-    let discovery = remote_client
-        .discovery_reference(crate::git_protocol::ServiceType::UploadPack)
+    Ok(RemoteOutput::Urls {
+        name,
+        push,
+        all,
+        urls,
+    })
+}
+
+async fn run_set_url(
+    name: String,
+    value: String,
+    push: bool,
+    add: bool,
+    delete: bool,
+    // `--all` and default replace both perform unset-all-then-set, so the
+    // behavior is identical today.  We accept the flag for CLI compatibility
+    // with Git but do not branch on it.
+    #[allow(unused_variables)] all: bool,
+) -> Result<RemoteOutput, RemoteError> {
+    ensure_remote_exists(&name).await?;
+
+    let key = if push { "pushurl" } else { "url" };
+    let role = if push { UrlRole::Push } else { UrlRole::Fetch };
+    let full_key = format!("remote.{name}.{key}");
+
+    let mode = if add {
+        ConfigKv::add(&full_key, &value, false)
+            .await
+            .map_err(|error| RemoteError::ConfigWrite {
+                detail: error.to_string(),
+            })?;
+        SetUrlMode::Add
+    } else if delete {
+        let entries =
+            ConfigKv::get_all(&full_key)
+                .await
+                .map_err(|error| RemoteError::ConfigRead {
+                    detail: error.to_string(),
+                })?;
+        let removed = entries
+            .iter()
+            .filter(|entry| entry.value.contains(&value))
+            .count();
+        if removed == 0 {
+            return Err(RemoteError::UrlPatternNotMatched {
+                name,
+                role,
+                pattern: value,
+            });
+        }
+
+        ConfigKv::unset_all(&full_key)
+            .await
+            .map_err(|error| RemoteError::ConfigWrite {
+                detail: error.to_string(),
+            })?;
+        for entry in entries
+            .into_iter()
+            .filter(|entry| !entry.value.contains(&value))
+        {
+            ConfigKv::add(&full_key, &entry.value, entry.encrypted)
+                .await
+                .map_err(|error| RemoteError::ConfigWrite {
+                    detail: error.to_string(),
+                })?;
+        }
+
+        let urls = load_config_urls(&name, key).await?;
+        return Ok(RemoteOutput::SetUrl {
+            name,
+            role,
+            mode: SetUrlMode::Delete,
+            urls,
+            removed,
+        });
+    } else {
+        ConfigKv::unset_all(&full_key)
+            .await
+            .map_err(|error| RemoteError::ConfigWrite {
+                detail: error.to_string(),
+            })?;
+        ConfigKv::set(&full_key, &value, false)
+            .await
+            .map_err(|error| RemoteError::ConfigWrite {
+                detail: error.to_string(),
+            })?;
+        SetUrlMode::Set
+    };
+
+    let urls = load_config_urls(&name, key).await?;
+    Ok(RemoteOutput::SetUrl {
+        name,
+        role,
+        mode,
+        urls,
+        removed: 0,
+    })
+}
+
+async fn run_prune_remote(name: String, dry_run: bool) -> Result<RemoteOutput, RemoteError> {
+    ensure_remote_exists(&name).await?;
+    let remote_config = ConfigKv::remote_config(&name)
         .await
-        .map_err(|e| {
-            CliError::fatal(format!(
-                "Failed to discover remote references for '{}' at '{}': {}",
-                name, remote_config.url, e
-            ))
-        })?;
+        .map_err(|error| RemoteError::ConfigRead {
+            detail: error.to_string(),
+        })?
+        .ok_or_else(|| RemoteError::NoUrlConfigured { name: name.clone() })?;
 
-    // Verify hash kind compatibility
+    let (_remote_client, discovery) =
+        fetch::discover_remote_with_name(&remote_config.url, Some(&remote_config.name)).await?;
+
     let local_kind = get_hash_kind();
     if discovery.hash_kind != local_kind {
-        return Err(CliError::fatal(format!(
-            "remote object format '{}' does not match local '{}'",
-            discovery.hash_kind, local_kind
-        )));
+        return Err(RemoteError::ObjectFormatMismatch {
+            remote: discovery.hash_kind.to_string(),
+            local: local_kind.to_string(),
+        });
     }
 
     set_wire_hash_kind(discovery.hash_kind);
 
-    // Get remote branch names from discovery (format: refs/heads/branch_name)
     let remote_branch_names: HashSet<String> = discovery
         .refs
         .iter()
-        .filter_map(|r| {
-            r._ref
+        .filter_map(|reference| {
+            reference
+                ._ref
                 .strip_prefix("refs/heads/")
                 .map(String::from)
                 .or_else(|| {
-                    r._ref
+                    reference
+                        ._ref
                         .strip_prefix("refs/mr/")
-                        .map(|mr| format!("mr/{}", mr))
+                        .map(|mr| format!("mr/{mr}"))
                 })
         })
         .collect();
-    // Get local remote-tracking branches (format: "refs/remotes/{remote}/branch_name")
-    let local_remote_branches = Branch::list_branches_result(Some(name))
-        .await
-        .map_err(|error| remote_branch_store_error("list remote-tracking branches", error))?;
 
-    // Find and prune stale branches
-    let mut pruned_count = 0;
-    let head_ref = format!("refs/remotes/{}/HEAD", name);
-    let prefix = format!("refs/remotes/{}/", name);
+    let local_remote_branches =
+        Branch::list_branches_result(Some(&name))
+            .await
+            .map_err(|error| match error {
+                BranchStoreError::Query(detail) => RemoteError::BranchList { detail },
+                BranchStoreError::Corrupt { name, detail } => {
+                    RemoteError::BranchCorrupt { name, detail }
+                }
+                other => RemoteError::BranchList {
+                    detail: other.to_string(),
+                },
+            })?;
+
+    let head_ref = format!("refs/remotes/{name}/HEAD");
+    let prefix = format!("refs/remotes/{name}/");
+    let mut stale_branches = Vec::new();
 
     for local_branch in &local_remote_branches {
-        // Skip HEAD reference
         if local_branch.name == head_ref {
             continue;
         }
-        // Extract branch name from "refs/remotes/{remote}/branch_name"
+
         let Some(branch_name) = local_branch.name.strip_prefix(&prefix) else {
             continue;
         };
 
-        // Check if this branch still exists on remote
-        if !remote_branch_names.contains(branch_name) {
-            if dry_run {
-                println!(" * [would prune] {}/{}", name, branch_name);
-            } else {
-                Branch::delete_branch_result(&local_branch.name, Some(name))
-                    .await
-                    .map_err(|error| {
-                        remote_branch_store_error("pruning remote-tracking branch", error)
-                    })?;
-                println!(" * [pruned] {}/{}", name, branch_name);
-            }
-            pruned_count += 1;
+        if remote_branch_names.contains(branch_name) {
+            continue;
         }
+
+        if !dry_run {
+            Branch::delete_branch_result(&local_branch.name, Some(&name))
+                .await
+                .map_err(|error| match error {
+                    BranchStoreError::Delete { name, detail } => {
+                        RemoteError::BranchDelete { name, detail }
+                    }
+                    BranchStoreError::Corrupt { name, detail } => {
+                        RemoteError::BranchCorrupt { name, detail }
+                    }
+                    BranchStoreError::Query(detail) => RemoteError::BranchList { detail },
+                    other => RemoteError::ConfigWrite {
+                        detail: other.to_string(),
+                    },
+                })?;
+        }
+
+        stale_branches.push(RemotePruneEntry {
+            remote_ref: local_branch.name.clone(),
+            branch: format!("{name}/{branch_name}"),
+        });
     }
 
-    // Print summary
-    match pruned_count {
-        0 => println!("Everything up-to-date"),
-        n if dry_run => println!("\nWould prune {} stale remote-tracking branch(es).", n),
-        n => println!("\nPruned {} stale remote-tracking branch(es).", n),
+    Ok(RemoteOutput::Prune {
+        name,
+        dry_run,
+        stale_branches,
+    })
+}
+
+/// A remote is considered to exist if **any** `remote.<name>.*` key is
+/// present, not only `remote.<name>.url`.  This handles the edge case where
+/// `set-url --delete` removed the last fetch URL but other keys (e.g.
+/// `pushurl`, vault SSH keys) still remain.
+///
+/// Uses `rsplit_once('.')` name extraction to avoid prefix collisions with
+/// dotted remote names (e.g. querying "corp" must not match a key belonging
+/// to remote "corp.prod").
+async fn remote_exists(name: &str) -> Result<bool, RemoteError> {
+    let prefix = format!("remote.{name}.");
+    let entries =
+        ConfigKv::get_by_prefix(&prefix)
+            .await
+            .map_err(|error| RemoteError::ConfigRead {
+                detail: error.to_string(),
+            })?;
+    // Verify that at least one entry actually parses as belonging to this
+    // exact remote name, not a longer dotted name that shares the prefix.
+    Ok(entries.iter().any(|e| {
+        e.key
+            .strip_prefix("remote.")
+            .and_then(|rest| rest.rsplit_once('.'))
+            .is_some_and(|(parsed_name, _)| parsed_name == name)
+    }))
+}
+
+async fn ensure_remote_exists(name: &str) -> Result<(), RemoteError> {
+    if remote_exists(name).await? {
+        Ok(())
+    } else {
+        Err(RemoteError::NotFound {
+            name: name.to_string(),
+        })
     }
-    Ok(())
+}
+
+/// Load a remote's URL configuration.  Tolerates missing fetch URLs so that
+/// remotes that only have `pushurl` (e.g. after `set-url --delete` removed the
+/// last fetch URL) are still visible in listings and accessible to `get-url
+/// --push`.
+async fn load_remote_entry(name: &str) -> Result<RemoteListEntry, RemoteError> {
+    ensure_remote_exists(name).await?;
+    let fetch_urls = load_config_urls(name, "url").await?;
+    let configured_push_urls = load_config_urls(name, "pushurl").await?;
+    let push_urls = effective_push_urls(&fetch_urls, &configured_push_urls);
+
+    Ok(RemoteListEntry {
+        name: name.to_string(),
+        fetch_urls,
+        push_urls,
+    })
+}
+
+async fn load_config_urls(name: &str, key: &str) -> Result<Vec<String>, RemoteError> {
+    ConfigKv::get_all(&format!("remote.{name}.{key}"))
+        .await
+        .map_err(|error| RemoteError::ConfigRead {
+            detail: error.to_string(),
+        })
+        .map(|entries| entries.into_iter().map(|entry| entry.value).collect())
+}
+
+fn effective_push_urls(fetch_urls: &[String], push_urls: &[String]) -> Vec<String> {
+    if push_urls.is_empty() {
+        fetch_urls.to_vec()
+    } else {
+        push_urls.to_vec()
+    }
+}
+
+fn render_remote_output(result: &RemoteOutput, output: &OutputConfig) -> CliResult<()> {
+    if output.is_json() {
+        return emit_json_data("remote", result, output);
+    }
+
+    if output.quiet {
+        return Ok(());
+    }
+
+    let stdout = io::stdout();
+    let mut writer = stdout.lock();
+    let write_err =
+        |error: io::Error| CliError::io(format!("failed to write remote output: {error}"));
+
+    match result {
+        RemoteOutput::Add { name, url } => writeln!(
+            writer,
+            "Added remote '{name}' -> {}",
+            fetch::redact_url_credentials(url)
+        )
+        .map_err(write_err),
+        RemoteOutput::Remove { name } => {
+            writeln!(writer, "Removed remote '{name}'").map_err(write_err)
+        }
+        RemoteOutput::Rename { old_name, new_name } => {
+            writeln!(writer, "Renamed remote '{old_name}' to '{new_name}'").map_err(write_err)
+        }
+        RemoteOutput::List { verbose, remotes } => {
+            if *verbose {
+                for remote in remotes {
+                    for url in &remote.fetch_urls {
+                        writeln!(
+                            writer,
+                            "{}\t{} (fetch)",
+                            remote.name,
+                            fetch::redact_url_credentials(url)
+                        )
+                        .map_err(write_err)?;
+                    }
+                    for url in &remote.push_urls {
+                        writeln!(
+                            writer,
+                            "{}\t{} (push)",
+                            remote.name,
+                            fetch::redact_url_credentials(url)
+                        )
+                        .map_err(write_err)?;
+                    }
+                }
+            } else {
+                for remote in remotes {
+                    writeln!(writer, "{}", remote.name).map_err(write_err)?;
+                }
+            }
+            Ok(())
+        }
+        RemoteOutput::Urls { urls, .. } => {
+            for url in urls {
+                writeln!(writer, "{}", fetch::redact_url_credentials(url)).map_err(write_err)?;
+            }
+            Ok(())
+        }
+        RemoteOutput::SetUrl {
+            name,
+            role,
+            mode,
+            urls,
+            removed,
+        } => match mode {
+            SetUrlMode::Add => writeln!(
+                writer,
+                "Added {role} URL for remote '{name}': {}",
+                fetch::redact_url_credentials(&urls.last().cloned().unwrap_or_default())
+            )
+            .map_err(write_err),
+            SetUrlMode::Delete => writeln!(
+                writer,
+                "Removed {removed} {role} URL(s) from remote '{name}'"
+            )
+            .map_err(write_err),
+            SetUrlMode::Set => writeln!(
+                writer,
+                "Set {role} URL for remote '{name}' to {}",
+                fetch::redact_url_credentials(&urls.first().cloned().unwrap_or_default())
+            )
+            .map_err(write_err),
+        },
+        RemoteOutput::Prune {
+            name: _,
+            dry_run,
+            stale_branches,
+        } => {
+            for entry in stale_branches {
+                if *dry_run {
+                    writeln!(writer, " * [would prune] {}", entry.branch).map_err(write_err)?;
+                } else {
+                    writeln!(writer, " * [pruned] {}", entry.branch).map_err(write_err)?;
+                }
+            }
+
+            if stale_branches.is_empty() {
+                writeln!(writer, "Everything up-to-date").map_err(write_err)?;
+            } else if *dry_run {
+                writeln!(
+                    writer,
+                    "\nWould prune {} stale remote-tracking branch(es).",
+                    stale_branches.len()
+                )
+                .map_err(write_err)?;
+            } else {
+                writeln!(
+                    writer,
+                    "\nPruned {} stale remote-tracking branch(es).",
+                    stale_branches.len()
+                )
+                .map_err(write_err)?;
+            }
+            Ok(())
+        }
+    }
 }

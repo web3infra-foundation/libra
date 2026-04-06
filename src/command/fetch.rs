@@ -17,6 +17,7 @@ use git_internal::{
 };
 use indicatif::ProgressBar;
 use sea_orm::{TransactionError, TransactionTrait};
+use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_util::io::StreamReader;
 use url::Url;
@@ -41,10 +42,18 @@ use crate::{
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
-        output::OutputConfig,
+        output::{OutputConfig, ProgressMode, ProgressReporter, emit_json_data},
         path, util,
     },
 };
+
+const FETCH_EXAMPLES: &str = "\
+EXAMPLES:
+    libra fetch                            Fetch the current branch's upstream
+    libra fetch origin                     Fetch from a specific remote
+    libra fetch origin main                Fetch only one branch from a remote
+    libra fetch --all                      Fetch every configured remote
+    libra --json fetch origin              Structured JSON output for agents";
 
 pub(crate) enum RemoteClient {
     Http(HttpsClient),
@@ -443,6 +452,7 @@ fn load_config_sync(configuration: &str, name: Option<&str>, key: &str) -> Optio
 }
 
 #[derive(Parser, Debug)]
+#[command(after_help = FETCH_EXAMPLES)]
 pub struct FetchArgs {
     /// Repository to fetch from
     pub repository: Option<String>,
@@ -456,19 +466,27 @@ pub struct FetchArgs {
     pub all: bool,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct FetchRefUpdate {
+#[derive(Debug, Clone, Serialize)]
+pub struct FetchRefUpdate {
     pub remote_ref: String,
     pub old_oid: Option<String>,
     pub new_oid: String,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct FetchRepositoryResult {
+#[derive(Debug, Clone, Serialize)]
+pub struct FetchRepositoryResult {
     pub remote: String,
     pub url: String,
     pub refs_updated: Vec<FetchRefUpdate>,
     pub objects_fetched: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FetchOutput {
+    pub all: bool,
+    pub requested_remote: Option<String>,
+    pub refspec: Option<String>,
+    pub remotes: Vec<FetchRepositoryResult>,
 }
 
 /// Typed classification for [`FetchError::InvalidRemoteSpec`] so that callers
@@ -526,8 +544,120 @@ pub enum FetchError {
 
 impl From<FetchError> for CliError {
     fn from(error: FetchError) -> Self {
-        CliError::fatal(error.to_string())
+        match &error {
+            FetchError::InvalidRemoteSpec { kind, reason, .. } => match kind {
+                RemoteSpecErrorKind::MissingLocalRepo => CliError::fatal(reason.clone())
+                    .with_stable_code(StableErrorCode::RepoNotFound)
+                    .with_hint("check that the remote path exists"),
+                RemoteSpecErrorKind::InvalidLocalRepo
+                | RemoteSpecErrorKind::MalformedUrl
+                | RemoteSpecErrorKind::UnsupportedScheme => CliError::command_usage(reason.clone())
+                    .with_stable_code(StableErrorCode::CliInvalidTarget)
+                    .with_hint("check the remote URL with 'libra remote get-url <name>'"),
+            },
+            FetchError::Discovery { source, .. } => {
+                map_fetch_discovery_error(error.to_string(), source)
+            }
+            FetchError::FetchObjects { source, .. } => map_fetch_io_error(
+                error.to_string(),
+                source,
+                StableErrorCode::NetworkUnavailable,
+            )
+            .with_hint("check network connectivity and retry"),
+            FetchError::PacketRead { source } => {
+                if is_timeout_io_error(source) {
+                    CliError::fatal(error.to_string())
+                        .with_stable_code(StableErrorCode::NetworkUnavailable)
+                        .with_hint("check network connectivity and retry")
+                } else {
+                    CliError::fatal(error.to_string())
+                        .with_stable_code(StableErrorCode::NetworkProtocol)
+                }
+            }
+            FetchError::RemoteBranchNotFound { .. } => CliError::command_usage(error.to_string())
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint("verify the remote branch name and try again"),
+            FetchError::ObjectFormatMismatch { .. } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::RepoStateInvalid),
+            FetchError::InvalidPktHeader { .. }
+            | FetchError::RemoteSideband { .. }
+            | FetchError::ChecksumMismatch
+            | FetchError::IndexPack { .. } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::NetworkProtocol),
+            FetchError::ObjectsDirNotFound { .. } => {
+                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
+            }
+            FetchError::PackDirCreate { .. }
+            | FetchError::PackWrite { .. }
+            | FetchError::UpdateRefs { .. } => {
+                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
+            }
+            FetchError::LocalState { .. } => {
+                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::RepoCorrupt)
+            }
+        }
     }
+}
+
+fn map_fetch_discovery_error(message: String, source: &GitError) -> CliError {
+    match source {
+        GitError::UnAuthorized(_) => CliError::fatal(message)
+            .with_stable_code(StableErrorCode::AuthPermissionDenied)
+            .with_hint("check SSH key / HTTP credentials and repository access rights"),
+        GitError::NetworkError(_) => CliError::fatal(message)
+            .with_stable_code(StableErrorCode::NetworkUnavailable)
+            .with_hint("check network connectivity and retry"),
+        GitError::IOError(error) => {
+            map_fetch_io_error(message, error, StableErrorCode::NetworkUnavailable)
+                .with_hint("check network connectivity and retry")
+        }
+        _ => CliError::fatal(message).with_stable_code(StableErrorCode::NetworkProtocol),
+    }
+}
+
+fn map_fetch_io_error(
+    message: String,
+    error: &std::io::Error,
+    default_code: StableErrorCode,
+) -> CliError {
+    if is_timeout_io_error(error) {
+        CliError::fatal(message).with_stable_code(StableErrorCode::NetworkUnavailable)
+    } else {
+        CliError::fatal(message).with_stable_code(default_code)
+    }
+}
+
+/// Strip embedded credentials (userinfo) from a URL before printing it to
+/// the terminal.  Falls back to the original string if the URL cannot be
+/// parsed (e.g. SCP-style `git@host:path`).
+///
+/// For SSH URLs, a bare username without a password (e.g. `git@`) is the
+/// standard convention and is NOT redacted.  Only URLs that carry a password
+/// component or an HTTP(S) username (which is typically a token) are stripped.
+pub(crate) fn redact_url_credentials(raw: &str) -> String {
+    match Url::parse(raw) {
+        Ok(mut url) => {
+            let has_password = url.password().is_some();
+            let is_http = matches!(url.scheme(), "http" | "https");
+            // Redact when there is a password (always sensitive) or when the
+            // scheme is HTTP(S) and a username is present (likely a token).
+            // For SSH, a bare username like "git" is conventional and harmless.
+            if has_password || (is_http && !url.username().is_empty()) {
+                let _ = url.set_username("");
+                let _ = url.set_password(None);
+            }
+            url.to_string()
+        }
+        Err(_) => raw.to_string(),
+    }
+}
+
+fn is_timeout_io_error(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::TimedOut {
+        return true;
+    }
+    let lower = error.to_string().to_lowercase();
+    lower.contains("timeout") || lower.contains("timed out")
 }
 
 pub async fn execute(args: FetchArgs) {
@@ -540,47 +670,144 @@ pub async fn execute(args: FetchArgs) {
 /// errors and exiting. Negotiates with remotes, downloads pack data, and
 /// updates remote-tracking refs.
 pub async fn execute_safe(args: FetchArgs, output: &OutputConfig) -> CliResult<()> {
+    let result = run_fetch(args, output).await?;
+    render_fetch_output(&result, output)
+}
+
+async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOutput> {
     tracing::debug!("`fetch` args: {:?}", args);
 
-    if args.all {
-        for remote in ConfigKv::all_remote_configs().await.map_err(|error| {
+    let FetchArgs {
+        repository,
+        refspec,
+        all,
+    } = args;
+
+    if all {
+        let remotes = ConfigKv::all_remote_configs().await.map_err(|error| {
             CliError::fatal(format!("failed to read remote configuration: {error}"))
                 .with_stable_code(StableErrorCode::IoReadFailed)
-        })? {
-            fetch_repository_safe(remote, None, false, None, output)
-                .await
-                .map_err(CliError::from)?;
+        })?;
+
+        let mut results = Vec::with_capacity(remotes.len());
+        for remote in remotes {
+            results.push(
+                fetch_repository_with_result(remote, None, false, None, output)
+                    .await
+                    .map_err(CliError::from)?,
+            );
         }
-        return Ok(());
+
+        return Ok(FetchOutput {
+            all: true,
+            requested_remote: None,
+            refspec: None,
+            remotes: results,
+        });
     }
 
-    let remote = match args.repository {
+    let remote = match repository {
         Some(remote) => remote,
         None => match ConfigKv::get_current_remote().await {
             Ok(Some(remote)) => remote,
             Ok(None) => {
-                return Err(CliError::fatal(
-                    "no configured remote for the current branch",
-                ));
+                return Err(
+                    CliError::fatal("no configured remote for the current branch")
+                        .with_stable_code(StableErrorCode::RepoStateInvalid)
+                        .with_hint("use 'libra remote add <name> <url>' to configure a remote"),
+                );
             }
-            Err(_) => return Err(CliError::fatal("HEAD is detached")),
+            Err(_) => {
+                return Err(CliError::fatal("HEAD is detached")
+                    .with_stable_code(StableErrorCode::RepoStateInvalid)
+                    .with_hint("switch to a branch before fetching its upstream"));
+            }
         },
     };
 
     let remote_config = ConfigKv::remote_config(&remote)
         .await
-        .ok()
-        .flatten()
+        .map_err(|error| {
+            CliError::fatal(format!("failed to read remote configuration: {error}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        })?
         .ok_or_else(|| {
-            CliError::fatal(format!(
-                "'{}' does not appear to be a libra repository",
-                remote
-            ))
+            CliError::fatal(format!("remote '{remote}' not found"))
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint("use 'libra remote -v' to inspect configured remotes")
         })?;
 
-    fetch_repository_safe(remote_config, args.refspec, false, None, output)
+    let result = fetch_repository_with_result(remote_config, refspec.clone(), false, None, output)
         .await
-        .map_err(CliError::from)
+        .map_err(CliError::from)?;
+
+    Ok(FetchOutput {
+        all: false,
+        requested_remote: Some(remote),
+        refspec,
+        remotes: vec![result],
+    })
+}
+
+fn render_fetch_output(result: &FetchOutput, output: &OutputConfig) -> CliResult<()> {
+    if output.is_json() {
+        return emit_json_data("fetch", result, output);
+    }
+
+    if output.quiet {
+        return Ok(());
+    }
+
+    let stdout = io::stdout();
+    let mut writer = stdout.lock();
+
+    if result.remotes.is_empty() {
+        writeln!(writer, "No remotes configured")
+            .map_err(|error| CliError::io(format!("failed to write fetch output: {error}")))?;
+        return Ok(());
+    }
+
+    for (index, remote) in result.remotes.iter().enumerate() {
+        if index > 0 {
+            writeln!(writer)
+                .map_err(|error| CliError::io(format!("failed to write fetch output: {error}")))?;
+        }
+
+        // `remote.url` is already credential-redacted at construction time in
+        // `fetch_repository_with_result`, so no additional redaction needed here.
+        writeln!(writer, "From {}", remote.url)
+            .map_err(|error| CliError::io(format!("failed to write fetch output: {error}")))?;
+
+        if remote.refs_updated.is_empty() {
+            writeln!(writer, "Already up to date with '{}'", remote.remote)
+                .map_err(|error| CliError::io(format!("failed to write fetch output: {error}")))?;
+            continue;
+        }
+
+        for update in &remote.refs_updated {
+            let ref_name = update
+                .remote_ref
+                .strip_prefix("refs/remotes/")
+                .unwrap_or(&update.remote_ref);
+            match &update.old_oid {
+                None => writeln!(writer, " * [new ref]         {}", ref_name).map_err(|error| {
+                    CliError::io(format!("failed to write fetch output: {error}"))
+                })?,
+                Some(old_oid) => {
+                    let old_short = &old_oid[..7.min(old_oid.len())];
+                    let new_short = &update.new_oid[..7.min(update.new_oid.len())];
+                    writeln!(writer, "   {}..{}  {}", old_short, new_short, ref_name).map_err(
+                        |error| CliError::io(format!("failed to write fetch output: {error}")),
+                    )?;
+                }
+            }
+        }
+
+        writeln!(writer, " {} objects fetched", remote.objects_fetched)
+            .map_err(|error| CliError::io(format!("failed to write fetch output: {error}")))?;
+    }
+
+    Ok(())
 }
 
 pub(crate) async fn discover_remote(
@@ -713,7 +940,10 @@ pub(crate) async fn fetch_repository_with_result(
 ) -> Result<FetchRepositoryResult, FetchError> {
     let (remote_client, discovery) =
         discover_remote_with_name(&remote_config.url, Some(&remote_config.name)).await?;
-    let normalized_url = normalize_remote_url(&remote_config.url, &remote_client);
+    // Redact credentials from the URL before storing it in the result to
+    // prevent secret leakage in both human and JSON output.
+    let normalized_url =
+        redact_url_credentials(&normalize_remote_url(&remote_config.url, &remote_client));
     let local_kind = get_hash_kind();
     if discovery.hash_kind != local_kind {
         return Err(FetchError::ObjectFormatMismatch {
@@ -773,7 +1003,8 @@ pub(crate) async fn fetch_repository_with_result(
             source,
         })?;
 
-    let pack_data = read_fetch_stream(&mut result_stream, output).await?;
+    let task = format!("fetch {}", remote_config.name);
+    let pack_data = read_fetch_stream(&mut result_stream, output, &task).await?;
     let objects_fetched = pack_object_count(&pack_data);
     let pack_file = write_pack_and_index(&pack_data)?;
     if let Some(pack_file) = pack_file {
@@ -808,12 +1039,15 @@ pub(crate) async fn fetch_repository_with_result(
 async fn read_fetch_stream(
     result_stream: &mut FetchStream,
     output: &OutputConfig,
+    task: &str,
 ) -> Result<Vec<u8>, FetchError> {
     let mut reader = StreamReader::new(result_stream);
     let mut pack_data = Vec::new();
     let mut reach_pack = false;
-    let render_progress = matches!(output.progress, crate::utils::output::ProgressMode::Text);
+    let render_progress = matches!(output.progress, ProgressMode::Text);
+    let json_progress = matches!(output.progress, ProgressMode::Json);
     let bar = render_progress.then(ProgressBar::new_spinner);
+    let progress = json_progress.then(|| ProgressReporter::new(task, None, output));
     let time = Instant::now();
 
     loop {
@@ -839,6 +1073,9 @@ async fn read_fetch_stream(
                             bar.tick();
                         }
                         pack_data.extend(payload);
+                        if let Some(progress) = &progress {
+                            progress.tick(pack_data.len() as u64);
+                        }
                     }
                     2 => print_remote_progress(payload, render_progress),
                     3 => {
@@ -879,6 +1116,9 @@ async fn read_fetch_stream(
     }
     if let Some(bar) = &bar {
         bar.finish_and_clear();
+    }
+    if let Some(progress) = &progress {
+        progress.finish();
     }
 
     Ok(pack_data)
