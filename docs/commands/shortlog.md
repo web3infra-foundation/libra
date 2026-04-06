@@ -2,6 +2,8 @@
 
 Summarize reachable commits by author.
 
+**Alias:** `slog`
+
 ## Synopsis
 
 ```

@@ -3,6 +3,8 @@
 `libra config` manages repository-local and user-global configuration stored in SQLite-backed
 `config_kv`, including vault-backed secrets and key management.
 
+**Alias:** `cfg`
+
 ## Synopsis
 
 ```

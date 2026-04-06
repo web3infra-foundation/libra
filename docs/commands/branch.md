@@ -2,6 +2,8 @@
 
 Create, delete, rename, inspect, or list branches.
 
+**Alias:** `br`
+
 ## Synopsis
 
 ```

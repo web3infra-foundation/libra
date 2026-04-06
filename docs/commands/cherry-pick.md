@@ -2,6 +2,8 @@
 
 Apply the changes introduced by some existing commits.
 
+**Alias:** `cp`
+
 ## Synopsis
 
 ```

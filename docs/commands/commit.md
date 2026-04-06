@@ -2,6 +2,8 @@
 
 Create a new commit from staged changes.
 
+**Alias:** `ci`
+
 ## Synopsis
 
 ```

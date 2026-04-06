@@ -3,6 +3,8 @@
 Find the nearest reachable tag for a commit and format it as a human-readable
 version description.
 
+**Alias:** `desc`
+
 ## Synopsis
 
 ```

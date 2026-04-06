@@ -2,6 +2,8 @@
 
 Show the working tree status.
 
+**Alias:** `st`
+
 ## Synopsis
 
 ```

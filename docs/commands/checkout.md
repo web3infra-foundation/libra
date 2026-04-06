@@ -98,24 +98,15 @@ Already on main
 
 `--quiet` suppresses all `stdout` output.
 
-## Structured Output (JSON examples)
+## Structured Output (JSON)
 
-`checkout` does not yet have its own structured JSON output model. Structured output for checkout is planned for a future batch. In the meantime, use `libra switch --json` for JSON-compatible branch switching.
+`checkout` does not support `--json` / `--machine` output. This is intentional — as a compatibility shim, it delegates to `switch` and `restore` internally without its own output model.
 
-When JSON output is added, it will follow the same envelope pattern:
+For structured output, use the preferred commands directly:
 
-```json
-{
-  "ok": true,
-  "command": "checkout",
-  "data": {
-    "action": "switch",
-    "branch": "main",
-    "commit": "abc1234...",
-    "created": false,
-    "auto_tracked": false
-  }
-}
+```bash
+libra switch --json main        # branch switching with JSON output
+libra restore --json -- file    # file restoration with JSON output
 ```
 
 ## Design Rationale

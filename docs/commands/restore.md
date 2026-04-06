@@ -2,6 +2,8 @@
 
 Restore working tree files or index entries from a source.
 
+**Alias:** `unstage`
+
 ## Synopsis
 
 ```

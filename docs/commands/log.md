@@ -2,6 +2,8 @@
 
 Show commit history.
 
+**Aliases:** `hist`, `history`
+
 ## Synopsis
 
 ```

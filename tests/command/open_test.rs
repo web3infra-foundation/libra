@@ -7,7 +7,7 @@ use libra::{
         open,
         remote::{self, RemoteCmds},
     },
-    utils::test,
+    utils::{error::StableErrorCode, output::OutputConfig, test},
 };
 use serial_test::serial;
 use tempfile::tempdir;
@@ -20,28 +20,52 @@ async fn test_open_remote_origin() {
     let repo_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(repo_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    let output = OutputConfig {
+        quiet: true,
+        ..OutputConfig::default()
+    };
 
     // Add origin remote
-    remote::execute(RemoteCmds::Add {
-        name: "origin".into(),
-        url: "git@github.com:web3infra-foundation/libra.git".into(),
-    })
-    .await;
+    remote::execute_safe(
+        RemoteCmds::Add {
+            name: "origin".into(),
+            url: "git@github.com:web3infra-foundation/libra.git".into(),
+        },
+        &output,
+    )
+    .await
+    .expect("adding origin remote should succeed");
 
     // Test explicit remote
-    open::execute(open::OpenArgs {
-        remote: Some("origin".to_string()),
-    })
-    .await;
+    open::execute_safe(
+        open::OpenArgs {
+            remote: Some("origin".to_string()),
+        },
+        &output,
+    )
+    .await
+    .expect("opening explicit origin remote should succeed");
 
     // Test default remote should find origin
-    open::execute(open::OpenArgs { remote: None }).await;
+    open::execute_safe(open::OpenArgs { remote: None }, &output)
+        .await
+        .expect("opening default remote should succeed");
 
-    // Test non-existent remote
-    open::execute(open::OpenArgs {
-        remote: Some("nonexistent".to_string()),
-    })
-    .await;
+    let error = open::execute_safe(
+        open::OpenArgs {
+            remote: Some("nonexistent".to_string()),
+        },
+        &output,
+    )
+    .await
+    .expect_err("invalid direct remote target should return a CLI error");
+    assert_eq!(error.stable_code(), StableErrorCode::CliInvalidTarget);
+    assert_eq!(error.exit_code(), 129);
+    assert!(
+        error.message().contains("unsafe or invalid"),
+        "unexpected error message: {}",
+        error.message()
+    );
 }
 
 #[tokio::test]
@@ -50,9 +74,29 @@ async fn test_open_no_remote() {
     let repo_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(repo_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(repo_dir.path());
+    let output = OutputConfig {
+        quiet: true,
+        ..OutputConfig::default()
+    };
 
-    // Should handle no remote configured
-    open::execute(open::OpenArgs { remote: None }).await;
+    let error = open::execute_safe(open::OpenArgs { remote: None }, &output)
+        .await
+        .expect_err("opening without a configured remote should fail");
+    assert_eq!(error.stable_code(), StableErrorCode::RepoStateInvalid);
+    assert_eq!(error.exit_code(), 128);
+    assert!(
+        error.message().contains("no remote configured"),
+        "unexpected error message: {}",
+        error.message()
+    );
+    assert!(
+        error
+            .hints()
+            .iter()
+            .any(|hint| hint.as_str().contains("libra remote add origin")),
+        "expected add-remote hint, got {:?}",
+        error.hints()
+    );
 }
 
 #[test]

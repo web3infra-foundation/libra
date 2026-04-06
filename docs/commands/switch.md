@@ -2,6 +2,8 @@
 
 Switch branches, create and switch to a new branch, or detach HEAD at a specific commit.
 
+**Alias:** `sw`
+
 ## Synopsis
 
 ```
