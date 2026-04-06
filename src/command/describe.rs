@@ -141,18 +141,25 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
 
         // Only include light-weight tags if --tags is specified
         if is_annotated || args.tags {
+            let tag_name = t.name;
             let target_commit_hash = match t.object {
                 TagObject::Commit(c) => c.id,
                 TagObject::Tag(tg) => tg.object_hash,
                 _ => continue,
             };
 
-            // If multiple tags point to the same commit, annotated tags take precedence
-            // Here use the entry.or_insert logic to prioritize the preservation of the tag discovered first
-            tag_map.entry(target_commit_hash).or_insert(TagInfo {
-                name: t.name,
-                is_annotated,
-            });
+            let should_replace = tag_map
+                .get(&target_commit_hash)
+                .is_none_or(|existing| prefer_tag(existing, &tag_name, is_annotated));
+            if should_replace {
+                tag_map.insert(
+                    target_commit_hash,
+                    TagInfo {
+                        name: tag_name,
+                        is_annotated,
+                    },
+                );
+            }
         }
     }
 
@@ -210,16 +217,12 @@ async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeErro
 
 // Formats the output string based on Git's describe rules.
 fn format_describe_result(tag_name: &str, dist: usize, full_sha: &str, abbrev: usize) -> String {
-    if dist == 0 {
+    if dist == 0 || abbrev == 0 {
         // If the current commit is exactly at the tag, just return the tag name
         tag_name.to_string()
     } else {
         // Extract the abbreviated hash based on the specified length (default 7)
-        let short_sha = if abbrev >= full_sha.len() {
-            full_sha
-        } else {
-            &full_sha[..abbrev]
-        };
+        let short_sha = abbreviate_hash(full_sha, abbrev);
         // format: <tag_name>-<distance>-g<abbreviated_sha>
         format!("{}-{}-g{}", tag_name, dist, short_sha)
     }
@@ -232,7 +235,8 @@ fn describe_output(
     distance: usize,
     abbrev: usize,
 ) -> DescribeOutput {
-    let abbreviated_commit = (distance > 0).then(|| abbreviate_hash(&resolved_commit, abbrev));
+    let abbreviated_commit =
+        (distance > 0 && abbrev > 0).then(|| abbreviate_hash(&resolved_commit, abbrev));
     DescribeOutput {
         input,
         resolved_commit: resolved_commit.clone(),
@@ -246,10 +250,18 @@ fn describe_output(
 }
 
 fn abbreviate_hash(full_sha: &str, abbrev: usize) -> String {
-    if abbrev >= full_sha.len() {
+    if abbrev == 0 || abbrev >= full_sha.len() {
         full_sha.to_string()
     } else {
         full_sha[..abbrev].to_string()
+    }
+}
+
+fn prefer_tag(existing: &TagInfo, candidate_name: &str, candidate_is_annotated: bool) -> bool {
+    match (existing.is_annotated, candidate_is_annotated) {
+        (false, true) => true,
+        (true, false) => false,
+        _ => candidate_name < existing.name.as_str(),
     }
 }
 

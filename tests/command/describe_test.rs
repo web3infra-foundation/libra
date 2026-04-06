@@ -66,6 +66,69 @@ fn test_describe_always_json_without_tags_returns_abbrev_commit() {
 }
 
 #[test]
+fn test_describe_always_respects_explicit_abbrev_length() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(
+        &["describe", "--always", "--abbrev=5", "--json"],
+        repo.path(),
+    );
+    assert_cli_success(
+        &output,
+        "describe --always --abbrev=5 --json should succeed",
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["result"].as_str().unwrap().len(), 5);
+    assert_eq!(
+        json["data"]["abbreviated_commit"].as_str().unwrap().len(),
+        5
+    );
+    assert_eq!(json["data"]["used_always"], true);
+}
+
+#[test]
+fn test_describe_always_abbrev_zero_returns_full_hash() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(
+        &["describe", "--always", "--abbrev=0", "--json"],
+        repo.path(),
+    );
+    assert_cli_success(
+        &output,
+        "describe --always --abbrev=0 --json should succeed",
+    );
+
+    let json = parse_json_stdout(&output);
+    let resolved_commit = json["data"]["resolved_commit"]
+        .as_str()
+        .expect("resolved_commit should be a string");
+    assert_eq!(json["data"]["result"], resolved_commit);
+    assert_eq!(json["data"]["abbreviated_commit"], resolved_commit);
+    assert_eq!(json["data"]["used_always"], true);
+}
+
+#[test]
+fn test_describe_tags_prefers_annotated_tag_over_lightweight_tag() {
+    let repo = create_committed_repo_via_cli();
+
+    let lightweight = run_libra_command(&["tag", "v-light"], repo.path());
+    assert_cli_success(&lightweight, "failed to create lightweight tag");
+
+    let annotated = run_libra_command(&["tag", "-m", "Release v-ann", "v-ann"], repo.path());
+    assert_cli_success(&annotated, "failed to create annotated tag");
+
+    let output = run_libra_command(&["describe", "--tags", "--json"], repo.path());
+    assert_cli_success(&output, "describe --tags --json should succeed");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["result"], "v-ann");
+    assert_eq!(json["data"]["tag"], "v-ann");
+    assert_eq!(json["data"]["distance"], 0);
+}
+
+#[test]
 fn test_describe_invalid_reference_returns_cli_invalid_target() {
     let repo = create_committed_repo_via_cli();
 

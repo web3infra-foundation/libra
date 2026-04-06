@@ -298,6 +298,27 @@ async fn test_clean_force_and_dry_run_prefers_dry_run() {
     assert!(test_dir.path().join("untracked.txt").exists());
 }
 
+#[test]
+fn test_clean_force_json_reports_deleted_files() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("generated.txt"), "content").unwrap();
+
+    let output = run_libra_command(&["clean", "-f", "--json"], repo.path());
+    assert_cli_success(&output, "clean -f --json should succeed");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "clean");
+    assert_eq!(json["data"]["dry_run"], false);
+    assert_eq!(
+        json["data"]["removed"],
+        serde_json::json!(["generated.txt"])
+    );
+    assert!(
+        !repo.path().join("generated.txt").exists(),
+        "clean -f should remove the reported file"
+    );
+}
+
 #[tokio::test]
 #[serial]
 /// Tests clean can handle relatively long file paths.

@@ -585,7 +585,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         command::tag::validate_cli_args(tag_args)?;
     }
     match &args.command {
-        Commands::Init(_) | Commands::Clone(_) => {}
+        Commands::Init(_) | Commands::Clone(_) | Commands::Open(_) => {}
         // Config global/system scopes don't require a repository
         Commands::Config(cfg) if cfg.global || cfg.system => {}
         _ => {

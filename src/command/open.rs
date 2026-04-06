@@ -191,9 +191,17 @@ async fn load_remote_url(remote: &str) -> Result<String, OpenError> {
 }
 
 fn open_browser(url: &str) -> std::io::Result<()> {
+    if std::env::var_os(crate::utils::pager::LIBRA_TEST_ENV).is_some() {
+        // Keep integration tests side-effect free across all platforms.
+        return Ok(());
+    }
+
     #[cfg(target_os = "windows")]
     {
-        Command::new("cmd").args(["/C", "start", "", url]).spawn()?;
+        let quoted_url = quote_windows_cmd_arg(url);
+        Command::new("cmd")
+            .args(["/C", "start", "", &quoted_url])
+            .spawn()?;
     }
     #[cfg(target_os = "macos")]
     {
@@ -204,6 +212,11 @@ fn open_browser(url: &str) -> std::io::Result<()> {
         Command::new("xdg-open").arg(url).spawn()?;
     }
     Ok(())
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn quote_windows_cmd_arg(url: &str) -> String {
+    format!("\"{url}\"")
 }
 
 fn is_safe_url(url: &str) -> bool {
@@ -308,5 +321,13 @@ mod tests {
         assert!(!is_safe_url("file:///etc/passwd"));
         assert!(!is_safe_url("javascript:alert(1)"));
         assert!(!is_safe_url("ftp://github.com/rust-lang/rust"));
+    }
+
+    #[test]
+    fn test_quote_windows_cmd_arg_wraps_url() {
+        assert_eq!(
+            quote_windows_cmd_arg("https://evil.example/repo&calc.exe"),
+            "\"https://evil.example/repo&calc.exe\""
+        );
     }
 }

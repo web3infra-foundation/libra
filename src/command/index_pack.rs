@@ -37,6 +37,7 @@ EXAMPLES:
   libra index-pack pack-123.pack -o pack-123.idx
   libra index-pack pack-123.pack --json
 ";
+const INDEX_WRITE_ERROR_PREFIX: &str = "index write failed";
 
 #[derive(Parser, Debug)]
 #[command(after_help = INDEX_PACK_EXAMPLES)]
@@ -134,11 +135,12 @@ pub fn execute_safe(args: IndexPackArgs, output: &OutputConfig) -> CliResult<()>
 
 fn index_pack_error(err: GitError) -> CliError {
     let stable_code = match err {
-        // IO errors during pack decoding are predominantly read failures (the
-        // explicit File::open check above already covers the initial open).
-        // Write-side IO errors from creating the .idx file also surface here,
-        // but we default to IoReadFailed to avoid misclassifying the more
-        // common read path.
+        GitError::PackEncodeError(ref message) if message.starts_with(INDEX_WRITE_ERROR_PREFIX) => {
+            StableErrorCode::IoWriteFailed
+        }
+        // IO errors that still reach this layer originate from reading or
+        // decoding the input pack. Explicit index write operations are wrapped
+        // with a write-specific PackEncodeError above.
         GitError::IOError(_) => StableErrorCode::IoReadFailed,
         GitError::InvalidArgument(_) => StableErrorCode::CliInvalidArguments,
         GitError::InvalidPackFile(_)
@@ -161,6 +163,12 @@ fn format_io_error(err: &std::io::Error) -> String {
         std::io::ErrorKind::PermissionDenied => "Permission denied".to_string(),
         _ => err.to_string(),
     }
+}
+
+fn index_write_error(action: &str, error: std::io::Error) -> GitError {
+    GitError::PackEncodeError(format!(
+        "{INDEX_WRITE_ERROR_PREFIX} while {action}: {error}"
+    ))
 }
 
 fn lock_state<'a, T>(mutex: &'a Mutex<T>, label: &str) -> Result<MutexGuard<'a, T>, GitError> {
@@ -243,7 +251,8 @@ pub fn build_index_v1(pack_file: &str, index_file: &str) -> Result<(), GitError>
     }
 
     let mut index_hash = Sha1::new();
-    let mut index_file = std::fs::File::create(index_file)?;
+    let mut index_file = std::fs::File::create(index_file)
+        .map_err(|e| index_write_error("creating output file", e))?;
     // fan-out table
     // The header consists of 256 4-byte network byte order integers.
     // N-th entry of this table records the number of objects in the corresponding pack,
@@ -272,7 +281,9 @@ pub fn build_index_v1(pack_file: &str, index_file: &str) -> Result<(), GitError>
         i += 1;
     }
     index_hash.update(&fan_out);
-    index_file.write_all(&fan_out)?;
+    index_file
+        .write_all(&fan_out)
+        .map_err(|e| index_write_error("writing fan-out table", e))?;
 
     // 4-byte network byte order integer, recording where the
     // object is stored in the pack-file as the offset from the beginning.
@@ -283,15 +294,21 @@ pub fn build_index_v1(pack_file: &str, index_file: &str) -> Result<(), GitError>
         buf.write_all(hash.as_ref())?;
 
         index_hash.update(&buf);
-        index_file.write_all(&buf)?;
+        index_file
+            .write_all(&buf)
+            .map_err(|e| index_write_error("writing object offsets", e))?;
     }
 
     index_hash.update(pack.signature.as_ref());
     // A copy of the pack checksum at the end of the corresponding pack-file.
-    index_file.write_all(pack.signature.as_ref())?;
+    index_file
+        .write_all(pack.signature.as_ref())
+        .map_err(|e| index_write_error("writing pack checksum", e))?;
     let index_hash: [u8; 20] = index_hash.finalize().into();
     // Index checksum of all of the above.
-    index_file.write_all(&index_hash)?;
+    index_file
+        .write_all(&index_hash)
+        .map_err(|e| index_write_error("writing index checksum", e))?;
 
     tracing::debug!("Index file is written to {:?}", index_file);
     Ok(())
@@ -305,14 +322,22 @@ async fn write_idx_v2_file(
 ) -> Result<(), GitError> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
     let mut builder = IdxBuilder::new(idx_entries.len(), tx, pack_hash);
-    let mut idx_file = tokio::fs::File::create(index_file).await?;
+    let mut idx_file = tokio::fs::File::create(index_file)
+        .await
+        .map_err(|e| index_write_error("creating output file", e))?;
     let writer = tokio::spawn(async move {
         use tokio::io::AsyncWriteExt;
 
         while let Some(chunk) = rx.recv().await {
-            idx_file.write_all(&chunk).await?;
+            idx_file
+                .write_all(&chunk)
+                .await
+                .map_err(|e| index_write_error("writing index data", e))?;
         }
-        idx_file.flush().await?;
+        idx_file
+            .flush()
+            .await
+            .map_err(|e| index_write_error("flushing index file", e))?;
         Ok::<(), GitError>(())
     });
 
@@ -419,4 +444,76 @@ pub fn build_index_v2(pack_file: &str, index_file: &str) -> Result<(), GitError>
     }
 
     write_idx_v2_sync(index_path, idx_entries, pack_hash)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn index_pack_error_maps_wrapped_write_failures_to_io_write_failed() {
+        let cli_error = index_pack_error(index_write_error(
+            "writing index data",
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "permission denied"),
+        ));
+
+        assert_eq!(cli_error.stable_code(), StableErrorCode::IoWriteFailed);
+    }
+
+    #[test]
+    fn lock_state_reports_poisoned_mutex() {
+        let mutex = Arc::new(Mutex::new(1_u8));
+        let poisoned = Arc::clone(&mutex);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned.lock().unwrap();
+            panic!("poison test mutex");
+        })
+        .join();
+
+        let err = lock_state(&mutex, "index entry buffer").expect_err("mutex should be poisoned");
+        match err {
+            GitError::PackEncodeError(message) => {
+                assert_eq!(message, "index entry buffer mutex poisoned");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn take_arc_mutex_reports_outstanding_references() {
+        let mutex = Arc::new(Mutex::new(vec![1_u8]));
+        let _extra_ref = Arc::clone(&mutex);
+
+        let err =
+            take_arc_mutex(mutex, "index entry buffer").expect_err("extra Arc ref should fail");
+        match err {
+            GitError::PackEncodeError(message) => {
+                assert_eq!(
+                    message,
+                    "index entry buffer still has outstanding references"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn take_arc_mutex_reports_poisoned_mutex() {
+        let mutex = Arc::new(Mutex::new(vec![1_u8]));
+        let poisoned = Arc::clone(&mutex);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned.lock().unwrap();
+            panic!("poison test mutex");
+        })
+        .join();
+
+        let err =
+            take_arc_mutex(mutex, "index entry buffer").expect_err("mutex should be poisoned");
+        match err {
+            GitError::PackEncodeError(message) => {
+                assert_eq!(message, "index entry buffer mutex poisoned");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
 }

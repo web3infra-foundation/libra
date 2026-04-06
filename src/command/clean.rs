@@ -99,27 +99,27 @@ fn run_clean(args: CleanArgs) -> Result<CleanOutput, CleanError> {
     };
     let untracked = worktree::untracked_workdir_paths(&index)
         .map_err(|e| CleanError::ScanUntracked(e.to_string()))?;
-    let removed = untracked
-        .iter()
-        .map(|path| path.display().to_string())
-        .collect::<Vec<_>>();
 
-    if removed.is_empty() {
+    if untracked.is_empty() {
         return Ok(CleanOutput {
             dry_run: args.dry_run,
-            removed,
+            removed: Vec::new(),
         });
     }
 
     if args.dry_run {
         return Ok(CleanOutput {
             dry_run: true,
-            removed,
+            removed: untracked
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect(),
         });
     }
 
     let workdir = fs::canonicalize(util::working_dir())
         .map_err(|e| CleanError::ResolveWorkdir(e.to_string()))?;
+    let mut removed = Vec::new();
     for path in untracked {
         let abs_path = util::workdir_to_absolute(&path);
         if abs_path.exists() {
@@ -134,6 +134,7 @@ fn run_clean(args: CleanArgs) -> Result<CleanOutput, CleanError> {
                 path: abs_path.display().to_string(),
                 detail: e.to_string(),
             })?;
+            removed.push(path.display().to_string());
         }
     }
     Ok(CleanOutput {

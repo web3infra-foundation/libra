@@ -186,6 +186,7 @@ pub async fn execute(args: ShortlogArgs) {
 /// errors and exiting. Summarises commit history by author, delegating to
 /// [`execute_to`] for formatted output.
 pub async fn execute_safe(args: ShortlogArgs, output: &OutputConfig) -> CliResult<()> {
+    crate::utils::util::require_repo().map_err(|_| CliError::repo_not_found())?;
     let shortlog_output = run_shortlog(&args).await?;
 
     if output.is_json() {
@@ -373,8 +374,15 @@ fn shortlog_commit_base_error(revision: &str, error: CommitBaseError) -> CliErro
 mod tests {
     use std::io;
 
+    use serial_test::serial;
+    use tempfile::tempdir;
+
     use super::*;
-    use crate::utils::error::StableErrorCode;
+    use crate::utils::{
+        error::StableErrorCode,
+        output::OutputConfig,
+        test::{self, ChangeDirGuard},
+    };
 
     #[test]
     fn test_parse_args() {
@@ -431,5 +439,22 @@ mod tests {
         let err = write_shortlog_line(&mut writer, format_args!("alice")).unwrap_err();
         assert_eq!(err.stable_code(), StableErrorCode::IoWriteFailed);
         assert!(err.message().contains("shortlog output error"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn execute_safe_requires_repository() {
+        let temp = tempdir().unwrap();
+        test::setup_clean_testing_env_in(temp.path());
+        let _guard = ChangeDirGuard::new(temp.path());
+
+        let err = execute_safe(
+            ShortlogArgs::parse_from(["shortlog"]),
+            &OutputConfig::default(),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.stable_code(), StableErrorCode::RepoNotFound);
     }
 }
