@@ -127,6 +127,40 @@ fn test_open_json_output_uses_origin_remote() {
     assert_eq!(json["data"]["launched"], false);
 }
 
+#[cfg(not(windows))]
+#[test]
+fn test_open_json_output_does_not_require_browser_launcher() {
+    let repo = create_committed_repo_via_cli();
+
+    let add_remote = run_libra_command(
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:web3infra-foundation/libra.git",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &add_remote,
+        "failed to add origin for browser-launch bypass test",
+    );
+
+    let output = base_libra_command(&["open", "--json"], repo.path())
+        .env_remove(LIBRA_TEST_ENV)
+        .env("PATH", repo.path())
+        .output()
+        .expect("failed to execute open --json without browser launcher");
+
+    assert_cli_success(
+        &output,
+        "open --json should not require a browser launcher in automation",
+    );
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["remote"], "origin");
+    assert_eq!(json["data"]["launched"], false);
+}
+
 #[test]
 fn test_open_json_output_falls_back_to_origin_when_head_is_detached() {
     let repo = create_committed_repo_via_cli();

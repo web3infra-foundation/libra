@@ -154,6 +154,41 @@ fn test_describe_tags_prefers_annotated_tag_over_lightweight_tag() {
 }
 
 #[test]
+fn test_describe_lowercase_head_resolves_named_ref_not_head() {
+    let repo = create_committed_repo_via_cli();
+
+    let first_tag = run_libra_command(&["tag", "-m", "Release v1", "v1"], repo.path());
+    assert_cli_success(&first_tag, "failed to create first describe tag");
+
+    let branch_output = run_libra_command(&["branch", "head"], repo.path());
+    assert_cli_success(&branch_output, "failed to create lowercase head branch");
+
+    std::fs::write(repo.path().join("tracked.txt"), "tracked\nnext\n")
+        .expect("failed to update tracked file");
+    let add_output = run_libra_command(&["add", "tracked.txt"], repo.path());
+    assert_cli_success(&add_output, "failed to stage updated tracked file");
+    let commit_output = run_libra_command(&["commit", "-m", "next", "--no-verify"], repo.path());
+    assert_cli_success(&commit_output, "failed to create second commit");
+
+    let second_tag = run_libra_command(&["tag", "-m", "Release v2", "v2"], repo.path());
+    assert_cli_success(&second_tag, "failed to create second describe tag");
+
+    let current_output = run_libra_command(&["describe", "--json"], repo.path());
+    assert_cli_success(&current_output, "describe --json should succeed");
+    let current_json = parse_json_stdout(&current_output);
+    assert_eq!(current_json["data"]["result"], "v2");
+
+    let output = run_libra_command(&["describe", "head", "--json"], repo.path());
+    assert_cli_success(&output, "describe head --json should succeed");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["result"], "v1");
+    assert_eq!(json["data"]["tag"], "v1");
+    assert_eq!(json["data"]["distance"], 0);
+    assert_eq!(json["data"]["exact_match"], true);
+}
+
+#[test]
 fn test_describe_invalid_reference_returns_cli_invalid_target() {
     let repo = create_committed_repo_via_cli();
 

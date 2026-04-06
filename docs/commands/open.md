@@ -1,6 +1,6 @@
 # `libra open`
 
-Resolve a remote URL into a web URL and launch the system browser.
+Resolve a remote URL into a web URL and optionally launch the system browser.
 
 ## Synopsis
 
@@ -10,9 +10,10 @@ libra open [<remote>]
 
 ## Description
 
-`libra open` determines the web-browsable URL for a repository and opens it in the
-default system browser. The command accepts an optional positional argument that can be
-either a configured remote name (e.g. `origin`) or a direct URL.
+`libra open` determines the web-browsable URL for a repository and, in human-output
+mode, opens it in the default system browser. The command accepts an optional
+positional argument that can be either a configured remote name (e.g. `origin`) or a
+direct URL.
 
 When no argument is given, the command tries the following in order:
 1. The current branch's configured upstream remote.
@@ -32,7 +33,7 @@ On macOS the command uses `open`, on Linux `xdg-open`, and on Windows `cmd /C st
 |-----------------|-------------|---------|
 | `<remote>` | Remote name or direct URL. When omitted, auto-detects from tracking config or `origin`. | `libra open origin` |
 | `--json` | Emit structured JSON envelope to stdout instead of opening a browser (global flag). | `libra open --json` |
-| `--machine` | Compact single-line JSON (global flag). | `libra open --machine` |
+| `--machine` | Compact single-line JSON without launching a browser (global flag). | `libra open --machine` |
 | `--quiet` | Suppress the "Opening ..." message on stdout. | `libra open --quiet` |
 
 ## Common Commands
@@ -62,7 +63,7 @@ Opening https://github.com/web3infra-foundation/libra
     "remote": "origin",
     "remote_url": "git@github.com:web3infra-foundation/libra.git",
     "web_url": "https://github.com/web3infra-foundation/libra",
-    "launched": true
+    "launched": false
   }
 }
 ```
@@ -77,7 +78,7 @@ When the argument is a direct URL instead of a remote name, `remote` is `null`:
     "remote": null,
     "remote_url": "https://github.com/web3infra-foundation/libra",
     "web_url": "https://github.com/web3infra-foundation/libra",
-    "launched": true
+    "launched": false
   }
 }
 ```
@@ -87,7 +88,8 @@ When the argument is a direct URL instead of a remote name, `remote` is `null`:
 - `remote` is the logical remote name, or `null` when a direct URL was provided
 - `remote_url` is the raw URL from config (or the direct URL argument)
 - `web_url` is the transformed browsable HTTPS URL
-- `launched` is `true` when the browser was successfully spawned
+- `launched` is `true` when the browser was successfully spawned in human mode
+- `launched` is `false` for `--json` / `--machine`, where browser launch is intentionally skipped
 
 ### URL Transformation Rules
 

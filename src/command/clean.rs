@@ -153,8 +153,12 @@ fn clean_cli_error(error: CleanError) -> CliError {
             CliError::fatal(format!("failed to load index: {message}"))
                 .with_stable_code(StableErrorCode::IoReadFailed)
         }
-        CleanError::ScanUntracked(message) | CleanError::ResolveWorkdir(message) => {
+        CleanError::ScanUntracked(message) => {
             CliError::fatal(message).with_stable_code(StableErrorCode::IoReadFailed)
+        }
+        CleanError::ResolveWorkdir(message) => {
+            CliError::fatal(format!("failed to resolve working directory: {message}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
         }
         CleanError::ResolvePath { path, detail } => {
             CliError::fatal(format!("failed to resolve path {path}: {detail}"))
@@ -168,5 +172,25 @@ fn clean_cli_error(error: CleanError) -> CliError {
             CliError::fatal(format!("failed to remove {path}: {detail}"))
                 .with_stable_code(StableErrorCode::IoWriteFailed)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CleanError, clean_cli_error};
+    use crate::utils::error::StableErrorCode;
+
+    #[test]
+    fn resolve_workdir_cli_error_keeps_context() {
+        let error = clean_cli_error(CleanError::ResolveWorkdir("permission denied".to_string()));
+
+        assert_eq!(error.stable_code(), StableErrorCode::IoReadFailed);
+        assert!(
+            error
+                .message()
+                .contains("failed to resolve working directory"),
+            "unexpected error message: {}",
+            error.message()
+        );
     }
 }

@@ -90,8 +90,12 @@ pub async fn execute_safe(args: OpenArgs, output: &OutputConfig) -> CliResult<()
         return Err(open_cli_error(OpenError::UnsafeUrl(web_url)));
     }
 
-    let launched = open_browser(&web_url)
-        .map_err(|e| open_cli_error(OpenError::BrowserLaunch(e.to_string())))?;
+    let launched = if output.is_json() {
+        false
+    } else {
+        open_browser(&web_url)
+            .map_err(|e| open_cli_error(OpenError::BrowserLaunch(e.to_string())))?
+    };
 
     let open_output = OpenOutput {
         remote: resolution.remote,

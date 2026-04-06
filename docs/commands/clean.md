@@ -7,7 +7,7 @@ Remove untracked files from the working tree.
 ```
 libra clean -n
 libra clean -f
-libra clean [--json] [--quiet]
+libra clean (-n | -f) [--json] [--quiet]
 ```
 
 ## Description

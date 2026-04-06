@@ -10,10 +10,7 @@ use serde::Serialize;
 
 use crate::{
     command::load_object,
-    internal::{
-        head::Head,
-        tag::{self, TagObject},
-    },
+    internal::tag::{self, TagObject},
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
@@ -118,15 +115,9 @@ pub async fn execute_safe(args: DescribeArgs, output: &OutputConfig) -> CliResul
 
 async fn run_describe(args: DescribeArgs) -> Result<DescribeOutput, DescribeError> {
     let input = args.commit.unwrap_or_else(|| "HEAD".to_string());
-    let start_hash = if input.eq_ignore_ascii_case("HEAD") {
-        Head::current_commit()
-            .await
-            .ok_or(DescribeError::HeadUnborn)?
-    } else {
-        util::get_commit_base_typed(&input)
-            .await
-            .map_err(DescribeError::from)?
-    };
+    let start_hash = util::get_commit_base_typed(&input)
+        .await
+        .map_err(DescribeError::from)?;
     let resolved_commit = start_hash.to_string();
     let abbrev = args.abbrev.unwrap_or(7);
 
