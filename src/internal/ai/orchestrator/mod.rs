@@ -230,16 +230,16 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
 
         let persistence = if let Some(session) = persistence_session {
             let persisted = session
-                .finalize(
-                    &spec,
-                    &execution_plan_spec,
-                    &plan_revision_specs,
-                    &run_state,
-                    &system_report,
-                    &decision,
-                    &self.config.working_dir,
-                    std::any::type_name::<M>(),
-                )
+                .finalize(persistence::ExecutionFinalizeRequest {
+                    spec: &spec,
+                    execution_plan_spec: &execution_plan_spec,
+                    plan_revision_specs: &plan_revision_specs,
+                    run_state: &run_state,
+                    system_report: &system_report,
+                    decision: &decision,
+                    working_dir: &self.config.working_dir,
+                    model_name: std::any::type_name::<M>(),
+                })
                 .await?;
             if let Some(observer) = &downstream_observer {
                 observer.on_persistence_complete(&persisted);

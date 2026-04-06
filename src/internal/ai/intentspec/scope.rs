@@ -14,7 +14,8 @@ pub fn effective_write_scope(intent: &Intent) -> Vec<String> {
         intent
             .in_scope
             .iter()
-            .filter_map(|item| looks_like_path_pattern(item).then(|| item.as_str())),
+            .filter(|item| looks_like_path_pattern(item))
+            .map(String::as_str),
     );
 
     patterns.into_iter().collect()
@@ -27,7 +28,8 @@ pub fn effective_forbidden_scope(intent: &Intent) -> Vec<String> {
         intent
             .out_of_scope
             .iter()
-            .filter_map(|item| looks_like_path_pattern(item).then(|| item.as_str())),
+            .filter(|item| looks_like_path_pattern(item))
+            .map(String::as_str),
     );
     patterns.into_iter().collect()
 }

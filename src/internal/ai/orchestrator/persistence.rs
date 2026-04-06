@@ -74,6 +74,17 @@ pub struct ExecutionPersistenceRequest<'a> {
     pub model_name: &'a str,
 }
 
+pub struct ExecutionFinalizeRequest<'a> {
+    pub spec: &'a IntentSpec,
+    pub execution_plan_spec: &'a ExecutionPlanSpec,
+    pub plan_revision_specs: &'a [ExecutionPlanSpec],
+    pub run_state: &'a RunStateSnapshot,
+    pub system_report: &'a SystemReport,
+    pub decision: &'a DecisionOutcome,
+    pub working_dir: &'a Path,
+    pub model_name: &'a str,
+}
+
 struct PatchSetRequest<'a> {
     mcp_server: &'a Arc<LibraMcpServer>,
     run_id: &'a str,
@@ -132,6 +143,26 @@ struct PersistedPlanRevision {
     step_id_map: HashMap<Uuid, Uuid>,
 }
 
+struct PlanSnapshotFamilyRequest<'a> {
+    thread_id: &'a str,
+    intent_id: &'a str,
+    root_task_id: &'a str,
+    plan_id: &'a str,
+    parent_plan_id: Option<&'a str>,
+    plan: &'a ExecutionPlanSpec,
+    persisted_step_ids: &'a HashMap<Uuid, Uuid>,
+    persisted_task_ids: &'a HashMap<Uuid, String>,
+}
+
+struct RunEventRequest<'a> {
+    run_id: &'a str,
+    kind: RunEventKind,
+    reason: Option<String>,
+    error: Option<String>,
+    metrics: Option<serde_json::Value>,
+    patchset_id: Option<&'a str>,
+}
+
 struct RuntimeAuditState {
     thread_id: String,
     intent_id: String,
@@ -152,8 +183,8 @@ struct RuntimeAuditState {
 
 enum RuntimeAuditCommand {
     TaskRuntime {
-        task: super::types::TaskSpec,
-        event: super::types::TaskRuntimeEvent,
+        task: Box<super::types::TaskSpec>,
+        event: Box<super::types::TaskRuntimeEvent>,
     },
     Flush {
         ack: oneshot::Sender<()>,
@@ -181,8 +212,8 @@ impl super::types::OrchestratorObserver for RuntimeAuditObserver {
         event: super::types::TaskRuntimeEvent,
     ) {
         let _ = self.tx.send(RuntimeAuditCommand::TaskRuntime {
-            task: task.clone(),
-            event,
+            task: Box::new(task.clone()),
+            event: Box::new(event),
         });
     }
 }
@@ -324,14 +355,16 @@ impl ExecutionAuditSession {
         .await?;
         persist_plan_snapshot_family(
             &self.mcp_server,
-            &thread_id,
-            &intent_id,
-            &root_task_id,
-            &persisted_plan.plan_id,
-            parent_plan_id.as_deref(),
-            plan,
-            &persisted_plan.step_id_map,
-            &persisted_task_ids,
+            PlanSnapshotFamilyRequest {
+                thread_id: &thread_id,
+                intent_id: &intent_id,
+                root_task_id: &root_task_id,
+                plan_id: &persisted_plan.plan_id,
+                parent_plan_id: parent_plan_id.as_deref(),
+                plan,
+                persisted_step_ids: &persisted_plan.step_id_map,
+                persisted_task_ids: &persisted_task_ids,
+            },
         )
         .await?;
         let mut state = self.state.lock().await;
@@ -356,20 +389,13 @@ impl ExecutionAuditSession {
 
     pub async fn finalize(
         self,
-        spec: &IntentSpec,
-        execution_plan_spec: &ExecutionPlanSpec,
-        plan_revision_specs: &[ExecutionPlanSpec],
-        run_state: &RunStateSnapshot,
-        system_report: &SystemReport,
-        decision: &DecisionOutcome,
-        working_dir: &Path,
-        model_name: &str,
+        request: ExecutionFinalizeRequest<'_>,
     ) -> Result<PersistedExecution, OrchestratorError> {
         self.flush_runtime_events().await?;
-        self.finalize_terminal_events(run_state, decision, model_name)
+        self.finalize_terminal_events(request.run_state, request.decision, request.model_name)
             .await?;
 
-        let task_results = run_state.ordered_task_results();
+        let task_results = request.run_state.ordered_task_results();
         let state = self.state.lock().await;
         let run_id = state.run_id.clone();
         let base_commit_sha = state.base_commit_sha.clone();
@@ -382,11 +408,11 @@ impl ExecutionAuditSession {
             create_provenance(
                 &self.mcp_server,
                 &run_id,
-                execution_plan_spec,
+                request.execution_plan_spec,
                 task_results,
-                system_report,
-                decision,
-                model_name,
+                request.system_report,
+                request.decision,
+                request.model_name,
             )
             .await?,
         );
@@ -399,15 +425,16 @@ impl ExecutionAuditSession {
         .await?;
         let mut checkpoints = create_replan_checkpoints(
             &self.mcp_server,
-            spec,
+            request.spec,
             &run_id,
-            plan_revision_specs,
-            working_dir,
+            request.plan_revision_specs,
+            request.working_dir,
             task_results,
         )
         .await?;
 
-        let task_index: HashMap<Uuid, _> = execution_plan_spec
+        let task_index: HashMap<Uuid, _> = request
+            .execution_plan_spec
             .tasks
             .iter()
             .map(|task| (task.id(), task))
@@ -537,7 +564,7 @@ impl ExecutionAuditSession {
             persisted_tasks.push(persisted);
         }
 
-        let chosen_patchset_id = if *decision == DecisionOutcome::Commit {
+        let chosen_patchset_id = if *request.decision == DecisionOutcome::Commit {
             persisted_tasks
                 .iter()
                 .rev()
@@ -545,19 +572,19 @@ impl ExecutionAuditSession {
         } else {
             None
         };
-        let final_checkpoint_id = if *decision == DecisionOutcome::HumanReviewRequired {
+        let final_checkpoint_id = if *request.decision == DecisionOutcome::HumanReviewRequired {
             Some(
                 create_context_snapshot(
                     &self.mcp_server,
                     build_snapshot_summary(
-                        spec,
-                        Some(execution_plan_spec),
+                        request.spec,
+                        Some(request.execution_plan_spec),
                         "Human review checkpoint",
                     ),
                     collect_snapshot_items(
-                        spec,
-                        Some(execution_plan_spec),
-                        working_dir,
+                        request.spec,
+                        Some(request.execution_plan_spec),
+                        request.working_dir,
                         task_results,
                     ),
                 )
@@ -572,20 +599,21 @@ impl ExecutionAuditSession {
                 run_id: &run_id,
                 chosen_patchset_id: chosen_patchset_id.as_deref(),
                 checkpoint_id: final_checkpoint_id.as_deref(),
-                execution_plan: execution_plan_spec,
+                execution_plan: request.execution_plan_spec,
                 task_results,
-                system_report,
-                decision,
+                system_report: request.system_report,
+                decision: request.decision,
             })
             .await?,
         );
         if let Some(snapshot_id) = final_checkpoint_id {
             checkpoints.push(PersistedCheckpoint {
-                revision: execution_plan_spec.revision,
+                revision: request.execution_plan_spec.revision,
                 reason: "human review required".to_string(),
                 snapshot_id: Some(snapshot_id),
                 decision_id: decision_id.clone(),
-                dagrs_checkpoint_id: run_state
+                dagrs_checkpoint_id: request
+                    .run_state
                     .dagrs_runtime
                     .checkpoints
                     .last()
@@ -593,12 +621,13 @@ impl ExecutionAuditSession {
             });
         }
         checkpoints.extend(
-            run_state
+            request
+                .run_state
                 .dagrs_runtime
                 .checkpoints
                 .iter()
                 .map(|checkpoint| PersistedCheckpoint {
-                    revision: execution_plan_spec.revision,
+                    revision: request.execution_plan_spec.revision,
                     reason: format!(
                         "dagrs runtime checkpoint at pc {} after {} completed nodes",
                         checkpoint.pc, checkpoint.completed_nodes
@@ -714,25 +743,24 @@ impl ExecutionAuditSession {
                 super::types::TaskNodeStatus::Pending => "pending",
                 super::types::TaskNodeStatus::Running => "progressing",
             };
-            if latest_plan_step_status != Some(plan_status) {
-                if let (Some(plan_id), Some(step_id)) =
+            if latest_plan_step_status != Some(plan_status)
+                && let (Some(plan_id), Some(step_id)) =
                     (latest_plan_id.as_deref(), persisted_step_id)
-                {
-                    create_plan_step_event(
-                        &self.mcp_server,
-                        plan_id,
-                        &step_id.to_string(),
-                        &run_id,
-                        plan_status,
-                        persisted_task_id.as_str(),
-                        result.agent_output.clone(),
-                    )
-                    .await?;
-                    let mut state = self.state.lock().await;
-                    state
-                        .latest_plan_step_status
-                        .insert(result.task_id, plan_status);
-                }
+            {
+                create_plan_step_event(
+                    &self.mcp_server,
+                    plan_id,
+                    &step_id.to_string(),
+                    &run_id,
+                    plan_status,
+                    persisted_task_id.as_str(),
+                    result.agent_output.clone(),
+                )
+                .await?;
+                let mut state = self.state.lock().await;
+                state
+                    .latest_plan_step_status
+                    .insert(result.task_id, plan_status);
             }
         }
         let (root_task_id, run_id, latest_run_event_kind) = {
@@ -769,24 +797,30 @@ impl ExecutionAuditSession {
             append_run_event(
                 &self.mcp_server,
                 &self.actor,
-                &run_id,
-                final_run_kind.clone(),
-                Some(format!("orchestrator finished with decision {:?}", decision)),
-                task_results.iter().find_map(|result| {
-                    (result.status == super::types::TaskNodeStatus::Failed)
-                        .then(|| result.agent_output.clone().unwrap_or_else(|| "task execution failed".to_string()))
-                }),
-                Some(
-                    json!({
-                        "taskCount": task_results.len(),
-                        "completedTasks": task_results.iter().filter(|result| result.status == super::types::TaskNodeStatus::Completed).count(),
-                        "failedTasks": task_results.iter().filter(|result| result.status == super::types::TaskNodeStatus::Failed).count(),
-                        "toolCalls": task_results.iter().map(|result| result.tool_calls.len()).sum::<usize>(),
-                        "policyViolations": task_results.iter().map(|result| result.policy_violations.len()).sum::<usize>(),
-                        "model": model_name,
+                RunEventRequest {
+                    run_id: &run_id,
+                    kind: final_run_kind.clone(),
+                    reason: Some(format!("orchestrator finished with decision {:?}", decision)),
+                    error: task_results.iter().find_map(|result| {
+                        (result.status == super::types::TaskNodeStatus::Failed).then(|| {
+                            result
+                                .agent_output
+                                .clone()
+                                .unwrap_or_else(|| "task execution failed".to_string())
+                        })
                     }),
-                ),
-                None,
+                    metrics: Some(
+                        json!({
+                            "taskCount": task_results.len(),
+                            "completedTasks": task_results.iter().filter(|result| result.status == super::types::TaskNodeStatus::Completed).count(),
+                            "failedTasks": task_results.iter().filter(|result| result.status == super::types::TaskNodeStatus::Failed).count(),
+                            "toolCalls": task_results.iter().map(|result| result.tool_calls.len()).sum::<usize>(),
+                            "policyViolations": task_results.iter().map(|result| result.policy_violations.len()).sum::<usize>(),
+                            "model": model_name,
+                        }),
+                    ),
+                    patchset_id: None,
+                },
             )
             .await?;
             let mut state = self.state.lock().await;
@@ -806,7 +840,7 @@ async fn runtime_audit_worker(
         match command {
             RuntimeAuditCommand::TaskRuntime { task, event } => {
                 if let Err(error) =
-                    persist_runtime_event(&mcp_server, &actor, &state, &task, event).await
+                    persist_runtime_event(&mcp_server, &actor, &state, task.as_ref(), *event).await
                 {
                     tracing::warn!(task_id = %task.id(), "failed to persist runtime audit event: {error}");
                 }
@@ -1005,62 +1039,58 @@ async fn create_pending_plan_step_events(
 
 async fn persist_plan_snapshot_family(
     mcp_server: &Arc<LibraMcpServer>,
-    thread_id: &str,
-    intent_id: &str,
-    root_task_id: &str,
-    plan_id: &str,
-    parent_plan_id: Option<&str>,
-    plan: &ExecutionPlanSpec,
-    persisted_step_ids: &HashMap<Uuid, Uuid>,
-    persisted_task_ids: &HashMap<Uuid, String>,
+    request: PlanSnapshotFamilyRequest<'_>,
 ) -> Result<(), OrchestratorError> {
     let plan_snapshot = PlanSnapshot {
-        id: plan_id.to_string(),
-        thread_id: thread_id.to_string(),
-        intent_id: Some(intent_id.to_string()),
-        turn_id: Some(thread_id.to_string()),
-        step_text: plan
+        id: request.plan_id.to_string(),
+        thread_id: request.thread_id.to_string(),
+        intent_id: Some(request.intent_id.to_string()),
+        turn_id: Some(request.thread_id.to_string()),
+        step_text: request
+            .plan
             .tasks
             .iter()
             .map(|task| task.title().to_string())
             .collect::<Vec<_>>()
             .join("\n"),
-        parents: parent_plan_id
+        parents: request
+            .parent_plan_id
             .map(|parent| vec![parent.to_string()])
             .unwrap_or_default(),
         context_frames: Vec::new(),
         created_at: Utc::now(),
     };
-    put_history_json(mcp_server, "plan_snapshot", plan_id, &plan_snapshot).await?;
-    for (ordinal, task) in plan.tasks.iter().enumerate() {
-        let Some(step_id) = persisted_step_ids.get(&task.step_id()) else {
+    put_history_json(mcp_server, "plan_snapshot", request.plan_id, &plan_snapshot).await?;
+    for (ordinal, task) in request.plan.tasks.iter().enumerate() {
+        let Some(step_id) = request.persisted_step_ids.get(&task.step_id()) else {
             continue;
         };
         let step_id = step_id.to_string();
         let step_snapshot = PlanStepSnapshot {
             id: step_id.clone(),
-            plan_id: plan_id.to_string(),
+            plan_id: request.plan_id.to_string(),
             text: task.title().to_string(),
             ordinal: ordinal as i64,
             created_at: Utc::now(),
         };
         put_history_json(mcp_server, "plan_step_snapshot", &step_id, &step_snapshot).await?;
         let task_snapshot = TaskSnapshot {
-            id: persisted_task_ids
+            id: request
+                .persisted_task_ids
                 .get(&task.id())
                 .cloned()
                 .unwrap_or_else(|| format!("task_{}", task.id())),
-            thread_id: thread_id.to_string(),
-            plan_id: Some(plan_id.to_string()),
-            intent_id: Some(intent_id.to_string()),
-            turn_id: Some(thread_id.to_string()),
+            thread_id: request.thread_id.to_string(),
+            plan_id: Some(request.plan_id.to_string()),
+            intent_id: Some(request.intent_id.to_string()),
+            turn_id: Some(request.thread_id.to_string()),
             title: Some(task.title().to_string()),
-            parent_task_id: Some(root_task_id.to_string()),
+            parent_task_id: Some(request.root_task_id.to_string()),
             origin_step_id: Some(step_id),
             dependencies: task
                 .dependencies()
                 .iter()
-                .filter_map(|dep| persisted_task_ids.get(dep).cloned())
+                .filter_map(|dep| request.persisted_task_ids.get(dep).cloned())
                 .collect(),
             created_at: Utc::now(),
         };
@@ -1160,12 +1190,14 @@ async fn persist_runtime_event(
                     append_run_event(
                         mcp_server,
                         actor,
-                        &context.run_id,
-                        run_kind.clone(),
-                        Some(format!("{} started", task.title())),
-                        None,
-                        None,
-                        None,
+                        RunEventRequest {
+                            run_id: &context.run_id,
+                            kind: run_kind.clone(),
+                            reason: Some(format!("{} started", task.title())),
+                            error: None,
+                            metrics: None,
+                            patchset_id: None,
+                        },
                     )
                     .await?;
                     let mut state = state.lock().await;
@@ -1465,25 +1497,21 @@ async fn append_task_event(
 async fn append_run_event(
     mcp_server: &Arc<LibraMcpServer>,
     actor: &ActorRef,
-    run_id: &str,
-    kind: RunEventKind,
-    reason: Option<String>,
-    error: Option<String>,
-    metrics: Option<serde_json::Value>,
-    patchset_id: Option<&str>,
+    request: RunEventRequest<'_>,
 ) -> Result<(), OrchestratorError> {
     let mut event = RunEvent::new(
         actor.clone(),
-        parse_object_id(run_id)
+        parse_object_id(request.run_id)
             .map_err(|e| OrchestratorError::ConfigError(format!("invalid run id: {e}")))?,
-        kind,
+        request.kind,
     )
     .map_err(|e| OrchestratorError::ConfigError(format!("failed to create run event: {e}")))?;
-    event.set_reason(reason);
-    event.set_error(error);
-    event.set_metrics(metrics);
+    event.set_reason(request.reason);
+    event.set_error(request.error);
+    event.set_metrics(request.metrics);
     event.set_patchset_id(
-        patchset_id
+        request
+            .patchset_id
             .map(parse_object_id)
             .transpose()
             .map_err(|e| OrchestratorError::ConfigError(format!("invalid patchset id: {e}")))?,
@@ -3616,16 +3644,16 @@ mod tests {
             dagrs_runtime: Default::default(),
         };
         let persisted = session
-            .finalize(
-                &spec,
-                &plan_spec,
-                std::slice::from_ref(&plan_spec),
-                &run_state,
-                &system_report,
-                &DecisionOutcome::Commit,
-                Path::new("."),
-                "test-model",
-            )
+            .finalize(ExecutionFinalizeRequest {
+                spec: &spec,
+                execution_plan_spec: &plan_spec,
+                plan_revision_specs: std::slice::from_ref(&plan_spec),
+                run_state: &run_state,
+                system_report: &system_report,
+                decision: &DecisionOutcome::Commit,
+                working_dir: Path::new("."),
+                model_name: "test-model",
+            })
             .await
             .unwrap();
         assert!(!persisted.run_id.is_empty());
@@ -3658,7 +3686,13 @@ mod tests {
             1
         );
         assert_eq!(history.list_objects("run_usage").await.unwrap().len(), 1);
-        assert!(history.list_objects("context_frame").await.unwrap().len() >= 1);
+        assert!(
+            !history
+                .list_objects("context_frame")
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert!(
             history
                 .list_objects("tool_invocation_event")
@@ -3747,16 +3781,16 @@ mod tests {
         };
 
         let persisted = session
-            .finalize(
-                &spec,
-                &plan_spec,
-                std::slice::from_ref(&plan_spec),
-                &run_state,
-                &system_report,
-                &DecisionOutcome::Commit,
-                Path::new("."),
-                "test-model",
-            )
+            .finalize(ExecutionFinalizeRequest {
+                spec: &spec,
+                execution_plan_spec: &plan_spec,
+                plan_revision_specs: std::slice::from_ref(&plan_spec),
+                run_state: &run_state,
+                system_report: &system_report,
+                decision: &DecisionOutcome::Commit,
+                working_dir: Path::new("."),
+                model_name: "test-model",
+            })
             .await
             .unwrap();
 
