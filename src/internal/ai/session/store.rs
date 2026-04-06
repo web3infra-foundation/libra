@@ -111,7 +111,10 @@ impl SessionStore {
     }
 
     /// Load the most recently updated session for a specific working directory.
-    pub fn load_latest_for_working_dir(&self, working_dir: &str) -> io::Result<Option<SessionState>> {
+    pub fn load_latest_for_working_dir(
+        &self,
+        working_dir: &str,
+    ) -> io::Result<Option<SessionState>> {
         let sessions = self.list()?;
         if sessions.is_empty() {
             return Ok(None);

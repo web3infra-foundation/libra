@@ -23,7 +23,7 @@ use tokio::{
 use tokio_stream::StreamExt;
 
 use super::{
-    app_event::{AgentEvent, AgentStatus, AppEvent, TaskMuxLogKind, TurnId},
+    app_event::{AgentEvent, AgentStatus, AppEvent, TurnId},
     chatwidget::ChatWidget,
     diff::FileChange,
     history_cell::{
@@ -55,7 +55,10 @@ use crate::{
             },
             server::LibraMcpServer,
         },
-        orchestrator::{planner::compile_execution_plan_spec, types::ExecutionPlanSpec},
+        orchestrator::{
+            planner::compile_execution_plan_spec,
+            types::{ExecutionPlanSpec, TaskRuntimeEvent, TaskRuntimeNoteLevel, TaskRuntimePhase},
+        },
         sandbox::{ExecApprovalRequest, ReviewDecision},
         session::{SessionState, SessionStore},
         tools::{
@@ -1179,7 +1182,6 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         ) {
                             let _ = self.tx.send(AppEvent::ToolCallBegin {
                                 turn_id: self.turn_id,
-                                task_id: None,
                                 call_id: call_id.to_string(),
                                 tool_name: tool_name.to_string(),
                                 arguments: arguments.clone(),
@@ -1194,7 +1196,6 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         ) {
                             let _ = self.tx.send(AppEvent::ToolCallEnd {
                                 turn_id: self.turn_id,
-                                task_id: None,
                                 call_id: call_id.to_string(),
                                 tool_name: tool_name.to_string(),
                                 result: result.clone(),
@@ -1404,7 +1405,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     self.mcp_plan_id = None;
                 }
 
-                self.widget.show_dag_panel((*plan).clone());
+                self.widget.show_dag_preview((*plan).clone());
                 self.replace_streaming_assistant_cell(Box::new(PlanSummaryHistoryCell::new(
                     *spec,
                     *plan,
@@ -1458,16 +1459,10 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             }
             AppEvent::ToolCallBegin {
                 turn_id: _turn_id,
-                task_id,
                 call_id,
                 tool_name,
                 arguments,
             } => {
-                if let Some(task_id) = task_id {
-                    let summary = summarize_task_tool_begin(&tool_name, &arguments);
-                    self.widget
-                        .push_task_mux_log(task_id, TaskMuxLogKind::Tool, summary);
-                }
                 if tool_name == "update_plan" {
                     // Parse the plan arguments and render a specialised cell.
                     let (explanation, steps) =
@@ -1493,20 +1488,10 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             }
             AppEvent::ToolCallEnd {
                 turn_id: _turn_id,
-                task_id,
                 call_id,
                 tool_name,
                 result,
             } => {
-                if let Some(task_id) = task_id {
-                    let summary = summarize_task_tool_end(&tool_name, &result);
-                    let kind = if result.is_ok() {
-                        TaskMuxLogKind::Note
-                    } else {
-                        TaskMuxLogKind::Error
-                    };
-                    self.widget.push_task_mux_log(task_id, kind, summary);
-                }
                 let should_hide_failure = should_hide_tool_failure(&tool_name, &result);
                 // For successful apply_patch, insert a visual diff cell.
                 if tool_name == "apply_patch"
@@ -1563,23 +1548,43 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 self.sync_mux_input_context();
                 self.schedule_draw();
             }
-            AppEvent::TaskWorkspaceReady {
-                turn_id: _turn_id,
+            AppEvent::TaskRuntimeEvent {
+                turn_id,
                 task_id,
-                working_dir,
-                isolated,
+                event,
             } => {
-                self.widget
-                    .set_task_workspace(task_id, working_dir, isolated);
-                self.schedule_draw();
-            }
-            AppEvent::TaskMuxLog {
-                turn_id: _turn_id,
-                task_id,
-                kind,
-                text,
-            } => {
-                self.widget.push_task_mux_log(task_id, kind, text);
+                self.widget.apply_task_runtime_event(task_id, event.clone());
+                match event {
+                    TaskRuntimeEvent::ToolCallBegin {
+                        call_id,
+                        tool_name,
+                        arguments,
+                    } => {
+                        let event = AppEvent::ToolCallBegin {
+                            turn_id,
+                            call_id,
+                            tool_name,
+                            arguments,
+                        };
+                        Box::pin(self.handle_app_event(event)).await?;
+                        return Ok(());
+                    }
+                    TaskRuntimeEvent::ToolCallEnd {
+                        call_id,
+                        tool_name,
+                        result,
+                    } => {
+                        let event = AppEvent::ToolCallEnd {
+                            turn_id,
+                            call_id,
+                            tool_name,
+                            result,
+                        };
+                        Box::pin(self.handle_app_event(event)).await?;
+                        return Ok(());
+                    }
+                    _ => {}
+                }
                 self.schedule_draw();
             }
             AppEvent::McpTurnTrackingReady {
@@ -1881,8 +1886,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 .bottom_pane
                 .set_input_context_label(Some("Revise IntentSpec".to_string()));
             self.widget.bottom_pane.set_input_hint(Some(
-                "Describe spec changes, or use /plan modify <changes> or /plan cancel"
-                    .to_string(),
+                "Describe spec changes, or use /plan modify <changes> or /plan cancel".to_string(),
             ));
         } else {
             self.widget.bottom_pane.set_input_context_label(None);
@@ -1990,24 +1994,6 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 fn scoped_call_id(task: &TaskSpec, call_id: &str) -> String {
                     format!("{}:{call_id}", task.id())
                 }
-
-                fn summarize_gate_check(
-                    check: &crate::internal::ai::intentspec::types::Check,
-                ) -> String {
-                    match check.kind {
-                        crate::internal::ai::intentspec::types::CheckKind::Policy => {
-                            format!("policy {}", check.id)
-                        }
-                        crate::internal::ai::intentspec::types::CheckKind::Command
-                        | crate::internal::ai::intentspec::types::CheckKind::TestSuite => check
-                            .command
-                            .as_deref()
-                            .map(str::trim)
-                            .filter(|command| !command.is_empty())
-                            .map(|command| command.to_string())
-                            .unwrap_or_else(|| check.id.clone()),
-                    }
-                }
             }
 
             impl OrchestratorObserver for UiOrchestratorObserver {
@@ -2018,170 +2004,81 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     });
                 }
 
-                fn on_task_started(&self, task: &TaskSpec) {
-                    let _ = self.tx.send(AppEvent::AgentStatusUpdate {
-                        turn_id: self.turn_id,
-                        status: AgentStatus::Thinking,
-                    });
-                    let _ = self.tx.send(AppEvent::TaskMuxLog {
-                        turn_id: self.turn_id,
-                        task_id: task.id(),
-                        kind: TaskMuxLogKind::Note,
-                        text: format!("started {}", task.title()),
-                    });
-                    let _ = self.tx.send(AppEvent::DagTaskStatus {
-                        turn_id: self.turn_id,
-                        task_id: task.id(),
-                        status: crate::internal::ai::orchestrator::types::TaskNodeStatus::Running,
-                    });
-                }
-
-                fn on_task_workspace_ready(
-                    &self,
-                    task: &TaskSpec,
-                    working_dir: &std::path::Path,
-                    isolated: bool,
-                ) {
-                    self.send_note(format_task_workspace_note(
-                        task.title(),
-                        working_dir,
-                        isolated,
-                    ));
-                    let _ = self.tx.send(AppEvent::TaskWorkspaceReady {
-                        turn_id: self.turn_id,
-                        task_id: task.id(),
-                        working_dir: working_dir.to_path_buf(),
-                        isolated,
-                    });
-                }
-
-                fn on_task_completed(
-                    &self,
-                    task: &TaskSpec,
-                    result: &crate::internal::ai::orchestrator::types::TaskResult,
-                ) {
-                    let completion_summary = format_task_completion_note(task.title(), result);
-                    let _ = self.tx.send(AppEvent::TaskMuxLog {
-                        turn_id: self.turn_id,
-                        task_id: task.id(),
-                        kind: if result.status
-                            == crate::internal::ai::orchestrator::types::TaskNodeStatus::Failed
-                        {
-                            TaskMuxLogKind::Error
-                        } else {
-                            TaskMuxLogKind::Note
-                        },
-                        text: completion_summary.clone(),
-                    });
-                    let _ = self.tx.send(AppEvent::DagTaskStatus {
-                        turn_id: self.turn_id,
-                        task_id: task.id(),
-                        status: result.status.clone(),
-                    });
-                    self.send_note(completion_summary);
-                }
-
-                fn on_task_assistant_message(&self, task: &TaskSpec, text: &str) {
-                    let _ = self.tx.send(AppEvent::TaskMuxLog {
-                        turn_id: self.turn_id,
-                        task_id: task.id(),
-                        kind: TaskMuxLogKind::Assistant,
-                        text: text.to_string(),
-                    });
-                }
-
-                fn on_tool_call_begin(
-                    &self,
-                    task: &TaskSpec,
-                    call_id: &str,
-                    tool_name: &str,
-                    arguments: &serde_json::Value,
-                ) {
-                    let _ = self.tx.send(AppEvent::ToolCallBegin {
-                        turn_id: self.turn_id,
-                        task_id: Some(task.id()),
-                        call_id: Self::scoped_call_id(task, call_id),
-                        tool_name: tool_name.to_string(),
-                        arguments: arguments.clone(),
-                    });
-                }
-
-                fn on_tool_call_end(
-                    &self,
-                    task: &TaskSpec,
-                    call_id: &str,
-                    tool_name: &str,
-                    result: &Result<ToolOutput, String>,
-                ) {
-                    let _ = self.tx.send(AppEvent::ToolCallEnd {
-                        turn_id: self.turn_id,
-                        task_id: Some(task.id()),
-                        call_id: Self::scoped_call_id(task, call_id),
-                        tool_name: tool_name.to_string(),
-                        result: result.clone(),
-                    });
-                }
-
-                fn on_reviewer_started(&self, _task: &TaskSpec) {}
-
-                fn on_reviewer_completed(
-                    &self,
-                    _task: &TaskSpec,
-                    _review: Option<&crate::internal::ai::orchestrator::types::ReviewOutcome>,
-                ) {
-                }
-
-                fn on_gate_check_started(
-                    &self,
-                    task: &TaskSpec,
-                    check: &crate::internal::ai::intentspec::types::Check,
-                ) {
-                    let summary = Self::summarize_gate_check(check);
-                    self.send_note(format!(
-                        "Gate Check · {}  \nrunning · {}",
-                        task.title(),
-                        summary
-                    ));
-                    let _ = self.tx.send(AppEvent::TaskMuxLog {
-                        turn_id: self.turn_id,
-                        task_id: task.id(),
-                        kind: TaskMuxLogKind::Tool,
-                        text: format!("gate running · {}", summary),
-                    });
-                }
-
-                fn on_gate_check_completed(
-                    &self,
-                    task: &TaskSpec,
-                    check: &crate::internal::ai::intentspec::types::Check,
-                    result: &crate::internal::ai::orchestrator::types::GateResult,
-                ) {
-                    let summary = Self::summarize_gate_check(check);
-                    let outcome = if result.passed { "passed" } else { "failed" };
-                    let detail = if result.timed_out {
-                        "timed out".to_string()
-                    } else {
-                        format!("exit {}", result.exit_code)
-                    };
-                    let mut metrics = vec![outcome.to_string(), summary];
-                    if result.duration_ms > 0 {
-                        metrics.push(format!("{} ms", result.duration_ms));
+                fn on_task_runtime_event(&self, task: &TaskSpec, event: TaskRuntimeEvent) {
+                    match &event {
+                        TaskRuntimeEvent::Phase(TaskRuntimePhase::Starting) => {
+                            let _ = self.tx.send(AppEvent::AgentStatusUpdate {
+                                turn_id: self.turn_id,
+                                status: AgentStatus::Thinking,
+                            });
+                            let _ = self.tx.send(AppEvent::DagTaskStatus {
+                                turn_id: self.turn_id,
+                                task_id: task.id(),
+                                status: crate::internal::ai::orchestrator::types::TaskNodeStatus::Running,
+                            });
+                        }
+                        TaskRuntimeEvent::Phase(TaskRuntimePhase::Completed) => {
+                            let _ = self.tx.send(AppEvent::DagTaskStatus {
+                                turn_id: self.turn_id,
+                                task_id: task.id(),
+                                status: crate::internal::ai::orchestrator::types::TaskNodeStatus::Completed,
+                            });
+                        }
+                        TaskRuntimeEvent::Phase(TaskRuntimePhase::Failed) => {
+                            let _ = self.tx.send(AppEvent::DagTaskStatus {
+                                turn_id: self.turn_id,
+                                task_id: task.id(),
+                                status: crate::internal::ai::orchestrator::types::TaskNodeStatus::Failed,
+                            });
+                        }
+                        TaskRuntimeEvent::WorkspaceReady {
+                            working_dir,
+                            isolated,
+                        } => {
+                            self.send_note(format_task_workspace_note(
+                                task.title(),
+                                working_dir,
+                                *isolated,
+                            ));
+                        }
+                        TaskRuntimeEvent::Note { level, text } => {
+                            let title = match level {
+                                TaskRuntimeNoteLevel::Info => format!("Task · {}", task.title()),
+                                TaskRuntimeNoteLevel::Error => {
+                                    format!("Task Failed · {}", task.title())
+                                }
+                            };
+                            self.send_note(format!("{title}  \n{text}"));
+                        }
+                        _ => {}
                     }
-                    metrics.push(detail);
-                    self.send_note(format!(
-                        "Gate Check · {}  \n{}",
-                        task.title(),
-                        metrics.join(" · ")
-                    ));
-                    let _ = self.tx.send(AppEvent::TaskMuxLog {
+
+                    let mux_event = match event {
+                        TaskRuntimeEvent::ToolCallBegin {
+                            call_id,
+                            tool_name,
+                            arguments,
+                        } => TaskRuntimeEvent::ToolCallBegin {
+                            call_id: Self::scoped_call_id(task, &call_id),
+                            tool_name,
+                            arguments,
+                        },
+                        TaskRuntimeEvent::ToolCallEnd {
+                            call_id,
+                            tool_name,
+                            result,
+                        } => TaskRuntimeEvent::ToolCallEnd {
+                            call_id: Self::scoped_call_id(task, &call_id),
+                            tool_name,
+                            result,
+                        },
+                        other => other,
+                    };
+
+                    let _ = self.tx.send(AppEvent::TaskRuntimeEvent {
                         turn_id: self.turn_id,
                         task_id: task.id(),
-                        kind: if result.passed {
-                            TaskMuxLogKind::Note
-                        } else {
-                            TaskMuxLogKind::Error
-                        },
-                        text: format!("gate {} · {}", outcome, metrics.join(" · ")),
+                        event: mux_event,
                     });
                 }
 
@@ -2353,7 +2250,6 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 ) {
                     let _ = self.tx.send(AppEvent::ToolCallBegin {
                         turn_id: self.turn_id,
-                        task_id: None,
                         call_id: call_id.to_string(),
                         tool_name: tool_name.to_string(),
                         arguments: arguments.clone(),
@@ -2386,7 +2282,6 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 ) {
                     let _ = self.tx.send(AppEvent::ToolCallEnd {
                         turn_id: self.turn_id,
-                        task_id: None,
                         call_id: call_id.to_string(),
                         tool_name: tool_name.to_string(),
                         result: result.clone(),
@@ -2653,24 +2548,22 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     .add_cell(Box::new(AssistantHistoryCell::new(rendered)));
                 self.schedule_draw();
             }
-            "execute" => {
-                match self.load_latest_intentspec_json().await {
-                    LatestIntentSpecLoad::Found(spec_json) => {
-                        self.start_execute_workflow(&spec_json).await;
-                    }
-                    LatestIntentSpecLoad::Missing => {
-                        self.widget.add_cell(Box::new(AssistantHistoryCell::new(
-                            "No IntentSpec found. Run `/plan <requirement>` first.".to_string(),
-                        )));
-                        self.schedule_draw();
-                    }
-                    LatestIntentSpecLoad::BindingMismatch(message) => {
-                        self.widget
-                            .add_cell(Box::new(AssistantHistoryCell::new(message)));
-                        self.schedule_draw();
-                    }
+            "execute" => match self.load_latest_intentspec_json().await {
+                LatestIntentSpecLoad::Found(spec_json) => {
+                    self.start_execute_workflow(&spec_json).await;
                 }
-            }
+                LatestIntentSpecLoad::Missing => {
+                    self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                        "No IntentSpec found. Run `/plan <requirement>` first.".to_string(),
+                    )));
+                    self.schedule_draw();
+                }
+                LatestIntentSpecLoad::BindingMismatch(message) => {
+                    self.widget
+                        .add_cell(Box::new(AssistantHistoryCell::new(message)));
+                    self.schedule_draw();
+                }
+            },
             _ => {
                 self.widget.add_cell(Box::new(AssistantHistoryCell::new(
                     "Usage: /intent show|execute".to_string(),
@@ -2869,6 +2762,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 tool_cell.interrupt_running();
             }
         }
+        self.widget.interrupt_task_mux_tool_calls();
     }
 
     /// Schedule a frame draw with frame rate limiting.
@@ -2995,58 +2889,6 @@ fn should_hide_tool_failure(tool_name: &str, result: &Result<ToolOutput, String>
         tool_name,
         "read_file" | "list_dir" | "grep_files" | "apply_patch"
     ) && !matches!(result, Ok(output) if output.is_success())
-}
-
-fn summarize_task_tool_begin(tool_name: &str, arguments: &serde_json::Value) -> String {
-    let mut summary = tool_name.to_string();
-    match tool_name {
-        "shell" => {
-            if let Some(command) = arguments.get("command").and_then(|value| value.as_str()) {
-                summary.push_str(&format!(" · {}", truncate_for_tool_log(command, 36)));
-            }
-            if let Some(workdir) = arguments.get("workdir").and_then(|value| value.as_str()) {
-                summary.push_str(&format!(" @ {}", truncate_for_tool_log(workdir, 20)));
-            }
-        }
-        "read_file" | "list_dir" | "grep_files" | "apply_patch" => {
-            if let Some(path) = arguments.get("path").and_then(|value| value.as_str()) {
-                summary.push_str(&format!(" · {}", truncate_for_tool_log(path, 36)));
-            } else if let Some(command) = arguments.get("cmd").and_then(|value| value.as_str()) {
-                summary.push_str(&format!(" · {}", truncate_for_tool_log(command, 36)));
-            }
-        }
-        _ => {}
-    }
-    summary
-}
-
-fn summarize_task_tool_end(tool_name: &str, result: &Result<ToolOutput, String>) -> String {
-    match result {
-        Ok(output) => {
-            let status = if output.is_success() {
-                "ok"
-            } else {
-                "needs attention"
-            };
-            format!("{tool_name} · {status}")
-        }
-        Err(error) => format!(
-            "{tool_name} · failed · {}",
-            truncate_for_tool_log(error, 40)
-        ),
-    }
-}
-
-fn truncate_for_tool_log(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_string();
-    }
-    let mut truncated = text
-        .chars()
-        .take(max_chars.saturating_sub(1))
-        .collect::<String>();
-    truncated.push('…');
-    truncated
 }
 
 fn format_orchestrator_result(
@@ -3335,10 +3177,10 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        append_to_last_tool_group_cell, build_plan_revision_prompt, format_intentspec_target_mismatch,
-        format_orchestrator_result, parse_pending_plan_revision_command,
-        pending_plan_revision_help_message,
-        should_hide_tool_failure, PendingPlanRevisionCommand,
+        PendingPlanRevisionCommand, append_to_last_tool_group_cell, build_plan_revision_prompt,
+        format_intentspec_target_mismatch, format_orchestrator_result,
+        parse_pending_plan_revision_command, pending_plan_revision_help_message,
+        should_hide_tool_failure,
     };
     use crate::internal::{
         ai::{
@@ -3492,20 +3334,6 @@ mod tests {
             "read_file",
             &Ok(ToolOutput::success("ok"))
         ));
-    }
-
-    #[test]
-    fn shell_tool_summary_includes_command_and_workdir() {
-        let summary = super::summarize_task_tool_begin(
-            "shell",
-            &json!({
-                "command": "cargo test --lib",
-                "workdir": "/tmp/workspace"
-            }),
-        );
-
-        assert!(summary.contains("cargo test --lib"));
-        assert!(summary.contains("/tmp/workspace"));
     }
 
     #[test]
@@ -3867,7 +3695,8 @@ fn intentspec_matches_workspace(
     workspace_locator: &str,
     head_sha: &str,
 ) -> bool {
-    spec.metadata.target.repo.locator == workspace_locator && spec.metadata.target.base_ref == head_sha
+    spec.metadata.target.repo.locator == workspace_locator
+        && spec.metadata.target.base_ref == head_sha
 }
 
 fn current_git_branch_label(working_dir: &std::path::Path) -> Option<String> {
@@ -4248,27 +4077,29 @@ mod orchestrator_result_tests {
 
     use super::{
         IntentSpecBinding, LATEST_INTENTSPEC_BASE_REF, LATEST_INTENTSPEC_BRANCH_LABEL,
-        LATEST_INTENTSPEC_WORKSPACE_KEY, canonical_working_dir_label,
-        format_orchestrator_result, format_task_completion_note, format_task_workspace_note,
-        intentspec_matches_workspace, latest_intentspec_binding_matches,
+        LATEST_INTENTSPEC_WORKSPACE_KEY, canonical_working_dir_label, format_orchestrator_result,
+        format_task_completion_note, format_task_workspace_note, intentspec_matches_workspace,
+        latest_intentspec_binding_matches,
     };
-    use crate::internal::ai::orchestrator::{
-        run_state::RunStateSnapshot,
-        types::{
-            DecisionOutcome, ExecutionPlanSpec, GateReport, GateResult, OrchestratorResult,
-            ReviewOutcome, SystemReport, TaskContract, TaskKind, TaskNodeStatus, TaskResult,
-            TaskSpec,
+    use crate::internal::ai::{
+        intentspec::types::{
+            Acceptance, Artifacts, ChangeType, ConstraintLicensing, ConstraintPlatform,
+            ConstraintPrivacy, ConstraintResources, ConstraintSecurity, Constraints, CreatedBy,
+            CreatorType, DomainAllowlistMode, EncodingPolicy, EvidencePolicy, EvidenceStrategy,
+            ExecutionPolicy, HumanInLoop, Intent, IntentSpec, Lifecycle, LifecycleStatus, Metadata,
+            NetworkPolicy, Objective, ObjectiveKind, OutputHandlingPolicy, PromptInjectionPolicy,
+            ProvenanceBindings, ProvenancePolicy, RepoTarget, RepoType, RetryPolicy, Risk,
+            RiskLevel, SecretAccessPolicy, SecretPolicy, SecurityPolicy, Target, ToolAcl,
+            TransparencyLogPolicy, TransparencyMode, TrustTier, VerificationPlan,
         },
-    };
-    use crate::internal::ai::intentspec::types::{
-        Acceptance, Artifacts, ChangeType, ConstraintLicensing, ConstraintPlatform,
-        ConstraintPrivacy, ConstraintResources, ConstraintSecurity, Constraints, CreatedBy,
-        CreatorType, DomainAllowlistMode, EncodingPolicy, EvidencePolicy, EvidenceStrategy,
-        ExecutionPolicy, HumanInLoop, Intent, IntentSpec, Lifecycle, LifecycleStatus, Metadata,
-        NetworkPolicy, Objective, ObjectiveKind, OutputHandlingPolicy, PromptInjectionPolicy,
-        ProvenanceBindings, ProvenancePolicy, RepoTarget, RepoType, RetryPolicy, Risk, RiskLevel,
-        SecretAccessPolicy, SecretPolicy, SecurityPolicy, Target, ToolAcl,
-        TransparencyLogPolicy, TransparencyMode, TrustTier, VerificationPlan,
+        orchestrator::{
+            run_state::RunStateSnapshot,
+            types::{
+                DecisionOutcome, ExecutionPlanSpec, GateReport, GateResult, OrchestratorResult,
+                ReviewOutcome, SystemReport, TaskContract, TaskKind, TaskNodeStatus, TaskResult,
+                TaskSpec,
+            },
+        },
     };
 
     fn test_task_spec(title: &str, kind: TaskKind) -> TaskSpec {
@@ -4335,7 +4166,8 @@ mod orchestrator_result_tests {
             constraints: Constraints {
                 security: ConstraintSecurity {
                     network_policy: NetworkPolicy::Deny,
-                    dependency_policy: crate::internal::ai::intentspec::types::DependencyPolicy::NoNew,
+                    dependency_policy:
+                        crate::internal::ai::intentspec::types::DependencyPolicy::NoNew,
                     crypto_policy: String::new(),
                 },
                 privacy: ConstraintPrivacy {

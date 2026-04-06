@@ -1,25 +1,18 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
     fs, io,
     path::{Path, PathBuf},
 };
 
-use git_internal::hash::ObjectHash;
 use uuid::Uuid;
 
 use super::acl::{ScopeVerdict, check_scope};
-use crate::{command::calc_file_blob_hash, utils::util};
-
-#[derive(Clone, Debug, Default)]
-pub(crate) struct WorkspaceSnapshot {
-    pub(crate) entries: BTreeMap<PathBuf, WorkspaceEntry>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum WorkspaceEntry {
-    File(ObjectHash),
-    Symlink(PathBuf),
-}
+use crate::{
+    internal::ai::workspace_snapshot::{
+        WorkspaceSnapshot, changed_paths_since_baseline, snapshot_workspace,
+        workspace_entry_if_exists,
+    },
+    utils::util,
+};
 
 pub(crate) struct TaskWorktree {
     pub(crate) root: PathBuf,
@@ -127,39 +120,6 @@ fn sync_contract_violation(
     }
 }
 
-fn snapshot_workspace(root: &Path) -> io::Result<WorkspaceSnapshot> {
-    fn visit_dir(
-        root: &Path,
-        dir: &Path,
-        entries: &mut BTreeMap<PathBuf, WorkspaceEntry>,
-    ) -> io::Result<()> {
-        for entry in fs::read_dir(dir)? {
-            let entry = entry?;
-            if entry.file_name() == util::ROOT_DIR {
-                continue;
-            }
-
-            let path = entry.path();
-            let file_type = entry.file_type()?;
-            if file_type.is_dir() {
-                visit_dir(root, &path, entries)?;
-                continue;
-            }
-
-            let rel = path
-                .strip_prefix(root)
-                .map_err(|err| io::Error::other(err.to_string()))?
-                .to_path_buf();
-            entries.insert(rel, snapshot_entry(&path, &file_type)?);
-        }
-        Ok(())
-    }
-
-    let mut entries = BTreeMap::new();
-    visit_dir(root, root, &mut entries)?;
-    Ok(WorkspaceSnapshot { entries })
-}
-
 fn materialize_workspace(
     source_root: &Path,
     target_root: &Path,
@@ -169,39 +129,6 @@ fn materialize_workspace(
         copy_workspace_entry(source_root, target_root, rel_path)?;
     }
     Ok(())
-}
-
-fn changed_paths_since_baseline(
-    baseline: &WorkspaceSnapshot,
-    current: &WorkspaceSnapshot,
-) -> Vec<PathBuf> {
-    let paths = baseline
-        .entries
-        .keys()
-        .chain(current.entries.keys())
-        .cloned()
-        .collect::<BTreeSet<_>>();
-
-    paths
-        .into_iter()
-        .filter(|path| baseline.entries.get(path) != current.entries.get(path))
-        .collect()
-}
-
-fn snapshot_entry(path: &Path, file_type: &fs::FileType) -> io::Result<WorkspaceEntry> {
-    if file_type.is_symlink() {
-        return Ok(WorkspaceEntry::Symlink(fs::read_link(path)?));
-    }
-
-    Ok(WorkspaceEntry::File(calc_file_blob_hash(path)?))
-}
-
-fn workspace_entry_if_exists(path: &Path) -> io::Result<Option<WorkspaceEntry>> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => snapshot_entry(path, &metadata.file_type()).map(Some),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(err),
-    }
 }
 
 fn copy_workspace_entry(source_root: &Path, target_root: &Path, rel_path: &Path) -> io::Result<()> {
@@ -385,10 +312,13 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        WorkspaceEntry, cleanup_task_worktree, clone_or_copy_file, materialize_workspace,
-        prepare_task_worktree, snapshot_workspace, sync_task_worktree_back,
+        cleanup_task_worktree, clone_or_copy_file, materialize_workspace, prepare_task_worktree,
+        sync_task_worktree_back,
     };
-    use crate::utils::util;
+    use crate::{
+        internal::ai::workspace_snapshot::{WorkspaceEntry, snapshot_workspace},
+        utils::util,
+    };
 
     #[cfg(unix)]
     fn symlink_path(target: &std::path::Path, link: &std::path::Path) -> io::Result<()> {
@@ -549,6 +479,24 @@ mod tests {
             "fn main() {}\n"
         );
         assert!(!task_worktree.root.join(util::ROOT_DIR).exists());
+
+        cleanup_task_worktree(&task_worktree.root).unwrap();
+    }
+
+    #[test]
+    fn prepare_task_worktree_skips_gitignored_build_outputs() {
+        let temp = tempdir().unwrap();
+        let main = temp.path().join("workspace");
+        std::fs::create_dir_all(main.join("src")).unwrap();
+        std::fs::create_dir_all(main.join("target/debug")).unwrap();
+        std::fs::write(main.join(".gitignore"), "target/\n").unwrap();
+        std::fs::write(main.join("src/lib.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(main.join("target/debug/app"), "compiled\n").unwrap();
+
+        let task_worktree = prepare_task_worktree(&main, Uuid::new_v4()).unwrap();
+
+        assert!(task_worktree.root.join("src/lib.rs").exists());
+        assert!(!task_worktree.root.join("target").exists());
 
         cleanup_task_worktree(&task_worktree.root).unwrap();
     }

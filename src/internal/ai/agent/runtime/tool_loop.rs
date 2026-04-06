@@ -25,6 +25,8 @@ pub struct ToolLoopTurn {
 ///
 /// All callbacks are best-effort and must be non-panicking.
 pub trait ToolLoopObserver: Send {
+    fn on_model_turn_start(&mut self, _turn: usize) {}
+
     fn on_assistant_step_text(&mut self, _text: &str) {}
 
     fn on_tool_call_begin(&mut self, _call_id: &str, _tool_name: &str, _arguments: &Value) {}
@@ -146,6 +148,7 @@ pub async fn run_tool_loop_with_history_and_observer<M: CompletionModel, O: Tool
             ..Default::default()
         };
 
+        observer.on_model_turn_start(turn_count);
         let response = model.completion(request).await?;
 
         let mut tool_calls = Vec::new();

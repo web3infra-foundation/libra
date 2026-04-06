@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Arc,
 };
 
@@ -13,6 +13,7 @@ use super::run_state::RunStateSnapshot;
 use crate::internal::ai::{
     intentspec::types::{ChangeLogEntry, Check},
     mcp::server::LibraMcpServer,
+    tools::ToolOutput,
 };
 
 /// Errors that can occur during orchestration.
@@ -212,6 +213,62 @@ impl ExecutionPlanSpec {
 
         groups
     }
+
+    pub fn scheduled_groups(&self) -> Vec<Vec<Uuid>> {
+        let parallel_limit = usize::from(self.max_parallel.max(1));
+        let mut remaining: BTreeSet<Uuid> = self.tasks.iter().map(TaskSpec::id).collect();
+        let task_by_id: BTreeMap<Uuid, &TaskSpec> =
+            self.tasks.iter().map(|task| (task.id(), task)).collect();
+        let mut completed = BTreeSet::new();
+        let mut groups = Vec::new();
+
+        while !remaining.is_empty() {
+            let ready = self
+                .tasks
+                .iter()
+                .filter(|task| remaining.contains(&task.id()))
+                .filter(|task| {
+                    task.dependencies()
+                        .iter()
+                        .all(|dep| completed.contains(dep))
+                })
+                .map(TaskSpec::id)
+                .take(parallel_limit)
+                .collect::<Vec<_>>();
+
+            if ready.is_empty() {
+                tracing::warn!(
+                    unresolved_tasks = remaining.len(),
+                    "unable to compute scheduled task groups due to unresolved dependencies"
+                );
+                let fallback = self
+                    .tasks
+                    .iter()
+                    .filter(|task| remaining.contains(&task.id()))
+                    .map(TaskSpec::id)
+                    .take(parallel_limit)
+                    .collect::<Vec<_>>();
+                if fallback.is_empty() {
+                    break;
+                }
+                for id in &fallback {
+                    completed.insert(*id);
+                    remaining.remove(id);
+                }
+                groups.push(fallback);
+                continue;
+            }
+
+            for id in &ready {
+                debug_assert!(task_by_id.contains_key(id));
+                completed.insert(*id);
+                remaining.remove(id);
+            }
+            groups.push(ready);
+        }
+
+        groups
+    }
 }
 
 /// A policy violation detected before or after a tool call.
@@ -399,53 +456,51 @@ pub struct PersistedExecution {
 }
 
 /// Best-effort observer for surfacing orchestrator runtime progress.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TaskRuntimePhase {
+    Pending,
+    Starting,
+    AwaitingModel { turn: usize },
+    ExecutingTool { tool_name: String },
+    Reviewing,
+    Completed,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TaskRuntimeNoteLevel {
+    Info,
+    Error,
+}
+
+#[derive(Clone, Debug)]
+pub enum TaskRuntimeEvent {
+    Phase(TaskRuntimePhase),
+    WorkspaceReady {
+        working_dir: PathBuf,
+        isolated: bool,
+    },
+    Note {
+        level: TaskRuntimeNoteLevel,
+        text: String,
+    },
+    AssistantMessage(String),
+    ToolCallBegin {
+        call_id: String,
+        tool_name: String,
+        arguments: Value,
+    },
+    ToolCallEnd {
+        call_id: String,
+        tool_name: String,
+        result: Result<ToolOutput, String>,
+    },
+}
+
 pub trait OrchestratorObserver: Send + Sync {
     fn on_plan_compiled(&self, _plan: &ExecutionPlanSpec) {}
 
-    fn on_task_workspace_ready(&self, _task: &TaskSpec, _working_dir: &Path, _isolated: bool) {}
-
-    fn on_task_started(&self, _task: &TaskSpec) {}
-
-    fn on_task_completed(&self, _task: &TaskSpec, _result: &TaskResult) {}
-
-    fn on_task_assistant_message(&self, _task: &TaskSpec, _text: &str) {}
-
-    fn on_tool_call_begin(
-        &self,
-        _task: &TaskSpec,
-        _call_id: &str,
-        _tool_name: &str,
-        _arguments: &Value,
-    ) {
-    }
-
-    fn on_tool_call_end(
-        &self,
-        _task: &TaskSpec,
-        _call_id: &str,
-        _tool_name: &str,
-        _result: &Result<crate::internal::ai::tools::ToolOutput, String>,
-    ) {
-    }
-
-    fn on_reviewer_started(&self, _task: &TaskSpec) {}
-
-    fn on_reviewer_completed(&self, _task: &TaskSpec, _review: Option<&ReviewOutcome>) {}
-
-    fn on_gate_check_started(
-        &self,
-        _task: &TaskSpec,
-        _check: &crate::internal::ai::intentspec::types::Check,
-    ) {
-    }
-
-    fn on_gate_check_completed(
-        &self,
-        _task: &TaskSpec,
-        _check: &crate::internal::ai::intentspec::types::Check,
-        _result: &GateResult,
-    ) {
-    }
+    fn on_task_runtime_event(&self, _task: &TaskSpec, _event: TaskRuntimeEvent) {}
 
     fn on_graph_progress(&self, _completed: usize, _total: usize) {}
 

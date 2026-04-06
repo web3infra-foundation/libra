@@ -211,18 +211,17 @@ mod tests {
                 .push(format!("plan:{}", plan.revision));
         }
 
-        fn on_task_started(&self, task: &types::TaskSpec) {
-            self.events
-                .lock()
-                .unwrap()
-                .push(format!("start:{}", task.title()));
-        }
-
-        fn on_task_completed(&self, task: &types::TaskSpec, _result: &types::TaskResult) {
-            self.events
-                .lock()
-                .unwrap()
-                .push(format!("done:{}", task.title()));
+        fn on_task_runtime_event(&self, task: &types::TaskSpec, event: types::TaskRuntimeEvent) {
+            let mut events = self.events.lock().unwrap();
+            match event {
+                types::TaskRuntimeEvent::Phase(types::TaskRuntimePhase::Starting) => {
+                    events.push(format!("start:{}", task.title()));
+                }
+                types::TaskRuntimeEvent::Phase(types::TaskRuntimePhase::Completed) => {
+                    events.push(format!("done:{}", task.title()));
+                }
+                _ => {}
+            }
         }
 
         fn on_graph_progress(&self, completed: usize, total: usize) {

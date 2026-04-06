@@ -14,8 +14,18 @@ use ratatui::{
 };
 use uuid::Uuid;
 
-use super::{app_event::TaskMuxLogKind, bottom_pane::BottomPane, history_cell::HistoryCell, theme};
-use crate::internal::ai::orchestrator::types::{ExecutionPlanSpec, TaskKind, TaskNodeStatus};
+use super::{
+    bottom_pane::BottomPane,
+    history_cell::{AssistantHistoryCell, HistoryCell, ToolCallHistoryCell},
+    theme,
+};
+use crate::internal::ai::{
+    orchestrator::types::{
+        ExecutionPlanSpec, TaskKind, TaskNodeStatus, TaskRuntimeEvent, TaskRuntimeNoteLevel,
+        TaskRuntimePhase,
+    },
+    tools::ToolOutput,
+};
 
 #[derive(Debug, Clone)]
 struct DagPanelNode {
@@ -49,7 +59,7 @@ struct DagGraphLayout {
 
 impl DagPanelState {
     fn new(plan: ExecutionPlanSpec) -> Self {
-        let groups = plan.parallel_groups();
+        let groups = plan.scheduled_groups();
         let mut id_to_depth = std::collections::HashMap::new();
         for (depth, group) in groups.iter().enumerate() {
             for id in group {
@@ -136,9 +146,16 @@ fn animation_phase(step_ms: u128) -> usize {
 }
 
 #[derive(Debug, Clone)]
-struct TaskMuxLogEntry {
-    kind: TaskMuxLogKind,
+struct TaskMuxNoteEntry {
+    level: TaskRuntimeNoteLevel,
     text: String,
+}
+
+#[derive(Debug, Clone)]
+enum TaskMuxTranscriptEntry {
+    Note(TaskMuxNoteEntry),
+    Assistant(AssistantHistoryCell),
+    Tool(ToolCallHistoryCell),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,9 +181,10 @@ struct TaskMuxTaskState {
     depth: usize,
     ordinal: usize,
     status: TaskNodeStatus,
+    phase: TaskRuntimePhase,
     working_dir: Option<PathBuf>,
     isolated: bool,
-    logs: Vec<TaskMuxLogEntry>,
+    transcript: Vec<TaskMuxTranscriptEntry>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -186,12 +204,12 @@ struct TaskMuxState {
     tasks: Vec<TaskMuxTaskState>,
 }
 
-const TASK_MUX_MAX_LOGS: usize = 24;
+const TASK_MUX_MAX_ENTRIES: usize = 96;
 const TASK_MUX_TRANSITION_DURATION: Duration = Duration::from_millis(220);
 
 impl TaskMuxState {
     fn new(plan: &ExecutionPlanSpec) -> Option<Self> {
-        let groups = plan.parallel_groups();
+        let groups = plan.scheduled_groups();
         let has_parallel = groups.iter().any(|group| group.len() > 1);
         if !has_parallel {
             return None;
@@ -215,9 +233,10 @@ impl TaskMuxState {
                 depth: id_to_depth.get(&task.id()).copied().unwrap_or_default(),
                 ordinal: idx + 1,
                 status: TaskNodeStatus::Pending,
+                phase: TaskRuntimePhase::Pending,
                 working_dir: None,
                 isolated: false,
-                logs: Vec::new(),
+                transcript: Vec::new(),
             })
             .collect::<Vec<_>>();
 
@@ -225,7 +244,7 @@ impl TaskMuxState {
             revision: plan.revision,
             selected: 0,
             focused: 0,
-            mode: TaskMuxMode::Overview,
+            mode: TaskMuxMode::Focused,
             transition: None,
             tasks,
         })
@@ -255,27 +274,100 @@ impl TaskMuxState {
         }
     }
 
-    fn set_task_workspace(&mut self, task_id: Uuid, working_dir: PathBuf, isolated: bool) {
-        if let Some(task) = self.tasks.iter_mut().find(|task| task.task_id == task_id) {
-            task.working_dir = Some(working_dir);
-            task.isolated = isolated;
+    fn apply_runtime_event(&mut self, task_id: Uuid, event: TaskRuntimeEvent) {
+        let Some(task) = self.tasks.iter_mut().find(|task| task.task_id == task_id) else {
+            return;
+        };
+
+        match event {
+            TaskRuntimeEvent::Phase(phase) => task.phase = phase,
+            TaskRuntimeEvent::WorkspaceReady {
+                working_dir,
+                isolated,
+            } => {
+                task.working_dir = Some(working_dir);
+                task.isolated = isolated;
+            }
+            TaskRuntimeEvent::Note { level, text } => {
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    return;
+                }
+                push_task_transcript_entry(
+                    &mut task.transcript,
+                    TaskMuxTranscriptEntry::Note(TaskMuxNoteEntry {
+                        level,
+                        text: trimmed.to_string(),
+                    }),
+                );
+            }
+            TaskRuntimeEvent::AssistantMessage(text) => {
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    return;
+                }
+                push_task_transcript_entry(
+                    &mut task.transcript,
+                    TaskMuxTranscriptEntry::Assistant(AssistantHistoryCell::new(
+                        trimmed.to_string(),
+                    )),
+                );
+            }
+            TaskRuntimeEvent::ToolCallBegin {
+                call_id,
+                tool_name,
+                arguments,
+            } => {
+                if let Some(TaskMuxTranscriptEntry::Tool(cell)) = task.transcript.last_mut()
+                    && cell.can_merge(&tool_name)
+                {
+                    cell.append_call(call_id, tool_name, arguments);
+                    return;
+                }
+
+                push_task_transcript_entry(
+                    &mut task.transcript,
+                    TaskMuxTranscriptEntry::Tool(ToolCallHistoryCell::new(
+                        call_id, tool_name, arguments,
+                    )),
+                );
+            }
+            TaskRuntimeEvent::ToolCallEnd {
+                call_id,
+                tool_name,
+                result,
+            } => {
+                let should_hide_failure = should_hide_task_tool_failure(&tool_name, &result);
+                let mut pending_result = Some(result);
+                for idx in (0..task.transcript.len()).rev() {
+                    let Some(TaskMuxTranscriptEntry::Tool(cell)) = task.transcript.get_mut(idx)
+                    else {
+                        continue;
+                    };
+                    if !cell.contains_call_id(&call_id) {
+                        continue;
+                    }
+                    if should_hide_failure && cell.hides_failed_calls() {
+                        cell.remove_call(&call_id);
+                        if cell.is_empty() {
+                            task.transcript.remove(idx);
+                        }
+                    } else if let Some(result) = pending_result.take() {
+                        cell.complete_call(&call_id, result);
+                    }
+                    break;
+                }
+            }
         }
     }
 
-    fn push_log(&mut self, task_id: Uuid, kind: TaskMuxLogKind, text: String) {
-        let trimmed = text.trim();
-        if trimmed.is_empty() {
-            return;
-        }
-        if let Some(task) = self.tasks.iter_mut().find(|task| task.task_id == task_id) {
-            if task.logs.len() >= TASK_MUX_MAX_LOGS {
-                let remove = task.logs.len() + 1 - TASK_MUX_MAX_LOGS;
-                task.logs.drain(0..remove);
+    fn interrupt_running_tool_calls(&mut self) {
+        for task in &mut self.tasks {
+            for entry in &mut task.transcript {
+                if let TaskMuxTranscriptEntry::Tool(cell) = entry {
+                    cell.interrupt_running();
+                }
             }
-            task.logs.push(TaskMuxLogEntry {
-                kind,
-                text: trimmed.to_string(),
-            });
         }
     }
 
@@ -461,6 +553,11 @@ impl ChatWidget {
         self.dag_panel = Some(DagPanelState::new(plan));
     }
 
+    pub fn show_dag_preview(&mut self, plan: ExecutionPlanSpec) {
+        self.task_mux = None;
+        self.dag_panel = Some(DagPanelState::new(plan));
+    }
+
     pub fn update_dag_task_status(&mut self, task_id: Uuid, status: TaskNodeStatus) {
         if let Some(panel) = self.dag_panel.as_mut() {
             panel.update_task_status(task_id, status.clone());
@@ -481,15 +578,15 @@ impl ChatWidget {
         self.task_mux = None;
     }
 
-    pub fn set_task_workspace(&mut self, task_id: Uuid, working_dir: PathBuf, isolated: bool) {
+    pub fn apply_task_runtime_event(&mut self, task_id: Uuid, event: TaskRuntimeEvent) {
         if let Some(task_mux) = self.task_mux.as_mut() {
-            task_mux.set_task_workspace(task_id, working_dir, isolated);
+            task_mux.apply_runtime_event(task_id, event);
         }
     }
 
-    pub fn push_task_mux_log(&mut self, task_id: Uuid, kind: TaskMuxLogKind, text: String) {
+    pub fn interrupt_task_mux_tool_calls(&mut self) {
         if let Some(task_mux) = self.task_mux.as_mut() {
-            task_mux.push_log(task_id, kind, text);
+            task_mux.interrupt_running_tool_calls();
         }
     }
 
@@ -643,55 +740,20 @@ impl ChatWidget {
             task_mux.finish_transition_if_ready();
         }
 
-        let (history_area, aux_area) = self.split_chat_layout(area);
-        self.last_chat_area_width = history_area.width;
+        let (main_area, aux_area) = self.split_chat_layout(area);
+        self.last_chat_area_width = main_area.width;
 
-        // Calculate visible lines
-        let mut lines: Vec<Line<'static>> = Vec::new();
-
-        for cell in &self.cells {
-            lines.extend(cell.display_lines(history_area.width));
-        }
-
-        let visible_lines = history_area.height as usize;
-        let total_lines = lines.len();
-
-        let max_scroll_from_bottom = total_lines.saturating_sub(visible_lines);
-        self.scroll_from_bottom_lines = self.scroll_from_bottom_lines.min(max_scroll_from_bottom);
-
-        let start_line = total_lines
-            .saturating_sub(visible_lines)
-            .saturating_sub(self.scroll_from_bottom_lines);
-
-        let text = Text::from(lines);
-        ratatui::widgets::Paragraph::new(text)
-            .scroll((start_line.min(u16::MAX as usize) as u16, 0))
-            .render(history_area, buf);
-
-        // Render scrollbar if needed
-        if total_lines > visible_lines {
-            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(Some("↑"))
-                .end_symbol(Some("↓"));
-            let mut scrollbar_state = ScrollbarState::new(total_lines)
-                .position(start_line)
-                .viewport_content_length(visible_lines);
-
-            // Note: ratatui 0.29 uses (area, buf, state) order for stateful widgets
-            ratatui::widgets::StatefulWidget::render(
-                scrollbar,
-                history_area,
-                buf,
-                &mut scrollbar_state,
-            );
-        }
-
-        if let Some(aux_area) = aux_area {
-            if self.task_mux.is_some() {
-                self.render_task_mux(aux_area, buf);
-            } else {
+        if self.task_mux.is_some() {
+            self.render_task_mux(main_area, buf);
+            if let Some(aux_area) = aux_area {
                 self.render_dag_panel(aux_area, buf);
             }
+            return;
+        }
+
+        self.render_history_cells(main_area, buf);
+        if let Some(aux_area) = aux_area {
+            self.render_dag_panel(aux_area, buf);
         }
     }
 
@@ -702,8 +764,8 @@ impl ChatWidget {
         }
 
         if self.task_mux.is_some() {
-            if area.width >= 116 {
-                let panel_width = (area.width * 5 / 9).clamp(44, 84);
+            if area.width >= 108 {
+                let panel_width = (area.width / 3).clamp(30, 40);
                 let chunks = Layout::horizontal([
                     Constraint::Min(area.width.saturating_sub(panel_width)),
                     Constraint::Length(panel_width),
@@ -711,15 +773,7 @@ impl ChatWidget {
                 .split(area);
                 return (chunks[0], Some(chunks[1]));
             }
-            if area.height >= 16 {
-                let panel_height = (area.height * 3 / 5).clamp(10, area.height.saturating_sub(5));
-                let chunks = Layout::vertical([
-                    Constraint::Min(area.height.saturating_sub(panel_height)),
-                    Constraint::Length(panel_height),
-                ])
-                .split(area);
-                return (chunks[0], Some(chunks[1]));
-            }
+            return (area, None);
         }
 
         if area.width < 96 {
@@ -733,6 +787,41 @@ impl ChatWidget {
         ])
         .split(area);
         (chunks[0], Some(chunks[1]))
+    }
+
+    fn render_history_cells(&mut self, area: Rect, buf: &mut Buffer) {
+        // Calculate visible lines.
+        let mut lines: Vec<Line<'static>> = Vec::new();
+
+        for cell in &self.cells {
+            lines.extend(cell.display_lines(area.width));
+        }
+
+        let visible_lines = area.height as usize;
+        let total_lines = lines.len();
+
+        let max_scroll_from_bottom = total_lines.saturating_sub(visible_lines);
+        self.scroll_from_bottom_lines = self.scroll_from_bottom_lines.min(max_scroll_from_bottom);
+
+        let start_line = total_lines
+            .saturating_sub(visible_lines)
+            .saturating_sub(self.scroll_from_bottom_lines);
+
+        let text = Text::from(lines);
+        ratatui::widgets::Paragraph::new(text)
+            .scroll((start_line.min(u16::MAX as usize) as u16, 0))
+            .render(area, buf);
+
+        if total_lines > visible_lines {
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("↑"))
+                .end_symbol(Some("↓"));
+            let mut scrollbar_state = ScrollbarState::new(total_lines)
+                .position(start_line)
+                .viewport_content_length(visible_lines);
+
+            ratatui::widgets::StatefulWidget::render(scrollbar, area, buf, &mut scrollbar_state);
+        }
     }
 
     fn render_task_mux(&self, area: Rect, buf: &mut Buffer) {
@@ -828,7 +917,7 @@ impl ChatWidget {
             .filter(|task| task.status == TaskNodeStatus::Failed)
             .count();
         let label = format!(
-            "● running {}  done {}  failed {}  lanes {}",
+            "● running {}  done {}  failed {}  layers {}",
             running,
             completed,
             failed,
@@ -1025,6 +1114,8 @@ impl ChatWidget {
                 panel_node_style(&task.status),
             ),
             Span::styled(format!(" · {}", mode_label), theme::text::muted()),
+            Span::styled(" · ", theme::text::muted()),
+            task_phase_span(&task.phase, task.ordinal, area.width),
         ]));
         if let Some(working_dir) = task.working_dir.as_ref() {
             let dir_label = working_dir
@@ -1042,7 +1133,8 @@ impl ChatWidget {
 
         let available_log_lines = inner.height.saturating_sub(lines.len() as u16) as usize;
         if available_log_lines > 0 {
-            let rendered_logs = render_task_log_lines(&task.logs, inner.width, available_log_lines);
+            let rendered_logs =
+                render_task_transcript_lines(&task.transcript, inner.width, available_log_lines);
             lines.extend(rendered_logs);
         }
 
@@ -1323,37 +1415,134 @@ fn gradient_line(text: &str, colors: &[Color], phase: usize, bold: bool) -> Line
     Line::from(spans)
 }
 
-fn render_task_log_lines(
-    logs: &[TaskMuxLogEntry],
+fn gradient_span(text: &str, colors: &[Color], phase: usize, bold: bool) -> Span<'static> {
+    Span::styled(
+        text.to_string(),
+        Style::default()
+            .fg(colors[phase % colors.len()])
+            .add_modifier(if bold {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            }),
+    )
+}
+
+fn push_task_transcript_entry(
+    transcript: &mut Vec<TaskMuxTranscriptEntry>,
+    entry: TaskMuxTranscriptEntry,
+) {
+    if transcript.len() >= TASK_MUX_MAX_ENTRIES {
+        let remove = transcript.len() + 1 - TASK_MUX_MAX_ENTRIES;
+        transcript.drain(0..remove);
+    }
+    transcript.push(entry);
+}
+
+fn render_task_transcript_lines(
+    transcript: &[TaskMuxTranscriptEntry],
     width: u16,
     max_lines: usize,
 ) -> Vec<Line<'static>> {
-    if logs.is_empty() || width == 0 || max_lines == 0 {
+    if transcript.is_empty() || width == 0 || max_lines == 0 {
         return vec![Line::styled("waiting for activity", theme::text::subtle())];
     }
 
-    let mut out = Vec::new();
-    for entry in logs.iter().rev() {
-        let prefix = match entry.kind {
-            TaskMuxLogKind::Note => "· ",
-            TaskMuxLogKind::Assistant => "› ",
-            TaskMuxLogKind::Tool => "◆ ",
-            TaskMuxLogKind::Error => "! ",
-        };
-        let style = match entry.kind {
-            TaskMuxLogKind::Note => theme::text::muted(),
-            TaskMuxLogKind::Assistant => theme::text::primary(),
-            TaskMuxLogKind::Tool => theme::interactive::accent(),
-            TaskMuxLogKind::Error => theme::status::danger(),
-        };
-        let available = width as usize;
-        let text = truncate_label(&format!("{}{}", prefix, entry.text), available.max(1));
-        out.push(Line::styled(text, style));
-        if out.len() >= max_lines {
-            break;
+    let mut all_lines = Vec::new();
+    for entry in transcript {
+        match entry {
+            TaskMuxTranscriptEntry::Note(entry) => {
+                let (prefix, style) = match entry.level {
+                    TaskRuntimeNoteLevel::Info => ("· ", theme::text::muted()),
+                    TaskRuntimeNoteLevel::Error => ("! ", theme::status::danger()),
+                };
+                all_lines.extend(wrap_mux_text(&entry.text, prefix, width, style));
+            }
+            TaskMuxTranscriptEntry::Assistant(cell) => {
+                all_lines.extend(cell.display_lines(width));
+            }
+            TaskMuxTranscriptEntry::Tool(cell) => {
+                all_lines.extend(cell.display_lines(width));
+            }
         }
     }
-    out.reverse();
+
+    if all_lines.len() <= max_lines {
+        return all_lines;
+    }
+
+    all_lines.split_off(all_lines.len() - max_lines)
+}
+
+fn task_phase_span(phase: &TaskRuntimePhase, ordinal: usize, width: u16) -> Span<'static> {
+    match phase {
+        TaskRuntimePhase::Pending => Span::styled("pending", theme::text::subtle()),
+        TaskRuntimePhase::Starting => Span::styled("starting", theme::text::muted()),
+        TaskRuntimePhase::AwaitingModel { turn } => {
+            let phase_ix = animation_phase(110);
+            let label = format!("thinking t{turn}");
+            gradient_span(
+                &truncate_label(&label, width.saturating_sub(24) as usize),
+                &theme::animation::active_gradient(),
+                ordinal + phase_ix,
+                true,
+            )
+        }
+        TaskRuntimePhase::ExecutingTool { tool_name } => Span::styled(
+            truncate_label(
+                &format!("tool {}", tool_name),
+                width.saturating_sub(24) as usize,
+            ),
+            theme::interactive::accent(),
+        ),
+        TaskRuntimePhase::Reviewing => Span::styled("reviewing", theme::interactive::accent()),
+        TaskRuntimePhase::Completed => Span::styled("complete", theme::status::success()),
+        TaskRuntimePhase::Failed => Span::styled("failed", theme::status::danger()),
+    }
+}
+
+fn should_hide_task_tool_failure(tool_name: &str, result: &Result<ToolOutput, String>) -> bool {
+    matches!(
+        tool_name,
+        "read_file" | "list_dir" | "grep_files" | "apply_patch"
+    ) && !matches!(result, Ok(output) if output.is_success())
+}
+
+fn wrap_mux_text(text: &str, prefix: &str, width: u16, style: Style) -> Vec<Line<'static>> {
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let total_cols = (width as usize).max(8);
+    let prefix_cols = prefix.chars().count();
+    let cont_prefix = " ".repeat(prefix_cols);
+
+    for logical_line in text.lines() {
+        let mut remaining = logical_line;
+        let mut first = true;
+        loop {
+            let pfx: &str = if first { prefix } else { &cont_prefix };
+            let available = total_cols.saturating_sub(prefix_cols).max(1);
+            let char_count = remaining.chars().count();
+            if char_count <= available {
+                out.push(Line::styled(format!("{pfx}{remaining}"), style));
+                break;
+            }
+            let split_byte = remaining
+                .char_indices()
+                .nth(available)
+                .map(|(i, _)| i)
+                .unwrap_or(remaining.len());
+            out.push(Line::styled(
+                format!("{pfx}{}", &remaining[..split_byte]),
+                style,
+            ));
+            remaining = &remaining[split_byte..];
+            first = false;
+        }
+    }
+
+    if out.is_empty() {
+        out.push(Line::styled(prefix.to_string(), style));
+    }
+
     out
 }
 
@@ -1529,10 +1718,14 @@ impl Default for ChatWidget {
 mod tests {
     use git_internal::internal::object::{task::Task as GitTask, types::ActorRef};
     use ratatui::{buffer::Buffer, layout::Rect};
+    use serde_json::json;
 
     use super::{ChatWidget, dag_graph_layout};
-    use crate::internal::ai::orchestrator::types::{
-        ExecutionPlanSpec, TaskContract, TaskKind, TaskNodeStatus, TaskSpec,
+    use crate::internal::{
+        ai::orchestrator::types::{
+            ExecutionPlanSpec, TaskContract, TaskKind, TaskNodeStatus, TaskRuntimeEvent, TaskSpec,
+        },
+        tui::history_cell::AssistantHistoryCell,
     };
 
     fn row_text(buf: &Buffer, y: u16, width: u16) -> String {
@@ -1619,15 +1812,28 @@ mod tests {
     }
 
     #[test]
-    fn task_mux_uses_aux_panel_for_parallel_plan() {
+    fn dag_preview_does_not_activate_task_mux() {
+        let mut widget = ChatWidget::new();
+        widget.show_dag_preview(sample_parallel_plan());
+
+        let (main, sidebar) = widget.split_chat_layout(Rect::new(0, 0, 140, 32));
+
+        assert!(!widget.has_task_mux());
+        assert!(sidebar.is_some());
+        assert!(main.width < 140);
+    }
+
+    #[test]
+    fn task_mux_uses_main_panel_and_keeps_sidebar_for_parallel_plan() {
         let mut widget = ChatWidget::new();
         widget.show_dag_panel(sample_parallel_plan());
 
-        let (history, mux) = widget.split_chat_layout(Rect::new(0, 0, 140, 32));
+        let (main, sidebar) = widget.split_chat_layout(Rect::new(0, 0, 140, 32));
 
         assert!(widget.has_task_mux());
-        assert!(mux.is_some());
-        assert!(history.width < 140);
+        assert!(sidebar.is_some());
+        assert!(main.width < 140);
+        assert!(main.width > sidebar.unwrap().width);
     }
 
     #[test]
@@ -1655,6 +1861,45 @@ mod tests {
         assert!(lines[0].contains("Implement A"));
         assert!(lines[1].contains("Implement B"));
         assert!(lines[2].contains("Fast gate"));
+    }
+
+    #[test]
+    fn parallel_workflow_renders_mux_in_main_area_and_dag_in_sidebar() {
+        let plan = sample_parallel_plan();
+        let first_task_id = plan.tasks[0].id();
+
+        let mut widget = ChatWidget::new();
+        widget.add_cell(Box::new(AssistantHistoryCell::new(
+            "transcript sentinel".to_string(),
+        )));
+        widget.show_dag_panel(plan);
+        widget.update_dag_task_status(first_task_id, TaskNodeStatus::Running);
+        widget.apply_task_runtime_event(
+            first_task_id,
+            TaskRuntimeEvent::ToolCallBegin {
+                call_id: "call-1".to_string(),
+                tool_name: "shell".to_string(),
+                arguments: json!({
+                    "command": "cargo test",
+                    "workdir": "/tmp/task-1"
+                }),
+            },
+        );
+
+        let area = Rect::new(0, 0, 140, 32);
+        let mut buf = Buffer::empty(area);
+        widget.render_chat_area(area, &mut buf);
+
+        let rendered = (0..area.height)
+            .map(|y| row_text(&buf, y, area.width))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Mux r2"));
+        assert!(rendered.contains("Workflow r2"));
+        assert!(rendered.contains("Running command"));
+        assert!(rendered.contains("cargo test"));
+        assert!(!rendered.contains("transcript sentinel"));
     }
 
     #[test]

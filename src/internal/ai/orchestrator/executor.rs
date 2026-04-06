@@ -23,19 +23,18 @@ use super::{
     run_state::{RunStateSnapshot, RunStateStore},
     types::{
         ExecutionPlanSpec, GateReport, OrchestratorError, OrchestratorObserver, ReviewOutcome,
-        TaskKind, TaskNodeStatus, TaskResult, TaskSpec, ToolCallRecord,
+        TaskKind, TaskNodeStatus, TaskResult, TaskRuntimeEvent, TaskRuntimeNoteLevel,
+        TaskRuntimePhase, TaskSpec, ToolCallRecord,
     },
     workspace::{cleanup_task_worktree, prepare_task_worktree, sync_task_worktree_back},
 };
-use crate::{
-    internal::ai::{
-        agent::{ToolLoopConfig, ToolLoopObserver, run_tool_loop_with_history_and_observer},
-        completion::{CompletionError, CompletionModel},
-        hooks::HookRunner,
-        intentspec::types::{IntentSpec, NetworkPolicy},
-        sandbox::{SandboxPermissions, SandboxPolicy, ToolRuntimeContext, ToolSandboxContext},
-        tools::{ToolOutput, registry::ToolRegistry},
-    },
+use crate::internal::ai::{
+    agent::{ToolLoopConfig, ToolLoopObserver, run_tool_loop_with_history_and_observer},
+    completion::{CompletionError, CompletionModel},
+    hooks::HookRunner,
+    intentspec::types::{IntentSpec, NetworkPolicy},
+    sandbox::{SandboxPermissions, SandboxPolicy, ToolRuntimeContext, ToolSandboxContext},
+    tools::{ToolOutput, registry::ToolRegistry},
 };
 
 /// Configuration for task execution.
@@ -85,15 +84,40 @@ impl TaskExecutionObserver {
 }
 
 impl ToolLoopObserver for TaskExecutionObserver {
+    fn on_model_turn_start(&mut self, turn: usize) {
+        if let Some(observer) = &self.observer {
+            observer.on_task_runtime_event(
+                &self.task,
+                TaskRuntimeEvent::Phase(TaskRuntimePhase::AwaitingModel { turn }),
+            );
+        }
+    }
+
     fn on_assistant_step_text(&mut self, text: &str) {
         if let Some(observer) = &self.observer {
-            observer.on_task_assistant_message(&self.task, text);
+            observer.on_task_runtime_event(
+                &self.task,
+                TaskRuntimeEvent::AssistantMessage(text.to_string()),
+            );
         }
     }
 
     fn on_tool_call_begin(&mut self, call_id: &str, tool_name: &str, arguments: &Value) {
         if let Some(observer) = &self.observer {
-            observer.on_tool_call_begin(&self.task, call_id, tool_name, arguments);
+            observer.on_task_runtime_event(
+                &self.task,
+                TaskRuntimeEvent::Phase(TaskRuntimePhase::ExecutingTool {
+                    tool_name: tool_name.to_string(),
+                }),
+            );
+            observer.on_task_runtime_event(
+                &self.task,
+                TaskRuntimeEvent::ToolCallBegin {
+                    call_id: call_id.to_string(),
+                    tool_name: tool_name.to_string(),
+                    arguments: arguments.clone(),
+                },
+            );
         }
     }
 
@@ -128,7 +152,14 @@ impl ToolLoopObserver for TaskExecutionObserver {
         result: &Result<ToolOutput, String>,
     ) {
         if let Some(observer) = &self.observer {
-            observer.on_tool_call_end(&self.task, call_id, tool_name, result);
+            observer.on_task_runtime_event(
+                &self.task,
+                TaskRuntimeEvent::ToolCallEnd {
+                    call_id: call_id.to_string(),
+                    tool_name: tool_name.to_string(),
+                    result: result.clone(),
+                },
+            );
         }
         if let Some(mut record) = self.in_flight.remove(call_id) {
             match result {
@@ -232,7 +263,10 @@ pub async fn execute_task<M: CompletionModel>(
                     Ok(review) => review,
                     Err(message) => {
                         if let Some(observer) = &config.observer {
-                            observer.on_reviewer_completed(task, None);
+                            observer.on_task_runtime_event(
+                                task,
+                                TaskRuntimeEvent::Phase(TaskRuntimePhase::Failed),
+                            );
                         }
                         return TaskResult {
                             task_id: task.id(),
@@ -345,7 +379,13 @@ async fn execute_gate_task(
 
         for check in &task.checks {
             if let Some(observer) = observer {
-                observer.on_gate_check_started(task, check);
+                observer.on_task_runtime_event(
+                    task,
+                    TaskRuntimeEvent::Note {
+                        level: TaskRuntimeNoteLevel::Info,
+                        text: format!("gate running · {}", check.id),
+                    },
+                );
             }
 
             let result = gate::run_check_with_context(
@@ -358,7 +398,22 @@ async fn execute_gate_task(
             .await;
 
             if let Some(observer) = observer {
-                observer.on_gate_check_completed(task, check, &result);
+                observer.on_task_runtime_event(
+                    task,
+                    TaskRuntimeEvent::Note {
+                        level: if result.passed {
+                            TaskRuntimeNoteLevel::Info
+                        } else {
+                            TaskRuntimeNoteLevel::Error
+                        },
+                        text: format!(
+                            "gate {} · {} · exit {}",
+                            if result.passed { "passed" } else { "failed" },
+                            check.id,
+                            result.exit_code
+                        ),
+                    },
+                );
             }
 
             if !result.passed && check.required {
@@ -416,7 +471,13 @@ async fn execute_gate_task_in_task_worktree(
     };
 
     if let Some(observer) = observer {
-        observer.on_task_workspace_ready(task, &prepared.root, true);
+        observer.on_task_runtime_event(
+            task,
+            TaskRuntimeEvent::WorkspaceReady {
+                working_dir: prepared.root.clone(),
+                isolated: true,
+            },
+        );
     }
 
     let result = execute_gate_task(task, &prepared.root, spec, inherited_runtime, observer).await;
@@ -470,7 +531,7 @@ async fn run_reviewer_pass<M: CompletionModel>(
     };
 
     if let Some(observer) = &config.observer {
-        observer.on_reviewer_started(task);
+        observer.on_task_runtime_event(task, TaskRuntimeEvent::Phase(TaskRuntimePhase::Reviewing));
     }
     let mut observer = TaskExecutionObserver::new(
         Arc::clone(&config.spec),
@@ -496,7 +557,25 @@ async fn run_reviewer_pass<M: CompletionModel>(
         issues: review.issues,
     };
     if let Some(observer) = &config.observer {
-        observer.on_reviewer_completed(task, Some(&outcome));
+        observer.on_task_runtime_event(
+            task,
+            TaskRuntimeEvent::Note {
+                level: if outcome.approved {
+                    TaskRuntimeNoteLevel::Info
+                } else {
+                    TaskRuntimeNoteLevel::Error
+                },
+                text: format!(
+                    "review {} · {}",
+                    if outcome.approved {
+                        "approved"
+                    } else {
+                        "rejected"
+                    },
+                    outcome.summary
+                ),
+            },
+        );
     }
     Ok(Some(outcome))
 }
@@ -546,7 +625,13 @@ async fn execute_task_in_task_worktree<M: CompletionModel>(
     task_config.tool_loop_config =
         clone_tool_loop_config_for_workdir(&config.tool_loop_config, &prepared.root);
     if let Some(observer) = &config.observer {
-        observer.on_task_workspace_ready(task, &prepared.root, true);
+        observer.on_task_runtime_event(
+            task,
+            TaskRuntimeEvent::WorkspaceReady {
+                working_dir: prepared.root.clone(),
+                isolated: true,
+            },
+        );
     }
 
     let mut result = execute_task(task, model, &task_registry, &task_config).await;
@@ -647,7 +732,14 @@ async fn record_terminal_result(
     result: TaskResult,
 ) {
     if let Some(observer) = observer {
-        observer.on_task_completed(task, &result);
+        observer.on_task_runtime_event(
+            task,
+            TaskRuntimeEvent::Phase(match result.status {
+                TaskNodeStatus::Completed => TaskRuntimePhase::Completed,
+                TaskNodeStatus::Failed => TaskRuntimePhase::Failed,
+                _ => TaskRuntimePhase::Pending,
+            }),
+        );
     }
     run_state.record_result(result).await;
 }
@@ -803,7 +895,10 @@ impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
         }
 
         if let Some(observer) = &self.config.observer {
-            observer.on_task_started(&self.task);
+            observer.on_task_runtime_event(
+                &self.task,
+                TaskRuntimeEvent::Phase(TaskRuntimePhase::Starting),
+            );
         }
 
         let use_task_worktree = should_use_task_worktree(&self.task);
@@ -811,7 +906,13 @@ impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
             && self.task.kind != TaskKind::Gate
             && let Some(observer) = &self.config.observer
         {
-            observer.on_task_workspace_ready(&self.task, &self.config.working_dir, false);
+            observer.on_task_runtime_event(
+                &self.task,
+                TaskRuntimeEvent::WorkspaceReady {
+                    working_dir: self.config.working_dir.clone(),
+                    isolated: false,
+                },
+            );
         }
 
         let result = if use_task_worktree {
@@ -828,7 +929,35 @@ impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
         };
 
         if let Some(observer) = &self.config.observer {
-            observer.on_task_completed(&self.task, &result);
+            observer.on_task_runtime_event(
+                &self.task,
+                TaskRuntimeEvent::Phase(match result.status {
+                    TaskNodeStatus::Completed => TaskRuntimePhase::Completed,
+                    TaskNodeStatus::Failed => TaskRuntimePhase::Failed,
+                    _ => TaskRuntimePhase::Pending,
+                }),
+            );
+            observer.on_task_runtime_event(
+                &self.task,
+                TaskRuntimeEvent::Note {
+                    level: if result.status == TaskNodeStatus::Failed {
+                        TaskRuntimeNoteLevel::Error
+                    } else {
+                        TaskRuntimeNoteLevel::Info
+                    },
+                    text: match result.status {
+                        TaskNodeStatus::Completed => "task completed".to_string(),
+                        TaskNodeStatus::Failed => result
+                            .agent_output
+                            .clone()
+                            .map(|message| format!("task failed · {message}"))
+                            .unwrap_or_else(|| "task failed".to_string()),
+                        TaskNodeStatus::Pending => "task pending".to_string(),
+                        TaskNodeStatus::Running => "task running".to_string(),
+                        TaskNodeStatus::Skipped => "task skipped".to_string(),
+                    },
+                },
+            );
         }
 
         self.run_state.record_result(result.clone()).await;
@@ -1533,9 +1662,7 @@ mod tests {
                 message::{AssistantContent, Function, Message, Text, ToolCall, UserContent},
             },
             intentspec::{profiles, types::*},
-            orchestrator::types::{
-                ExecutionPlanSpec, GateResult, TaskContract, TaskKind, TaskSpec,
-            },
+            orchestrator::types::{ExecutionPlanSpec, TaskContract, TaskKind, TaskSpec},
             tools::{handlers::ApplyPatchHandler, registry::ToolRegistry},
         },
         utils::test,
@@ -1712,34 +1839,26 @@ mod tests {
     }
 
     impl OrchestratorObserver for RecordingObserver {
-        fn on_task_started(&self, task: &TaskSpec) {
-            self.events
-                .lock()
-                .unwrap()
-                .push(format!("start:{}", task.title()));
-        }
-
-        fn on_task_completed(&self, task: &TaskSpec, _result: &TaskResult) {
-            self.events
-                .lock()
-                .unwrap()
-                .push(format!("done:{}", task.title()));
-        }
-
-        fn on_gate_check_started(&self, task: &TaskSpec, check: &Check) {
-            self.events
-                .lock()
-                .unwrap()
-                .push(format!("gate-start:{}:{}", task.title(), check.id));
-        }
-
-        fn on_gate_check_completed(&self, task: &TaskSpec, check: &Check, result: &GateResult) {
-            self.events.lock().unwrap().push(format!(
-                "gate-done:{}:{}:{}",
-                task.title(),
-                check.id,
-                if result.passed { "pass" } else { "fail" }
-            ));
+        fn on_task_runtime_event(&self, task: &TaskSpec, event: TaskRuntimeEvent) {
+            let mut events = self.events.lock().unwrap();
+            match event {
+                TaskRuntimeEvent::Phase(TaskRuntimePhase::Starting) => {
+                    events.push(format!("start:{}", task.title()));
+                }
+                TaskRuntimeEvent::Phase(TaskRuntimePhase::Completed) => {
+                    events.push(format!("done:{}", task.title()));
+                }
+                TaskRuntimeEvent::Note { text, .. } if text.starts_with("gate running") => {
+                    events.push(format!("gate-start:{}:{}", task.title(), text));
+                }
+                TaskRuntimeEvent::Note { text, .. } if text.starts_with("gate passed") => {
+                    events.push(format!("gate-done:{}:pass", task.title()));
+                }
+                TaskRuntimeEvent::Note { text, .. } if text.starts_with("gate failed") => {
+                    events.push(format!("gate-done:{}:fail", task.title()));
+                }
+                _ => {}
+            }
         }
     }
 
@@ -2008,8 +2127,12 @@ mod tests {
 
         assert_eq!(result.status, TaskNodeStatus::Completed);
         let recorded = events.lock().unwrap();
-        assert!(recorded.contains(&"gate-start:Do thing:fmt".to_string()));
-        assert!(recorded.contains(&"gate-done:Do thing:fmt:pass".to_string()));
+        assert!(
+            recorded
+                .iter()
+                .any(|event| event.starts_with("gate-start:Do thing:gate running"))
+        );
+        assert!(recorded.contains(&"gate-done:Do thing:pass".to_string()));
     }
 
     #[tokio::test]

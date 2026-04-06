@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 
 use git_internal::internal::object::{
     plan::PlanStep,
@@ -596,26 +596,33 @@ fn apply_conflict_resolution(
 }
 
 fn find_overlaps(nodes: &[TaskSpec]) -> Vec<String> {
-    let mut seen: HashMap<&str, usize> = HashMap::new();
     let mut overlaps = BTreeSet::new();
     let implementation_nodes = nodes
         .iter()
         .filter(|node| node.kind == TaskKind::Implementation)
         .collect::<Vec<_>>();
 
-    for node in &implementation_nodes {
-        for path in &node.contract.touch_files {
-            let count = seen.entry(path.as_str()).or_default();
-            *count += 1;
-            if *count == 2 {
-                overlaps.insert(path.clone());
-            }
-        }
-    }
-
     for (idx, left) in implementation_nodes.iter().enumerate() {
         for right in implementation_nodes.iter().skip(idx + 1) {
-            if !left.contract.touch_files.is_empty() && !right.contract.touch_files.is_empty() {
+            let left_files = left
+                .contract
+                .touch_files
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let right_files = right
+                .contract
+                .touch_files
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>();
+
+            if !left_files.is_empty() && !right_files.is_empty() {
+                if left_files == right_files && left_files.len() > 1 {
+                    continue;
+                }
+
+                overlaps.extend(left_files.intersection(&right_files).cloned());
                 continue;
             }
 
@@ -984,8 +991,9 @@ mod tests {
         let plan = compile_execution_plan_spec(&minimal_spec()).unwrap();
         assert_eq!(plan.tasks.len(), 7);
         let groups = plan.parallel_groups();
-        assert_eq!(groups.len(), 7);
-        assert!(groups.iter().all(|group| group.len() == 1), "{groups:?}");
+        assert_eq!(groups.len(), 5, "{groups:?}");
+        assert_eq!(groups[0].len(), 2, "{groups:?}");
+        assert_eq!(groups[1].len(), 2, "{groups:?}");
         assert!(
             plan.tasks
                 .iter()
@@ -1005,8 +1013,9 @@ mod tests {
                 .any(|task| task.gate_stage == Some(GateStage::Fast))
         );
         let groups = plan_spec.parallel_groups();
-        assert_eq!(groups.len(), 7);
-        assert!(groups.iter().all(|group| group.len() == 1), "{groups:?}");
+        assert_eq!(groups.len(), 5, "{groups:?}");
+        assert_eq!(groups[0].len(), 2, "{groups:?}");
+        assert_eq!(groups[1].len(), 2, "{groups:?}");
     }
 
     #[test]
@@ -1165,8 +1174,7 @@ mod tests {
             .tasks
             .iter()
             .find(|task| {
-                task.gate_stage == Some(GateStage::Fast)
-                    && task.dependencies() == [first_task.id()]
+                task.gate_stage == Some(GateStage::Fast) && task.dependencies() == [first_task.id()]
             })
             .expect("fast gate for first implementation task");
 

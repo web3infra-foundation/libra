@@ -1660,7 +1660,7 @@ fn task_status_style(status: &TaskNodeStatus) -> Style {
 }
 
 fn parallel_layout_stats(plan: &ExecutionPlanSpec) -> (usize, usize) {
-    let groups = plan.parallel_groups();
+    let groups = plan.scheduled_groups();
     let lane_count = groups.iter().map(Vec::len).max().unwrap_or(0);
     let layer_count = groups.len();
     (lane_count, layer_count)
