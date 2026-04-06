@@ -1,5 +1,5 @@
 use serde_json::Value;
-use wax::{Glob, Program};
+use wax::Glob;
 
 /// Verdict for a tool ACL check.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -341,7 +341,7 @@ fn glob_matches(pattern: &str, path: &str) -> bool {
     }
 
     Glob::new(&pattern)
-        .map(|glob| glob.is_match(path.as_str()))
+        .map(|glob| wax::Program::is_match(&glob, path.as_str()))
         .unwrap_or_else(|_| pattern == path)
 }
 

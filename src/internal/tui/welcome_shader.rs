@@ -77,16 +77,20 @@ fn render_info_panel(area: Rect, buf: &mut Buffer, view: &WelcomeView<'_>) {
         .render(area, buf);
 }
 
-fn shader_line(text: &str, row: usize) -> Line<'static> {
+fn shader_line(text: &'static str, row: usize) -> Line<'static> {
     let time = WELCOME_ANIMATION_START.elapsed().as_secs_f64();
 
     let mut spans = Vec::with_capacity(text.chars().count());
-    for (col, ch) in text.chars().enumerate() {
+    let mut chars = text.char_indices().peekable();
+    let mut col = 0;
+    while let Some((start, _)) = chars.next() {
+        let end = chars.peek().map_or(text.len(), |(idx, _)| *idx);
         let color = gradient_color(col, row, time);
         spans.push(Span::styled(
-            ch.to_string(),
+            &text[start..end],
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ));
+        col += 1;
     }
     Line::from(spans)
 }
@@ -189,6 +193,8 @@ fn truncate_middle(text: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use super::*;
 
     #[test]
@@ -246,5 +252,16 @@ mod tests {
         let diff = (after - before).abs();
         let wrapped_diff = diff.min(1.0 - diff);
         assert!(wrapped_diff < 0.01, "phase jumped too far: {wrapped_diff}");
+    }
+
+    #[test]
+    fn shader_line_reuses_static_character_slices() {
+        let line = shader_line("LBR", 0);
+        assert_eq!(line.spans.len(), 3);
+        assert!(
+            line.spans
+                .iter()
+                .all(|span| matches!(span.content, Cow::Borrowed(_)))
+        );
     }
 }

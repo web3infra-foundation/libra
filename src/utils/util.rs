@@ -409,20 +409,20 @@ pub fn list_workdir_files() -> io::Result<Vec<PathBuf>> {
     list_files(&working_dir())
 }
 
-/// Integrate the input paths (relative, absolute, file, dir) to workdir paths
-/// - only include existing files
-pub fn integrate_pathspec(paths: &Vec<PathBuf>) -> HashSet<PathBuf> {
+/// Integrate the input paths (relative, absolute, file, dir) to workdir paths.
+/// Only existing files are expanded; directory traversal failures are surfaced
+/// to the caller so command code can report them instead of panicking.
+pub fn integrate_pathspec(paths: &[PathBuf]) -> io::Result<HashSet<PathBuf>> {
     let mut workdir_paths = HashSet::new();
     for path in paths {
         if path.is_dir() {
-            // unwrap is safe here: list_files only fails if path doesn't exist, but we just checked is_dir()
-            let files = list_files(path).unwrap();
+            let files = list_files(path)?;
             workdir_paths.extend(files);
         } else {
             workdir_paths.insert(path.to_workdir());
         }
     }
-    workdir_paths
+    Ok(workdir_paths)
 }
 
 /// write content to file
@@ -440,16 +440,19 @@ pub fn clear_empty_dir(dir: &Path) {
     let mut dir = if dir.is_dir() {
         dir.to_path_buf()
     } else {
-        // unwrap is safe: if dir is not a dir and has no parent, we want to panic
-        dir.parent().unwrap().to_path_buf()
+        let Some(parent) = dir.parent() else {
+            return;
+        };
+        parent.to_path_buf()
     };
 
     let repo = storage_path();
     // CAN NOT remove .libra & current dir
     while !is_sub_path(&repo, &dir) && !is_cur_dir(&dir) {
         if is_empty_dir(&dir) {
-            // unwrap is safe: is_empty_dir just verified it's a directory
-            fs::remove_dir(&dir).unwrap();
+            if fs::remove_dir(&dir).is_err() {
+                break;
+            }
         } else {
             break; // once meet a non-empty dir, stop
         }
@@ -461,13 +464,21 @@ pub fn is_empty_dir(dir: &Path) -> bool {
     if !dir.is_dir() {
         return false;
     }
-    // unwrap is safe: is_dir() just verified the path exists and is a directory
-    fs::read_dir(dir).unwrap().next().is_none()
+    match fs::read_dir(dir) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(_) => false,
+    }
 }
 
 pub fn is_cur_dir(dir: &Path) -> bool {
-    // unwrap is safe: absolutize only fails on extremely long paths, which is rare
-    dir.absolutize().unwrap() == cur_dir().absolutize().unwrap()
+    let Ok(dir) = dir.absolutize() else {
+        return false;
+    };
+    let current_dir = cur_dir();
+    let Ok(current) = current_dir.absolutize() else {
+        return false;
+    };
+    dir == current
 }
 
 /// Transform a path to a string.
@@ -974,6 +985,18 @@ mod test {
     fn test_to_relative() {
         assert_eq!(to_relative("src/main.rs", "src"), PathBuf::from("main.rs"));
         assert_eq!(to_relative(".", "src"), PathBuf::from(".."));
+    }
+
+    #[test]
+    fn is_empty_dir_returns_false_for_missing_directory() {
+        let temp = tempdir().unwrap();
+        let missing = temp.path().join("missing");
+        assert!(!is_empty_dir(&missing));
+    }
+
+    #[test]
+    fn clear_empty_dir_ignores_parentless_paths() {
+        clear_empty_dir(Path::new(""));
     }
 
     #[tokio::test]
