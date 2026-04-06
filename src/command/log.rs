@@ -1,9 +1,11 @@
 //! Log command rendering commit history with optional decorations, filtering, and custom formatting utilities.
 
 use std::{
+    cell::RefCell,
     cmp::min,
     collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
+    rc::Rc,
     str::FromStr,
 };
 
@@ -14,11 +16,13 @@ use git_internal::{
     hash::ObjectHash,
     internal::object::{blob::Blob, commit::Commit, tree::Tree},
 };
+use serde::Serialize;
 
 use crate::{
     command::load_object,
+    common_utils::parse_commit_msg,
     internal::{
-        branch::Branch,
+        branch::{Branch, BranchStoreError},
         config::ConfigKv,
         head::Head,
         log::{
@@ -27,15 +31,84 @@ use crate::{
         },
     },
     utils::{
-        error::{CliError, CliResult},
+        error::{CliError, CliResult, StableErrorCode},
         object_ext::TreeExt,
-        output::OutputConfig,
+        output::{OutputConfig, emit_json_data},
         pager::Pager,
         util,
     },
 };
 
+const LOG_EXAMPLES: &str = "\
+EXAMPLES:
+    libra log -n 5                         Show the latest 5 commits
+    libra log --oneline --graph            Show a compact commit graph
+    libra log --author alice --since 2026-01-01
+                                          Filter commits by author and date
+    libra log --name-status src/           Show changed files under src/
+    libra --json log -n 1                  Structured JSON output for agents";
+
+fn log_branch_store_error(context: &str, error: BranchStoreError) -> CliError {
+    match error {
+        BranchStoreError::Query(detail) => {
+            CliError::fatal(format!("failed to {context}: {detail}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        }
+        other => CliError::fatal(format!("failed to {context}: {other}"))
+            .with_stable_code(StableErrorCode::RepoCorrupt),
+    }
+}
+
+fn log_no_commits_error(branch_name: Option<&str>) -> CliError {
+    let error = match branch_name {
+        Some(name) => CliError::fatal(format!(
+            "your current branch '{name}' does not have any commits yet"
+        )),
+        None => CliError::fatal("your current HEAD does not have any commits yet"),
+    }
+    .with_stable_code(StableErrorCode::RepoStateInvalid);
+
+    error.with_hint("create a commit first before running 'libra log'.")
+}
+
+async fn resolve_log_head_commit() -> CliResult<(Option<String>, ObjectHash)> {
+    let head = Head::current_result()
+        .await
+        .map_err(|error| log_branch_store_error("resolve HEAD", error))?;
+    let branch_name = match head {
+        Head::Branch(name) => Some(name),
+        Head::Detached(_) => None,
+    };
+
+    if let Some(name) = &branch_name
+        && Branch::find_branch_result(name, None)
+            .await
+            .map_err(|error| log_branch_store_error("inspect the current branch", error))?
+            .is_none()
+    {
+        return Err(log_no_commits_error(Some(name)));
+    }
+
+    let current_head_commit = Head::current_commit_result()
+        .await
+        .map_err(|error| log_branch_store_error("resolve HEAD commit", error))?
+        .ok_or_else(|| log_no_commits_error(branch_name.as_deref()))?;
+
+    Ok((branch_name, current_head_commit))
+}
+
+fn log_invalid_object_error(object: &str) -> CliError {
+    CliError::fatal(format!("invalid object name: {object}"))
+        .with_stable_code(StableErrorCode::CliInvalidTarget)
+        .with_hint("check the revision name and try again")
+}
+
+fn log_repo_corrupt_error(message: impl Into<String>) -> CliError {
+    CliError::fatal(message.into()).with_stable_code(StableErrorCode::RepoCorrupt)
+}
+
 #[derive(Parser, Debug)]
+#[command(after_help = LOG_EXAMPLES)]
 pub struct LogArgs {
     /// Limit the number of output
     #[clap(short, long)]
@@ -116,6 +189,41 @@ pub enum ChangeType {
 pub struct FileChange {
     pub path: PathBuf,
     pub status: ChangeType,
+}
+
+#[derive(Debug)]
+struct SelectedLogCommit {
+    commit: Commit,
+    cached_changes: Option<Vec<FileChange>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LogFileChange {
+    pub path: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LogCommitEntry {
+    pub hash: String,
+    pub short_hash: String,
+    pub author_name: String,
+    pub author_email: String,
+    pub author_date: String,
+    pub committer_name: String,
+    pub committer_email: String,
+    pub committer_date: String,
+    pub subject: String,
+    pub body: String,
+    pub parents: Vec<String>,
+    pub refs: Vec<String>,
+    pub files: Vec<LogFileChange>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LogOutput {
+    pub commits: Vec<LogCommitEntry>,
+    pub total: Option<usize>,
 }
 
 struct CommitFilter {
@@ -265,8 +373,8 @@ pub async fn get_reachable_commits(
     let mut reachable_commits: Vec<Commit> = Vec::new();
 
     // Push the initial commit with depth 0
-    let initial_hash = ObjectHash::from_str(&commit_hash)
-        .map_err(|_| CliError::fatal(format!("invalid object name: {commit_hash}")))?;
+    let initial_hash =
+        ObjectHash::from_str(&commit_hash).map_err(|_| log_invalid_object_error(&commit_hash))?;
     queue.push_back((initial_hash, 0)); // (commit_id, current_depth)
 
     while let Some((commit_id, current_depth)) = queue.pop_front() {
@@ -275,8 +383,9 @@ pub async fn get_reachable_commits(
             continue;
         }
 
-        let commit = load_object::<Commit>(&commit_id)
-            .map_err(|e| CliError::fatal(format!("storage broken, object not found: {e}")))?;
+        let commit = load_object::<Commit>(&commit_id).map_err(|e| {
+            log_repo_corrupt_error(format!("storage broken, object not found: {e}"))
+        })?;
 
         // If depth is limited and the current depth exceeds the limit, skip further processing
         if let Some(max_depth) = depth
@@ -310,6 +419,22 @@ struct Reference {
     name: String,
 }
 
+fn parse_date_arg(value: &str) -> CliResult<i64> {
+    parse_date(value).map_err(|e| {
+        CliError::command_usage(e.to_string())
+            .with_stable_code(StableErrorCode::CliInvalidArguments)
+            .with_hint(r#"supported formats: YYYY-MM-DD, "N days ago", unix timestamp"#)
+    })
+}
+
+async fn resolve_decorate_option(args: &LogArgs) -> CliResult<DecorateOptions> {
+    determine_decorate_option(args).await.map_err(|value| {
+        CliError::command_usage(format!("invalid --decorate option: {value}"))
+            .with_stable_code(StableErrorCode::CliInvalidArguments)
+            .with_hint("valid options: no, short, full, auto")
+    })
+}
+
 pub async fn execute(args: LogArgs) {
     if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
         err.print_stderr();
@@ -320,10 +445,11 @@ pub async fn execute(args: LogArgs) {
 /// errors and exiting. Walks commit history applying filters (date range,
 /// author, path) and renders formatted log output.
 pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()> {
+    let decorate_option = resolve_decorate_option(&args).await?;
+
     if output.is_json() {
-        return Err(CliError::command_usage(
-            "`log` does not yet support --json or --machine output",
-        ));
+        let result = run_log(&args).await?;
+        return emit_json_data("log", &result, output);
     }
 
     let name_status = args.name_status;
@@ -331,62 +457,49 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     let name_only = args.name_only && !name_status;
     let patch = args.patch && !name_only && !name_status;
 
-    let since = args
-        .since
-        .as_deref()
-        .map(parse_date)
-        .transpose()
-        .map_err(|e| CliError::fatal(e.to_string()))?;
-    let until = args
-        .until
-        .as_deref()
-        .map(parse_date)
-        .transpose()
-        .map_err(|e| CliError::fatal(e.to_string()))?;
+    let since = args.since.as_deref().map(parse_date_arg).transpose()?;
+    let until = args.until.as_deref().map(parse_date_arg).transpose()?;
     let path_filters: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
     let filter = CommitFilter::new(args.author.clone(), since, until, path_filters.clone());
 
-    let decorate_option = determine_decorate_option(&args)
-        .await
-        .map_err(|value| CliError::fatal(format!("invalid --decorate option: {value}")))?;
-
-    let mut pager = Pager::with_config(output)?;
-
-    let head = Head::current().await;
-    // check if the current branch has any commits
-    let branch_name = if let Head::Branch(n) = head.to_owned() {
-        Some(n)
-    } else {
-        None
-    };
-    if let Some(n) = &branch_name {
-        let branch = Branch::find_branch(n, None).await;
-        if branch.is_none() {
-            return Err(CliError::fatal(format!(
-                "your current branch '{n}' does not have any commits yet"
-            )));
-        }
-    }
-
-    let commit_hash = Head::current_commit()
-        .await
-        .ok_or_else(|| match branch_name.as_deref() {
-            Some(name) => CliError::fatal(format!(
-                "your current branch '{name}' does not have any commits yet"
-            )),
-            None => CliError::fatal("your current HEAD does not have any commits yet"),
-        })?
-        .to_string();
+    let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
+    let commit_hash = current_head_commit.to_string();
 
     let mut reachable_commits = get_reachable_commits(commit_hash.clone(), None).await?;
     // default sort with signature time
     reachable_commits.sort_by_key(|b| std::cmp::Reverse(b.committer.timestamp));
+    let default_abbrev = util::get_min_unique_hash_length(&reachable_commits).max(7);
+
+    let max_output_number = min(args.number.unwrap_or(usize::MAX), reachable_commits.len());
+    let reuse_changed_files = name_only || name_status;
+    let selected_commits = select_log_commits(
+        reachable_commits,
+        &filter,
+        &path_filters,
+        max_output_number,
+        reuse_changed_files,
+    )
+    .await?;
 
     if output.quiet {
-        return Ok(());
+        return validate_selected_log_commits(
+            &selected_commits,
+            &path_filters,
+            name_only,
+            name_status,
+            patch,
+            args.stat,
+        )
+        .await;
     }
 
-    let ref_commits = create_reference_commit_map().await;
+    let mut pager = Pager::with_config(output)?;
+
+    let ref_commits = if decorate_option == DecorateOptions::No {
+        HashMap::new()
+    } else {
+        create_reference_commit_map().await
+    };
     let full_hash_len = commit_hash.len();
 
     let format_type = if args.oneline {
@@ -398,15 +511,12 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     };
     let formatter = CommitFormatter::new(format_type);
 
-    let max_output_number = min(args.number.unwrap_or(usize::MAX), reachable_commits.len());
-    let mut output_number = 0;
     let mut graph_state = if args.graph {
         Some(GraphState::new())
     } else {
         None
     };
     // Decide abbreviated hash length
-    let default_abbrev = util::get_min_unique_hash_length(&reachable_commits).max(7);
     let abbrev_len = if args.no_abbrev_commit {
         full_hash_len
     } else if let Some(n) = args.abbrev {
@@ -416,29 +526,14 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     } else {
         full_hash_len
     };
-    for commit in reachable_commits {
-        if output_number >= max_output_number {
-            break;
-        }
-        if !filter.passes_non_path_filters(&commit) {
-            continue;
-        }
-
-        let mut cached_changes = if filter.paths.is_empty() && !name_only && !name_status {
-            None
-        } else {
-            Some(get_changed_files_for_commit(&commit, &path_filters).await?)
-        };
-
-        if !filter.matches(&commit, cached_changes.as_deref()).await? {
-            continue;
-        }
-
-        output_number += 1;
-
+    for (index, selected) in selected_commits.into_iter().enumerate() {
+        let SelectedLogCommit {
+            commit,
+            mut cached_changes,
+        } = selected;
         let ref_msg = if decorate_option != DecorateOptions::No {
             let mut ref_msgs: Vec<String> = vec![];
-            if output_number == 1 {
+            if index == 0 {
                 ref_msgs.push(if let Some(b_name) = &branch_name {
                     format!(
                         "{} -> {}{}",
@@ -559,6 +654,226 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     Ok(())
 }
 
+async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
+    let since = args.since.as_deref().map(parse_date_arg).transpose()?;
+    let until = args.until.as_deref().map(parse_date_arg).transpose()?;
+    let path_filters: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
+    let filter = CommitFilter::new(args.author.clone(), since, until, path_filters.clone());
+
+    let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
+    let commit_hash = current_head_commit.to_string();
+
+    let mut reachable_commits = get_reachable_commits(commit_hash, None).await?;
+    reachable_commits.sort_by_key(|commit| std::cmp::Reverse(commit.committer.timestamp));
+
+    let max_output_number = min(args.number.unwrap_or(usize::MAX), reachable_commits.len());
+    let include_total = args.number.is_none();
+    let ref_commits = create_reference_commit_map().await;
+    let mut commits = Vec::new();
+    let mut total = 0usize;
+
+    for commit in reachable_commits {
+        if !include_total && commits.len() >= max_output_number {
+            break;
+        }
+        if !filter.passes_non_path_filters(&commit) {
+            continue;
+        }
+
+        let files = get_changed_files_for_commit(&commit, &path_filters).await?;
+        if !filter.matches(&commit, Some(&files)).await? {
+            continue;
+        }
+
+        total += 1;
+        if commits.len() >= max_output_number {
+            continue;
+        }
+
+        let (parsed_message, _) = parse_commit_msg(&commit.message);
+        let mut message_lines = parsed_message.lines();
+        let subject = message_lines.next().unwrap_or("").to_string();
+        let body = message_lines.collect::<Vec<_>>().join("\n");
+        let hash = commit.id.to_string();
+        let short_hash = hash.get(..7).unwrap_or(&hash).to_string();
+
+        commits.push(LogCommitEntry {
+            hash,
+            short_hash,
+            author_name: commit.author.name.trim().to_string(),
+            author_email: commit.author.email.trim().to_string(),
+            author_date: format_log_timestamp(commit.author.timestamp as i64),
+            committer_name: commit.committer.name.trim().to_string(),
+            committer_email: commit.committer.email.trim().to_string(),
+            committer_date: format_log_timestamp(commit.committer.timestamp as i64),
+            subject,
+            body,
+            parents: commit
+                .parent_commit_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            refs: collect_log_refs(
+                &commit,
+                &ref_commits,
+                branch_name.as_deref(),
+                Some(current_head_commit),
+            ),
+            files: files
+                .into_iter()
+                .map(|file| LogFileChange {
+                    path: file.path.display().to_string(),
+                    status: match file.status {
+                        ChangeType::Added => "added",
+                        ChangeType::Modified => "modified",
+                        ChangeType::Deleted => "deleted",
+                    }
+                    .to_string(),
+                })
+                .collect(),
+        });
+    }
+
+    Ok(LogOutput {
+        commits,
+        total: include_total.then_some(total),
+    })
+}
+
+async fn select_log_commits(
+    reachable_commits: Vec<Commit>,
+    filter: &CommitFilter,
+    path_filters: &[PathBuf],
+    max_output_number: usize,
+    keep_changed_files: bool,
+) -> Result<Vec<SelectedLogCommit>, CliError> {
+    let mut selected = Vec::new();
+
+    for commit in reachable_commits {
+        if selected.len() >= max_output_number {
+            break;
+        }
+        if !filter.passes_non_path_filters(&commit) {
+            continue;
+        }
+
+        let cached_changes = if filter.paths.is_empty() && !keep_changed_files {
+            None
+        } else {
+            Some(get_changed_files_for_commit(&commit, path_filters).await?)
+        };
+
+        if !filter.matches(&commit, cached_changes.as_deref()).await? {
+            continue;
+        }
+
+        selected.push(SelectedLogCommit {
+            commit,
+            cached_changes,
+        });
+    }
+
+    Ok(selected)
+}
+
+async fn validate_selected_log_commits(
+    selected_commits: &[SelectedLogCommit],
+    path_filters: &[PathBuf],
+    name_only: bool,
+    name_status: bool,
+    patch: bool,
+    stat: bool,
+) -> CliResult<()> {
+    for selected in selected_commits {
+        if name_only || name_status {
+            if selected.cached_changes.is_none() {
+                let _ = get_changed_files_for_commit(&selected.commit, path_filters).await?;
+            }
+        } else if patch {
+            let _ = generate_diff(&selected.commit, path_filters.to_vec()).await?;
+        } else if stat {
+            let _ = compute_commit_stat(&selected.commit, path_filters.to_vec()).await?;
+        }
+    }
+
+    Ok(())
+}
+
+fn format_log_timestamp(timestamp: i64) -> String {
+    chrono::DateTime::from_timestamp(timestamp, 0)
+        .map(|date| date.to_rfc3339())
+        .unwrap_or_else(|| timestamp.to_string())
+}
+
+fn collect_log_refs(
+    commit: &Commit,
+    ref_commits: &HashMap<ObjectHash, Vec<Reference>>,
+    head_branch: Option<&str>,
+    current_head_commit: Option<ObjectHash>,
+) -> Vec<String> {
+    let mut refs = Vec::new();
+    if current_head_commit == Some(commit.id) {
+        if let Some(branch) = head_branch {
+            refs.push(format!("HEAD -> {branch}"));
+        } else {
+            refs.push("HEAD".to_string());
+        }
+    }
+
+    let mut extra_refs = ref_commits.get(&commit.id).cloned().unwrap_or_default();
+    extra_refs.sort();
+    for reference in extra_refs {
+        if reference.kind == ReferenceKind::Local && Some(reference.name.as_str()) == head_branch {
+            continue;
+        }
+
+        refs.push(match reference.kind {
+            ReferenceKind::Tag => format!("tag: {}", reference.name),
+            ReferenceKind::Remote | ReferenceKind::Local => reference.name,
+        });
+    }
+
+    refs
+}
+
+fn load_commit_blob_content(hash: &ObjectHash) -> Result<Vec<u8>, CliError> {
+    load_object::<Blob>(hash)
+        .map(|blob| blob.data)
+        .map_err(|e| log_repo_corrupt_error(format!("failed to load blob object {hash}: {e}")))
+}
+
+fn record_commit_diff_error(slot: &Rc<RefCell<Option<CliError>>>, error: CliError) {
+    let mut slot = slot.borrow_mut();
+    if slot.is_none() {
+        *slot = Some(error);
+    }
+}
+
+fn build_commit_diff_items(
+    old_blobs: Vec<(PathBuf, ObjectHash)>,
+    new_blobs: Vec<(PathBuf, ObjectHash)>,
+    paths: Vec<PathBuf>,
+) -> Result<Vec<git_internal::diff::DiffItem>, CliError> {
+    let load_error = Rc::new(RefCell::new(None::<CliError>));
+    let load_error_for_read = Rc::clone(&load_error);
+    let diffs = Diff::diff(
+        old_blobs,
+        new_blobs,
+        paths.into_iter().collect(),
+        move |_file, hash| match load_commit_blob_content(hash) {
+            Ok(blob) => blob,
+            Err(error) => {
+                record_commit_diff_error(&load_error_for_read, error);
+                Vec::new()
+            }
+        },
+    );
+    if let Some(error) = load_error.borrow_mut().take() {
+        return Err(error);
+    }
+    Ok(diffs)
+}
+
 async fn commit_touches_paths(commit: &Commit, filters: &[PathBuf]) -> Result<bool, CliError> {
     if filters.is_empty() {
         return Ok(true);
@@ -573,15 +888,15 @@ pub(crate) async fn get_changed_files_for_commit(
     paths: &[PathBuf],
 ) -> Result<Vec<FileChange>, CliError> {
     let tree = load_object::<Tree>(&commit.tree_id)
-        .map_err(|e| CliError::fatal(format!("failed to load tree object: {e}")))?;
+        .map_err(|e| log_repo_corrupt_error(format!("failed to load tree object: {e}")))?;
     let new_blobs: Vec<(PathBuf, ObjectHash)> = tree.get_plain_items();
 
     let old_blobs: Vec<(PathBuf, ObjectHash)> = if !commit.parent_commit_ids.is_empty() {
         let parent = &commit.parent_commit_ids[0];
         let parent_commit = load_object::<Commit>(parent)
-            .map_err(|e| CliError::fatal(format!("failed to load parent commit: {e}")))?;
+            .map_err(|e| log_repo_corrupt_error(format!("failed to load parent commit: {e}")))?;
         let parent_tree = load_object::<Tree>(&parent_commit.tree_id)
-            .map_err(|e| CliError::fatal(format!("failed to load parent tree: {e}")))?;
+            .map_err(|e| log_repo_corrupt_error(format!("failed to load parent tree: {e}")))?;
         parent_tree.get_plain_items()
     } else {
         Vec::new()
@@ -678,42 +993,21 @@ pub async fn compute_commit_stat(
     paths: Vec<PathBuf>,
 ) -> Result<Vec<FileStat>, CliError> {
     let tree = load_object::<Tree>(&commit.tree_id)
-        .map_err(|e| CliError::fatal(format!("failed to load tree object: {e}")))?;
+        .map_err(|e| log_repo_corrupt_error(format!("failed to load tree object: {e}")))?;
     let new_blobs: Vec<(PathBuf, ObjectHash)> = tree.get_plain_items();
 
     let old_blobs: Vec<(PathBuf, ObjectHash)> = if !commit.parent_commit_ids.is_empty() {
         let parent = &commit.parent_commit_ids[0];
         let parent_commit = load_object::<Commit>(parent)
-            .map_err(|e| CliError::fatal(format!("failed to load parent commit: {e}")))?;
+            .map_err(|e| log_repo_corrupt_error(format!("failed to load parent commit: {e}")))?;
         let parent_tree = load_object::<Tree>(&parent_commit.tree_id)
-            .map_err(|e| CliError::fatal(format!("failed to load parent tree: {e}")))?;
+            .map_err(|e| log_repo_corrupt_error(format!("failed to load parent tree: {e}")))?;
         parent_tree.get_plain_items()
     } else {
         Vec::new()
     };
 
-    let read_content = |file: &PathBuf, hash: &ObjectHash| match load_object::<Blob>(hash) {
-        Ok(blob) => blob.data,
-        Err(_) => {
-            let file = util::to_workdir_path(file);
-            std::fs::read(&file).unwrap_or_else(|e| {
-                eprintln!(
-                    "warning: failed to read blob {} for '{}': {}",
-                    hash,
-                    file.display(),
-                    e
-                );
-                Vec::new()
-            })
-        }
-    };
-
-    let diffs = Diff::diff(
-        old_blobs,
-        new_blobs,
-        paths.into_iter().collect(),
-        read_content,
-    );
+    let diffs = build_commit_diff_items(old_blobs, new_blobs, paths)?;
 
     let mut stats = Vec::new();
     for diff_item in diffs {
@@ -878,7 +1172,7 @@ impl GraphState {
 async fn create_reference_commit_map() -> HashMap<ObjectHash, Vec<Reference>> {
     let mut commit_to_refs: HashMap<ObjectHash, Vec<Reference>> = HashMap::new();
 
-    let all_branches = Branch::list_branches(None).await;
+    let all_branches = Branch::list_branches_best_effort(None).await;
     for branch in all_branches {
         commit_to_refs
             .entry(branch.commit)
@@ -925,43 +1219,22 @@ pub(crate) async fn generate_diff(
     // prepare old and new blobs
     // new_blobs from commit tree
     let tree = load_object::<Tree>(&commit.tree_id)
-        .map_err(|e| CliError::fatal(format!("failed to load tree object: {e}")))?;
+        .map_err(|e| log_repo_corrupt_error(format!("failed to load tree object: {e}")))?;
     let new_blobs: Vec<(PathBuf, ObjectHash)> = tree.get_plain_items();
 
     // old_blobs from first parent if exists
     let old_blobs: Vec<(PathBuf, ObjectHash)> = if !commit.parent_commit_ids.is_empty() {
         let parent = &commit.parent_commit_ids[0];
         let parent_commit = load_object::<Commit>(parent)
-            .map_err(|e| CliError::fatal(format!("failed to load parent commit: {e}")))?;
+            .map_err(|e| log_repo_corrupt_error(format!("failed to load parent commit: {e}")))?;
         let parent_tree = load_object::<Tree>(&parent_commit.tree_id)
-            .map_err(|e| CliError::fatal(format!("failed to load parent tree: {e}")))?;
+            .map_err(|e| log_repo_corrupt_error(format!("failed to load parent tree: {e}")))?;
         parent_tree.get_plain_items()
     } else {
         Vec::new()
     };
 
-    let read_content = |file: &PathBuf, hash: &ObjectHash| match load_object::<Blob>(hash) {
-        Ok(blob) => blob.data,
-        Err(_) => {
-            let file = util::to_workdir_path(file);
-            std::fs::read(&file).unwrap_or_else(|e| {
-                eprintln!(
-                    "warning: failed to read blob {} for '{}': {}",
-                    hash,
-                    file.display(),
-                    e
-                );
-                Vec::new()
-            })
-        }
-    };
-
-    let diffs = Diff::diff(
-        old_blobs,
-        new_blobs,
-        paths.into_iter().collect(),
-        read_content,
-    );
+    let diffs = build_commit_diff_items(old_blobs, new_blobs, paths)?;
     let mut out = String::new();
     for d in diffs {
         out.push_str(&d.data);

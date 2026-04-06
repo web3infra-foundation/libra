@@ -10,19 +10,28 @@ use crate::{
         switch,
     },
     internal::{
-        branch::{Branch, INTENT_BRANCH},
+        branch::{Branch, BranchStoreError, INTENT_BRANCH},
         head::Head,
     },
     utils::{
-        error::{CliError, CliResult},
+        error::{CliError, CliResult, StableErrorCode},
         output::OutputConfig,
         util,
     },
 };
 
+const CHECKOUT_EXAMPLES: &str = "\
+EXAMPLES:
+    libra checkout                         Show the current branch
+    libra checkout main                    Switch to an existing local branch
+    libra checkout feature-x               Switch to another branch
+    libra checkout -b feature-x            Create and switch to a new branch
+    libra checkout --quiet main            Switch without informational stdout";
+
 #[derive(Parser, Debug)]
+#[command(after_help = CHECKOUT_EXAMPLES)]
 pub struct CheckoutArgs {
-    /// Target branche name
+    /// Target branch name
     branch: Option<String>,
 
     /// Create and switch to a new branch with the same content as the current branch
@@ -66,20 +75,32 @@ pub async fn execute_safe(args: CheckoutArgs, output: &OutputConfig) -> CliResul
         return Ok(());
     }
 
-    match switch::ensure_clean_status(output).await {
+    let target_commit = if let Some(ref branch_name) = args.branch {
+        Branch::find_branch_result(branch_name, None)
+            .await
+            .map_err(|error| checkout_branch_store_error("resolve checkout target", error))?
+            .map(|branch| branch.commit)
+    } else {
+        None
+    };
+
+    let clean_status = match target_commit {
+        Some(target_commit) => switch::ensure_clean_status_for_commit(target_commit, output).await,
+        None => switch::ensure_clean_status(output).await,
+    };
+
+    match clean_status {
         Ok(()) => {}
-        Err(err)
-            if matches!(
-                err.message(),
-                "unstaged changes, can't switch branch"
-                    | "uncommitted changes, can't switch branch"
-            ) =>
-        {
+        Err(
+            switch::SwitchError::DirtyUnstaged
+            | switch::SwitchError::DirtyUncommitted
+            | switch::SwitchError::UntrackedOverwrite(..),
+        ) => {
             return Err(CliError::failure(
                 "local changes would be overwritten by checkout",
             ));
         }
-        Err(err) => return Err(err),
+        Err(err) => return Err(CliError::from(err)),
     }
 
     match (args.branch, args.new_branch) {
@@ -88,6 +109,17 @@ pub async fn execute_safe(args: CheckoutArgs, output: &OutputConfig) -> CliResul
         (None, None) => show_current_branch(output).await,
     }
     Ok(())
+}
+
+fn checkout_branch_store_error(context: &str, error: BranchStoreError) -> CliError {
+    match error {
+        BranchStoreError::Query(detail) => {
+            CliError::fatal(format!("failed to {context}: {detail}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        }
+        other => CliError::fatal(format!("failed to {context}: {other}"))
+            .with_stable_code(StableErrorCode::RepoCorrupt),
+    }
 }
 
 pub async fn get_current_branch() -> Option<String> {
@@ -119,8 +151,9 @@ async fn switch_branch_with_output(branch_name: &str, output: &OutputConfig) -> 
             INTENT_BRANCH
         )));
     }
-    let target_branch = Branch::find_branch(branch_name, None)
+    let target_branch = Branch::find_branch_result(branch_name, None)
         .await
+        .map_err(|error| checkout_branch_store_error("resolve branch", error))?
         .ok_or_else(|| CliError::fatal(format!("branch '{}' not found", branch_name)))?;
     restore_to_commit(target_branch.commit, output).await?;
     let head = Head::Branch(branch_name.to_string());
@@ -162,10 +195,16 @@ async fn check_branch_with_output(
         return Ok(None);
     }
 
-    let target_branch: Option<Branch> = Branch::find_branch(branch_name, None).await;
+    let target_branch: Option<Branch> = Branch::find_branch_result(branch_name, None)
+        .await
+        .map_err(|error| checkout_branch_store_error("resolve branch", error))?;
     if target_branch.is_none() {
         let remote_branch_name: String = format!("origin/{branch_name}");
-        if !Branch::search_branch(&remote_branch_name).await.is_empty() {
+        if !Branch::search_branch_result(&remote_branch_name)
+            .await
+            .map_err(|error| checkout_branch_store_error("search remote tracking branches", error))?
+            .is_empty()
+        {
             crate::info_println!(
                 output,
                 "branch '{branch_name}' set up to track '{remote_branch_name}'."
@@ -199,7 +238,7 @@ async fn restore_to_commit(commit_id: ObjectHash, output: &OutputConfig) -> CliR
         source: Some(commit_id.to_string()),
         pathspec: vec![util::working_dir_string()],
     };
-    restore::execute_safe(restore_args, output).await
+    restore::execute_safe(restore_args, &output.child_output_config()).await
 }
 
 /// Unit tests for the checkout module

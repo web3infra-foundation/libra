@@ -4,6 +4,7 @@
 
 use std::{fs, io::Write};
 
+use chrono::DateTime;
 use libra::{
     command::{
         add::{self, AddArgs},
@@ -28,6 +29,159 @@ fn test_blame_cli_outside_repository_returns_fatal_128() {
         stderr.contains("fatal: not a libra repository"),
         "unexpected stderr: {stderr}"
     );
+}
+
+#[test]
+fn test_blame_json_output_includes_lines() {
+    let repo = create_committed_repo_via_cli();
+    std::fs::write(repo.path().join("tracked.txt"), "line1\nline2\n").unwrap();
+    let add_output = run_libra_command(&["add", "tracked.txt"], repo.path());
+    assert!(
+        add_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&add_output.stderr)
+    );
+    let commit_output = run_libra_command(
+        &["commit", "-m", "update tracked", "--no-verify"],
+        repo.path(),
+    );
+    assert!(
+        commit_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&commit_output.stderr)
+    );
+
+    let output = run_libra_command(&["--json", "blame", "tracked.txt"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "blame");
+    assert_eq!(json["data"]["file"], "tracked.txt");
+    assert!(json["data"]["lines"].as_array().is_some());
+}
+
+#[test]
+fn test_blame_machine_output_is_single_line_json() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--machine", "blame", "tracked.txt"], repo.path());
+    assert_cli_success(&output, "machine blame tracked.txt");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let non_empty_lines: Vec<&str> = stdout.lines().filter(|line| !line.is_empty()).collect();
+    assert_eq!(
+        non_empty_lines.len(),
+        1,
+        "machine output should be exactly one non-empty line, got: {stdout}"
+    );
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(non_empty_lines[0]).expect("machine output should be valid JSON");
+    assert_eq!(parsed["command"], "blame");
+    assert_eq!(parsed["data"]["file"], "tracked.txt");
+    assert!(parsed["data"]["lines"].as_array().is_some());
+}
+
+#[test]
+fn test_blame_human_output_handles_long_unicode_author_names() {
+    let repo = create_committed_repo_via_cli();
+
+    let name_output = run_libra_command(
+        &[
+            "config",
+            "user.name",
+            "测试作者名字很长很长很长很长很长很长",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&name_output, "config user.name");
+    let email_output = run_libra_command(
+        &["config", "user.email", "unicode@example.com"],
+        repo.path(),
+    );
+    assert_cli_success(&email_output, "config user.email");
+
+    std::fs::write(repo.path().join("tracked.txt"), "unicode blame line\n").unwrap();
+    let add_output = run_libra_command(&["add", "tracked.txt"], repo.path());
+    assert_cli_success(&add_output, "add tracked.txt");
+    let commit_output = run_libra_command(
+        &["commit", "-m", "unicode author", "--no-verify"],
+        repo.path(),
+    );
+    assert_cli_success(&commit_output, "commit unicode author");
+
+    let output = run_libra_command(&["blame", "tracked.txt"], repo.path());
+    assert_cli_success(&output, "blame tracked.txt");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("..."),
+        "expected truncated author marker in blame output, got: {stdout}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_blame_json_assigns_lines_to_introducing_commits() {
+    let repo = tempdir().unwrap();
+    let _guard = setup_repo_with_hash(&repo, "sha1").await;
+    let (first, second) = prepare_history().await;
+
+    let output = run_libra_command(&["--json", "blame", "foo.txt"], repo.path());
+    assert_cli_success(&output, "json blame foo.txt");
+
+    let json = parse_json_stdout(&output);
+    let lines = json["data"]["lines"]
+        .as_array()
+        .expect("blame lines should be an array");
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0]["line_number"], 1);
+    assert_eq!(lines[0]["hash"], first.to_string());
+    assert_eq!(lines[1]["line_number"], 2);
+    assert_eq!(lines[1]["hash"], second.to_string());
+    let date = lines[0]["date"]
+        .as_str()
+        .expect("blame date should be a string");
+    assert!(
+        DateTime::parse_from_rfc3339(date).is_ok(),
+        "expected RFC3339 blame date, got: {date}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_blame_json_line_range_filters_output() {
+    let repo = tempdir().unwrap();
+    let _guard = setup_repo_with_hash(&repo, "sha1").await;
+    let (_first, second) = prepare_history().await;
+
+    let output = run_libra_command(&["--json", "blame", "-L", "2,2", "foo.txt"], repo.path());
+    assert_cli_success(&output, "json blame with line range");
+
+    let json = parse_json_stdout(&output);
+    let lines = json["data"]["lines"]
+        .as_array()
+        .expect("blame lines should be an array");
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["line_number"], 2);
+    assert_eq!(lines[0]["hash"], second.to_string());
+    assert_eq!(lines[0]["content"], "line2-modified");
+}
+
+#[test]
+fn test_blame_invalid_line_range_uses_stable_cli_error() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["blame", "-L", "9,10", "tracked.txt"], repo.path());
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert_eq!(report.category, "cli");
 }
 
 async fn setup_repo_with_hash(

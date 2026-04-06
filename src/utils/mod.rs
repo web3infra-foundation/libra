@@ -16,6 +16,7 @@ pub mod path_ext;
 pub mod storage;
 pub mod storage_ext;
 pub mod test;
+pub mod text;
 pub mod tree;
 pub mod util;
 pub mod worktree;

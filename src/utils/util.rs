@@ -18,7 +18,12 @@ use once_cell::sync::Lazy;
 use path_absolutize::*;
 
 use crate::{
-    internal::{branch::Branch, head::Head, tag},
+    command::load_object,
+    internal::{
+        branch::{Branch, BranchStoreError},
+        head::Head,
+        tag,
+    },
     utils::{client_storage::ClientStorage, path, path_ext::PathExt},
 };
 
@@ -476,73 +481,275 @@ pub fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
 
-/// Resolve a string to a commit ObjectHash.
-/// The string can be a branch name, a tag name, or a commit hash prefix.
-/// Order of resolution:
-/// 1. HEAD
-/// 2. Local Branch
-/// 3. Tag
-/// 4. Commit hash prefix
-pub async fn get_commit_base(name: &str) -> Result<ObjectHash, String> {
-    // 1. Check for HEAD
-    if name.to_uppercase() == "HEAD" {
-        if let Some(commit_id) = Head::current_commit().await {
-            return Ok(commit_id);
-        } else {
-            return Err("fatal: HEAD does not point to a commit".to_string());
+#[derive(Debug, thiserror::Error)]
+pub enum CommitBaseError {
+    #[error("HEAD does not point to a commit")]
+    HeadUnborn,
+    #[error("{0}")]
+    InvalidReference(String),
+    #[error("{0}")]
+    ReadFailure(String),
+    #[error("{0}")]
+    CorruptReference(String),
+}
+
+impl CommitBaseError {
+    fn from_branch_store_error(context: String, error: BranchStoreError) -> Self {
+        let message = format!("{context}: {error}");
+        match error {
+            BranchStoreError::Query(_) | BranchStoreError::Delete { .. } => {
+                Self::ReadFailure(message)
+            }
+            BranchStoreError::Corrupt { .. } => Self::CorruptReference(message),
+            BranchStoreError::NotFound(_) => Self::InvalidReference(message),
         }
     }
 
-    // 2. Check for a local branch
-    if let Some(branch) = Branch::find_branch(name, None).await {
-        return Ok(branch.commit);
+    fn classify_storage_failure(message: String) -> Self {
+        let lower = message.to_ascii_lowercase();
+        if lower.contains("database is locked")
+            || lower.contains("database schema is locked")
+            || lower.contains("permission denied")
+            || lower.contains("input/output error")
+            || lower.contains("failed to read")
+            || lower.contains("could not read")
+            || lower.contains("failed to query")
+        {
+            Self::ReadFailure(message)
+        } else {
+            Self::CorruptReference(message)
+        }
+    }
+}
+
+async fn resolve_branch_commit_typed(
+    branch_name: &str,
+    remote: Option<&str>,
+    display_name: &str,
+) -> Result<Option<ObjectHash>, CommitBaseError> {
+    let context = match remote {
+        Some(remote_name) => {
+            format!("failed to resolve branch '{display_name}' on remote '{remote_name}'")
+        }
+        None => format!("failed to resolve branch '{display_name}'"),
+    };
+
+    match Branch::find_branch_result(branch_name, remote).await {
+        Ok(Some(branch)) => Ok(Some(branch.commit)),
+        Ok(None) => match Branch::exists_result(branch_name, remote).await {
+            Ok(true) => Err(CommitBaseError::InvalidReference(format!(
+                "branch '{display_name}' does not point to a commit"
+            ))),
+            Ok(false) => Ok(None),
+            Err(error) => Err(CommitBaseError::from_branch_store_error(context, error)),
+        },
+        Err(error) => Err(CommitBaseError::from_branch_store_error(context, error)),
+    }
+}
+
+fn split_revision_navigation(name: &str) -> Option<(&str, &str)> {
+    name.char_indices()
+        .find(|(_, ch)| *ch == '~' || *ch == '^')
+        .map(|(index, _)| name.split_at(index))
+}
+
+fn nth_parent_commit_typed(
+    commit_id: &ObjectHash,
+    n: usize,
+    display_name: &str,
+) -> Result<ObjectHash, CommitBaseError> {
+    let commit: Commit = load_object(commit_id).map_err(|error| {
+        CommitBaseError::classify_storage_failure(format!(
+            "failed to load commit object while resolving '{display_name}': {error}"
+        ))
+    })?;
+
+    if n == 0 || n > commit.parent_commit_ids.len() {
+        return Err(CommitBaseError::InvalidReference(format!(
+            "invalid reference: {display_name}"
+        )));
     }
 
-    // Added: detect remote branch in remote/branch format
+    Ok(commit.parent_commit_ids[n - 1])
+}
+
+fn navigate_commit_path_typed(
+    mut current: ObjectHash,
+    path: &str,
+    display_name: &str,
+) -> Result<ObjectHash, CommitBaseError> {
+    let mut chars = path.chars().peekable();
+
+    while let Some(symbol) = chars.next() {
+        if symbol != '^' && symbol != '~' {
+            return Err(CommitBaseError::InvalidReference(format!(
+                "invalid reference: {display_name}"
+            )));
+        }
+
+        let mut digits = String::new();
+        while let Some(ch) = chars.peek() {
+            if ch.is_ascii_digit() {
+                digits.push(*ch);
+                chars.next();
+            } else {
+                break;
+            }
+        }
+
+        let step = if digits.is_empty() {
+            1
+        } else {
+            digits.parse::<usize>().map_err(|_| {
+                CommitBaseError::InvalidReference(format!("invalid reference: {display_name}"))
+            })?
+        };
+
+        if step == 0 {
+            // `~0` is identity. `^0` is also identity here because
+            // `resolve_commit_base_atom_typed()` already peels named tags and
+            // direct tag-object hashes to their referenced object before
+            // navigation runs.
+            continue;
+        }
+
+        match symbol {
+            '^' => {
+                current = nth_parent_commit_typed(&current, step, display_name)?;
+            }
+            '~' => {
+                for _ in 0..step {
+                    current = nth_parent_commit_typed(&current, 1, display_name)?;
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    Ok(current)
+}
+
+async fn resolve_commit_base_atom_typed(name: &str) -> Result<ObjectHash, CommitBaseError> {
+    // 1. Check for HEAD
+    if name.eq_ignore_ascii_case("HEAD") {
+        return match Head::current_commit_result().await {
+            Ok(Some(commit_id)) => Ok(commit_id),
+            Ok(None) => Err(CommitBaseError::HeadUnborn),
+            Err(error) => Err(CommitBaseError::from_branch_store_error(
+                "failed to resolve HEAD".to_string(),
+                error,
+            )),
+        };
+    }
+
+    // 2. Check for a local branch
+    if let Some(commit) = resolve_branch_commit_typed(name, None, name).await? {
+        return Ok(commit);
+    }
+
+    // Support both short remote branches (`main` with `remote = origin`) and
+    // fetched remote-tracking refs (`refs/remotes/origin/main`) for inputs such
+    // as `origin/main`.
     if let Some((remote, branch_name)) = name.split_once('/')
         && !remote.is_empty()
         && !branch_name.is_empty()
-        && let Some(branch) = Branch::find_branch(branch_name, Some(remote)).await
     {
-        return Ok(branch.commit);
+        if let Some(commit) = resolve_branch_commit_typed(
+            &format!("refs/remotes/{remote}/{branch_name}"),
+            Some(remote),
+            name,
+        )
+        .await?
+        {
+            return Ok(commit);
+        }
+
+        if let Some(commit) = resolve_branch_commit_typed(branch_name, Some(remote), name).await? {
+            return Ok(commit);
+        }
     }
 
     // 3. Check for a tag
-    if let Ok(Some((_tag_object, commit))) = tag::find_tag_and_commit(name).await {
-        // The find_tag_and_commit function already dereferences annotated tags for us.
-        return Ok(commit.id);
+    match tag::find_tag_and_commit(name).await {
+        Ok(Some((_tag_object, commit))) => return Ok(commit.id),
+        Ok(None) => {}
+        Err(error) => {
+            return Err(CommitBaseError::classify_storage_failure(format!(
+                "failed to resolve tag '{name}': {error}"
+            )));
+        }
     }
 
     // 4. Check for a hash prefix
     let storage = objects_storage();
-    let commits = storage.search(name).await;
+    let commits = storage.search_result(name).await.map_err(|error| {
+        CommitBaseError::classify_storage_failure(format!(
+            "failed to search objects while resolving '{name}': {error}"
+        ))
+    })?;
     if commits.is_empty() {
-        return Err(format!("fatal: invalid reference: {}", name));
+        return Err(CommitBaseError::InvalidReference(format!(
+            "invalid reference: {name}"
+        )));
     } else if commits.len() > 1 {
-        return Err(format!("fatal: ambiguous argument: {}", name));
+        return Err(CommitBaseError::InvalidReference(format!(
+            "ambiguous argument: {name}"
+        )));
     }
 
     let object_id = commits[0];
-    let object_type = storage
-        .get_object_type(&object_id)
-        .map_err(|e| format!("fatal: could not read object type for {}: {}", name, e))?;
+    let object_type = storage.get_object_type(&object_id).map_err(|e| {
+        CommitBaseError::classify_storage_failure(format!(
+            "could not read object type for {name}: {e}"
+        ))
+    })?;
 
     match object_type {
         ObjectType::Commit => Ok(object_id),
         ObjectType::Tag => {
             // Manually dereference tag if search returned a tag object directly
             let tag_obj: git_internal::internal::object::tag::Tag =
-                match crate::command::load_object(&object_id) {
-                    Ok(obj) => obj,
-                    Err(e) => return Err(format!("fatal: failed to load tag object: {}", e)),
-                };
+                crate::command::load_object(&object_id).map_err(|e| {
+                    CommitBaseError::classify_storage_failure(format!(
+                        "failed to load tag object: {e}"
+                    ))
+                })?;
             Ok(tag_obj.object_hash)
         }
-        _ => Err(format!(
-            "fatal: reference is not a commit: {}, is {}",
-            name, object_type
-        )),
+        _ => Err(CommitBaseError::InvalidReference(format!(
+            "reference is not a commit: {name}, is {object_type}"
+        ))),
     }
+}
+
+pub async fn get_commit_base_typed(name: &str) -> Result<ObjectHash, CommitBaseError> {
+    if let Some((base_ref, path)) = split_revision_navigation(name) {
+        if base_ref.is_empty() {
+            return Err(CommitBaseError::InvalidReference(format!(
+                "invalid reference: {name}"
+            )));
+        }
+
+        let base_commit = resolve_commit_base_atom_typed(base_ref).await?;
+        return navigate_commit_path_typed(base_commit, path, name);
+    }
+
+    resolve_commit_base_atom_typed(name).await
+}
+
+/// Resolve a string to a commit [`ObjectHash`].
+/// The string can be a local branch name, a remote-tracking branch name
+/// (such as `origin/main`), a tag name, or a commit hash prefix.
+/// Order of resolution:
+/// 1. HEAD
+/// 2. Local branch
+/// 3. Remote-tracking branch (e.g. `origin/main`)
+/// 4. Tag
+/// 5. Commit hash prefix
+pub async fn get_commit_base(name: &str) -> Result<ObjectHash, String> {
+    get_commit_base_typed(name)
+        .await
+        .map_err(|error| format!("fatal: {error}"))
 }
 
 /// Get the repository name from the url
@@ -705,11 +912,19 @@ pub fn get_min_unique_hash_length(commits: &[Commit]) -> usize {
 mod test {
     use std::{env, path::PathBuf};
 
+    use sea_orm::{ActiveModelTrait, Set};
     use serial_test::serial;
     use tempfile::tempdir;
 
     use super::*;
-    use crate::utils::test;
+    use crate::{
+        command::{
+            add::{self, AddArgs},
+            commit::{self, CommitArgs},
+        },
+        internal::{db::get_db_conn_instance, head::Head, model::reference, tag as internal_tag},
+        utils::test,
+    };
 
     #[test]
     ///Test get current directory success.
@@ -759,6 +974,115 @@ mod test {
     fn test_to_relative() {
         assert_eq!(to_relative("src/main.rs", "src"), PathBuf::from("main.rs"));
         assert_eq!(to_relative(".", "src"), PathBuf::from(".."));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn get_commit_base_typed_rejects_unborn_branch_before_hash_fallback() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+
+        test::ensure_file("tracked.txt", Some("tracked\n"));
+        add::execute(AddArgs {
+            pathspec: vec!["tracked.txt".into()],
+            all: false,
+            update: false,
+            refresh: false,
+            verbose: false,
+            force: false,
+            dry_run: false,
+            ignore_errors: false,
+        })
+        .await;
+        commit::execute(CommitArgs {
+            message: Some("base".into()),
+            disable_pre: true,
+            no_verify: true,
+            ..Default::default()
+        })
+        .await;
+
+        let head_commit = Head::current_commit()
+            .await
+            .expect("expected committed HEAD");
+        let branch_name = head_commit.to_string()[..7].to_string();
+
+        let db = get_db_conn_instance().await;
+        reference::ActiveModel {
+            name: Set(Some(branch_name.clone())),
+            kind: Set(reference::ConfigKind::Branch),
+            commit: Set(None),
+            remote: Set(None),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("failed to insert unborn branch");
+
+        let error = get_commit_base_typed(&branch_name)
+            .await
+            .expect_err("unborn branch must not fall back to hash prefix resolution");
+        assert!(matches!(error, CommitBaseError::InvalidReference(_)));
+        assert!(
+            error.to_string().contains(&format!(
+                "branch '{branch_name}' does not point to a commit"
+            )),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn get_commit_base_typed_head_navigation_reports_unborn_head() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+
+        let error = get_commit_base_typed("HEAD~1")
+            .await
+            .expect_err("unborn HEAD navigation must not panic");
+        assert!(matches!(error, CommitBaseError::HeadUnborn));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn get_commit_base_typed_tag_object_hash_with_caret_zero_resolves_commit() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+
+        test::ensure_file("tracked.txt", Some("tracked\n"));
+        add::execute(AddArgs {
+            pathspec: vec!["tracked.txt".into()],
+            all: false,
+            update: false,
+            refresh: false,
+            verbose: false,
+            force: false,
+            dry_run: false,
+            ignore_errors: false,
+        })
+        .await;
+        commit::execute(CommitArgs {
+            message: Some("base".into()),
+            disable_pre: true,
+            no_verify: true,
+            ..Default::default()
+        })
+        .await;
+
+        let head_commit = Head::current_commit()
+            .await
+            .expect("expected committed HEAD");
+        let created = internal_tag::create("v1.0.0", Some("release".into()), false)
+            .await
+            .expect("failed to create annotated tag");
+
+        let resolved = get_commit_base_typed(&format!("{}^0", created.target))
+            .await
+            .expect("tag object hash ^0 should resolve to the tagged commit");
+        assert_eq!(resolved, head_commit);
     }
 
     #[tokio::test]

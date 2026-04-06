@@ -111,6 +111,11 @@ fn configure_pull_tracking(repo: &Path, remote_dir: &Path, branch: &str) {
     assert_cli_success(&branch_merge, "set branch.main.merge");
 }
 
+fn parse_json_stderr(stderr: &[u8]) -> serde_json::Value {
+    serde_json::from_str(String::from_utf8_lossy(stderr).trim())
+        .expect("stderr should contain a JSON error report")
+}
+
 #[test]
 #[serial]
 fn test_pull_cli_without_tracking_returns_repo_exit_code() {
@@ -234,4 +239,118 @@ fn test_pull_quiet_suppresses_stdout() {
         stdout.trim().is_empty(),
         "quiet pull should suppress stdout, got: {stdout}"
     );
+}
+
+#[test]
+#[serial]
+fn test_pull_human_output_reports_update_range_after_follow_up_fast_forward() {
+    let (_temp_root, remote_dir, work_dir, branch) = create_remote_fixture();
+
+    let local_repo = tempdir().expect("failed to create local repo");
+    init_repo_via_cli(local_repo.path());
+    configure_identity_via_cli(local_repo.path());
+    configure_pull_tracking(local_repo.path(), &remote_dir, &branch);
+
+    let first_pull = run_libra_command(&["pull"], local_repo.path());
+    assert_cli_success(&first_pull, "initial pull");
+
+    let new_head = push_remote_commit(
+        &work_dir,
+        &branch,
+        "next.txt",
+        "next change\n",
+        "remote follow-up",
+    );
+    let previous_head = git_stdout(&["rev-parse", "HEAD~1"], &work_dir);
+
+    let output = run_libra_command(&["pull"], local_repo.path());
+    assert_cli_success(&output, "follow-up pull");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("From "),
+        "pull should include the fetched remote, stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains(&format!(
+            "Updating {}..{}",
+            &previous_head[..7],
+            &new_head[..7]
+        )),
+        "pull should report the fast-forward range, stdout: {stdout}"
+    );
+    assert!(
+        stdout.lines().any(|line| line == "Fast-forward"),
+        "pull should report the merge strategy, stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("1 file changed"),
+        "pull should summarize changed files, stdout: {stdout}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_pull_json_fetch_error_includes_phase_detail() {
+    let repo = create_committed_repo_via_cli();
+
+    let missing_remote = repo.path().join("missing-remote.git");
+    let missing_remote_str = missing_remote.to_string_lossy().to_string();
+
+    let remote_output = run_libra_command(
+        &["remote", "add", "origin", &missing_remote_str],
+        repo.path(),
+    );
+    assert_cli_success(&remote_output, "remote add");
+    let branch_remote = run_libra_command(&["config", "branch.main.remote", "origin"], repo.path());
+    assert_cli_success(&branch_remote, "set branch.main.remote");
+    let branch_merge = run_libra_command(
+        &["config", "branch.main.merge", "refs/heads/main"],
+        repo.path(),
+    );
+    assert_cli_success(&branch_merge, "set branch.main.merge");
+
+    let output = run_libra_command(&["--json", "pull"], repo.path());
+    let report = parse_json_stderr(&output.stderr);
+
+    assert_eq!(report["ok"], false);
+    assert_eq!(report["details"]["phase"], "fetch");
+}
+
+#[test]
+#[serial]
+fn test_pull_json_manual_merge_error_includes_phase_detail() {
+    let (_temp_root, remote_dir, work_dir, branch) = create_remote_fixture();
+
+    let local_repo = tempdir().expect("failed to create local repo");
+    init_repo_via_cli(local_repo.path());
+    configure_identity_via_cli(local_repo.path());
+    configure_pull_tracking(local_repo.path(), &remote_dir, &branch);
+
+    let first_pull = run_libra_command(&["pull"], local_repo.path());
+    assert_cli_success(&first_pull, "initial pull");
+
+    let _remote_head = push_remote_commit(
+        &work_dir,
+        &branch,
+        "remote.txt",
+        "remote change\n",
+        "remote update",
+    );
+
+    fs::write(local_repo.path().join("local.txt"), "local change\n").expect("write local change");
+    let add = run_libra_command(&["add", "local.txt"], local_repo.path());
+    assert_cli_success(&add, "stage local change");
+    let commit = run_libra_command(
+        &["commit", "-m", "local update", "--no-verify"],
+        local_repo.path(),
+    );
+    assert_cli_success(&commit, "commit local change");
+
+    let output = run_libra_command(&["--json", "pull"], local_repo.path());
+    let report = parse_json_stderr(&output.stderr);
+
+    assert_eq!(report["ok"], false);
+    assert_eq!(report["error_code"], "LBR-CONFLICT-002");
+    assert_eq!(report["details"]["phase"], "merge");
 }

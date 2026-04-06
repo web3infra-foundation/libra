@@ -59,7 +59,7 @@ use clap::Parser;
 use git_internal::internal::object::commit::Commit;
 
 use crate::{
-    internal::{head::Head, log::date_parser::parse_date},
+    internal::{branch::BranchStoreError, head::Head, log::date_parser::parse_date},
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::OutputConfig,
@@ -134,9 +134,7 @@ pub async fn execute_to(args: ShortlogArgs, writer: &mut impl Write) -> CliResul
         None
     };
 
-    let commits = get_commits_for_shortlog(&args, since_ts, until_ts)
-        .await
-        .map_err(|e| CliError::fatal(e.message().to_string()))?;
+    let commits = get_commits_for_shortlog(&args, since_ts, until_ts).await?;
 
     let mut author_map: HashMap<String, AuthorStats> = HashMap::new();
 
@@ -255,11 +253,14 @@ async fn get_commits_for_shortlog(
 ) -> CliResult<Vec<Commit>> {
     use crate::command::log::get_reachable_commits;
 
-    let head = Head::current().await;
+    let head = Head::current_result()
+        .await
+        .map_err(|error| shortlog_branch_store_error("resolve HEAD", error))?;
     let commit_hash = match head {
         Head::Branch(name) => {
-            let branch = crate::internal::branch::Branch::find_branch(&name, None)
+            let branch = crate::internal::branch::Branch::find_branch_result(&name, None)
                 .await
+                .map_err(|error| shortlog_branch_store_error("resolve current branch", error))?
                 .map(|b| b.commit.to_string());
             match branch {
                 Some(h) => h,
@@ -280,6 +281,17 @@ async fn get_commits_for_shortlog(
     commits.sort_by_key(|b| std::cmp::Reverse(b.author.timestamp));
 
     Ok(commits)
+}
+
+fn shortlog_branch_store_error(context: &str, error: BranchStoreError) -> CliError {
+    match error {
+        BranchStoreError::Query(detail) => {
+            CliError::fatal(format!("failed to {context}: {detail}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        }
+        other => CliError::fatal(format!("failed to {context}: {other}"))
+            .with_stable_code(StableErrorCode::RepoCorrupt),
+    }
 }
 
 fn passes_filter(commit: &Commit, since_ts: Option<i64>, until_ts: Option<i64>) -> bool {

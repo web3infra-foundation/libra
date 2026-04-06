@@ -17,7 +17,7 @@ use super::{
 };
 use crate::{
     internal::{
-        branch::Branch,
+        branch::{Branch, BranchStoreError},
         db::get_db_conn_instance,
         head::Head,
         reflog::{ReflogAction, ReflogContext, with_reflog},
@@ -39,6 +39,8 @@ pub struct MergeArgs {
 #[derive(Debug, Clone)]
 pub(crate) struct PullMergeSummary {
     pub strategy: String,
+    /// The previous HEAD commit before merge (None for root commits).
+    pub old_commit: Option<String>,
     pub commit: Option<String>,
     pub files_changed: usize,
     pub up_to_date: bool,
@@ -60,6 +62,8 @@ pub(crate) enum PullMergeError {
     ManualMergeRequired { upstream: String },
     #[error("failed to load tree '{tree_id}': {detail}")]
     TreeLoad { tree_id: String, detail: String },
+    #[error("failed to resolve HEAD state: {0}")]
+    HeadResolve(String),
     #[error("failed to update HEAD during merge: {0}")]
     HeadUpdate(String),
     #[error("failed to restore working tree after merge: {0}")]
@@ -80,6 +84,8 @@ impl From<PullMergeError> for CliError {
                 .with_stable_code(crate::utils::error::StableErrorCode::RepoStateInvalid),
             PullMergeError::ManualMergeRequired { .. } => CliError::failure(error.to_string())
                 .with_stable_code(crate::utils::error::StableErrorCode::ConflictOperationBlocked),
+            PullMergeError::HeadResolve(..) => CliError::fatal(error.to_string())
+                .with_stable_code(crate::utils::error::StableErrorCode::IoReadFailed),
             PullMergeError::HeadUpdate(..) | PullMergeError::Restore(..) => {
                 CliError::fatal(error.to_string())
                     .with_stable_code(crate::utils::error::StableErrorCode::IoWriteFailed)
@@ -137,6 +143,7 @@ pub(crate) async fn run_merge_for_pull(
         apply_fast_forward_merge(target_commit.clone(), upstream, output).await?;
         return Ok(PullMergeSummary {
             strategy: "fast-forward".to_string(),
+            old_commit: None,
             commit: Some(target_commit.id.to_string()),
             files_changed,
             up_to_date: false,
@@ -162,6 +169,7 @@ pub(crate) async fn run_merge_for_pull(
     if lca.id == target_commit.id {
         return Ok(PullMergeSummary {
             strategy: "already-up-to-date".to_string(),
+            old_commit: Some(current_commit_id.to_string()),
             commit: None,
             files_changed: 0,
             up_to_date: true,
@@ -173,6 +181,7 @@ pub(crate) async fn run_merge_for_pull(
         apply_fast_forward_merge(target_commit.clone(), upstream, output).await?;
         return Ok(PullMergeSummary {
             strategy: "fast-forward".to_string(),
+            old_commit: Some(current_commit_id.to_string()),
             commit: Some(target_commit.id.to_string()),
             files_changed,
             up_to_date: false,
@@ -187,7 +196,9 @@ pub(crate) async fn run_merge_for_pull(
 async fn resolve_merge_target(target_ref: &str) -> Result<ObjectHash, Box<dyn std::error::Error>> {
     if let Some(remote) = target_ref.strip_prefix("refs/remotes/")
         && let Some((remote_name, _)) = remote.split_once('/')
-        && let Some(branch) = Branch::find_branch(target_ref, Some(remote_name)).await
+        && let Some(branch) = Branch::find_branch_result(target_ref, Some(remote_name))
+            .await
+            .map_err(|error: BranchStoreError| Box::new(error) as Box<dyn std::error::Error>)?
     {
         return Ok(branch.commit);
     }
@@ -230,8 +241,12 @@ async fn apply_fast_forward_merge(
 ) -> Result<(), PullMergeError> {
     let db = get_db_conn_instance().await;
 
-    let old_oid_opt = Head::current_commit_with_conn(&db).await;
-    let current_head_state = Head::current_with_conn(&db).await;
+    let old_oid_opt = Head::current_commit_result_with_conn(&db)
+        .await
+        .map_err(|e| PullMergeError::HeadResolve(e.to_string()))?;
+    let current_head_state = Head::current_result_with_conn(&db)
+        .await
+        .map_err(|e| PullMergeError::HeadResolve(e.to_string()))?;
 
     let action = ReflogAction::Merge {
         branch: target_branch_name.to_string(),
@@ -285,7 +300,7 @@ async fn apply_fast_forward_merge(
             source: None, // `restore` without source defaults to HEAD, which is now correct.
             pathspec: vec![util::working_dir_string()],
         },
-        output,
+        &output.child_output_config(),
     )
     .await
     .map_err(|error| PullMergeError::Restore(error.to_string()))?;

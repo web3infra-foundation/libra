@@ -23,6 +23,7 @@
 //! ```
 
 pub mod agent;
+pub mod claudecode;
 pub mod client;
 pub mod codex;
 pub mod commands;

@@ -22,6 +22,15 @@ pub struct HttpsClient {
     pub(crate) client: reqwest::Client,
 }
 
+/// Default connection timeout for initial TCP+TLS handshake.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Default idle (read) timeout — triggers when no bytes arrive for this duration.
+/// This acts as an "idle timeout" rather than a total-request timeout: as long as
+/// the server keeps sending data the timer resets, but if the connection stalls for
+/// longer than this the request is aborted.
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 impl ProtocolClient for HttpsClient {
     fn from_url(url: &Url) -> Self {
         // TODO check repo url
@@ -32,7 +41,12 @@ impl ProtocolClient for HttpsClient {
             url.set_path(&format!("{}/", url.path()));
             url
         };
-        let client = reqwest::Client::builder().http1_only().build().unwrap();
+        let client = reqwest::Client::builder()
+            .http1_only()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(READ_TIMEOUT)
+            .build()
+            .unwrap();
         Self { url, client }
     }
 }

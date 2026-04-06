@@ -14,8 +14,8 @@
 - `add` 命令主改造已落地：`run_add()` → `AddOutput` 执行层/渲染层拆分、JSON/machine 输出、显式 `StableErrorCode`、warning 接入共享 tracker
 - `status` 命令主改造已落地：`StatusData` 共享数据层、upstream tracking、`--exit-code` 标志、显式 `StableErrorCode`
 
-**已有 JSON 输出的命令（面向终端用户的高层命令）：** commit, status, branch, config, init, clone, add（底层命令如 `cat-file`、`show-ref` 也已支持 JSON，但未纳入本优先级列表；`switch` 仅用 `is_json()` 抑制 human 输出，但 `--json` 模式下不产生结构化 stdout，不计入）
-**已用 StableErrorCode 的命令：** init, clone, add, status, commit, shortlog, lfs, code（共 8 个）
+**已有 JSON 输出的命令（面向终端用户的高层命令）：** commit, status, branch, config, init, clone, add, push, pull, switch, reset, tag，第三批已落地的 `log` / `diff` / `show` / `blame`，第四批已落地的 `stash` / `restore` / `revert` / `cherry-pick`，以及第五批已落地的 `remote` / `fetch`（底层命令如 `cat-file`、`show-ref` 也已支持 JSON，但未纳入本优先级列表）
+**主要错误路径已接入 StableErrorCode 的命令：** init, clone, add, status, commit, push, pull, switch, reset, tag, branch, show, log, diff, blame, stash, restore, revert, cherry-pick, remote, fetch, shortlog, lfs, code
 
 ---
 
@@ -53,8 +53,8 @@
 | **4** | `add` | ✅ 已落地 | 执行层/渲染层拆分（`run_add()` → `AddOutput`）；JSON/machine 结构化输出；成功摘要；`--dry-run`/`--verbose` 输出经 `OutputConfig` 管控；显式 `StableErrorCode`；ignored/failed 按 warning 处理并接入 `--exit-code-on-warning`（详见 [add.md](add.md)） |
 | **5** | `status` | ✅ 已落地 | `StatusData` 共享数据层消除重复计算；upstream tracking（human/JSON/porcelain v2）；显式 `StableErrorCode`；新增 `--exit-code` dirty → exit `1`；颜色控制统一到 `OutputConfig`（详见 [status.md](status.md)） |
 | **6** | `commit` | ✅ 已落地 | `CommitError`（18 变体）typed enum + 显式 `StableErrorCode`；`run_commit()` + `render_commit_output()` 执行/渲染拆分；JSON 向后兼容扩展（+`branch`/`amend`/`signoff`/`conventional`/`signed`）；hook I/O 隔离；`--help` EXAMPLES（详见 [commit.md](commit.md)） |
-| **7** | `push` | 功能失败/60s 超时/无 JSON | 修复 refspec 语法；10s 连接/空闲超时；human 进度输出；JSON 输出；错误码。**前置依赖**：需在 `protocol/` 建立可替换 transport seam 供超时/auth/protocol 测试 |
-| **8** | `pull` | 级联失败/无 JSON | 聚合 fetch + fast-forward/up-to-date 结果；修复 upstream tracking；JSON 输出；错误码（non-fast-forward merge 留 merge 批次）。**前置依赖**：需在 `fetch.rs`/`merge.rs` 建立 pull 可复用的最小 typed helper（完整 JSON/进度改造留第五/六批） |
+| **7** | `push` | ✅ 已落地 | 修复 refspec 语法；10s 连接/空闲超时；human 进度输出；JSON 输出；错误码。**前置依赖**：需在 `protocol/` 建立可替换 transport seam 供超时/auth/protocol 测试 |
+| **8** | `pull` | ✅ 已落地 | 聚合 fetch + fast-forward/up-to-date 结果；修复 upstream tracking；JSON 输出；错误码（non-fast-forward merge 留 merge 批次）。**前置依赖**：需在 `fetch.rs`/`merge.rs` 建立 pull 可复用的最小 typed helper（完整 JSON/进度改造留第五/六批） |
 
 **理由：** config 是基础设施层，vault 加密存储和 `resolve_env()` 被其他命令（push 认证、code AI provider）依赖，必须最先完成。init/clone 是入口命令（审计指出 init 耗时 ~6s 严重违反 CLIG "100ms 内打印内容"原则）；add 是 commit 前的必经步骤；push 是审计中"最严重的三个缺陷"之一。
 
@@ -73,12 +73,13 @@
 
 | 顺序 | 命令 | 当前状态 | 改进重点 |
 |------|------|--------|--------|
-| **9** | `switch` | 有 JSON + 确认消息 | 补齐 StableErrorCode；切换不存在分支时提示 `did you mean -c` |
-| **10** | `reset` | 有确认消息，无 JSON | 输出 "HEAD is now at \<SHA\> \<msg\>"；JSON 输出；错误码 |
-| **11** | `tag` | 有短标志 -l/-d/-m/-a | 补齐 JSON 输出；重复创建时 hint；退出码对齐 exit 1 |
-| **12** | `branch` | 有 JSON | 补齐 StableErrorCode；退出码对齐（删除不存在分支 exit 1） |
+| **9** | `switch` | ✅ 已落地 | 第二批主改造已落地；后续仅维护回归测试、文档同步与大仓库切换性能观察（详见 [switch.md](switch.md)） |
+| **9a** | `checkout`（兼容收口） | ✅ 第二批兼容收口已落地 | 已完成 `SwitchError` 变体匹配适配与 `--help` EXAMPLES；**不是完整现代化**——`CheckoutError` / JSON / render split 仍留第六批（详见 [checkout.md](checkout.md)） |
+| **10** | `reset` | ✅ 主改造已落地：已有确认消息、JSON/machine、显式 `StableErrorCode`、`ResetError`、warning 管线、`run_reset()` / `render_reset_output()` | 后续仅维护 rollback / warning / pathspec corruption 边界回归与文档示例（详见 [reset.md](reset.md)） |
+| **11** | `tag` | ✅ 主改造已落地：已有 JSON/machine、显式 `StableErrorCode`、`TagError`、run/render 分层、重复创建 hint 与统一 human 确认消息 | 后续仅维护 lightweight tag 的 human / machine 双契约、边界回归与文档同步（详见 [tag.md](tag.md)） |
+| **12** | `branch` | 主改造已落地：JSON 已覆盖 list/create/delete/rename/set-upstream/show-current，`BranchError` typed enum、run/render 分层、确认消息、fuzzy suggestion 与 `--help` EXAMPLES 已就绪 | 继续把旧调用点迁移到 `internal::branch::*_result` fallible API，减少 legacy best-effort 查询路径（详见 [branch.md](branch.md)） |
 
-**理由：** 这些命令改变仓库状态，必须告知用户发生了什么。
+**理由：** 这些命令改变仓库状态，必须告知用户发生了什么。`checkout` 的兼容收口随 `switch` 一起落地，因为 `switch` 的 `ensure_clean_status()` 签名变更强制要求 `checkout` 同步适配。
 
 ### 第三批：历史查询命令（P1 结构化输出）
 
@@ -86,12 +87,19 @@
 
 | 顺序 | 命令 | 当前状态 | 改进重点 |
 |------|------|--------|--------|
-| **13** | `log` | 明确拒绝 --json | 实现 JSON 输出（结构化提交列表）；保持 --oneline/--graph |
-| **14** | `diff` | 无 JSON | JSON 输出（hunk 级别结构化）；--numstat/--name-only |
-| **15** | `show` | 有 --oneline/-s | JSON 输出；错误码 |
-| **16** | `blame` | 与 Git 一致 | JSON 输出 |
+| **13** | `log` | ✅ 第三批用户契约已落地：JSON / machine、稳定错误码、`run_log()`、`--help` EXAMPLES、decorate refs best-effort、历史 blob 损坏显式失败 | 后续仅维护回归测试和文档同步；完整 `LogError` / human render split 归入后续跨命令 error/render 收口，不再阻塞第三批验收 |
+| **14** | `diff` | ✅ 主改造已落地：`DiffError`、`run_diff()` / render split、JSON / machine、`--name-only` / `--name-status` / `--numstat` / `--stat`、`--quiet` exit code、`--help` EXAMPLES | 后续仅维护大 diff 性能回归和 pager / TTY 细节 |
+| **15** | `show` | ✅ 第三批用户契约已落地：JSON / machine、稳定错误码、`run_show()`、`--quiet` 契约、refs best-effort、历史 blob 损坏显式失败 | 后续仅维护回归测试和文档同步；完整 `ShowError` / human render split 归入后续跨命令 error/render 收口，不再阻塞第三批验收 |
+| **16** | `blame` | ✅ 主改造已落地：`BlameError`、`run_blame()`、JSON / machine、`-L` 结构化输出、`--help` EXAMPLES | 后续仅维护 blame 归属正确性、范围过滤和边界回归 |
 
 **理由：** Agent 需要从历史/差异中提取结构化信息来决策。log --json 是 MCP 维度最关键的改进。
+
+**第三批基于 Review 的计划修订：**
+
+- `diff` 负责 hunk / patch 级结构化输出；`log` / `show` 的 JSON 只保留提交元数据和文件变更摘要，避免 schema 重叠、重复计算和用户认知冲突。
+- `log` / `show` 中的 refs / decoration 元数据属于辅助信息，按用户习惯改为 best-effort；commit / tree / blob 主体对象读取保持 strict，历史对象损坏必须显式失败，禁止回退到工作区内容。
+- `--quiet` 对历史查询命令统一解释为“只抑制 human stdout，不跳过校验和退出语义”；`diff --quiet` 仍以 exit `1` 表示存在差异，即使同时写入 `--output` 文件。
+- 第三批验收以“对外契约完整、测试覆盖到 review 回归、命令文档与实现一致”为准；`LogError` / `ShowError` 这类内部统一重构保留为后续跨命令 error/render 收口项，不再与第三批用户契约绑定。
 
 ### 第四批：暂存与撤销命令（P1 一致性修复）
 
@@ -99,10 +107,10 @@
 
 | 顺序 | 命令 | 当前状态 | 改进重点 |
 |------|------|--------|--------|
-| **17** | `stash` | 有 -m，有子命令 | JSON 输出（stash list）；保存确认和 stash 编号 |
-| **18** | `restore` | 无确认/无 JSON | 确认消息；退出码对齐 exit 1；错误码 |
-| **19** | `revert` | 有确认消息，有 -n | 补齐 --no-edit；JSON 输出；错误码 |
-| **20** | `cherry-pick` | 与 Git 一致 | JSON 输出；错误码 |
+| **17** | `stash` | ✅ 已落地 | `StashError` typed enum、`run_stash()` / render split、JSON / machine、`--help` EXAMPLES、显式 `StableErrorCode`（详见 [stash.md](stash.md)） |
+| **18** | `restore` | ✅ 已落地 | `RestoreError` → `StableErrorCode` 映射、`run_restore()` / render split、JSON / machine、确认消息、`--help` EXAMPLES（详见 [restore.md](restore.md)） |
+| **19** | `revert` | ✅ 已落地 | `RevertError` typed enum、`run_revert()` / render split、JSON / machine、`--help` EXAMPLES、显式 `StableErrorCode`（详见 [revert.md](revert.md)） |
+| **20** | `cherry-pick` | ✅ 已落地 | `CherryPickError` typed enum、`run_cherry_pick()` / render split、JSON / machine、`--help` EXAMPLES、显式 `StableErrorCode`（详见 [cherry-pick.md](cherry-pick.md)） |
 
 **理由：** 撤销操作的错误反馈尤为重要，用户需要知道操作是否成功。
 
@@ -110,8 +118,14 @@
 
 | 顺序 | 命令 | 当前状态 | 改进重点 |
 |------|------|--------|--------|
-| **21** | `remote` | 有子命令，无 JSON | JSON 输出；退出码对齐（重复添加 exit 3 或 exit 1） |
-| **22** | `fetch` | 与 Git 一致 | JSON 进度事件；错误码 |
+| **21** | `remote` | ✅ 已落地 | `run_remote()` / render split；JSON / machine；显式 `StableErrorCode`；`remote -v` 多 URL 展示修复；prune 结构化输出（详见 [remote.md](remote.md)） |
+| **22** | `fetch` | ✅ 已落地 | `FetchOutput` 顶层结果；JSON / machine；显式 `StableErrorCode`；JSON progress 事件；human 摘要输出（详见 [fetch.md](fetch.md)） |
+
+**第五批基于 Review 的计划修订：**
+
+- `remote` 沿用当前 CLI 形态，只收口输出、错误码和 `remote -v` 多 URL 行为；`remote show` 的 Git 全量兼容语义单列为后续独立收口项，避免本批引入 breaking CLI 变更。
+- `fetch` 保持底层传输和 refs 更新 helper 不变，只在顶层命令补结构化结果、显式错误码和进度契约，避免影响 `pull` / `clone` / `convert` 对 `fetch_repository_with_result()` 的复用。
+- 本轮 Review 同步修正了第四批子计划文档的陈旧状态：`stash` / `restore` / `revert` / `cherry-pick` 改为记录“已落地基线 + 后续维护点”，不再与当前代码状态冲突。
 
 ### 第六批：辅助命令（P2 增强）
 
@@ -120,9 +134,39 @@
 | **23** | `reflog` | 子命令结构偏离 Git | 重构为 `libra reflog [-n N]`；JSON 输出 |
 | **24** | `describe` | 有 --abbrev/--tags | 补齐 --always；JSON 输出 |
 | **25** | `shortlog` | 已有错误码 | 补齐 revision 位置参数；JSON 输出 |
-| **26** | `clean` / `checkout` / `rebase` / `merge` | 与 Git 语法一致 | JSON 输出；merge 冲突结构化输出（pull 依赖的 three-way merge 能力在此批次统一实现） |
+| **26** | `clean` / `checkout` / `rebase` / `merge` | 与 Git 语法一致 | JSON 输出；merge 冲突结构化输出（pull 依赖的 three-way merge 能力在此批次统一实现）。**说明**：`checkout` 的兼容性收口（`SwitchError` 变体匹配适配、`--help` EXAMPLES）已随第二批 `switch` 提前落地（见 [checkout.md](checkout.md)）；本批次负责 `checkout` 的完整现代化（`CheckoutError` typed enum、JSON 输出、执行/渲染拆分） |
 
-### 第七批：全局层面改进（贯穿所有命令）
+### 第七批：工作树操作与文件管理命令（P2 补齐）
+
+已在代码库中实现但未纳入前六批改进计划的用户可见命令。这些命令已具备基本功能，但缺少结构化输出、显式错误码和现代化的执行/渲染分离。
+
+| 顺序 | 命令 | 当前状态 | 改进重点 |
+|------|------|--------|--------|
+| **27** | `mv` | 无 JSON，无 StableErrorCode（492 行） | 执行层/渲染层拆分；JSON 输出（移动/重命名结果）；显式 `StableErrorCode`；成功确认消息 |
+| **28** | `rm` | 无 JSON，无 StableErrorCode（376 行） | 执行层/渲染层拆分；JSON 输出（删除文件列表）；显式 `StableErrorCode`；`--dry-run` 结构化输出 |
+| **29** | `worktree` | 无 JSON，无 StableErrorCode（745 行） | JSON 输出（worktree list 结构化）；显式 `StableErrorCode`；子命令 add/list/lock/unlock/remove 补齐确认消息 |
+| **30** | `open` | 无 JSON，无 StableErrorCode（172 行） | 显式 `StableErrorCode`；无远程 URL 时 hint |
+
+**理由：** `mv`/`rm` 是文件管理基本操作，静默成功违反 CLIG 原则；`worktree` 是多任务并行开发的重要命令；`open` 体量小，可顺带收尾。
+
+### 第八批：底层与特殊用途命令（P2 增强）
+
+底层管道命令和特殊用途命令。这些命令主要面向脚本和内部基础设施，部分已有 JSON 支持。
+
+| 顺序 | 命令 | 当前状态 | 改进重点 |
+|------|------|--------|--------|
+| **31** | `cat-file` | 有 JSON（1,329 行） | 补齐 `StableErrorCode`；统一错误输出格式 |
+| **32** | `show-ref` | 有 JSON（193 行） | 补齐 `StableErrorCode` |
+| **33** | `index-pack` | 无 JSON，无 StableErrorCode（313 行） | 显式 `StableErrorCode`；JSON 进度/结果输出 |
+| **34** | `lfs` | 无 JSON，已有 StableErrorCode（357 行） | 补齐 JSON 输出（batch、lock 子命令） |
+| **35** | `cloud` | 无 JSON，无 StableErrorCode（937 行） | JSON 输出（backup/restore 结果）；显式 `StableErrorCode`；进度输出 |
+
+**不纳入改进计划的模块：**
+- `web_assets.rs`（11 行）：纯资源嵌入模块，无命令逻辑
+- `claudecode/`（模块）：Claude Code managed runtime，属于独立子系统，改进节奏由 Claude Code 自身演进决定
+- `code.rs`（1,153 行）：`libra code` TUI/Web/MCP 入口，已有 StableErrorCode，改进节奏由 AI Agent 子系统自身演进决定
+
+### 全局层面改进（贯穿所有命令）
 
 这些改进不针对单个命令，而是全局性的：
 
@@ -147,8 +191,23 @@
 - [Add 命令改进详细计划](add.md) ✅ 已落地
 - [Status 命令改进详细计划](status.md) ✅ 已落地
 - [Commit 命令改进详细计划](commit.md) ✅ 已落地
-- [Push 命令改进详细计划](push.md)
-- [Pull 命令改进详细计划](pull.md)
+- [Push 命令改进详细计划](push.md) ✅ 已落地
+- [Pull 命令改进详细计划](pull.md) ✅ 已落地
+- [Switch 命令改进详细计划](switch.md) ✅ 已落地
+- [Checkout 命令改进详细计划（第二批兼容收口）](checkout.md) ✅ 已落地（完整现代化留第六批）
+- [Reset 命令改进详细计划](reset.md) ✅ 已落地
+- [Tag 命令改进详细计划](tag.md) ✅ 已落地
+- [Branch 命令改进详细计划](branch.md) ✅ 已落地（仍有少量 legacy wrapper 待继续迁移）
+- [Log 命令改进详细计划](log.md) ✅ 已落地（内部统一重构留后续全局收口）
+- [Diff 命令改进详细计划](diff.md) ✅ 已落地
+- [Show 命令改进详细计划](show.md) ✅ 已落地（内部统一重构留后续全局收口）
+- [Blame 命令改进详细计划](blame.md) ✅ 已落地
+- [Stash 命令改进详细计划](stash.md) ✅ 已落地
+- [Restore 命令改进详细计划](restore.md) ✅ 已落地
+- [Revert 命令改进详细计划](revert.md) ✅ 已落地
+- [Cherry-Pick 命令改进详细计划](cherry-pick.md) ✅ 已落地
+- [Remote 命令改进详细计划](remote.md) ✅ 已落地
+- [Fetch 命令改进详细计划](fetch.md) ✅ 已落地
 
 ## 命令改进实施记录
 

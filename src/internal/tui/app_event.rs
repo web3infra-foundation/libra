@@ -27,6 +27,13 @@ pub enum AgentEvent {
         text: String,
         new_history: Vec<Message>,
     },
+    /// Managed provider produced a streamed delta for the current response.
+    ResponseDelta { delta: String },
+    /// Managed provider completed a turn and returned follow-up session context.
+    ManagedResponseComplete {
+        text: String,
+        provider_session_id: String,
+    },
     /// Error during agent execution.
     Error { message: String },
     /// The underlying model request is being retried after a transient failure.
@@ -88,6 +95,8 @@ pub enum AppEvent {
         turn_id: TurnId,
         cell: Box<dyn HistoryCell>,
     },
+    /// Insert a simple managed-provider info note into the transcript.
+    ManagedInfoNote { turn_id: TurnId, message: String },
     /// Tool call is starting.
     ToolCallBegin {
         turn_id: TurnId,
@@ -151,6 +160,7 @@ impl AppEvent {
             | AppEvent::SubmitUserMessage { turn_id, .. }
             | AppEvent::PlanWorkflowComplete { turn_id, .. }
             | AppEvent::InsertHistoryCell { turn_id, .. }
+            | AppEvent::ManagedInfoNote { turn_id, .. }
             | AppEvent::ToolCallBegin { turn_id, .. }
             | AppEvent::ToolCallEnd { turn_id, .. }
             | AppEvent::TaskRuntimeEvent { turn_id, .. }

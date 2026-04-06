@@ -275,6 +275,24 @@ impl OutputConfig {
         self.json_format.is_some()
     }
 
+    /// Build a child configuration for nested command execution.
+    ///
+    /// Nested commands must stay silent when the parent command owns the
+    /// machine-readable output contract or has requested quiet mode.
+    #[must_use]
+    pub fn child_output_config(&self) -> Self {
+        if self.is_json() || self.quiet {
+            Self {
+                json_format: None,
+                quiet: true,
+                progress: ProgressMode::None,
+                ..self.clone()
+            }
+        } else {
+            self.clone()
+        }
+    }
+
     /// Apply the resolved color choice to the `colored` crate's global override.
     ///
     /// Call this once, early in `parse_async()`, before any command runs.

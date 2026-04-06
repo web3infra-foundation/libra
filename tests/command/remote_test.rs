@@ -2,6 +2,8 @@
 //!
 //! **Layer:** L1 — deterministic, no external dependencies.
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{fs, process::Command};
 
 use libra::{
@@ -13,7 +15,7 @@ use libra::{
         branch::Branch,
         config::{ConfigKv, RemoteConfig},
     },
-    utils::output::OutputConfig,
+    utils::{error::StableErrorCode, output::OutputConfig},
 };
 
 use super::*;
@@ -66,7 +68,8 @@ async fn test_remote_add_duplicate_name_returns_error() {
     assert!(result.is_err(), "adding existing remote should fail");
     let err = result.unwrap_err();
     assert!(
-        err.render().contains("fatal: remote origin already exists"),
+        err.render()
+            .contains("fatal: remote 'origin' already exists"),
         "unexpected error: {}",
         err.render()
     );
@@ -350,6 +353,108 @@ async fn test_remote_set_url_all_replaces_all_fetch_urls() {
         name: "origin".into(),
     })
     .await;
+}
+
+#[test]
+fn test_remote_verbose_cli_lists_all_fetch_and_push_urls() {
+    let repo = tempdir().expect("failed to create repo");
+    init_repo_via_cli(repo.path());
+
+    let add_output = run_libra_command(
+        &["remote", "add", "origin", "https://one.example/repo.git"],
+        repo.path(),
+    );
+    assert_cli_success(&add_output, "remote add origin");
+
+    let add_fetch_url = run_libra_command(
+        &[
+            "remote",
+            "set-url",
+            "--add",
+            "origin",
+            "https://two.example/repo.git",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&add_fetch_url, "remote set-url --add origin");
+
+    let add_push_url = run_libra_command(
+        &[
+            "remote",
+            "set-url",
+            "--add",
+            "--push",
+            "origin",
+            "ssh://git@example.com/repo.git",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&add_push_url, "remote set-url --add --push origin");
+
+    let output = run_libra_command(&["remote", "-v"], repo.path());
+    assert_cli_success(&output, "remote -v");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("origin\thttps://one.example/repo.git (fetch)"),
+        "missing first fetch URL: {stdout}"
+    );
+    assert!(
+        stdout.contains("origin\thttps://two.example/repo.git (fetch)"),
+        "missing second fetch URL: {stdout}"
+    );
+    assert!(
+        stdout.contains("origin\tssh://git@example.com/repo.git (push)"),
+        "missing push URL: {stdout}"
+    );
+    assert!(
+        !stdout.contains("origin\thttps://one.example/repo.git (push)"),
+        "verbose output should prefer explicit pushurl entries: {stdout}"
+    );
+}
+
+#[test]
+fn test_remote_get_url_json_output_is_structured() {
+    let repo = tempdir().expect("failed to create repo");
+    init_repo_via_cli(repo.path());
+
+    let add_output = run_libra_command(
+        &["remote", "add", "origin", "https://one.example/repo.git"],
+        repo.path(),
+    );
+    assert_cli_success(&add_output, "remote add origin");
+
+    let add_fetch_url = run_libra_command(
+        &[
+            "remote",
+            "set-url",
+            "--add",
+            "origin",
+            "https://two.example/repo.git",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&add_fetch_url, "remote set-url --add origin");
+
+    let output = run_libra_command(
+        &["--json", "remote", "get-url", "--all", "origin"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "remote get-url --json");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "remote");
+    assert_eq!(json["data"]["action"], "urls");
+    assert_eq!(json["data"]["name"], "origin");
+    assert_eq!(json["data"]["push"], false);
+    assert_eq!(json["data"]["all"], true);
+    assert_eq!(
+        json["data"]["urls"],
+        serde_json::json!([
+            "https://one.example/repo.git",
+            "https://two.example/repo.git"
+        ])
+    );
 }
 
 #[tokio::test]
@@ -735,20 +840,337 @@ async fn test_remote_prune_dry_run_previews_changes() {
     );
 }
 
+#[test]
+fn test_remote_add_duplicate_name_returns_conflict_error_code() {
+    let repo = tempdir().expect("failed to create repo");
+    init_repo_via_cli(repo.path());
+
+    let first = run_libra_command(
+        &["remote", "add", "origin", "https://example.com/repo.git"],
+        repo.path(),
+    );
+    assert_cli_success(&first, "initial remote add");
+
+    let duplicate = run_libra_command(
+        &["remote", "add", "origin", "https://example.com/other.git"],
+        repo.path(),
+    );
+    let (_stderr, report) = parse_cli_error_stderr(&duplicate.stderr);
+    assert_eq!(duplicate.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-CONFLICT-002");
+    assert_eq!(report.message, "remote 'origin' already exists");
+}
+
+#[cfg(unix)]
 #[tokio::test]
 #[serial]
-async fn test_remote_prune_nonexistent_remote_returns_error() {
+async fn test_remote_prune_does_not_report_success_when_delete_fails() {
+    if skip_permission_denied_test_if_root(
+        "test_remote_prune_does_not_report_success_when_delete_fails",
+    ) {
+        return;
+    }
+
+    let temp_root = tempdir().unwrap();
+    let remote_dir = temp_root.path().join("remote.git");
+    let work_dir = temp_root.path().join("workdir");
+    let repo_dir = temp_root.path().join("libra_repo");
+
+    assert!(
+        Command::new("git")
+            .args(["init", "--bare", remote_dir.to_str().unwrap()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args(["init", work_dir.to_str().unwrap()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args(["config", "user.name", "Libra Tester"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args(["config", "user.email", "tester@example.com"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::write(work_dir.join("README.md"), "hello libra").unwrap();
+    assert!(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args(["add", "README.md"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args(["commit", "-m", "initial commit"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args(["remote", "add", "origin", remote_dir.to_str().unwrap()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args(["checkout", "-b", "stale_branch"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args(["push", "origin", "stale_branch"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::create_dir_all(&repo_dir).unwrap();
+    init_repo_via_cli(&repo_dir);
+
+    let remote_path = remote_dir.to_str().unwrap().to_string();
+    let add_remote = run_libra_command(&["remote", "add", "origin", &remote_path], &repo_dir);
+    assert_cli_success(&add_remote, "remote add origin");
+
+    let fetch_output = run_libra_command(&["fetch", "origin"], &repo_dir);
+    assert_cli_success(&fetch_output, "fetch origin");
+
+    let tracked_branch = "refs/remotes/origin/stale_branch";
+    {
+        let _guard = test::ChangeDirGuard::new(&repo_dir);
+        assert!(
+            Branch::find_branch(tracked_branch, Some("origin"))
+                .await
+                .is_some(),
+            "expected stale remote-tracking branch to exist before prune"
+        );
+    }
+
+    assert!(
+        Command::new("git")
+            .current_dir(remote_dir.to_str().unwrap())
+            .args(["update-ref", "-d", "refs/heads/stale_branch"])
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    let db_path = repo_dir.join(".libra").join("libra.db");
+    let original_mode = fs::metadata(&db_path).unwrap().permissions().mode();
+    fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let output = run_libra_command(&["remote", "prune", "origin"], &repo_dir);
+    fs::set_permissions(&db_path, std::fs::Permissions::from_mode(original_mode)).unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-IO-002");
+    assert!(
+        !stdout.contains("[pruned] origin/stale_branch"),
+        "prune should not report success when deletion fails: {stdout}"
+    );
+    assert!(
+        stderr.contains("failed to prune remote-tracking branch"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remote_set_url_delete_no_match_returns_error() {
     let repo_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(repo_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(repo_dir.path());
 
-    // Attempt to prune a non-existent remote
-    remote::execute(RemoteCmds::Prune {
-        name: "nonexistent".into(),
-        dry_run: false,
-    })
+    remote::execute_safe(
+        RemoteCmds::Add {
+            name: "origin".into(),
+            url: "https://example.com/repo.git".into(),
+        },
+        &OutputConfig::default(),
+    )
+    .await
+    .expect("add should succeed");
+
+    let result = remote::execute_safe(
+        RemoteCmds::SetUrl {
+            add: false,
+            delete: true,
+            push: false,
+            all: false,
+            name: "origin".into(),
+            value: "nonexistent-pattern".into(),
+        },
+        &OutputConfig::default(),
+    )
     .await;
 
-    // The command should fail gracefully (error is printed to stderr, not returned)
-    // We can't easily test stderr output, but we can verify it doesn't panic
+    assert!(result.is_err(), "delete with no matching URL should fail");
+    let err = result.unwrap_err();
+    assert_eq!(err.stable_code(), StableErrorCode::CliInvalidTarget);
+    assert!(
+        err.render().contains("no matching fetch URL"),
+        "unexpected error: {}",
+        err.render()
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remote_prune_nonexistent_remote_returns_structured_error() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    let result = remote::execute_safe(
+        RemoteCmds::Prune {
+            name: "nonexistent".into(),
+            dry_run: false,
+        },
+        &OutputConfig::default(),
+    )
+    .await;
+
+    assert!(result.is_err(), "prune nonexistent remote should fail");
+    let err = result.unwrap_err();
+    assert_eq!(err.stable_code(), StableErrorCode::CliInvalidTarget);
+    assert!(
+        err.render().contains("no such remote"),
+        "unexpected error: {}",
+        err.render()
+    );
+}
+
+#[test]
+fn test_remote_rename_json_output_is_structured() {
+    let repo = tempdir().expect("failed to create repo");
+    init_repo_via_cli(repo.path());
+
+    run_libra_command(
+        &["remote", "add", "origin", "https://example.com/repo.git"],
+        repo.path(),
+    );
+
+    let output = run_libra_command(
+        &["--json", "remote", "rename", "origin", "upstream"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "remote rename --json");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "remote");
+    assert_eq!(json["data"]["action"], "rename");
+    assert_eq!(json["data"]["old_name"], "origin");
+    assert_eq!(json["data"]["new_name"], "upstream");
+}
+
+#[test]
+fn test_remote_set_url_delete_no_match_returns_error_code_cli() {
+    let repo = tempdir().expect("failed to create repo");
+    init_repo_via_cli(repo.path());
+
+    run_libra_command(
+        &["remote", "add", "origin", "https://example.com/repo.git"],
+        repo.path(),
+    );
+
+    let output = run_libra_command(
+        &[
+            "remote",
+            "set-url",
+            "--delete",
+            "origin",
+            "nonexistent-pattern",
+        ],
+        repo.path(),
+    );
+
+    let (_stderr, report) = parse_cli_error_stderr(&output.stderr);
+    // CliInvalidTarget (LBR-CLI-003) maps to Cli category → exit code 129 (usage)
+    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert!(
+        report.message.contains("no matching fetch URL"),
+        "unexpected message: {}",
+        report.message
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remote_remove_works_after_deleting_last_url() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    // Add a remote, then add a pushurl key
+    remote::execute_safe(
+        RemoteCmds::Add {
+            name: "origin".into(),
+            url: "https://example.com/repo.git".into(),
+        },
+        &OutputConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    ConfigKv::set(
+        "remote.origin.pushurl",
+        "ssh://git@example.com/repo.git",
+        false,
+    )
+    .await
+    .unwrap();
+
+    // Delete the fetch URL
+    remote::execute_safe(
+        RemoteCmds::SetUrl {
+            add: false,
+            delete: true,
+            push: false,
+            all: false,
+            name: "origin".into(),
+            value: "example.com".into(),
+        },
+        &OutputConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    // The remote should still be removable even though url is gone
+    let result = remote::execute_safe(
+        RemoteCmds::Remove {
+            name: "origin".into(),
+        },
+        &OutputConfig::default(),
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "remove should succeed when remote has pushurl but no url: {:?}",
+        result.err()
+    );
 }

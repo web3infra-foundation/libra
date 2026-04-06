@@ -4,8 +4,11 @@
 
 #![cfg(test)]
 
-use std::collections::HashSet;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+use std::{collections::HashSet, fs};
 
+use git_internal::hash::{ObjectHash, get_hash_kind};
 use libra::internal::config::ConfigKv;
 use serial_test::serial;
 use tempfile::tempdir;
@@ -22,6 +25,182 @@ fn test_branch_cli_invalid_start_point_returns_cli_exit_code() {
     assert_eq!(output.status.code(), Some(129));
     assert!(stderr.contains("fatal: not a valid object name: 'badref'"));
     assert!(stderr.contains("Error-Code: LBR-CLI-003"));
+}
+
+#[test]
+fn test_branch_json_create_output_reports_branch() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["--json", "branch", "feature"], repo.path());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "branch");
+    assert_eq!(json["data"]["action"], "create");
+    assert_eq!(json["data"]["name"], "feature");
+    assert!(json["data"]["commit"].as_str().is_some());
+}
+
+#[test]
+fn test_branch_create_outputs_confirmation() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["branch", "feature"], repo.path());
+    assert_cli_success(&output, "branch feature");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Created branch 'feature' at "),
+        "unexpected stdout: {stdout}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_branch_all_shows_unborn_head_even_with_remote_refs() {
+    let repo = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = ChangeDirGuard::new(repo.path());
+
+    let remote_add = run_libra_command(
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/repo.git",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&remote_add, "remote add origin");
+
+    Branch::update_branch(
+        "refs/remotes/origin/main",
+        &ObjectHash::zero_str(get_hash_kind()),
+        Some("origin"),
+    )
+    .await
+    .unwrap();
+
+    let output = run_libra_command(&["branch", "-a"], repo.path());
+    assert_cli_success(&output, "branch -a on unborn repo with remotes");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("* main"),
+        "expected unborn HEAD marker in stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("origin/main"),
+        "expected remote branch in stdout: {stdout}"
+    );
+}
+
+#[test]
+fn test_branch_not_found_suggests_similar_name() {
+    let repo = create_committed_repo_via_cli();
+
+    let create = run_libra_command(&["branch", "featur"], repo.path());
+    assert_cli_success(&create, "branch featur");
+
+    let output = run_libra_command(&["branch", "-d", "feature"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert!(
+        stderr.contains("did you mean 'featur'?"),
+        "expected suggestion in stderr, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_branch_set_upstream_detached_head_returns_repo_state_error() {
+    let repo = create_committed_repo_via_cli();
+
+    let detach = run_libra_command(&["switch", "--detach", "HEAD"], repo.path());
+    assert!(
+        detach.status.success(),
+        "detach failed: {}",
+        String::from_utf8_lossy(&detach.stderr)
+    );
+
+    let output = run_libra_command(&["branch", "--set-upstream-to", "origin/main"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-REPO-003");
+    assert!(stderr.contains("HEAD is detached"));
+    assert!(stderr.contains("checkout a branch first"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_branch_set_upstream_surfaces_config_write_failure() {
+    if skip_permission_denied_test_if_root("test_branch_set_upstream_surfaces_config_write_failure")
+    {
+        return;
+    }
+
+    let repo = create_committed_repo_via_cli();
+    let db_path = repo.path().join(".libra").join("libra.db");
+    let original_mode = fs::metadata(&db_path).unwrap().permissions().mode();
+
+    fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let output = run_libra_command(&["branch", "--set-upstream-to", "origin/main"], repo.path());
+    fs::set_permissions(&db_path, std::fs::Permissions::from_mode(original_mode)).unwrap();
+
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-IO-002");
+    assert!(
+        stderr.contains("failed to persist branch config 'branch.main.remote'"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_branch_set_upstream_idempotent_path_skips_redundant_write() {
+    if skip_permission_denied_test_if_root(
+        "test_branch_set_upstream_idempotent_path_skips_redundant_write",
+    ) {
+        return;
+    }
+
+    let repo = create_committed_repo_via_cli();
+
+    let first = run_libra_command(&["branch", "--set-upstream-to", "origin/main"], repo.path());
+    assert_cli_success(&first, "initial set-upstream");
+
+    let db_path = repo.path().join(".libra").join("libra.db");
+    let original_mode = fs::metadata(&db_path).unwrap().permissions().mode();
+
+    fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let second = run_libra_command(&["branch", "--set-upstream-to", "origin/main"], repo.path());
+    fs::set_permissions(&db_path, std::fs::Permissions::from_mode(original_mode)).unwrap();
+
+    assert_cli_success(&second, "idempotent set-upstream");
+}
+
+#[test]
+fn test_branch_force_delete_outputs_confirmation() {
+    let repo = create_committed_repo_via_cli();
+
+    let create = run_libra_command(&["branch", "topic"], repo.path());
+    assert_cli_success(&create, "branch topic");
+
+    let output = run_libra_command(&["branch", "-D", "topic"], repo.path());
+    assert_cli_success(&output, "branch -D topic");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Deleted branch topic (was "),
+        "unexpected stdout: {stdout}"
+    );
 }
 
 #[tokio::test]
@@ -195,6 +374,158 @@ async fn test_create_branch_from_remote() {
         .await
         .expect("branch create failed found");
     assert_eq!(branch.commit, hash);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_create_branch_from_remote_tracking_ref() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    commit::execute(CommitArgs {
+        message: Some("first".to_string()),
+        allow_empty: true,
+        disable_pre: true,
+        no_verify: false,
+        ..Default::default()
+    })
+    .await;
+
+    let hash = Head::current_commit().await.unwrap();
+    Branch::update_branch(
+        "refs/remotes/origin/main",
+        &hash.to_string(),
+        Some("origin"),
+    )
+    .await
+    .unwrap();
+
+    assert!(get_target_commit("origin/main").await.is_ok());
+
+    execute(BranchArgs {
+        new_branch: Some("tracking-copy".to_string()),
+        commit_hash: Some("origin/main".into()),
+        list: false,
+        delete: None,
+        delete_safe: None,
+        set_upstream_to: None,
+        show_current: false,
+        rename: vec![],
+        remotes: false,
+        all: false,
+        contains: vec![],
+        no_contains: vec![],
+    })
+    .await;
+
+    let branch = Branch::find_branch("tracking-copy", None)
+        .await
+        .expect("branch create from tracking ref failed");
+    assert_eq!(branch.commit, hash);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_branch_create_without_base_surfaces_corrupt_head_storage() {
+    let repo = create_committed_repo_via_cli();
+    {
+        let _guard = ChangeDirGuard::new(repo.path());
+        Branch::update_branch("main", "not-a-valid-hash", None)
+            .await
+            .unwrap();
+    }
+
+    let output = run_libra_command(&["branch", "feature"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-REPO-002");
+    assert!(
+        stderr.contains("failed to resolve HEAD commit"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("stored branch reference 'main' is corrupt"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_branch_delete_safe_surfaces_corrupt_head_storage() {
+    let repo = create_committed_repo_via_cli();
+    let create = run_libra_command(&["branch", "topic"], repo.path());
+    assert_cli_success(&create, "branch topic");
+
+    {
+        let _guard = ChangeDirGuard::new(repo.path());
+        Branch::update_branch("main", "not-a-valid-hash", None)
+            .await
+            .unwrap();
+    }
+
+    let output = run_libra_command(&["branch", "-d", "topic"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-REPO-002");
+    assert!(
+        stderr.contains("failed to resolve HEAD commit"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("stored branch reference 'main' is corrupt"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_branch_show_current_surfaces_corrupt_head_storage() {
+    let repo = create_committed_repo_via_cli();
+    {
+        let _guard = ChangeDirGuard::new(repo.path());
+        Branch::update_branch("main", "not-a-valid-hash", None)
+            .await
+            .unwrap();
+    }
+
+    let output = run_libra_command(&["branch", "--show-current"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-REPO-002");
+    assert!(
+        stderr.contains("failed to resolve HEAD commit"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("stored branch reference 'main' is corrupt"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_branch_list_surfaces_corrupt_reference_name() {
+    let repo = create_committed_repo_via_cli();
+    {
+        let _guard = ChangeDirGuard::new(repo.path());
+        Branch::update_branch("broken-topic", "not-a-valid-hash", None)
+            .await
+            .unwrap();
+    }
+
+    let output = run_libra_command(&["branch"], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(report.error_code, "LBR-REPO-002");
+    assert!(
+        stderr.contains("stored branch reference 'broken-topic' is corrupt"),
+        "unexpected stderr: {stderr}"
+    );
 }
 
 #[tokio::test]

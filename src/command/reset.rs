@@ -2,7 +2,7 @@
 
 use std::{
     collections::HashSet,
-    fs,
+    fs, io,
     path::{Path, PathBuf},
 };
 
@@ -14,25 +14,37 @@ use git_internal::{
         object::{commit::Commit, tree::Tree},
     },
 };
+use serde::Serialize;
 
 use crate::{
-    cli_error,
-    command::{get_target_commit, load_object},
+    command::load_object,
+    common_utils::parse_commit_msg,
     internal::{
-        branch::Branch,
+        branch::{self, Branch},
         db::get_db_conn_instance,
         head::Head,
         reflog::{ReflogAction, ReflogContext, with_reflog},
     },
     utils::{
-        error::{CliError, CliResult},
+        error::{CliError, CliResult, StableErrorCode, emit_warning},
         object_ext::{BlobExt, TreeExt},
-        output::OutputConfig,
-        path, util,
+        output::{OutputConfig, emit_json_data},
+        path,
+        text::short_display_hash,
+        util,
     },
 };
 
+const RESET_EXAMPLES: &str = "\
+EXAMPLES:
+    libra reset HEAD~1                    Move HEAD and reset index to the previous commit
+    libra reset --soft HEAD~2             Move HEAD only, keep index and worktree
+    libra reset --hard main               Reset HEAD, index, and worktree to branch 'main'
+    libra reset HEAD -- src/lib.rs        Unstage a path back to HEAD
+    libra reset --json --hard HEAD~1      Structured JSON output for agents";
+
 #[derive(Parser, Debug)]
+#[command(after_help = RESET_EXAMPLES)]
 pub struct ResetArgs {
     /// The commit to reset to (default: HEAD)
     #[clap(default_value = "HEAD")]
@@ -55,11 +67,45 @@ pub struct ResetArgs {
     pub pathspecs: Vec<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 enum ResetMode {
     Soft,
     Mixed,
     Hard,
+}
+
+impl ResetMode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Soft => "soft",
+            Self::Mixed => "mixed",
+            Self::Hard => "hard",
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+struct ResetStats {
+    files_restored: usize,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ResetExecution {
+    output: ResetOutput,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ResetOutput {
+    pub mode: String,
+    pub commit: String,
+    pub short_commit: String,
+    pub subject: String,
+    pub previous_commit: Option<String>,
+    pub files_unstaged: usize,
+    pub files_restored: usize,
+    pub pathspecs: Vec<String>,
 }
 
 /// Execute the reset command with the given arguments.
@@ -76,92 +122,293 @@ pub async fn execute(args: ResetArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Moves HEAD (and optionally the index/worktree) to a
 /// target commit using soft, mixed, or hard mode.
-pub async fn execute_safe(args: ResetArgs, _output: &OutputConfig) -> CliResult<()> {
-    util::require_repo().map_err(|_| CliError::repo_not_found())?;
+pub async fn execute_safe(args: ResetArgs, output: &OutputConfig) -> CliResult<()> {
+    let result = run_reset(args).await.map_err(CliError::from)?;
+    render_reset_output(&result.output, output)?;
+    for warning in result.warnings {
+        emit_warning(warning);
+    }
+    Ok(())
+}
 
-    // Determine reset mode
+#[derive(Debug, thiserror::Error)]
+enum ResetError {
+    #[error("not a libra repository")]
+    NotInRepo,
+
+    #[error("{0}")]
+    InvalidRevision(String),
+
+    #[error("Cannot reset: HEAD is unborn and points to no commit.")]
+    HeadUnborn,
+
+    #[error("failed to resolve HEAD commit: {0}")]
+    HeadRead(String),
+
+    #[error("stored HEAD reference is corrupt: {0}")]
+    HeadCorrupt(String),
+
+    #[error("failed to load {kind} '{object_id}': {detail}")]
+    ObjectLoad {
+        kind: &'static str,
+        object_id: String,
+        detail: String,
+    },
+
+    #[error("failed to load index: {0}")]
+    IndexLoad(String),
+
+    #[error("failed to save index: {0}")]
+    IndexSave(String),
+
+    #[error("failed to update HEAD: {0}")]
+    HeadUpdate(String),
+
+    #[error("failed to read working tree: {0}")]
+    WorktreeRead(String),
+
+    #[error("failed to restore working tree: {0}")]
+    WorktreeRestore(String),
+
+    #[error("{0}")]
+    RevisionRead(String),
+
+    #[error("{0}")]
+    RevisionCorrupt(String),
+
+    #[error("path contains invalid UTF-8: {0}")]
+    InvalidPathspecEncoding(String),
+
+    #[error("pathspec '{0}' is not compatible with --soft reset")]
+    PathspecWithSoft(String),
+
+    #[error("Cannot do hard reset with paths.")]
+    PathspecWithHard,
+
+    #[error("pathspec '{0}' did not match any file(s) known to libra")]
+    PathspecNotMatched(String),
+
+    #[error("{primary}; rollback failed: {rollback}")]
+    Rollback {
+        primary: Box<ResetError>,
+        rollback: Box<ResetError>,
+    },
+}
+
+impl ResetError {
+    fn stable_code(&self) -> StableErrorCode {
+        match self {
+            Self::NotInRepo => StableErrorCode::RepoNotFound,
+            Self::InvalidRevision(_) => StableErrorCode::CliInvalidTarget,
+            Self::HeadUnborn => StableErrorCode::RepoStateInvalid,
+            Self::HeadRead(_) => StableErrorCode::IoReadFailed,
+            Self::HeadCorrupt(_) => StableErrorCode::RepoCorrupt,
+            Self::ObjectLoad { .. } => StableErrorCode::RepoCorrupt,
+            Self::IndexLoad(_) => StableErrorCode::RepoCorrupt,
+            Self::IndexSave(_) => StableErrorCode::IoWriteFailed,
+            Self::HeadUpdate(_) => StableErrorCode::IoWriteFailed,
+            Self::WorktreeRead(_) => StableErrorCode::IoReadFailed,
+            Self::WorktreeRestore(_) => StableErrorCode::IoWriteFailed,
+            Self::RevisionRead(_) => StableErrorCode::IoReadFailed,
+            Self::RevisionCorrupt(_) => StableErrorCode::RepoCorrupt,
+            Self::InvalidPathspecEncoding(_) => StableErrorCode::CliInvalidArguments,
+            Self::PathspecWithSoft(_) => StableErrorCode::CliInvalidArguments,
+            Self::PathspecWithHard => StableErrorCode::CliInvalidArguments,
+            Self::PathspecNotMatched(_) => StableErrorCode::CliInvalidTarget,
+            Self::Rollback { primary, .. } => primary.stable_code(),
+        }
+    }
+
+    fn hint(&self) -> Option<&'static str> {
+        match self {
+            Self::NotInRepo => {
+                Some("run 'libra init' to create a repository in the current directory.")
+            }
+            Self::InvalidRevision(_) => Some("check the revision name and try again."),
+            Self::HeadUnborn => Some("create a commit first before resetting HEAD."),
+            Self::HeadRead(_) => Some("check whether the repository database is readable."),
+            Self::HeadCorrupt(_) => Some("the HEAD reference or branch metadata may be corrupted."),
+            Self::ObjectLoad { .. } => Some("the object store may be corrupted."),
+            Self::IndexLoad(_) => Some("the index file may be corrupted."),
+            Self::InvalidPathspecEncoding(_) => {
+                Some("rename the path or invoke libra from a path representable as UTF-8.")
+            }
+            Self::PathspecWithSoft(_) => {
+                Some("--soft only moves HEAD; use --mixed to reset index for specific paths.")
+            }
+            Self::PathspecWithHard => Some(
+                "--hard updates the working tree; omit pathspecs or use --mixed for specific paths.",
+            ),
+            Self::PathspecNotMatched(_) => Some("check the path and try again."),
+            Self::RevisionRead(_) => {
+                Some("check whether the repository references and object storage are readable.")
+            }
+            Self::RevisionCorrupt(_) => {
+                Some("the referenced branch, tag, or object metadata may be corrupted.")
+            }
+            Self::IndexSave(_)
+            | Self::HeadUpdate(_)
+            | Self::WorktreeRead(_)
+            | Self::WorktreeRestore(_) => None,
+            Self::Rollback { primary, .. } => primary.hint(),
+        }
+    }
+
+    fn is_command_usage(&self) -> bool {
+        match self {
+            Self::PathspecWithSoft(_) | Self::PathspecWithHard => true,
+            Self::Rollback { primary, .. } => primary.is_command_usage(),
+            _ => false,
+        }
+    }
+}
+
+impl From<ResetError> for CliError {
+    fn from(error: ResetError) -> Self {
+        match error {
+            ResetError::NotInRepo => CliError::repo_not_found(),
+            other => {
+                let message = other.to_string();
+                let stable_code = other.stable_code();
+                let mut cli = if other.is_command_usage() {
+                    CliError::command_usage(message)
+                } else {
+                    CliError::fatal(message)
+                }
+                .with_stable_code(stable_code);
+
+                if let Some(hint) = other.hint() {
+                    cli = cli.with_hint(hint);
+                }
+
+                cli
+            }
+        }
+    }
+}
+
+fn object_load_error(
+    kind: &'static str,
+    object_id: impl Into<String>,
+    detail: impl Into<String>,
+) -> ResetError {
+    ResetError::ObjectLoad {
+        kind,
+        object_id: object_id.into(),
+        detail: detail.into(),
+    }
+}
+
+fn map_reset_head_commit_error(error: branch::BranchStoreError) -> ResetError {
+    match error {
+        branch::BranchStoreError::Query(detail) => ResetError::HeadRead(detail),
+        other => ResetError::HeadCorrupt(other.to_string()),
+    }
+}
+
+async fn run_reset(args: ResetArgs) -> Result<ResetExecution, ResetError> {
+    util::require_repo().map_err(|_| ResetError::NotInRepo)?;
+
     let mode = if args.soft {
         ResetMode::Soft
     } else if args.hard {
         ResetMode::Hard
     } else {
-        ResetMode::Mixed // default
+        ResetMode::Mixed
     };
+    let previous_commit = Head::current_commit().await.map(|hash| hash.to_string());
 
-    // Handle pathspec reset (only affects index)
     if !args.pathspecs.is_empty() {
-        reset_pathspecs(&args.pathspecs, &args.target).await?;
-        return Ok(());
+        if matches!(mode, ResetMode::Soft) {
+            return Err(ResetError::PathspecWithSoft(args.pathspecs.join(" ")));
+        }
+        if matches!(mode, ResetMode::Hard) {
+            return Err(ResetError::PathspecWithHard);
+        }
+
+        let target_commit_id = resolve_commit(&args.target).await?;
+        let changed_paths = reset_pathspecs(&args.pathspecs, &target_commit_id).await?;
+        let subject = load_commit_summary_or_warn(&target_commit_id);
+        let commit = target_commit_id.to_string();
+
+        return Ok(ResetExecution {
+            output: ResetOutput {
+                mode: mode.as_str().to_string(),
+                short_commit: short_display_hash(&commit).to_string(),
+                commit,
+                subject,
+                previous_commit,
+                files_unstaged: changed_paths.len(),
+                files_restored: 0,
+                pathspecs: changed_paths,
+            },
+            warnings: Vec::new(),
+        });
     }
 
-    // Resolve target commit
-    let target_commit_id = resolve_commit(&args.target)
-        .await
-        .map_err(CliError::fatal)?;
+    let target_commit_id = resolve_commit(&args.target).await?;
+    let reset_stats = perform_reset(target_commit_id, mode, &args.target).await?;
 
-    // Perform reset based on mode
-    perform_reset(target_commit_id, mode, &args.target)
-        .await
-        .map_err(CliError::fatal)?;
-
-    println!(
-        "HEAD is now at {} {}",
-        &target_commit_id.to_string()[..7],
-        get_commit_summary(&target_commit_id).unwrap_or_else(|_| "".to_string())
-    );
-    Ok(())
+    let subject = load_commit_summary_or_warn(&target_commit_id);
+    let commit = target_commit_id.to_string();
+    Ok(ResetExecution {
+        output: ResetOutput {
+            mode: mode.as_str().to_string(),
+            short_commit: short_display_hash(&commit).to_string(),
+            commit,
+            subject,
+            previous_commit,
+            files_unstaged: 0,
+            files_restored: reset_stats.files_restored,
+            pathspecs: Vec::new(),
+        },
+        warnings: reset_stats.warnings,
+    })
 }
 
 /// Reset specific files in the index to their state in the target commit.
 /// This function only affects the index, not the working directory.
-async fn reset_pathspecs(pathspecs: &[String], target: &str) -> CliResult<()> {
-    // Reset specific files in index to target commit
-    let target_commit_id = resolve_commit(target).await.map_err(CliError::fatal)?;
-
-    let commit: Commit = load_object(&target_commit_id)
-        .map_err(|e| CliError::fatal(format!("failed to load commit: {e}")))?;
+async fn reset_pathspecs(
+    pathspecs: &[String],
+    target_commit_id: &ObjectHash,
+) -> Result<Vec<String>, ResetError> {
+    let commit: Commit = load_object(target_commit_id)
+        .map_err(|e| object_load_error("commit", target_commit_id.to_string(), e.to_string()))?;
 
     let tree: Tree = load_object(&commit.tree_id)
-        .map_err(|e| CliError::fatal(format!("failed to load tree: {e}")))?;
+        .map_err(|e| object_load_error("tree", commit.tree_id.to_string(), e.to_string()))?;
 
     let index_file = path::index();
-    let mut index = Index::load(&index_file)
-        .map_err(|e| CliError::fatal(format!("failed to load index: {e}")))?;
+    let mut index = Index::load(&index_file).map_err(|e| ResetError::IndexLoad(e.to_string()))?;
     let mut changed = false;
+    let mut changed_paths = Vec::new();
 
     for pathspec in pathspecs {
         let relative_path = util::workdir_to_current(PathBuf::from(pathspec));
         let path_str = relative_path.to_str().ok_or_else(|| {
-            CliError::fatal(format!(
-                "path contains invalid UTF-8: {}",
-                relative_path.display()
-            ))
+            ResetError::InvalidPathspecEncoding(relative_path.display().to_string())
         })?;
 
-        match find_tree_item(&tree, path_str) {
+        match find_tree_item(&tree, path_str)? {
             Some(item) => {
                 let blob: git_internal::internal::object::blob::Blob = load_object(&item.id)
-                    .map_err(|e| {
-                        CliError::fatal(format!("failed to load blob '{}': {e}", item.id))
-                    })?;
+                    .map_err(|e| object_load_error("blob", item.id.to_string(), e.to_string()))?;
                 let entry = IndexEntry::new_from_blob(
                     path_str.to_string(),
                     item.id,
                     blob.data.len() as u32,
                 );
                 index.add(entry);
-                println!("Unstaged changes after reset of: {pathspec}");
                 changed = true;
+                changed_paths.push(pathspec.clone());
             }
             None => {
                 if index.get(path_str, 0).is_some() {
                     index.remove(path_str, 0);
-                    println!("Removed from staging: {pathspec}");
                     changed = true;
+                    changed_paths.push(pathspec.clone());
                 } else {
-                    eprintln!(
-                        "error: pathspec '{pathspec}' did not match any file(s) known to libra"
-                    );
+                    return Err(ResetError::PathspecNotMatched(pathspec.clone()));
                 }
             }
         }
@@ -170,9 +417,9 @@ async fn reset_pathspecs(pathspecs: &[String], target: &str) -> CliResult<()> {
     if changed {
         index
             .save(&index_file)
-            .map_err(|e| CliError::fatal(format!("failed to save index: {e}")))?;
+            .map_err(|e| ResetError::IndexSave(e.to_string()))?;
     }
-    Ok(())
+    Ok(changed_paths)
 }
 
 /// Perform the actual reset operation based on the specified mode.
@@ -181,25 +428,108 @@ async fn perform_reset(
     target_commit_id: ObjectHash,
     mode: ResetMode,
     target_ref_str: &str, // e.g, "HEAD~2"
-) -> Result<(), String> {
+) -> Result<ResetStats, ResetError> {
     // avoids holding the transaction open while doing read-only preparations.
     let db = get_db_conn_instance().await;
-    let old_oid = Head::current_commit_with_conn(&db)
+    let old_oid = Head::current_commit_result_with_conn(&db)
         .await
-        .ok_or_else(|| "Cannot reset: HEAD is unborn and points to no commit.".to_string())?;
+        .map_err(map_reset_head_commit_error)?
+        .ok_or(ResetError::HeadUnborn)?;
+    let current_head_state = if old_oid != target_commit_id {
+        Some(Head::current_with_conn(&db).await)
+    } else {
+        None
+    };
+    let previously_tracked_paths = if matches!(mode, ResetMode::Hard) {
+        tracked_paths_for_hard_reset(&old_oid)?
+    } else {
+        HashSet::new()
+    };
+    let stats =
+        match apply_reset_side_effects(mode, &target_commit_id, &previously_tracked_paths).await {
+            Ok(stats) => stats,
+            Err(error) => {
+                let rollback = rollback_reset_side_effects(mode, &old_oid, &target_commit_id).await;
+                return Err(merge_reset_failure(error, rollback));
+            }
+        };
 
-    if old_oid == target_commit_id {
-        println!(
-            "HEAD already at {}, nothing to do.",
-            &target_commit_id.to_string()[..7]
-        );
-        return Ok(());
+    if let Some(current_head_state) = current_head_state
+        && let Err(error) = update_reset_reference(
+            current_head_state,
+            old_oid,
+            target_commit_id,
+            target_ref_str,
+        )
+        .await
+    {
+        let rollback = rollback_reset_side_effects(mode, &old_oid, &target_commit_id).await;
+        return Err(merge_reset_failure(error, rollback));
     }
 
-    // determine if HEAD is attached to a branch or detached. This is crucial for
-    // deciding which reference pointer to update in the transaction.
-    let current_head_state = Head::current_with_conn(&db).await;
+    Ok(stats)
+}
 
+async fn apply_reset_side_effects(
+    mode: ResetMode,
+    target_commit_id: &ObjectHash,
+    previously_tracked_paths: &HashSet<PathBuf>,
+) -> Result<ResetStats, ResetError> {
+    let mut stats = ResetStats::default();
+    match mode {
+        ResetMode::Soft => {}
+        ResetMode::Mixed => {
+            reset_index_to_commit_typed(target_commit_id)?;
+        }
+        ResetMode::Hard => {
+            reset_index_to_commit_typed(target_commit_id)?;
+            let worktree_stats =
+                reset_working_directory_to_commit(target_commit_id, previously_tracked_paths)
+                    .await?;
+            stats.files_restored = worktree_stats.files_restored;
+            stats.warnings = worktree_stats.warnings;
+        }
+    }
+    Ok(stats)
+}
+
+async fn rollback_reset_side_effects(
+    mode: ResetMode,
+    old_oid: &ObjectHash,
+    target_commit_id: &ObjectHash,
+) -> Result<(), ResetError> {
+    match mode {
+        ResetMode::Soft => Ok(()),
+        ResetMode::Mixed => reset_index_to_commit_typed(old_oid),
+        ResetMode::Hard => {
+            reset_index_to_commit_typed(old_oid)?;
+            let rollback_paths = tracked_paths_for_hard_reset(target_commit_id)?;
+            let rollback_stats =
+                reset_working_directory_to_commit(old_oid, &rollback_paths).await?;
+            if !rollback_stats.warnings.is_empty() {
+                tracing::warn!(
+                    warnings = ?rollback_stats.warnings,
+                    "rollback after reset completed with worktree warnings"
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+fn load_commit_summary_or_warn(commit_id: &ObjectHash) -> String {
+    get_commit_summary(commit_id).unwrap_or_else(|error| {
+        tracing::warn!("failed to load commit summary for {commit_id}: {error}");
+        String::new()
+    })
+}
+
+async fn update_reset_reference(
+    current_head_state: Head,
+    old_oid: ObjectHash,
+    target_commit_id: ObjectHash,
+    target_ref_str: &str,
+) -> Result<(), ResetError> {
     let action = ReflogAction::Reset {
         target: target_ref_str.to_string(),
     };
@@ -214,7 +544,6 @@ async fn perform_reset(
         move |txn| {
             Box::pin(async move {
                 match &current_head_state {
-                    // If on a branch, update the branch pointer. HEAD will move with it.
                     Head::Branch(branch_name) => {
                         Branch::update_branch_with_conn(
                             txn,
@@ -224,7 +553,6 @@ async fn perform_reset(
                         )
                         .await?;
                     }
-                    // If in a detached state, update the HEAD pointer directly.
                     Head::Detached(_) => {
                         let new_head = Head::Detached(target_commit_id);
                         Head::update_with_conn(txn, new_head, None).await;
@@ -236,113 +564,70 @@ async fn perform_reset(
         true,
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| ResetError::HeadUpdate(e.to_string()))
+}
 
-    match mode {
-        ResetMode::Soft => {
-            // Only move HEAD, nothing else to do
-        }
-        ResetMode::Mixed => {
-            // Reset index to target commit
-            reset_index_to_commit(&target_commit_id)?;
-        }
-        ResetMode::Hard => {
-            // Reset index and working directory
-            reset_index_to_commit(&target_commit_id)?;
-            reset_working_directory_to_commit(&target_commit_id, Some(old_oid)).await?;
-        }
+fn merge_reset_failure(error: ResetError, rollback: Result<(), ResetError>) -> ResetError {
+    match rollback {
+        Ok(()) => error,
+        Err(rollback_error) => ResetError::Rollback {
+            primary: Box::new(error),
+            rollback: Box::new(rollback_error),
+        },
     }
-    Ok(())
 }
 
 /// Reset the index to match the specified commit's tree.
 /// Clears the current index and rebuilds it from the commit's tree structure.
 pub(crate) fn reset_index_to_commit(commit_id: &ObjectHash) -> Result<(), String> {
-    let commit: Commit =
-        load_object(commit_id).map_err(|e| format!("failed to load commit: {e}"))?;
-
-    let tree: Tree =
-        load_object(&commit.tree_id).map_err(|e| format!("failed to load tree: {e}"))?;
-
-    let index_file = path::index();
-    let mut index = Index::new();
-
-    // Rebuild index from tree
-    rebuild_index_from_tree(&tree, &mut index, "")?;
-
-    index
-        .save(&index_file)
-        .map_err(|e| format!("failed to save index: {e}"))?;
-
-    Ok(())
+    reset_index_to_commit_typed(commit_id).map_err(|e| e.to_string())
 }
 
 /// Reset the working directory to match the specified commit.
 /// Removes files that exist in the original commit but not in the target commit,
 /// and restores files from the target commit's tree.
-pub(crate) async fn reset_working_directory_to_commit(
+async fn reset_working_directory_to_commit(
     commit_id: &ObjectHash,
-    original_head_commit: Option<ObjectHash>,
-) -> Result<(), String> {
-    let commit: Commit =
-        load_object(commit_id).map_err(|e| format!("failed to load commit: {e}"))?;
+    previously_tracked_paths: &HashSet<PathBuf>,
+) -> Result<ResetStats, ResetError> {
+    let commit: Commit = load_object(commit_id)
+        .map_err(|e| object_load_error("commit", commit_id.to_string(), e.to_string()))?;
 
-    let tree: Tree =
-        load_object(&commit.tree_id).map_err(|e| format!("failed to load tree: {e}"))?;
+    let tree: Tree = load_object(&commit.tree_id)
+        .map_err(|e| object_load_error("tree", commit.tree_id.to_string(), e.to_string()))?;
 
     let workdir = util::working_dir();
+    let target_files = tree.get_plain_items();
+    let target_files_set: HashSet<_> = target_files.iter().map(|(path, _)| path.clone()).collect();
+    let mut files_restored = 0;
 
-    // Use the original HEAD commit to determine what files to clean up
-    if let Some(current_commit_id) = original_head_commit {
-        if current_commit_id != *commit_id {
-            // Remove files that exist in current commit but not in target commit
-            let current_commit: Commit = load_object(&current_commit_id)
-                .map_err(|e| format!("failed to load current commit: {e}"))?;
-            let current_tree: Tree = load_object(&current_commit.tree_id)
-                .map_err(|e| format!("failed to load current tree: {e}"))?;
-
-            let current_files = current_tree.get_plain_items();
-            let target_files: Vec<_> = tree.get_plain_items();
-            let target_files_set: HashSet<_> = target_files.iter().map(|(path, _)| path).collect();
-
-            // Remove files that are in current commit but not in target commit
-            for (file_path, _) in current_files {
-                if !target_files_set.contains(&file_path) {
-                    let full_path = workdir.join(&file_path);
-                    if full_path.exists()
-                        && let Err(e) = fs::remove_file(&full_path)
-                    {
-                        cli_error!(e, "warning: failed to remove '{}'", full_path.display());
-                    }
-                }
-            }
-        }
-    } else {
-        // No current HEAD, remove all tracked files from index
-        let index = Index::load(path::index()).unwrap_or_else(|_| Index::new());
-        let tracked_files = index.tracked_files();
-
-        for file_path in tracked_files {
-            let full_path = workdir.join(&file_path);
-            if full_path.exists()
-                && let Err(e) = fs::remove_file(&full_path)
-            {
-                crate::utils::error::emit_warning(format!(
-                    "failed to remove {}: {}",
-                    full_path.display(),
-                    e
-                ));
+    // Remove tracked files that should not exist in the target tree.
+    for file_path in previously_tracked_paths {
+        if !target_files_set.contains(file_path) {
+            let full_path = workdir.join(file_path);
+            if full_path.exists() {
+                fs::remove_file(&full_path).map_err(|e| {
+                    ResetError::WorktreeRestore(format!(
+                        "failed to remove file {}: {}",
+                        full_path.display(),
+                        e
+                    ))
+                })?;
+                files_restored += 1;
             }
         }
     }
 
     // Remove empty directories
-    remove_empty_directories(&workdir)?;
+    let warnings = remove_empty_directories_with_warnings(&workdir)?;
 
     // Restore files from target tree
-    restore_working_directory_from_tree(&tree, &workdir, "")?;
+    files_restored += restore_working_directory_from_tree_counted_typed(&tree, &workdir, "")?;
 
-    Ok(())
+    Ok(ResetStats {
+        files_restored,
+        warnings,
+    })
 }
 
 /// Recursively rebuild the index from a tree structure.
@@ -352,6 +637,33 @@ pub(crate) fn rebuild_index_from_tree(
     index: &mut Index,
     prefix: &str,
 ) -> Result<(), String> {
+    rebuild_index_from_tree_typed(tree, index, prefix).map_err(|e| e.to_string())
+}
+
+fn reset_index_to_commit_typed(commit_id: &ObjectHash) -> Result<(), ResetError> {
+    let commit: Commit = load_object(commit_id)
+        .map_err(|e| object_load_error("commit", commit_id.to_string(), e.to_string()))?;
+
+    let tree: Tree = load_object(&commit.tree_id)
+        .map_err(|e| object_load_error("tree", commit.tree_id.to_string(), e.to_string()))?;
+
+    let index_file = path::index();
+    let mut index = Index::new();
+
+    rebuild_index_from_tree_typed(&tree, &mut index, "")?;
+
+    index
+        .save(&index_file)
+        .map_err(|e| ResetError::IndexSave(e.to_string()))?;
+
+    Ok(())
+}
+
+fn rebuild_index_from_tree_typed(
+    tree: &Tree,
+    index: &mut Index,
+    prefix: &str,
+) -> Result<(), ResetError> {
     for item in &tree.tree_items {
         let full_path = if prefix.is_empty() {
             item.name.clone()
@@ -361,9 +673,9 @@ pub(crate) fn rebuild_index_from_tree(
 
         match item.mode {
             git_internal::internal::object::tree::TreeItemMode::Tree => {
-                let subtree: Tree =
-                    load_object(&item.id).map_err(|e| format!("failed to load subtree: {e}"))?;
-                rebuild_index_from_tree(&subtree, index, &full_path)?;
+                let subtree: Tree = load_object(&item.id)
+                    .map_err(|e| object_load_error("tree", item.id.to_string(), e.to_string()))?;
+                rebuild_index_from_tree_typed(&subtree, index, &full_path)?;
             }
             _ => {
                 // Add file to index - but don't modify working directory files
@@ -387,6 +699,17 @@ pub(crate) fn restore_working_directory_from_tree(
     workdir: &Path,
     prefix: &str,
 ) -> Result<(), String> {
+    restore_working_directory_from_tree_counted_typed(tree, workdir, prefix)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+fn restore_working_directory_from_tree_counted_typed(
+    tree: &Tree,
+    workdir: &Path,
+    prefix: &str,
+) -> Result<usize, ResetError> {
+    let mut files_restored = 0;
     for item in &tree.tree_items {
         let full_path = if prefix.is_empty() {
             item.name.clone()
@@ -400,50 +723,98 @@ pub(crate) fn restore_working_directory_from_tree(
             git_internal::internal::object::tree::TreeItemMode::Tree => {
                 // Create directory
                 fs::create_dir_all(&file_path).map_err(|e| {
-                    format!("failed to create directory {}: {}", file_path.display(), e)
+                    ResetError::WorktreeRestore(format!(
+                        "failed to create directory {}: {}",
+                        file_path.display(),
+                        e
+                    ))
                 })?;
 
-                let subtree: Tree =
-                    load_object(&item.id).map_err(|e| format!("failed to load subtree: {e}"))?;
-                restore_working_directory_from_tree(&subtree, workdir, &full_path)?;
+                let subtree: Tree = load_object(&item.id)
+                    .map_err(|e| object_load_error("tree", item.id.to_string(), e.to_string()))?;
+                files_restored += restore_working_directory_from_tree_counted_typed(
+                    &subtree, workdir, &full_path,
+                )?;
             }
             _ => {
                 // Restore file
                 let blob = load_object::<git_internal::internal::object::blob::Blob>(&item.id)
-                    .map_err(|e| format!("failed to load blob: {e}"))?;
+                    .map_err(|e| object_load_error("blob", item.id.to_string(), e.to_string()))?;
 
                 // Create parent directory if needed
                 if let Some(parent) = file_path.parent() {
                     fs::create_dir_all(parent).map_err(|e| {
-                        format!("failed to create directory {}: {}", parent.display(), e)
+                        ResetError::WorktreeRestore(format!(
+                            "failed to create directory {}: {}",
+                            parent.display(),
+                            e
+                        ))
                     })?;
                 }
 
-                fs::write(&file_path, blob.data)
-                    .map_err(|e| format!("failed to write file {}: {}", file_path.display(), e))?;
+                let needs_write = match fs::read(&file_path) {
+                    Ok(existing) => existing != blob.data,
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => true,
+                    Err(err) => {
+                        return Err(ResetError::WorktreeRead(format!(
+                            "failed to read file {}: {}",
+                            file_path.display(),
+                            err
+                        )));
+                    }
+                };
+
+                if needs_write {
+                    fs::write(&file_path, blob.data).map_err(|e| {
+                        ResetError::WorktreeRestore(format!(
+                            "failed to write file {}: {}",
+                            file_path.display(),
+                            e
+                        ))
+                    })?;
+                    files_restored += 1;
+                }
             }
         }
     }
-    Ok(())
+    Ok(files_restored)
 }
 
 /// Remove empty directories from the working directory.
 /// Recursively traverses the directory tree and removes any empty directories,
 /// except for the .libra directory and the working directory root.
+///
+/// This is a backward-compatible shim for callers (e.g. `stash.rs`) that do
+/// not have a warning pipeline.  Non-fatal directory-removal warnings are
+/// intentionally dropped here; the typed reset path collects them via
+/// [`remove_empty_directories_with_warnings`] and routes them through
+/// `emit_warning()`.
 pub(crate) fn remove_empty_directories(workdir: &Path) -> Result<(), String> {
-    fn remove_empty_dirs_recursive(dir: &Path, workdir: &Path) -> Result<(), String> {
+    remove_empty_directories_with_warnings(workdir)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+fn remove_empty_directories_with_warnings(workdir: &Path) -> Result<Vec<String>, ResetError> {
+    fn remove_empty_dirs_recursive(
+        dir: &Path,
+        workdir: &Path,
+        warnings: &mut Vec<String>,
+    ) -> Result<bool, ResetError> {
         if !dir.is_dir() || dir == workdir {
-            return Ok(());
+            return Ok(true);
         }
 
-        let entries = fs::read_dir(dir)
-            .map_err(|e| format!("failed to read directory {}: {}", dir.display(), e))?;
+        let entries = fs::read_dir(dir).map_err(|e| {
+            ResetError::WorktreeRead(format!("failed to read directory {}: {}", dir.display(), e))
+        })?;
 
         let mut has_files = false;
-        let mut subdirs = Vec::new();
 
         for entry in entries {
-            let entry = entry.map_err(|e| format!("failed to read directory entry: {e}"))?;
+            let entry = entry.map_err(|e| {
+                ResetError::WorktreeRead(format!("failed to read directory entry: {e}"))
+            })?;
             let path = entry.path();
 
             if path.is_dir() {
@@ -451,29 +822,7 @@ pub(crate) fn remove_empty_directories(workdir: &Path) -> Result<(), String> {
                 if path.file_name().and_then(|n| n.to_str()) == Some(".libra") {
                     has_files = true;
                 } else {
-                    subdirs.push(path);
-                }
-            } else {
-                has_files = true;
-            }
-        }
-
-        // Recursively process subdirectories
-        for subdir in subdirs {
-            remove_empty_dirs_recursive(&subdir, workdir)?;
-
-            // Check if subdir is now empty
-            if subdir
-                .read_dir()
-                .map(|mut d| d.next().is_none())
-                .unwrap_or(false)
-            {
-                if let Err(e) = fs::remove_dir(&subdir) {
-                    eprintln!(
-                        "warning: failed to remove empty directory {}: {}",
-                        subdir.display(),
-                        e
-                    );
+                    has_files |= remove_empty_dirs_recursive(&path, workdir, warnings)?;
                 }
             } else {
                 has_files = true;
@@ -481,51 +830,122 @@ pub(crate) fn remove_empty_directories(workdir: &Path) -> Result<(), String> {
         }
 
         // Remove this directory if it's empty and not the working directory
-        if !has_files
-            && dir != workdir
-            && let Err(e) = fs::remove_dir(dir)
-        {
-            eprintln!(
-                "warning: failed to remove empty directory {}: {}",
-                dir.display(),
-                e
-            );
+        if !has_files && dir != workdir {
+            if let Err(e) = fs::remove_dir(dir) {
+                warnings.push(format!(
+                    "failed to remove empty directory {}: {}",
+                    dir.display(),
+                    e
+                ));
+                return Ok(true);
+            }
+            return Ok(false);
         }
 
-        Ok(())
+        Ok(has_files)
     }
 
     // Start from working directory and process all subdirectories
-    let entries =
-        fs::read_dir(workdir).map_err(|e| format!("failed to read working directory: {e}"))?;
+    let entries = fs::read_dir(workdir)
+        .map_err(|e| ResetError::WorktreeRead(format!("failed to read working directory: {e}")))?;
+    let mut warnings = Vec::new();
 
     for entry in entries {
-        let entry = entry.map_err(|e| format!("failed to read directory entry: {e}"))?;
+        let entry = entry.map_err(|e| {
+            ResetError::WorktreeRead(format!("failed to read directory entry: {e}"))
+        })?;
         let path = entry.path();
 
         if path.is_dir() && path.file_name().and_then(|n| n.to_str()) != Some(".libra") {
-            remove_empty_dirs_recursive(&path, workdir)?;
+            let _ = remove_empty_dirs_recursive(&path, workdir, &mut warnings)?;
         }
     }
 
-    Ok(())
+    Ok(warnings)
 }
 
 /// Resolve a reference string to a commit ObjectHash.
 /// Accepts commit hashes, branch names, or HEAD references.
-async fn resolve_commit(reference: &str) -> Result<ObjectHash, String> {
-    get_target_commit(reference)
+async fn resolve_commit(reference: &str) -> Result<ObjectHash, ResetError> {
+    util::get_commit_base_typed(reference)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(map_commit_base_error)
+}
+
+fn map_commit_base_error(error: util::CommitBaseError) -> ResetError {
+    match error {
+        util::CommitBaseError::HeadUnborn => ResetError::HeadUnborn,
+        util::CommitBaseError::InvalidReference(message) => ResetError::InvalidRevision(message),
+        util::CommitBaseError::ReadFailure(message) => ResetError::RevisionRead(message),
+        util::CommitBaseError::CorruptReference(message) => ResetError::RevisionCorrupt(message),
+    }
 }
 
 /// Get the first line of a commit's message for display purposes.
-fn get_commit_summary(commit_id: &ObjectHash) -> Result<String, String> {
-    let commit: Commit =
-        load_object(commit_id).map_err(|e| format!("failed to load commit: {e}"))?;
+fn get_commit_summary(commit_id: &ObjectHash) -> Result<String, ResetError> {
+    let commit: Commit = load_object(commit_id)
+        .map_err(|e| object_load_error("commit", commit_id.to_string(), e.to_string()))?;
 
-    let first_line = commit.message.lines().next().unwrap_or("").to_string();
+    let first_line = parse_commit_msg(&commit.message)
+        .0
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_string();
     Ok(first_line)
+}
+
+fn tracked_paths_from_index() -> Result<HashSet<PathBuf>, ResetError> {
+    let index = Index::load(path::index()).map_err(|e| ResetError::IndexLoad(e.to_string()))?;
+    Ok(index.tracked_files().into_iter().collect())
+}
+
+fn tracked_paths_from_commit(commit_id: &ObjectHash) -> Result<HashSet<PathBuf>, ResetError> {
+    let commit: Commit = load_object(commit_id)
+        .map_err(|e| object_load_error("commit", commit_id.to_string(), e.to_string()))?;
+    let tree: Tree = load_object(&commit.tree_id)
+        .map_err(|e| object_load_error("tree", commit.tree_id.to_string(), e.to_string()))?;
+    Ok(tree
+        .get_plain_items()
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect())
+}
+
+fn tracked_paths_for_hard_reset(
+    current_commit_id: &ObjectHash,
+) -> Result<HashSet<PathBuf>, ResetError> {
+    // `reset --hard` must remove paths that are tracked either by the current HEAD
+    // tree or by the staged index, otherwise cached removals can leave stale files
+    // behind when the target commit does not contain them.
+    let mut tracked_paths = tracked_paths_from_commit(current_commit_id)?;
+    tracked_paths.extend(tracked_paths_from_index()?);
+    Ok(tracked_paths)
+}
+
+fn render_reset_output(result: &ResetOutput, output: &OutputConfig) -> CliResult<()> {
+    if output.is_json() {
+        return emit_json_data("reset", result, output);
+    }
+
+    if output.quiet {
+        return Ok(());
+    }
+
+    if result.pathspecs.is_empty() {
+        if result.subject.is_empty() {
+            println!("HEAD is now at {}", result.short_commit);
+        } else {
+            println!("HEAD is now at {} {}", result.short_commit, result.subject);
+        }
+    } else {
+        println!("Unstaged changes after reset:");
+        for path in &result.pathspecs {
+            println!("M\t{path}");
+        }
+    }
+
+    Ok(())
 }
 
 /// Find a specific file or directory in a tree by path.
@@ -533,7 +953,7 @@ fn get_commit_summary(commit_id: &ObjectHash) -> Result<String, String> {
 fn find_tree_item(
     tree: &Tree,
     path: &str,
-) -> Option<git_internal::internal::object::tree::TreeItem> {
+) -> Result<Option<git_internal::internal::object::tree::TreeItem>, ResetError> {
     let parts: Vec<&str> = path.split('/').collect();
     find_tree_item_recursive(tree, &parts, 0)
 }
@@ -544,27 +964,27 @@ fn find_tree_item_recursive(
     tree: &Tree,
     parts: &[&str],
     index: usize,
-) -> Option<git_internal::internal::object::tree::TreeItem> {
+) -> Result<Option<git_internal::internal::object::tree::TreeItem>, ResetError> {
     if index >= parts.len() {
-        return None;
+        return Ok(None);
     }
 
     for item in &tree.tree_items {
         if item.name == parts[index] {
             if index == parts.len() - 1 {
                 // Found the target
-                return Some(item.clone());
+                return Ok(Some(item.clone()));
             } else if item.mode == git_internal::internal::object::tree::TreeItemMode::Tree {
                 // Continue searching in subtree
-                if let Ok(subtree) = load_object::<Tree>(&item.id)
-                    && let Some(result) = find_tree_item_recursive(&subtree, parts, index + 1)
-                {
-                    return Some(result);
+                let subtree = load_object::<Tree>(&item.id)
+                    .map_err(|e| object_load_error("tree", item.id.to_string(), e.to_string()))?;
+                if let Some(result) = find_tree_item_recursive(&subtree, parts, index + 1)? {
+                    return Ok(Some(result));
                 }
             }
         }
     }
-    None
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -585,5 +1005,67 @@ mod tests {
 
         let args = ResetArgs::try_parse_from(["reset"]).unwrap();
         assert!(!args.soft && !args.hard);
+    }
+
+    #[test]
+    fn test_reset_error_maps_unborn_head_as_repo_state() {
+        let error = CliError::from(ResetError::HeadUnborn);
+        assert_eq!(error.stable_code(), StableErrorCode::RepoStateInvalid);
+    }
+
+    #[test]
+    fn test_reset_error_maps_head_read_failures_as_io_read() {
+        let error = CliError::from(ResetError::HeadRead("database is locked".into()));
+        assert_eq!(error.stable_code(), StableErrorCode::IoReadFailed);
+    }
+
+    #[test]
+    fn test_reset_error_maps_file_read_failures_as_io_read() {
+        let error = CliError::from(ResetError::WorktreeRead(
+            "failed to read file /tmp/repo/tracked.txt: Permission denied".into(),
+        ));
+        assert_eq!(error.stable_code(), StableErrorCode::IoReadFailed);
+    }
+
+    #[test]
+    fn test_reset_error_maps_revision_read_failures_as_io_read() {
+        let error = CliError::from(ResetError::RevisionRead(
+            "failed to resolve branch 'main': failed to query branch storage: database is locked"
+                .into(),
+        ));
+        assert_eq!(error.stable_code(), StableErrorCode::IoReadFailed);
+    }
+
+    #[test]
+    fn test_reset_error_maps_revision_corruption_as_repo_corrupt() {
+        let error = CliError::from(ResetError::RevisionCorrupt(
+            "failed to resolve branch 'main': stored branch reference 'main' is corrupt: invalid hash"
+                .into(),
+        ));
+        assert_eq!(error.stable_code(), StableErrorCode::RepoCorrupt);
+    }
+
+    #[test]
+    fn test_merge_reset_failure_preserves_primary_error_category() {
+        let merged = merge_reset_failure(
+            ResetError::ObjectLoad {
+                kind: "tree",
+                object_id: "deadbeef".into(),
+                detail: "corrupt object".into(),
+            },
+            Err(ResetError::WorktreeRestore(
+                "failed to restore working tree".into(),
+            )),
+        );
+
+        assert!(matches!(merged, ResetError::Rollback { .. }));
+        let cli_error = CliError::from(merged);
+        assert_eq!(cli_error.stable_code(), StableErrorCode::RepoCorrupt);
+        assert!(cli_error.message().contains("rollback failed"));
+        assert!(
+            cli_error
+                .message()
+                .contains("failed to restore working tree")
+        );
     }
 }

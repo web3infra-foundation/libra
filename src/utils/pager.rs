@@ -186,6 +186,7 @@ fn should_use_pager() -> bool {
     io::stdout().is_terminal() && env::var_os(LIBRA_TEST_ENV).is_none()
 }
 
+#[cfg(unix)]
 fn pager_spawn_error(err: io::Error) -> CliError {
     CliError::fatal(format!("failed to execute pager: {err}"))
         .with_stable_code(StableErrorCode::IoWriteFailed)

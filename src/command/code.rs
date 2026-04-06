@@ -6,6 +6,7 @@
 //! - Stdio Mode (`--stdio`): MCP server over standard input/output, designed for integration with AI clients like Claude Desktop.
 
 use std::{
+    io::IsTerminal,
     net::SocketAddr,
     path::{Path, PathBuf},
     process::Stdio,
@@ -25,6 +26,7 @@ use url::Url;
 // use uuid::Uuid;
 use crate::internal::{
     ai::{
+        claudecode as agent_claudecode,
         client::CompletionClient,
         codex as agent_codex,
         history::HistoryManager,
@@ -53,7 +55,10 @@ use crate::internal::{
 };
 use crate::{
     cli_error,
-    utils::error::{CliError, CliResult, StableErrorCode},
+    utils::{
+        error::{CliError, CliResult, StableErrorCode},
+        output::OutputConfig,
+    },
 };
 
 const DEFAULT_WEB_PORT: u16 = 3000;
@@ -62,17 +67,13 @@ const DEFAULT_BIND_HOST: &str = "127.0.0.1";
 const DEFAULT_CODEX_BIN: &str = "codex";
 const CODEX_STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const CODEX_STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(200);
-#[expect(
-    dead_code,
-    reason = "Embedded browse page is reserved for the web/TUI code flow"
-)]
-const BROWSE_PAGE_HTML: &str = include_str!("code/index.html");
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum CodeProvider {
     Gemini,
     Openai,
     Anthropic,
+    Claudecode,
     Deepseek,
     Zhipu,
     Ollama,
@@ -153,6 +154,22 @@ pub struct CodeArgs {
     #[arg(long)]
     pub resume: bool,
 
+    /// Resume a specific Claude Code managed provider session UUID.
+    #[arg(long)]
+    pub resume_session: Option<String>,
+
+    /// Fork into a new Claude Code managed session when resuming a provider session.
+    #[arg(long, default_value_t = false)]
+    pub fork_session: bool,
+
+    /// Use an explicit Claude Code managed session UUID on the first turn.
+    #[arg(long)]
+    pub session_id: Option<String>,
+
+    /// Resume only up to and including a specific Claude Code assistant message UUID.
+    #[arg(long)]
+    pub resume_at: Option<String>,
+
     /// Tool approval policy:
     /// - `never`: no prompts, dangerous commands are rejected
     /// - `on-failure`: prompt only for retry outside sandbox after sandbox denial
@@ -173,6 +190,22 @@ pub struct CodeArgs {
     #[arg(long)]
     pub api_base: Option<String>,
 
+    /// Optional custom Claude Code managed helper path.
+    #[arg(long, hide = true)]
+    pub helper_path: Option<PathBuf>,
+
+    /// Python executable used by the Claude Code managed helper.
+    #[arg(long, hide = true)]
+    pub python_binary: Option<String>,
+
+    /// Override the Claude Code managed helper timeout in seconds.
+    #[arg(long, hide = true)]
+    pub timeout_seconds: Option<u64>,
+
+    /// Override the Claude Code managed helper permission mode.
+    #[arg(long, hide = true)]
+    pub permission_mode: Option<String>,
+
     /// Codex executable used to launch the managed app-server.
     #[arg(long, default_value = DEFAULT_CODEX_BIN)]
     pub codex_bin: String,
@@ -186,8 +219,8 @@ pub struct CodeArgs {
     pub plan_mode: bool,
 }
 
-pub async fn execute(args: CodeArgs) -> CliResult<()> {
-    validate_mode_args(&args).map_err(CliError::command_usage)?;
+pub async fn execute(args: CodeArgs, output: &OutputConfig) -> CliResult<()> {
+    validate_mode_args(&args, output).map_err(CliError::command_usage)?;
     if args.stdio {
         execute_stdio(&args).await
     } else if args.web_only {
@@ -227,16 +260,22 @@ async fn static_handler(uri: axum::http::Uri) -> impl IntoResponse {
     };
 
     match resolved {
-        Some(resolved_path) => {
-            let content = WebAssets::get(&resolved_path).unwrap();
-            let mime = mime_guess::from_path(&resolved_path).first_or_octet_stream();
-            (
-                StatusCode::OK,
-                [(header::CONTENT_TYPE, mime.as_ref().to_string())],
-                content.data.to_vec(),
+        Some(resolved_path) => match WebAssets::get(&resolved_path) {
+            Some(content) => {
+                let mime = mime_guess::from_path(&resolved_path).first_or_octet_stream();
+                (
+                    StatusCode::OK,
+                    [(header::CONTENT_TYPE, mime.as_ref().to_string())],
+                    content.data.to_vec(),
+                )
+                    .into_response()
+            }
+            None => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "embedded asset lookup became inconsistent",
             )
-                .into_response()
-        }
+                .into_response(),
+        },
         None => (StatusCode::NOT_FOUND, "404 Not Found").into_response(),
     }
 }
@@ -383,6 +422,8 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
     let preamble = system_preamble(&working_dir, args.context);
     let temperature = args.temperature;
     let resume = args.resume;
+    let stdout_is_terminal = std::io::stdout().is_terminal();
+    let host = args.host.clone();
 
     // Prepare MCP server instance shared between the HTTP transport and TUI bridge
     let mcp_server = init_mcp_server(&working_dir).await;
@@ -395,7 +436,7 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
         tokio::sync::mpsc::unbounded_channel::<ExecApprovalRequest>();
 
     // Build registry: basic file tools + MCP workflow tools
-    let mut builder = ToolRegistryBuilder::with_working_dir(working_dir)
+    let mut builder = ToolRegistryBuilder::with_working_dir(working_dir.clone())
         .register("read_file", Arc::new(ReadFileHandler))
         .register("list_dir", Arc::new(ListDirHandler))
         .register("grep_files", Arc::new(GrepFilesHandler))
@@ -405,7 +446,7 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
         .register("submit_intent_draft", Arc::new(SubmitIntentDraftHandler))
         .register(
             "request_user_input",
-            Arc::new(RequestUserInputHandler::new(user_input_tx)),
+            Arc::new(RequestUserInputHandler::new(user_input_tx.clone())),
         );
 
     for (name, handler) in McpBridgeHandler::all_handlers(mcp_server.clone()) {
@@ -416,7 +457,7 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
 
     let provider_name = format!("{:?}", args.provider).to_lowercase();
     let launch_config = TuiLaunchConfig {
-        host: args.host,
+        host,
         port: args.port,
         mcp_port: args.mcp_port,
         registry,
@@ -425,10 +466,12 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
         context: args.context,
         resume,
         approval_policy: args.approval_policy.into(),
+        user_input_tx,
         user_input_rx,
         exec_approval_rx,
         exec_approval_tx,
         mcp_server,
+        managed_claudecode: None,
     };
 
     // Create agent based on provider
@@ -459,6 +502,29 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
             let model_name = args.model.unwrap_or_else(|| CLAUDE_3_5_SONNET.to_string());
             let model = client.completion_model(&model_name);
             run_tui_with_model(model, launch_config, model_name, provider_name).await?;
+        }
+        CodeProvider::Claudecode => {
+            if !stdout_is_terminal {
+                return execute_claudecode_mode(args, working_dir).await;
+            }
+
+            let claudecode_args = build_claudecode_code_args(&args, working_dir);
+            validate_claudecode_code_args(&claudecode_args)?;
+
+            let runtime = agent_claudecode::prepare_tui_runtime(claudecode_args)
+                .await
+                .map_err(map_claudecode_cli_error)?;
+
+            let model_name = runtime.model_name().to_string();
+            let mut launch_config = launch_config;
+            launch_config.managed_claudecode = Some(runtime);
+            run_tui_with_model(
+                UnsupportedCompletionModel,
+                launch_config,
+                model_name,
+                provider_name,
+            )
+            .await?;
         }
         CodeProvider::Deepseek => {
             let client = match DeepSeekClient::from_env() {
@@ -496,7 +562,9 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
             run_tui_with_model(model, launch_config, model_name, provider_name).await?;
         }
         CodeProvider::Codex => {
-            unreachable!("codex provider is handled before the TUI provider match")
+            return Err(CliError::internal(
+                "codex provider reached unexpected TUI provider dispatch",
+            ));
         }
     }
 
@@ -549,12 +617,88 @@ async fn execute_codex_mode(args: CodeArgs, working_dir: PathBuf) -> CliResult<(
     result
 }
 
+async fn execute_claudecode_mode(args: CodeArgs, working_dir: PathBuf) -> CliResult<()> {
+    println!("Starting Libra Code with Claude Code managed provider");
+    println!("Working directory: {}", working_dir.display());
+    if args.resume {
+        println!("Claude Code session continuity: resume latest provider session in cwd");
+    } else if let Some(resume_session) = &args.resume_session {
+        println!("Claude Code session continuity: resume {}", resume_session);
+    }
+
+    let claudecode_args = build_claudecode_code_args(&args, working_dir);
+    validate_claudecode_code_args(&claudecode_args)?;
+
+    agent_claudecode::execute(claudecode_args)
+        .await
+        .map_err(map_claudecode_cli_error)
+}
+
+fn build_claudecode_code_args(
+    args: &CodeArgs,
+    working_dir: PathBuf,
+) -> agent_claudecode::ClaudecodeCodeArgs {
+    agent_claudecode::ClaudecodeCodeArgs {
+        working_dir,
+        model: args.model.clone(),
+        python_binary: args.python_binary.clone(),
+        helper_path: args.helper_path.clone(),
+        timeout_seconds: args.timeout_seconds,
+        interactive_approvals: approval_policy_enables_claudecode_interactive_approvals(
+            args.approval_policy,
+            args.permission_mode.as_deref(),
+        ),
+        permission_mode: Some(args.permission_mode.clone().unwrap_or_else(|| {
+            approval_policy_to_claudecode_managed_permission_mode(args.approval_policy).to_string()
+        })),
+        continue_session: args.resume,
+        resume: args.resume_session.clone(),
+        fork_session: args.fork_session,
+        session_id: args.session_id.clone(),
+        resume_session_at: args.resume_at.clone(),
+    }
+}
+
+fn validate_claudecode_code_args(
+    args: &agent_claudecode::ClaudecodeCodeArgs,
+) -> Result<(), CliError> {
+    agent_claudecode::validate_code_args(args, &OutputConfig::default())
+        .map_err(|error| CliError::command_usage(error.to_string()))
+}
+
 fn approval_policy_to_codex(policy: CodeApprovalPolicy) -> &'static str {
     match policy {
         CodeApprovalPolicy::Never => "accept",
         CodeApprovalPolicy::OnFailure
         | CodeApprovalPolicy::OnRequest
         | CodeApprovalPolicy::Untrusted => "ask",
+    }
+}
+
+fn approval_policy_to_claudecode_managed_permission_mode(
+    policy: CodeApprovalPolicy,
+) -> &'static str {
+    match policy {
+        CodeApprovalPolicy::Never => "acceptEdits",
+        CodeApprovalPolicy::OnFailure
+        | CodeApprovalPolicy::OnRequest
+        | CodeApprovalPolicy::Untrusted => "plan",
+    }
+}
+
+fn approval_policy_enables_claudecode_interactive_approvals(
+    policy: CodeApprovalPolicy,
+    permission_mode_override: Option<&str>,
+) -> bool {
+    !matches!(policy, CodeApprovalPolicy::Never)
+        && !matches!(permission_mode_override, Some("bypassPermissions"))
+}
+
+fn map_claudecode_cli_error(error: anyhow::Error) -> CliError {
+    if agent_claudecode::is_auth_error(&error) {
+        CliError::auth(error.to_string())
+    } else {
+        CliError::fatal(error.to_string())
     }
 }
 
@@ -708,9 +852,34 @@ struct TuiLaunchConfig {
     approval_policy: AskForApproval,
     user_input_rx:
         tokio::sync::mpsc::UnboundedReceiver<crate::internal::ai::tools::context::UserInputRequest>,
+    user_input_tx:
+        tokio::sync::mpsc::UnboundedSender<crate::internal::ai::tools::context::UserInputRequest>,
     exec_approval_rx: tokio::sync::mpsc::UnboundedReceiver<ExecApprovalRequest>,
     exec_approval_tx: tokio::sync::mpsc::UnboundedSender<ExecApprovalRequest>,
     mcp_server: Arc<LibraMcpServer>,
+    managed_claudecode: Option<agent_claudecode::ClaudecodeTuiRuntime>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct UnsupportedCompletionModel;
+
+impl crate::internal::ai::completion::CompletionModel for UnsupportedCompletionModel {
+    type Response = serde_json::Value;
+
+    async fn completion(
+        &self,
+        _request: crate::internal::ai::completion::CompletionRequest,
+    ) -> Result<
+        crate::internal::ai::completion::CompletionResponse<Self::Response>,
+        crate::internal::ai::completion::CompletionError,
+    > {
+        Err(
+            crate::internal::ai::completion::CompletionError::NotImplemented(
+                "generic completion workflows are not available for the active managed provider"
+                    .to_string(),
+            ),
+        )
+    }
 }
 
 async fn run_tui_with_model<M>(
@@ -720,7 +889,7 @@ async fn run_tui_with_model<M>(
     provider_name: String,
 ) -> CliResult<()>
 where
-    M: crate::internal::ai::completion::CompletionModel + 'static,
+    M: crate::internal::ai::completion::CompletionModel + Clone + 'static,
 {
     let registry = params.registry;
     let hook_runner = {
@@ -817,10 +986,13 @@ where
             session,
             session_store,
             user_input_rx: params.user_input_rx,
+            user_input_tx: params.user_input_tx,
             exec_approval_rx: params.exec_approval_rx,
+            exec_approval_tx: params.exec_approval_tx,
             model_name,
             provider_name,
             mcp_server: Some(params.mcp_server),
+            managed_claudecode: params.managed_claudecode,
         },
     );
 
@@ -1047,7 +1219,7 @@ async fn execute_stdio(args: &CodeArgs) -> CliResult<()> {
     Ok(())
 }
 
-fn validate_mode_args(args: &CodeArgs) -> Result<(), String> {
+fn validate_mode_args(args: &CodeArgs, output: &OutputConfig) -> Result<(), String> {
     if !args.stdio && args.port == args.mcp_port {
         return Err(format!(
             "--port ({}) and --mcp-port ({}) must be different",
@@ -1078,8 +1250,86 @@ fn validate_mode_args(args: &CodeArgs) -> Result<(), String> {
         }
     }
 
+    if args.provider != CodeProvider::Claudecode && has_claudecode_managed_flags(args) {
+        return Err(
+            "Claude Code managed runtime flags are only supported with --provider=claudecode"
+                .to_string(),
+        );
+    }
+
     if args.provider == CodeProvider::Codex && args.api_base.is_some() {
         return Err("--api-base is not supported with --provider=codex".to_string());
+    }
+
+    if args.provider == CodeProvider::Claudecode {
+        reject_mode_flag(
+            args.temperature.is_some(),
+            "--temperature",
+            "--provider=claudecode",
+        )?;
+        reject_mode_flag(args.context.is_some(), "--context", "--provider=claudecode")?;
+        reject_mode_flag(
+            args.api_base.is_some(),
+            "--api-base",
+            "--provider=claudecode",
+        )?;
+        if output.is_json() || output.quiet {
+            return Err(
+                "--json, --machine, and --quiet are not supported with --provider=claudecode"
+                    .to_string(),
+            );
+        }
+        validate_claudecode_managed_flags(args)?;
+    }
+
+    Ok(())
+}
+
+fn has_claudecode_managed_flags(args: &CodeArgs) -> bool {
+    args.resume_session.is_some()
+        || args.fork_session
+        || args.session_id.is_some()
+        || args.resume_at.is_some()
+        || args.helper_path.is_some()
+        || args.python_binary.is_some()
+        || args.timeout_seconds.is_some()
+        || args.permission_mode.is_some()
+}
+
+fn validate_claudecode_managed_flags(args: &CodeArgs) -> Result<(), String> {
+    if args.resume && args.resume_session.is_some() {
+        return Err("--resume cannot be combined with --resume-session".to_string());
+    }
+    if args.resume && args.fork_session {
+        return Err("--fork-session requires --resume-session".to_string());
+    }
+    if args.resume && args.resume_at.is_some() {
+        return Err("--resume-at requires --resume-session".to_string());
+    }
+    if args.resume && args.session_id.is_some() {
+        return Err("--session-id requires --resume-session when resuming".to_string());
+    }
+    if args.resume_at.is_some() && args.resume_session.is_none() {
+        return Err("--resume-at requires --resume-session".to_string());
+    }
+    if args.fork_session && args.resume_session.is_none() {
+        return Err("--fork-session requires --resume-session".to_string());
+    }
+    if args.session_id.is_some() && args.resume_session.is_some() && !args.fork_session {
+        return Err(
+            "--session-id requires --fork-session when combined with --resume-session".to_string(),
+        );
+    }
+
+    if let Some(permission_mode) = args.permission_mode.as_deref() {
+        match permission_mode {
+            "default" | "acceptEdits" | "plan" | "bypassPermissions" => {}
+            _ => {
+                return Err(format!(
+                    "--permission-mode must be one of default, acceptEdits, plan, bypassPermissions (got {permission_mode})"
+                ));
+            }
+        }
     }
 
     Ok(())
@@ -1098,12 +1348,20 @@ fn reject_non_tui_flags(args: &CodeArgs, mode: &str) -> Result<(), String> {
     reject_mode_flag(args.temperature.is_some(), "--temperature", mode)?;
     reject_mode_flag(args.context.is_some(), "--context", mode)?;
     reject_mode_flag(args.resume, "--resume", mode)?;
+    reject_mode_flag(args.resume_session.is_some(), "--resume-session", mode)?;
+    reject_mode_flag(args.fork_session, "--fork-session", mode)?;
+    reject_mode_flag(args.session_id.is_some(), "--session-id", mode)?;
+    reject_mode_flag(args.resume_at.is_some(), "--resume-at", mode)?;
     reject_mode_flag(
         args.approval_policy != CodeApprovalPolicy::OnRequest,
         "--approval-policy",
         mode,
     )?;
     reject_mode_flag(args.api_base.is_some(), "--api-base", mode)?;
+    reject_mode_flag(args.helper_path.is_some(), "--helper-path", mode)?;
+    reject_mode_flag(args.python_binary.is_some(), "--python-binary", mode)?;
+    reject_mode_flag(args.timeout_seconds.is_some(), "--timeout-seconds", mode)?;
+    reject_mode_flag(args.permission_mode.is_some(), "--permission-mode", mode)?;
     Ok(())
 }
 
@@ -1126,10 +1384,18 @@ mod tests {
             temperature: None,
             context: None,
             resume: false,
+            resume_session: None,
+            fork_session: false,
+            session_id: None,
+            resume_at: None,
             approval_policy: CodeApprovalPolicy::OnRequest,
             mcp_port: DEFAULT_MCP_PORT,
             stdio: false,
             api_base: None,
+            helper_path: None,
+            python_binary: None,
+            timeout_seconds: None,
+            permission_mode: None,
             codex_bin: DEFAULT_CODEX_BIN.to_string(),
             codex_port: None,
             plan_mode: false,
@@ -1140,7 +1406,7 @@ mod tests {
     fn rejects_same_web_and_mcp_ports() {
         let mut args = base_args();
         args.mcp_port = args.port;
-        assert!(validate_mode_args(&args).is_err());
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_err());
     }
 
     #[test]
@@ -1148,7 +1414,7 @@ mod tests {
         let mut args = base_args();
         args.web_only = true;
         args.model = Some("foo".to_string());
-        assert!(validate_mode_args(&args).is_err());
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_err());
     }
 
     #[test]
@@ -1156,13 +1422,146 @@ mod tests {
         let mut args = base_args();
         args.stdio = true;
         args.host = "0.0.0.0".to_string();
-        assert!(validate_mode_args(&args).is_err());
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_err());
     }
 
     #[test]
     fn accepts_default_tui_mode() {
         let args = base_args();
-        assert!(validate_mode_args(&args).is_ok());
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn accepts_anthropic_provider_in_tui_mode() {
+        let mut args = base_args();
+        args.provider = CodeProvider::Anthropic;
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn maps_never_approval_to_accept_edits_for_claudecode_managed_runtime() {
+        assert_eq!(
+            approval_policy_to_claudecode_managed_permission_mode(CodeApprovalPolicy::Never),
+            "acceptEdits"
+        );
+        assert_eq!(
+            approval_policy_to_claudecode_managed_permission_mode(CodeApprovalPolicy::OnRequest),
+            "plan"
+        );
+        assert_eq!(
+            approval_policy_to_claudecode_managed_permission_mode(CodeApprovalPolicy::Untrusted),
+            "plan"
+        );
+    }
+
+    #[test]
+    fn claudecode_interactive_approvals_follow_approval_policy() {
+        assert!(!approval_policy_enables_claudecode_interactive_approvals(
+            CodeApprovalPolicy::Never,
+            None
+        ));
+        assert!(approval_policy_enables_claudecode_interactive_approvals(
+            CodeApprovalPolicy::OnRequest,
+            None
+        ));
+        assert!(!approval_policy_enables_claudecode_interactive_approvals(
+            CodeApprovalPolicy::OnRequest,
+            Some("bypassPermissions")
+        ));
+    }
+
+    #[test]
+    fn accepts_claudecode_provider_in_tui_mode() {
+        let mut args = base_args();
+        args.provider = CodeProvider::Claudecode;
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn rejects_resume_and_resume_session_together_for_claudecode() {
+        let mut args = base_args();
+        args.provider = CodeProvider::Claudecode;
+        args.resume = true;
+        args.resume_session = Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string());
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_err());
+    }
+
+    #[test]
+    fn rejects_resume_at_without_resume_session_for_claudecode() {
+        let mut args = base_args();
+        args.provider = CodeProvider::Claudecode;
+        args.resume_at = Some("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".to_string());
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_err());
+    }
+
+    #[test]
+    fn rejects_fork_without_resume_session_for_claudecode() {
+        let mut args = base_args();
+        args.provider = CodeProvider::Claudecode;
+        args.fork_session = true;
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_err());
+    }
+
+    #[test]
+    fn rejects_session_id_without_fork_when_resuming_explicit_claudecode_session() {
+        let mut args = base_args();
+        args.provider = CodeProvider::Claudecode;
+        args.resume_session = Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string());
+        args.session_id = Some("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".to_string());
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_err());
+    }
+
+    #[test]
+    fn rejects_claudecode_managed_flags_for_non_claudecode_provider() {
+        let mut args = base_args();
+        args.resume_session = Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string());
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_err());
+    }
+
+    #[test]
+    fn rejects_json_output_for_claudecode() {
+        let mut args = base_args();
+        args.provider = CodeProvider::Claudecode;
+        let output = OutputConfig {
+            json_format: Some(crate::utils::output::JsonFormat::Pretty),
+            ..OutputConfig::default()
+        };
+        assert!(validate_mode_args(&args, &output).is_err());
+    }
+
+    #[test]
+    fn rejects_quiet_output_for_claudecode() {
+        let mut args = base_args();
+        args.provider = CodeProvider::Claudecode;
+        let output = OutputConfig {
+            quiet: true,
+            ..OutputConfig::default()
+        };
+        assert!(validate_mode_args(&args, &output).is_err());
+    }
+
+    #[test]
+    fn invalid_claudecode_resume_session_is_reported_as_command_usage() {
+        let mut args = base_args();
+        args.provider = CodeProvider::Claudecode;
+        args.resume_session = Some("not-a-uuid".to_string());
+
+        let cli = validate_claudecode_code_args(&build_claudecode_code_args(
+            &args,
+            PathBuf::from("/tmp/libra-claudecode"),
+        ))
+        .expect_err("invalid resume UUID should be rejected");
+
+        assert_eq!(cli.kind(), crate::utils::error::CliErrorKind::CommandUsage);
+        assert_eq!(
+            cli.stable_code(),
+            crate::utils::error::StableErrorCode::CliInvalidArguments
+        );
+        assert!(
+            cli.message().contains("--resume must be a valid UUID"),
+            "unexpected usage message: {}",
+            cli.message()
+        );
     }
 
     #[test]

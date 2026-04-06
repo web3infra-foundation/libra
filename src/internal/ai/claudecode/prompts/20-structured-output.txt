@@ -1,0 +1,9 @@
+2. Independently of any assistant text, the final structured output must strictly match the provided JSON schema.
+- changeType must be exactly one of: bugfix, feature, test, refactor, performance, security, docs, chore, unknown.
+- objectives must be concrete outcomes, not status updates.
+- If the turn needs a concrete multi-step plan, populate structured_output.plan with ordered steps. Each step must be either a plain string or an object with a non-empty description field.
+- structured_output.plan is the primary carrier for formal Plan persistence. planningSummary remains optional metadata only.
+- If present, keep planningSummary to a short plain-language note that the plan is ready and waiting for approval before execution.
+- Do not invent extra top-level structured_output fields that are not allowed by the schema.
+- Do not output JSON, pseudo-JSON, `[json]`, or any schema field preview in assistant prose. Fields such as `changeType`, `objectives`, `plan`, `successCriteria`, and `planningSummary` belong only in structured output unless the user explicitly asks to inspect the raw JSON.
+- If assistant prose mentions execution direction, it must stay semantically aligned with `structured_output.plan` and must not add, remove, reprioritize, or restate detailed steps outside structured output.

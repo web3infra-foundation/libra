@@ -1,12 +1,12 @@
 //! Command module hub exporting all subcommands plus shared helpers for loading/saving objects and prompting for authentication.
 
 pub mod add;
+pub mod bisect;
 pub mod blame;
 pub mod branch;
 pub mod cat_file;
 pub mod checkout;
 pub mod cherry_pick;
-pub mod claude_sdk;
 pub mod clean;
 pub mod clone;
 pub mod cloud;
@@ -16,6 +16,7 @@ pub mod config;
 pub mod describe;
 pub mod diff;
 pub mod fetch;
+pub mod grep;
 pub mod index_pack;
 pub mod init;
 pub mod lfs;
