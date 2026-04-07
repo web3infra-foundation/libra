@@ -43,6 +43,7 @@ pub mod session;
 pub mod tools;
 pub mod util;
 pub mod workflow_objects;
+pub mod workspace_snapshot;
 
 pub use agent::{Agent, AgentBuilder, ChatAgent};
 pub use completion::{Chat, CompletionModel, Message, Prompt};

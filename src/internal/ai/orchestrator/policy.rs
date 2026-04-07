@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use super::{
     acl::{AclVerdict, ScopeVerdict, check_scope, check_tool_acl_with_context},
-    types::{PolicyViolation, TaskSpec, ToolCallRecord, ToolDiffRecord},
+    types::{PolicyViolation, TaskKind, TaskSpec, ToolCallRecord, ToolDiffRecord},
 };
 use crate::internal::ai::{
     intentspec::types::{IntentSpec, NetworkPolicy},
@@ -45,33 +45,26 @@ pub fn evaluate_tool_call(
     ) {
         AclVerdict::Allow => {}
         AclVerdict::Deny(reason) => {
-            return Err(PolicyViolation {
-                code: "tool-acl-deny".into(),
-                message: reason,
-                tool_name: Some(tool_name.to_string()),
-                path: None,
-            });
+            if gate_shell_uses_internal_verification_allowance(task, tool_name, &reason) {
+                // Gate tasks execute spec-defined verification commands directly, so
+                // they do not need the interactive shell ACL that governs agent-chosen
+                // tool calls.
+            } else {
+                return Err(PolicyViolation {
+                    code: "tool-acl-deny".into(),
+                    message: reason,
+                    tool_name: Some(tool_name.to_string()),
+                    path: None,
+                });
+            }
         }
     }
 
     if tool_name == "shell" {
-        if shell_requests_escalation(arguments)
-            && spec.constraints.security.network_policy == NetworkPolicy::Deny
-        {
+        if shell_requests_escalation(arguments) {
             return Err(PolicyViolation {
                 code: "sandbox-escalation-deny".into(),
-                message:
-                    "shell escalation is blocked while constraints.security.networkPolicy=deny"
-                        .into(),
-                tool_name: Some(tool_name.to_string()),
-                path: None,
-            });
-        }
-
-        if shell_requests_escalation(arguments) && !shell_has_justification(arguments) {
-            return Err(PolicyViolation {
-                code: "sandbox-escalation-justification-required".into(),
-                message: "shell escalation requires a non-empty justification".into(),
+                message: "shell escalation is not allowed for orchestrator-managed tasks".into(),
                 tool_name: Some(tool_name.to_string()),
                 path: None,
             });
@@ -118,8 +111,19 @@ pub fn evaluate_tool_call(
     })
 }
 
+fn gate_shell_uses_internal_verification_allowance(
+    task: &TaskSpec,
+    tool_name: &str,
+    reason: &str,
+) -> bool {
+    task.kind == TaskKind::Gate
+        && tool_name == "shell"
+        && reason.starts_with("no allow rule for tool 'shell' action 'execute'")
+}
+
 pub fn evaluate_tool_result(
     spec: &IntentSpec,
+    task: &TaskSpec,
     tool_name: &str,
     output: &ToolOutput,
     record: &mut ToolCallRecord,
@@ -129,10 +133,17 @@ pub fn evaluate_tool_result(
         .as_text()
         .map(|text| text.lines().next().unwrap_or_default().trim().to_string())
         .filter(|summary| !summary.is_empty());
-    if tool_name == "apply_patch"
-        && let Some(meta) = output.metadata()
-    {
-        record.diffs = extract_patch_diffs(meta);
+    if let Some(meta) = output.metadata() {
+        if tool_name == "apply_patch" || tool_name == "shell" {
+            record.diffs = extract_patch_diffs(meta);
+        }
+        if tool_name == "shell" {
+            record.paths_written = extract_written_paths(meta);
+        }
+    }
+
+    if tool_name == "shell" && !record.paths_written.is_empty() {
+        validate_recorded_writes(spec, task, record)?;
     }
 
     if spec.security.output_handling.no_direct_eval
@@ -211,6 +222,66 @@ fn extract_patch_diffs(meta: &Value) -> Vec<ToolDiffRecord> {
             })
         })
         .collect()
+}
+
+fn extract_written_paths(meta: &Value) -> Vec<String> {
+    let mut paths = meta
+        .get("paths_written")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+
+    for diff in extract_patch_diffs(meta) {
+        if !paths.iter().any(|path| path == &diff.path) {
+            paths.push(diff.path);
+        }
+    }
+
+    paths
+}
+
+fn validate_recorded_writes(
+    spec: &IntentSpec,
+    task: &TaskSpec,
+    record: &ToolCallRecord,
+) -> Result<(), PolicyViolation> {
+    let acl_tool = acl_tool_alias(&record.tool_name);
+    match check_tool_acl_with_context(
+        &spec.security.tool_acl,
+        acl_tool,
+        &record.action,
+        record.arguments_json.as_ref(),
+        &record.paths_written,
+    ) {
+        AclVerdict::Allow => {}
+        AclVerdict::Deny(reason) => {
+            return Err(PolicyViolation {
+                code: "tool-acl-deny".into(),
+                message: reason,
+                tool_name: Some(record.tool_name.clone()),
+                path: record.paths_written.first().cloned(),
+            });
+        }
+    }
+
+    for path in &record.paths_written {
+        match check_scope(&task.scope_in, &task.scope_out, path) {
+            ScopeVerdict::InScope => {}
+            ScopeVerdict::OutOfScope(reason) => {
+                return Err(PolicyViolation {
+                    code: "scope-creep".into(),
+                    message: reason,
+                    tool_name: Some(record.tool_name.clone()),
+                    path: Some(path.clone()),
+                });
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn derive_tool_footprint(
@@ -341,14 +412,6 @@ fn shell_requests_escalation(arguments: &Value) -> bool {
         .unwrap_or(false)
 }
 
-fn shell_has_justification(arguments: &Value) -> bool {
-    arguments
-        .get("justification")
-        .and_then(Value::as_str)
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
-}
-
 fn patch_metadata_looks_unsafe(metadata: &Value) -> bool {
     let diffs = metadata
         .get("diffs")
@@ -390,6 +453,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use git_internal::internal::object::{task::Task as GitTask, types::ActorRef};
+    use tempfile::tempdir;
 
     use super::*;
     use crate::internal::ai::{
@@ -401,7 +465,7 @@ mod tests {
             QualityGates, RepoTarget, RepoType, Risk, RiskLevel, SecretAccessPolicy, SecretPolicy,
             SecurityPolicy, Target, ToolAcl, ToolRule, TouchHints, TrustTier,
         },
-        orchestrator::types::{TaskContract, TaskKind, TaskSpec},
+        orchestrator::types::{TaskContract, TaskKind, TaskSpec, ToolCallRecord},
     };
 
     fn spec() -> IntentSpec {
@@ -580,6 +644,14 @@ mod tests {
         }
     }
 
+    fn gate_task() -> TaskSpec {
+        TaskSpec {
+            kind: TaskKind::Gate,
+            owner_role: Some("verifier".into()),
+            ..task()
+        }
+    }
+
     #[test]
     fn test_scope_violation_rejected() {
         let res = evaluate_tool_call(
@@ -592,6 +664,30 @@ mod tests {
             Path::new("/tmp/work"),
         );
         assert!(matches!(res, Err(PolicyViolation { code, .. }) if code == "scope-creep"));
+    }
+
+    #[test]
+    fn test_apply_patch_scope_preflight_uses_relative_path_inside_worktree() {
+        let temp = tempdir().unwrap();
+        let src_dir = temp.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let target = src_dir.join("lib.rs");
+
+        let res = evaluate_tool_call(
+            &spec(),
+            &task(),
+            "apply_patch",
+            &serde_json::json!({
+                "input": format!(
+                    "*** Begin Patch\n*** Add File: {}\n+pub fn demo() {{}}\n*** End Patch",
+                    target.display()
+                )
+            }),
+            temp.path(),
+        )
+        .expect("absolute path inside isolated worktree should stay in scope");
+
+        assert_eq!(res.record.paths_written, vec!["src/lib.rs".to_string()]);
     }
 
     #[test]
@@ -625,7 +721,7 @@ mod tests {
     }
 
     #[test]
-    fn test_shell_escalation_requires_justification_when_network_allowed() {
+    fn test_shell_escalation_is_rejected_even_without_justification() {
         let mut intent = spec();
         intent.constraints.security.network_policy = NetworkPolicy::Allow;
         let res = evaluate_tool_call(
@@ -640,12 +736,12 @@ mod tests {
         );
         assert!(matches!(
             res,
-            Err(PolicyViolation { code, .. }) if code == "sandbox-escalation-justification-required"
+            Err(PolicyViolation { code, .. }) if code == "sandbox-escalation-deny"
         ));
     }
 
     #[test]
-    fn test_shell_escalation_allowed_with_justification_when_network_allowed() {
+    fn test_shell_escalation_is_rejected_even_with_justification() {
         let mut intent = spec();
         intent.constraints.security.network_policy = NetworkPolicy::Allow;
         let res = evaluate_tool_call(
@@ -659,6 +755,90 @@ mod tests {
             }),
             Path::new("/tmp/work"),
         );
-        assert!(res.is_ok());
+        assert!(matches!(
+            res,
+            Err(PolicyViolation { code, .. }) if code == "sandbox-escalation-deny"
+        ));
+    }
+
+    #[test]
+    fn test_gate_shell_is_allowed_without_interactive_shell_acl() {
+        let mut intent = spec();
+        intent
+            .security
+            .tool_acl
+            .allow
+            .retain(|rule| rule.tool != "shell");
+        let res = evaluate_tool_call(
+            &intent,
+            &gate_task(),
+            "shell",
+            &serde_json::json!({ "command": "cargo test --lib" }),
+            Path::new("/tmp/work"),
+        );
+        assert!(res.is_ok(), "{res:?}");
+    }
+
+    #[test]
+    fn test_gate_shell_still_honors_explicit_shell_denies() {
+        let mut intent = spec();
+        intent
+            .security
+            .tool_acl
+            .allow
+            .retain(|rule| rule.tool != "shell");
+        intent.security.tool_acl.deny.push(ToolRule {
+            tool: "shell".into(),
+            actions: vec!["execute".into()],
+            constraints: BTreeMap::new(),
+        });
+        let res = evaluate_tool_call(
+            &intent,
+            &gate_task(),
+            "shell",
+            &serde_json::json!({ "command": "cargo test --lib" }),
+            Path::new("/tmp/work"),
+        );
+        assert!(matches!(res, Err(PolicyViolation { code, .. }) if code == "tool-acl-deny"));
+    }
+
+    #[test]
+    fn test_shell_result_records_written_paths_from_metadata() {
+        let output = ToolOutput::success("Exit code: 0").with_metadata(serde_json::json!({
+            "paths_written": ["src/lib.rs"]
+        }));
+        let mut record = ToolCallRecord {
+            tool_name: "shell".into(),
+            action: "execute".into(),
+            arguments_json: Some(
+                serde_json::json!({ "command": "perl -pi -e 's/x/y/' src/lib.rs" }),
+            ),
+            ..ToolCallRecord::default()
+        };
+
+        evaluate_tool_result(&spec(), &task(), "shell", &output, &mut record).unwrap();
+
+        assert_eq!(record.paths_written, vec!["src/lib.rs".to_string()]);
+    }
+
+    #[test]
+    fn test_shell_result_rejects_out_of_scope_metadata_writes() {
+        let output = ToolOutput::success("Exit code: 0").with_metadata(serde_json::json!({
+            "paths_written": ["vendor/generated.rs"]
+        }));
+        let mut record = ToolCallRecord {
+            tool_name: "shell".into(),
+            action: "execute".into(),
+            arguments_json: Some(
+                serde_json::json!({ "command": "printf hi > vendor/generated.rs" }),
+            ),
+            ..ToolCallRecord::default()
+        };
+
+        let violation = evaluate_tool_result(&spec(), &task(), "shell", &output, &mut record)
+            .expect_err("out-of-scope shell writes must be rejected");
+
+        assert_eq!(violation.code, "scope-creep");
+        assert_eq!(violation.path.as_deref(), Some("vendor/generated.rs"));
     }
 }

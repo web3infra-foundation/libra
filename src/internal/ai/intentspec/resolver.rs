@@ -399,4 +399,63 @@ mod tests {
         assert!(!spec.provenance.require_slsa_provenance);
         assert!(!spec.provenance.require_sbom);
     }
+
+    #[test]
+    fn test_resolve_implementation_only_does_not_require_test_log_without_checks() {
+        let draft = IntentDraft {
+            intent: DraftIntent {
+                summary: "Implement feature".to_string(),
+                problem_statement: "Add the requested behavior".to_string(),
+                change_type: ChangeType::Feature,
+                objectives: vec![Objective {
+                    title: "Ship feature".to_string(),
+                    kind: ObjectiveKind::Implementation,
+                }],
+                in_scope: vec!["src".to_string()],
+                out_of_scope: vec![],
+                touch_hints: None,
+            },
+            acceptance: DraftAcceptance {
+                success_criteria: vec!["feature works".to_string()],
+                fast_checks: vec![],
+                integration_checks: vec![],
+                security_checks: vec![],
+                release_checks: vec![],
+            },
+            risk: DraftRisk {
+                rationale: "normal feature".to_string(),
+                factors: vec![],
+                level: Some(RiskLevel::Low),
+            },
+        };
+
+        let spec = resolve_intentspec(
+            draft,
+            RiskLevel::Low,
+            ResolveContext {
+                working_dir: ".".to_string(),
+                base_ref: "HEAD".to_string(),
+                created_by_id: "tester".to_string(),
+            },
+        );
+
+        assert!(
+            spec.artifacts
+                .required
+                .iter()
+                .any(|req| req.name == ArtifactName::Patchset),
+            "{:?}",
+            spec.artifacts.required
+        );
+        assert!(
+            !spec
+                .artifacts
+                .required
+                .iter()
+                .any(|req| req.name == ArtifactName::TestLog
+                    && req.stage == ArtifactStage::PerTask),
+            "{:?}",
+            spec.artifacts.required
+        );
+    }
 }

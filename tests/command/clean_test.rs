@@ -298,6 +298,27 @@ async fn test_clean_force_and_dry_run_prefers_dry_run() {
     assert!(test_dir.path().join("untracked.txt").exists());
 }
 
+#[test]
+fn test_clean_force_json_reports_deleted_files() {
+    let repo = create_committed_repo_via_cli();
+    fs::write(repo.path().join("generated.txt"), "content").unwrap();
+
+    let output = run_libra_command(&["clean", "-f", "--json"], repo.path());
+    assert_cli_success(&output, "clean -f --json should succeed");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "clean");
+    assert_eq!(json["data"]["dry_run"], false);
+    assert_eq!(
+        json["data"]["removed"],
+        serde_json::json!(["generated.txt"])
+    );
+    assert!(
+        !repo.path().join("generated.txt").exists(),
+        "clean -f should remove the reported file"
+    );
+}
+
 #[tokio::test]
 #[serial]
 /// Tests clean can handle relatively long file paths.
@@ -376,4 +397,27 @@ async fn test_clean_force_permission_error_returns_io_exit_code() {
     let mut perms = fs::metadata("protected").unwrap().permissions();
     perms.set_mode(0o755);
     fs::set_permissions("protected", perms).unwrap();
+}
+
+#[tokio::test]
+#[serial]
+async fn test_clean_json_dry_run_lists_candidates() {
+    let repo = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    fs::write(repo.path().join("alpha.txt"), "alpha").unwrap();
+    fs::write(repo.path().join("beta.txt"), "beta").unwrap();
+
+    let output = run_libra_command(&["clean", "-n", "--json"], repo.path());
+    assert_cli_success(&output, "clean --json dry-run should succeed");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "clean");
+    assert_eq!(json["data"]["dry_run"], true);
+
+    let removed = json["data"]["removed"]
+        .as_array()
+        .expect("removed should be an array");
+    assert!(removed.iter().any(|path| path == "alpha.txt"));
+    assert!(removed.iter().any(|path| path == "beta.txt"));
 }

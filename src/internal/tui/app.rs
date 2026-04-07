@@ -43,7 +43,7 @@ use crate::{
         commands::CommandDispatcher,
         completion::{
             CompletionModel, CompletionRetryEvent, CompletionRetryObserver, CompletionRetryPolicy,
-            Message, RetryingCompletionModel,
+            CompletionUsage, Message, RetryingCompletionModel,
         },
         intentspec::{
             IntentDraft, ResolveContext, RiskLevel, render_summary, repair_intentspec,
@@ -51,12 +51,15 @@ use crate::{
         },
         mcp::{
             resource::{
-                CreateContextSnapshotParams, CreateDecisionParams, CreateIntentParams,
-                CreatePlanParams, CreateRunParams, CreateTaskParams, CreateToolInvocationParams,
+                CreateContextSnapshotParams, CreateDecisionParams, CreatePlanParams,
+                CreateRunParams, CreateTaskParams, CreateToolInvocationParams,
             },
             server::LibraMcpServer,
         },
-        orchestrator::{planner::compile_execution_plan_spec, types::ExecutionPlanSpec},
+        orchestrator::{
+            planner::compile_execution_plan_spec,
+            types::{ExecutionPlanSpec, TaskRuntimeEvent, TaskRuntimeNoteLevel, TaskRuntimePhase},
+        },
         sandbox::{ExecApprovalRequest, ReviewDecision},
         session::{SessionState, SessionStore},
         tools::{
@@ -113,6 +116,9 @@ impl McpWriteTracker {
 const LATEST_INTENTSPEC_INTENT_ID: &str = "latest_intentspec_intent_id";
 const LATEST_EXECUTION_PLAN_ID: &str = "latest_execution_plan_id";
 const LATEST_INTENTSPEC_JSON: &str = "latest_intentspec_json";
+const LATEST_INTENTSPEC_WORKSPACE_KEY: &str = "latest_intentspec_workspace_key";
+const LATEST_INTENTSPEC_BASE_REF: &str = "latest_intentspec_base_ref";
+const LATEST_INTENTSPEC_BRANCH_LABEL: &str = "latest_intentspec_branch_label";
 const MAX_INTENTSPEC_REPAIR_ATTEMPTS: usize = 2;
 const MCP_WRITE_TIMEOUT: Duration = Duration::from_secs(8);
 const MCP_TURN_TRACKING_TIMEOUT: Duration = Duration::from_secs(3);
@@ -181,6 +187,8 @@ struct PendingUserInput {
 /// Post-plan dialog state: stores the spec and user selection.
 struct PendingPostPlan {
     spec_json: String,
+    intent_id: Option<String>,
+    plan_id: Option<String>,
     selected: usize, // 0=Execute, 1=Modify, 2=Cancel
 }
 
@@ -263,6 +271,8 @@ pub struct App<M: CompletionModel> {
     pending_exec_approval: Option<PendingExecApproval>,
     /// Post-plan dialog state (present when user is choosing Execute/Modify/Cancel).
     pending_post_plan: Option<PendingPostPlan>,
+    /// Base IntentSpec JSON for the next spec-revision request, if the user chose Modify.
+    pending_plan_revision: Option<String>,
     /// Display name of the active model.
     model_name: String,
     /// Provider identifier.
@@ -289,7 +299,10 @@ pub struct App<M: CompletionModel> {
     managed_claudecode: Option<ClaudecodeTuiRuntime>,
 }
 
-impl<M: CompletionModel + Clone + 'static> App<M> {
+impl<M: CompletionModel + Clone + 'static> App<M>
+where
+    M::Response: CompletionUsage,
+{
     /// Create a new App instance.
     pub fn new(
         tui: Tui,
@@ -374,6 +387,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             pending_user_input: None,
             pending_exec_approval: None,
             pending_post_plan: None,
+            pending_plan_revision: None,
             model_name: app_config.model_name,
             provider_name: app_config.provider_name,
             mcp_server: app_config.mcp_server,
@@ -700,18 +714,85 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 _ => {}
             },
             AgentStatus::Thinking | AgentStatus::Retrying | AgentStatus::ExecutingTool => {
-                // During processing, only handle Escape for interrupt
-                if key.code == KeyCode::Esc {
-                    self.enqueue_mcp_turn_decision(
-                        "abandon",
-                        "Turn interrupted by user".to_string(),
-                    );
-                    self.interrupt_agent_task();
-                    self.clear_mcp_run_id();
-                    self.widget.bottom_pane.set_status(AgentStatus::Idle);
-                    self.complete_streaming_assistant_cell("Interrupted.".to_string());
-                    self.complete_running_tool_cells_with_interrupt();
-                    self.schedule_draw();
+                let mux_visible = self.widget.has_task_mux();
+                match key.code {
+                    KeyCode::Tab if mux_visible => {
+                        self.widget.task_mux_next();
+                        self.sync_mux_input_context();
+                        self.schedule_draw();
+                    }
+                    KeyCode::BackTab if mux_visible => {
+                        self.widget.task_mux_prev();
+                        self.sync_mux_input_context();
+                        self.schedule_draw();
+                    }
+                    KeyCode::Char('o')
+                        if mux_visible && key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        self.widget.task_mux_show_overview();
+                        self.sync_mux_input_context();
+                        self.schedule_draw();
+                    }
+                    KeyCode::Char('f')
+                        if mux_visible && key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        self.widget.task_mux_focus_selected();
+                        self.sync_mux_input_context();
+                        self.schedule_draw();
+                    }
+                    KeyCode::Enter if mux_visible && !self.widget.bottom_pane.is_empty() => {
+                        let command = self.widget.bottom_pane.take_input();
+                        if let Some(args) = command.trim().strip_prefix("/mux") {
+                            if !self.handle_mux_command(args) {
+                                self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                                    "Unknown mux command. Use `/mux next`, `/mux prev`, `/mux focus <n>`, `/mux overview`, or `/mux toggle`.".to_string(),
+                                )));
+                            }
+                        } else {
+                            self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                                "Workflow is running. Only local `/mux ...` commands are accepted in the shared input box right now.".to_string(),
+                            )));
+                        }
+                        self.schedule_draw();
+                    }
+                    KeyCode::Char(c) if mux_visible => {
+                        self.widget.bottom_pane.insert_char(c);
+                        self.schedule_draw();
+                    }
+                    KeyCode::Backspace if mux_visible => {
+                        self.widget.bottom_pane.backspace();
+                        self.schedule_draw();
+                    }
+                    KeyCode::Delete if mux_visible => {
+                        self.widget.bottom_pane.delete();
+                        self.schedule_draw();
+                    }
+                    KeyCode::Left if mux_visible => {
+                        self.widget.bottom_pane.cursor_left();
+                        self.schedule_draw();
+                    }
+                    KeyCode::Right if mux_visible => {
+                        self.widget.bottom_pane.cursor_right();
+                        self.schedule_draw();
+                    }
+                    KeyCode::Esc if mux_visible && !self.widget.bottom_pane.is_empty() => {
+                        self.widget.bottom_pane.clear();
+                        self.schedule_draw();
+                    }
+                    KeyCode::Esc => {
+                        self.enqueue_mcp_turn_decision(
+                            "abandon",
+                            "Turn interrupted by user".to_string(),
+                        );
+                        self.interrupt_agent_task();
+                        self.clear_mcp_run_id();
+                        self.widget.bottom_pane.set_status(AgentStatus::Idle);
+                        self.sync_mux_input_context();
+                        self.complete_streaming_assistant_cell("Interrupted.".to_string());
+                        self.complete_running_tool_cells_with_interrupt();
+                        self.schedule_draw();
+                    }
+                    _ => {}
                 }
             }
         }
@@ -808,6 +889,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             KeyCode::Esc => {
                 self.cancel_pending_user_input();
                 self.widget.bottom_pane.set_status(AgentStatus::Thinking);
+                self.sync_mux_input_context();
                 self.schedule_draw();
             }
             _ => {}
@@ -918,6 +1000,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         self.widget
             .bottom_pane
             .set_status(AgentStatus::AwaitingUserInput);
+        self.sync_mux_input_context();
         self.widget.bottom_pane.clear();
         self.sync_user_input_to_pane();
         self.schedule_draw();
@@ -929,12 +1012,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             return;
         }
 
-        self.widget.bottom_pane.set_exec_approval(
-            Some(request.command.clone()),
-            Some(request.cwd.display().to_string()),
-            request.reason.clone(),
-            request.is_retry,
-        );
+        self.widget.bottom_pane.set_exec_approval(Some(&request));
         self.pending_exec_approval = Some(PendingExecApproval {
             request,
             selected: 0,
@@ -943,6 +1021,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         self.widget
             .bottom_pane
             .set_status(AgentStatus::AwaitingApproval);
+        self.sync_mux_input_context();
         self.schedule_draw();
     }
 
@@ -959,9 +1038,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         };
         let _ = pending.request.response_tx.send(decision);
 
-        self.widget
-            .bottom_pane
-            .set_exec_approval(None, None, None, false);
+        self.widget.bottom_pane.set_exec_approval(None);
 
         if decision == ReviewDecision::Abort {
             self.enqueue_mcp_turn_decision(
@@ -980,6 +1057,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         self.widget
             .bottom_pane
             .set_status(AgentStatus::ExecutingTool);
+        self.sync_mux_input_context();
         self.schedule_draw();
     }
 
@@ -987,12 +1065,11 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         if let Some(pending) = self.pending_exec_approval.take() {
             let _ = pending.request.response_tx.send(ReviewDecision::Denied);
         }
-        self.widget
-            .bottom_pane
-            .set_exec_approval(None, None, None, false);
+        self.widget.bottom_pane.set_exec_approval(None);
         self.widget
             .bottom_pane
             .set_status(AgentStatus::ExecutingTool);
+        self.sync_mux_input_context();
         self.schedule_draw();
     }
 
@@ -1000,9 +1077,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         if let Some(pending) = self.pending_exec_approval.take() {
             let _ = pending.request.response_tx.send(ReviewDecision::Denied);
         }
-        self.widget
-            .bottom_pane
-            .set_exec_approval(None, None, None, false);
+        self.widget.bottom_pane.set_exec_approval(None);
     }
 
     fn handle_mouse_event(&mut self, mouse: crossterm::event::MouseEvent) {
@@ -1048,6 +1123,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 self.widget
                     .add_cell(Box::new(AssistantHistoryCell::streaming()));
                 self.widget.bottom_pane.set_status(AgentStatus::Thinking);
+                self.sync_mux_input_context();
                 self.schedule_draw();
                 self.clear_mcp_run_id();
                 if let Some(run_id_slot) = self.active_turn_run_id.as_ref()
@@ -1362,6 +1438,23 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     LATEST_INTENTSPEC_JSON.to_string(),
                     serde_json::Value::String(spec_json.clone()),
                 );
+                let binding = current_intentspec_binding(self.registry.working_dir());
+                self.session.metadata.insert(
+                    LATEST_INTENTSPEC_WORKSPACE_KEY.to_string(),
+                    serde_json::Value::String(binding.workspace_key),
+                );
+                self.session.metadata.insert(
+                    LATEST_INTENTSPEC_BASE_REF.to_string(),
+                    serde_json::Value::String(binding.base_ref),
+                );
+                if let Some(branch_label) = binding.branch_label {
+                    self.session.metadata.insert(
+                        LATEST_INTENTSPEC_BRANCH_LABEL.to_string(),
+                        serde_json::Value::String(branch_label),
+                    );
+                } else {
+                    self.session.metadata.remove(LATEST_INTENTSPEC_BRANCH_LABEL);
+                }
                 if let Some(ref id) = intent_id {
                     self.session.metadata.insert(
                         LATEST_INTENTSPEC_INTENT_ID.to_string(),
@@ -1381,6 +1474,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     self.mcp_plan_id = None;
                 }
 
+                self.widget.show_dag_preview((*plan).clone());
                 self.replace_streaming_assistant_cell(Box::new(PlanSummaryHistoryCell::new(
                     *spec,
                     *plan,
@@ -1392,12 +1486,15 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 // Show post-plan dialog instead of returning to Idle
                 self.pending_post_plan = Some(PendingPostPlan {
                     spec_json,
+                    intent_id,
+                    plan_id,
                     selected: 0,
                 });
                 self.widget.bottom_pane.reset_post_plan_selection();
                 self.widget
                     .bottom_pane
                     .set_status(AgentStatus::AwaitingPostPlanChoice);
+                self.sync_mux_input_context();
                 self.schedule_draw();
             }
             AppEvent::InsertHistoryCell {
@@ -1421,6 +1518,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 plan,
             } => {
                 self.widget.show_dag_panel(plan);
+                self.sync_mux_input_context();
                 self.schedule_draw();
             }
             AppEvent::DagTaskStatus {
@@ -1474,7 +1572,6 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 tool_name,
                 result,
             } => {
-                let should_hide_failure = should_hide_tool_failure(&tool_name, &result);
                 // For successful apply_patch, insert a visual diff cell.
                 if tool_name == "apply_patch"
                     && let Ok(ref output) = result
@@ -1507,12 +1604,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         if !tool_cell.contains_call_id(&call_id) {
                             continue;
                         }
-                        if should_hide_failure && tool_cell.hides_failed_calls() {
-                            tool_cell.remove_call(&call_id);
-                            if tool_cell.is_empty() {
-                                self.widget.cells.remove(idx);
-                            }
-                        } else if let Some(result) = pending_result.take() {
+                        if let Some(result) = pending_result.take() {
                             tool_cell.complete_call(&call_id, result);
                         }
                         break;
@@ -1527,6 +1619,46 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 status,
             } => {
                 self.widget.bottom_pane.set_status(status);
+                self.sync_mux_input_context();
+                self.schedule_draw();
+            }
+            AppEvent::TaskRuntimeEvent {
+                turn_id,
+                task_id,
+                event,
+            } => {
+                self.widget.apply_task_runtime_event(task_id, event.clone());
+                match event {
+                    TaskRuntimeEvent::ToolCallBegin {
+                        call_id,
+                        tool_name,
+                        arguments,
+                    } => {
+                        let event = AppEvent::ToolCallBegin {
+                            turn_id,
+                            call_id,
+                            tool_name,
+                            arguments,
+                        };
+                        Box::pin(self.handle_app_event(event)).await?;
+                        return Ok(());
+                    }
+                    TaskRuntimeEvent::ToolCallEnd {
+                        call_id,
+                        tool_name,
+                        result,
+                    } => {
+                        let event = AppEvent::ToolCallEnd {
+                            turn_id,
+                            call_id,
+                            tool_name,
+                            result,
+                        };
+                        Box::pin(self.handle_app_event(event)).await?;
+                        return Ok(());
+                    }
+                    _ => {}
+                }
                 self.schedule_draw();
             }
             AppEvent::McpTurnTrackingReady {
@@ -1571,6 +1703,20 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             return;
         }
 
+        if let Some(spec_json) = self.pending_plan_revision.take() {
+            if text.trim_start().starts_with('/') {
+                self.pending_plan_revision = Some(spec_json);
+                self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                    pending_plan_revision_help_message(),
+                )));
+                self.sync_mux_input_context();
+                self.schedule_draw();
+                return;
+            }
+            self.begin_plan_revision_flow(spec_json, &text).await;
+            return;
+        }
+
         // 2. Try YAML-defined slash commands (sent to model).
         let (effective_text, agent_name) =
             if let Some(result) = self.command_dispatcher.dispatch(&text) {
@@ -1595,6 +1741,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         };
 
         self.widget.clear_dag_panel();
+        self.sync_mux_input_context();
         let turn_id = self.begin_turn();
         let _ = self.app_event_tx.send(AppEvent::SubmitUserMessage {
             turn_id,
@@ -1630,7 +1777,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 self.session = SessionState::new(&self.registry.working_dir().to_string_lossy());
                 self.mcp_plan_id = None;
                 self.mcp_run_id = None;
+                self.pending_plan_revision = None;
                 reset_managed_claudecode_session(self.managed_claudecode.as_mut());
+                self.sync_mux_input_context();
             }
             BuiltinCommand::Model => {
                 let info = format!(
@@ -1659,10 +1808,43 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     self.schedule_draw();
                     return;
                 }
-                self.start_plan_workflow(args).await;
+                if let Some(spec_json) = self.pending_plan_revision.take() {
+                    match parse_pending_plan_revision_command(args) {
+                        PendingPlanRevisionCommand::Modify(request) => {
+                            self.begin_plan_revision_flow(spec_json, request).await;
+                        }
+                        PendingPlanRevisionCommand::Cancel => {
+                            self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                                "Spec revision canceled.".to_string(),
+                            )));
+                            self.widget.bottom_pane.set_status(AgentStatus::Idle);
+                            self.sync_mux_input_context();
+                            self.schedule_draw();
+                        }
+                        PendingPlanRevisionCommand::Invalid => {
+                            self.pending_plan_revision = Some(spec_json);
+                            self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                                pending_plan_revision_help_message(),
+                            )));
+                            self.sync_mux_input_context();
+                            self.schedule_draw();
+                        }
+                    }
+                } else {
+                    self.start_plan_workflow(args).await;
+                }
             }
             BuiltinCommand::Intent => {
                 self.handle_intent_command(args).await;
+            }
+            BuiltinCommand::Mux => {
+                let handled = self.handle_mux_command(args);
+                if !handled {
+                    self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                        "Mux unavailable. Start a parallel workflow first, or use `/mux next|prev|focus <n>|overview|toggle|list` while it is running.".to_string(),
+                    )));
+                }
+                self.schedule_draw();
             }
             BuiltinCommand::Quit => {
                 self.exit_info = Some(AppExitInfo {
@@ -1670,6 +1852,50 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 });
             }
         }
+    }
+
+    fn handle_mux_command(&mut self, args: &str) -> bool {
+        if !self.widget.has_task_mux() {
+            return false;
+        }
+
+        let trimmed = args.trim();
+        let mut parts = trimmed.split_whitespace();
+        let command = parts.next().unwrap_or("toggle");
+        let handled = match command {
+            "" | "toggle" => self.widget.task_mux_toggle_mode(),
+            "next" => self.widget.task_mux_next(),
+            "prev" => self.widget.task_mux_prev(),
+            "overview" => self.widget.task_mux_show_overview(),
+            "focus" => {
+                if let Some(index_text) = parts.next() {
+                    index_text
+                        .parse::<usize>()
+                        .ok()
+                        .and_then(|index| index.checked_sub(1))
+                        .is_some_and(|index| self.widget.task_mux_focus_index(index))
+                } else {
+                    self.widget.task_mux_focus_selected()
+                }
+            }
+            "list" => {
+                if let Some(lines) = self.widget.task_mux_list_lines() {
+                    self.widget
+                        .add_cell(Box::new(AssistantHistoryCell::new(format!(
+                            "Task mux panes:\n{}",
+                            lines.join("\n")
+                        ))));
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
+        if handled {
+            self.sync_mux_input_context();
+        }
+        handled
     }
 
     async fn create_mcp_exit_decision(&self, reason: &ExitReason) {
@@ -1723,7 +1949,39 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             .bottom_pane
             .set_git_branch(current_git_branch_label(self.registry.working_dir()));
         self.widget.bottom_pane.set_status(AgentStatus::Idle);
+        self.sync_mux_input_context();
         self.schedule_draw();
+    }
+
+    fn sync_mux_input_context(&mut self) {
+        let show_mux_context = self.widget.has_task_mux()
+            && matches!(
+                self.widget.bottom_pane.status,
+                AgentStatus::Thinking
+                    | AgentStatus::Retrying
+                    | AgentStatus::ExecutingTool
+                    | AgentStatus::AwaitingApproval
+            );
+        if show_mux_context {
+            self.widget
+                .bottom_pane
+                .set_input_context_label(self.widget.task_mux_context_label());
+            self.widget
+                .bottom_pane
+                .set_input_hint(self.widget.task_mux_input_hint());
+        } else if self.pending_plan_revision.is_some()
+            && matches!(self.widget.bottom_pane.status, AgentStatus::Idle)
+        {
+            self.widget
+                .bottom_pane
+                .set_input_context_label(Some("Revise IntentSpec".to_string()));
+            self.widget.bottom_pane.set_input_hint(Some(
+                "Describe spec changes, or use /plan modify <changes> or /plan cancel".to_string(),
+            ));
+        } else {
+            self.widget.bottom_pane.set_input_context_label(None);
+            self.widget.bottom_pane.set_input_hint(None);
+        }
     }
 
     // ── Post-plan dialog ────────────────────────────────────────────
@@ -1737,14 +1995,20 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         match pending.selected {
             0 => {
                 // Execute: validate spec and show placeholder
-                self.start_execute_workflow(&pending.spec_json).await;
+                self.start_execute_workflow(
+                    &pending.spec_json,
+                    pending.intent_id.clone(),
+                    pending.plan_id.clone(),
+                )
+                .await;
             }
             _ => {
                 // Modify (1) or Cancel (2+)
                 if pending.selected == 1 {
+                    self.pending_plan_revision = Some(pending.spec_json);
                     let msg = format!(
-                        "Here is the current IntentSpec. Please tell me what you'd like to change:\n\n```json\n{}\n```",
-                        pending.spec_json
+                        "{} Your next plain-text message will revise the current spec.",
+                        pending_plan_revision_help_message()
                     );
                     self.widget
                         .add_cell(Box::new(AssistantHistoryCell::new(msg.clone())));
@@ -1752,6 +2016,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     self.session.add_assistant_message(&msg);
                 }
                 self.widget.bottom_pane.set_status(AgentStatus::Idle);
+                self.sync_mux_input_context();
             }
         }
         self.schedule_draw();
@@ -1762,7 +2027,12 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         self.set_idle_and_draw();
     }
 
-    async fn start_execute_workflow(&mut self, spec_json: &str) {
+    async fn start_execute_workflow(
+        &mut self,
+        spec_json: &str,
+        persisted_intent_id: Option<String>,
+        persisted_plan_id: Option<String>,
+    ) {
         use crate::internal::ai::{
             intentspec::types::IntentSpec,
             orchestrator::{
@@ -1787,6 +2057,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         self.widget
             .add_cell(Box::new(AssistantHistoryCell::streaming()));
         self.widget.bottom_pane.set_status(AgentStatus::Thinking);
+        self.sync_mux_input_context();
         self.schedule_draw();
         let turn_id = self.begin_turn();
         self.running_tool_calls = 0;
@@ -1800,7 +2071,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             .map(|a| a.system_prompt.clone());
         let reviewer_preamble = self
             .agent_router
-            .get("reviewer")
+            .get("code_reviewer")
             .map(|a| a.system_prompt.clone());
         let mcp_server = self.mcp_server.clone();
         let tx = self.app_event_tx.clone();
@@ -1823,24 +2094,6 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 fn scoped_call_id(task: &TaskSpec, call_id: &str) -> String {
                     format!("{}:{call_id}", task.id())
                 }
-
-                fn summarize_gate_check(
-                    check: &crate::internal::ai::intentspec::types::Check,
-                ) -> String {
-                    match check.kind {
-                        crate::internal::ai::intentspec::types::CheckKind::Policy => {
-                            format!("policy {}", check.id)
-                        }
-                        crate::internal::ai::intentspec::types::CheckKind::Command
-                        | crate::internal::ai::intentspec::types::CheckKind::TestSuite => check
-                            .command
-                            .as_deref()
-                            .map(str::trim)
-                            .filter(|command| !command.is_empty())
-                            .map(|command| command.to_string())
-                            .unwrap_or_else(|| check.id.clone()),
-                    }
-                }
             }
 
             impl OrchestratorObserver for UiOrchestratorObserver {
@@ -1851,108 +2104,82 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     });
                 }
 
-                fn on_task_started(&self, task: &TaskSpec) {
-                    let _ = self.tx.send(AppEvent::AgentStatusUpdate {
-                        turn_id: self.turn_id,
-                        status: AgentStatus::Thinking,
-                    });
-                    let _ = self.tx.send(AppEvent::DagTaskStatus {
-                        turn_id: self.turn_id,
-                        task_id: task.id(),
-                        status: crate::internal::ai::orchestrator::types::TaskNodeStatus::Running,
-                    });
-                }
-
-                fn on_task_completed(
-                    &self,
-                    task: &TaskSpec,
-                    result: &crate::internal::ai::orchestrator::types::TaskResult,
-                ) {
-                    let _ = self.tx.send(AppEvent::DagTaskStatus {
-                        turn_id: self.turn_id,
-                        task_id: task.id(),
-                        status: result.status.clone(),
-                    });
-                    self.send_note(format_task_completion_note(task.title(), result));
-                }
-
-                fn on_task_assistant_message(&self, _task: &TaskSpec, _text: &str) {}
-
-                fn on_tool_call_begin(
-                    &self,
-                    task: &TaskSpec,
-                    call_id: &str,
-                    tool_name: &str,
-                    arguments: &serde_json::Value,
-                ) {
-                    let _ = self.tx.send(AppEvent::ToolCallBegin {
-                        turn_id: self.turn_id,
-                        call_id: Self::scoped_call_id(task, call_id),
-                        tool_name: tool_name.to_string(),
-                        arguments: arguments.clone(),
-                    });
-                }
-
-                fn on_tool_call_end(
-                    &self,
-                    task: &TaskSpec,
-                    call_id: &str,
-                    tool_name: &str,
-                    result: &Result<ToolOutput, String>,
-                ) {
-                    let _ = self.tx.send(AppEvent::ToolCallEnd {
-                        turn_id: self.turn_id,
-                        call_id: Self::scoped_call_id(task, call_id),
-                        tool_name: tool_name.to_string(),
-                        result: result.clone(),
-                    });
-                }
-
-                fn on_reviewer_started(&self, _task: &TaskSpec) {}
-
-                fn on_reviewer_completed(
-                    &self,
-                    _task: &TaskSpec,
-                    _review: Option<&crate::internal::ai::orchestrator::types::ReviewOutcome>,
-                ) {
-                }
-
-                fn on_gate_check_started(
-                    &self,
-                    task: &TaskSpec,
-                    check: &crate::internal::ai::intentspec::types::Check,
-                ) {
-                    let summary = Self::summarize_gate_check(check);
-                    self.send_note(format!(
-                        "Gate Check · {}  \nrunning · {}",
-                        task.title(),
-                        summary
-                    ));
-                }
-
-                fn on_gate_check_completed(
-                    &self,
-                    task: &TaskSpec,
-                    check: &crate::internal::ai::intentspec::types::Check,
-                    result: &crate::internal::ai::orchestrator::types::GateResult,
-                ) {
-                    let summary = Self::summarize_gate_check(check);
-                    let outcome = if result.passed { "passed" } else { "failed" };
-                    let detail = if result.timed_out {
-                        "timed out".to_string()
-                    } else {
-                        format!("exit {}", result.exit_code)
-                    };
-                    let mut metrics = vec![outcome.to_string(), summary];
-                    if result.duration_ms > 0 {
-                        metrics.push(format!("{} ms", result.duration_ms));
+                fn on_task_runtime_event(&self, task: &TaskSpec, event: TaskRuntimeEvent) {
+                    match &event {
+                        TaskRuntimeEvent::Phase(TaskRuntimePhase::Starting) => {
+                            let _ = self.tx.send(AppEvent::AgentStatusUpdate {
+                                turn_id: self.turn_id,
+                                status: AgentStatus::Thinking,
+                            });
+                            let _ = self.tx.send(AppEvent::DagTaskStatus {
+                                turn_id: self.turn_id,
+                                task_id: task.id(),
+                                status: crate::internal::ai::orchestrator::types::TaskNodeStatus::Running,
+                            });
+                        }
+                        TaskRuntimeEvent::Phase(TaskRuntimePhase::Completed) => {
+                            let _ = self.tx.send(AppEvent::DagTaskStatus {
+                                turn_id: self.turn_id,
+                                task_id: task.id(),
+                                status: crate::internal::ai::orchestrator::types::TaskNodeStatus::Completed,
+                            });
+                        }
+                        TaskRuntimeEvent::Phase(TaskRuntimePhase::Failed) => {
+                            let _ = self.tx.send(AppEvent::DagTaskStatus {
+                                turn_id: self.turn_id,
+                                task_id: task.id(),
+                                status: crate::internal::ai::orchestrator::types::TaskNodeStatus::Failed,
+                            });
+                        }
+                        TaskRuntimeEvent::WorkspaceReady {
+                            working_dir,
+                            isolated,
+                        } => {
+                            self.send_note(format_task_workspace_note(
+                                task.title(),
+                                working_dir,
+                                *isolated,
+                            ));
+                        }
+                        TaskRuntimeEvent::Note { level, text } => {
+                            let title = match level {
+                                TaskRuntimeNoteLevel::Info => format!("Task · {}", task.title()),
+                                TaskRuntimeNoteLevel::Error => {
+                                    format!("Task Failed · {}", task.title())
+                                }
+                            };
+                            self.send_note(format!("{title}  \n{text}"));
+                        }
+                        _ => {}
                     }
-                    metrics.push(detail);
-                    self.send_note(format!(
-                        "Gate Check · {}  \n{}",
-                        task.title(),
-                        metrics.join(" · ")
-                    ));
+
+                    let mux_event = match event {
+                        TaskRuntimeEvent::ToolCallBegin {
+                            call_id,
+                            tool_name,
+                            arguments,
+                        } => TaskRuntimeEvent::ToolCallBegin {
+                            call_id: Self::scoped_call_id(task, &call_id),
+                            tool_name,
+                            arguments,
+                        },
+                        TaskRuntimeEvent::ToolCallEnd {
+                            call_id,
+                            tool_name,
+                            result,
+                        } => TaskRuntimeEvent::ToolCallEnd {
+                            call_id: Self::scoped_call_id(task, &call_id),
+                            tool_name,
+                            result,
+                        },
+                        other => other,
+                    };
+
+                    let _ = self.tx.send(AppEvent::TaskRuntimeEvent {
+                        turn_id: self.turn_id,
+                        task_id: task.id(),
+                        event: mux_event,
+                    });
                 }
 
                 fn on_graph_progress(&self, completed: usize, total: usize) {
@@ -1992,6 +2219,8 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             let config = OrchestratorConfig {
                 working_dir,
                 base_commit: None,
+                persisted_intent_id,
+                persisted_plan_id,
                 dagrs_resume_checkpoint_id: None,
                 coder_preamble,
                 reviewer_preamble,
@@ -2031,27 +2260,53 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             return;
         }
 
+        let prompt_body = build_plan_prompt(request);
+        let prompt = if let Some(agent) = self.agent_router.get("planner") {
+            format!("{}\n\n---\n\n{}", agent.system_prompt, prompt_body)
+        } else {
+            prompt_body
+        };
         let user_text = format!("/plan {request}");
+        self.begin_plan_workflow(user_text, prompt).await;
+    }
+
+    async fn begin_plan_revision_flow(&mut self, spec_json: String, request: &str) {
+        let request = request.trim();
+        if request.is_empty() {
+            self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                pending_plan_revision_help_message(),
+            )));
+            self.pending_plan_revision = Some(spec_json);
+            self.sync_mux_input_context();
+            self.schedule_draw();
+            return;
+        }
+
+        let prompt_body = build_plan_revision_prompt(&spec_json, request);
+        let prompt = if let Some(agent) = self.agent_router.get("planner") {
+            format!("{}\n\n---\n\n{}", agent.system_prompt, prompt_body)
+        } else {
+            prompt_body
+        };
+        let user_text = format!("Modify current spec: {request}");
+        self.begin_plan_workflow(user_text, prompt).await;
+    }
+
+    async fn begin_plan_workflow(&mut self, user_text: String, prompt: String) {
+        self.pending_plan_revision = None;
         let turn_id = self.begin_turn();
         self.running_tool_calls = 0;
         self.session.add_user_message(&user_text);
         self.widget
             .add_cell(Box::new(UserHistoryCell::new(user_text.clone())));
         self.widget.clear_dag_panel();
+        self.sync_mux_input_context();
         self.widget
             .add_cell(Box::new(AssistantHistoryCell::streaming()));
         self.widget.bottom_pane.set_status(AgentStatus::Thinking);
+        self.sync_mux_input_context();
         self.schedule_draw();
 
-        let prompt = if let Some(agent) = self.agent_router.get("planner") {
-            format!(
-                "{}\n\n---\n\n{}",
-                agent.system_prompt,
-                build_plan_prompt(request)
-            )
-        } else {
-            build_plan_prompt(request)
-        };
         let model = self.model.clone();
         let registry = self.registry.clone();
         let mut config = self.config.clone();
@@ -2224,7 +2479,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 draft,
                 risk_level,
                 ResolveContext {
-                    working_dir: working_dir.display().to_string(),
+                    working_dir: canonical_working_dir_label(&working_dir),
                     base_ref: current_head_sha(&working_dir),
                     created_by_id: "tui-user".to_string(),
                 },
@@ -2257,51 +2512,17 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 return;
             }
 
-            let canonical =
-                match crate::internal::ai::intentspec::canonical::to_canonical_json(&spec) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        let _ = tx.send(AppEvent::AgentEvent {
-                            turn_id,
-                            event: AgentEvent::Error {
-                                message: format!("Plan failed: cannot serialize IntentSpec: {e}"),
-                            },
-                        });
-                        return;
-                    }
-                };
-
             let mut persistence_warning = None;
             let intent_id = if let Some(ref mcp_server) = mcp_server {
-                let params = CreateIntentParams {
-                    content: "IntentSpec generated by planner".to_string(),
-                    structured_content: Some(canonical),
-                    parent_id: None,
-                    parent_ids: None,
-                    analysis_context_frame_ids: None,
-                    status: Some("active".to_string()),
-                    commit_sha: None,
-                    reason: None,
-                    next_intent_id: None,
-                    actor_kind: Some("system".to_string()),
-                    actor_id: Some("libra-plan".to_string()),
-                };
-                let actor_kind = params.actor_kind.clone();
-                let actor_id = params.actor_id.clone();
-                match mcp_server
-                    .resolve_actor_from_params(actor_kind.as_deref(), actor_id.as_deref())
+                match crate::internal::ai::intentspec::persistence::persist_intentspec(
+                    &spec, mcp_server,
+                )
+                .await
                 {
-                    Ok(actor) => match mcp_server.create_intent_impl(params, actor).await {
-                        Ok(call_result) => parse_created_id(&call_result),
-                        Err(e) => {
-                            persistence_warning =
-                                Some(format!("failed to persist intent into MCP: {e:?}"));
-                            None
-                        }
-                    },
-                    Err(e) => {
+                    Ok(intent_id) => Some(intent_id),
+                    Err(error) => {
                         persistence_warning =
-                            Some(format!("failed to resolve MCP actor for intent: {e:?}"));
+                            Some(format!("failed to persist intent into MCP: {error}"));
                         None
                     }
                 }
@@ -2384,32 +2605,65 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
     async fn handle_intent_command(&mut self, args: &str) {
         match args.trim() {
             "show" => {
-                let rendered = self.load_latest_intentspec_json().await.unwrap_or_else(|| {
-                    "No IntentSpec found. Run `/plan <requirement>` first.".to_string()
-                });
+                let rendered = match self.load_latest_intentspec_json().await {
+                    LatestIntentSpecLoad::Found(json) => json,
+                    LatestIntentSpecLoad::Missing => {
+                        "No IntentSpec found. Run `/plan <requirement>` first.".to_string()
+                    }
+                    LatestIntentSpecLoad::BindingMismatch(message) => message,
+                };
                 self.widget
                     .add_cell(Box::new(AssistantHistoryCell::new(rendered)));
                 self.schedule_draw();
             }
+            "execute" => match self.load_latest_intentspec_json().await {
+                LatestIntentSpecLoad::Found(spec_json) => {
+                    self.start_execute_workflow(
+                        &spec_json,
+                        self.session
+                            .metadata
+                            .get(LATEST_INTENTSPEC_INTENT_ID)
+                            .and_then(serde_json::Value::as_str)
+                            .map(ToString::to_string),
+                        self.session
+                            .metadata
+                            .get(LATEST_EXECUTION_PLAN_ID)
+                            .and_then(serde_json::Value::as_str)
+                            .map(ToString::to_string),
+                    )
+                    .await;
+                }
+                LatestIntentSpecLoad::Missing => {
+                    self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                        "No IntentSpec found. Run `/plan <requirement>` first.".to_string(),
+                    )));
+                    self.schedule_draw();
+                }
+                LatestIntentSpecLoad::BindingMismatch(message) => {
+                    self.widget
+                        .add_cell(Box::new(AssistantHistoryCell::new(message)));
+                    self.schedule_draw();
+                }
+            },
             _ => {
                 self.widget.add_cell(Box::new(AssistantHistoryCell::new(
-                    "Usage: /intent show".to_string(),
+                    "Usage: /intent show|execute".to_string(),
                 )));
                 self.schedule_draw();
             }
         }
     }
 
-    async fn load_latest_intentspec_json(&self) -> Option<String> {
-        if let (Some(id), Some(mcp)) = (
-            self.session
-                .metadata
-                .get(LATEST_INTENTSPEC_INTENT_ID)
-                .and_then(|v| v.as_str()),
-            self.mcp_server.clone(),
-        ) && let Some(spec) = fetch_intentspec_from_object_id(&mcp, id).await
-        {
-            return serde_json::to_string_pretty(&spec).ok();
+    async fn load_latest_intentspec_json(&self) -> LatestIntentSpecLoad {
+        let binding = current_intentspec_binding(self.registry.working_dir());
+        let binding_matches = latest_intentspec_binding_matches(&self.session.metadata, &binding);
+        if !binding_matches {
+            return LatestIntentSpecLoad::BindingMismatch(
+                latest_intentspec_binding_mismatch_message(&self.session.metadata, &binding)
+                    .unwrap_or_else(|| {
+                        "Latest IntentSpec belongs to a different workspace or HEAD.".to_string()
+                    }),
+            );
         }
 
         if let Some(json_text) = self
@@ -2417,18 +2671,50 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             .metadata
             .get(LATEST_INTENTSPEC_JSON)
             .and_then(|v| v.as_str())
+            && let Ok(spec) =
+                serde_json::from_str::<crate::internal::ai::intentspec::IntentSpec>(json_text)
         {
-            return Some(json_text.to_string());
+            if intentspec_matches_workspace(&spec, &binding.workspace_key, &binding.base_ref) {
+                return LatestIntentSpecLoad::Found(json_text.to_string());
+            }
+            return LatestIntentSpecLoad::BindingMismatch(format_intentspec_target_mismatch(
+                spec.metadata.target.repo.locator.as_str(),
+                &spec.metadata.target.base_ref,
+                self.session
+                    .metadata
+                    .get(LATEST_INTENTSPEC_BRANCH_LABEL)
+                    .and_then(|value| value.as_str()),
+                &binding,
+            ));
         }
 
-        let mcp = self.mcp_server.clone()?;
-        let ids = list_intent_object_ids(&mcp).await;
-        for id in ids.into_iter().rev() {
-            if let Some(spec) = fetch_intentspec_from_object_id(&mcp, &id).await {
-                return serde_json::to_string_pretty(&spec).ok();
+        let Some(mcp) = self.mcp_server.clone() else {
+            return LatestIntentSpecLoad::Missing;
+        };
+        if let Some(id) = self
+            .session
+            .metadata
+            .get(LATEST_INTENTSPEC_INTENT_ID)
+            .and_then(|v| v.as_str())
+            && let Some(spec) = fetch_intentspec_from_object_id(&mcp, id).await
+        {
+            if intentspec_matches_workspace(&spec, &binding.workspace_key, &binding.base_ref) {
+                return serde_json::to_string_pretty(&spec)
+                    .map(LatestIntentSpecLoad::Found)
+                    .unwrap_or(LatestIntentSpecLoad::Missing);
             }
+            return LatestIntentSpecLoad::BindingMismatch(format_intentspec_target_mismatch(
+                spec.metadata.target.repo.locator.as_str(),
+                &spec.metadata.target.base_ref,
+                self.session
+                    .metadata
+                    .get(LATEST_INTENTSPEC_BRANCH_LABEL)
+                    .and_then(|value| value.as_str()),
+                &binding,
+            ));
         }
-        None
+
+        LatestIntentSpecLoad::Missing
     }
 
     fn interrupt_agent_task(&mut self) {
@@ -2454,6 +2740,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             AgentStatus::Idle
         };
         self.widget.bottom_pane.set_status(next_status);
+        self.sync_mux_input_context();
     }
 
     fn insert_before_streaming_assistant(
@@ -2570,6 +2857,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 tool_cell.interrupt_running();
             }
         }
+        self.widget.interrupt_task_mux_tool_calls();
     }
 
     /// Schedule a frame draw with frame rate limiting.
@@ -2630,6 +2918,32 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
     }
 }
 
+enum PendingPlanRevisionCommand<'a> {
+    Modify(&'a str),
+    Cancel,
+    Invalid,
+}
+
+fn parse_pending_plan_revision_command(args: &str) -> PendingPlanRevisionCommand<'_> {
+    let trimmed = args.trim();
+    if trimmed.eq_ignore_ascii_case("cancel") {
+        return PendingPlanRevisionCommand::Cancel;
+    }
+    if let Some(request) = trimmed
+        .strip_prefix("modify ")
+        .or_else(|| trimmed.strip_prefix("revise "))
+        .map(str::trim)
+        .filter(|request| !request.is_empty())
+    {
+        return PendingPlanRevisionCommand::Modify(request);
+    }
+    PendingPlanRevisionCommand::Invalid
+}
+
+fn pending_plan_revision_help_message() -> String {
+    "Revise mode is active. Describe changes in plain text, use `/plan modify <changes>` to keep revising, or `/plan cancel` to exit.".to_string()
+}
+
 fn append_to_last_tool_group_cell(
     cells: &mut Vec<Box<dyn super::history_cell::HistoryCell>>,
     call_id: String,
@@ -2663,13 +2977,6 @@ fn append_to_last_tool_group_cell(
 
     tool_cell.append_call(call_id, tool_name.to_string(), arguments);
     true
-}
-
-fn should_hide_tool_failure(tool_name: &str, result: &Result<ToolOutput, String>) -> bool {
-    matches!(
-        tool_name,
-        "read_file" | "list_dir" | "grep_files" | "apply_patch"
-    ) && !matches!(result, Ok(output) if output.is_success())
 }
 
 fn format_orchestrator_result(
@@ -2958,16 +3265,15 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        append_to_last_tool_group_cell, format_orchestrator_result, should_hide_tool_failure,
+        PendingPlanRevisionCommand, append_to_last_tool_group_cell, build_plan_revision_prompt,
+        format_intentspec_target_mismatch, format_orchestrator_result,
+        parse_pending_plan_revision_command, pending_plan_revision_help_message,
         should_start_mcp_turn_tracking,
     };
     use crate::internal::{
-        ai::{
-            orchestrator::types::{
-                DecisionOutcome, ExecutionPlanSpec, GateReport, OrchestratorResult, SystemReport,
-                TaskContract, TaskKind, TaskNodeStatus, TaskResult, TaskSpec,
-            },
-            tools::ToolOutput,
+        ai::orchestrator::types::{
+            DecisionOutcome, ExecutionPlanSpec, GateReport, OrchestratorResult, SystemReport,
+            TaskContract, TaskKind, TaskNodeStatus, TaskResult, TaskSpec,
         },
         tui::history_cell::{AssistantHistoryCell, HistoryCell, ToolCallHistoryCell},
     };
@@ -3014,6 +3320,7 @@ mod tests {
                 retry_count: 4,
                 tool_calls: vec![],
                 policy_violations: vec![],
+                model_usage: None,
                 review: None,
             }],
             system_report: SystemReport {
@@ -3098,27 +3405,84 @@ mod tests {
     }
 
     #[test]
-    fn hides_failed_explore_and_edit_calls() {
-        assert!(should_hide_tool_failure(
-            "read_file",
-            &Err("file not found".to_string())
+    fn keeps_failed_tool_calls_visible() {
+        let mut cell = ToolCallHistoryCell::new(
+            "1".to_string(),
+            "read_file".to_string(),
+            json!({"file_path":"src/main.rs"}),
+        );
+
+        cell.complete_call("1", Err("file not found".to_string()));
+
+        let rendered = cell.display_lines(100);
+        let joined = rendered
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(joined.contains("Explore failed"));
+        assert!(joined.contains("Read src/main.rs"));
+        assert!(joined.contains("file not found"));
+    }
+
+    #[test]
+    fn plan_revision_prompt_uses_current_spec_as_baseline() {
+        let prompt = build_plan_revision_prompt(
+            "{\n  \"kind\": \"IntentSpec\"\n}",
+            "add an integration gate for cargo test",
+        );
+
+        assert!(prompt.contains("You are revising an existing IntentSpec."));
+        assert!(prompt.contains("Current IntentSpec:"));
+        assert!(prompt.contains("\"kind\": \"IntentSpec\""));
+        assert!(prompt.contains("Requested changes:\nadd an integration gate for cargo test"));
+        assert!(prompt.contains("submit_intent_draft exactly once"));
+    }
+
+    #[test]
+    fn parses_pending_revision_builtin_commands() {
+        assert!(matches!(
+            parse_pending_plan_revision_command("modify tighten sandbox"),
+            PendingPlanRevisionCommand::Modify("tighten sandbox")
         ));
-        assert!(should_hide_tool_failure(
-            "apply_patch",
-            &Err("context mismatch".to_string())
+        assert!(matches!(
+            parse_pending_plan_revision_command("revise add checks"),
+            PendingPlanRevisionCommand::Modify("add checks")
+        ));
+        assert!(matches!(
+            parse_pending_plan_revision_command("cancel"),
+            PendingPlanRevisionCommand::Cancel
+        ));
+        assert!(matches!(
+            parse_pending_plan_revision_command("status"),
+            PendingPlanRevisionCommand::Invalid
         ));
     }
 
     #[test]
-    fn keeps_failed_shell_calls_visible() {
-        assert!(!should_hide_tool_failure(
-            "shell",
-            &Err("command exited with status 1".to_string())
-        ));
-        assert!(!should_hide_tool_failure(
-            "read_file",
-            &Ok(ToolOutput::success("ok"))
-        ));
+    fn pending_revision_help_mentions_escape_hatch() {
+        let help = pending_plan_revision_help_message();
+        assert!(help.contains("/plan modify <changes>"));
+        assert!(help.contains("/plan cancel"));
+    }
+
+    #[test]
+    fn intent_mismatch_message_mentions_current_and_stored_bindings() {
+        let message = format_intentspec_target_mismatch(
+            "/tmp/other",
+            "1234567890abcdef",
+            Some("feature/spec"),
+            &super::IntentSpecBinding {
+                workspace_key: "/tmp/current".into(),
+                base_ref: "fedcba0987654321".into(),
+                branch_label: Some("main".into()),
+            },
+        );
+
+        assert!(message.contains("current · /tmp/current @ fedcba098765 (main)"));
+        assert!(message.contains("stored · /tmp/other @ 1234567890ab (feature/spec)"));
+        assert!(message.contains("different workspace or HEAD"));
     }
 }
 
@@ -3263,6 +3627,18 @@ User request:\n{request}"
     )
 }
 
+fn build_plan_revision_prompt(spec_json: &str, request: &str) -> String {
+    format!(
+        "You are revising an existing IntentSpec.\n\
+First, you MUST call request_user_input with exactly one question id=risk_profile, header=Risk, and options Low/Medium/High.\n\
+Use the current IntentSpec as the baseline, apply only the user's requested changes, and then call submit_intent_draft exactly once.\n\
+If required information is missing, call request_user_input again for focused follow-up questions.\n\
+Do not output a plain-text plan; finalize by submitting the draft tool call.\n\n\
+Current IntentSpec:\n```json\n{spec_json}\n```\n\n\
+Requested changes:\n{request}"
+    )
+}
+
 fn parse_value_or_json_string<T: serde::de::DeserializeOwned>(
     value: &serde_json::Value,
 ) -> Result<T, serde_json::Error> {
@@ -3307,6 +3683,110 @@ fn current_head_sha(working_dir: &std::path::Path) -> String {
         }
         _ => "HEAD".to_string(),
     }
+}
+
+struct IntentSpecBinding {
+    workspace_key: String,
+    base_ref: String,
+    branch_label: Option<String>,
+}
+
+enum LatestIntentSpecLoad {
+    Found(String),
+    Missing,
+    BindingMismatch(String),
+}
+
+fn canonical_working_dir_label(working_dir: &std::path::Path) -> String {
+    std::fs::canonicalize(working_dir)
+        .unwrap_or_else(|_| working_dir.to_path_buf())
+        .display()
+        .to_string()
+}
+
+fn current_intentspec_binding(working_dir: &std::path::Path) -> IntentSpecBinding {
+    IntentSpecBinding {
+        workspace_key: canonical_working_dir_label(working_dir),
+        base_ref: current_head_sha(working_dir),
+        branch_label: current_git_branch_label(working_dir),
+    }
+}
+
+fn latest_intentspec_binding_matches(
+    metadata: &HashMap<String, serde_json::Value>,
+    binding: &IntentSpecBinding,
+) -> bool {
+    metadata
+        .get(LATEST_INTENTSPEC_WORKSPACE_KEY)
+        .and_then(|value| value.as_str())
+        .is_some_and(|workspace| workspace == binding.workspace_key)
+        && metadata
+            .get(LATEST_INTENTSPEC_BASE_REF)
+            .and_then(|value| value.as_str())
+            .is_some_and(|base_ref| base_ref == binding.base_ref)
+        && metadata
+            .get(LATEST_INTENTSPEC_BRANCH_LABEL)
+            .and_then(|value| value.as_str())
+            == binding.branch_label.as_deref()
+}
+
+fn latest_intentspec_binding_mismatch_message(
+    metadata: &HashMap<String, serde_json::Value>,
+    binding: &IntentSpecBinding,
+) -> Option<String> {
+    let workspace = metadata
+        .get(LATEST_INTENTSPEC_WORKSPACE_KEY)
+        .and_then(|value| value.as_str())?;
+    let base_ref = metadata
+        .get(LATEST_INTENTSPEC_BASE_REF)
+        .and_then(|value| value.as_str())?;
+    let branch = metadata
+        .get(LATEST_INTENTSPEC_BRANCH_LABEL)
+        .and_then(|value| value.as_str());
+    Some(format_intentspec_target_mismatch(
+        workspace, base_ref, branch, binding,
+    ))
+}
+
+fn format_intentspec_target_mismatch(
+    stored_workspace: &str,
+    stored_base_ref: &str,
+    stored_branch: Option<&str>,
+    binding: &IntentSpecBinding,
+) -> String {
+    format!(
+        "Latest IntentSpec belongs to a different workspace or HEAD.\ncurrent · {} @ {}{}\nstored · {} @ {}{}\nRun `/plan <requirement>` in this worktree/head, or switch back to the matching checkout.",
+        binding.workspace_key,
+        shorten_binding_ref(&binding.base_ref),
+        format_binding_branch(binding.branch_label.as_deref()),
+        stored_workspace,
+        shorten_binding_ref(stored_base_ref),
+        format_binding_branch(stored_branch),
+    )
+}
+
+fn shorten_binding_ref(raw: &str) -> String {
+    const MAX_LEN: usize = 12;
+    if raw.len() <= MAX_LEN {
+        raw.to_string()
+    } else {
+        raw[..MAX_LEN].to_string()
+    }
+}
+
+fn format_binding_branch(branch: Option<&str>) -> String {
+    branch
+        .map(|branch| format!(" ({branch})"))
+        .unwrap_or_default()
+}
+
+fn intentspec_matches_workspace(
+    spec: &crate::internal::ai::intentspec::IntentSpec,
+    workspace_locator: &str,
+    head_sha: &str,
+) -> bool {
+    spec.metadata.target.repo.locator == workspace_locator
+        && spec.metadata.target.base_ref == head_sha
 }
 
 fn current_git_branch_label(working_dir: &std::path::Path) -> Option<String> {
@@ -3525,6 +4005,7 @@ fn summarize_turn_task_title(text: &str) -> String {
     format!("TUI: {title}")
 }
 
+#[cfg(test)]
 fn format_task_completion_note(
     title: &str,
     result: &crate::internal::ai::orchestrator::types::TaskResult,
@@ -3580,6 +4061,25 @@ fn format_task_completion_note(
     note
 }
 
+fn format_task_workspace_note(
+    title: &str,
+    working_dir: &std::path::Path,
+    isolated: bool,
+) -> String {
+    let mode = if isolated {
+        "isolated worktree"
+    } else {
+        "shared workspace"
+    };
+    format!(
+        "Workspace · {}  \n{} · {}",
+        title.trim(),
+        mode,
+        working_dir.display()
+    )
+}
+
+#[cfg(test)]
 fn task_status_heading(
     status: &crate::internal::ai::orchestrator::types::TaskNodeStatus,
 ) -> &'static str {
@@ -3636,26 +4136,6 @@ fn summarize_failed_gate_report(
     }
 }
 
-async fn list_intent_object_ids(mcp: &Arc<LibraMcpServer>) -> Vec<String> {
-    let mut ids = Vec::new();
-    let resources = match mcp.read_resource_impl("libra://objects/intent").await {
-        Ok(v) => v,
-        Err(_) => return ids,
-    };
-    let Some(content) = resources.first() else {
-        return ids;
-    };
-    let Some(text) = resource_text(content) else {
-        return ids;
-    };
-    for line in text.lines() {
-        if let Some(id) = line.split_whitespace().next() {
-            ids.push(id.to_string());
-        }
-    }
-    ids
-}
-
 async fn fetch_intentspec_from_object_id(
     mcp: &Arc<LibraMcpServer>,
     object_id: &str,
@@ -3692,16 +4172,35 @@ fn extract_content_field(value: &serde_json::Value) -> Option<String> {
 
 #[cfg(test)]
 mod orchestrator_result_tests {
+    use std::collections::HashMap;
+
     use git_internal::internal::object::{plan::PlanStep, task::Task as GitTask, types::ActorRef};
     use uuid::Uuid;
 
-    use super::{format_orchestrator_result, format_task_completion_note};
-    use crate::internal::ai::orchestrator::{
-        run_state::RunStateSnapshot,
-        types::{
-            DecisionOutcome, ExecutionPlanSpec, GateReport, GateResult, OrchestratorResult,
-            ReviewOutcome, SystemReport, TaskContract, TaskKind, TaskNodeStatus, TaskResult,
-            TaskSpec,
+    use super::{
+        IntentSpecBinding, LATEST_INTENTSPEC_BASE_REF, LATEST_INTENTSPEC_BRANCH_LABEL,
+        LATEST_INTENTSPEC_WORKSPACE_KEY, canonical_working_dir_label, format_orchestrator_result,
+        format_task_completion_note, format_task_workspace_note, intentspec_matches_workspace,
+        latest_intentspec_binding_matches,
+    };
+    use crate::internal::ai::{
+        intentspec::types::{
+            Acceptance, Artifacts, ChangeType, ConstraintLicensing, ConstraintPlatform,
+            ConstraintPrivacy, ConstraintResources, ConstraintSecurity, Constraints, CreatedBy,
+            CreatorType, DomainAllowlistMode, EncodingPolicy, EvidencePolicy, EvidenceStrategy,
+            ExecutionPolicy, HumanInLoop, Intent, IntentSpec, Lifecycle, LifecycleStatus, Metadata,
+            NetworkPolicy, Objective, ObjectiveKind, OutputHandlingPolicy, PromptInjectionPolicy,
+            ProvenanceBindings, ProvenancePolicy, RepoTarget, RepoType, RetryPolicy, Risk,
+            RiskLevel, SecretAccessPolicy, SecretPolicy, SecurityPolicy, Target, ToolAcl,
+            TransparencyLogPolicy, TransparencyMode, TrustTier, VerificationPlan,
+        },
+        orchestrator::{
+            run_state::RunStateSnapshot,
+            types::{
+                DecisionOutcome, ExecutionPlanSpec, GateReport, GateResult, OrchestratorResult,
+                ReviewOutcome, SystemReport, TaskContract, TaskKind, TaskNodeStatus, TaskResult,
+                TaskSpec,
+            },
         },
     };
 
@@ -3722,6 +4221,146 @@ mod orchestrator_result_tests {
         }
     }
 
+    fn intentspec_fixture(locator: &str, base_ref: &str) -> IntentSpec {
+        IntentSpec {
+            api_version: "intentspec.io/v1alpha1".into(),
+            kind: "IntentSpec".into(),
+            metadata: Metadata {
+                id: "intent-1".into(),
+                created_at: "2026-04-02T00:00:00Z".into(),
+                created_by: CreatedBy {
+                    creator_type: CreatorType::User,
+                    id: "tester".into(),
+                    display_name: None,
+                },
+                target: Target {
+                    repo: RepoTarget {
+                        repo_type: RepoType::Local,
+                        locator: locator.into(),
+                    },
+                    base_ref: base_ref.into(),
+                    workspace_id: None,
+                    labels: Default::default(),
+                },
+            },
+            intent: Intent {
+                summary: "summary".into(),
+                problem_statement: "problem".into(),
+                change_type: ChangeType::Feature,
+                objectives: vec![Objective {
+                    title: "Ship feature".into(),
+                    kind: ObjectiveKind::Implementation,
+                }],
+                in_scope: vec!["src/".into()],
+                out_of_scope: vec![],
+                touch_hints: None,
+            },
+            acceptance: Acceptance {
+                success_criteria: vec!["tests pass".into()],
+                verification_plan: VerificationPlan {
+                    fast_checks: vec![],
+                    integration_checks: vec![],
+                    security_checks: vec![],
+                    release_checks: vec![],
+                },
+                quality_gates: None,
+            },
+            constraints: Constraints {
+                security: ConstraintSecurity {
+                    network_policy: NetworkPolicy::Deny,
+                    dependency_policy:
+                        crate::internal::ai::intentspec::types::DependencyPolicy::NoNew,
+                    crypto_policy: String::new(),
+                },
+                privacy: ConstraintPrivacy {
+                    data_classes_allowed: vec![],
+                    redaction_required: false,
+                    retention_days: 30,
+                },
+                licensing: ConstraintLicensing {
+                    allowed_spdx: vec![],
+                    forbid_new_licenses: false,
+                },
+                platform: ConstraintPlatform {
+                    language_runtime: "rust".into(),
+                    supported_os: vec![],
+                },
+                resources: ConstraintResources {
+                    max_wall_clock_seconds: 30,
+                    max_cost_units: 0,
+                },
+            },
+            risk: Risk {
+                level: RiskLevel::Low,
+                rationale: "low".into(),
+                factors: vec![],
+                human_in_loop: HumanInLoop {
+                    required: false,
+                    min_approvers: 0,
+                },
+            },
+            evidence: EvidencePolicy {
+                strategy: EvidenceStrategy::RepoFirst,
+                trust_tiers: vec![TrustTier::Repo],
+                domain_allowlist_mode: DomainAllowlistMode::Disabled,
+                allowed_domains: vec![],
+                blocked_domains: vec![],
+                min_citations_per_decision: 1,
+            },
+            security: SecurityPolicy {
+                tool_acl: ToolAcl {
+                    allow: vec![],
+                    deny: vec![],
+                },
+                secrets: SecretPolicy {
+                    policy: SecretAccessPolicy::DenyAll,
+                    allowed_scopes: vec![],
+                },
+                prompt_injection: PromptInjectionPolicy {
+                    treat_retrieved_content_as_untrusted: true,
+                    enforce_output_schema: true,
+                    disallow_instruction_from_evidence: true,
+                },
+                output_handling: OutputHandlingPolicy {
+                    encoding_policy: EncodingPolicy::StrictJson,
+                    no_direct_eval: true,
+                },
+            },
+            execution: ExecutionPolicy {
+                retry: RetryPolicy {
+                    max_retries: 0,
+                    backoff_seconds: 0,
+                },
+                replan: crate::internal::ai::intentspec::types::ReplanPolicy { triggers: vec![] },
+                concurrency: crate::internal::ai::intentspec::types::ConcurrencyPolicy {
+                    max_parallel_tasks: 1,
+                },
+            },
+            artifacts: Artifacts {
+                required: vec![],
+                retention: crate::internal::ai::intentspec::types::ArtifactRetention { days: 30 },
+            },
+            provenance: ProvenancePolicy {
+                require_slsa_provenance: false,
+                require_sbom: false,
+                transparency_log: TransparencyLogPolicy {
+                    mode: TransparencyMode::None,
+                },
+                bindings: ProvenanceBindings {
+                    embed_intent_spec_digest: false,
+                    embed_evidence_digests: false,
+                },
+            },
+            lifecycle: Lifecycle {
+                schema_version: "1.0.0".into(),
+                status: LifecycleStatus::Active,
+                change_log: vec![],
+            },
+            libra: None,
+            extensions: Default::default(),
+        }
+    }
+
     #[test]
     fn failed_task_note_includes_review_summary() {
         let note = format_task_completion_note(
@@ -3734,6 +4373,7 @@ mod orchestrator_result_tests {
                 retry_count: 4,
                 tool_calls: vec![],
                 policy_violations: vec![],
+                model_usage: None,
                 review: Some(ReviewOutcome {
                     approved: false,
                     summary: "response is incomplete".into(),
@@ -3758,6 +4398,7 @@ mod orchestrator_result_tests {
                 retry_count: 4,
                 tool_calls: vec![],
                 policy_violations: vec![],
+                model_usage: None,
                 review: None,
             },
         );
@@ -3789,11 +4430,98 @@ mod orchestrator_result_tests {
                 retry_count: 0,
                 tool_calls: vec![],
                 policy_violations: vec![],
+                model_usage: None,
                 review: None,
             },
         );
 
         assert!(note.contains("reason · cargo-test (exit 101: tests failed)"));
+    }
+
+    #[test]
+    fn workspace_note_includes_mode_and_directory() {
+        let isolated_note = format_task_workspace_note(
+            "Implement parser",
+            std::path::Path::new("/tmp/libra/.libra/worktrees/task-1"),
+            true,
+        );
+        assert!(isolated_note.contains("Workspace · Implement parser"));
+        assert!(isolated_note.contains("isolated worktree"));
+        assert!(isolated_note.contains("/tmp/libra/.libra/worktrees/task-1"));
+
+        let shared_note =
+            format_task_workspace_note("Run gate", std::path::Path::new("/tmp/libra"), false);
+        assert!(shared_note.contains("shared workspace"));
+        assert!(shared_note.contains("/tmp/libra"));
+    }
+
+    #[test]
+    fn intentspec_match_requires_same_workspace_and_head() {
+        let workspace = tempfile::tempdir().unwrap();
+        let locator = canonical_working_dir_label(workspace.path());
+        let spec = intentspec_fixture(&locator, "abc123");
+        assert!(intentspec_matches_workspace(&spec, &locator, "abc123"));
+        assert!(!intentspec_matches_workspace(&spec, &locator, "def456"));
+    }
+
+    #[test]
+    fn intentspec_match_rejects_other_worktree_locator() {
+        let workspace = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let locator = canonical_working_dir_label(workspace.path());
+        let other_locator = canonical_working_dir_label(other.path());
+        let spec = intentspec_fixture(&other_locator, "abc123");
+        assert!(!intentspec_matches_workspace(&spec, &locator, "abc123"));
+    }
+
+    #[test]
+    fn latest_intentspec_binding_requires_exact_worktree_head_and_branch() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            LATEST_INTENTSPEC_WORKSPACE_KEY.to_string(),
+            serde_json::Value::String("/repo/worktree-a".into()),
+        );
+        metadata.insert(
+            LATEST_INTENTSPEC_BASE_REF.to_string(),
+            serde_json::Value::String("abc123".into()),
+        );
+        metadata.insert(
+            LATEST_INTENTSPEC_BRANCH_LABEL.to_string(),
+            serde_json::Value::String("feature/spec".into()),
+        );
+
+        assert!(latest_intentspec_binding_matches(
+            &metadata,
+            &IntentSpecBinding {
+                workspace_key: "/repo/worktree-a".into(),
+                base_ref: "abc123".into(),
+                branch_label: Some("feature/spec".into()),
+            }
+        ));
+        assert!(!latest_intentspec_binding_matches(
+            &metadata,
+            &IntentSpecBinding {
+                workspace_key: "/repo/worktree-b".into(),
+                base_ref: "abc123".into(),
+                branch_label: Some("feature/spec".into()),
+            }
+        ));
+        assert!(!latest_intentspec_binding_matches(
+            &metadata,
+            &IntentSpecBinding {
+                workspace_key: "/repo/worktree-a".into(),
+                base_ref: "def456".into(),
+                branch_label: Some("feature/spec".into()),
+            }
+        ));
+        assert!(!latest_intentspec_binding_matches(
+            &metadata,
+            &IntentSpecBinding {
+                workspace_key: "/repo/worktree-a".into(),
+                base_ref: "abc123".into(),
+                branch_label: Some("main".into()),
+            }
+        ));
     }
 
     #[test]
@@ -3822,6 +4550,7 @@ mod orchestrator_result_tests {
                     retry_count: 0,
                     tool_calls: vec![],
                     policy_violations: vec![],
+                    model_usage: None,
                     review: Some(ReviewOutcome {
                         approved: true,
                         summary: "analysis is complete".into(),
@@ -3838,6 +4567,7 @@ mod orchestrator_result_tests {
                     retry_count: 4,
                     tool_calls: vec![],
                     policy_violations: vec![],
+                    model_usage: None,
                     review: None,
                 },
             ],
@@ -3902,6 +4632,7 @@ mod orchestrator_result_tests {
                 retry_count: 0,
                 tool_calls: vec![],
                 policy_violations: vec![],
+                model_usage: None,
                 review: None,
             }],
             system_report: SystemReport {

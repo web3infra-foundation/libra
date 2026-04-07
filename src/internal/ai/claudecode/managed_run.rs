@@ -2469,6 +2469,8 @@ async fn respond_to_claude_approval_request(
         .get("sessionUpgradeAvailable")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let (sandbox_label, network_access, writable_roots) =
+        infer_claude_approval_request_context(tool_name, &tool_input, cwd);
     let (response_tx, response_rx) = oneshot::channel();
     exec_approval_tx
         .send(ExecApprovalRequest {
@@ -2477,6 +2479,9 @@ async fn respond_to_claude_approval_request(
             cwd: cwd.to_path_buf(),
             reason: render_claude_tool_reason(event),
             is_retry: false,
+            sandbox_label,
+            network_access,
+            writable_roots,
             response_tx,
         })
         .map_err(|_| anyhow!("TUI exec approval channel is unavailable"))?;
@@ -2492,6 +2497,46 @@ async fn respond_to_claude_approval_request(
 
     write_claude_interactive_response(response_dir, request_id, &json!({ "decision": decision }))
         .await
+}
+
+fn infer_claude_approval_request_context(
+    tool_name: &str,
+    tool_input: &Value,
+    cwd: &Path,
+) -> (String, bool, Vec<PathBuf>) {
+    let writable_roots = claude_tool_writable_roots(tool_input, cwd);
+    match tool_name {
+        "Edit" | "Write" | "MultiEdit" => (
+            "workspace-write".to_string(),
+            false,
+            if writable_roots.is_empty() {
+                vec![cwd.to_path_buf()]
+            } else {
+                writable_roots
+            },
+        ),
+        "Bash" => ("outside sandbox".to_string(), true, writable_roots),
+        _ => (
+            format!("Claude managed tool: {tool_name}"),
+            false,
+            writable_roots,
+        ),
+    }
+}
+
+fn claude_tool_writable_roots(tool_input: &Value, cwd: &Path) -> Vec<PathBuf> {
+    ["file_path", "path", "worktree_path", "blocked_path"]
+        .into_iter()
+        .filter_map(|key| tool_input.get(key).and_then(Value::as_str))
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                cwd.join(path)
+            }
+        })
+        .collect()
 }
 
 async fn respond_to_claude_user_question(
@@ -5099,6 +5144,35 @@ mod tests {
         assert!(interactive_approvals_enabled("plan", false));
         assert!(interactive_approvals_enabled("acceptEdits", true));
         assert!(!interactive_approvals_enabled("acceptEdits", false));
+    }
+
+    #[test]
+    fn edit_approval_requests_use_workspace_write_metadata() {
+        let (sandbox_label, network_access, writable_roots) = infer_claude_approval_request_context(
+            "Edit",
+            &json!({ "file_path": "src/lib.rs" }),
+            Path::new("/repo"),
+        );
+
+        assert_eq!(sandbox_label, "workspace-write");
+        assert!(!network_access);
+        assert_eq!(
+            writable_roots,
+            vec![std::path::PathBuf::from("/repo/src/lib.rs")]
+        );
+    }
+
+    #[test]
+    fn bash_approval_requests_use_external_command_metadata() {
+        let (sandbox_label, network_access, writable_roots) = infer_claude_approval_request_context(
+            "Bash",
+            &json!({ "command": "cargo test" }),
+            Path::new("/repo"),
+        );
+
+        assert_eq!(sandbox_label, "outside sandbox");
+        assert!(network_access);
+        assert!(writable_roots.is_empty());
     }
 
     #[test]

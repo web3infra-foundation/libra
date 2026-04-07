@@ -21,6 +21,10 @@ pub enum ToolError {
     #[error("Path outside working directory: {0}")]
     PathOutsideWorkingDir(PathBuf),
 
+    /// Path is reserved for repository metadata and cannot be accessed by AI tools.
+    #[error("Path reserved for repository metadata: {0}")]
+    PathReserved(PathBuf),
+
     /// IO error during file operation.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),

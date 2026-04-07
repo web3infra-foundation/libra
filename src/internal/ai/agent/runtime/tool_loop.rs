@@ -4,8 +4,8 @@ use serde_json::Value;
 
 use crate::internal::ai::{
     completion::{
-        AssistantContent, CompletionError, CompletionModel, CompletionRequest, Message, OneOrMany,
-        ToolResult, UserContent,
+        AssistantContent, CompletionError, CompletionModel, CompletionRequest, CompletionUsage,
+        CompletionUsageSummary, Message, OneOrMany, ToolResult, UserContent,
     },
     hooks::HookRunner,
     tools::{
@@ -25,6 +25,10 @@ pub struct ToolLoopTurn {
 ///
 /// All callbacks are best-effort and must be non-panicking.
 pub trait ToolLoopObserver: Send {
+    fn on_model_turn_start(&mut self, _turn: usize) {}
+
+    fn on_model_usage(&mut self, _usage: &CompletionUsageSummary) {}
+
     fn on_assistant_step_text(&mut self, _text: &str) {}
 
     fn on_tool_call_begin(&mut self, _call_id: &str, _tool_name: &str, _arguments: &Value) {}
@@ -88,7 +92,10 @@ pub async fn run_tool_loop<M: CompletionModel>(
     prompt: impl Into<String>,
     registry: &ToolRegistry,
     config: ToolLoopConfig,
-) -> Result<String, CompletionError> {
+) -> Result<String, CompletionError>
+where
+    M::Response: CompletionUsage,
+{
     let mut observer = NoopObserver;
     let turn = run_tool_loop_with_history_and_observer(
         model,
@@ -111,7 +118,10 @@ pub async fn run_tool_loop_with_history_and_observer<M: CompletionModel, O: Tool
     registry: &ToolRegistry,
     config: ToolLoopConfig,
     observer: &mut O,
-) -> Result<ToolLoopTurn, CompletionError> {
+) -> Result<ToolLoopTurn, CompletionError>
+where
+    M::Response: CompletionUsage,
+{
     existing_history.push(Message::user(prompt.into()));
     let mut history = existing_history;
     let max_turns = config.max_turns.unwrap_or(DEFAULT_MAX_TOOL_LOOP_TURNS);
@@ -146,7 +156,11 @@ pub async fn run_tool_loop_with_history_and_observer<M: CompletionModel, O: Tool
             ..Default::default()
         };
 
+        observer.on_model_turn_start(turn_count);
         let response = model.completion(request).await?;
+        if let Some(usage) = response.raw_response.usage_summary() {
+            observer.on_model_usage(&usage);
+        }
 
         let mut tool_calls = Vec::new();
         let mut text_parts = Vec::new();

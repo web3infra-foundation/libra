@@ -10,7 +10,9 @@ use super::history_cell::HistoryCell;
 use crate::internal::ai::{
     completion::Message,
     intentspec::types::IntentSpec,
-    orchestrator::types::{ExecutionPlanSpec, OrchestratorResult, TaskNodeStatus},
+    orchestrator::types::{
+        ExecutionPlanSpec, OrchestratorResult, TaskNodeStatus, TaskRuntimeEvent,
+    },
     tools::ToolOutput,
 };
 
@@ -109,6 +111,12 @@ pub enum AppEvent {
         tool_name: String,
         result: Result<ToolOutput, String>,
     },
+    /// Task-scoped runtime progress for the workflow mux.
+    TaskRuntimeEvent {
+        turn_id: TurnId,
+        task_id: Uuid,
+        event: TaskRuntimeEvent,
+    },
     /// Agent status has changed.
     AgentStatusUpdate {
         turn_id: TurnId,
@@ -155,6 +163,7 @@ impl AppEvent {
             | AppEvent::ManagedInfoNote { turn_id, .. }
             | AppEvent::ToolCallBegin { turn_id, .. }
             | AppEvent::ToolCallEnd { turn_id, .. }
+            | AppEvent::TaskRuntimeEvent { turn_id, .. }
             | AppEvent::AgentStatusUpdate { turn_id, .. }
             | AppEvent::McpTurnTrackingReady { turn_id, .. }
             | AppEvent::DagGraphBegin { turn_id, .. }

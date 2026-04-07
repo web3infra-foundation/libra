@@ -296,7 +296,10 @@ fn map_checkout_error(source: RestoreError) -> CliError {
                     "the fetched tree is inconsistent; retry the clone or inspect the remote",
                 )
         }
-        RestoreError::ReadIndex | RestoreError::ReadObject | RestoreError::InvalidPathEncoding => {
+        RestoreError::ReadIndex
+        | RestoreError::ReadObject
+        | RestoreError::ReadWorktree
+        | RestoreError::InvalidPathEncoding => {
             CliError::fatal("failed to read repository state while checking out the working tree")
                 .with_stable_code(StableErrorCode::IoReadFailed)
                 .with_hint("failed to read repository state while checking out the working tree")

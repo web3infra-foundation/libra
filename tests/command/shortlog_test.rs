@@ -9,6 +9,8 @@
 //!
 //! **Layer:** L1 — deterministic, no external dependencies.
 
+use std::fs;
+
 use super::*;
 
 #[test]
@@ -66,6 +68,57 @@ async fn test_shortlog_corrupt_head_reference_returns_repo_corrupt() {
     assert!(
         stderr.contains("invalid detached HEAD commit hash"),
         "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn test_shortlog_json_output_has_author_summary() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["shortlog", "--json"], repo.path());
+    assert_cli_success(&output, "shortlog --json should succeed");
+
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["command"], "shortlog");
+    assert_eq!(json["data"]["total_commits"], 1);
+    assert_eq!(json["data"]["authors"][0]["name"], "Test User");
+    assert_eq!(json["data"]["authors"][0]["count"], 1);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_shortlog_revision_argument_limits_history() {
+    let repo = create_committed_repo_via_cli();
+    let _guard = ChangeDirGuard::new(repo.path());
+
+    fs::write(repo.path().join("second.txt"), "second\n").unwrap();
+    let add_output = run_libra_command(&["add", "second.txt"], repo.path());
+    assert_cli_success(&add_output, "failed to add second file");
+
+    let commit_output = run_libra_command(&["commit", "-m", "second", "--no-verify"], repo.path());
+    assert_cli_success(&commit_output, "failed to create second commit");
+
+    let head = Head::current_commit().await.unwrap();
+    let commits = get_reachable_commits(head.to_string(), None).await.unwrap();
+    let base_commit = commits
+        .iter()
+        .find(|commit| commit.message.contains("base"))
+        .expect("expected base commit")
+        .id
+        .to_string();
+
+    let args = ShortlogArgs::parse_from(["shortlog", base_commit.as_str()]);
+    let mut buf = Vec::new();
+    shortlog::execute_to(args, &mut buf).await.unwrap();
+
+    let stdout = String::from_utf8(buf).unwrap();
+    assert!(
+        stdout.contains("base"),
+        "expected base commit in shortlog output"
+    );
+    assert!(
+        !stdout.contains("second"),
+        "revision-limited shortlog should not include newer commits: {stdout}"
     );
 }
 

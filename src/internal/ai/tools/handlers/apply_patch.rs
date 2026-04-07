@@ -80,6 +80,13 @@ impl ToolHandler for ApplyPatchHandler {
                     cwd: working_dir.clone(),
                     reason: Some(format_patch_approval_reason(&touched_paths, &working_dir)),
                     is_retry: false,
+                    sandbox_label: if constrained_to_workspace {
+                        "workspace-write".to_string()
+                    } else {
+                        "outside workspace".to_string()
+                    },
+                    network_access: false,
+                    writable_roots: touched_paths.iter().cloned().collect(),
                     response_tx,
                 },
             )

@@ -21,8 +21,8 @@ use serde::{Deserialize, Serialize};
 use crate::internal::ai::{
     client::{CompletionClient, Provider},
     completion::{
-        AssistantContent, CompletionError, CompletionModel as CompletionModelTrait, Function,
-        Message, Text, ToolCall, UserContent,
+        AssistantContent, CompletionError, CompletionModel as CompletionModelTrait,
+        CompletionUsage, CompletionUsageSummary, Function, Message, Text, ToolCall, UserContent,
         request::{CompletionRequest, CompletionResponse},
     },
     providers::anthropic::client::Client,
@@ -221,6 +221,16 @@ pub struct AnthropicResponse {
     pub stop_reason: Option<String>,
     /// Token usage statistics for this request/response pair.
     usage: AnthropicUsage,
+}
+
+impl CompletionUsage for AnthropicResponse {
+    fn usage_summary(&self) -> Option<CompletionUsageSummary> {
+        Some(CompletionUsageSummary {
+            input_tokens: self.usage.input_tokens,
+            output_tokens: self.usage.output_tokens,
+            cost_usd: None,
+        })
+    }
 }
 
 /// Inner error payload returned by the API on failure.

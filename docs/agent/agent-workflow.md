@@ -3,8 +3,9 @@
 > Local implementation note (2026-03-13)
 >
 > Libra currently supports explicit objective kinds (`implementation` /
-> `analysis`). Until task-specific worktree / staging support is added,
-> code-changing objectives are intentionally scheduled serially.
+> `analysis`). Code-changing objectives may now run concurrently inside
+> task-specific linked worktrees, with successful results replayed back
+> into the primary workspace after conflict checks.
 
 
 This document defines the runtime workflow after the snapshot / event /

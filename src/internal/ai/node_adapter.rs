@@ -27,7 +27,7 @@ use dagrs::{Action, Content, EnvVar, InChannels, OutChannels, Output};
 
 use crate::internal::ai::{
     agent::{Agent, ToolLoopConfig, run_tool_loop},
-    completion::{CompletionModel, Prompt},
+    completion::{CompletionModel, CompletionUsage, Prompt},
     tools::ToolRegistry,
 };
 
@@ -185,7 +185,10 @@ impl<M: CompletionModel> ToolLoopAction<M> {
 }
 
 #[async_trait]
-impl<M: CompletionModel> Action for ToolLoopAction<M> {
+impl<M: CompletionModel> Action for ToolLoopAction<M>
+where
+    M::Response: CompletionUsage,
+{
     /// Executes the tool loop within the DAG node lifecycle.
     ///
     /// Follows the same input collection pattern as [`AgentAction::run`]:

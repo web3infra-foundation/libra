@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    io,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -22,12 +23,15 @@ use super::{
     run_state::{RunStateSnapshot, RunStateStore},
     types::{
         ExecutionPlanSpec, GateReport, OrchestratorError, OrchestratorObserver, ReviewOutcome,
-        TaskKind, TaskNodeStatus, TaskResult, TaskSpec, ToolCallRecord,
+        TaskKind, TaskNodeStatus, TaskResult, TaskRuntimeEvent, TaskRuntimeNoteLevel,
+        TaskRuntimePhase, TaskSpec, ToolCallRecord,
     },
+    workspace::{cleanup_task_worktree, prepare_task_worktree, sync_task_worktree_back},
 };
 use crate::internal::ai::{
     agent::{ToolLoopConfig, ToolLoopObserver, run_tool_loop_with_history_and_observer},
-    completion::{CompletionError, CompletionModel},
+    completion::{CompletionError, CompletionModel, CompletionUsage, CompletionUsageSummary},
+    hooks::HookRunner,
     intentspec::types::{IntentSpec, NetworkPolicy},
     sandbox::{SandboxPermissions, SandboxPolicy, ToolRuntimeContext, ToolSandboxContext},
     tools::{ToolOutput, registry::ToolRegistry},
@@ -53,6 +57,7 @@ struct TaskExecutionObserver {
     in_flight: HashMap<String, ToolCallRecord>,
     tool_calls: Vec<ToolCallRecord>,
     violations: Vec<super::types::PolicyViolation>,
+    model_usage: CompletionUsageSummary,
     observer: Option<Arc<dyn OrchestratorObserver>>,
 }
 
@@ -70,25 +75,62 @@ impl TaskExecutionObserver {
             in_flight: HashMap::new(),
             tool_calls: Vec::new(),
             violations: Vec::new(),
+            model_usage: CompletionUsageSummary::default(),
             observer,
         }
     }
 
-    fn finish(self) -> (Vec<ToolCallRecord>, Vec<super::types::PolicyViolation>) {
-        (self.tool_calls, self.violations)
+    fn finish(
+        self,
+    ) -> (
+        Vec<ToolCallRecord>,
+        Vec<super::types::PolicyViolation>,
+        Option<CompletionUsageSummary>,
+    ) {
+        let usage = (!self.model_usage.is_zero()).then_some(self.model_usage);
+        (self.tool_calls, self.violations, usage)
     }
 }
 
 impl ToolLoopObserver for TaskExecutionObserver {
+    fn on_model_turn_start(&mut self, turn: usize) {
+        if let Some(observer) = &self.observer {
+            observer.on_task_runtime_event(
+                &self.task,
+                TaskRuntimeEvent::Phase(TaskRuntimePhase::AwaitingModel { turn }),
+            );
+        }
+    }
+
     fn on_assistant_step_text(&mut self, text: &str) {
         if let Some(observer) = &self.observer {
-            observer.on_task_assistant_message(&self.task, text);
+            observer.on_task_runtime_event(
+                &self.task,
+                TaskRuntimeEvent::AssistantMessage(text.to_string()),
+            );
         }
+    }
+
+    fn on_model_usage(&mut self, usage: &CompletionUsageSummary) {
+        self.model_usage.merge(usage);
     }
 
     fn on_tool_call_begin(&mut self, call_id: &str, tool_name: &str, arguments: &Value) {
         if let Some(observer) = &self.observer {
-            observer.on_tool_call_begin(&self.task, call_id, tool_name, arguments);
+            observer.on_task_runtime_event(
+                &self.task,
+                TaskRuntimeEvent::Phase(TaskRuntimePhase::ExecutingTool {
+                    tool_name: tool_name.to_string(),
+                }),
+            );
+            observer.on_task_runtime_event(
+                &self.task,
+                TaskRuntimeEvent::ToolCallBegin {
+                    call_id: call_id.to_string(),
+                    tool_name: tool_name.to_string(),
+                    arguments: arguments.clone(),
+                },
+            );
         }
     }
 
@@ -123,14 +165,25 @@ impl ToolLoopObserver for TaskExecutionObserver {
         result: &Result<ToolOutput, String>,
     ) {
         if let Some(observer) = &self.observer {
-            observer.on_tool_call_end(&self.task, call_id, tool_name, result);
+            observer.on_task_runtime_event(
+                &self.task,
+                TaskRuntimeEvent::ToolCallEnd {
+                    call_id: call_id.to_string(),
+                    tool_name: tool_name.to_string(),
+                    result: result.clone(),
+                },
+            );
         }
         if let Some(mut record) = self.in_flight.remove(call_id) {
             match result {
                 Ok(output) => {
-                    if let Err(violation) =
-                        policy::evaluate_tool_result(&self.spec, tool_name, output, &mut record)
-                    {
+                    if let Err(violation) = policy::evaluate_tool_result(
+                        &self.spec,
+                        &self.task,
+                        tool_name,
+                        output,
+                        &mut record,
+                    ) {
                         self.violations.push(violation);
                     }
                 }
@@ -152,15 +205,25 @@ struct ReviewerDecision {
     issues: Vec<String>,
 }
 
+struct ReviewerPassArtifacts {
+    outcome: Result<Option<ReviewOutcome>, String>,
+    tool_calls: Vec<ToolCallRecord>,
+    policy_violations: Vec<super::types::PolicyViolation>,
+    model_usage: Option<CompletionUsageSummary>,
+}
+
 /// Execute a single task with retry logic.
 pub async fn execute_task<M: CompletionModel>(
     task: &TaskSpec,
     model: &M,
     registry: &ToolRegistry,
     config: &ExecutorConfig,
-) -> TaskResult {
+) -> TaskResult
+where
+    M::Response: CompletionUsage,
+{
     if task.kind == TaskKind::Gate {
-        return execute_gate_task(
+        return execute_gate_task_in_task_worktree(
             task,
             &config.working_dir,
             &config.spec,
@@ -181,6 +244,7 @@ pub async fn execute_task<M: CompletionModel>(
     let mut retry_count: u8 = 0;
     let mut accumulated_tool_calls = Vec::new();
     let mut accumulated_policy_violations = Vec::new();
+    let mut accumulated_model_usage = CompletionUsageSummary::default();
     let mut last_review = None;
 
     loop {
@@ -204,13 +268,16 @@ pub async fn execute_task<M: CompletionModel>(
             &mut observer,
         )
         .await;
-        let (tool_calls, policy_violations) = observer.finish();
+        let (tool_calls, policy_violations, model_usage) = observer.finish();
         accumulated_tool_calls.extend(tool_calls.iter().cloned());
         accumulated_policy_violations.extend(policy_violations.iter().cloned());
+        if let Some(usage) = model_usage.as_ref() {
+            accumulated_model_usage.merge(usage);
+        }
 
         let retryable_failure = match agent_result {
             Ok(turn) if policy_violations.is_empty() => {
-                let review = match run_reviewer_pass(
+                let review_artifacts = run_reviewer_pass(
                     task,
                     &turn.final_text,
                     &accumulated_tool_calls,
@@ -218,12 +285,21 @@ pub async fn execute_task<M: CompletionModel>(
                     registry,
                     config,
                 )
-                .await
-                {
+                .await;
+                accumulated_tool_calls.extend(review_artifacts.tool_calls.iter().cloned());
+                accumulated_policy_violations
+                    .extend(review_artifacts.policy_violations.iter().cloned());
+                if let Some(usage) = review_artifacts.model_usage.as_ref() {
+                    accumulated_model_usage.merge(usage);
+                }
+                let review = match review_artifacts.outcome {
                     Ok(review) => review,
                     Err(message) => {
                         if let Some(observer) = &config.observer {
-                            observer.on_reviewer_completed(task, None);
+                            observer.on_task_runtime_event(
+                                task,
+                                TaskRuntimeEvent::Phase(TaskRuntimePhase::Failed),
+                            );
                         }
                         return TaskResult {
                             task_id: task.id(),
@@ -233,6 +309,8 @@ pub async fn execute_task<M: CompletionModel>(
                             retry_count,
                             tool_calls: accumulated_tool_calls,
                             policy_violations: accumulated_policy_violations,
+                            model_usage: (!accumulated_model_usage.is_zero())
+                                .then_some(accumulated_model_usage),
                             review: None,
                         };
                     }
@@ -257,6 +335,8 @@ pub async fn execute_task<M: CompletionModel>(
                         retry_count,
                         tool_calls: accumulated_tool_calls,
                         policy_violations: accumulated_policy_violations,
+                        model_usage: (!accumulated_model_usage.is_zero())
+                            .then_some(accumulated_model_usage),
                         review,
                     };
                 }
@@ -287,6 +367,8 @@ pub async fn execute_task<M: CompletionModel>(
                     retry_count,
                     tool_calls: accumulated_tool_calls,
                     policy_violations: accumulated_policy_violations,
+                    model_usage: (!accumulated_model_usage.is_zero())
+                        .then_some(accumulated_model_usage),
                     review: last_review,
                 };
             }
@@ -306,6 +388,8 @@ pub async fn execute_task<M: CompletionModel>(
                 retry_count,
                 tool_calls: accumulated_tool_calls,
                 policy_violations: accumulated_policy_violations,
+                model_usage: (!accumulated_model_usage.is_zero())
+                    .then_some(accumulated_model_usage),
                 review: last_review,
             };
         }
@@ -327,7 +411,7 @@ async fn execute_gate_task(
     inherited_runtime: Option<&ToolRuntimeContext>,
     observer: Option<&Arc<dyn OrchestratorObserver>>,
 ) -> TaskResult {
-    let runtime_context = runtime_context_for_gate_task(spec, inherited_runtime);
+    let runtime_context = runtime_context_for_gate_task(spec, working_dir, inherited_runtime);
     let gate_report = if task.checks.is_empty() {
         GateReport::empty()
     } else {
@@ -336,7 +420,13 @@ async fn execute_gate_task(
 
         for check in &task.checks {
             if let Some(observer) = observer {
-                observer.on_gate_check_started(task, check);
+                observer.on_task_runtime_event(
+                    task,
+                    TaskRuntimeEvent::Note {
+                        level: TaskRuntimeNoteLevel::Info,
+                        text: format!("gate running · {}", check.id),
+                    },
+                );
             }
 
             let result = gate::run_check_with_context(
@@ -349,7 +439,22 @@ async fn execute_gate_task(
             .await;
 
             if let Some(observer) = observer {
-                observer.on_gate_check_completed(task, check, &result);
+                observer.on_task_runtime_event(
+                    task,
+                    TaskRuntimeEvent::Note {
+                        level: if result.passed {
+                            TaskRuntimeNoteLevel::Info
+                        } else {
+                            TaskRuntimeNoteLevel::Error
+                        },
+                        text: format!(
+                            "gate {} · {} · exit {}",
+                            if result.passed { "passed" } else { "failed" },
+                            check.id,
+                            result.exit_code
+                        ),
+                    },
+                );
             }
 
             if !result.passed && check.required {
@@ -376,8 +481,62 @@ async fn execute_gate_task(
         retry_count: 0,
         tool_calls: Vec::new(),
         policy_violations: Vec::new(),
+        model_usage: None,
         review: None,
     }
+}
+
+async fn execute_gate_task_in_task_worktree(
+    task: &TaskSpec,
+    working_dir: &Path,
+    spec: &IntentSpec,
+    inherited_runtime: Option<&ToolRuntimeContext>,
+    observer: Option<&Arc<dyn OrchestratorObserver>>,
+) -> TaskResult {
+    let prepared = match tokio::task::spawn_blocking({
+        let working_dir = working_dir.to_path_buf();
+        let task_id = task.id();
+        move || prepare_task_worktree(&working_dir, task_id)
+    })
+    .await
+    {
+        Ok(Ok(worktree)) => worktree,
+        Ok(Err(err)) => return task_workspace_failure(task, err),
+        Err(err) => {
+            return task_workspace_failure(
+                task,
+                io::Error::other(format!(
+                    "failed to prepare isolated worktree for verification: {err}"
+                )),
+            );
+        }
+    };
+
+    if let Some(observer) = observer {
+        observer.on_task_runtime_event(
+            task,
+            TaskRuntimeEvent::WorkspaceReady {
+                working_dir: prepared.root.clone(),
+                isolated: true,
+            },
+        );
+    }
+
+    let result = execute_gate_task(task, &prepared.root, spec, inherited_runtime, observer).await;
+
+    let cleanup_root = prepared.root.clone();
+    let cleanup_result = tokio::task::spawn_blocking(move || cleanup_task_worktree(prepared)).await;
+    match cleanup_result {
+        Err(err) => tracing::warn!("gate worktree cleanup worker failed: {}", err),
+        Ok(Err(err)) => tracing::warn!(
+            path = %cleanup_root.display(),
+            "failed to clean up gate worktree: {}",
+            err
+        ),
+        Ok(Ok(())) => {}
+    }
+
+    result
 }
 
 async fn run_reviewer_pass<M: CompletionModel>(
@@ -387,9 +546,17 @@ async fn run_reviewer_pass<M: CompletionModel>(
     model: &M,
     registry: &ToolRegistry,
     config: &ExecutorConfig,
-) -> Result<Option<ReviewOutcome>, String> {
+) -> ReviewerPassArtifacts
+where
+    M::Response: CompletionUsage,
+{
     let Some(reviewer_preamble) = config.reviewer_preamble.clone() else {
-        return Ok(None);
+        return ReviewerPassArtifacts {
+            outcome: Ok(None),
+            tool_calls: Vec::new(),
+            policy_violations: Vec::new(),
+            model_usage: None,
+        };
     };
 
     let allowed_tools = allowed_tools_for_reviewer(&config.spec);
@@ -411,7 +578,7 @@ async fn run_reviewer_pass<M: CompletionModel>(
     };
 
     if let Some(observer) = &config.observer {
-        observer.on_reviewer_started(task);
+        observer.on_task_runtime_event(task, TaskRuntimeEvent::Phase(TaskRuntimePhase::Reviewing));
     }
     let mut observer = TaskExecutionObserver::new(
         Arc::clone(&config.spec),
@@ -427,19 +594,229 @@ async fn run_reviewer_pass<M: CompletionModel>(
         review_config,
         &mut observer,
     )
-    .await
-    .map_err(|err| format!("reviewer pass failed: {err}"))?;
+    .await;
+    let (tool_calls, policy_violations, model_usage) = observer.finish();
+    let turn = match turn {
+        Ok(turn) => turn,
+        Err(err) => {
+            return ReviewerPassArtifacts {
+                outcome: Err(format!("reviewer pass failed: {err}")),
+                tool_calls,
+                policy_violations,
+                model_usage,
+            };
+        }
+    };
 
-    let review = parse_reviewer_decision(&turn.final_text)?;
+    let review = match parse_reviewer_decision(&turn.final_text) {
+        Ok(review) => review,
+        Err(error) => {
+            return ReviewerPassArtifacts {
+                outcome: Err(error),
+                tool_calls,
+                policy_violations,
+                model_usage,
+            };
+        }
+    };
     let outcome = ReviewOutcome {
         approved: review.approved,
         summary: review.summary,
         issues: review.issues,
     };
     if let Some(observer) = &config.observer {
-        observer.on_reviewer_completed(task, Some(&outcome));
+        observer.on_task_runtime_event(
+            task,
+            TaskRuntimeEvent::Note {
+                level: if outcome.approved {
+                    TaskRuntimeNoteLevel::Info
+                } else {
+                    TaskRuntimeNoteLevel::Error
+                },
+                text: format!(
+                    "review {} · {}",
+                    if outcome.approved {
+                        "approved"
+                    } else {
+                        "rejected"
+                    },
+                    outcome.summary
+                ),
+            },
+        );
     }
-    Ok(Some(outcome))
+    ReviewerPassArtifacts {
+        outcome: Ok(Some(outcome)),
+        tool_calls,
+        policy_violations,
+        model_usage,
+    }
+}
+
+fn clone_tool_loop_config_for_workdir(
+    config: &ToolLoopConfig,
+    working_dir: &Path,
+) -> ToolLoopConfig {
+    let mut cloned = config.clone();
+    if cloned.hook_runner.is_some() {
+        cloned.hook_runner = Some(Arc::new(HookRunner::load(working_dir)));
+    }
+    cloned
+}
+
+fn should_use_task_worktree(task: &TaskSpec) -> bool {
+    task.kind == TaskKind::Implementation
+}
+
+async fn execute_task_in_task_worktree<M: CompletionModel>(
+    task: &TaskSpec,
+    model: &M,
+    registry: &Arc<ToolRegistry>,
+    config: &ExecutorConfig,
+    workspace_sync: &Arc<tokio::sync::Mutex<()>>,
+) -> TaskResult
+where
+    M::Response: CompletionUsage,
+{
+    let prepared = match tokio::task::spawn_blocking({
+        let working_dir = config.working_dir.clone();
+        let task_id = task.id();
+        move || prepare_task_worktree(&working_dir, task_id)
+    })
+    .await
+    {
+        Ok(Ok(worktree)) => worktree,
+        Ok(Err(err)) => return task_workspace_failure(task, err),
+        Err(err) => {
+            return task_workspace_failure(
+                task,
+                io::Error::other(format!("failed to prepare task worktree: {err}")),
+            );
+        }
+    };
+
+    let task_registry = Arc::new(registry.clone_with_working_dir(prepared.root.clone()));
+    let mut task_config = config.clone();
+    task_config.working_dir = prepared.root.clone();
+    task_config.tool_loop_config =
+        clone_tool_loop_config_for_workdir(&config.tool_loop_config, &prepared.root);
+    if let Some(observer) = &config.observer {
+        observer.on_task_runtime_event(
+            task,
+            TaskRuntimeEvent::WorkspaceReady {
+                working_dir: prepared.root.clone(),
+                isolated: true,
+            },
+        );
+    }
+
+    let mut result = execute_task(task, model, &task_registry, &task_config).await;
+
+    if result.status == TaskNodeStatus::Completed {
+        let sync_result = {
+            let _guard = workspace_sync.lock().await;
+            tokio::task::spawn_blocking({
+                let main_working_dir = config.working_dir.clone();
+                let task_worktree_dir = prepared.root.clone();
+                let baseline = prepared.baseline.clone();
+                let touch_files = task.contract.touch_files.clone();
+                let scope_in = task.scope_in.clone();
+                let scope_out = task.scope_out.clone();
+                move || {
+                    sync_task_worktree_back(
+                        &main_working_dir,
+                        &task_worktree_dir,
+                        &baseline,
+                        &touch_files,
+                        &scope_in,
+                        &scope_out,
+                    )
+                }
+            })
+            .await
+        };
+
+        match sync_result {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                result.status = TaskNodeStatus::Failed;
+                result.agent_output = Some(format!(
+                    "task completed in isolated worktree but failed to sync changes back: {err}"
+                ));
+            }
+            Err(err) => {
+                result.status = TaskNodeStatus::Failed;
+                result.agent_output = Some(format!(
+                    "task completed in isolated worktree but sync worker failed: {err}"
+                ));
+            }
+        }
+    }
+
+    let cleanup_root = prepared.root.clone();
+    let cleanup_result = tokio::task::spawn_blocking(move || cleanup_task_worktree(prepared)).await;
+    match cleanup_result {
+        Err(err) => tracing::warn!("task worktree cleanup worker failed: {}", err),
+        Ok(Err(err)) => tracing::warn!(
+            path = %cleanup_root.display(),
+            "failed to clean up task worktree: {}",
+            err
+        ),
+        Ok(Ok(())) => {}
+    }
+
+    result
+}
+
+fn task_workspace_failure(task: &TaskSpec, err: io::Error) -> TaskResult {
+    TaskResult {
+        task_id: task.id(),
+        status: TaskNodeStatus::Failed,
+        gate_report: None,
+        agent_output: Some(format!("failed to prepare isolated worktree: {err}")),
+        retry_count: 0,
+        tool_calls: Vec::new(),
+        policy_violations: Vec::new(),
+        model_usage: None,
+        review: None,
+    }
+}
+
+fn terminal_task_result(
+    task: &TaskSpec,
+    status: TaskNodeStatus,
+    agent_output: impl Into<Option<String>>,
+) -> TaskResult {
+    TaskResult {
+        task_id: task.id(),
+        status,
+        gate_report: None,
+        agent_output: agent_output.into(),
+        retry_count: 0,
+        tool_calls: Vec::new(),
+        policy_violations: Vec::new(),
+        model_usage: None,
+        review: None,
+    }
+}
+
+async fn record_terminal_result(
+    run_state: &RunStateStore,
+    observer: Option<&Arc<dyn OrchestratorObserver>>,
+    task: &TaskSpec,
+    result: TaskResult,
+) {
+    if let Some(observer) = observer {
+        observer.on_task_runtime_event(
+            task,
+            TaskRuntimeEvent::Phase(match result.status {
+                TaskNodeStatus::Completed => TaskRuntimePhase::Completed,
+                TaskNodeStatus::Failed => TaskRuntimePhase::Failed,
+                _ => TaskRuntimePhase::Pending,
+            }),
+        );
+    }
+    run_state.record_result(result).await;
 }
 
 struct TaskDagrsAction<M: CompletionModel + 'static> {
@@ -451,6 +828,7 @@ struct TaskDagrsAction<M: CompletionModel + 'static> {
     metered_task_ids: Arc<HashSet<Uuid>>,
     parallelism: Arc<Semaphore>,
     cost_budget_serial: Arc<tokio::sync::Mutex<()>>,
+    workspace_sync_serial: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Clone)]
@@ -459,6 +837,7 @@ struct DagrsBuildContext {
     metered_task_ids: Arc<HashSet<Uuid>>,
     parallelism: Arc<Semaphore>,
     cost_budget_serial: Arc<tokio::sync::Mutex<()>>,
+    workspace_sync_serial: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Clone)]
@@ -473,7 +852,10 @@ async fn broadcast_dependency_signal(out_channels: &mut OutChannels, success: bo
 }
 
 #[async_trait]
-impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
+impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M>
+where
+    M::Response: CompletionUsage,
+{
     async fn run(
         &self,
         in_channels: &mut InChannels,
@@ -497,6 +879,20 @@ impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
         }
 
         if !dependencies_ok {
+            record_terminal_result(
+                &self.run_state,
+                self.config.observer.as_ref(),
+                &self.task,
+                terminal_task_result(
+                    &self.task,
+                    TaskNodeStatus::Skipped,
+                    Some(
+                        "skipped because an upstream dependency did not complete successfully"
+                            .into(),
+                    ),
+                ),
+            )
+            .await;
             broadcast_dependency_signal(out_channels, false).await;
             return Output::empty();
         }
@@ -504,12 +900,20 @@ impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
         let _parallel_permit = match Arc::clone(&self.parallelism).acquire_owned().await {
             Ok(permit) => permit,
             Err(err) => {
-                broadcast_dependency_signal(out_channels, false).await;
-                return Output::error(format!(
+                let message = format!(
                     "failed to acquire execution permit for task {}: {}",
                     self.task.title(),
                     err
-                ));
+                );
+                record_terminal_result(
+                    &self.run_state,
+                    self.config.observer.as_ref(),
+                    &self.task,
+                    terminal_task_result(&self.task, TaskNodeStatus::Failed, Some(message.clone())),
+                )
+                .await;
+                broadcast_dependency_signal(out_channels, false).await;
+                return Output::error(message);
             }
         };
 
@@ -523,11 +927,19 @@ impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
                 .metered_result_count(&self.metered_task_ids)
                 .await;
             if consumed >= max_cost_units {
-                broadcast_dependency_signal(out_channels, false).await;
-                return Output::error(format!(
+                let message = format!(
                     "cost budget exceeded: maxCostUnits={} consumed={}",
                     max_cost_units, consumed
-                ));
+                );
+                record_terminal_result(
+                    &self.run_state,
+                    self.config.observer.as_ref(),
+                    &self.task,
+                    terminal_task_result(&self.task, TaskNodeStatus::Failed, Some(message.clone())),
+                )
+                .await;
+                broadcast_dependency_signal(out_channels, false).await;
+                return Output::error(message);
             }
 
             let remaining = max_cost_units.saturating_sub(consumed);
@@ -538,24 +950,92 @@ impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
                     .metered_result_count(&self.metered_task_ids)
                     .await;
                 if consumed_after_lock >= max_cost_units {
-                    broadcast_dependency_signal(out_channels, false).await;
-                    return Output::error(format!(
+                    let message = format!(
                         "cost budget exceeded: maxCostUnits={} consumed={}",
                         max_cost_units, consumed_after_lock
-                    ));
+                    );
+                    record_terminal_result(
+                        &self.run_state,
+                        self.config.observer.as_ref(),
+                        &self.task,
+                        terminal_task_result(
+                            &self.task,
+                            TaskNodeStatus::Failed,
+                            Some(message.clone()),
+                        ),
+                    )
+                    .await;
+                    broadcast_dependency_signal(out_channels, false).await;
+                    return Output::error(message);
                 }
                 cost_budget_guard = Some(guard);
             }
         }
 
         if let Some(observer) = &self.config.observer {
-            observer.on_task_started(&self.task);
+            observer.on_task_runtime_event(
+                &self.task,
+                TaskRuntimeEvent::Phase(TaskRuntimePhase::Starting),
+            );
         }
 
-        let result = execute_task(&self.task, &self.model, &self.registry, &self.config).await;
+        let use_task_worktree = should_use_task_worktree(&self.task);
+        if !use_task_worktree
+            && self.task.kind != TaskKind::Gate
+            && let Some(observer) = &self.config.observer
+        {
+            observer.on_task_runtime_event(
+                &self.task,
+                TaskRuntimeEvent::WorkspaceReady {
+                    working_dir: self.config.working_dir.clone(),
+                    isolated: false,
+                },
+            );
+        }
+
+        let result = if use_task_worktree {
+            execute_task_in_task_worktree(
+                &self.task,
+                &self.model,
+                &self.registry,
+                &self.config,
+                &self.workspace_sync_serial,
+            )
+            .await
+        } else {
+            execute_task(&self.task, &self.model, &self.registry, &self.config).await
+        };
 
         if let Some(observer) = &self.config.observer {
-            observer.on_task_completed(&self.task, &result);
+            observer.on_task_runtime_event(
+                &self.task,
+                TaskRuntimeEvent::Phase(match result.status {
+                    TaskNodeStatus::Completed => TaskRuntimePhase::Completed,
+                    TaskNodeStatus::Failed => TaskRuntimePhase::Failed,
+                    _ => TaskRuntimePhase::Pending,
+                }),
+            );
+            observer.on_task_runtime_event(
+                &self.task,
+                TaskRuntimeEvent::Note {
+                    level: if result.status == TaskNodeStatus::Failed {
+                        TaskRuntimeNoteLevel::Error
+                    } else {
+                        TaskRuntimeNoteLevel::Info
+                    },
+                    text: match result.status {
+                        TaskNodeStatus::Completed => "task completed".to_string(),
+                        TaskNodeStatus::Failed => result
+                            .agent_output
+                            .clone()
+                            .map(|message| format!("task failed · {message}"))
+                            .unwrap_or_else(|| "task failed".to_string()),
+                        TaskNodeStatus::Pending => "task pending".to_string(),
+                        TaskNodeStatus::Running => "task running".to_string(),
+                        TaskNodeStatus::Skipped => "task skipped".to_string(),
+                    },
+                },
+            );
         }
 
         self.run_state.record_result(result.clone()).await;
@@ -596,7 +1076,10 @@ fn build_dagrs_graph<M: CompletionModel + 'static>(
     registry: &Arc<ToolRegistry>,
     config: &ExecutorConfig,
     context: DagrsBuildContext,
-) -> Result<Graph, OrchestratorError> {
+) -> Result<Graph, OrchestratorError>
+where
+    M::Response: CompletionUsage,
+{
     let mut graph = Graph::new();
     configure_graph_runtime(&mut graph, plan, config);
     let mut node_table = NodeTable::new();
@@ -612,6 +1095,7 @@ fn build_dagrs_graph<M: CompletionModel + 'static>(
             metered_task_ids: Arc::clone(&context.metered_task_ids),
             parallelism: Arc::clone(&context.parallelism),
             cost_budget_serial: Arc::clone(&context.cost_budget_serial),
+            workspace_sync_serial: Arc::clone(&context.workspace_sync_serial),
         };
         let dagrs_node =
             DefaultNode::with_action(task_spec.id().to_string(), action, &mut node_table);
@@ -730,7 +1214,10 @@ pub async fn execute_dag<M: CompletionModel + 'static>(
     model: &M,
     registry: &Arc<ToolRegistry>,
     config: &ExecutorConfig,
-) -> Result<RunStateSnapshot, OrchestratorError> {
+) -> Result<RunStateSnapshot, OrchestratorError>
+where
+    M::Response: CompletionUsage,
+{
     if config.dagrs_resume_checkpoint_id.is_some() {
         return Err(OrchestratorError::ConfigError(
             "dagrs checkpoint resume is not supported yet; TODO: redesign resume semantics after userspace-fs checkpoint integration".to_string(),
@@ -759,11 +1246,13 @@ pub async fn execute_dag<M: CompletionModel + 'static>(
     };
     let parallelism = Arc::new(Semaphore::new(initial_parallel));
     let cost_budget_serial = Arc::new(tokio::sync::Mutex::new(()));
+    let workspace_sync_serial = Arc::new(tokio::sync::Mutex::new(()));
     let graph_context = DagrsBuildContext {
         run_state: run_state_snapshot,
         metered_task_ids,
         parallelism,
         cost_budget_serial,
+        workspace_sync_serial,
     };
     let mut graph = tokio::task::spawn_blocking(move || {
         build_dagrs_graph(
@@ -814,16 +1303,34 @@ pub async fn execute_dag<M: CompletionModel + 'static>(
         tracing::warn!("dagrs event monitor terminated unexpectedly: {}", err);
     }
 
-    if let Err(ref err) = execution_result {
+    let execution_error = execution_result.err().map(|err| {
         tracing::warn!("dagrs execution terminated with error: {}", err);
-        if !run_state.has_results().await {
-            return Err(OrchestratorError::AgentError(format!(
-                "dagrs execution failed before any task completed: {err}"
-            )));
-        }
-    }
+        err.to_string()
+    });
 
     let snapshot = run_state.snapshot(plan_spec).await;
+    let incomplete_tasks = plan_spec
+        .tasks
+        .iter()
+        .filter(|task| {
+            matches!(
+                snapshot.status_for(task.id()),
+                TaskNodeStatus::Pending | TaskNodeStatus::Running
+            )
+        })
+        .map(|task| task.title().to_string())
+        .collect::<Vec<_>>();
+    if !incomplete_tasks.is_empty() {
+        let detail = execution_error
+            .as_deref()
+            .map(|err| format!("; dagrs_error={err}"))
+            .unwrap_or_default();
+        return Err(OrchestratorError::AgentError(format!(
+            "dagrs execution ended with incomplete tasks: {}{}",
+            incomplete_tasks.join(", "),
+            detail
+        )));
+    }
     Ok(snapshot)
 }
 
@@ -1054,20 +1561,20 @@ fn runtime_context_for_task(
 
 fn runtime_context_for_gate_task(
     spec: &IntentSpec,
+    working_dir: &Path,
     inherited_runtime: Option<&ToolRuntimeContext>,
 ) -> ToolRuntimeContext {
-    let network_access = if matches!(
-        spec.constraints.security.network_policy,
-        NetworkPolicy::Allow
-    ) {
-        crate::internal::ai::sandbox::NetworkAccess::Enabled
-    } else {
-        crate::internal::ai::sandbox::NetworkAccess::Restricted
-    };
-
     ToolRuntimeContext {
         sandbox: Some(ToolSandboxContext {
-            policy: SandboxPolicy::ExternalSandbox { network_access },
+            policy: SandboxPolicy::WorkspaceWrite {
+                writable_roots: vec![working_dir.to_path_buf()],
+                network_access: matches!(
+                    spec.constraints.security.network_policy,
+                    NetworkPolicy::Allow
+                ),
+                exclude_tmpdir_env_var: false,
+                exclude_slash_tmp: false,
+            },
             permissions: SandboxPermissions::UseDefault,
         }),
         sandbox_runtime: inherited_runtime.and_then(|ctx| ctx.sandbox_runtime.clone()),
@@ -1103,44 +1610,81 @@ fn runtime_context_for_reviewer(
 
 fn collect_writable_roots(spec: &IntentSpec, task: &TaskSpec, working_dir: &Path) -> Vec<PathBuf> {
     let mut roots = Vec::<PathBuf>::new();
-    push_unique_root(&mut roots, working_dir.to_path_buf());
 
-    for scope in &task.scope_in {
-        if scope.contains('*') {
-            continue;
+    for touch_file in &task.contract.touch_files {
+        if let Some(resolved) = resolve_writable_root_candidate(touch_file, working_dir, true) {
+            push_unique_root(&mut roots, resolved);
         }
-        let resolved = if Path::new(scope).is_absolute() {
-            PathBuf::from(scope)
-        } else {
-            working_dir.join(scope)
-        };
-        push_unique_root(&mut roots, resolved);
     }
 
-    for rule in &spec.security.tool_acl.allow {
-        let writes_allowed = rule
-            .actions
-            .iter()
-            .any(|action| action == "*" || action == "write");
-        if !writes_allowed {
-            continue;
-        }
-        if let Some(serde_json::Value::Array(write_roots)) = rule.constraints.get("writeRoots") {
-            for root in write_roots.iter().filter_map(serde_json::Value::as_str) {
-                if root.contains('*') {
-                    continue;
-                }
-                let resolved = if Path::new(root).is_absolute() {
-                    PathBuf::from(root)
-                } else {
-                    working_dir.join(root)
-                };
+    if roots.is_empty() {
+        for scope in task.scope_in.iter().chain(task.contract.write_scope.iter()) {
+            if let Some(resolved) = resolve_writable_root_candidate(scope, working_dir, false) {
                 push_unique_root(&mut roots, resolved);
             }
         }
     }
 
+    if roots.is_empty() {
+        for rule in &spec.security.tool_acl.allow {
+            let writes_allowed = rule
+                .actions
+                .iter()
+                .any(|action| action == "*" || action == "write");
+            if !writes_allowed {
+                continue;
+            }
+            if let Some(serde_json::Value::Array(write_roots)) = rule.constraints.get("writeRoots")
+            {
+                for root in write_roots.iter().filter_map(serde_json::Value::as_str) {
+                    if let Some(resolved) =
+                        resolve_writable_root_candidate(root, working_dir, false)
+                    {
+                        push_unique_root(&mut roots, resolved);
+                    }
+                }
+            }
+        }
+    }
+
+    if roots.is_empty() {
+        push_unique_root(&mut roots, working_dir.to_path_buf());
+    }
+
     roots
+}
+
+fn resolve_writable_root_candidate(
+    raw: &str,
+    working_dir: &Path,
+    prefer_parent_for_missing_leaf: bool,
+) -> Option<PathBuf> {
+    let normalized = raw.trim().replace('\\', "/");
+    let trimmed = normalized.trim_start_matches("./");
+    if trimmed.is_empty() || matches!(trimmed, "*" | "**") {
+        return None;
+    }
+
+    let literal_or_root = trimmed
+        .find(['*', '?', '[', '{'])
+        .map(|index| trimmed[..index].trim_end_matches('/').to_string())
+        .unwrap_or_else(|| trimmed.trim_end_matches('/').to_string());
+
+    if literal_or_root.is_empty() {
+        return None;
+    }
+
+    let resolved = if Path::new(&literal_or_root).is_absolute() {
+        PathBuf::from(&literal_or_root)
+    } else {
+        working_dir.join(&literal_or_root)
+    };
+
+    if prefer_parent_for_missing_leaf && !resolved.exists() {
+        return resolved.parent().map(Path::to_path_buf).or(Some(resolved));
+    }
+
+    Some(resolved)
 }
 
 fn push_unique_root(roots: &mut Vec<PathBuf>, root: PathBuf) {
@@ -1186,21 +1730,26 @@ fn matches_tool_glob(pattern: &str, tool_name: &str) -> bool {
 mod tests {
     use std::{
         collections::BTreeMap,
+        path::PathBuf,
         sync::{Arc, Mutex},
         time::Duration,
     };
 
     use git_internal::internal::object::{task::Task as GitTask, types::ActorRef};
+    use serial_test::serial;
 
     use super::*;
-    use crate::internal::ai::{
-        completion::{
-            CompletionError, CompletionRequest, CompletionResponse,
-            message::{AssistantContent, Message, Text, UserContent},
+    use crate::{
+        internal::ai::{
+            completion::{
+                CompletionError, CompletionRequest, CompletionResponse,
+                message::{AssistantContent, Function, Message, Text, ToolCall, UserContent},
+            },
+            intentspec::{profiles, types::*},
+            orchestrator::types::{ExecutionPlanSpec, TaskContract, TaskKind, TaskSpec},
+            tools::{handlers::ApplyPatchHandler, registry::ToolRegistry},
         },
-        intentspec::{profiles, types::*},
-        orchestrator::types::{ExecutionPlanSpec, GateResult, TaskContract, TaskKind, TaskSpec},
-        tools::registry::ToolRegistry,
+        utils::test,
     };
 
     #[derive(Clone)]
@@ -1267,39 +1816,133 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct PatchApplyingModel;
+
+    impl CompletionModel for PatchApplyingModel {
+        type Response = ();
+
+        async fn completion(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+            let has_tool_result = request.chat_history.iter().any(|message| match message {
+                Message::User { content } => content
+                    .iter()
+                    .any(|item| matches!(item, UserContent::ToolResult(_))),
+                _ => false,
+            });
+            if has_tool_result {
+                return Ok(CompletionResponse {
+                    content: vec![AssistantContent::Text(Text {
+                        text: "done".to_string(),
+                    })],
+                    raw_response: (),
+                });
+            }
+
+            let prompt = request
+                .chat_history
+                .iter()
+                .rev()
+                .find_map(|message| match message {
+                    Message::User { content } => content.iter().find_map(|item| match item {
+                        UserContent::Text(text) => Some(text.text.clone()),
+                        _ => None,
+                    }),
+                    _ => None,
+                })
+                .unwrap_or_default();
+
+            let (call_id, patch) = if prompt.contains("## Task\nTask A") {
+                (
+                    "call_a",
+                    "*** Begin Patch\n*** Update File: task_a.txt\n@@\n-base\n+task-a\n*** End Patch",
+                )
+            } else {
+                (
+                    "call_b",
+                    "*** Begin Patch\n*** Update File: task_b.txt\n@@\n-base\n+task-b\n*** End Patch",
+                )
+            };
+
+            Ok(CompletionResponse {
+                content: vec![AssistantContent::ToolCall(ToolCall {
+                    id: call_id.to_string(),
+                    name: "apply_patch".to_string(),
+                    function: Function {
+                        name: "apply_patch".to_string(),
+                        arguments: serde_json::json!({ "input": patch }),
+                    },
+                })],
+                raw_response: (),
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct PatchThenFailModel;
+
+    impl CompletionModel for PatchThenFailModel {
+        type Response = ();
+
+        async fn completion(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+            let has_tool_result = request.chat_history.iter().any(|message| match message {
+                Message::User { content } => content
+                    .iter()
+                    .any(|item| matches!(item, UserContent::ToolResult(_))),
+                _ => false,
+            });
+            if has_tool_result {
+                return Err(CompletionError::ResponseError(
+                    "intentional failure after patch".to_string(),
+                ));
+            }
+
+            Ok(CompletionResponse {
+                content: vec![AssistantContent::ToolCall(ToolCall {
+                    id: "call_fail".to_string(),
+                    name: "apply_patch".to_string(),
+                    function: Function {
+                        name: "apply_patch".to_string(),
+                        arguments: serde_json::json!({
+                            "input": "*** Begin Patch\n*** Update File: task_a.txt\n@@\n-base\n+task-a\n*** End Patch"
+                        }),
+                    },
+                })],
+                raw_response: (),
+            })
+        }
+    }
+
     struct RecordingObserver {
         events: Arc<Mutex<Vec<String>>>,
     }
 
     impl OrchestratorObserver for RecordingObserver {
-        fn on_task_started(&self, task: &TaskSpec) {
-            self.events
-                .lock()
-                .unwrap()
-                .push(format!("start:{}", task.title()));
-        }
-
-        fn on_task_completed(&self, task: &TaskSpec, _result: &TaskResult) {
-            self.events
-                .lock()
-                .unwrap()
-                .push(format!("done:{}", task.title()));
-        }
-
-        fn on_gate_check_started(&self, task: &TaskSpec, check: &Check) {
-            self.events
-                .lock()
-                .unwrap()
-                .push(format!("gate-start:{}:{}", task.title(), check.id));
-        }
-
-        fn on_gate_check_completed(&self, task: &TaskSpec, check: &Check, result: &GateResult) {
-            self.events.lock().unwrap().push(format!(
-                "gate-done:{}:{}:{}",
-                task.title(),
-                check.id,
-                if result.passed { "pass" } else { "fail" }
-            ));
+        fn on_task_runtime_event(&self, task: &TaskSpec, event: TaskRuntimeEvent) {
+            let mut events = self.events.lock().unwrap();
+            match event {
+                TaskRuntimeEvent::Phase(TaskRuntimePhase::Starting) => {
+                    events.push(format!("start:{}", task.title()));
+                }
+                TaskRuntimeEvent::Phase(TaskRuntimePhase::Completed) => {
+                    events.push(format!("done:{}", task.title()));
+                }
+                TaskRuntimeEvent::Note { text, .. } if text.starts_with("gate running") => {
+                    events.push(format!("gate-start:{}:{}", task.title(), text));
+                }
+                TaskRuntimeEvent::Note { text, .. } if text.starts_with("gate passed") => {
+                    events.push(format!("gate-done:{}:pass", task.title()));
+                }
+                TaskRuntimeEvent::Note { text, .. } if text.starts_with("gate failed") => {
+                    events.push(format!("gate-done:{}:fail", task.title()));
+                }
+                _ => {}
+            }
         }
     }
 
@@ -1481,6 +2124,33 @@ mod tests {
         }
     }
 
+    fn scoped_implementation_task(title: &str, file: &str) -> TaskSpec {
+        let actor = ActorRef::agent("test-executor").unwrap();
+        let mut task = GitTask::new(actor, title, None).unwrap();
+        task.set_description(Some(format!("Modify {file}")));
+        task.add_constraint("network:allow");
+        task.add_acceptance_criterion("tests pass");
+        TaskSpec {
+            step: git_internal::internal::object::plan::PlanStep::new(title),
+            task,
+            objective: title.into(),
+            kind: TaskKind::Implementation,
+            gate_stage: None,
+            owner_role: Some("coder".into()),
+            scope_in: vec![file.into()],
+            scope_out: vec![],
+            checks: vec![],
+            contract: TaskContract {
+                write_scope: vec![file.into()],
+                forbidden_scope: vec![],
+                touch_files: vec![file.into()],
+                touch_symbols: vec![],
+                touch_apis: vec![],
+                expected_outputs: vec![format!("update {file}")],
+            },
+        }
+    }
+
     fn plan_for_tasks(tasks: Vec<TaskSpec>, max_parallel: u8) -> ExecutionPlanSpec {
         ExecutionPlanSpec {
             intent_spec_id: "test".into(),
@@ -1541,8 +2211,84 @@ mod tests {
 
         assert_eq!(result.status, TaskNodeStatus::Completed);
         let recorded = events.lock().unwrap();
-        assert!(recorded.contains(&"gate-start:Do thing:fmt".to_string()));
-        assert!(recorded.contains(&"gate-done:Do thing:fmt:pass".to_string()));
+        assert!(
+            recorded
+                .iter()
+                .any(|event| event.starts_with("gate-start:Do thing:gate running"))
+        );
+        assert!(recorded.contains(&"gate-done:Do thing:pass".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_execute_gate_task_with_default_security() {
+        let task = TaskSpec {
+            kind: TaskKind::Gate,
+            gate_stage: Some(super::super::types::GateStage::Fast),
+            checks: vec![Check {
+                id: "verify".into(),
+                kind: CheckKind::Command,
+                command: Some(":".into()),
+                timeout_seconds: Some(10),
+                expected_exit_code: Some(0),
+                required: true,
+                artifacts_produced: vec![],
+            }],
+            ..implementation_task()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut spec = (*spec()).clone();
+        spec.security = profiles::default_security();
+
+        let result = execute_gate_task(&task, dir.path(), &spec, None, None).await;
+
+        assert_eq!(result.status, TaskNodeStatus::Completed);
+        assert!(result.gate_report.unwrap().all_required_passed);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn execute_task_runs_gate_checks_in_isolated_worktree() {
+        let repo = tempfile::tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        std::fs::write(repo.path().join("tracked.txt"), "base\n").unwrap();
+
+        let task = TaskSpec {
+            kind: TaskKind::Gate,
+            gate_stage: Some(super::super::types::GateStage::Fast),
+            checks: vec![Check {
+                id: "scratch".into(),
+                kind: CheckKind::Command,
+                command: Some("printf 'scratch\\n' > gate-output.txt".into()),
+                timeout_seconds: Some(10),
+                expected_exit_code: Some(0),
+                required: true,
+                artifacts_produced: vec![],
+            }],
+            ..implementation_task()
+        };
+        let config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig::default(),
+            max_retries: 0,
+            backoff_seconds: 0,
+            working_dir: repo.path().to_path_buf(),
+            spec: spec(),
+            reviewer_preamble: None,
+            dagrs_resume_checkpoint_id: None,
+            observer: None,
+        };
+        let registry = ToolRegistry::new();
+        let model = MockModel {
+            final_text: "unused".into(),
+        };
+
+        let result = execute_task(&task, &model, &registry, &config).await;
+
+        assert_eq!(result.status, TaskNodeStatus::Completed);
+        assert!(!repo.path().join("gate-output.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("tracked.txt")).unwrap(),
+            "base\n"
+        );
     }
 
     #[tokio::test]
@@ -1550,8 +2296,8 @@ mod tests {
         let model = MockModel {
             final_text: "done".into(),
         };
-        let registry = Arc::new(ToolRegistry::new());
         let dir = tempfile::tempdir().unwrap();
+        let registry = Arc::new(ToolRegistry::with_working_dir(dir.path().to_path_buf()));
         let config = ExecutorConfig {
             tool_loop_config: ToolLoopConfig::default(),
             max_retries: 1,
@@ -1566,6 +2312,95 @@ mod tests {
         let result = execute_task(&task, &model, &registry, &config).await;
         assert_eq!(result.status, TaskNodeStatus::Completed);
         assert_eq!(result.retry_count, 0);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn execute_dag_replays_parallel_task_worktrees_back_to_main_workspace() {
+        let repo = tempfile::tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        std::fs::write(repo.path().join("task_a.txt"), "base\n").unwrap();
+        std::fs::write(repo.path().join("task_b.txt"), "base\n").unwrap();
+
+        let mut registry = ToolRegistry::with_working_dir(repo.path().to_path_buf());
+        registry.register("apply_patch", Arc::new(ApplyPatchHandler));
+        let registry = Arc::new(registry);
+
+        let config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig::default(),
+            max_retries: 0,
+            backoff_seconds: 0,
+            working_dir: repo.path().to_path_buf(),
+            spec: spec(),
+            reviewer_preamble: None,
+            dagrs_resume_checkpoint_id: None,
+            observer: None,
+        };
+
+        let plan = plan_for_tasks(
+            vec![
+                scoped_implementation_task("Task A", "task_a.txt"),
+                scoped_implementation_task("Task B", "task_b.txt"),
+            ],
+            2,
+        );
+
+        let run_state = execute_dag(&plan, &PatchApplyingModel, &registry, &config)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("task_a.txt")).unwrap(),
+            "task-a\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("task_b.txt")).unwrap(),
+            "task-b\n"
+        );
+        assert!(
+            run_state
+                .ordered_task_results()
+                .iter()
+                .all(|result| result.status == TaskNodeStatus::Completed)
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn execute_dag_keeps_main_workspace_clean_when_serial_task_fails() {
+        let repo = tempfile::tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        std::fs::write(repo.path().join("task_a.txt"), "base\n").unwrap();
+
+        let mut registry = ToolRegistry::with_working_dir(repo.path().to_path_buf());
+        registry.register("apply_patch", Arc::new(ApplyPatchHandler));
+        let registry = Arc::new(registry);
+
+        let config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig::default(),
+            max_retries: 0,
+            backoff_seconds: 0,
+            working_dir: repo.path().to_path_buf(),
+            spec: spec(),
+            reviewer_preamble: None,
+            dagrs_resume_checkpoint_id: None,
+            observer: None,
+        };
+
+        let plan = plan_for_tasks(vec![scoped_implementation_task("Task A", "task_a.txt")], 1);
+
+        let run_state = execute_dag(&plan, &PatchThenFailModel, &registry, &config)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("task_a.txt")).unwrap(),
+            "base\n"
+        );
+        assert_eq!(
+            run_state.ordered_task_results()[0].status,
+            TaskNodeStatus::Failed
+        );
     }
 
     #[test]
@@ -1588,6 +2423,63 @@ mod tests {
         assert!(tools.contains(&"read_file".to_string()));
         assert!(tools.contains(&"apply_patch".to_string()));
         assert!(!tools.contains(&"shell".to_string()));
+    }
+
+    #[test]
+    fn gate_runtime_uses_workspace_write_sandbox() {
+        let runtime = runtime_context_for_gate_task(&spec(), Path::new("/tmp/workspace"), None);
+        let sandbox = runtime
+            .sandbox
+            .expect("gate tasks should always execute with sandbox context");
+        assert!(matches!(
+            sandbox.policy,
+            SandboxPolicy::WorkspaceWrite {
+                writable_roots,
+                ..
+            } if writable_roots == vec![PathBuf::from("/tmp/workspace")]
+        ));
+    }
+
+    #[test]
+    fn task_runtime_prefers_touch_files_as_writable_roots() {
+        let workspace = tempfile::tempdir().unwrap();
+        let src_dir = workspace.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(src_dir.join("main.rs"), "fn main() {}\n").unwrap();
+        let expected_root = workspace.path().join("src/main.rs").canonicalize().unwrap();
+
+        let runtime =
+            runtime_context_for_task(&spec(), &implementation_task(), workspace.path(), None);
+        let sandbox = runtime
+            .sandbox
+            .expect("implementation tasks should always execute with sandbox context");
+        assert!(matches!(
+            sandbox.policy,
+            SandboxPolicy::WorkspaceWrite {
+                writable_roots,
+                ..
+            } if writable_roots == vec![expected_root]
+        ));
+    }
+
+    #[test]
+    fn task_runtime_falls_back_to_scope_roots_when_touch_files_are_absent() {
+        let mut task = implementation_task();
+        task.contract.touch_files.clear();
+        task.scope_in = vec!["src/**/*.rs".into()];
+        task.contract.write_scope = vec!["src/**/*.rs".into()];
+
+        let runtime = runtime_context_for_task(&spec(), &task, Path::new("/tmp/workspace"), None);
+        let sandbox = runtime
+            .sandbox
+            .expect("implementation tasks should always execute with sandbox context");
+        assert!(matches!(
+            sandbox.policy,
+            SandboxPolicy::WorkspaceWrite {
+                writable_roots,
+                ..
+            } if writable_roots == vec![PathBuf::from("/tmp/workspace/src")]
+        ));
     }
 
     #[test]
@@ -1737,12 +2629,89 @@ mod tests {
             .filter_map(|event| event.strip_prefix("start:").map(ToString::to_string))
             .collect();
         assert_eq!(start_order, vec!["Fail first"]);
-        assert_eq!(run_state.task_results.len(), 1);
+        assert_eq!(run_state.task_results.len(), 2);
         assert_eq!(run_state.task_results[0].task_id, failing.id());
         assert_eq!(run_state.task_results[0].status, TaskNodeStatus::Failed);
+        assert_eq!(run_state.task_results[1].task_id, later.id());
+        assert_eq!(run_state.task_results[1].status, TaskNodeStatus::Skipped);
         assert_eq!(run_state.dagrs_runtime.total_nodes, 2);
         assert_eq!(run_state.dagrs_runtime.completed_nodes, 2);
-        assert_eq!(run_state.status_for(later.id()), TaskNodeStatus::Pending);
+        assert_eq!(run_state.status_for(later.id()), TaskNodeStatus::Skipped);
+    }
+
+    #[tokio::test]
+    async fn execute_dag_records_cost_budget_abort_as_failure() {
+        let model = MockModel {
+            final_text: "done".into(),
+        };
+        let registry = Arc::new(ToolRegistry::new());
+        let dir = tempfile::tempdir().unwrap();
+        let mut spec = (*spec()).clone();
+        spec.constraints.resources.max_cost_units = 1;
+        spec.execution.concurrency.max_parallel_tasks = 1;
+        let config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig::default(),
+            max_retries: 0,
+            backoff_seconds: 0,
+            working_dir: dir.path().to_path_buf(),
+            spec: Arc::new(spec),
+            reviewer_preamble: None,
+            dagrs_resume_checkpoint_id: None,
+            observer: None,
+        };
+
+        let first = implementation_task();
+        let mut second = implementation_task();
+        second.task = {
+            let actor = ActorRef::agent("test-executor").unwrap();
+            let mut task = GitTask::new(actor, "Second", None).unwrap();
+            task.set_description(Some("Implement change".into()));
+            task.add_constraint("network:allow");
+            task.add_acceptance_criterion("tests pass");
+            task
+        };
+        second.objective = "Second".into();
+
+        let plan = plan_for_tasks(vec![first.clone(), second.clone()], 1);
+        let run_state = execute_dag(&plan, &model, &registry, &config)
+            .await
+            .unwrap();
+
+        let completed = run_state
+            .ordered_task_results()
+            .iter()
+            .filter(|result| result.status == TaskNodeStatus::Completed)
+            .count();
+        let failed = run_state
+            .ordered_task_results()
+            .iter()
+            .filter(|result| result.status == TaskNodeStatus::Failed)
+            .count();
+        assert_eq!(completed, 1, "{:?}", run_state.ordered_task_results());
+        assert_eq!(failed, 1, "{:?}", run_state.ordered_task_results());
+
+        let failure = run_state
+            .ordered_task_results()
+            .iter()
+            .find(|result| result.status == TaskNodeStatus::Failed)
+            .expect("budget-exhausted task result should be recorded");
+        assert!(
+            failure
+                .agent_output
+                .as_deref()
+                .is_some_and(|message| message.contains("cost budget exceeded")),
+            "{failure:?}"
+        );
+        assert!(
+            [first.id(), second.id()].into_iter().all(|task_id| {
+                !matches!(
+                    run_state.status_for(task_id),
+                    TaskNodeStatus::Pending | TaskNodeStatus::Running
+                )
+            }),
+            "{:?}",
+            run_state.task_statuses
+        );
     }
 
     #[tokio::test]

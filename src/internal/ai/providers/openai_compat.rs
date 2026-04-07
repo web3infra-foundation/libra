@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::internal::ai::{
     completion::{
-        AssistantContent, CompletionError, Function, Message, Text, ToolCall, UserContent,
-        request::CompletionRequest,
+        AssistantContent, CompletionError, CompletionUsage, CompletionUsageSummary, Function,
+        Message, Text, ToolCall, UserContent, request::CompletionRequest,
     },
     tools::ToolDefinition,
 };
@@ -100,6 +100,16 @@ pub struct ChatResponse {
     pub model: String,
     pub choices: Vec<ChatChoice>,
     pub usage: Option<ChatUsage>,
+}
+
+impl CompletionUsage for ChatResponse {
+    fn usage_summary(&self) -> Option<CompletionUsageSummary> {
+        self.usage.as_ref().map(|usage| CompletionUsageSummary {
+            input_tokens: usage.prompt_tokens as u64,
+            output_tokens: usage.completion_tokens as u64,
+            cost_usd: None,
+        })
+    }
 }
 
 /// Inner error object from an OpenAI-compatible API.

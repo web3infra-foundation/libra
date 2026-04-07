@@ -2,6 +2,58 @@
 
 Switch branches, create and switch to a new branch, or detach HEAD at a specific commit.
 
+**Alias:** `sw`
+
+## Synopsis
+
+```
+libra switch <branch>
+libra switch -c <name> [<start-point>]
+libra switch -d <commit|tag|branch>
+libra switch --track <remote/branch>
+```
+
+## Description
+
+`libra switch` is the primary command for changing branches. It validates that the working tree is clean before switching, updates HEAD and the index, and restores the working tree to match the target commit. Unlike `libra checkout`, which exists as a Git-compatibility surface, `switch` is the recommended command for branch operations.
+
+The command supports four modes: switching to an existing local branch (default), creating a new branch with `-c`, detaching HEAD with `-d`, and tracking a remote branch with `--track`. When the target branch is already the current branch, the command is a no-op and skips the cleanliness check entirely.
+
+Fuzzy branch name suggestions are provided via Levenshtein distance when a branch is not found, helping catch typos without requiring exact matches.
+
+## Options
+
+| Flag | Long | Value | Description |
+|------|------|-------|-------------|
+| | `<branch>` | positional (optional) | Target branch, commit, or remote reference to switch to |
+| `-c` | `--create` | `<name>` | Create a new branch and switch to it |
+| `-d` | `--detach` | | Detach HEAD at the given commit, tag, or branch |
+| | `--track` | | Create a local branch tracking the given remote branch and switch to it |
+
+### Flag details
+
+**`-c / --create <name> [start-point]`**: Creates a new branch named `<name>` from `<start-point>` (or HEAD if omitted), then switches to it. Validates the name, checks that no branch with that name already exists, and rejects reserved internal branch names.
+
+```bash
+libra switch -c feature-x              # New branch from HEAD
+libra switch -c fix-123 abc1234        # New branch from specific commit
+libra switch -c release-2.0 main       # New branch from another branch
+```
+
+**`-d / --detach`**: Moves HEAD to point directly at a commit rather than a branch. Useful for inspecting historical states or building from tags.
+
+```bash
+libra switch --detach v1.0             # Detach at a tag
+libra switch --detach abc1234          # Detach at a commit
+```
+
+**`--track`**: Looks up the remote-tracking reference, creates a local branch with the same name, sets upstream tracking, and switches to it. Conflicts with `--create` and `--detach`.
+
+```bash
+libra switch --track origin/main       # Track and switch to remote branch
+libra switch --track feature            # Assumes origin/feature
+```
+
 ## Common Commands
 
 ```bash
@@ -43,7 +95,7 @@ Already on 'main'
 
 `--quiet` suppresses all `stdout` output.
 
-## Structured Output
+## Structured Output (JSON examples)
 
 `libra switch` supports the global `--json` and `--machine` flags.
 
@@ -138,6 +190,39 @@ Track and switch to a remote branch:
 - `tracking` is present only with `--track`, containing `remote` and `remote_branch`
 - `created` is `true` when `--create` or `--track` created a new local branch
 
+## Design Rationale
+
+### Why separate from checkout?
+
+Git's `checkout` is overloaded: it switches branches, restores files, detaches HEAD, and creates branches -- all through the same command with different flag combinations. This makes it difficult for both humans and AI agents to predict behavior. Libra follows Git's own modernization path (introduced in Git 2.23) by splitting `checkout` into `switch` (branch operations) and `restore` (file operations). `libra switch` handles only branch-related state changes, making its behavior predictable and its error messages precise.
+
+Keeping `switch` focused also simplifies structured output: every `SwitchOutput` contains the same fields regardless of the operation mode, so agents can parse results without guessing which schema variant applies.
+
+### Why auto-track remote branches?
+
+When `--track origin/feature` is used, Libra automatically creates a local branch, sets upstream tracking, and switches to it in a single atomic operation. This eliminates the multi-step ceremony of `git fetch && git branch feature origin/feature && git branch -u origin/feature feature && git switch feature`. For AI agents operating in trunk-based workflows, reducing a four-command sequence to one command means fewer failure points and simpler tool orchestration.
+
+The `--track` flag defaults to the `origin` remote when only a branch name is provided (e.g., `libra switch --track feature` assumes `origin/feature`), which matches the most common remote setup.
+
+### Why fuzzy suggestions?
+
+When a branch name is not found, Libra computes Levenshtein distance against all known branches and suggests matches within edit distance 2. This catches common typos (`faeture` instead of `feature`) without requiring glob patterns or regex. The suggestions appear as actionable hints in the error output, reducing round-trips for both human users and AI agents that can parse hint text.
+
+## Parameter Comparison: Libra vs Git vs jj
+
+| Feature | Git | Libra | jj |
+|---------|-----|-------|----|
+| Switch branch | `git switch main` | `libra switch main` | `jj edit <rev>` |
+| Create and switch | `git switch -c feature` | `libra switch -c feature` | `jj new -m "feature"` + `jj branch create feature` |
+| Create from commit | `git switch -c fix abc1234` | `libra switch -c fix abc1234` | `jj new abc1234` + `jj branch create fix` |
+| Detach HEAD | `git switch --detach v1.0` | `libra switch --detach v1.0` | `jj edit <rev>` (always detached-like) |
+| Track remote | `git switch --track origin/main` | `libra switch --track origin/main` | N/A (jj tracks all remotes) |
+| Force create | `git switch -C feature` | Not supported (delete first) | N/A |
+| Orphan branch | `git switch --orphan <name>` | Not supported | `jj new root()` |
+| Structured output | No | `--json` / `--machine` | `--template` |
+| Fuzzy suggestions | No | Levenshtein-based "did you mean" hints | No |
+| Clean-state validation | Warns but proceeds (sometimes) | Blocks switch with actionable error | No dirty state concept |
+
 ## Error Handling
 
 Every `SwitchError` variant maps to an explicit `StableErrorCode`.
@@ -166,16 +251,3 @@ Every `SwitchError` variant maps to an explicit `StableErrorCode`.
 command conflict contract through `DelegatedCli`, so that path keeps the branch
 command's existing error shape instead of adding the `SwitchError::BranchAlreadyExists`
 hint.
-
-## Feature Comparison: Libra vs Git
-
-| Use Case | Git | Libra |
-|----------|-----|-------|
-| Switch branch | `git switch main` | `libra switch main` |
-| Create and switch | `git switch -c feature` | `libra switch -c feature` |
-| Create from commit | `git switch -c fix abc1234` | `libra switch -c fix abc1234` |
-| Detach HEAD | `git switch --detach v1.0` | `libra switch --detach v1.0` |
-| Track remote | `git switch --track origin/main` | `libra switch --track origin/main` |
-| Structured output | No | `--json` / `--machine` |
-| Fuzzy suggestions | No | Levenshtein-based "did you mean" hints |
-| Error hints | Minimal | Most errors include actionable hints |
