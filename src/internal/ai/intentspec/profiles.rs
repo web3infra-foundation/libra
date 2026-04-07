@@ -156,12 +156,6 @@ pub fn default_artifacts(risk_level: RiskLevel, has_implementation_work: bool) -
             required: true,
             format: "git-diff".to_string(),
         });
-        required.push(ArtifactReq {
-            name: ArtifactName::TestLog,
-            stage: ArtifactStage::PerTask,
-            required: true,
-            format: "text".to_string(),
-        });
     }
 
     if has_implementation_work && matches!(risk_level, RiskLevel::Medium | RiskLevel::High) {
@@ -260,6 +254,19 @@ mod tests {
                 .required
                 .iter()
                 .any(|req| req.name == ArtifactName::Patchset),
+            "{:?}",
+            artifacts.required
+        );
+    }
+
+    #[test]
+    fn implementation_defaults_do_not_require_test_log_without_explicit_checks() {
+        let artifacts = default_artifacts(RiskLevel::Low, true);
+        assert!(
+            !artifacts
+                .required
+                .iter()
+                .any(|req| req.name == ArtifactName::TestLog),
             "{:?}",
             artifacts.required
         );

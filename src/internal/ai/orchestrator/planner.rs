@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 
 use git_internal::internal::object::{
     plan::PlanStep,
@@ -11,9 +11,12 @@ use super::types::{
     TaskSpec,
 };
 use crate::internal::ai::{
-    intentspec::types::{
-        ChangeType, ConflictResolution, DecompositionMode, DependencyPolicy, IntentSpec,
-        LibraBinding, NetworkPolicy, ObjectiveKind, PlanGenerationConfig, RiskLevel, TouchHints,
+    intentspec::{
+        effective_forbidden_scope, effective_write_scope,
+        types::{
+            ChangeType, ConflictResolution, DecompositionMode, DependencyPolicy, IntentSpec,
+            NetworkPolicy, ObjectiveKind, PlanGenerationConfig, RiskLevel, TouchHints,
+        },
     },
     workflow_objects::planner_actor,
 };
@@ -33,7 +36,7 @@ struct TaskSpecMeta {
 pub fn compile_execution_plan_spec(
     spec: &IntentSpec,
 ) -> Result<ExecutionPlanSpec, OrchestratorError> {
-    let plan_config = effective_plan_generation(spec.libra.as_ref());
+    let plan_config = effective_plan_generation(spec);
     let max_parallel = effective_max_parallel(spec);
     let common_constraints = build_common_constraints(spec);
     let common_contract = build_common_contract(spec);
@@ -56,12 +59,6 @@ pub fn compile_execution_plan_spec(
     ) {
         make_sequential(&mut tasks);
     }
-    let serial_implementation_flow = should_force_serial(
-        &plan_config,
-        max_parallel,
-        contains_implementation_tasks(&tasks),
-    );
-
     let has_implementation_work = contains_implementation_tasks(&tasks);
     let work_task_ids: Vec<Uuid> = tasks
         .iter()
@@ -82,7 +79,7 @@ pub fn compile_execution_plan_spec(
                 .cloned()
                 .collect::<Vec<_>>();
 
-            for (index, task) in work_tasks.iter().enumerate() {
+            for task in &work_tasks {
                 let task_title = task.title().to_string();
                 let fast_gate = task_spec(
                     git_task(
@@ -114,16 +111,7 @@ pub fn compile_execution_plan_spec(
                     after_tasks: vec![gate_id],
                     reason: format!("fast gate boundary for {}", task.title()),
                 });
-                if serial_implementation_flow
-                    && task.kind == TaskKind::Implementation
-                    && let Some(next_task_id) = work_tasks.get(index + 1).map(TaskSpec::id)
-                    && let Some(next_task) = tasks
-                        .iter_mut()
-                        .find(|candidate| candidate.id() == next_task_id)
-                    && !next_task.dependencies().contains(&gate_id)
-                {
-                    next_task.task.add_dependency(gate_id);
-                }
+                add_fast_gate_to_direct_dependents(&mut tasks, task.id(), gate_id);
                 tasks.push(fast_gate);
             }
 
@@ -174,8 +162,8 @@ pub fn compile_execution_plan_spec(
                     kind: TaskKind::Gate,
                     gate_stage: Some(stage.clone()),
                     owner_role: Some("verifier".to_string()),
-                    scope_in: spec.intent.in_scope.clone(),
-                    scope_out: spec.intent.out_of_scope.clone(),
+                    scope_in: common_contract.write_scope.clone(),
+                    scope_out: common_contract.forbidden_scope.clone(),
                     checks,
                     contract: common_contract.clone(),
                 },
@@ -202,10 +190,35 @@ pub fn compile_execution_plan_spec(
     })
 }
 
-fn effective_plan_generation(libra: Option<&LibraBinding>) -> PlanGenerationConfig {
-    libra
+fn effective_plan_generation(spec: &IntentSpec) -> PlanGenerationConfig {
+    let mut plan_generation = spec
+        .libra
+        .as_ref()
         .and_then(|binding| binding.plan_generation.clone())
-        .unwrap_or_default()
+        .unwrap_or_default();
+
+    let plan_generation_is_explicit = spec
+        .libra
+        .as_ref()
+        .and_then(|binding| binding.plan_generation.as_ref())
+        .is_some();
+    if !plan_generation_is_explicit && should_auto_use_per_file_cluster(spec) {
+        plan_generation.decomposition_mode = DecompositionMode::PerFileCluster;
+    }
+
+    plan_generation
+}
+
+fn should_auto_use_per_file_cluster(spec: &IntentSpec) -> bool {
+    spec.intent
+        .touch_hints
+        .as_ref()
+        .is_some_and(|hints| !hints.files.is_empty())
+        && spec
+            .intent
+            .objectives
+            .iter()
+            .all(|objective| objective.kind == ObjectiveKind::Implementation)
 }
 
 fn effective_max_parallel(spec: &IntentSpec) -> u8 {
@@ -252,8 +265,8 @@ fn build_common_contract(spec: &IntentSpec) -> TaskContract {
     });
 
     TaskContract {
-        write_scope: spec.intent.in_scope.clone(),
-        forbidden_scope: spec.intent.out_of_scope.clone(),
+        write_scope: effective_write_scope(&spec.intent),
+        forbidden_scope: effective_forbidden_scope(&spec.intent),
         touch_files: hints.files,
         touch_symbols: hints.symbols,
         touch_apis: hints.apis,
@@ -329,8 +342,8 @@ fn build_work_tasks(
                         kind: work_kind.clone(),
                         gate_stage: None,
                         owner_role: Some(owner_role_for_kind(&work_kind).to_string()),
-                        scope_in: spec.intent.in_scope.clone(),
-                        scope_out: spec.intent.out_of_scope.clone(),
+                        scope_in: common_contract.write_scope.clone(),
+                        scope_out: common_contract.forbidden_scope.clone(),
                         checks: Vec::new(),
                         contract: common_contract.clone(),
                     },
@@ -402,8 +415,8 @@ fn build_work_tasks(
                         owner_role: Some(
                             owner_role_for_kind(&TaskKind::Implementation).to_string(),
                         ),
-                        scope_in: spec.intent.in_scope.clone(),
-                        scope_out: spec.intent.out_of_scope.clone(),
+                        scope_in: common_contract.write_scope.clone(),
+                        scope_out: common_contract.forbidden_scope.clone(),
                         checks: Vec::new(),
                         contract,
                     },
@@ -586,23 +599,79 @@ fn apply_conflict_resolution(
 }
 
 fn find_overlaps(nodes: &[TaskSpec]) -> Vec<String> {
-    let mut seen: HashMap<&str, usize> = HashMap::new();
-    let mut overlaps = Vec::new();
-
-    for node in nodes
+    let mut overlaps = BTreeSet::new();
+    let implementation_nodes = nodes
         .iter()
         .filter(|node| node.kind == TaskKind::Implementation)
-    {
-        for path in &node.contract.touch_files {
-            let count = seen.entry(path.as_str()).or_default();
-            *count += 1;
-            if *count == 2 {
-                overlaps.push(path.clone());
+        .collect::<Vec<_>>();
+
+    for (idx, left) in implementation_nodes.iter().enumerate() {
+        for right in implementation_nodes.iter().skip(idx + 1) {
+            let left_files = left
+                .contract
+                .touch_files
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let right_files = right
+                .contract
+                .touch_files
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>();
+
+            if !left_files.is_empty() && !right_files.is_empty() {
+                if left_files == right_files && left_files.len() > 1 {
+                    continue;
+                }
+
+                overlaps.extend(left_files.intersection(&right_files).cloned());
+                continue;
+            }
+
+            for left_scope in &left.scope_in {
+                for right_scope in &right.scope_in {
+                    if scope_patterns_overlap(left_scope, right_scope) {
+                        overlaps.insert(format!("scope:{}<->{}", left_scope, right_scope));
+                    }
+                }
             }
         }
     }
 
-    overlaps
+    overlaps.into_iter().collect()
+}
+
+fn scope_patterns_overlap(left: &str, right: &str) -> bool {
+    if matches!(left.trim(), "*" | "**") || matches!(right.trim(), "*" | "**") {
+        return true;
+    }
+
+    let left_root = scope_pattern_root(left);
+    let right_root = scope_pattern_root(right);
+
+    if left_root.is_empty() || right_root.is_empty() {
+        return true;
+    }
+
+    left_root == right_root
+        || left_root
+            .strip_prefix(&right_root)
+            .is_some_and(|rest| rest.starts_with('/'))
+        || right_root
+            .strip_prefix(&left_root)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+fn scope_pattern_root(pattern: &str) -> String {
+    let normalized = pattern.trim().replace('\\', "/");
+    let trimmed = normalized.trim_start_matches("./");
+    let prefix = trimmed
+        .find('*')
+        .map(|index| &trimmed[..index])
+        .unwrap_or(trimmed)
+        .trim_end_matches('/');
+    prefix.to_string()
 }
 
 fn make_sequential(nodes: &mut [TaskSpec]) {
@@ -617,6 +686,19 @@ fn make_sequential(nodes: &mut [TaskSpec]) {
     }
 }
 
+fn add_fast_gate_to_direct_dependents(tasks: &mut [TaskSpec], task_id: Uuid, gate_id: Uuid) {
+    for task in tasks
+        .iter_mut()
+        .filter(|task| task.kind != TaskKind::Gate)
+        .filter(|task| task.id() != task_id)
+        .filter(|task| task.dependencies().contains(&task_id))
+    {
+        if !task.dependencies().contains(&gate_id) {
+            task.task.add_dependency(gate_id);
+        }
+    }
+}
+
 fn contains_implementation_tasks(tasks: &[TaskSpec]) -> bool {
     tasks
         .iter()
@@ -626,12 +708,9 @@ fn contains_implementation_tasks(tasks: &[TaskSpec]) -> bool {
 fn should_force_serial(
     _plan_config: &PlanGenerationConfig,
     max_parallel: u8,
-    has_implementation_tasks: bool,
+    _has_implementation_tasks: bool,
 ) -> bool {
-    // TODO(worktree): docs/agent/agent-workflow.md requires task-specific sandbox/worktree
-    // state for concurrent code-changing tasks. Until that execution model exists, keep
-    // implementation work serial even if max_parallel > 1.
-    max_parallel <= 1 || has_implementation_tasks
+    max_parallel <= 1
 }
 
 fn owner_role_for_kind(kind: &TaskKind) -> &'static str {
@@ -914,7 +993,10 @@ mod tests {
     fn test_compile_execution_plan_builds_gate_tasks() {
         let plan = compile_execution_plan_spec(&minimal_spec()).unwrap();
         assert_eq!(plan.tasks.len(), 7);
-        assert_eq!(plan.parallel_groups().len(), 7);
+        let groups = plan.parallel_groups();
+        assert_eq!(groups.len(), 5, "{groups:?}");
+        assert_eq!(groups[0].len(), 2, "{groups:?}");
+        assert_eq!(groups[1].len(), 2, "{groups:?}");
         assert!(
             plan.tasks
                 .iter()
@@ -933,7 +1015,10 @@ mod tests {
                 .iter()
                 .any(|task| task.gate_stage == Some(GateStage::Fast))
         );
-        assert_eq!(plan_spec.parallel_groups().len(), 7);
+        let groups = plan_spec.parallel_groups();
+        assert_eq!(groups.len(), 5, "{groups:?}");
+        assert_eq!(groups[0].len(), 2, "{groups:?}");
+        assert_eq!(groups[1].len(), 2, "{groups:?}");
     }
 
     #[test]
@@ -952,6 +1037,63 @@ mod tests {
                 .iter()
                 .any(|task| task.contract.touch_files == vec!["src/auth/login.rs".to_string()])
         );
+    }
+
+    #[test]
+    fn test_compile_execution_plan_auto_uses_file_clusters_for_default_specs() {
+        let mut spec = minimal_spec();
+        spec.libra = None;
+
+        let plan = compile_execution_plan_spec(&spec).unwrap();
+        let implementation_tasks = plan
+            .tasks
+            .iter()
+            .filter(|task| task.kind == TaskKind::Implementation)
+            .collect::<Vec<_>>();
+
+        assert_eq!(implementation_tasks.len(), 2);
+        assert!(
+            implementation_tasks
+                .iter()
+                .all(|task| task.contract.touch_files.len() == 1)
+        );
+        assert!(
+            implementation_tasks
+                .iter()
+                .any(|task| task.contract.touch_files == vec!["src/auth/login.rs".to_string()])
+        );
+        assert!(
+            implementation_tasks
+                .iter()
+                .any(|task| task.contract.touch_files == vec!["src/auth/logout.rs".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_compile_execution_plan_uses_file_scope_not_freeform_scope_text() {
+        let mut spec = minimal_spec();
+        spec.intent.in_scope = vec![
+            "Run and fix clippy warnings across the codebase".into(),
+            "Fix error handling anti-patterns (unwrap/expect)".into(),
+        ];
+        spec.intent.touch_hints = Some(TouchHints {
+            files: vec!["src/**/*.rs".into(), "tests/**/*.rs".into()],
+            symbols: vec![],
+            apis: vec![],
+        });
+        spec.libra = None;
+
+        let plan = compile_execution_plan_spec(&spec).unwrap();
+        let implementation_tasks = plan
+            .tasks
+            .iter()
+            .filter(|task| task.kind == TaskKind::Implementation)
+            .collect::<Vec<_>>();
+
+        assert!(!implementation_tasks.is_empty());
+        assert!(implementation_tasks.iter().all(|task| {
+            task.scope_in == vec!["src/**/*.rs".to_string(), "tests/**/*.rs".to_string()]
+        }));
     }
 
     #[test]
@@ -1014,6 +1156,63 @@ mod tests {
                 .iter()
                 .map(|task| format!("{:?}", task.kind))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_compile_execution_plan_serializes_overlapping_scopes_without_touch_hints() {
+        let mut spec = minimal_spec();
+        spec.intent.touch_hints = None;
+
+        let plan = compile_execution_plan_spec(&spec).unwrap();
+        let implementation_tasks = plan
+            .tasks
+            .iter()
+            .filter(|task| task.kind == TaskKind::Implementation)
+            .collect::<Vec<_>>();
+
+        assert_eq!(implementation_tasks.len(), 2);
+        assert!(
+            implementation_tasks[1]
+                .dependencies()
+                .contains(&implementation_tasks[0].id()),
+            "{:?}",
+            implementation_tasks
+                .iter()
+                .map(|task| (task.title().to_string(), task.dependencies().to_vec()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_fast_gate_blocks_downstream_tasks_after_overlap_serialization() {
+        let mut spec = minimal_spec();
+        spec.intent.touch_hints = None;
+        spec.execution.concurrency.max_parallel_tasks = 2;
+
+        let plan = compile_execution_plan_spec(&spec).unwrap();
+        let implementation_tasks = plan
+            .tasks
+            .iter()
+            .filter(|task| task.kind == TaskKind::Implementation)
+            .collect::<Vec<_>>();
+        assert_eq!(implementation_tasks.len(), 2);
+
+        let first_task = implementation_tasks[0];
+        let second_task = implementation_tasks[1];
+        let first_fast_gate = plan
+            .tasks
+            .iter()
+            .find(|task| {
+                task.gate_stage == Some(GateStage::Fast) && task.dependencies() == [first_task.id()]
+            })
+            .expect("fast gate for first implementation task");
+
+        assert!(second_task.dependencies().contains(&first_task.id()));
+        assert!(
+            second_task.dependencies().contains(&first_fast_gate.id()),
+            "{:?}",
+            second_task.dependencies()
         );
     }
 

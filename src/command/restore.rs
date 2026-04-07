@@ -60,6 +60,8 @@ pub enum RestoreError {
     ReadIndex,
     #[error("failed to read object")]
     ReadObject,
+    #[error("failed to read worktree")]
+    ReadWorktree,
     #[error("invalid path encoding")]
     InvalidPathEncoding,
     #[error("failed to write worktree file")]
@@ -76,6 +78,7 @@ impl RestoreError {
             Self::PathspecNotMatched(_) => StableErrorCode::CliInvalidTarget,
             Self::ReadIndex => StableErrorCode::IoReadFailed,
             Self::ReadObject => StableErrorCode::IoReadFailed,
+            Self::ReadWorktree => StableErrorCode::IoReadFailed,
             Self::InvalidPathEncoding => StableErrorCode::CliInvalidArguments,
             Self::WriteWorktree => StableErrorCode::IoWriteFailed,
             Self::LfsDownload => StableErrorCode::NetworkUnavailable,
@@ -296,8 +299,8 @@ async fn restore_worktree_tracked(
         }
     }
 
-    let filter_vec = filter.to_vec();
-    let mut file_paths = util::integrate_pathspec(&filter_vec);
+    let mut file_paths =
+        util::integrate_pathspec(filter).map_err(|_| RestoreError::ReadWorktree)?;
     file_paths.extend(deleted_files);
 
     let index = Index::load(path::index()).map_err(|_| RestoreError::ReadIndex)?;
@@ -743,8 +746,7 @@ pub async fn restore_worktree(
         }
     }
 
-    let filter_vec = filter.to_vec();
-    let mut file_paths = util::integrate_pathspec(&filter_vec);
+    let mut file_paths = util::integrate_pathspec(filter)?;
     file_paths.extend(deleted_files);
 
     let index = Index::load(path::index()).map_err(|e| io::Error::other(e.to_string()))?;
@@ -793,8 +795,8 @@ async fn restore_worktree_legacy_typed(
         }
     }
 
-    let filter_vec = filter.to_vec();
-    let mut file_paths = util::integrate_pathspec(&filter_vec);
+    let mut file_paths =
+        util::integrate_pathspec(filter).map_err(|_| RestoreError::ReadWorktree)?;
     file_paths.extend(deleted_files);
 
     let index = Index::load(path::index()).map_err(|_| RestoreError::ReadIndex)?;

@@ -1,13 +1,13 @@
 //! Utility functions for tool handlers.
 
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     path::{Component, Path, PathBuf},
 };
 
 use crate::{
     internal::ai::tools::error::{ToolError, ToolResult},
-    utils,
+    utils::{self, util},
 };
 
 /// Validate that a path is within the allowed working directory.
@@ -17,6 +17,10 @@ use crate::{
 pub fn validate_path(path: &Path, working_dir: &Path) -> ToolResult<()> {
     if !path.is_absolute() {
         return Err(ToolError::PathNotAbsolute(path.to_path_buf()));
+    }
+
+    if is_reserved_metadata_path(path, working_dir) {
+        return Err(ToolError::PathReserved(path.to_path_buf()));
     }
 
     if !is_within_working_dir(path, working_dir)? {
@@ -48,6 +52,20 @@ pub fn resolve_path(path: &Path, working_dir: &Path) -> ToolResult<PathBuf> {
     };
     validate_path(&resolved, working_dir)?;
     Ok(resolved)
+}
+
+fn is_reserved_metadata_path(path: &Path, working_dir: &Path) -> bool {
+    let normalized_working_dir = normalize_lexical_absolute(working_dir);
+    let normalized_path = normalize_lexical_absolute(path);
+    let relative = match normalized_path.strip_prefix(&normalized_working_dir) {
+        Ok(relative) => relative,
+        Err(_) => return false,
+    };
+
+    matches!(
+        relative.components().next(),
+        Some(Component::Normal(name)) if name == OsStr::new(util::ROOT_DIR)
+    )
 }
 
 fn canonicalize_for_boundary(path: &Path) -> ToolResult<PathBuf> {
@@ -103,7 +121,9 @@ fn normalize_lexical_absolute(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{fs, path::PathBuf};
+
+    use tempfile::tempdir;
 
     use super::*;
 
@@ -140,5 +160,17 @@ mod tests {
         let path = PathBuf::from("src/main.rs");
         let resolved = resolve_path(&path, &working_dir).unwrap();
         assert_eq!(resolved, PathBuf::from("/tmp/work/src/main.rs"));
+    }
+
+    #[test]
+    fn test_validate_path_rejects_repository_metadata() {
+        let temp = tempdir().unwrap();
+        let working_dir = temp.path().to_path_buf();
+        fs::create_dir_all(working_dir.join(util::ROOT_DIR)).unwrap();
+        let reserved_path = working_dir.join(util::ROOT_DIR).join("refs").join("heads");
+
+        let result = validate_path(&reserved_path, &working_dir);
+
+        assert!(matches!(result, Err(ToolError::PathReserved(path)) if path == reserved_path));
     }
 }

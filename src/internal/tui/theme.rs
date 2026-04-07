@@ -33,6 +33,15 @@ const EXECUTING_GRADIENT: [Color; 5] = [
     Color::Rgb(76, 108, 152),
 ];
 
+const WELCOME_GRADIENT: [Color; 6] = [
+    ACCENT_PRIMARY,
+    ACCENT_EXPLORE,
+    ACCENT_BADGE,
+    TEXT_PRIMARY,
+    ACCENT_DRAFT,
+    ACCENT_PRIMARY,
+];
+
 pub(crate) mod text {
     use super::*;
 
@@ -262,6 +271,10 @@ pub(crate) mod animation {
 
     pub(crate) fn executing_gradient() -> [Color; 5] {
         EXECUTING_GRADIENT
+    }
+
+    pub(crate) fn welcome_gradient() -> [Color; 6] {
+        WELCOME_GRADIENT
     }
 }
 

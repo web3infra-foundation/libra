@@ -123,7 +123,9 @@ impl SandboxPolicy {
                     push_root_unique(&mut roots, resolve_root(root, cwd));
                 }
 
-                push_root_unique(&mut roots, cwd.to_path_buf());
+                if roots.is_empty() {
+                    push_root_unique(&mut roots, cwd.to_path_buf());
+                }
 
                 if cfg!(unix) && !exclude_slash_tmp {
                     let slash_tmp = PathBuf::from("/tmp");
@@ -173,4 +175,39 @@ fn protected_subpaths(root: &Path) -> Vec<PathBuf> {
         paths.push(root.join(subdir));
     }
     paths
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_workspace_roots_do_not_expand_to_cwd() {
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![PathBuf::from("src/main.rs")],
+            network_access: false,
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
+        };
+
+        let roots = policy.get_writable_roots_with_cwd(Path::new("/tmp/workspace"));
+
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].root, PathBuf::from("/tmp/workspace/src/main.rs"));
+    }
+
+    #[test]
+    fn empty_workspace_roots_fall_back_to_cwd() {
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: Vec::new(),
+            network_access: false,
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
+        };
+
+        let roots = policy.get_writable_roots_with_cwd(Path::new("/tmp/workspace"));
+
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].root, PathBuf::from("/tmp/workspace"));
+    }
 }

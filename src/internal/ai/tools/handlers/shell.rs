@@ -7,13 +7,21 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 
+// SAFETY: The unwrap() and expect() calls in test code are acceptable as test
+// failures are expected to panic on assertion failures.
 use super::parse_arguments;
-use crate::internal::ai::tools::{
-    context::{ShellArgs, ToolInvocation, ToolKind, ToolOutput, ToolPayload},
-    error::{ToolError, ToolResult},
-    registry::ToolHandler,
-    spec::ToolSpec,
-    utils::validate_path,
+use crate::internal::ai::{
+    tools::{
+        context::{ShellArgs, ToolInvocation, ToolKind, ToolOutput, ToolPayload},
+        error::{ToolError, ToolResult},
+        registry::ToolHandler,
+        spec::ToolSpec,
+        utils::validate_path,
+    },
+    workspace_snapshot::{
+        WorkspaceSnapshot, changed_paths_since_baseline as changed_workspace_paths,
+        snapshot_workspace,
+    },
 };
 
 /// Handler for executing shell commands.
@@ -75,6 +83,9 @@ impl ToolHandler for ShellHandler {
                 sandbox
             })
         });
+        let baseline_snapshot = snapshot_workspace(&working_dir).map_err(|err| {
+            ToolError::ExecutionFailed(format!("failed to snapshot workspace: {err}"))
+        })?;
 
         let output = crate::internal::ai::sandbox::run_shell_command_with_approval(
             crate::internal::ai::sandbox::ShellCommandRequest {
@@ -91,6 +102,18 @@ impl ToolHandler for ShellHandler {
         )
         .await
         .map_err(ToolError::ExecutionFailed)?;
+        let final_snapshot = snapshot_workspace(&working_dir).map_err(|err| {
+            ToolError::ExecutionFailed(format!(
+                "failed to inspect workspace changes after shell command: {err}"
+            ))
+        })?;
+        let metadata = serde_json::json!({
+            "paths_written": changed_paths_since_baseline(
+                &baseline_snapshot,
+                &final_snapshot,
+                &working_dir,
+            ),
+        });
 
         let formatted = format_output(
             output.exit_code,
@@ -98,11 +121,12 @@ impl ToolHandler for ShellHandler {
             &output.stderr,
             output.timed_out,
         );
-        if output.exit_code == 0 {
-            Ok(ToolOutput::success(formatted))
+        let rendered = if output.exit_code == 0 {
+            ToolOutput::success(formatted)
         } else {
-            Ok(ToolOutput::failure(formatted))
-        }
+            ToolOutput::failure(formatted)
+        };
+        Ok(rendered.with_metadata(metadata))
     }
 
     fn schema(&self) -> ToolSpec {
@@ -160,12 +184,24 @@ fn resolve_workdir(requested_workdir: Option<&str>, working_dir: &Path) -> ToolR
     Ok(requested_canon)
 }
 
+fn changed_paths_since_baseline(
+    baseline: &WorkspaceSnapshot,
+    current: &WorkspaceSnapshot,
+    _root: &Path,
+) -> Vec<String> {
+    changed_workspace_paths(baseline, current)
+        .into_iter()
+        .map(|path| path.to_string_lossy().to_string())
+        .collect()
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
+    use serial_test::serial;
     use tempfile::TempDir;
 
     use super::*;
@@ -417,6 +453,27 @@ mod tests {
         assert!(
             text.contains("truncated"),
             "expected truncation notice:\n{text}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_shell_metadata_tracks_written_paths() {
+        let temp = TempDir::new().unwrap();
+        let outside_repo = TempDir::new().unwrap();
+        let _cwd = crate::utils::test::ChangeDirGuard::new(outside_repo.path());
+        let inv = make_invocation(
+            serde_json::json!({ "command": "printf 'hello\\n' > touched.txt" }),
+            temp.path().to_path_buf(),
+        );
+        let result = ShellHandler.handle(inv).await.unwrap();
+
+        let metadata = result
+            .metadata()
+            .expect("shell results should include metadata");
+        assert_eq!(
+            metadata["paths_written"],
+            serde_json::json!(["touched.txt"])
         );
     }
 

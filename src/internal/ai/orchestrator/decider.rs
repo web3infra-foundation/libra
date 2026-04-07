@@ -90,6 +90,7 @@ mod tests {
             retry_count: 0,
             tool_calls: vec![],
             policy_violations: vec![],
+            model_usage: None,
             review: None,
         }
     }

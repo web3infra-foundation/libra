@@ -84,6 +84,8 @@ pub fn load_embedded_profiles() -> Vec<AgentProfile> {
     let sources = [
         include_str!("embedded/planner.md"),
         include_str!("embedded/code_reviewer.md"),
+        include_str!("embedded/coder.md"),
+        include_str!("embedded/orchestrator.md"),
         include_str!("embedded/architect.md"),
         include_str!("embedded/build_error_resolver.md"),
     ];
@@ -195,10 +197,12 @@ mod tests {
     #[test]
     fn test_load_embedded_profiles() {
         let profiles = load_embedded_profiles();
-        assert_eq!(profiles.len(), 4);
+        assert_eq!(profiles.len(), 6);
         let names: Vec<&str> = profiles.iter().map(|a| a.name.as_str()).collect();
         assert!(names.contains(&"planner"));
         assert!(names.contains(&"code_reviewer"));
+        assert!(names.contains(&"coder"));
+        assert!(names.contains(&"orchestrator"));
         assert!(names.contains(&"architect"));
         assert!(names.contains(&"build_error_resolver"));
     }

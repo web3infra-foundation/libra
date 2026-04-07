@@ -7,6 +7,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+// SAFETY: The unwrap() calls in this module are generally safe because:
+// 1. They operate on data structures with guaranteed invariants (e.g., string indices)
+// 2. They are used in rendering where dimensions are pre-validated
+// 3. Test code uses unwrap for test assertions
 use ratatui::{
     prelude::*,
     widgets::{Block, BorderType, Borders, Clear, Paragraph},
@@ -14,9 +18,10 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{app_event::AgentStatus, theme};
+use crate::internal::ai::sandbox::ExecApprovalRequest;
 
 /// Snapshot of user-input question data for rendering (avoids borrowing the request).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct UserInputQuestionSnapshot {
     header: String,
     question: String,
@@ -29,15 +34,19 @@ struct UserInputQuestionSnapshot {
     is_secret: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct ExecApprovalSnapshot {
     command: String,
     cwd: String,
     reason: Option<String>,
     is_retry: bool,
+    sandbox_label: String,
+    network_access: bool,
+    writable_roots: Vec<String>,
 }
 
 /// State for the slash-command autocomplete popup.
+#[derive(Debug)]
 struct CommandPopupState {
     /// Known commands: `(name, description)`, set once at startup.
     commands: Vec<(String, String)>,
@@ -52,6 +61,7 @@ struct CommandPopupState {
 const COMMAND_POPUP_MAX_VISIBLE: usize = 8;
 
 /// The bottom pane containing input area and status.
+#[derive(Debug)]
 pub struct BottomPane {
     /// Current input text.
     pub input: String,
@@ -85,6 +95,10 @@ pub struct BottomPane {
     git_branch: Option<String>,
     /// Current retry notice shown in the status line.
     retry_notice: Option<String>,
+    /// Optional context label shown on the input box title.
+    input_context_label: Option<String>,
+    /// Optional placeholder override for local TUI controls.
+    input_hint: Option<String>,
 }
 
 impl BottomPane {
@@ -112,6 +126,8 @@ impl BottomPane {
             cwd: None,
             git_branch: None,
             retry_notice: None,
+            input_context_label: None,
+            input_hint: None,
         }
     }
 
@@ -141,22 +157,20 @@ impl BottomPane {
         self.user_input_notes_text.clear();
     }
 
-    pub fn set_exec_approval(
-        &mut self,
-        command: Option<String>,
-        cwd: Option<String>,
-        reason: Option<String>,
-        is_retry: bool,
-    ) {
-        self.exec_approval = match (command, cwd) {
-            (Some(command), Some(cwd)) => Some(ExecApprovalSnapshot {
-                command,
-                cwd,
-                reason,
-                is_retry,
-            }),
-            _ => None,
-        };
+    pub fn set_exec_approval(&mut self, request: Option<&ExecApprovalRequest>) {
+        self.exec_approval = request.map(|request| ExecApprovalSnapshot {
+            command: request.command.clone(),
+            cwd: request.cwd.display().to_string(),
+            reason: request.reason.clone(),
+            is_retry: request.is_retry,
+            sandbox_label: request.sandbox_label.clone(),
+            network_access: request.network_access,
+            writable_roots: request
+                .writable_roots
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect(),
+        });
         self.exec_approval_selected = 0;
     }
 
@@ -247,6 +261,16 @@ impl BottomPane {
     pub fn set_retry_notice(&mut self, notice: String) {
         self.retry_notice = Some(notice);
         self.status = AgentStatus::Retrying;
+    }
+
+    /// Set or clear a contextual title for the shared input box.
+    pub fn set_input_context_label(&mut self, label: Option<String>) {
+        self.input_context_label = label;
+    }
+
+    /// Set or clear a placeholder override for the shared input box.
+    pub fn set_input_hint(&mut self, hint: Option<String>) {
+        self.input_hint = hint;
     }
 
     // ── Slash-command autocomplete popup ────────────────────────────
@@ -679,7 +703,7 @@ impl BottomPane {
 
         let chunks = Layout::vertical([
             Constraint::Length(1), // Status bar
-            Constraint::Length(3), // Command summary
+            Constraint::Length(7), // Command summary
             Constraint::Length(4), // Options
             Constraint::Length(1), // Help text
         ])
@@ -694,10 +718,49 @@ impl BottomPane {
                 theme::text::primary(),
             ),
             Line::styled(
+                format!("  sandbox: {}", approval.sandbox_label),
+                theme::text::muted(),
+            ),
+            Line::styled(
+                format!(
+                    "  network: {}",
+                    if approval.network_access {
+                        "enabled"
+                    } else {
+                        "restricted"
+                    }
+                ),
+                theme::text::muted(),
+            ),
+            Line::styled(
                 format!("  cwd: {}", approval.cwd),
                 theme::text::muted().add_modifier(Modifier::DIM),
             ),
         ];
+        if let Some(label) = self.input_context_label.as_deref() {
+            summary_lines.push(Line::styled(
+                format!("  context: {label}"),
+                theme::interactive::title(),
+            ));
+        }
+        if !approval.writable_roots.is_empty() {
+            let preview = approval
+                .writable_roots
+                .iter()
+                .take(2)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            let suffix = if approval.writable_roots.len() > 2 {
+                format!(" (+{} more)", approval.writable_roots.len() - 2)
+            } else {
+                String::new()
+            };
+            summary_lines.push(Line::styled(
+                format!("  write roots: {preview}{suffix}"),
+                theme::text::muted(),
+            ));
+        }
         if let Some(reason) = approval.reason.as_deref() {
             summary_lines.push(Line::styled(
                 format!("  reason: {reason}"),
@@ -886,10 +949,16 @@ impl BottomPane {
             theme::border::idle()
         };
 
-        let block = Block::default()
+        let mut block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(border_style);
+        if let Some(label) = self.input_context_label.as_deref() {
+            block = block.title(Line::styled(
+                format!(" {} ", label),
+                theme::interactive::title(),
+            ));
+        }
 
         let inner = block.inner(area);
 
@@ -899,7 +968,7 @@ impl BottomPane {
             let placeholder = if self.status == AgentStatus::AwaitingUserInput {
                 "Type custom answer..."
             } else {
-                "Type your message..."
+                self.input_hint.as_deref().unwrap_or("Type your message...")
             };
             (
                 Text::from(vec![Line::styled(placeholder, theme::text::placeholder())]),
@@ -971,7 +1040,11 @@ impl BottomPane {
                 }
             }
             AgentStatus::Thinking | AgentStatus::Retrying | AgentStatus::ExecutingTool => {
-                "[Esc: Interrupt] [PgUp/PgDn: Scroll] [Shift+Drag: Select] [Ctrl+C: Exit]"
+                if self.input_hint.is_some() {
+                    "[Tab/Shift+Tab: Switch pane] [Ctrl+O: Overview] [Ctrl+F: Focus] [Enter: Run /mux] [Esc: Clear/Interrupt]"
+                } else {
+                    "[Esc: Interrupt] [PgUp/PgDn: Scroll] [Shift+Drag: Select] [Ctrl+C: Exit]"
+                }
             }
             AgentStatus::AwaitingUserInput => {
                 "[Up/Down: Select] [1-9: Quick select] [Enter: Submit] [Esc: Cancel]"

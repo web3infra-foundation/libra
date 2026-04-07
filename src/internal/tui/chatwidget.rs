@@ -4,17 +4,25 @@
 
 use std::{
     collections::BTreeMap,
-    time::{SystemTime, UNIX_EPOCH},
+    path::PathBuf,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
 };
 use uuid::Uuid;
 
-use super::{bottom_pane::BottomPane, history_cell::HistoryCell, theme};
-use crate::internal::ai::orchestrator::types::{ExecutionPlanSpec, TaskKind, TaskNodeStatus};
+use super::{
+    bottom_pane::BottomPane,
+    history_cell::{AssistantHistoryCell, HistoryCell, ToolCallHistoryCell},
+    theme,
+};
+use crate::internal::ai::orchestrator::types::{
+    ExecutionPlanSpec, TaskKind, TaskNodeStatus, TaskRuntimeEvent, TaskRuntimeNoteLevel,
+    TaskRuntimePhase,
+};
 
 #[derive(Debug, Clone)]
 struct DagPanelNode {
@@ -48,7 +56,7 @@ struct DagGraphLayout {
 
 impl DagPanelState {
     fn new(plan: ExecutionPlanSpec) -> Self {
-        let groups = plan.parallel_groups();
+        let groups = plan.scheduled_groups();
         let mut id_to_depth = std::collections::HashMap::new();
         for (depth, group) in groups.iter().enumerate() {
             for id in group {
@@ -134,12 +142,331 @@ fn animation_phase(step_ms: u128) -> usize {
     (millis / step_ms.max(1)) as usize
 }
 
+#[derive(Debug, Clone)]
+struct TaskMuxNoteEntry {
+    level: TaskRuntimeNoteLevel,
+    text: String,
+}
+
+#[derive(Debug, Clone)]
+enum TaskMuxTranscriptEntry {
+    Note(TaskMuxNoteEntry),
+    Assistant(AssistantHistoryCell),
+    Tool(ToolCallHistoryCell),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TaskMuxMode {
+    Overview,
+    Focused,
+}
+
+#[derive(Debug, Clone)]
+struct TaskMuxTransition {
+    from_mode: TaskMuxMode,
+    to_mode: TaskMuxMode,
+    from_focus: usize,
+    to_focus: usize,
+    started_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+struct TaskMuxTaskState {
+    task_id: Uuid,
+    kind: TaskKind,
+    title: String,
+    depth: usize,
+    ordinal: usize,
+    status: TaskNodeStatus,
+    phase: TaskRuntimePhase,
+    working_dir: Option<PathBuf>,
+    isolated: bool,
+    transcript: Vec<TaskMuxTranscriptEntry>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TaskWindowRenderState {
+    selected: bool,
+    focused: bool,
+    emphasis: f32,
+}
+
+#[derive(Debug, Clone)]
+struct TaskMuxState {
+    revision: u32,
+    selected: usize,
+    focused: usize,
+    mode: TaskMuxMode,
+    transition: Option<TaskMuxTransition>,
+    tasks: Vec<TaskMuxTaskState>,
+}
+
+const TASK_MUX_MAX_ENTRIES: usize = 96;
+const TASK_MUX_TRANSITION_DURATION: Duration = Duration::from_millis(220);
+
+impl TaskMuxState {
+    fn new(plan: &ExecutionPlanSpec) -> Option<Self> {
+        let groups = plan.scheduled_groups();
+        let has_parallel = groups.iter().any(|group| group.len() > 1);
+        if !has_parallel {
+            return None;
+        }
+
+        let mut id_to_depth = std::collections::HashMap::new();
+        for (depth, group) in groups.iter().enumerate() {
+            for id in group {
+                id_to_depth.insert(*id, depth);
+            }
+        }
+
+        let tasks = plan
+            .tasks
+            .iter()
+            .enumerate()
+            .map(|(idx, task)| TaskMuxTaskState {
+                task_id: task.id(),
+                kind: task.kind.clone(),
+                title: task.title().to_string(),
+                depth: id_to_depth.get(&task.id()).copied().unwrap_or_default(),
+                ordinal: idx + 1,
+                status: TaskNodeStatus::Pending,
+                phase: TaskRuntimePhase::Pending,
+                working_dir: None,
+                isolated: false,
+                transcript: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+
+        Some(Self {
+            revision: plan.revision,
+            selected: 0,
+            focused: 0,
+            mode: TaskMuxMode::Focused,
+            transition: None,
+            tasks,
+        })
+    }
+
+    fn current_focus_index(&self) -> usize {
+        self.transition
+            .as_ref()
+            .map(|transition| transition.to_focus)
+            .unwrap_or_else(|| {
+                if self.mode == TaskMuxMode::Focused {
+                    self.focused
+                } else {
+                    self.selected
+                }
+            })
+            .min(self.tasks.len().saturating_sub(1))
+    }
+
+    fn current_focus_task(&self) -> Option<&TaskMuxTaskState> {
+        self.tasks.get(self.current_focus_index())
+    }
+
+    fn update_task_status(&mut self, task_id: Uuid, status: TaskNodeStatus) {
+        if let Some(task) = self.tasks.iter_mut().find(|task| task.task_id == task_id) {
+            task.status = status;
+        }
+    }
+
+    fn apply_runtime_event(&mut self, task_id: Uuid, event: TaskRuntimeEvent) {
+        let Some(task) = self.tasks.iter_mut().find(|task| task.task_id == task_id) else {
+            return;
+        };
+
+        match event {
+            TaskRuntimeEvent::Phase(phase) => task.phase = phase,
+            TaskRuntimeEvent::WorkspaceReady {
+                working_dir,
+                isolated,
+            } => {
+                task.working_dir = Some(working_dir);
+                task.isolated = isolated;
+            }
+            TaskRuntimeEvent::Note { level, text } => {
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    return;
+                }
+                push_task_transcript_entry(
+                    &mut task.transcript,
+                    TaskMuxTranscriptEntry::Note(TaskMuxNoteEntry {
+                        level,
+                        text: trimmed.to_string(),
+                    }),
+                );
+            }
+            TaskRuntimeEvent::AssistantMessage(text) => {
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    return;
+                }
+                push_task_transcript_entry(
+                    &mut task.transcript,
+                    TaskMuxTranscriptEntry::Assistant(AssistantHistoryCell::new(
+                        trimmed.to_string(),
+                    )),
+                );
+            }
+            TaskRuntimeEvent::ToolCallBegin {
+                call_id,
+                tool_name,
+                arguments,
+            } => {
+                if let Some(TaskMuxTranscriptEntry::Tool(cell)) = task.transcript.last_mut()
+                    && cell.can_merge(&tool_name)
+                {
+                    cell.append_call(call_id, tool_name, arguments);
+                    return;
+                }
+
+                push_task_transcript_entry(
+                    &mut task.transcript,
+                    TaskMuxTranscriptEntry::Tool(ToolCallHistoryCell::new(
+                        call_id, tool_name, arguments,
+                    )),
+                );
+            }
+            TaskRuntimeEvent::ToolCallEnd {
+                call_id,
+                tool_name: _tool_name,
+                result,
+            } => {
+                let mut pending_result = Some(result);
+                for idx in (0..task.transcript.len()).rev() {
+                    let Some(TaskMuxTranscriptEntry::Tool(cell)) = task.transcript.get_mut(idx)
+                    else {
+                        continue;
+                    };
+                    if !cell.contains_call_id(&call_id) {
+                        continue;
+                    }
+                    if let Some(result) = pending_result.take() {
+                        cell.complete_call(&call_id, result);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    fn interrupt_running_tool_calls(&mut self) {
+        for task in &mut self.tasks {
+            for entry in &mut task.transcript {
+                if let TaskMuxTranscriptEntry::Tool(cell) = entry {
+                    cell.interrupt_running();
+                }
+            }
+        }
+    }
+
+    fn next(&mut self) {
+        if self.tasks.is_empty() {
+            return;
+        }
+        let next = (self.current_focus_index() + 1) % self.tasks.len();
+        self.set_selected(next);
+    }
+
+    fn prev(&mut self) {
+        if self.tasks.is_empty() {
+            return;
+        }
+        let current = self.current_focus_index();
+        let next = if current == 0 {
+            self.tasks.len() - 1
+        } else {
+            current - 1
+        };
+        self.set_selected(next);
+    }
+
+    fn set_selected(&mut self, index: usize) {
+        let index = index.min(self.tasks.len().saturating_sub(1));
+        self.selected = index;
+        if self.mode == TaskMuxMode::Focused {
+            self.start_transition(TaskMuxMode::Focused, index);
+        }
+    }
+
+    fn focus_selected(&mut self) {
+        self.start_transition(TaskMuxMode::Focused, self.selected);
+    }
+
+    fn toggle_mode(&mut self) {
+        let target = if self.mode == TaskMuxMode::Focused {
+            TaskMuxMode::Overview
+        } else {
+            TaskMuxMode::Focused
+        };
+        let target_focus = self.selected.min(self.tasks.len().saturating_sub(1));
+        self.start_transition(target, target_focus);
+    }
+
+    fn show_overview(&mut self) {
+        let target_focus = self.selected.min(self.tasks.len().saturating_sub(1));
+        self.start_transition(TaskMuxMode::Overview, target_focus);
+    }
+
+    fn focus_index(&mut self, index: usize) -> bool {
+        if index >= self.tasks.len() {
+            return false;
+        }
+        self.selected = index;
+        self.start_transition(TaskMuxMode::Focused, index);
+        true
+    }
+
+    fn start_transition(&mut self, to_mode: TaskMuxMode, to_focus: usize) {
+        if self.tasks.is_empty() {
+            return;
+        }
+        let to_focus = to_focus.min(self.tasks.len().saturating_sub(1));
+        let current_focus = self.current_focus_index();
+        if self.transition.is_none() && self.mode == to_mode && current_focus == to_focus {
+            return;
+        }
+        self.transition = Some(TaskMuxTransition {
+            from_mode: self.mode,
+            to_mode,
+            from_focus: current_focus,
+            to_focus,
+            started_at: Instant::now(),
+        });
+    }
+
+    fn transition_progress(&self) -> Option<f32> {
+        self.transition.as_ref().map(|transition| {
+            let elapsed = transition.started_at.elapsed();
+            (elapsed.as_secs_f32() / TASK_MUX_TRANSITION_DURATION.as_secs_f32()).clamp(0.0, 1.0)
+        })
+    }
+
+    fn finish_transition_if_ready(&mut self) {
+        let Some(progress) = self.transition_progress() else {
+            return;
+        };
+        if progress < 1.0 {
+            return;
+        }
+        if let Some(transition) = self.transition.take() {
+            self.mode = transition.to_mode;
+            self.focused = transition.to_focus;
+            self.selected = transition.to_focus;
+        }
+    }
+}
+
 /// The main chat widget displaying conversation history.
 pub struct ChatWidget {
     /// History cells to display.
     pub cells: Vec<Box<dyn HistoryCell>>,
     /// Active DAG panel shown alongside history while a workflow is running.
     dag_panel: Option<DagPanelState>,
+    /// Active task mux view for parallel task execution.
+    task_mux: Option<TaskMuxState>,
     /// Number of lines scrolled up from the bottom. `0` means pinned to bottom.
     pub scroll_from_bottom_lines: usize,
     /// Bottom pane for input.
@@ -156,6 +483,7 @@ impl ChatWidget {
         Self {
             cells: Vec::new(),
             dag_panel: None,
+            task_mux: None,
             scroll_from_bottom_lines: 0,
             bottom_pane: BottomPane::new(),
             last_input_area: None,
@@ -207,16 +535,26 @@ impl ChatWidget {
     pub fn clear(&mut self) {
         self.cells.clear();
         self.dag_panel = None;
+        self.task_mux = None;
         self.scroll_from_bottom_lines = 0;
     }
 
     pub fn show_dag_panel(&mut self, plan: ExecutionPlanSpec) {
+        self.task_mux = TaskMuxState::new(&plan);
+        self.dag_panel = Some(DagPanelState::new(plan));
+    }
+
+    pub fn show_dag_preview(&mut self, plan: ExecutionPlanSpec) {
+        self.task_mux = None;
         self.dag_panel = Some(DagPanelState::new(plan));
     }
 
     pub fn update_dag_task_status(&mut self, task_id: Uuid, status: TaskNodeStatus) {
         if let Some(panel) = self.dag_panel.as_mut() {
-            panel.update_task_status(task_id, status);
+            panel.update_task_status(task_id, status.clone());
+        }
+        if let Some(task_mux) = self.task_mux.as_mut() {
+            task_mux.update_task_status(task_id, status);
         }
     }
 
@@ -228,6 +566,122 @@ impl ChatWidget {
 
     pub fn clear_dag_panel(&mut self) {
         self.dag_panel = None;
+        self.task_mux = None;
+    }
+
+    pub fn apply_task_runtime_event(&mut self, task_id: Uuid, event: TaskRuntimeEvent) {
+        if let Some(task_mux) = self.task_mux.as_mut() {
+            task_mux.apply_runtime_event(task_id, event);
+        }
+    }
+
+    pub fn interrupt_task_mux_tool_calls(&mut self) {
+        if let Some(task_mux) = self.task_mux.as_mut() {
+            task_mux.interrupt_running_tool_calls();
+        }
+    }
+
+    pub fn has_task_mux(&self) -> bool {
+        self.task_mux.is_some()
+    }
+
+    pub fn task_mux_next(&mut self) -> bool {
+        let Some(task_mux) = self.task_mux.as_mut() else {
+            return false;
+        };
+        task_mux.next();
+        true
+    }
+
+    pub fn task_mux_prev(&mut self) -> bool {
+        let Some(task_mux) = self.task_mux.as_mut() else {
+            return false;
+        };
+        task_mux.prev();
+        true
+    }
+
+    pub fn task_mux_toggle_mode(&mut self) -> bool {
+        let Some(task_mux) = self.task_mux.as_mut() else {
+            return false;
+        };
+        task_mux.toggle_mode();
+        true
+    }
+
+    pub fn task_mux_show_overview(&mut self) -> bool {
+        let Some(task_mux) = self.task_mux.as_mut() else {
+            return false;
+        };
+        task_mux.show_overview();
+        true
+    }
+
+    pub fn task_mux_focus_selected(&mut self) -> bool {
+        let Some(task_mux) = self.task_mux.as_mut() else {
+            return false;
+        };
+        task_mux.focus_selected();
+        true
+    }
+
+    pub fn task_mux_focus_index(&mut self, index: usize) -> bool {
+        let Some(task_mux) = self.task_mux.as_mut() else {
+            return false;
+        };
+        task_mux.focus_index(index)
+    }
+
+    pub fn task_mux_context_label(&self) -> Option<String> {
+        let task_mux = self.task_mux.as_ref()?;
+        let task = task_mux.current_focus_task()?;
+        let mode_label = match task_mux.mode {
+            TaskMuxMode::Overview => "Overview",
+            TaskMuxMode::Focused => "Focus",
+        };
+        let workspace_label = if task.isolated { "isolated" } else { "shared" };
+        Some(format!(
+            "Mux · {} · {:02} {} · {}",
+            mode_label,
+            task.ordinal,
+            truncate_label(&task.title, 18),
+            workspace_label
+        ))
+    }
+
+    pub fn task_mux_list_lines(&self) -> Option<Vec<String>> {
+        let task_mux = self.task_mux.as_ref()?;
+        let focus_index = task_mux.current_focus_index();
+        Some(
+            task_mux
+                .tasks
+                .iter()
+                .enumerate()
+                .map(|(index, task)| {
+                    let focus_marker = if index == focus_index { ">" } else { " " };
+                    let workspace_label = if task.isolated { "isolated" } else { "shared" };
+                    format!(
+                        "{} {:02} {:<8} {:<10} {:<9} {}",
+                        focus_marker,
+                        task.ordinal,
+                        task_kind_label(&task.kind),
+                        task_status_label(&task.status),
+                        workspace_label,
+                        task.title
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    pub fn task_mux_input_hint(&self) -> Option<String> {
+        self.task_mux.as_ref().map(|task_mux| {
+            let total = task_mux.tasks.len();
+            format!(
+                "Type /mux next, /mux prev, /mux focus <1-{}>, /mux overview",
+                total
+            )
+        })
     }
 
     pub fn is_in_input_area(&self, x: u16, y: u16) -> bool {
@@ -273,17 +727,68 @@ impl ChatWidget {
     }
 
     fn render_chat_area(&mut self, area: Rect, buf: &mut Buffer) {
-        let (history_area, dag_area) = self.split_chat_columns(area);
-        self.last_chat_area_width = history_area.width;
+        if let Some(task_mux) = self.task_mux.as_mut() {
+            task_mux.finish_transition_if_ready();
+        }
 
-        // Calculate visible lines
+        let (main_area, aux_area) = self.split_chat_layout(area);
+        self.last_chat_area_width = main_area.width;
+
+        if self.task_mux.is_some() {
+            self.render_task_mux(main_area, buf);
+            if let Some(aux_area) = aux_area {
+                self.render_dag_panel(aux_area, buf);
+            }
+            return;
+        }
+
+        self.render_history_cells(main_area, buf);
+        if let Some(aux_area) = aux_area {
+            self.render_dag_panel(aux_area, buf);
+        }
+    }
+
+    fn split_chat_layout(&self, area: Rect) -> (Rect, Option<Rect>) {
+        let has_aux = self.task_mux.is_some() || self.dag_panel.is_some();
+        if !has_aux {
+            return (area, None);
+        }
+
+        if self.task_mux.is_some() {
+            if area.width >= 108 {
+                let panel_width = (area.width / 3).clamp(30, 40);
+                let chunks = Layout::horizontal([
+                    Constraint::Min(area.width.saturating_sub(panel_width)),
+                    Constraint::Length(panel_width),
+                ])
+                .split(area);
+                return (chunks[0], Some(chunks[1]));
+            }
+            return (area, None);
+        }
+
+        if area.width < 96 {
+            return (area, None);
+        }
+
+        let panel_width = (area.width / 3).clamp(30, 42);
+        let chunks = Layout::horizontal([
+            Constraint::Min(area.width.saturating_sub(panel_width)),
+            Constraint::Length(panel_width),
+        ])
+        .split(area);
+        (chunks[0], Some(chunks[1]))
+    }
+
+    fn render_history_cells(&mut self, area: Rect, buf: &mut Buffer) {
+        // Calculate visible lines.
         let mut lines: Vec<Line<'static>> = Vec::new();
 
         for cell in &self.cells {
-            lines.extend(cell.display_lines(history_area.width));
+            lines.extend(cell.display_lines(area.width));
         }
 
-        let visible_lines = history_area.height as usize;
+        let visible_lines = area.height as usize;
         let total_lines = lines.len();
 
         let max_scroll_from_bottom = total_lines.saturating_sub(visible_lines);
@@ -296,9 +801,8 @@ impl ChatWidget {
         let text = Text::from(lines);
         ratatui::widgets::Paragraph::new(text)
             .scroll((start_line.min(u16::MAX as usize) as u16, 0))
-            .render(history_area, buf);
+            .render(area, buf);
 
-        // Render scrollbar if needed
         if total_lines > visible_lines {
             let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(Some("↑"))
@@ -307,35 +811,342 @@ impl ChatWidget {
                 .position(start_line)
                 .viewport_content_length(visible_lines);
 
-            // Note: ratatui 0.29 uses (area, buf, state) order for stateful widgets
-            ratatui::widgets::StatefulWidget::render(
-                scrollbar,
-                history_area,
-                buf,
-                &mut scrollbar_state,
-            );
-        }
-
-        if let Some(dag_area) = dag_area {
-            self.render_dag_panel(dag_area, buf);
+            ratatui::widgets::StatefulWidget::render(scrollbar, area, buf, &mut scrollbar_state);
         }
     }
 
-    fn split_chat_columns(&self, area: Rect) -> (Rect, Option<Rect>) {
-        let Some(_) = self.dag_panel else {
-            return (area, None);
+    fn render_task_mux(&self, area: Rect, buf: &mut Buffer) {
+        let Some(task_mux) = self.task_mux.as_ref() else {
+            return;
         };
-        if area.width < 96 {
-            return (area, None);
+        if area.width < 18 || area.height < 8 {
+            return;
         }
 
-        let panel_width = (area.width / 3).clamp(30, 42);
-        let chunks = Layout::horizontal([
-            Constraint::Min(area.width.saturating_sub(panel_width)),
-            Constraint::Length(panel_width),
-        ])
-        .split(area);
-        (chunks[0], Some(chunks[1]))
+        let phase = animation_phase(95);
+        let progress = task_mux.transition_progress();
+        let transition_active = progress.is_some_and(|progress| progress < 1.0);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(if transition_active {
+                theme::interactive::in_progress()
+            } else {
+                theme::border::idle()
+            })
+            .title(Line::from(vec![
+                Span::styled(
+                    format!(" Mux r{} ", task_mux.revision),
+                    theme::interactive::title(),
+                ),
+                Span::styled(
+                    format!(" {} panes ", task_mux.tasks.len()),
+                    theme::text::muted(),
+                ),
+                Span::styled(
+                    match task_mux.mode {
+                        TaskMuxMode::Overview => " overview ",
+                        TaskMuxMode::Focused => " focus ",
+                    },
+                    theme::text::subtle().add_modifier(Modifier::DIM),
+                ),
+            ]))
+            .title_alignment(Alignment::Center);
+        let inner = block.inner(area);
+        block.render(area, buf);
+        if inner.width < 12 || inner.height < 6 {
+            return;
+        }
+
+        let chunks = Layout::vertical([Constraint::Length(2), Constraint::Min(4)]).split(inner);
+        let header_rows =
+            Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(chunks[0]);
+        self.render_task_mux_summary(header_rows[0], buf, task_mux, phase, transition_active);
+
+        if let Some(focus_index) = task_mux.current_focus_task().map(|task| task.ordinal) {
+            let summary = format!(
+                "focus {:02}  tab next/prev  ctrl+o overview  ctrl+f focus  enter /mux",
+                focus_index
+            );
+            Paragraph::new(Line::styled(
+                truncate_label(&summary, header_rows[1].width as usize),
+                theme::text::help(),
+            ))
+            .render(header_rows[1], buf);
+        }
+
+        let transition = task_mux.transition.clone();
+        match (&task_mux.mode, transition.as_ref()) {
+            (_, Some(transition)) if task_mux.tasks.len() > 1 => {
+                self.render_task_mux_transition(chunks[1], buf, task_mux, transition);
+            }
+            (TaskMuxMode::Focused, _) => self.render_task_mux_focus(chunks[1], buf, task_mux),
+            (TaskMuxMode::Overview, _) => self.render_task_mux_overview(chunks[1], buf, task_mux),
+        }
+    }
+
+    fn render_task_mux_summary(
+        &self,
+        area: Rect,
+        buf: &mut Buffer,
+        task_mux: &TaskMuxState,
+        phase: usize,
+        transition_active: bool,
+    ) {
+        let running = task_mux
+            .tasks
+            .iter()
+            .filter(|task| task.status == TaskNodeStatus::Running)
+            .count();
+        let completed = task_mux
+            .tasks
+            .iter()
+            .filter(|task| task.status == TaskNodeStatus::Completed)
+            .count();
+        let failed = task_mux
+            .tasks
+            .iter()
+            .filter(|task| task.status == TaskNodeStatus::Failed)
+            .count();
+        let label = format!(
+            "● running {}  done {}  failed {}  layers {}",
+            running,
+            completed,
+            failed,
+            task_mux
+                .tasks
+                .iter()
+                .map(|task| task.depth)
+                .max()
+                .map(|depth| depth + 1)
+                .unwrap_or(0)
+        );
+        let line = if transition_active {
+            gradient_line(&label, &theme::animation::executing_gradient(), phase, true)
+        } else {
+            Line::styled(label, theme::text::muted())
+        };
+        Paragraph::new(line).render(area, buf);
+    }
+
+    fn render_task_mux_transition(
+        &self,
+        area: Rect,
+        buf: &mut Buffer,
+        task_mux: &TaskMuxState,
+        transition: &TaskMuxTransition,
+    ) {
+        let progress = task_mux.transition_progress().unwrap_or(1.0);
+        match (transition.from_mode, transition.to_mode) {
+            (TaskMuxMode::Overview, TaskMuxMode::Focused) => {
+                self.render_task_mux_overview(area, buf, task_mux);
+                if let Some(task) = task_mux.tasks.get(transition.to_focus) {
+                    let start = overview_cell_rect(area, transition.to_focus, task_mux.tasks.len());
+                    let overlay = lerp_rect(start, area, ease_out(progress));
+                    self.render_task_window(
+                        overlay,
+                        buf,
+                        task_mux,
+                        task,
+                        TaskWindowRenderState {
+                            selected: true,
+                            focused: true,
+                            emphasis: progress,
+                        },
+                    );
+                }
+            }
+            (TaskMuxMode::Focused, TaskMuxMode::Overview) => {
+                self.render_task_mux_overview(area, buf, task_mux);
+                if let Some(task) = task_mux.tasks.get(transition.from_focus) {
+                    let end = overview_cell_rect(area, transition.from_focus, task_mux.tasks.len());
+                    let overlay = lerp_rect(area, end, ease_out(progress));
+                    self.render_task_window(
+                        overlay,
+                        buf,
+                        task_mux,
+                        task,
+                        TaskWindowRenderState {
+                            selected: true,
+                            focused: false,
+                            emphasis: 1.0 - progress,
+                        },
+                    );
+                }
+            }
+            (_, _) => {
+                self.render_task_mux_focus(area, buf, task_mux);
+            }
+        }
+    }
+
+    fn render_task_mux_overview(&self, area: Rect, buf: &mut Buffer, task_mux: &TaskMuxState) {
+        let cells = split_overview_cells(area, task_mux.tasks.len());
+        for (index, task) in task_mux.tasks.iter().enumerate() {
+            let Some(cell) = cells.get(index).copied() else {
+                break;
+            };
+            let is_selected = index == task_mux.selected;
+            let is_focused = index == task_mux.focused && task_mux.mode == TaskMuxMode::Focused;
+            self.render_task_window(
+                cell,
+                buf,
+                task_mux,
+                task,
+                TaskWindowRenderState {
+                    selected: is_selected,
+                    focused: is_focused,
+                    emphasis: 1.0,
+                },
+            );
+        }
+    }
+
+    fn render_task_mux_focus(&self, area: Rect, buf: &mut Buffer, task_mux: &TaskMuxState) {
+        let chunks = Layout::vertical([Constraint::Length(3), Constraint::Min(4)]).split(area);
+        self.render_task_mux_tabs(chunks[0], buf, task_mux);
+        if let Some(task) = task_mux.tasks.get(task_mux.current_focus_index()) {
+            self.render_task_window(
+                chunks[1],
+                buf,
+                task_mux,
+                task,
+                TaskWindowRenderState {
+                    selected: true,
+                    focused: true,
+                    emphasis: 1.0,
+                },
+            );
+        }
+    }
+
+    fn render_task_mux_tabs(&self, area: Rect, buf: &mut Buffer, task_mux: &TaskMuxState) {
+        let phase = animation_phase(100);
+        let spans = task_mux
+            .tasks
+            .iter()
+            .enumerate()
+            .flat_map(|(index, task)| {
+                let mut style = if index == task_mux.current_focus_index() {
+                    theme::interactive::selected_option()
+                } else {
+                    theme::text::muted()
+                };
+                if task.status == TaskNodeStatus::Running {
+                    style = Style::default()
+                        .fg(theme::animation::active_gradient()
+                            [(index + phase) % theme::animation::active_gradient().len()])
+                        .add_modifier(Modifier::BOLD);
+                }
+                [
+                    Span::styled(
+                        format!(" {:02} {} ", task.ordinal, truncate_label(&task.title, 12)),
+                        style,
+                    ),
+                    Span::raw(" "),
+                ]
+            })
+            .collect::<Vec<_>>();
+        Paragraph::new(Line::from(spans)).render(area, buf);
+    }
+
+    fn render_task_window(
+        &self,
+        area: Rect,
+        buf: &mut Buffer,
+        task_mux: &TaskMuxState,
+        task: &TaskMuxTaskState,
+        render_state: TaskWindowRenderState,
+    ) {
+        if area.width < 12 || area.height < 4 {
+            return;
+        }
+
+        let phase = animation_phase(90);
+        let running = task.status == TaskNodeStatus::Running;
+        let mut border_style = if render_state.focused || render_state.selected {
+            theme::border::focused()
+        } else {
+            theme::border::idle()
+        };
+        if running {
+            border_style = Style::default().fg(theme::animation::executing_gradient()
+                [(task.ordinal + phase) % theme::animation::executing_gradient().len()]);
+        }
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .title(Line::from(vec![
+                Span::styled(
+                    format!(" {:02} ", task.ordinal),
+                    panel_node_style(&task.status),
+                ),
+                Span::styled(
+                    truncate_label(&task.title, area.width.saturating_sub(12) as usize),
+                    if render_state.focused {
+                        theme::interactive::selected_option()
+                    } else {
+                        theme::text::primary()
+                    },
+                ),
+            ]));
+        let inner = block.inner(area);
+        block.render(area, buf);
+        if inner.width < 4 || inner.height < 2 {
+            return;
+        }
+
+        let mut lines = Vec::new();
+        let mode_label = if task.isolated { "isolated" } else { "shared" };
+        lines.push(Line::from(vec![
+            Span::styled(task_kind_label(&task.kind), task_kind_style(&task.kind)),
+            Span::raw(" "),
+            Span::styled(
+                task_status_label(&task.status),
+                panel_node_style(&task.status),
+            ),
+            Span::styled(format!(" · {}", mode_label), theme::text::muted()),
+            Span::styled(" · ", theme::text::muted()),
+            task_phase_span(&task.phase, task.ordinal, area.width),
+        ]));
+        if let Some(working_dir) = task.working_dir.as_ref() {
+            let dir_label = working_dir
+                .file_name()
+                .and_then(|part| part.to_str())
+                .unwrap_or_else(|| working_dir.as_os_str().to_str().unwrap_or("."));
+            lines.push(Line::styled(
+                format!(
+                    "cwd {}",
+                    truncate_label(dir_label, inner.width.saturating_sub(4) as usize)
+                ),
+                theme::text::subtle(),
+            ));
+        }
+
+        let available_log_lines = inner.height.saturating_sub(lines.len() as u16) as usize;
+        if available_log_lines > 0 {
+            let rendered_logs =
+                render_task_transcript_lines(&task.transcript, inner.width, available_log_lines);
+            lines.extend(rendered_logs);
+        }
+
+        if lines.is_empty() {
+            lines.push(Line::styled("idle", theme::text::subtle()));
+        }
+
+        let style = if render_state.emphasis < 1.0 {
+            theme::text::muted().add_modifier(Modifier::DIM)
+        } else {
+            Style::default()
+        };
+        Paragraph::new(Text::from(lines))
+            .style(style)
+            .render(inner, buf);
+
+        if render_state.selected && task_mux.mode == TaskMuxMode::Overview && inner.width > 2 {
+            buf[(inner.x, inner.y)]
+                .set_symbol("›")
+                .set_style(theme::interactive::selected_option());
+        }
     }
 
     fn render_dag_panel(&self, area: Rect, buf: &mut Buffer) {
@@ -523,6 +1334,228 @@ impl ChatWidget {
     }
 }
 
+fn split_overview_cells(area: Rect, count: usize) -> Vec<Rect> {
+    if count == 0 || area.width < 12 || area.height < 4 {
+        return Vec::new();
+    }
+    let columns = if count == 1 {
+        1
+    } else if area.width >= 56 {
+        2
+    } else {
+        1
+    };
+    let rows = count.div_ceil(columns);
+    if rows == 0 {
+        return Vec::new();
+    }
+
+    let row_constraints = vec![Constraint::Ratio(1, rows as u32); rows];
+    let row_chunks = Layout::vertical(row_constraints).split(area);
+    let mut rects = Vec::new();
+    for row in row_chunks.iter().copied() {
+        let col_constraints = vec![Constraint::Ratio(1, columns as u32); columns];
+        let cols = Layout::horizontal(col_constraints).split(row);
+        rects.extend(cols.iter().copied());
+    }
+    rects.truncate(count);
+    rects
+}
+
+fn overview_cell_rect(area: Rect, index: usize, count: usize) -> Rect {
+    split_overview_cells(area, count)
+        .get(index)
+        .copied()
+        .unwrap_or(area)
+}
+
+fn lerp_rect(from: Rect, to: Rect, progress: f32) -> Rect {
+    let lerp = |start: u16, end: u16| -> u16 {
+        let start = start as f32;
+        let end = end as f32;
+        (start + (end - start) * progress)
+            .round()
+            .clamp(0.0, u16::MAX as f32) as u16
+    };
+    Rect {
+        x: lerp(from.x, to.x),
+        y: lerp(from.y, to.y),
+        width: lerp(from.width.max(1), to.width.max(1)).max(1),
+        height: lerp(from.height.max(1), to.height.max(1)).max(1),
+    }
+}
+
+fn ease_out(progress: f32) -> f32 {
+    let inv = 1.0 - progress.clamp(0.0, 1.0);
+    1.0 - inv * inv
+}
+
+fn gradient_line(text: &str, colors: &[Color], phase: usize, bold: bool) -> Line<'static> {
+    let spans = text
+        .chars()
+        .enumerate()
+        .map(|(idx, ch)| {
+            let color = colors[(idx + phase) % colors.len()];
+            let mut style = Style::default().fg(color);
+            if bold {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+            Span::styled(ch.to_string(), style)
+        })
+        .collect::<Vec<_>>();
+    Line::from(spans)
+}
+
+fn gradient_span(text: &str, colors: &[Color], phase: usize, bold: bool) -> Span<'static> {
+    Span::styled(
+        text.to_string(),
+        Style::default()
+            .fg(colors[phase % colors.len()])
+            .add_modifier(if bold {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            }),
+    )
+}
+
+fn push_task_transcript_entry(
+    transcript: &mut Vec<TaskMuxTranscriptEntry>,
+    entry: TaskMuxTranscriptEntry,
+) {
+    if transcript.len() >= TASK_MUX_MAX_ENTRIES {
+        let remove = transcript.len() + 1 - TASK_MUX_MAX_ENTRIES;
+        transcript.drain(0..remove);
+    }
+    transcript.push(entry);
+}
+
+fn render_task_transcript_lines(
+    transcript: &[TaskMuxTranscriptEntry],
+    width: u16,
+    max_lines: usize,
+) -> Vec<Line<'static>> {
+    if transcript.is_empty() || width == 0 || max_lines == 0 {
+        return vec![Line::styled("waiting for activity", theme::text::subtle())];
+    }
+
+    let mut all_lines = Vec::new();
+    for entry in transcript {
+        match entry {
+            TaskMuxTranscriptEntry::Note(entry) => {
+                let (prefix, style) = match entry.level {
+                    TaskRuntimeNoteLevel::Info => ("· ", theme::text::muted()),
+                    TaskRuntimeNoteLevel::Error => ("! ", theme::status::danger()),
+                };
+                all_lines.extend(wrap_mux_text(&entry.text, prefix, width, style));
+            }
+            TaskMuxTranscriptEntry::Assistant(cell) => {
+                all_lines.extend(cell.display_lines(width));
+            }
+            TaskMuxTranscriptEntry::Tool(cell) => {
+                all_lines.extend(cell.display_lines(width));
+            }
+        }
+    }
+
+    if all_lines.len() <= max_lines {
+        return all_lines;
+    }
+
+    all_lines.split_off(all_lines.len() - max_lines)
+}
+
+fn task_phase_span(phase: &TaskRuntimePhase, ordinal: usize, width: u16) -> Span<'static> {
+    match phase {
+        TaskRuntimePhase::Pending => Span::styled("pending", theme::text::subtle()),
+        TaskRuntimePhase::Starting => Span::styled("starting", theme::text::muted()),
+        TaskRuntimePhase::AwaitingModel { turn } => {
+            let phase_ix = animation_phase(110);
+            let label = format!("thinking t{turn}");
+            gradient_span(
+                &truncate_label(&label, width.saturating_sub(24) as usize),
+                &theme::animation::active_gradient(),
+                ordinal + phase_ix,
+                true,
+            )
+        }
+        TaskRuntimePhase::ExecutingTool { tool_name } => Span::styled(
+            truncate_label(
+                &format!("tool {}", tool_name),
+                width.saturating_sub(24) as usize,
+            ),
+            theme::interactive::accent(),
+        ),
+        TaskRuntimePhase::Reviewing => Span::styled("reviewing", theme::interactive::accent()),
+        TaskRuntimePhase::Completed => Span::styled("complete", theme::status::success()),
+        TaskRuntimePhase::Failed => Span::styled("failed", theme::status::danger()),
+    }
+}
+
+fn wrap_mux_text(text: &str, prefix: &str, width: u16, style: Style) -> Vec<Line<'static>> {
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let total_cols = (width as usize).max(8);
+    let prefix_cols = prefix.chars().count();
+    let cont_prefix = " ".repeat(prefix_cols);
+
+    for logical_line in text.lines() {
+        let mut remaining = logical_line;
+        let mut first = true;
+        loop {
+            let pfx: &str = if first { prefix } else { &cont_prefix };
+            let available = total_cols.saturating_sub(prefix_cols).max(1);
+            let char_count = remaining.chars().count();
+            if char_count <= available {
+                out.push(Line::styled(format!("{pfx}{remaining}"), style));
+                break;
+            }
+            let split_byte = remaining
+                .char_indices()
+                .nth(available)
+                .map(|(i, _)| i)
+                .unwrap_or(remaining.len());
+            out.push(Line::styled(
+                format!("{pfx}{}", &remaining[..split_byte]),
+                style,
+            ));
+            remaining = &remaining[split_byte..];
+            first = false;
+        }
+    }
+
+    if out.is_empty() {
+        out.push(Line::styled(prefix.to_string(), style));
+    }
+
+    out
+}
+
+fn task_kind_label(kind: &TaskKind) -> &'static str {
+    match kind {
+        TaskKind::Implementation => "impl",
+        TaskKind::Analysis => "analysis",
+        TaskKind::Gate => "gate",
+    }
+}
+
+fn task_kind_style(kind: &TaskKind) -> Style {
+    match kind {
+        TaskKind::Implementation => theme::interactive::accent(),
+        TaskKind::Analysis => theme::text::muted(),
+        TaskKind::Gate => theme::status::warning(),
+    }
+}
+
+fn task_status_label(status: &TaskNodeStatus) -> &'static str {
+    match status {
+        TaskNodeStatus::Pending => "pending",
+        TaskNodeStatus::Running => "running",
+        TaskNodeStatus::Completed => "done",
+        TaskNodeStatus::Failed => "failed",
+        TaskNodeStatus::Skipped => "skipped",
+    }
+}
+
 fn dag_graph_layout(inner: Rect, depth_count: usize) -> DagGraphLayout {
     let available_height = inner.height.saturating_sub(4) as usize;
     let (row_step, used_height) = if depth_count <= 1 {
@@ -669,10 +1702,14 @@ impl Default for ChatWidget {
 mod tests {
     use git_internal::internal::object::{task::Task as GitTask, types::ActorRef};
     use ratatui::{buffer::Buffer, layout::Rect};
+    use serde_json::json;
 
     use super::{ChatWidget, dag_graph_layout};
-    use crate::internal::ai::orchestrator::types::{
-        ExecutionPlanSpec, TaskContract, TaskKind, TaskNodeStatus, TaskSpec,
+    use crate::internal::{
+        ai::orchestrator::types::{
+            ExecutionPlanSpec, TaskContract, TaskKind, TaskNodeStatus, TaskRuntimeEvent, TaskSpec,
+        },
+        tui::history_cell::AssistantHistoryCell,
     };
 
     fn row_text(buf: &Buffer, y: u16, width: u16) -> String {
@@ -721,12 +1758,27 @@ mod tests {
         }
     }
 
+    fn sample_parallel_plan() -> ExecutionPlanSpec {
+        let first = make_task("Implement A", TaskKind::Implementation, vec![]);
+        let second = make_task("Implement B", TaskKind::Implementation, vec![]);
+        let gate = make_task("Fast gate", TaskKind::Gate, vec![first.id(), second.id()]);
+        ExecutionPlanSpec {
+            intent_spec_id: "intent-par".into(),
+            revision: 2,
+            parent_revision: None,
+            replan_reason: None,
+            tasks: vec![first, second, gate],
+            max_parallel: 2,
+            checkpoints: vec![],
+        }
+    }
+
     #[test]
     fn dag_panel_uses_side_column_when_wide() {
         let mut widget = ChatWidget::new();
         widget.show_dag_panel(sample_plan());
 
-        let (history, dag) = widget.split_chat_columns(Rect::new(0, 0, 120, 30));
+        let (history, dag) = widget.split_chat_layout(Rect::new(0, 0, 120, 30));
 
         assert_eq!(history.width + dag.unwrap().width, 120);
         assert!(history.width < 120);
@@ -737,10 +1789,101 @@ mod tests {
         let mut widget = ChatWidget::new();
         widget.show_dag_panel(sample_plan());
 
-        let (history, dag) = widget.split_chat_columns(Rect::new(0, 0, 80, 24));
+        let (history, dag) = widget.split_chat_layout(Rect::new(0, 0, 80, 24));
 
         assert_eq!(history.width, 80);
         assert!(dag.is_none());
+    }
+
+    #[test]
+    fn dag_preview_does_not_activate_task_mux() {
+        let mut widget = ChatWidget::new();
+        widget.show_dag_preview(sample_parallel_plan());
+
+        let (main, sidebar) = widget.split_chat_layout(Rect::new(0, 0, 140, 32));
+
+        assert!(!widget.has_task_mux());
+        assert!(sidebar.is_some());
+        assert!(main.width < 140);
+    }
+
+    #[test]
+    fn task_mux_uses_main_panel_and_keeps_sidebar_for_parallel_plan() {
+        let mut widget = ChatWidget::new();
+        widget.show_dag_panel(sample_parallel_plan());
+
+        let (main, sidebar) = widget.split_chat_layout(Rect::new(0, 0, 140, 32));
+
+        assert!(widget.has_task_mux());
+        assert!(sidebar.is_some());
+        assert!(main.width < 140);
+        assert!(main.width > sidebar.unwrap().width);
+    }
+
+    #[test]
+    fn task_mux_focus_command_updates_context_label() {
+        let mut widget = ChatWidget::new();
+        widget.show_dag_panel(sample_parallel_plan());
+
+        assert!(widget.task_mux_focus_index(1));
+        let label = widget.task_mux_context_label().unwrap();
+
+        assert!(label.contains("02"));
+        assert!(label.contains("Implement B"));
+    }
+
+    #[test]
+    fn task_mux_list_includes_all_panes_and_focus_marker() {
+        let mut widget = ChatWidget::new();
+        widget.show_dag_panel(sample_parallel_plan());
+
+        assert!(widget.task_mux_focus_index(1));
+        let lines = widget.task_mux_list_lines().unwrap();
+
+        assert_eq!(lines.len(), 3);
+        assert!(lines[1].starts_with("> 02"));
+        assert!(lines[0].contains("Implement A"));
+        assert!(lines[1].contains("Implement B"));
+        assert!(lines[2].contains("Fast gate"));
+    }
+
+    #[test]
+    fn parallel_workflow_renders_mux_in_main_area_and_dag_in_sidebar() {
+        let plan = sample_parallel_plan();
+        let first_task_id = plan.tasks[0].id();
+
+        let mut widget = ChatWidget::new();
+        widget.add_cell(Box::new(AssistantHistoryCell::new(
+            "transcript sentinel".to_string(),
+        )));
+        widget.show_dag_panel(plan);
+        widget.update_dag_task_status(first_task_id, TaskNodeStatus::Running);
+        widget.apply_task_runtime_event(
+            first_task_id,
+            TaskRuntimeEvent::ToolCallBegin {
+                call_id: "call-1".to_string(),
+                tool_name: "shell".to_string(),
+                arguments: json!({
+                    "command": "cargo test",
+                    "workdir": "/tmp/task-1"
+                }),
+            },
+        );
+
+        let area = Rect::new(0, 0, 140, 32);
+        let mut buf = Buffer::empty(area);
+        widget.render_chat_area(area, &mut buf);
+
+        let rendered = (0..area.height)
+            .map(|y| row_text(&buf, y, area.width))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Mux r2"));
+        assert!(rendered.contains("Workflow r2"));
+        assert!(rendered.contains("Running command"));
+        assert!(rendered.contains("cargo test"));
+        assert!(!rendered.contains("transcript sentinel"));
     }
 
     #[test]
@@ -797,9 +1940,9 @@ mod tests {
         let mut widget = ChatWidget::new();
         widget.show_dag_panel(plan);
 
-        let area = Rect::new(0, 0, 120, 24);
+        let area = Rect::new(0, 0, 42, 24);
         let mut buf = Buffer::empty(area);
-        widget.render_chat_area(area, &mut buf);
+        widget.render_dag_panel(area, &mut buf);
 
         let rendered = (0..area.height)
             .map(|y| row_text(&buf, y, area.width))
@@ -811,7 +1954,7 @@ mod tests {
         let label_idx = gate_row.find("03").expect("gate label position");
 
         assert!(
-            label_idx > 95,
+            label_idx > 18,
             "single lower-layer node should be centered in panel, got index {label_idx}"
         );
     }
