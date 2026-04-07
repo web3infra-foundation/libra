@@ -9,10 +9,7 @@ use std::os::unix::fs::PermissionsExt;
 use libra::{
     command::tag::{self, TagArgs},
     internal::{config::ConfigKv, db::get_db_conn_instance, model::reference, tag as internal_tag},
-    utils::{
-        path,
-        test::{ChangeDirGuard, setup_with_new_libra_in},
-    },
+    utils::test::{ChangeDirGuard, setup_with_new_libra_in},
 };
 use sea_orm::{ActiveModelTrait, Set};
 use serial_test::serial;

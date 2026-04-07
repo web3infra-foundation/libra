@@ -264,8 +264,21 @@ fn render_change(change: &FileChange, out: &mut Vec<Line<'static>>, width: usize
 ///
 /// Prefers relative paths when possible for cleaner display.
 pub fn display_path_for(path: &Path, cwd: &Path) -> String {
-    if path.is_relative() {
+    if path.is_relative() && !looks_like_rooted_unix_path(path) {
         return path.display().to_string();
+    }
+
+    if let (Some(path_components), Some(cwd_components)) = (
+        normalized_path_components(path),
+        normalized_path_components(cwd),
+    ) && path_components.starts_with(&cwd_components)
+    {
+        let relative = path_components[cwd_components.len()..].join("/");
+        return if relative.is_empty() {
+            ".".to_string()
+        } else {
+            relative
+        };
     }
 
     if let Ok(stripped) = path.strip_prefix(cwd) {
@@ -286,6 +299,37 @@ pub fn display_path_for(path: &Path, cwd: &Path) -> String {
 
     // Fallback to full path
     path.display().to_string()
+}
+
+fn looks_like_rooted_unix_path(path: &Path) -> bool {
+    path.to_string_lossy().starts_with('/')
+}
+
+fn normalized_path_components(path: &Path) -> Option<Vec<String>> {
+    let raw = path.to_string_lossy().replace('\\', "/");
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Some(Vec::new());
+    }
+
+    let without_drive = if trimmed.len() >= 2 && trimmed.as_bytes()[1] == b':' {
+        &trimmed[2..]
+    } else {
+        trimmed
+    };
+
+    let components = without_drive
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .try_fold(Vec::new(), |mut acc, part| {
+            if part == ".." {
+                return None;
+            }
+            acc.push(part.to_string());
+            Some(acc)
+        })?;
+
+    Some(components)
 }
 
 /// Calculate the number of added and removed lines from a unified diff.

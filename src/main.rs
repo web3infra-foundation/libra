@@ -4,6 +4,22 @@ use libra::{cli, utils::output::OutputConfig};
 use tracing_subscriber::EnvFilter;
 
 fn main() {
+    #[cfg(windows)]
+    {
+        std::thread::Builder::new()
+            .name("libra-main".to_string())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(run_main)
+            .expect("failed to spawn main thread")
+            .join()
+            .expect("main thread panicked");
+    }
+
+    #[cfg(not(windows))]
+    run_main();
+}
+
+fn run_main() {
     if std::env::var_os("LIBRA_LOG").is_some() || std::env::var_os("RUST_LOG").is_some() {
         if std::env::var_os("RUST_LOG").is_none()
             && let Some(value) = std::env::var_os("LIBRA_LOG")
