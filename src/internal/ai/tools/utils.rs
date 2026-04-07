@@ -152,10 +152,10 @@ mod tests {
     fn test_validate_path_outside_working_dir() {
         let temp = tempdir().unwrap();
         let working_dir = temp.path().join("work");
-        let outside_dir = temp.path().join("outside");
+        let outside_root = temp.path().join("outside");
         fs::create_dir_all(&working_dir).unwrap();
-        fs::create_dir_all(&outside_dir).unwrap();
-        let path = outside_dir.join("passwd");
+        fs::create_dir_all(&outside_root).unwrap();
+        let path = outside_root.join("passwd");
         let result = validate_path(&path, &working_dir);
         assert!(result.is_err());
     }

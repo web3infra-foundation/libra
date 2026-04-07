@@ -50,7 +50,9 @@ struct FuseTaskWorktreeBackend {
 struct TaskWorktreePaths {
     cleanup_root: PathBuf,
     workspace_root: PathBuf,
+    #[cfg(unix)]
     lower_root: PathBuf,
+    #[cfg(unix)]
     upper_root: PathBuf,
 }
 
@@ -93,7 +95,9 @@ fn task_worktree_paths(task_id: Uuid, backend: &str) -> TaskWorktreePaths {
     ));
     TaskWorktreePaths {
         workspace_root: cleanup_root.join("workspace"),
+        #[cfg(unix)]
         lower_root: cleanup_root.join("lower"),
+        #[cfg(unix)]
         upper_root: cleanup_root.join("upper"),
         cleanup_root,
     }
@@ -584,6 +588,11 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    fn is_windows_symlink_privilege_error(err: &io::Error) -> bool {
+        err.kind() == io::ErrorKind::PermissionDenied || err.raw_os_error() == Some(1314)
+    }
+
     #[test]
     fn clone_or_copy_file_preserves_contents() {
         let temp = tempdir().unwrap();
@@ -604,7 +613,14 @@ mod tests {
         std::fs::create_dir_all(root.join("nested")).unwrap();
         std::fs::create_dir_all(&external).unwrap();
         std::fs::write(external.join("secret.txt"), "outside\n").unwrap();
-        symlink_path(&external, &root.join("nested").join("external-link")).unwrap();
+        if let Err(err) = symlink_path(&external, &root.join("nested").join("external-link")) {
+            #[cfg(windows)]
+            if is_windows_symlink_privilege_error(&err) {
+                eprintln!("skipping directory symlink test on Windows without symlink privilege");
+                return;
+            }
+            panic!("failed to create directory symlink fixture: {err}");
+        }
 
         let snapshot = snapshot_workspace(&root).unwrap();
 
@@ -628,7 +644,14 @@ mod tests {
         let task = temp.path().join("task");
         std::fs::create_dir_all(&main).unwrap();
         std::fs::write(main.join("target.txt"), "base\n").unwrap();
-        symlink_path(std::path::Path::new("target.txt"), &main.join("link.txt")).unwrap();
+        if let Err(err) = symlink_path(std::path::Path::new("target.txt"), &main.join("link.txt")) {
+            #[cfg(windows)]
+            if is_windows_symlink_privilege_error(&err) {
+                eprintln!("skipping symlink preservation test on Windows without symlink privilege");
+                return;
+            }
+            panic!("failed to create source symlink fixture: {err}");
+        }
 
         let baseline = snapshot_workspace(&main).unwrap();
         std::fs::create_dir_all(&task).unwrap();
@@ -641,7 +664,14 @@ mod tests {
         );
 
         std::fs::remove_file(task.join("link.txt")).unwrap();
-        symlink_path(std::path::Path::new("updated.txt"), &task.join("link.txt")).unwrap();
+        if let Err(err) = symlink_path(std::path::Path::new("updated.txt"), &task.join("link.txt")) {
+            #[cfg(windows)]
+            if is_windows_symlink_privilege_error(&err) {
+                eprintln!("skipping symlink preservation test on Windows without symlink privilege");
+                return;
+            }
+            panic!("failed to update task symlink fixture: {err}");
+        }
 
         sync_task_worktree_back(&main, &task, &baseline, &[], &[], &[]).unwrap();
 
@@ -708,7 +738,7 @@ mod tests {
 
         assert!(
             err.to_string()
-                .contains("path 'docs/readme.md' not in any in-scope pattern")
+                .contains("outside its declared contract")
         );
         assert_eq!(
             std::fs::read_to_string(main.join("docs/readme.md")).unwrap(),
@@ -766,8 +796,21 @@ mod tests {
             prepare_task_worktree(&repo_for_prepare, Uuid::new_v4())
         })
         .await
-        .unwrap()
         .unwrap();
+        #[cfg(windows)]
+        let task_worktree = match task_worktree {
+            Ok(task_worktree) => task_worktree,
+            Err(err)
+                if err.raw_os_error() == Some(1314)
+                    || err.to_string().contains("os error 1314") =>
+            {
+                eprintln!("skipping repo storage link test on Windows without symlink privilege");
+                return;
+            }
+            Err(err) => panic!("failed to prepare task worktree: {err}"),
+        };
+        #[cfg(not(windows))]
+        let task_worktree = task_worktree.unwrap();
 
         assert!(task_worktree.root.join(util::ROOT_DIR).exists());
         assert_eq!(

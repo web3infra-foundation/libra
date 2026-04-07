@@ -46,10 +46,6 @@ pub(super) async fn init_local_mcp_server(storage_dir: &Path) -> Result<Arc<Libr
     let db_path_str = db_path
         .to_str()
         .ok_or_else(|| anyhow!("database path '{}' is not valid UTF-8", db_path.display()))?;
-    #[cfg(target_os = "windows")]
-    let db_path_string = db_path_str.replace("\\", "/");
-    #[cfg(target_os = "windows")]
-    let db_path_str = db_path_string.as_str();
 
     let db_conn = Arc::new(
         db::establish_connection(db_path_str)

@@ -177,7 +177,16 @@ mod tests {
         fs::write(root.join(".codex/session"), "state\n").unwrap();
         fs::write(root.join(".agents/cache"), "cache\n").unwrap();
         fs::write(root.join("real.txt"), "hello\n").unwrap();
-        symlink_path(Path::new("real.txt"), &root.join("nested/link.txt")).unwrap();
+        if let Err(err) = symlink_path(Path::new("real.txt"), &root.join("nested/link.txt")) {
+            #[cfg(windows)]
+            if matches!(err.kind(), io::ErrorKind::PermissionDenied)
+                || err.raw_os_error() == Some(1314)
+            {
+                eprintln!("skipping symlink assertion on Windows without symlink privilege");
+                return;
+            }
+            panic!("failed to create symlink fixture: {err}");
+        }
 
         let snapshot = snapshot_workspace(&root).unwrap();
 

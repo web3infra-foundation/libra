@@ -375,9 +375,11 @@ fn normalize_path(path: impl Into<String>, working_dir: &Path) -> String {
 }
 
 fn relative_or_display(path: PathBuf, working_dir: &Path) -> String {
-    path.strip_prefix(working_dir)
+    let rendered = path
+        .strip_prefix(working_dir)
         .map(|rel| rel.to_string_lossy().to_string())
-        .unwrap_or_else(|_| path.to_string_lossy().to_string())
+        .unwrap_or_else(|_| path.to_string_lossy().to_string());
+    rendered.replace('\\', "/")
 }
 
 fn shell_looks_networked(arguments: &Value) -> bool {

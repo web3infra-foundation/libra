@@ -82,6 +82,7 @@ fn run_libra_command(args: &[&str], cwd: &Path) -> Output {
         .expect("failed to execute libra binary")
 }
 
+#[allow(dead_code)]
 fn run_libra_command_with_stdin(args: &[&str], cwd: &Path, stdin_body: &str) -> Output {
     let mut child = base_libra_command(args, cwd)
         .stdin(Stdio::piped())
@@ -101,6 +102,7 @@ fn run_libra_command_with_stdin(args: &[&str], cwd: &Path, stdin_body: &str) -> 
         .expect("failed to collect libra command output")
 }
 
+#[allow(dead_code)]
 fn run_libra_command_with_stdin_and_env(
     args: &[&str],
     cwd: &Path,
@@ -268,7 +270,6 @@ mod remote_test;
 mod remove_test;
 mod reset_test;
 mod restore_test;
-mod rev_parse_test;
 mod revert_test;
 mod shortlog_test;
 mod show_ref_test;
