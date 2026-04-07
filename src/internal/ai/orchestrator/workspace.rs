@@ -58,35 +58,36 @@ pub(crate) fn prepare_task_worktree(
     main_working_dir: &Path,
     task_id: Uuid,
 ) -> io::Result<TaskWorktree> {
-    let paths = task_worktree_paths(task_id);
-    if paths.cleanup_root.exists() {
-        fs::remove_dir_all(&paths.cleanup_root)?;
-    }
-    fs::create_dir_all(&paths.cleanup_root)?;
-
     let baseline = snapshot_workspace(main_working_dir)?;
 
     #[cfg(unix)]
-    if let Some(backend) = prepare_fuse_task_worktree(main_working_dir, &paths, &baseline)? {
-        return Ok(TaskWorktree {
-            root: paths.workspace_root,
-            baseline,
-            backend,
-        });
+    {
+        let fuse_paths = task_worktree_paths(task_id, "fuse");
+        if let Some(backend) = prepare_fuse_task_worktree(main_working_dir, &fuse_paths, &baseline)?
+        {
+            return Ok(TaskWorktree {
+                root: fuse_paths.workspace_root,
+                baseline,
+                backend,
+            });
+        }
     }
 
-    let backend = prepare_copy_task_worktree(main_working_dir, &paths, &baseline)?;
+    let copy_paths = task_worktree_paths(task_id, "copy");
+    prepare_task_worktree_root(&copy_paths.cleanup_root)?;
+    let backend = prepare_copy_task_worktree(main_working_dir, &copy_paths, &baseline)?;
 
     Ok(TaskWorktree {
-        root: paths.workspace_root,
+        root: copy_paths.workspace_root,
         baseline,
         backend,
     })
 }
 
-fn task_worktree_paths(task_id: Uuid) -> TaskWorktreePaths {
+fn task_worktree_paths(task_id: Uuid, backend: &str) -> TaskWorktreePaths {
     let cleanup_root = std::env::temp_dir().join(format!(
-        "libra-task-worktree-{}-{}",
+        "libra-task-worktree-{}-{}-{}",
+        backend,
         std::process::id(),
         task_id
     ));
@@ -98,6 +99,13 @@ fn task_worktree_paths(task_id: Uuid) -> TaskWorktreePaths {
     }
 }
 
+fn prepare_task_worktree_root(cleanup_root: &Path) -> io::Result<()> {
+    if cleanup_root.exists() {
+        fs::remove_dir_all(cleanup_root)?;
+    }
+    fs::create_dir_all(cleanup_root)
+}
+
 fn prepare_copy_task_worktree(
     main_working_dir: &Path,
     paths: &TaskWorktreePaths,
@@ -105,7 +113,11 @@ fn prepare_copy_task_worktree(
 ) -> io::Result<TaskWorktreeBackend> {
     fs::create_dir_all(&paths.workspace_root)?;
     match util::try_get_storage_path(Some(main_working_dir.to_path_buf())) {
-        Ok(storage) => create_storage_link(&storage, &paths.workspace_root.join(util::ROOT_DIR))?,
+        Ok(storage) => link_repo_storage(
+            &storage,
+            &paths.workspace_root.join(util::ROOT_DIR),
+            "copy task worktree",
+        )?,
         Err(err) if err.kind() == io::ErrorKind::NotFound => {}
         Err(err) => return Err(err),
     }
@@ -125,6 +137,7 @@ fn prepare_fuse_task_worktree(
         return Ok(None);
     };
 
+    prepare_task_worktree_root(&paths.cleanup_root)?;
     fs::create_dir_all(&paths.workspace_root)?;
     fs::create_dir_all(&paths.lower_root)?;
     fs::create_dir_all(&paths.upper_root)?;
@@ -132,7 +145,11 @@ fn prepare_fuse_task_worktree(
 
     match util::try_get_storage_path(Some(main_working_dir.to_path_buf())) {
         Ok(storage) => {
-            create_storage_link(&storage, &paths.upper_root.join(util::ROOT_DIR))?;
+            link_repo_storage(
+                &storage,
+                &paths.upper_root.join(util::ROOT_DIR),
+                "FUSE upper layer",
+            )?;
         }
         Err(err) if err.kind() == io::ErrorKind::NotFound => {}
         Err(err) => return Err(err),
@@ -147,8 +164,14 @@ fn prepare_fuse_task_worktree(
     match mount_result {
         Ok(mount_handle) => {
             if let Err(err) = verify_fuse_task_worktree_mount(&paths.workspace_root) {
-                let _ = runtime.block_on(mount_handle.unmount());
-                let _ = remove_cleanup_root(&paths.cleanup_root);
+                if let Err(unmount_err) = runtime.block_on(mount_handle.unmount()) {
+                    warn!(
+                        mount = %paths.workspace_root.display(),
+                        "failed to unmount unhealthy FUSE task worktree before fallback: {}",
+                        unmount_err
+                    );
+                }
+                warn_cleanup_root_failure(&paths.cleanup_root);
                 warn!(
                     path = %main_working_dir.display(),
                     mount = %paths.workspace_root.display(),
@@ -164,7 +187,7 @@ fn prepare_fuse_task_worktree(
             })))
         }
         Err(err) => {
-            let _ = remove_cleanup_root(&paths.cleanup_root);
+            warn_cleanup_root_failure(&paths.cleanup_root);
             warn!(
                 path = %main_working_dir.display(),
                 mount = %paths.workspace_root.display(),
@@ -252,6 +275,17 @@ fn remove_cleanup_root(cleanup_root: &Path) -> io::Result<()> {
         fs::remove_dir_all(cleanup_root)?;
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn warn_cleanup_root_failure(cleanup_root: &Path) {
+    if let Err(err) = remove_cleanup_root(cleanup_root) {
+        warn!(
+            path = %cleanup_root.display(),
+            "failed to clean up abandoned task worktree root: {}",
+            err
+        );
+    }
 }
 
 pub(crate) fn sync_task_worktree_back(
@@ -459,6 +493,21 @@ fn remove_existing_target(path: &Path) -> io::Result<()> {
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(err),
     }
+}
+
+fn link_repo_storage(storage: &Path, link_path: &Path, context: &str) -> io::Result<()> {
+    create_storage_link(storage, link_path).map_err(|err| {
+        io::Error::new(
+            err.kind(),
+            format!(
+                "failed to link repository storage '{}' into {} at '{}': {}",
+                storage.display(),
+                context,
+                link_path.display(),
+                err
+            ),
+        )
+    })
 }
 
 fn remove_empty_parents(root: &Path, mut current: Option<&Path>) {
