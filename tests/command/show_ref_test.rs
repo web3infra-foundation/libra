@@ -33,6 +33,7 @@ async fn setup_repo_with_commit(temp: &tempfile::TempDir) -> ChangeDirGuard {
 
     commit::execute(CommitArgs {
         message: Some("initial".into()),
+        no_verify: true,
         ..Default::default()
     })
     .await;

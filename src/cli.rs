@@ -186,6 +186,8 @@ enum Commands {
     Show(command::show::ShowArgs),
     #[command(about = "List references in a local repository")]
     ShowRef(command::show_ref::ShowRefArgs),
+    #[command(about = "Parse and normalize revision names and repository paths")]
+    RevParse(command::rev_parse::RevParseArgs),
     #[command(about = "List, create, or delete branches", alias = "br")]
     Branch(command::branch::BranchArgs),
     #[command(about = "Create a new tag")]
@@ -644,6 +646,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Shortlog(cmd_args) => command::shortlog::execute_safe(cmd_args, &output).await?,
         Commands::Show(cmd_args) => command::show::execute_safe(cmd_args, &output).await?,
         Commands::ShowRef(cmd_args) => command::show_ref::execute_safe(cmd_args, &output).await?,
+        Commands::RevParse(cmd_args) => command::rev_parse::execute_safe(cmd_args, &output).await?,
         Commands::Branch(cmd_args) => command::branch::execute_safe(cmd_args, &output).await?,
         Commands::Tag(cmd_args) => command::tag::execute_safe(cmd_args, &output).await?,
         Commands::Commit(cmd_args) => command::commit::execute_safe(cmd_args, &output).await?,

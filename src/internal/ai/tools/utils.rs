@@ -129,14 +129,18 @@ mod tests {
 
     #[test]
     fn test_validate_path_absolute() {
-        let working_dir = PathBuf::from("/tmp/work");
-        let path = PathBuf::from("/tmp/work/file.txt");
+        let temp = tempdir().unwrap();
+        let working_dir = temp.path().join("work");
+        fs::create_dir_all(&working_dir).unwrap();
+        let path = working_dir.join("file.txt");
         assert!(validate_path(&path, &working_dir).is_ok());
     }
 
     #[test]
     fn test_validate_path_relative() {
-        let working_dir = PathBuf::from("/tmp/work");
+        let temp = tempdir().unwrap();
+        let working_dir = temp.path().join("work");
+        fs::create_dir_all(&working_dir).unwrap();
         let path = PathBuf::from("relative/file.txt");
         assert!(matches!(
             validate_path(&path, &working_dir),
@@ -146,20 +150,24 @@ mod tests {
 
     #[test]
     fn test_validate_path_outside_working_dir() {
-        let working_dir = PathBuf::from("/tmp/work");
-        let path = PathBuf::from("/etc/passwd");
-        // The result depends on whether the path is a subpath of working_dir
-        // Since /etc is not under /tmp/work, this should fail
+        let temp = tempdir().unwrap();
+        let working_dir = temp.path().join("work");
+        let outside_dir = temp.path().join("outside");
+        fs::create_dir_all(&working_dir).unwrap();
+        fs::create_dir_all(&outside_dir).unwrap();
+        let path = outside_dir.join("passwd");
         let result = validate_path(&path, &working_dir);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_resolve_path_relative_to_working_dir() {
-        let working_dir = PathBuf::from("/tmp/work");
+        let temp = tempdir().unwrap();
+        let working_dir = temp.path().join("work");
+        fs::create_dir_all(working_dir.join("src")).unwrap();
         let path = PathBuf::from("src/main.rs");
         let resolved = resolve_path(&path, &working_dir).unwrap();
-        assert_eq!(resolved, PathBuf::from("/tmp/work/src/main.rs"));
+        assert_eq!(resolved, working_dir.join("src/main.rs"));
     }
 
     #[test]
