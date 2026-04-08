@@ -8,6 +8,7 @@
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
+    path::PathBuf,
     sync::Arc,
 };
 
@@ -591,14 +592,28 @@ async fn execute_status(args: StatusArgs) -> Result<(), String> {
     Ok(())
 }
 
-async fn resolve_cloud_env(name: &str) -> Result<Option<String>, String> {
-    crate::internal::config::resolve_env(name)
+fn cloud_local_db_path() -> Result<PathBuf, String> {
+    let storage = util::try_get_storage_path(None)
+        .map_err(|e| format!("failed to resolve current repository storage: {e}"))?;
+    Ok(storage.join(util::DATABASE))
+}
+
+async fn resolve_cloud_env(name: &str, local_db_path: Option<&std::path::Path>) -> Result<Option<String>, String> {
+    let local_target = match local_db_path {
+        Some(db_path) => crate::internal::config::LocalIdentityTarget::ExplicitDb(db_path),
+        None => crate::internal::config::LocalIdentityTarget::CurrentRepo,
+    };
+
+    crate::internal::config::resolve_env_for_target(name, local_target)
         .await
         .map_err(|e| format!("failed to resolve '{name}' from env or config: {e}"))
 }
 
-async fn resolve_required_cloud_env(name: &str) -> Result<String, String> {
-    match resolve_cloud_env(name).await? {
+async fn resolve_required_cloud_env(
+    name: &str,
+    local_db_path: Option<&std::path::Path>,
+) -> Result<String, String> {
+    match resolve_cloud_env(name, local_db_path).await? {
         Some(value) if !value.is_empty() => Ok(value),
         _ => Err(format!("{name} not set")),
     }
@@ -606,11 +621,21 @@ async fn resolve_required_cloud_env(name: &str) -> Result<String, String> {
 
 /// Create R2 remote storage from environment variables and config.
 async fn create_r2_storage(repo_id: &str) -> Result<RemoteStorage, String> {
-    let endpoint = resolve_required_cloud_env("LIBRA_STORAGE_ENDPOINT").await?;
-    let bucket = resolve_required_cloud_env("LIBRA_STORAGE_BUCKET").await?;
-    let access_key = resolve_required_cloud_env("LIBRA_STORAGE_ACCESS_KEY").await?;
-    let secret_key = resolve_required_cloud_env("LIBRA_STORAGE_SECRET_KEY").await?;
-    let region = resolve_cloud_env("LIBRA_STORAGE_REGION")
+    let local_db_path = cloud_local_db_path()?;
+    create_r2_storage_for_db_path(repo_id, &local_db_path).await
+}
+
+async fn create_r2_storage_for_db_path(
+    repo_id: &str,
+    local_db_path: &std::path::Path,
+) -> Result<RemoteStorage, String> {
+    let endpoint = resolve_required_cloud_env("LIBRA_STORAGE_ENDPOINT", Some(local_db_path)).await?;
+    let bucket = resolve_required_cloud_env("LIBRA_STORAGE_BUCKET", Some(local_db_path)).await?;
+    let access_key =
+        resolve_required_cloud_env("LIBRA_STORAGE_ACCESS_KEY", Some(local_db_path)).await?;
+    let secret_key =
+        resolve_required_cloud_env("LIBRA_STORAGE_SECRET_KEY", Some(local_db_path)).await?;
+    let region = resolve_cloud_env("LIBRA_STORAGE_REGION", Some(local_db_path))
         .await?
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "auto".to_string());
@@ -647,9 +672,10 @@ async fn validate_cloud_backup_env(skip_r2: bool) -> Result<(), String> {
         ]);
     }
 
+    let local_db_path = cloud_local_db_path()?;
     let mut missing = Vec::new();
     for key in required {
-        match resolve_cloud_env(key).await? {
+        match resolve_cloud_env(key, Some(&local_db_path)).await? {
             Some(value) if !value.is_empty() => {}
             _ => missing.push(key),
         }
@@ -910,8 +936,11 @@ mod tests {
                 .unwrap();
         });
 
-        rt.block_on(create_r2_storage("repo-from-config"))
-            .expect("R2 storage should initialize from local config values");
+        let repo_db_path = repo.path().join(".libra").join(util::DATABASE);
+        let _manifest_dir = ChangeDirGuard::new(env!("CARGO_MANIFEST_DIR"));
+
+        rt.block_on(create_r2_storage_for_db_path("repo-from-config", &repo_db_path))
+            .expect("R2 storage should initialize from local config values even after cwd drift");
     }
 
     #[test]
@@ -934,7 +963,8 @@ mod tests {
             .block_on(validate_cloud_backup_env(true))
             .expect_err("global config resolution failure should surface");
         assert!(
-            err.contains("failed to connect to global config"),
+            err.contains("failed to open config database")
+                || err.contains("failed to connect to global config"),
             "unexpected error: {err}"
         );
     }

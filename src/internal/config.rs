@@ -670,63 +670,33 @@ pub async fn encrypt_value(value: &str, scope: &str) -> Result<String> {
 /// `name` is the raw env var name (e.g. `"GEMINI_API_KEY"`).
 /// Returns `Err` if a vault/DB query fails (not the same as "not configured").
 pub async fn resolve_env(name: &str) -> Result<Option<String>> {
+    resolve_env_for_target(name, LocalIdentityTarget::CurrentRepo).await
+}
+
+/// Resolve an environment variable using an explicit local config target.
+///
+/// Resolution order remains:
+/// 1. System environment variable (`std::env::var`)
+/// 2. Local config for `local_target` (`vault.env.<name>`)
+/// 3. Global config (`vault.env.<name>` in `~/.libra/config.db`)
+pub async fn resolve_env_for_target(
+    name: &str,
+    local_target: LocalIdentityTarget<'_>,
+) -> Result<Option<String>> {
     // 1. System environment variable — per-process override (12-Factor)
     if let Ok(val) = std::env::var(name) {
         return Ok(Some(val));
     }
 
-    // 2. Local config (vault.env.*)
     let vault_key = format!("vault.env.{name}");
-    match ConfigKv::get(&vault_key).await {
-        Ok(Some(entry)) => {
-            if entry.encrypted {
-                // Decrypt the stored value using local-scope unseal key
-                let plaintext = decrypt_value(&entry.value, "local")
-                    .await
-                    .context(format!("failed to decrypt vault.env.{name}"))?;
-                return Ok(Some(plaintext));
-            }
-            return Ok(Some(entry.value));
-        }
-        Ok(None) => {}
-        Err(e) => {
-            return Err(e.context(format!("failed to read '{name}' from local config")));
-        }
+
+    // 2. Local config (vault.env.*)
+    if let Some(value) = local_env_value_for_target(local_target, &vault_key).await? {
+        return Ok(Some(value));
     }
 
     // 3. Global config — lowest priority
-    if let Some(global_path) = global_config_path()
-        && global_path.exists()
-    {
-        let conn = crate::internal::db::establish_connection(&global_path.to_string_lossy())
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to connect to global config '{}'",
-                    global_path.display()
-                )
-            })?;
-        match ConfigKv::get_with_conn(&conn, &vault_key).await {
-            Ok(Some(entry)) => {
-                if entry.encrypted {
-                    let plaintext =
-                        decrypt_value(&entry.value, "global")
-                            .await
-                            .context(format!(
-                                "failed to decrypt vault.env.{name} from global config"
-                            ))?;
-                    return Ok(Some(plaintext));
-                }
-                return Ok(Some(entry.value));
-            }
-            Ok(None) => {}
-            Err(e) => {
-                return Err(e.context(format!("failed to read '{name}' from global config")));
-            }
-        }
-    }
-
-    Ok(None)
+    global_env_value(name, &vault_key).await
 }
 
 /// Resolve the global config database path.
@@ -807,6 +777,62 @@ pub async fn resolve_user_identity_sources(
     })
 }
 
+async fn local_env_value_for_target(
+    local_target: LocalIdentityTarget<'_>,
+    vault_key: &str,
+) -> Result<Option<String>> {
+    let Some(entry) = local_config_entry_for_target(local_target, vault_key).await? else {
+        return Ok(None);
+    };
+
+    if entry.encrypted {
+        let plaintext = decrypt_value(&entry.value, "local")
+            .await
+            .context(format!("failed to decrypt {vault_key}"))?;
+        return Ok(Some(plaintext));
+    }
+
+    Ok(Some(entry.value))
+}
+
+async fn local_config_entry_for_target(
+    local_target: LocalIdentityTarget<'_>,
+    key: &str,
+) -> Result<Option<ConfigKvEntry>> {
+    match local_target {
+        LocalIdentityTarget::CurrentRepo => {
+            let storage = crate::utils::util::try_get_storage_path(None)
+                .context("failed to resolve current repository storage")?;
+            let db_path = storage.join(crate::utils::util::DATABASE);
+            read_config_entry_from_db_path(&db_path, key).await
+        }
+        LocalIdentityTarget::ExplicitDb(db_path) => read_config_entry_from_db_path(db_path, key).await,
+        LocalIdentityTarget::None => Ok(None),
+    }
+}
+
+async fn global_env_value(name: &str, vault_key: &str) -> Result<Option<String>> {
+    let Some(global_path) = global_config_path() else {
+        return Ok(None);
+    };
+    if !global_path.exists() {
+        return Ok(None);
+    }
+
+    let Some(entry) = read_config_entry_from_db_path(&global_path, vault_key).await? else {
+        return Ok(None);
+    };
+
+    if entry.encrypted {
+        let plaintext = decrypt_value(&entry.value, "global")
+            .await
+            .context(format!("failed to decrypt vault.env.{name} from global config"))?;
+        return Ok(Some(plaintext));
+    }
+
+    Ok(Some(entry.value))
+}
+
 async fn local_config_value_for_target(
     local_target: LocalIdentityTarget<'_>,
     key: &str,
@@ -818,9 +844,7 @@ async fn local_config_value_for_target(
             let db_path = storage.join(crate::utils::util::DATABASE);
             read_config_value_from_db_path(&db_path, key).await
         }
-        LocalIdentityTarget::ExplicitDb(db_path) => {
-            read_config_value_from_db_path(db_path, key).await
-        }
+        LocalIdentityTarget::ExplicitDb(db_path) => read_config_value_from_db_path(db_path, key).await,
         LocalIdentityTarget::None => Ok(None),
     }
 }
@@ -836,6 +860,14 @@ async fn global_config_value(key: &str) -> Result<Option<String>> {
 }
 
 async fn read_config_value_from_db_path(db_path: &Path, key: &str) -> Result<Option<String>> {
+    let entry = read_config_entry_from_db_path(db_path, key).await?;
+    Ok(entry.and_then(|entry| {
+        let trimmed = entry.value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    }))
+}
+
+async fn read_config_entry_from_db_path(db_path: &Path, key: &str) -> Result<Option<ConfigKvEntry>> {
     if !db_path.exists() {
         return Ok(None);
     }
@@ -843,17 +875,12 @@ async fn read_config_value_from_db_path(db_path: &Path, key: &str) -> Result<Opt
     let conn = get_db_conn_instance_for_path(db_path)
         .await
         .with_context(|| format!("failed to open config database '{}'", db_path.display()))?;
-    let entry = ConfigKv::get_with_conn(&conn, key).await.with_context(|| {
+    ConfigKv::get_with_conn(&conn, key).await.with_context(|| {
         format!(
             "failed to query '{key}' from config database '{}'",
             db_path.display()
         )
-    })?;
-
-    Ok(entry.and_then(|entry| {
-        let trimmed = entry.value.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_string())
-    }))
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

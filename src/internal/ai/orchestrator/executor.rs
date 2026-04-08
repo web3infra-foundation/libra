@@ -2349,6 +2349,14 @@ mod tests {
             .await
             .unwrap();
 
+        assert!(
+            run_state
+                .ordered_task_results()
+                .iter()
+                .all(|result| result.status == TaskNodeStatus::Completed),
+            "{:?}",
+            run_state.ordered_task_results()
+        );
         assert_eq!(
             std::fs::read_to_string(repo.path().join("task_a.txt")).unwrap(),
             "task-a\n"
@@ -2356,12 +2364,6 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(repo.path().join("task_b.txt")).unwrap(),
             "task-b\n"
-        );
-        assert!(
-            run_state
-                .ordered_task_results()
-                .iter()
-                .all(|result| result.status == TaskNodeStatus::Completed)
         );
     }
 

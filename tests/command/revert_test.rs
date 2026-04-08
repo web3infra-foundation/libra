@@ -62,7 +62,7 @@ async fn test_basic_revert() {
         signoff: false,
         disable_pre: false,
         all: false,
-        no_verify: true,
+        no_verify: false,
         author: None,
     })
     .await;
@@ -91,7 +91,7 @@ async fn test_basic_revert() {
         signoff: false,
         disable_pre: false,
         all: false,
-        no_verify: true,
+        no_verify: false,
         author: None,
     })
     .await;
@@ -121,7 +121,7 @@ async fn test_basic_revert() {
         signoff: false,
         disable_pre: false,
         all: false,
-        no_verify: true,
+        no_verify: false,
         author: None,
     })
     .await;
@@ -225,7 +225,7 @@ async fn test_revert_no_commit() {
         signoff: false,
         disable_pre: false,
         all: false,
-        no_verify: true,
+        no_verify: false,
         author: None,
     })
     .await;
@@ -252,7 +252,7 @@ async fn test_revert_no_commit() {
         signoff: false,
         disable_pre: false,
         all: false,
-        no_verify: true,
+        no_verify: false,
         author: None,
     })
     .await;
@@ -282,7 +282,7 @@ async fn test_revert_no_commit() {
         signoff: false,
         disable_pre: false,
         all: false,
-        no_verify: true,
+        no_verify: false,
         author: None,
     })
     .await;
@@ -322,7 +322,7 @@ async fn test_revert_root_commit() {
         signoff: false,
         disable_pre: false,
         all: false,
-        no_verify: true,
+        no_verify: false,
         author: None,
     })
     .await;
