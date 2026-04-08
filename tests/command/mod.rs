@@ -281,3 +281,5 @@ mod switch_json_test;
 mod switch_test;
 mod tag_test;
 mod worktree_test;
+#[cfg(all(unix, feature = "worktree-fuse"))]
+mod worktree_fuse_test;

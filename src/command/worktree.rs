@@ -118,6 +118,7 @@ impl Drop for DirGuard {
 /// This function verifies that a Libra repository exists and then dispatches
 /// to the concrete handler for the requested worktree operation. Any `io::Error`
 /// returned from handlers is formatted as a `fatal:` message on stderr.
+#[cfg_attr(all(unix, feature = "worktree-fuse"), allow(dead_code))]
 pub async fn execute(args: WorktreeArgs) {
     if let Err(e) = execute_safe(args, &OutputConfig::default()).await {
         e.print_stderr();
