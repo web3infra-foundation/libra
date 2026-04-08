@@ -4,9 +4,9 @@
 
 #![cfg(test)]
 
+use std::collections::HashSet;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::collections::HashSet;
 
 use git_internal::hash::{ObjectHash, get_hash_kind};
 use libra::internal::config::ConfigKv;

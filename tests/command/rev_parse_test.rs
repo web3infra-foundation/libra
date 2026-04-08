@@ -18,7 +18,7 @@ fn test_rev_parse_head_resolves_commit() {
 }
 
 #[test]
-fn test_rev_parse_short_head_returns_abbreviated_hash() {
+fn test_rev_parse_short_head_returns_non_ambiguous_hash() {
     let repo = create_committed_repo_via_cli();
 
     let full = run_libra_command(&["rev-parse", "HEAD"], repo.path());
@@ -29,12 +29,16 @@ fn test_rev_parse_short_head_returns_abbreviated_hash() {
     assert_cli_success(&output, "rev-parse --short HEAD");
 
     let short_hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    assert_eq!(
-        short_hash.len(),
-        7,
-        "expected 7-char hash, got: {short_hash}"
+    assert!(
+        short_hash.len() >= 7,
+        "expected abbreviated hash, got: {short_hash}"
     );
+    assert!(short_hash.len() <= full_hash.len());
     assert!(full_hash.starts_with(&short_hash));
+
+    let resolved = run_libra_command(&["rev-parse", short_hash.as_str()], repo.path());
+    assert_cli_success(&resolved, "rev-parse <short-hash>");
+    assert_eq!(String::from_utf8_lossy(&resolved.stdout).trim(), full_hash);
 }
 
 #[test]
@@ -63,11 +67,11 @@ fn test_rev_parse_invalid_target_returns_cli_error_code() {
     let repo = create_committed_repo_via_cli();
 
     let output = run_libra_command(&["rev-parse", "badref"], repo.path());
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
 
     assert_eq!(output.status.code(), Some(129));
     assert!(stderr.contains("not a valid object name: 'badref'"));
-    assert!(stderr.contains("Error-Code: LBR-CLI-003"));
+    assert_eq!(report.error_code, "LBR-CLI-003");
 }
 
 #[test]

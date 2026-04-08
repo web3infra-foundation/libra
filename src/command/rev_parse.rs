@@ -3,6 +3,7 @@
 use std::io::Write;
 
 use clap::Parser;
+use git_internal::hash::ObjectHash;
 use serde::Serialize;
 
 use crate::{
@@ -10,7 +11,8 @@ use crate::{
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
-        util,
+        text::SHORT_HASH_LEN,
+        util::{self, CommitBaseError},
     },
 };
 
@@ -82,11 +84,11 @@ async fn resolve_rev_parse(args: &RevParseArgs) -> CliResult<RevParseOutput> {
         });
     }
 
-    let commit = util::get_commit_base(spec)
+    let commit = util::get_commit_base_typed(spec)
         .await
-        .map_err(|e| rev_parse_invalid_target(spec, e))?;
+        .map_err(|err| rev_parse_target_error(spec, err))?;
     let value = if args.short {
-        commit.to_string().chars().take(7).collect()
+        resolve_short_commit(&commit).await?
     } else {
         commit.to_string()
     };
@@ -125,6 +127,27 @@ async fn resolve_abbrev_ref(spec: &str) -> CliResult<String> {
         .with_hint("use 'libra rev-parse <rev>' to resolve it to a commit hash."))
 }
 
+async fn resolve_short_commit(commit: &ObjectHash) -> CliResult<String> {
+    let full = commit.to_string();
+    let storage = util::objects_storage();
+
+    for len in SHORT_HASH_LEN..=full.len() {
+        let prefix = &full[..len];
+        let matches = storage.search_result(prefix).await.map_err(|error| {
+            CliError::fatal(format!(
+                "failed to search objects while abbreviating '{full}': {error}"
+            ))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+        })?;
+
+        if matches.len() == 1 && matches[0] == *commit {
+            return Ok(prefix.to_string());
+        }
+    }
+
+    Ok(full)
+}
+
 fn map_repo_path_error(err: std::io::Error) -> CliError {
     match err.kind() {
         std::io::ErrorKind::NotFound => CliError::repo_not_found(),
@@ -133,13 +156,26 @@ fn map_repo_path_error(err: std::io::Error) -> CliError {
     }
 }
 
-fn rev_parse_invalid_target(spec: &str, message: String) -> CliError {
-    let detail = message
-        .strip_prefix("fatal: ")
-        .unwrap_or(message.as_str())
-        .to_string();
-    CliError::failure(format!("not a valid object name: '{spec}' ({detail})"))
+fn rev_parse_target_error(spec: &str, error: CommitBaseError) -> CliError {
+    match error {
+        CommitBaseError::HeadUnborn => CliError::failure(format!(
+            "not a valid object name: '{spec}' (HEAD does not point to a commit)"
+        ))
         .with_stable_code(StableErrorCode::CliInvalidTarget)
+        .with_hint("create a commit before resolving HEAD."),
+        CommitBaseError::InvalidReference(detail) => {
+            CliError::failure(format!("not a valid object name: '{spec}' ({detail})"))
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+        }
+        CommitBaseError::ReadFailure(detail) => {
+            CliError::fatal(format!("failed to resolve '{spec}': {detail}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        }
+        CommitBaseError::CorruptReference(detail) => {
+            CliError::fatal(format!("failed to resolve '{spec}': {detail}"))
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+        }
+    }
 }
 
 #[cfg(test)]

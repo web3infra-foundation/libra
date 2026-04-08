@@ -2,7 +2,7 @@
 //!
 //! **Layer:** L1 — deterministic, no external dependencies.
 
-use std::{fs, io::Write, process::Command};
+use std::{fs, io::Write};
 
 use libra::internal::{branch::Branch, db::get_db_conn_instance, model::reference};
 use sea_orm::{ActiveModelTrait, Set};
@@ -33,7 +33,6 @@ async fn setup_repo_with_commit(temp: &tempfile::TempDir) -> ChangeDirGuard {
 
     commit::execute(CommitArgs {
         message: Some("initial".into()),
-        no_verify: true,
         ..Default::default()
     })
     .await;
@@ -48,11 +47,7 @@ async fn test_show_ref_empty_repo() {
     let temp = tempdir().unwrap();
     test::setup_with_new_libra_in(temp.path()).await;
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp.path())
-        .arg("show-ref")
-        .output()
-        .expect("failed to execute `libra show-ref`");
+    let output = run_libra_command(&["show-ref"], temp.path());
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -71,12 +66,7 @@ async fn test_show_ref_lists_branch() {
 
     let head_commit = Head::current_commit().await.unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp.path())
-        .arg("show-ref")
-        .arg("--heads")
-        .output()
-        .unwrap();
+    let output = run_libra_command(&["show-ref", "--heads"], temp.path());
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -133,12 +123,7 @@ async fn test_show_ref_surfaces_corrupt_branch_storage() {
     .await
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp.path())
-        .arg("show-ref")
-        .arg("--heads")
-        .output()
-        .unwrap();
+    let output = run_libra_command(&["show-ref", "--heads"], temp.path());
 
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
     assert_eq!(output.status.code(), Some(128));
@@ -161,12 +146,7 @@ async fn test_show_ref_lists_tag() {
         .await
         .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp.path())
-        .arg("show-ref")
-        .arg("--tags")
-        .output()
-        .unwrap();
+    let output = run_libra_command(&["show-ref", "--tags"], temp.path());
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -192,12 +172,7 @@ async fn test_show_ref_surfaces_corrupt_tag_storage() {
     .await
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp.path())
-        .arg("show-ref")
-        .arg("--tags")
-        .output()
-        .unwrap();
+    let output = run_libra_command(&["show-ref", "--tags"], temp.path());
 
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
     assert_eq!(output.status.code(), Some(128));
@@ -217,12 +192,7 @@ async fn test_show_ref_includes_head() {
 
     let head_commit = Head::current_commit().await.unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp.path())
-        .arg("show-ref")
-        .arg("--head")
-        .output()
-        .unwrap();
+    let output = run_libra_command(&["show-ref", "--head"], temp.path());
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     // First line should be HEAD
@@ -246,12 +216,7 @@ async fn test_show_ref_hash_only() {
 
     let head_commit = Head::current_commit().await.unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp.path())
-        .arg("show-ref")
-        .arg("--hash")
-        .output()
-        .unwrap();
+    let output = run_libra_command(&["show-ref", "--hash"], temp.path());
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -272,12 +237,7 @@ async fn test_show_ref_pattern_no_match() {
     let temp = tempdir().unwrap();
     let _guard = setup_repo_with_commit(&temp).await;
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp.path())
-        .arg("show-ref")
-        .arg("nonexistent-xyz")
-        .output()
-        .unwrap();
+    let output = run_libra_command(&["show-ref", "nonexistent-xyz"], temp.path());
 
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
     assert_eq!(output.status.code(), Some(129));
@@ -301,13 +261,7 @@ async fn test_show_ref_pattern_match() {
         .await
         .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp.path())
-        .arg("show-ref")
-        .arg("--heads")
-        .arg("main")
-        .output()
-        .unwrap();
+    let output = run_libra_command(&["show-ref", "--heads", "main"], temp.path());
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -331,11 +285,7 @@ async fn test_show_ref_default_shows_both() {
         .await
         .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp.path())
-        .arg("show-ref")
-        .output()
-        .unwrap();
+    let output = run_libra_command(&["show-ref"], temp.path());
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -352,13 +302,7 @@ async fn test_show_ref_head_exempt_from_pattern_filter() {
     let temp = tempdir().unwrap();
     let _guard = setup_repo_with_commit(&temp).await;
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp.path())
-        .arg("show-ref")
-        .arg("--head")
-        .arg("main")
-        .output()
-        .unwrap();
+    let output = run_libra_command(&["show-ref", "--head", "main"], temp.path());
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(

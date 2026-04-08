@@ -117,7 +117,7 @@ fn prepare_copy_task_worktree(
 ) -> io::Result<TaskWorktreeBackend> {
     fs::create_dir_all(&paths.workspace_root)?;
     match util::try_get_storage_path(Some(main_working_dir.to_path_buf())) {
-        Ok(storage) => link_repo_storage(
+        Ok(storage) => populate_repo_storage(
             &storage,
             &paths.workspace_root.join(util::ROOT_DIR),
             "copy task worktree",
@@ -499,19 +499,68 @@ fn remove_existing_target(path: &Path) -> io::Result<()> {
     }
 }
 
-fn link_repo_storage(storage: &Path, link_path: &Path, context: &str) -> io::Result<()> {
-    create_storage_link(storage, link_path).map_err(|err| {
-        io::Error::new(
+#[cfg(windows)]
+fn is_windows_symlink_privilege_error(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::PermissionDenied || err.raw_os_error() == Some(1314)
+}
+
+fn populate_repo_storage(storage: &Path, target_path: &Path, context: &str) -> io::Result<()> {
+    populate_repo_storage_with_link(storage, target_path, context, create_storage_link)
+}
+
+fn populate_repo_storage_with_link(
+    storage: &Path,
+    target_path: &Path,
+    context: &str,
+    link: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
+    match link(storage, target_path) {
+        Ok(()) => Ok(()),
+        #[cfg(windows)]
+        Err(err) if is_windows_symlink_privilege_error(&err) => {
+            copy_dir_all(storage, target_path).map_err(|copy_err| {
+                io::Error::new(
+                    copy_err.kind(),
+                    format!(
+                        "failed to populate repository storage '{}' into {} at '{}' after symlink fallback: {}",
+                        storage.display(),
+                        context,
+                        target_path.display(),
+                        copy_err
+                    ),
+                )
+            })
+        }
+        Err(err) => Err(io::Error::new(
             err.kind(),
             format!(
                 "failed to link repository storage '{}' into {} at '{}': {}",
                 storage.display(),
                 context,
-                link_path.display(),
+                target_path.display(),
                 err
             ),
-        )
-    })
+        )),
+    }
+}
+
+fn copy_dir_all(source: &Path, target: &Path) -> io::Result<()> {
+    fs::create_dir_all(target)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_all(&source_path, &target_path)?;
+        } else if file_type.is_symlink() {
+            let link_target = fs::read_link(&source_path)?;
+            create_symlink(&link_target, &source_path, &target_path)?;
+        } else {
+            clone_or_copy_file(&source_path, &target_path)?;
+        }
+    }
+    Ok(())
 }
 
 fn remove_empty_parents(root: &Path, mut current: Option<&Path>) {
@@ -567,8 +616,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        cleanup_task_worktree, clone_or_copy_file, materialize_workspace, prepare_task_worktree,
-        sync_task_worktree_back,
+        cleanup_task_worktree, copy_dir_all, materialize_workspace,
+        populate_repo_storage_with_link, prepare_task_worktree, sync_task_worktree_back,
     };
     use crate::{
         internal::ai::workspace_snapshot::{WorkspaceEntry, snapshot_workspace},
@@ -594,15 +643,48 @@ mod tests {
     }
 
     #[test]
-    fn clone_or_copy_file_preserves_contents() {
+    fn copy_dir_all_copies_nested_storage_tree() {
         let temp = tempdir().unwrap();
-        let source = temp.path().join("source.txt");
-        let target = temp.path().join("target.txt");
-        std::fs::write(&source, "cow me maybe\n").unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        std::fs::create_dir_all(source.join("objects/ab")).unwrap();
+        std::fs::write(source.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(source.join("objects/ab/cd"), "blob\n").unwrap();
 
-        clone_or_copy_file(&source, &target).unwrap();
+        copy_dir_all(&source, &target).unwrap();
 
-        assert_eq!(std::fs::read_to_string(&target).unwrap(), "cow me maybe\n");
+        assert_eq!(
+            std::fs::read_to_string(target.join("HEAD")).unwrap(),
+            "ref: refs/heads/main\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("objects/ab/cd")).unwrap(),
+            "blob\n"
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn populate_repo_storage_falls_back_to_copy_on_windows_symlink_privilege_error() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("storage");
+        let target = temp.path().join("workspace/.libra");
+        std::fs::create_dir_all(source.join("objects/ab")).unwrap();
+        std::fs::write(source.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(source.join("objects/ab/cd"), "blob\n").unwrap();
+
+        let err = io::Error::from_raw_os_error(1314);
+        populate_repo_storage_with_link(&source, &target, "copy task worktree", |_, _| Err(err))
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(target.join("HEAD")).unwrap(),
+            "ref: refs/heads/main\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("objects/ab/cd")).unwrap(),
+            "blob\n"
+        );
     }
 
     #[test]
@@ -647,7 +729,9 @@ mod tests {
         if let Err(err) = symlink_path(std::path::Path::new("target.txt"), &main.join("link.txt")) {
             #[cfg(windows)]
             if is_windows_symlink_privilege_error(&err) {
-                eprintln!("skipping symlink preservation test on Windows without symlink privilege");
+                eprintln!(
+                    "skipping symlink preservation test on Windows without symlink privilege"
+                );
                 return;
             }
             panic!("failed to create source symlink fixture: {err}");
@@ -664,10 +748,13 @@ mod tests {
         );
 
         std::fs::remove_file(task.join("link.txt")).unwrap();
-        if let Err(err) = symlink_path(std::path::Path::new("updated.txt"), &task.join("link.txt")) {
+        if let Err(err) = symlink_path(std::path::Path::new("updated.txt"), &task.join("link.txt"))
+        {
             #[cfg(windows)]
             if is_windows_symlink_privilege_error(&err) {
-                eprintln!("skipping symlink preservation test on Windows without symlink privilege");
+                eprintln!(
+                    "skipping symlink preservation test on Windows without symlink privilege"
+                );
                 return;
             }
             panic!("failed to update task symlink fixture: {err}");
@@ -736,10 +823,7 @@ mod tests {
         let err = sync_task_worktree_back(&main, &task, &baseline, &[], &["src/".to_string()], &[])
             .unwrap_err();
 
-        assert!(
-            err.to_string()
-                .contains("outside its declared contract")
-        );
+        assert!(err.to_string().contains("outside its declared contract"));
         assert_eq!(
             std::fs::read_to_string(main.join("docs/readme.md")).unwrap(),
             "base\n"
@@ -796,21 +880,8 @@ mod tests {
             prepare_task_worktree(&repo_for_prepare, Uuid::new_v4())
         })
         .await
+        .unwrap()
         .unwrap();
-        #[cfg(windows)]
-        let task_worktree = match task_worktree {
-            Ok(task_worktree) => task_worktree,
-            Err(err)
-                if err.raw_os_error() == Some(1314)
-                    || err.to_string().contains("os error 1314") =>
-            {
-                eprintln!("skipping repo storage link test on Windows without symlink privilege");
-                return;
-            }
-            Err(err) => panic!("failed to prepare task worktree: {err}"),
-        };
-        #[cfg(not(windows))]
-        let task_worktree = task_worktree.unwrap();
 
         assert!(task_worktree.root.join(util::ROOT_DIR).exists());
         assert_eq!(
