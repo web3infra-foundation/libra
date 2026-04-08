@@ -7,7 +7,7 @@ use git_internal::hash::ObjectHash;
 use serde::Serialize;
 
 use crate::{
-    internal::{branch::Branch, head::Head},
+    internal::{branch::Branch, branch::BranchStoreError, head::Head},
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
@@ -102,10 +102,11 @@ async fn resolve_rev_parse(args: &RevParseArgs) -> CliResult<RevParseOutput> {
 
 async fn resolve_abbrev_ref(spec: &str) -> CliResult<String> {
     if spec.eq_ignore_ascii_case("HEAD") {
-        return Ok(match Head::current().await {
-            Head::Branch(name) => name,
-            Head::Detached(_) => "HEAD".to_string(),
-        });
+        return match Head::current_result().await {
+            Ok(Head::Branch(name)) => Ok(name),
+            Ok(Head::Detached(_)) => Ok("HEAD".to_string()),
+            Err(error) => Err(map_head_resolution_error(error)),
+        };
     }
 
     if let Some(branch) = Branch::find_branch(spec, None).await {
@@ -153,6 +154,21 @@ fn map_repo_path_error(err: std::io::Error) -> CliError {
         std::io::ErrorKind::NotFound => CliError::repo_not_found(),
         _ => CliError::io(format!("failed to determine repository root: {err}"))
             .with_stable_code(StableErrorCode::IoReadFailed),
+    }
+}
+
+fn map_head_resolution_error(error: BranchStoreError) -> CliError {
+    match error {
+        BranchStoreError::Corrupt { detail, .. } => {
+            CliError::fatal(format!("failed to resolve symbolic HEAD: {detail}"))
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+        }
+        BranchStoreError::Query(detail)
+        | BranchStoreError::NotFound(detail)
+        | BranchStoreError::Delete { detail, .. } => {
+            CliError::fatal(format!("failed to resolve symbolic HEAD: {detail}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+        }
     }
 }
 

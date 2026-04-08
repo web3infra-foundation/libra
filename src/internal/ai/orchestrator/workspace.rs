@@ -149,7 +149,7 @@ fn prepare_fuse_task_worktree(
 
     match util::try_get_storage_path(Some(main_working_dir.to_path_buf())) {
         Ok(storage) => {
-            link_repo_storage(
+            populate_repo_storage(
                 &storage,
                 &paths.upper_root.join(util::ROOT_DIR),
                 "FUSE upper layer",
@@ -615,10 +615,10 @@ mod tests {
     use tempfile::tempdir;
     use uuid::Uuid;
 
-    use super::{
-        cleanup_task_worktree, copy_dir_all, materialize_workspace,
-        populate_repo_storage_with_link, prepare_task_worktree, sync_task_worktree_back,
-    };
+    use super::{cleanup_task_worktree, copy_dir_all, materialize_workspace, prepare_task_worktree,
+        sync_task_worktree_back};
+    #[cfg(windows)]
+    use super::populate_repo_storage_with_link;
     use crate::{
         internal::ai::workspace_snapshot::{WorkspaceEntry, snapshot_workspace},
         utils::{test, util},
