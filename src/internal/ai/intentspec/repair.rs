@@ -2,7 +2,8 @@ use std::collections::HashSet;
 
 use super::{
     types::{
-        ArtifactName, ArtifactReq, ArtifactStage, ChangeType, LifecycleStatus, RiskLevel, ToolRule,
+        ArtifactName, ArtifactReq, ArtifactStage, ChangeType, LifecycleStatus, QualityGates,
+        RiskLevel, ToolRule,
     },
     validator::ValidationIssue,
 };
@@ -17,12 +18,10 @@ pub fn repair_intentspec(spec: &mut IntentSpec, _issues: &[ValidationIssue]) {
     }
 
     if spec.intent.change_type == ChangeType::Bugfix {
-        let quality = spec.acceptance.quality_gates.get_or_insert(
-            crate::internal::ai::intentspec::types::QualityGates {
-                require_new_tests_when_bugfix: None,
-                max_allowed_regression: None,
-            },
-        );
+        let quality = spec.acceptance.quality_gates.get_or_insert(QualityGates {
+            require_new_tests_when_bugfix: None,
+            max_allowed_regression: None,
+        });
         quality.require_new_tests_when_bugfix = Some(true);
     }
 

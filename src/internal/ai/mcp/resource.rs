@@ -57,7 +57,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use uuid::Uuid;
 
 use crate::{
-    internal::ai::mcp::server::LibraMcpServer,
+    internal::ai::{mcp::server::LibraMcpServer, util::normalize_commit_anchor},
     utils::storage_ext::{Identifiable, StorageExt},
 };
 
@@ -886,7 +886,7 @@ impl LibraMcpServer {
             let mut event = IntentEvent::new(actor, intent.header().object_id(), kind)
                 .map_err(|e| ErrorData::internal_error(e, None))?;
             if let Some(sha) = params.commit_sha {
-                let normalized = crate::internal::ai::util::normalize_commit_anchor(&sha)
+                let normalized = normalize_commit_anchor(&sha)
                     .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
                 let ih = normalized
                     .parse()
@@ -1041,7 +1041,7 @@ impl LibraMcpServer {
             .map_err(|e| ErrorData::internal_error(e, None))?;
 
         if let Some(sha) = params.commit_sha {
-            let normalized = crate::internal::ai::util::normalize_commit_anchor(&sha)
+            let normalized = normalize_commit_anchor(&sha)
                 .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
             let ih = normalized
                 .parse()
@@ -1259,9 +1259,8 @@ impl LibraMcpServer {
             .load_tracked_object::<Task>("task", task_id, "task_id")
             .await?;
 
-        let base_commit_sha =
-            crate::internal::ai::util::normalize_commit_anchor(&params.base_commit_sha)
-                .map_err(|e| ErrorData::invalid_params(e, None))?;
+        let base_commit_sha = normalize_commit_anchor(&params.base_commit_sha)
+            .map_err(|e| ErrorData::invalid_params(e, None))?;
 
         let mut run = Run::new(actor.clone(), task_id, &base_commit_sha)
             .map_err(|e| ErrorData::invalid_params(e, None))?;
@@ -1641,9 +1640,8 @@ impl LibraMcpServer {
         let run_id = parse_uuid(&params.run_id, "run_id")?;
         self.ensure_object_exists("run", run_id, "run_id").await?;
 
-        let base_commit_sha =
-            crate::internal::ai::util::normalize_commit_anchor(&params.base_commit_sha)
-                .map_err(|e| ErrorData::invalid_params(e, None))?;
+        let base_commit_sha = normalize_commit_anchor(&params.base_commit_sha)
+            .map_err(|e| ErrorData::invalid_params(e, None))?;
 
         let mut patchset = PatchSet::new(actor, run_id, &base_commit_sha)
             .map_err(|e| ErrorData::invalid_params(e, None))?;
@@ -2139,8 +2137,8 @@ impl LibraMcpServer {
 
         // Set result commit SHA if provided
         if let Some(sha) = params.result_commit_sha {
-            let normalized = crate::internal::ai::util::normalize_commit_anchor(&sha)
-                .map_err(|e| ErrorData::invalid_params(e, None))?;
+            let normalized =
+                normalize_commit_anchor(&sha).map_err(|e| ErrorData::invalid_params(e, None))?;
             let hash_val = normalized
                 .parse()
                 .map_err(|e: String| ErrorData::invalid_params(e, None))?;

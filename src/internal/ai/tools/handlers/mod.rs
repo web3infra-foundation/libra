@@ -20,14 +20,10 @@ pub use request_user_input::RequestUserInputHandler;
 pub use shell::ShellHandler;
 pub use submit_intent_draft::SubmitIntentDraftHandler;
 
+use crate::internal::ai::tools::{ToolResult, error::ToolError};
+
 /// Helper function to parse JSON arguments for tool handlers.
-pub fn parse_arguments<T: serde::de::DeserializeOwned>(
-    arguments: &str,
-) -> crate::internal::ai::tools::ToolResult<T> {
-    serde_json::from_str(arguments).map_err(|e| {
-        crate::internal::ai::tools::error::ToolError::ParseError(format!(
-            "Failed to parse arguments: {}",
-            e
-        ))
-    })
+pub fn parse_arguments<T: serde::de::DeserializeOwned>(arguments: &str) -> ToolResult<T> {
+    serde_json::from_str(arguments)
+        .map_err(|e| ToolError::ParseError(format!("Failed to parse arguments: {}", e)))
 }

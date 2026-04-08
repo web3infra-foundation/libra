@@ -27,7 +27,7 @@ use sea_orm::ConnectionTrait;
 use serde::Serialize;
 
 use crate::{
-    command::{load_object, status},
+    command::{load_object, save_object_to_storage, status},
     common_utils::{check_conventional_commits_message, format_commit_msg},
     internal::{
         branch::Branch,
@@ -926,7 +926,7 @@ pub async fn create_tree(
         }
     };
     // save
-    crate::command::save_object_to_storage(storage, &tree, &tree.id)
+    save_object_to_storage(storage, &tree, &tree.id)
         .map_err(|e| CommitError::TreeCreation(format!("failed to save tree object: {}", e)))?;
     Ok(tree)
 }

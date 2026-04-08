@@ -1,73 +1,177 @@
-//! Code command for interactive coding sessions.
+//! # Code Command — Interactive AI-Powered Coding Sessions
 //!
-//! Supports three modes:
-//! - Default: Terminal UI (TUI) for interactive coding (and background web server)
-//! - Web Mode (`--web`): Web server only, suitable for browser access or remote hosting.
-//! - Stdio Mode (`--stdio`): MCP server over standard input/output, designed for integration with AI clients like Claude Desktop.
+//! This module implements the `libra code` subcommand, which is the primary entry point
+//! for AI-agent-driven and human-collaborative development within a Libra repository.
+//!
+//! ## Architecture Overview
+//!
+//! The command orchestrates several concurrent subsystems:
+//!
+//! - **TUI (Terminal UI)**: A `ratatui`/`crossterm`-based interactive terminal interface
+//!   that renders the chat conversation, tool outputs, and approval prompts.
+//! - **Web Server**: An embedded `axum` HTTP server that serves the Next.js static export
+//!   from `web/out/`, providing a browser-based UI alternative.
+//! - **MCP Server**: A Model Context Protocol server (using `rmcp`) that exposes Libra's
+//!   tools (read, grep, patch, shell, etc.) over Streamable HTTP or Stdio transport,
+//!   enabling integration with external AI clients such as Claude Desktop.
+//! - **AI Agent**: A tool-calling loop powered by configurable LLM providers (Gemini,
+//!   OpenAI, Anthropic, DeepSeek, Zhipu, Ollama) or managed runtimes (Claude Code, Codex).
+//!
+//! ## Supported Modes
+//!
+//! The command supports three mutually exclusive operating modes:
+//!
+//! | Mode | Flag | Description |
+//! |------|------|-------------|
+//! | **TUI** (default) | *(none)* | Full interactive terminal UI with background web + MCP servers |
+//! | **Web-only** | `--web` | Headless web server + MCP server; no terminal UI |
+//! | **Stdio** | `--stdio` | MCP server over stdin/stdout for AI client integration |
+//!
+//! ## Provider Dispatch
+//!
+//! The `--provider` flag selects the AI backend. Each provider follows the same pattern:
+//! 1. Create a client from environment variables (API keys).
+//! 2. Instantiate a completion model with the selected (or default) model name.
+//! 3. Pass the model into the shared `run_tui_with_model` function.
+//!
+//! Special providers (`claudecode`, `codex`) bypass the generic completion model path
+//! and use their own managed runtimes with dedicated execution flows.
+//!
+//! ## Sandbox & Approval
+//!
+//! Tool execution is governed by a layered sandbox and approval system:
+//! - **SandboxPolicy**: Controls filesystem and network access (read-only for review/research,
+//!   workspace-write for dev mode).
+//! - **AskForApproval**: Determines when to prompt the user for tool execution approval
+//!   (never, on-failure, on-request, unless-trusted).
+//!
+//! ## Session Persistence
+//!
+//! Conversation history is persisted via `SessionStore` under the `.libra/` storage
+//! directory, supporting `--resume` to continue the latest session.
 
 use std::{
-    io::IsTerminal,
+    collections::{HashMap, HashSet, VecDeque},
+    io::{BufRead, IsTerminal, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, Mutex},
 };
 
-use axum::{Router, response::IntoResponse, routing::get};
+use chrono::Utc;
 use clap::{Parser, ValueEnum};
+use hyper_util::{
+    rt::{TokioExecutor, TokioIo},
+    service::TowerToHyperService,
+};
+use rmcp::transport::streamable_http_server::{
+    StreamableHttpService, session::local::LocalSessionManager,
+};
 use tokio::{
     process::{Child, Command},
-    sync::oneshot,
+    sync::{mpsc, oneshot},
     time::{Duration, Instant, sleep},
 };
 use tokio_tungstenite::connect_async;
 use url::Url;
 
-// use uuid::Uuid;
-use crate::internal::{
-    ai::{
-        claudecode as agent_claudecode,
-        client::CompletionClient,
-        codex as agent_codex,
-        history::HistoryManager,
-        mcp::server::LibraMcpServer,
-        providers::{
-            anthropic::{CLAUDE_3_5_SONNET, Client as AnthropicClient},
-            deepseek::client::Client as DeepSeekClient,
-            gemini::{Client as GeminiClient, GEMINI_2_5_FLASH},
-            ollama::Client as OllamaClient,
-            openai::{Client as OpenAIClient, GPT_4O_MINI},
-            zhipu::{Client as ZhipuClient, GLM_5},
-        },
-        sandbox::{
-            ApprovalStore, AskForApproval, ExecApprovalRequest, SandboxPermissions, SandboxPolicy,
-            ToolApprovalContext, ToolRuntimeContext, ToolSandboxContext,
-        },
-        tools::{
-            ToolRegistry, ToolRegistryBuilder,
-            handlers::{
-                ApplyPatchHandler, GrepFilesHandler, ListDirHandler, McpBridgeHandler, PlanHandler,
-                ReadFileHandler, RequestUserInputHandler, ShellHandler, SubmitIntentDraftHandler,
-            },
-        },
-    },
-    tui::{App, AppConfig, Tui, tui_init, tui_restore},
-};
 use crate::{
     cli_error,
+    internal::{
+        ai::{
+            agent::{
+                ToolLoopConfig,
+                profile::{AgentProfileRouter, load_profiles},
+            },
+            claudecode as agent_claudecode,
+            client::CompletionClient,
+            codex as agent_codex,
+            commands::{CommandDispatcher, load_commands},
+            completion::{
+                CompletionError, CompletionModel, CompletionRequest, CompletionResponse,
+                CompletionUsage,
+            },
+            history::HistoryManager,
+            hooks::HookRunner,
+            mcp::server::LibraMcpServer,
+            prompt::{ContextMode, SystemPromptBuilder},
+            providers::{
+                anthropic::{CLAUDE_3_5_SONNET, Client as AnthropicClient},
+                deepseek::client::Client as DeepSeekClient,
+                gemini::{Client as GeminiClient, GEMINI_2_5_FLASH},
+                ollama::Client as OllamaClient,
+                openai::{Client as OpenAIClient, GPT_4O_MINI},
+                zhipu::{Client as ZhipuClient, GLM_5},
+            },
+            sandbox::{
+                ApprovalStore, AskForApproval, ExecApprovalRequest, SandboxPermissions,
+                SandboxPolicy, ToolApprovalContext, ToolRuntimeContext, ToolSandboxContext,
+            },
+            session::{SessionState, SessionStore},
+            tools::{
+                ToolRegistry, ToolRegistryBuilder,
+                context::UserInputRequest,
+                handlers::{
+                    ApplyPatchHandler, GrepFilesHandler, ListDirHandler, McpBridgeHandler,
+                    PlanHandler, ReadFileHandler, RequestUserInputHandler, ShellHandler,
+                    SubmitIntentDraftHandler,
+                },
+            },
+            web::{
+                WebServerHandle, WebServerOptions,
+                code_ui::{
+                    CodeUiApplyToFuture, CodeUiCapabilities, CodeUiControllerKind,
+                    CodeUiInitialController, CodeUiInteractionResponse, CodeUiProviderInfo,
+                    CodeUiRuntimeHandle, CodeUiSession, CodeUiSessionSnapshot, CodeUiSessionStatus,
+                    CodeUiTranscriptEntry, CodeUiTranscriptEntryKind, ReadOnlyCodeUiAdapter,
+                    initial_snapshot, snapshot_from_event,
+                },
+                start as start_web_server,
+            },
+        },
+        db::establish_connection,
+        tui::{App, AppConfig, ExitReason, Tui, tui_init, tui_restore},
+    },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::OutputConfig,
+        storage::local::LocalStorage,
+        util::try_get_storage_path,
     },
 };
 
+// ---------------------------------------------------------------------------
+// Constants — default network ports, bind address, and Codex startup tuning
+// ---------------------------------------------------------------------------
+
+/// Default port for the embedded web server serving the Next.js static export.
 const DEFAULT_WEB_PORT: u16 = 3000;
+
+/// Default port for the MCP (Model Context Protocol) HTTP server.
 const DEFAULT_MCP_PORT: u16 = 6789;
+
+/// Default network interface to bind servers to (localhost only).
 const DEFAULT_BIND_HOST: &str = "127.0.0.1";
+
+/// Default executable name for the Codex CLI app-server.
 const DEFAULT_CODEX_BIN: &str = "codex";
+
+/// Maximum time to wait for the Codex app-server WebSocket to become reachable.
 const CODEX_STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Interval between WebSocket connectivity checks during Codex startup.
 const CODEX_STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
+// ---------------------------------------------------------------------------
+// Enums — provider selection, context mode, and approval policy
+// ---------------------------------------------------------------------------
+
+/// Available AI provider backends for the `libra code` command.
+///
+/// Each variant maps to a specific LLM client implementation. The provider
+/// determines which API key environment variable is required and which
+/// default model is used when `--model` is omitted.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum CodeProvider {
     Gemini,
@@ -80,6 +184,11 @@ pub enum CodeProvider {
     Codex,
 }
 
+/// Operating context that shapes the agent's system prompt and sandbox policy.
+///
+/// - `Dev`: Full read-write access to the workspace; the agent can modify files.
+/// - `Review`: Read-only sandbox; the agent focuses on code review feedback.
+/// - `Research`: Read-only sandbox; the agent focuses on codebase exploration.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum CodeContext {
     #[value(alias = "development")]
@@ -90,6 +199,11 @@ pub enum CodeContext {
     Research,
 }
 
+/// User-facing approval policy controlling when tool execution requires
+/// explicit human confirmation in the TUI.
+///
+/// This enum is the CLI-facing representation; it converts into the internal
+/// [`AskForApproval`] enum via the `From` impl below.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum CodeApprovalPolicy {
     /// Never prompt; dangerous commands are rejected.
@@ -105,6 +219,8 @@ pub enum CodeApprovalPolicy {
     Untrusted,
 }
 
+/// Maps the user-facing [`CodeApprovalPolicy`] to the internal [`AskForApproval`]
+/// enum used by the sandbox/approval subsystem.
 impl From<CodeApprovalPolicy> for AskForApproval {
     fn from(value: CodeApprovalPolicy) -> Self {
         match value {
@@ -116,6 +232,15 @@ impl From<CodeApprovalPolicy> for AskForApproval {
     }
 }
 
+// ---------------------------------------------------------------------------
+// CLI argument definition
+// ---------------------------------------------------------------------------
+
+/// Command-line arguments for `libra code`.
+///
+/// This struct is parsed by `clap` and drives all three operating modes
+/// (TUI, web-only, stdio). Many flags are mode-specific and validated
+/// at runtime by [`validate_mode_args`].
 #[derive(Parser, Debug)]
 pub struct CodeArgs {
     /// Run the web server only (no TUI). Alias: `--web`.
@@ -133,6 +258,11 @@ pub struct CodeArgs {
     /// Working directory for the code session.
     #[arg(long)]
     pub cwd: Option<PathBuf>,
+
+    /// Path to a libra repository. When specified, the code session uses this
+    /// repository instead of discovering one from the current working directory.
+    #[arg(long)]
+    pub repo: Option<PathBuf>,
 
     /// AI provider backend
     #[arg(long, value_enum, default_value_t = CodeProvider::Gemini)]
@@ -219,6 +349,15 @@ pub struct CodeArgs {
     pub plan_mode: bool,
 }
 
+// ---------------------------------------------------------------------------
+// Top-level entry point — mode dispatch
+// ---------------------------------------------------------------------------
+
+/// Entry point for the `libra code` subcommand.
+///
+/// Validates CLI flag combinations, then dispatches to one of three mode-specific
+/// execution paths: stdio (MCP over stdin/stdout), web-only (headless HTTP servers),
+/// or TUI (full interactive terminal with background servers).
 pub async fn execute(args: CodeArgs, output: &OutputConfig) -> CliResult<()> {
     validate_mode_args(&args, output).map_err(CliError::command_usage)?;
     if args.stdio {
@@ -230,86 +369,20 @@ pub async fn execute(args: CodeArgs, output: &OutputConfig) -> CliResult<()> {
     }
 }
 
-/// Serve embedded static assets from the Next.js export (`web/out/`).
+// ---------------------------------------------------------------------------
+// Server handles — RAII wrappers for graceful shutdown
+// ---------------------------------------------------------------------------
+
+/// Handle to a running MCP server.
 ///
-/// Lookup order:
-/// 1. Exact path match (e.g. `_next/static/chunks/main.js`)
-/// 2. Directory index (`path/index.html`) — works with `trailingSlash: true`
-/// 3. SPA fallback → `index.html`
-/// 4. 404
-async fn static_handler(uri: axum::http::Uri) -> impl IntoResponse {
-    use axum::http::{StatusCode, header};
-
-    use super::web_assets::WebAssets;
-
-    let path = uri.path().trim_start_matches('/');
-
-    // Try exact path, then directory index, then SPA fallback.
-    // Track the resolved filename so MIME detection uses the actual file extension.
-    let resolved = if WebAssets::get(path).is_some() {
-        Some(path.to_string())
-    } else {
-        let index_path = format!("{}/index.html", path.trim_end_matches('/'));
-        if WebAssets::get(&index_path).is_some() {
-            Some(index_path)
-        } else if WebAssets::get("index.html").is_some() {
-            Some("index.html".to_string())
-        } else {
-            None
-        }
-    };
-
-    match resolved {
-        Some(resolved_path) => match WebAssets::get(&resolved_path) {
-            Some(content) => {
-                let mime = mime_guess::from_path(&resolved_path).first_or_octet_stream();
-                (
-                    StatusCode::OK,
-                    [(header::CONTENT_TYPE, mime.as_ref().to_string())],
-                    content.data.to_vec(),
-                )
-                    .into_response()
-            }
-            None => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "embedded asset lookup became inconsistent",
-            )
-                .into_response(),
-        },
-        None => (StatusCode::NOT_FOUND, "404 Not Found").into_response(),
-    }
-}
-
-/// Placeholder API router — extend with endpoints as needed.
-fn api_router() -> Router {
-    Router::new().route("/health", get(|| async { "ok" }))
-}
-
-/// Build the web router: API routes under `/api`, everything else served from
-/// the embedded Next.js static export.
-fn build_web_router() -> Router {
-    Router::new()
-        .nest("/api", api_router())
-        .fallback(static_handler)
-}
-
-struct WebServerHandle {
-    addr: SocketAddr,
-    shutdown_tx: oneshot::Sender<()>,
-    join: tokio::task::JoinHandle<anyhow::Result<()>>,
-}
-
-impl WebServerHandle {
-    async fn shutdown(self) {
-        let _ = self.shutdown_tx.send(());
-        let _ = self.join.await;
-    }
-}
-
+/// In addition to the shared shutdown mechanism, this tracks individual
+/// per-connection tasks so they can be aborted during shutdown — preventing
+/// leaked tasks when the server is torn down.
 struct McpServerHandle {
     addr: SocketAddr,
     shutdown_tx: oneshot::Sender<()>,
     join: tokio::task::JoinHandle<anyhow::Result<()>>,
+    /// Tracks spawned per-connection Hyper service tasks for cleanup.
     connection_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
@@ -328,33 +401,64 @@ impl McpServerHandle {
     }
 }
 
-async fn start_web_server(host: &str, port: u16) -> anyhow::Result<WebServerHandle> {
-    let addr: SocketAddr = format!("{host}:{port}").parse()?;
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+// ---------------------------------------------------------------------------
+// Mode: Web-only — headless web + MCP servers (no TUI)
+// ---------------------------------------------------------------------------
 
-    let app = build_web_router();
-    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-
-    let join = tokio::spawn(async move {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async move {
-                let _ = shutdown_rx.await;
-            })
-            .await
-            .map_err(|e| anyhow::anyhow!(e))
-    });
-
-    Ok(WebServerHandle {
-        addr,
-        shutdown_tx,
-        join,
-    })
-}
-
+/// Runs the web server and MCP server without a terminal UI.
+///
+/// Blocks on `Ctrl-C`, then performs graceful shutdown of both servers.
+/// This mode is useful for remote/headless environments where the user
+/// interacts through a browser or external MCP client.
 async fn execute_web_only(args: &CodeArgs) -> CliResult<()> {
-    let web_handle = match start_web_server(&args.host, args.port).await {
+    let working_dir = resolve_code_working_dir(args)?;
+    let mcp_server = init_mcp_server(&working_dir).await;
+
+    let mut managed_codex_server = None;
+    let code_ui_runtime = if args.provider == CodeProvider::Codex {
+        ensure_loopback_browser_control_host(&args.host)?;
+
+        let server =
+            start_managed_codex_server(&args.codex_bin, args.codex_port, &working_dir).await?;
+        println!("Starting Libra Code Web UI with Codex provider");
+        println!("Working directory: {}", working_dir.display());
+        println!("Codex WebSocket: {}", server.ws_url);
+        println!("Codex app-server: auto-started");
+        managed_codex_server = Some(server);
+
+        let ws_url = managed_codex_server
+            .as_ref()
+            .map(|server| server.ws_url.as_str())
+            .unwrap_or_default();
+        start_codex_code_ui_runtime(
+            args,
+            &working_dir,
+            ws_url,
+            mcp_server.clone(),
+            true,
+            CodeUiInitialController::Unclaimed,
+        )
+        .await?
+    } else {
+        build_placeholder_web_code_ui_runtime(args, &working_dir).await
+    };
+
+    let web_handle = match start_web_server(
+        &args.host,
+        args.port,
+        working_dir.clone(),
+        WebServerOptions {
+            code_ui: Some(code_ui_runtime.clone()),
+        },
+    )
+    .await
+    {
         Ok(handle) => handle,
         Err(err) => {
+            let _ = code_ui_runtime.shutdown().await;
+            if let Some(server) = managed_codex_server.as_mut() {
+                server.shutdown().await;
+            }
             return Err(
                 CliError::network(format!("failed to start web server: {err}"))
                     .with_detail("component", "web_server"),
@@ -363,10 +467,6 @@ async fn execute_web_only(args: &CodeArgs) -> CliResult<()> {
     };
     println!("Libra Code server running at http://{}", web_handle.addr);
 
-    let working_dir = resolve_code_working_dir(args)?;
-
-    let mcp_server = init_mcp_server(&working_dir).await;
-
     // Start MCP Server
     let mcp_handle = match start_mcp_server(&args.host, args.mcp_port, mcp_server.clone()).await {
         Ok(handle) => {
@@ -374,6 +474,10 @@ async fn execute_web_only(args: &CodeArgs) -> CliResult<()> {
             handle
         }
         Err(err) => {
+            let _ = code_ui_runtime.shutdown().await;
+            if let Some(server) = managed_codex_server.as_mut() {
+                server.shutdown().await;
+            }
             web_handle.shutdown().await;
             return Err(
                 CliError::network(format!("failed to start MCP server: {err}"))
@@ -383,12 +487,37 @@ async fn execute_web_only(args: &CodeArgs) -> CliResult<()> {
     };
 
     let _ = tokio::signal::ctrl_c().await;
+    let _ = code_ui_runtime.shutdown().await;
     web_handle.shutdown().await;
     mcp_handle.shutdown().await;
+    if let Some(server) = managed_codex_server.as_mut() {
+        server.shutdown().await;
+    }
     Ok(())
 }
 
-async fn execute_tui(args: CodeArgs) -> CliResult<()> {
+// ---------------------------------------------------------------------------
+// Mode: TUI — full interactive terminal with background servers
+// ---------------------------------------------------------------------------
+
+/// Main TUI execution path: initializes the AI provider, builds the tool
+/// registry, starts background web/MCP servers, and launches the interactive
+/// terminal application.
+///
+/// This function handles provider-specific client creation (API key validation,
+/// model selection) and delegates the actual TUI lifecycle to [`run_tui_with_model`].
+async fn execute_tui(mut args: CodeArgs) -> CliResult<()> {
+    // When --provider=codex and --cwd points to a file (not a directory),
+    // treat it as the codex binary path instead of the working directory.
+    if args.provider == CodeProvider::Codex
+        && let Some(ref cwd_path) = args.cwd
+        && cwd_path.exists()
+        && cwd_path.is_file()
+    {
+        args.codex_bin = cwd_path.to_string_lossy().to_string();
+        args.cwd = None;
+    }
+
     let working_dir = resolve_code_working_dir(&args)?;
 
     if args.provider == CodeProvider::Codex {
@@ -429,9 +558,7 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
     let mcp_server = init_mcp_server(&working_dir).await;
 
     // Create the bridge channel for request_user_input tool <-> TUI communication.
-    let (user_input_tx, user_input_rx) = tokio::sync::mpsc::unbounded_channel::<
-        crate::internal::ai::tools::context::UserInputRequest,
-    >();
+    let (user_input_tx, user_input_rx) = tokio::sync::mpsc::unbounded_channel::<UserInputRequest>();
     let (exec_approval_tx, exec_approval_rx) =
         tokio::sync::mpsc::unbounded_channel::<ExecApprovalRequest>();
 
@@ -571,12 +698,26 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Codex provider — managed app-server lifecycle
+// ---------------------------------------------------------------------------
+
+/// Represents a managed Codex app-server child process and its WebSocket URL.
+///
+/// The server is spawned as a child process and communicated with over WebSocket.
+/// [`ManagedCodexServer::shutdown`] sends SIGKILL and waits up to 5 seconds.
 struct ManagedCodexServer {
     ws_url: String,
     child: Child,
 }
 
 impl ManagedCodexServer {
+    /// Gracefully shuts down the managed Codex app-server process.
+    ///
+    /// If the child process has already exited (`id()` returns `None`), this is
+    /// a no-op. Otherwise it sends a kill signal via `start_kill()` and waits up
+    /// to 5 seconds for the process to terminate. If the timeout expires the
+    /// process is abandoned (the OS will reap it when the handle is dropped).
     async fn shutdown(&mut self) {
         if self.child.id().is_none() {
             return;
@@ -586,6 +727,13 @@ impl ManagedCodexServer {
     }
 }
 
+/// Executes the Codex provider mode: starts a managed Codex app-server,
+/// MCP HTTP server, and web server, then runs the agent loop over WebSocket.
+///
+/// The MCP server instance is created here and shared with the Codex agent
+/// so that all AI object writes go through the same `LibraMcpServer` that is
+/// served over HTTP at `http://{host}:{mcp_port}`.
+/// All servers are gracefully shut down on exit.
 async fn execute_codex_mode(args: CodeArgs, working_dir: PathBuf) -> CliResult<()> {
     let mut server =
         start_managed_codex_server(&args.codex_bin, args.codex_port, &working_dir).await?;
@@ -597,8 +745,147 @@ async fn execute_codex_mode(args: CodeArgs, working_dir: PathBuf) -> CliResult<(
         println!("Plan Mode: enabled (plan required before execution)");
     }
 
+    let mcp_server = init_mcp_server(&working_dir).await;
+    let code_ui_runtime = start_codex_code_ui_runtime(
+        &args,
+        &working_dir,
+        &server.ws_url,
+        mcp_server.clone(),
+        false,
+        CodeUiInitialController::Fixed {
+            kind: CodeUiControllerKind::Cli,
+            owner_label: "Terminal".to_string(),
+            reason: Some("The terminal session controls this live Codex run".to_string()),
+        },
+    )
+    .await?;
+
+    // Start embedded web server
+    let web_handle = match start_web_server(
+        &args.host,
+        args.port,
+        working_dir.clone(),
+        WebServerOptions {
+            code_ui: Some(code_ui_runtime.clone()),
+        },
+    )
+    .await
+    {
+        Ok(handle) => {
+            println!("Web: http://{}", handle.addr);
+            Some(handle)
+        }
+        Err(err) => {
+            eprintln!("warning: failed to start web server: {err}");
+            None
+        }
+    };
+
+    // Initialize the MCP server instance and serve it over HTTP.
+    let mcp_handle = match start_mcp_server(&args.host, args.mcp_port, mcp_server.clone()).await {
+        Ok(handle) => {
+            println!("MCP: http://{}", handle.addr);
+            Some(handle)
+        }
+        Err(err) => {
+            eprintln!("warning: failed to start MCP server: {err}");
+            None
+        }
+    };
+
+    let result = run_codex_cli_controller(code_ui_runtime).await;
+
+    let _ = mcp_server;
+    server.shutdown().await;
+    if let Some(handle) = web_handle {
+        handle.shutdown().await;
+    }
+    if let Some(handle) = mcp_handle {
+        handle.shutdown().await;
+    }
+    result
+}
+
+fn ensure_loopback_browser_control_host(host: &str) -> CliResult<()> {
+    let normalized = host.trim().trim_matches('[').trim_matches(']');
+    let is_loopback = matches!(normalized, "localhost" | "127.0.0.1" | "::1")
+        || normalized
+            .parse::<std::net::IpAddr>()
+            .map(|addr| addr.is_loopback())
+            .unwrap_or(false);
+
+    if is_loopback {
+        return Ok(());
+    }
+
+    Err(CliError::command_usage(
+        "interactive web control is restricted to loopback hosts in v1; use --host 127.0.0.1",
+    ))
+}
+
+async fn build_placeholder_web_code_ui_runtime(
+    args: &CodeArgs,
+    working_dir: &Path,
+) -> Arc<CodeUiRuntimeHandle> {
+    let capabilities = CodeUiCapabilities {
+        message_input: false,
+        streaming_text: false,
+        plan_updates: false,
+        tool_calls: false,
+        patchsets: false,
+        interactive_approvals: false,
+        structured_questions: false,
+        provider_session_resume: matches!(args.provider, CodeProvider::Claudecode),
+    };
+
+    let mut snapshot = initial_snapshot(
+        working_dir.to_string_lossy().to_string(),
+        CodeUiProviderInfo {
+            provider: format!("{:?}", args.provider).to_lowercase(),
+            model: args.model.clone(),
+            mode: Some("web".to_string()),
+            managed: matches!(
+                args.provider,
+                CodeProvider::Claudecode | CodeProvider::Codex
+            ),
+        },
+        capabilities.clone(),
+    );
+    let now = Utc::now();
+    snapshot.status = CodeUiSessionStatus::Idle;
+    snapshot.transcript.push(CodeUiTranscriptEntry {
+        id: "web-ui-placeholder".to_string(),
+        kind: CodeUiTranscriptEntryKind::InfoNote,
+        title: Some("Web Control Unavailable".to_string()),
+        content: Some(
+            "Interactive browser control is fully implemented for `--provider codex`. For other providers, launch `libra code` without `--web-only` to observe the live terminal session in the browser."
+                .to_string(),
+        ),
+        status: Some("completed".to_string()),
+        streaming: false,
+        metadata: serde_json::json!({ "providerAgnostic": true }),
+        created_at: now,
+        updated_at: now,
+    });
+
+    CodeUiRuntimeHandle::build(
+        ReadOnlyCodeUiAdapter::new(CodeUiSession::new(snapshot), capabilities),
+        false,
+        CodeUiInitialController::Unclaimed,
+    )
+    .await
+}
+
+async fn start_codex_code_ui_runtime(
+    args: &CodeArgs,
+    working_dir: &Path,
+    ws_url: &str,
+    mcp_server: Arc<LibraMcpServer>,
+    browser_write_enabled: bool,
+    initial_controller: CodeUiInitialController,
+) -> CliResult<Arc<CodeUiRuntimeHandle>> {
     let agent_args = agent_codex::AgentCodexArgs {
-        url: server.ws_url.clone(),
+        url: ws_url.to_string(),
         cwd: working_dir.to_string_lossy().to_string(),
         approval: approval_policy_to_codex(args.approval_policy).to_string(),
         model_provider: None,
@@ -609,14 +896,257 @@ async fn execute_codex_mode(args: CodeArgs, working_dir: PathBuf) -> CliResult<(
         debug: false,
     };
 
-    let result = agent_codex::execute(agent_args)
-        .await
-        .map_err(|e| CliError::fatal(e.to_string()));
-
-    server.shutdown().await;
-    result
+    agent_codex::start_code_ui_runtime(
+        agent_args,
+        mcp_server,
+        browser_write_enabled,
+        initial_controller,
+    )
+    .await
+    .map_err(|error| CliError::fatal(error.to_string()))
 }
 
+#[derive(Default)]
+struct CodexCliRenderState {
+    transcript_content: HashMap<String, String>,
+    completed_assistant_entries: HashSet<String>,
+    pending_queue: VecDeque<String>,
+    responding_interactions: HashSet<String>,
+    active_interaction: Option<String>,
+}
+
+fn render_codex_cli_snapshot(snapshot: &CodeUiSessionSnapshot, state: &mut CodexCliRenderState) {
+    for entry in &snapshot.transcript {
+        render_codex_cli_transcript_entry(entry, state);
+    }
+
+    let pending_ids = snapshot
+        .interactions
+        .iter()
+        .map(|interaction| interaction.id.clone())
+        .collect::<HashSet<_>>();
+    state
+        .responding_interactions
+        .retain(|interaction_id| pending_ids.contains(interaction_id));
+    state
+        .pending_queue
+        .retain(|interaction_id| pending_ids.contains(interaction_id));
+
+    if let Some(active_interaction) = state.active_interaction.clone()
+        && !pending_ids.contains(&active_interaction)
+    {
+        state.active_interaction = None;
+    }
+
+    for interaction in &snapshot.interactions {
+        let already_active = state.active_interaction.as_deref() == Some(interaction.id.as_str());
+        let already_queued = state
+            .pending_queue
+            .iter()
+            .any(|interaction_id| interaction_id == &interaction.id);
+        if !already_active
+            && !already_queued
+            && !state.responding_interactions.contains(&interaction.id)
+        {
+            state.pending_queue.push_back(interaction.id.clone());
+        }
+    }
+
+    if state.active_interaction.is_none()
+        && let Some(next_interaction_id) = state.pending_queue.pop_front()
+        && let Some(interaction) = snapshot
+            .interactions
+            .iter()
+            .find(|interaction| interaction.id == next_interaction_id)
+    {
+        print_codex_cli_interaction_prompt(interaction);
+        state.active_interaction = Some(interaction.id.clone());
+    }
+}
+
+fn render_codex_cli_transcript_entry(
+    entry: &CodeUiTranscriptEntry,
+    state: &mut CodexCliRenderState,
+) {
+    let content = entry.content.clone().unwrap_or_default();
+
+    match entry.kind {
+        CodeUiTranscriptEntryKind::UserMessage => {
+            if state.transcript_content.contains_key(&entry.id) {
+                return;
+            }
+            println!();
+            println!("Developer: {}", content);
+            state.transcript_content.insert(entry.id.clone(), content);
+        }
+        CodeUiTranscriptEntryKind::AssistantMessage => {
+            let previous = state
+                .transcript_content
+                .get(&entry.id)
+                .cloned()
+                .unwrap_or_default();
+            if previous.is_empty() && !content.is_empty() {
+                print!("\nAssistant: ");
+            }
+
+            if content.starts_with(&previous) {
+                let delta = &content[previous.len()..];
+                if !delta.is_empty() {
+                    print!("{delta}");
+                    let _ = std::io::stdout().flush();
+                }
+            } else if previous != content {
+                print!("\nAssistant: {content}");
+                let _ = std::io::stdout().flush();
+            }
+
+            if !entry.streaming && !state.completed_assistant_entries.contains(&entry.id) {
+                println!();
+                state.completed_assistant_entries.insert(entry.id.clone());
+            }
+
+            state.transcript_content.insert(entry.id.clone(), content);
+        }
+        CodeUiTranscriptEntryKind::InfoNote | CodeUiTranscriptEntryKind::PlanSummary => {
+            if state.transcript_content.contains_key(&entry.id) {
+                return;
+            }
+            println!();
+            if let Some(title) = &entry.title {
+                println!("{title}: {}", content);
+            } else {
+                println!("{content}");
+            }
+            state.transcript_content.insert(entry.id.clone(), content);
+        }
+        CodeUiTranscriptEntryKind::ToolCall | CodeUiTranscriptEntryKind::Diff => {}
+    }
+}
+
+fn print_codex_cli_interaction_prompt(
+    interaction: &crate::internal::ai::web::code_ui::CodeUiInteractionRequest,
+) {
+    println!();
+    println!(
+        "{}",
+        interaction.title.as_deref().unwrap_or("Approval required")
+    );
+    if let Some(description) = &interaction.description {
+        println!("{description}");
+    }
+    if let Some(prompt) = &interaction.prompt {
+        println!("Request: {prompt}");
+    }
+    println!("Reply with `y` / `ya` / `n` / `na`");
+}
+
+fn parse_codex_cli_interaction_response(input: &str) -> Option<CodeUiInteractionResponse> {
+    match input.trim().to_lowercase().as_str() {
+        "y" | "yes" | "approve" => Some(CodeUiInteractionResponse {
+            approved: Some(true),
+            ..CodeUiInteractionResponse::default()
+        }),
+        "ya" | "yes-all" | "approve-all" | "all" => Some(CodeUiInteractionResponse {
+            approved: Some(true),
+            apply_to_future: Some(CodeUiApplyToFuture::AcceptAll),
+            ..CodeUiInteractionResponse::default()
+        }),
+        "n" | "no" | "decline" => Some(CodeUiInteractionResponse {
+            approved: Some(false),
+            ..CodeUiInteractionResponse::default()
+        }),
+        "na" | "no-all" | "decline-all" | "never" => Some(CodeUiInteractionResponse {
+            approved: Some(false),
+            apply_to_future: Some(CodeUiApplyToFuture::DeclineAll),
+            ..CodeUiInteractionResponse::default()
+        }),
+        _ => None,
+    }
+}
+
+async fn run_codex_cli_controller(runtime: Arc<CodeUiRuntimeHandle>) -> CliResult<()> {
+    let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel::<String>();
+    std::thread::spawn(move || {
+        let stdin = std::io::stdin();
+        let reader = std::io::BufReader::new(stdin);
+        for line in reader.lines().map_while(Result::ok) {
+            if stdin_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut state = CodexCliRenderState::default();
+    let initial_snapshot = runtime.snapshot().await;
+    render_codex_cli_snapshot(&initial_snapshot, &mut state);
+    println!("Type your message and press Enter. Ctrl-C exits.");
+
+    let adapter = runtime.adapter();
+    let mut events = runtime.subscribe();
+    loop {
+        tokio::select! {
+            line = stdin_rx.recv() => {
+                let Some(line) = line else {
+                    break;
+                };
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+
+                if let Some(interaction_id) = state.active_interaction.clone() {
+                    let Some(response) = parse_codex_cli_interaction_response(trimmed) else {
+                        println!("Reply with `y` / `ya` / `n` / `na`");
+                        continue;
+                    };
+                    adapter
+                        .respond_interaction(&interaction_id, response)
+                        .await
+                        .map_err(|error| CliError::fatal(error.to_string()))?;
+                    state.responding_interactions.insert(interaction_id);
+                    state.active_interaction = None;
+                    continue;
+                }
+
+                adapter
+                    .submit_message(trimmed.to_string())
+                    .await
+                    .map_err(|error| CliError::fatal(error.to_string()))?;
+            }
+            event = events.recv() => {
+                match event {
+                    Ok(event) => {
+                        let snapshot = snapshot_from_event(&event)
+                            .map_err(|error| CliError::fatal(error.to_string()))?;
+                        render_codex_cli_snapshot(&snapshot, &mut state);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        let snapshot = runtime.snapshot().await;
+                        render_codex_cli_snapshot(&snapshot, &mut state);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                println!();
+                break;
+            }
+        }
+    }
+
+    let _ = runtime.shutdown().await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Claude Code managed provider — headless (non-TUI) execution
+// ---------------------------------------------------------------------------
+
+/// Executes the Claude Code managed provider in non-interactive (non-TUI) mode.
+///
+/// This path is taken when stdout is not a terminal (e.g. piped output) and
+/// `--provider=claudecode` is selected. It delegates entirely to the
+/// `agent_claudecode` module.
 async fn execute_claudecode_mode(args: CodeArgs, working_dir: PathBuf) -> CliResult<()> {
     println!("Starting Libra Code with Claude Code managed provider");
     println!("Working directory: {}", working_dir.display());
@@ -634,6 +1164,9 @@ async fn execute_claudecode_mode(args: CodeArgs, working_dir: PathBuf) -> CliRes
         .map_err(map_claudecode_cli_error)
 }
 
+/// Converts CLI [`CodeArgs`] into the internal `ClaudecodeCodeArgs` struct
+/// expected by the Claude Code managed runtime, mapping approval policies
+/// and session continuity flags.
 fn build_claudecode_code_args(
     args: &CodeArgs,
     working_dir: PathBuf,
@@ -659,6 +1192,8 @@ fn build_claudecode_code_args(
     }
 }
 
+/// Validates Claude Code managed runtime arguments (e.g. UUID format for
+/// `--resume-session`). Returns a [`CliError::CommandUsage`] on failure.
 fn validate_claudecode_code_args(
     args: &agent_claudecode::ClaudecodeCodeArgs,
 ) -> Result<(), CliError> {
@@ -666,6 +1201,12 @@ fn validate_claudecode_code_args(
         .map_err(|error| CliError::command_usage(error.to_string()))
 }
 
+// ---------------------------------------------------------------------------
+// Approval policy mapping helpers
+// ---------------------------------------------------------------------------
+
+/// Maps [`CodeApprovalPolicy`] to the Codex app-server's approval string.
+/// Codex only distinguishes between "accept" (auto-approve) and "ask" (prompt).
 fn approval_policy_to_codex(policy: CodeApprovalPolicy) -> &'static str {
     match policy {
         CodeApprovalPolicy::Never => "accept",
@@ -675,6 +1216,9 @@ fn approval_policy_to_codex(policy: CodeApprovalPolicy) -> &'static str {
     }
 }
 
+/// Maps [`CodeApprovalPolicy`] to Claude Code's permission mode string.
+/// - `Never` → `"acceptEdits"` (auto-approve edits, no prompts)
+/// - Others → `"plan"` (require plan approval before execution)
 fn approval_policy_to_claudecode_managed_permission_mode(
     policy: CodeApprovalPolicy,
 ) -> &'static str {
@@ -686,6 +1230,9 @@ fn approval_policy_to_claudecode_managed_permission_mode(
     }
 }
 
+/// Determines whether interactive approval prompts should be enabled for
+/// the Claude Code managed runtime. Disabled when the policy is `Never`
+/// or when the user has explicitly set `bypassPermissions`.
 fn approval_policy_enables_claudecode_interactive_approvals(
     policy: CodeApprovalPolicy,
     permission_mode_override: Option<&str>,
@@ -694,6 +1241,8 @@ fn approval_policy_enables_claudecode_interactive_approvals(
         && !matches!(permission_mode_override, Some("bypassPermissions"))
 }
 
+/// Converts a Claude Code runtime error into a typed [`CliError`],
+/// distinguishing authentication errors from other fatal failures.
 fn map_claudecode_cli_error(error: anyhow::Error) -> CliError {
     if agent_claudecode::is_auth_error(&error) {
         CliError::auth(error.to_string())
@@ -702,6 +1251,13 @@ fn map_claudecode_cli_error(error: anyhow::Error) -> CliError {
     }
 }
 
+/// Starts the Codex app-server as a managed child process.
+///
+/// 1. Resolves the WebSocket URL (using the requested port or auto-selecting a free one).
+/// 2. Spawns the Codex binary with `app-server --listen <ws_url>`.
+/// 3. Polls the WebSocket endpoint until it becomes reachable (or times out).
+///
+/// On failure, the child process is killed before returning the error.
 async fn start_managed_codex_server(
     codex_bin: &str,
     requested_port: Option<u16>,
@@ -719,6 +1275,9 @@ async fn start_managed_codex_server(
     Ok(ManagedCodexServer { ws_url, child })
 }
 
+/// Builds a `tokio::process::Command` for the Codex app-server.
+/// Stdin/stdout/stderr are all set to null since the server communicates
+/// exclusively over WebSocket.
 fn build_codex_command(program: &str, ws_url: &str, working_dir: &Path) -> Command {
     let mut command = Command::new(program);
     command
@@ -732,6 +1291,8 @@ fn build_codex_command(program: &str, ws_url: &str, working_dir: &Path) -> Comma
     command
 }
 
+/// Windows fallback: wraps the Codex binary invocation in `cmd /C` to
+/// handle `.cmd`/`.bat` shims that are common on Windows (e.g. from npm).
 #[cfg(target_os = "windows")]
 fn build_windows_shell_codex_command(codex_bin: &str, ws_url: &str, working_dir: &Path) -> Command {
     let mut command = Command::new("cmd");
@@ -748,6 +1309,8 @@ fn build_windows_shell_codex_command(codex_bin: &str, ws_url: &str, working_dir:
     command
 }
 
+/// Attempts to spawn the Codex app-server process. On Windows, falls back
+/// to `cmd /C` if the direct spawn fails with `NotFound` (handles `.cmd` shims).
 fn spawn_codex_app_server(codex_bin: &str, ws_url: &str, working_dir: &Path) -> CliResult<Child> {
     match build_codex_command(codex_bin, ws_url, working_dir).spawn() {
         Ok(child) => Ok(child),
@@ -769,6 +1332,8 @@ fn spawn_codex_app_server(codex_bin: &str, ws_url: &str, working_dir: &Path) -> 
     }
 }
 
+/// Resolves the WebSocket URL for the Codex app-server.
+/// If no port is specified, auto-selects a free local port via [`pick_free_local_port`].
 fn resolve_codex_ws_url(requested_port: Option<u16>) -> CliResult<String> {
     let port = match requested_port {
         Some(0) => {
@@ -782,6 +1347,9 @@ fn resolve_codex_ws_url(requested_port: Option<u16>) -> CliResult<String> {
     Ok(format!("ws://{DEFAULT_BIND_HOST}:{port}"))
 }
 
+/// Binds to port 0 on the given host to let the OS assign a free ephemeral
+/// port, then returns that port number. The listener is dropped immediately,
+/// releasing the port for the Codex server to bind to.
 fn pick_free_local_port(host: &str) -> CliResult<u16> {
     let listener = std::net::TcpListener::bind((host, 0)).map_err(|e| {
         CliError::network(format!(
@@ -797,6 +1365,9 @@ fn pick_free_local_port(host: &str) -> CliResult<u16> {
     })
 }
 
+/// Polls the Codex app-server WebSocket endpoint until a connection succeeds
+/// or [`CODEX_STARTUP_TIMEOUT`] is exceeded. The probe connection is immediately
+/// dropped after a successful handshake.
 async fn wait_for_codex_ready(ws_url: &str) -> CliResult<()> {
     let deadline = Instant::now() + CODEX_STARTUP_TIMEOUT;
 
@@ -820,26 +1391,61 @@ async fn wait_for_codex_ready(ws_url: &str) -> CliResult<()> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Working directory resolution
+// ---------------------------------------------------------------------------
+
+/// Resolves the effective working directory for the code session.
+///
+/// Priority: `--cwd` > `--repo` > current working directory.
+/// Validates that the resolved path exists and is a directory.
+/// `--cwd` and `--repo` are mutually exclusive.
 fn resolve_code_working_dir(args: &CodeArgs) -> CliResult<PathBuf> {
+    if args.cwd.is_some() && args.repo.is_some() {
+        return Err(CliError::command_usage(
+            "--cwd and --repo cannot be used together".to_string(),
+        ));
+    }
+
     let working_dir = args
         .cwd
         .clone()
-        .unwrap_or_else(crate::utils::util::working_dir);
+        .or_else(|| args.repo.clone())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     if !working_dir.exists() {
+        let flag = if args.repo.is_some() {
+            "--repo"
+        } else {
+            "--cwd"
+        };
         return Err(CliError::command_usage(format!(
-            "--cwd path does not exist: {}",
+            "{flag} path does not exist: {}",
             working_dir.display()
         )));
     }
     if !working_dir.is_dir() {
+        let flag = if args.repo.is_some() {
+            "--repo"
+        } else {
+            "--cwd"
+        };
         return Err(CliError::command_usage(format!(
-            "--cwd must point to a directory: {}",
+            "{flag} must point to a directory: {}",
             working_dir.display()
         )));
     }
     Ok(working_dir)
 }
 
+// ---------------------------------------------------------------------------
+// TUI launch configuration and model abstraction
+// ---------------------------------------------------------------------------
+
+/// Aggregates all parameters needed to launch the TUI application.
+///
+/// This struct is built once in [`execute_tui`] and consumed by
+/// [`run_tui_with_model`]. It bundles network config, tool registry,
+/// prompt/temperature settings, session state, and inter-component channels.
 struct TuiLaunchConfig {
     host: String,
     port: u16,
@@ -850,38 +1456,138 @@ struct TuiLaunchConfig {
     context: Option<CodeContext>,
     resume: bool,
     approval_policy: AskForApproval,
-    user_input_rx:
-        tokio::sync::mpsc::UnboundedReceiver<crate::internal::ai::tools::context::UserInputRequest>,
-    user_input_tx:
-        tokio::sync::mpsc::UnboundedSender<crate::internal::ai::tools::context::UserInputRequest>,
+    user_input_rx: tokio::sync::mpsc::UnboundedReceiver<UserInputRequest>,
+    user_input_tx: tokio::sync::mpsc::UnboundedSender<UserInputRequest>,
     exec_approval_rx: tokio::sync::mpsc::UnboundedReceiver<ExecApprovalRequest>,
     exec_approval_tx: tokio::sync::mpsc::UnboundedSender<ExecApprovalRequest>,
     mcp_server: Arc<LibraMcpServer>,
     managed_claudecode: Option<agent_claudecode::ClaudecodeTuiRuntime>,
 }
 
-#[derive(Clone, Debug, Default)]
-struct UnsupportedCompletionModel;
-
-impl crate::internal::ai::completion::CompletionModel for UnsupportedCompletionModel {
-    type Response = serde_json::Value;
-
-    async fn completion(
-        &self,
-        _request: crate::internal::ai::completion::CompletionRequest,
-    ) -> Result<
-        crate::internal::ai::completion::CompletionResponse<Self::Response>,
-        crate::internal::ai::completion::CompletionError,
-    > {
-        Err(
-            crate::internal::ai::completion::CompletionError::NotImplemented(
-                "generic completion workflows are not available for the active managed provider"
-                    .to_string(),
-            ),
-        )
+fn build_tui_code_ui_capabilities(
+    provider_name: &str,
+    managed_claudecode: bool,
+) -> CodeUiCapabilities {
+    CodeUiCapabilities {
+        message_input: true,
+        streaming_text: managed_claudecode,
+        plan_updates: true,
+        tool_calls: true,
+        patchsets: true,
+        interactive_approvals: true,
+        structured_questions: true,
+        provider_session_resume: provider_name == "claudecode",
     }
 }
 
+fn build_tui_code_ui_transcript(session: &SessionState) -> Vec<CodeUiTranscriptEntry> {
+    session
+        .messages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| {
+            let kind = match message.role.as_str() {
+                "user" => CodeUiTranscriptEntryKind::UserMessage,
+                "assistant" => CodeUiTranscriptEntryKind::AssistantMessage,
+                _ => return None,
+            };
+            Some(CodeUiTranscriptEntry {
+                id: format!("session-message-{}", index + 1),
+                kind,
+                title: Some(match message.role.as_str() {
+                    "user" => "Developer".to_string(),
+                    _ => "Assistant".to_string(),
+                }),
+                content: Some(message.content.clone()),
+                status: Some("completed".to_string()),
+                streaming: false,
+                metadata: serde_json::json!({ "restored": true }),
+                created_at: message.timestamp,
+                updated_at: message.timestamp,
+            })
+        })
+        .collect()
+}
+
+async fn build_tui_code_ui_runtime(
+    working_dir: &str,
+    session: &SessionState,
+    provider_name: &str,
+    model_name: &str,
+    managed_claudecode: bool,
+) -> Arc<CodeUiRuntimeHandle> {
+    let capabilities = build_tui_code_ui_capabilities(provider_name, managed_claudecode);
+    let mut snapshot = initial_snapshot(
+        working_dir.to_string(),
+        CodeUiProviderInfo {
+            provider: provider_name.to_string(),
+            model: Some(model_name.to_string()),
+            mode: Some("tui".to_string()),
+            managed: managed_claudecode,
+        },
+        capabilities.clone(),
+    );
+    snapshot.session_id = session.id.clone();
+    snapshot.transcript = build_tui_code_ui_transcript(session);
+    snapshot.updated_at = Utc::now();
+
+    let code_ui_session = CodeUiSession::new(snapshot);
+    CodeUiRuntimeHandle::build(
+        ReadOnlyCodeUiAdapter::new(code_ui_session, capabilities),
+        false,
+        CodeUiInitialController::Fixed {
+            kind: CodeUiControllerKind::Tui,
+            owner_label: "Terminal UI".to_string(),
+            reason: Some("The terminal UI controls this live session".to_string()),
+        },
+    )
+    .await
+}
+
+/// Stub completion model used when the provider bypasses the generic completion
+/// path (e.g. Claude Code managed runtime). Any call to `completion()` returns
+/// `CompletionError::NotImplemented`. This allows the TUI to be launched with
+/// a uniform type signature while the actual AI interaction is handled by the
+/// managed runtime.
+#[derive(Clone, Debug, Default)]
+struct UnsupportedCompletionModel;
+
+/// Implementation of `CompletionModel` that unconditionally returns
+/// `CompletionError::NotImplemented`. This allows managed providers (Claude Code,
+/// Codex) — which drive the AI loop through their own runtime rather than the
+/// generic completion trait — to satisfy the type parameter required by
+/// [`run_tui_with_model`] without providing an actual LLM backend.
+impl CompletionModel for UnsupportedCompletionModel {
+    /// Uses `serde_json::Value` as a placeholder; never actually produced.
+    type Response = serde_json::Value;
+
+    /// Always returns `NotImplemented` — callers should never reach this path
+    /// when a managed provider runtime is active.
+    async fn completion(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+        Err(CompletionError::NotImplemented(
+            "generic completion workflows are not available for the active managed provider"
+                .to_string(),
+        ))
+    }
+}
+
+/// Core TUI lifecycle: wires up the terminal, background servers, agent
+/// configuration, session persistence, and the interactive `App` event loop.
+///
+/// This function is generic over the completion model `M`, allowing all
+/// providers to share the same TUI setup code. The flow is:
+///
+/// 1. Load git hooks from the working directory.
+/// 2. Build the agent's `ToolLoopConfig` (preamble, temperature, sandbox policy).
+/// 3. Initialize the terminal via `tui_init()` with a restore guard.
+/// 4. Start the web server and MCP server as background tasks.
+/// 5. Load slash commands and agent profiles from disk.
+/// 6. Restore or create a new session.
+/// 7. Run the `App` event loop until the user exits.
+/// 8. Gracefully shut down all background servers.
 async fn run_tui_with_model<M>(
     model: M,
     params: TuiLaunchConfig,
@@ -889,12 +1595,12 @@ async fn run_tui_with_model<M>(
     provider_name: String,
 ) -> CliResult<()>
 where
-    M: crate::internal::ai::completion::CompletionModel + Clone + 'static,
-    M::Response: crate::internal::ai::completion::CompletionUsage,
+    M: CompletionModel + Clone + 'static,
+    M::Response: CompletionUsage,
 {
     let registry = params.registry;
     let hook_runner = {
-        let runner = crate::internal::ai::hooks::HookRunner::load(registry.working_dir());
+        let runner = HookRunner::load(registry.working_dir());
         if runner.has_hooks() {
             Some(std::sync::Arc::new(runner))
         } else {
@@ -902,7 +1608,7 @@ where
         }
     };
 
-    let config = crate::internal::ai::agent::ToolLoopConfig {
+    let config = ToolLoopConfig {
         preamble: Some(params.preamble),
         temperature: params.temperature,
         hook_runner,
@@ -929,12 +1635,47 @@ where
 
     let tui = Tui::new(terminal);
 
-    let (web_handle, web_line) = match start_web_server(&params.host, params.port).await {
+    // Set up session persistence
+    let working_dir_str = registry.working_dir().to_string_lossy().to_string();
+    let storage_root = resolve_storage_root(registry.working_dir());
+    let session_store = SessionStore::from_storage_path(&storage_root);
+    let session = if params.resume {
+        match session_store.load_latest_for_working_dir(&working_dir_str) {
+            Ok(Some(s)) => s,
+            _ => SessionState::new(&working_dir_str),
+        }
+    } else {
+        SessionState::new(&working_dir_str)
+    };
+
+    let code_ui_runtime = build_tui_code_ui_runtime(
+        &working_dir_str,
+        &session,
+        &provider_name,
+        &model_name,
+        params.managed_claudecode.is_some(),
+    )
+    .await;
+    let code_ui_session = code_ui_runtime.adapter().session();
+
+    let (web_handle, web_line) = match start_web_server(
+        &params.host,
+        params.port,
+        registry.working_dir().to_path_buf(),
+        WebServerOptions {
+            code_ui: Some(code_ui_runtime),
+        },
+    )
+    .await
+    {
         Ok(handle) => {
             let line = format!("Web: http://{}", handle.addr);
             (Some(handle), line)
         }
-        Err(err) => (None, format!("Web: failed to start ({err})")),
+        Err(err) => (
+            None::<WebServerHandle>,
+            format!("Web: failed to start ({err})"),
+        ),
     };
 
     // Start MCP Server
@@ -953,26 +1694,12 @@ where
     );
 
     // Load slash commands
-    let commands = crate::internal::ai::commands::load_commands(registry.working_dir());
-    let command_dispatcher = crate::internal::ai::commands::CommandDispatcher::new(commands);
+    let commands = load_commands(registry.working_dir());
+    let command_dispatcher = CommandDispatcher::new(commands);
 
     // Load agent profiles
-    let profiles = crate::internal::ai::agent::profile::load_profiles(registry.working_dir());
-    let agent_router = crate::internal::ai::agent::profile::AgentProfileRouter::new(profiles);
-
-    // Set up session persistence
-    let working_dir_str = registry.working_dir().to_string_lossy().to_string();
-    let storage_root = resolve_storage_root(registry.working_dir());
-    let session_store =
-        crate::internal::ai::session::SessionStore::from_storage_path(&storage_root);
-    let session = if params.resume {
-        match session_store.load_latest_for_working_dir(&working_dir_str) {
-            Ok(Some(s)) => s,
-            _ => crate::internal::ai::session::SessionState::new(&working_dir_str),
-        }
-    } else {
-        crate::internal::ai::session::SessionState::new(&working_dir_str)
-    };
+    let profiles = load_profiles(registry.working_dir());
+    let agent_router = AgentProfileRouter::new(profiles);
 
     // Create and run app
     let mut app = App::new(
@@ -993,13 +1720,14 @@ where
             model_name,
             provider_name,
             mcp_server: Some(params.mcp_server),
+            code_ui_session: Some(code_ui_session),
             managed_claudecode: params.managed_claudecode,
         },
     );
 
     match app.run().await {
         Ok(exit_info) => {
-            if let crate::internal::tui::ExitReason::Fatal(msg) = exit_info.reason {
+            if let ExitReason::Fatal(msg) = exit_info.reason {
                 return Err(
                     CliError::fatal(msg).with_stable_code(StableErrorCode::InternalInvariant)
                 );
@@ -1018,14 +1746,17 @@ where
     Ok(())
 }
 
-use hyper_util::{
-    rt::{TokioExecutor, TokioIo},
-    service::TowerToHyperService,
-};
-use rmcp::transport::streamable_http_server::{
-    StreamableHttpService, session::local::LocalSessionManager,
-};
+// ---------------------------------------------------------------------------
+// MCP server — Streamable HTTP transport via Hyper
+// ---------------------------------------------------------------------------
 
+/// Starts the MCP server using `rmcp`'s Streamable HTTP transport.
+///
+/// Each incoming TCP connection is handled by a Hyper service that wraps the
+/// `StreamableHttpService`. Per-connection tasks are tracked in `connection_tasks`
+/// so they can be aborted during shutdown, preventing task leaks.
+///
+/// Uses `LocalSessionManager` for session management (single-node, in-memory).
 async fn start_mcp_server(
     host: &str,
     port: u16,
@@ -1091,19 +1822,33 @@ async fn start_mcp_server(
     })
 }
 
+// ---------------------------------------------------------------------------
+// System prompt and runtime context construction
+// ---------------------------------------------------------------------------
+
+/// Builds the system prompt (preamble) for the AI agent, incorporating the
+/// working directory context and optional operating mode (dev/review/research).
 fn system_preamble(working_dir: &std::path::Path, context: Option<CodeContext>) -> String {
-    let mut builder = crate::internal::ai::prompt::SystemPromptBuilder::new(working_dir);
+    let mut builder = SystemPromptBuilder::new(working_dir);
     if let Some(ctx) = context {
         let mode = match ctx {
-            CodeContext::Dev => crate::internal::ai::prompt::ContextMode::Dev,
-            CodeContext::Review => crate::internal::ai::prompt::ContextMode::Review,
-            CodeContext::Research => crate::internal::ai::prompt::ContextMode::Research,
+            CodeContext::Dev => ContextMode::Dev,
+            CodeContext::Review => ContextMode::Review,
+            CodeContext::Research => ContextMode::Research,
         };
         builder = builder.with_context(mode);
     }
     builder.build()
 }
 
+/// Constructs the default [`ToolRuntimeContext`] for TUI mode, configuring
+/// the sandbox policy based on the operating context:
+///
+/// - **Dev mode (or no context)**: Workspace-write sandbox allowing modifications
+///   within the working directory; network access is denied.
+/// - **Review / Research mode**: Read-only sandbox; no writes or network access.
+///
+/// The approval policy and its communication channel are also wired in here.
 fn default_tui_runtime_context(
     working_dir: &std::path::Path,
     context: Option<CodeContext>,
@@ -1135,6 +1880,15 @@ fn default_tui_runtime_context(
     }
 }
 
+// ---------------------------------------------------------------------------
+// MCP server initialization — storage and database setup
+// ---------------------------------------------------------------------------
+
+/// Initializes the [`LibraMcpServer`] instance with optional history persistence.
+///
+/// Sets up the local object storage directory and SQLite database under the
+/// `.libra/` storage root. If any step fails (directory creation, DB connection),
+/// falls back to a read-only MCP server with history disabled, printing a warning.
 async fn init_mcp_server(working_dir: &std::path::Path) -> Arc<LibraMcpServer> {
     let storage_dir = resolve_storage_root(working_dir);
     let objects_dir = storage_dir.join("objects");
@@ -1165,7 +1919,7 @@ async fn init_mcp_server(working_dir: &std::path::Path) -> Arc<LibraMcpServer> {
     #[cfg(target_os = "windows")]
     let db_path_str = &db_path_string;
 
-    let db_conn = match crate::internal::db::establish_connection(db_path_str).await {
+    let db_conn = match establish_connection(db_path_str).await {
         Ok(conn) => Arc::new(conn),
         Err(e) => {
             eprintln!(
@@ -1176,7 +1930,7 @@ async fn init_mcp_server(working_dir: &std::path::Path) -> Arc<LibraMcpServer> {
         }
     };
 
-    let storage = Arc::new(crate::utils::storage::local::LocalStorage::new(objects_dir));
+    let storage = Arc::new(LocalStorage::new(objects_dir));
     let intent_history_manager = Arc::new(HistoryManager::new(storage.clone(), dot_libra, db_conn));
     Arc::new(LibraMcpServer::new(
         Some(intent_history_manager),
@@ -1184,13 +1938,25 @@ async fn init_mcp_server(working_dir: &std::path::Path) -> Arc<LibraMcpServer> {
     ))
 }
 
-fn resolve_storage_root(working_dir: &std::path::Path) -> std::path::PathBuf {
-    // Use the resolved .libra storage directory for isolation, supporting
-    // linked worktrees via try_get_storage_path.
-    crate::utils::util::try_get_storage_path(Some(working_dir.to_path_buf()))
+/// Resolves the `.libra/` storage root for the given working directory.
+///
+/// Supports linked worktrees by delegating to `try_get_storage_path`, which
+/// follows `.libra` symlinks to the main repository's storage. Falls back to
+/// `<working_dir>/.libra` if resolution fails.
+pub(crate) fn resolve_storage_root(working_dir: &std::path::Path) -> std::path::PathBuf {
+    try_get_storage_path(Some(working_dir.to_path_buf()))
         .unwrap_or_else(|_| working_dir.join(".libra"))
 }
 
+// ---------------------------------------------------------------------------
+// Mode: Stdio — MCP server over stdin/stdout
+// ---------------------------------------------------------------------------
+
+/// Runs the MCP server over stdin/stdout using `rmcp`'s async read/write
+/// transport. This mode is designed for integration with AI clients (e.g.
+/// Claude Desktop) that communicate via the Model Context Protocol over pipes.
+///
+/// Blocks until the MCP session ends (client disconnects or EOF on stdin).
 async fn execute_stdio(args: &CodeArgs) -> CliResult<()> {
     let working_dir = resolve_code_working_dir(args)?;
 
@@ -1220,6 +1986,18 @@ async fn execute_stdio(args: &CodeArgs) -> CliResult<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// CLI argument validation
+// ---------------------------------------------------------------------------
+
+/// Validates CLI flag combinations across all three operating modes.
+///
+/// Enforces constraints such as:
+/// - Web and MCP ports must differ (except in stdio mode).
+/// - TUI-specific flags (--model, --temperature, --resume, etc.) are rejected
+///   in web-only and stdio modes.
+/// - Provider-specific flags are only accepted for their respective providers.
+/// - Claude Code managed flags have their own cross-flag consistency rules.
 fn validate_mode_args(args: &CodeArgs, output: &OutputConfig) -> Result<(), String> {
     if !args.stdio && args.port == args.mcp_port {
         return Err(format!(
@@ -1286,6 +2064,8 @@ fn validate_mode_args(args: &CodeArgs, output: &OutputConfig) -> Result<(), Stri
     Ok(())
 }
 
+/// Returns `true` if any Claude Code managed runtime–specific flags are set.
+/// Used to reject these flags when a non-Claude Code provider is selected.
 fn has_claudecode_managed_flags(args: &CodeArgs) -> bool {
     args.resume_session.is_some()
         || args.fork_session
@@ -1297,6 +2077,13 @@ fn has_claudecode_managed_flags(args: &CodeArgs) -> bool {
         || args.permission_mode.is_some()
 }
 
+/// Validates cross-flag consistency for Claude Code managed runtime flags.
+///
+/// Enforces rules such as:
+/// - `--resume` and `--resume-session` are mutually exclusive.
+/// - `--fork-session` and `--resume-at` require `--resume-session`.
+/// - `--session-id` with `--resume-session` requires `--fork-session`.
+/// - `--permission-mode` must be one of the recognized values.
 fn validate_claudecode_managed_flags(args: &CodeArgs) -> Result<(), String> {
     if args.resume && args.resume_session.is_some() {
         return Err("--resume cannot be combined with --resume-session".to_string());
@@ -1336,6 +2123,8 @@ fn validate_claudecode_managed_flags(args: &CodeArgs) -> Result<(), String> {
     Ok(())
 }
 
+/// Helper: rejects a flag if it was set (`is_invalid == true`) with a
+/// standardized error message indicating the flag is not supported in the given mode.
 fn reject_mode_flag(is_invalid: bool, flag: &str, mode: &str) -> Result<(), String> {
     if is_invalid {
         return Err(format!("{flag} is not supported in {mode} mode"));
@@ -1343,6 +2132,8 @@ fn reject_mode_flag(is_invalid: bool, flag: &str, mode: &str) -> Result<(), Stri
     Ok(())
 }
 
+/// Rejects all TUI-specific flags when running in a non-TUI mode (web-only or stdio).
+/// This ensures users get clear errors instead of silently ignored flags.
 fn reject_non_tui_flags(args: &CodeArgs, mode: &str) -> Result<(), String> {
     reject_mode_flag(args.provider != CodeProvider::Gemini, "--provider", mode)?;
     reject_mode_flag(args.model.is_some(), "--model", mode)?;
@@ -1366,6 +2157,10 @@ fn reject_non_tui_flags(args: &CodeArgs, mode: &str) -> Result<(), String> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
@@ -1373,6 +2168,10 @@ mod tests {
     use tokio::sync::mpsc::unbounded_channel;
 
     use super::*;
+    use crate::utils::{
+        error::{CliErrorKind, StableErrorCode as StableCode},
+        output::JsonFormat,
+    };
 
     fn base_args() -> CodeArgs {
         CodeArgs {
@@ -1380,6 +2179,7 @@ mod tests {
             port: DEFAULT_WEB_PORT,
             host: DEFAULT_BIND_HOST.to_string(),
             cwd: None,
+            repo: None,
             provider: CodeProvider::Gemini,
             model: None,
             temperature: None,
@@ -1524,7 +2324,7 @@ mod tests {
         let mut args = base_args();
         args.provider = CodeProvider::Claudecode;
         let output = OutputConfig {
-            json_format: Some(crate::utils::output::JsonFormat::Pretty),
+            json_format: Some(JsonFormat::Pretty),
             ..OutputConfig::default()
         };
         assert!(validate_mode_args(&args, &output).is_err());
@@ -1553,11 +2353,8 @@ mod tests {
         ))
         .expect_err("invalid resume UUID should be rejected");
 
-        assert_eq!(cli.kind(), crate::utils::error::CliErrorKind::CommandUsage);
-        assert_eq!(
-            cli.stable_code(),
-            crate::utils::error::StableErrorCode::CliInvalidArguments
-        );
+        assert_eq!(cli.kind(), CliErrorKind::CommandUsage);
+        assert_eq!(cli.stable_code(), StableCode::CliInvalidArguments);
         assert!(
             cli.message().contains("--resume must be a valid UUID"),
             "unexpected usage message: {}",

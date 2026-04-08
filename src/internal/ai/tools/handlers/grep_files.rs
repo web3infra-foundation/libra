@@ -16,7 +16,7 @@ use walkdir::WalkDir;
 
 use super::parse_arguments;
 use crate::internal::ai::tools::{
-    context::{GrepFilesArgs, ToolInvocation, ToolKind, ToolOutput},
+    context::{GrepFilesArgs, ToolInvocation, ToolKind, ToolOutput, ToolPayload},
     error::ToolError,
     registry::ToolHandler,
     spec::{FunctionParameters, ToolSpec},
@@ -42,7 +42,7 @@ impl ToolHandler for GrepFilesHandler {
         } = invocation;
 
         let arguments = match payload {
-            crate::internal::ai::tools::context::ToolPayload::Function { arguments } => arguments,
+            ToolPayload::Function { arguments } => arguments,
             _ => {
                 return Err(ToolError::IncompatiblePayload(
                     "grep_files handler only accepts Function payloads".to_string(),

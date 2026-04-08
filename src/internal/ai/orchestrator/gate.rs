@@ -8,7 +8,7 @@ use super::{
 };
 use crate::internal::ai::{
     intentspec::types::{Check, CheckKind, IntentSpec},
-    sandbox::ToolRuntimeContext,
+    sandbox::{ToolRuntimeContext, run_shell_command},
 };
 
 const DEFAULT_TIMEOUT_SECS: u64 = 900;
@@ -113,7 +113,7 @@ async fn run_command_check(
     let sandbox = runtime_context.and_then(|ctx| ctx.sandbox.clone());
     let sandbox_runtime = runtime_context.and_then(|ctx| ctx.sandbox_runtime.as_ref());
 
-    let result = crate::internal::ai::sandbox::run_shell_command(
+    let result = run_shell_command(
         &command,
         working_dir,
         Some(timeout_secs.saturating_mul(1000)),

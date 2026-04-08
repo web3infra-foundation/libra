@@ -32,8 +32,10 @@ use crate::internal::ai::{
     agent::{ToolLoopConfig, ToolLoopObserver, run_tool_loop_with_history_and_observer},
     completion::{CompletionError, CompletionModel, CompletionUsage, CompletionUsageSummary},
     hooks::HookRunner,
-    intentspec::types::{IntentSpec, NetworkPolicy},
-    sandbox::{SandboxPermissions, SandboxPolicy, ToolRuntimeContext, ToolSandboxContext},
+    intentspec::types::{IntentSpec, NetworkPolicy, ToolAcl},
+    sandbox::{
+        NetworkAccess, SandboxPermissions, SandboxPolicy, ToolRuntimeContext, ToolSandboxContext,
+    },
     tools::{ToolOutput, registry::ToolRegistry},
 };
 
@@ -1508,11 +1510,7 @@ fn allowed_tools_for_reviewer(spec: &IntentSpec) -> Vec<String> {
     }
 }
 
-fn acl_allows(
-    acl: &crate::internal::ai::intentspec::types::ToolAcl,
-    tool: &str,
-    action: &str,
-) -> bool {
+fn acl_allows(acl: &ToolAcl, tool: &str, action: &str) -> bool {
     matches!(check_tool_acl(acl, tool, action), AclVerdict::Allow)
 }
 
@@ -1592,7 +1590,7 @@ fn runtime_context_for_reviewer(
         NetworkPolicy::Allow
     ) {
         SandboxPolicy::ExternalSandbox {
-            network_access: crate::internal::ai::sandbox::NetworkAccess::Enabled,
+            network_access: NetworkAccess::Enabled,
         }
     } else {
         SandboxPolicy::ReadOnly
@@ -1695,11 +1693,7 @@ fn push_unique_root(roots: &mut Vec<PathBuf>, root: PathBuf) {
     roots.push(normalized);
 }
 
-fn max_output_limit(
-    acl: &crate::internal::ai::intentspec::types::ToolAcl,
-    tool_name: &str,
-    action: &str,
-) -> Option<usize> {
+fn max_output_limit(acl: &ToolAcl, tool_name: &str, action: &str) -> Option<usize> {
     acl.allow
         .iter()
         .filter(|rule| {

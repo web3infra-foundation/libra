@@ -38,6 +38,8 @@ use libvault::{
 use sea_orm::sqlx::{SqlitePool, query_scalar, sqlite::SqliteConnectOptions};
 use serde_json::Value;
 
+use crate::utils::util::try_get_storage_path;
+
 const VAULT_DB_NAME: &str = "vault.db";
 const PGP_KEY_NAME: &str = "libra-signing";
 const SSH_ROLE_NAME: &str = "libra-ssh";
@@ -649,8 +651,8 @@ pub async fn lazy_init_vault_for_scope(scope: &str) -> Result<Vec<u8>> {
         }
         _ => {
             // Local scope: use the full vault init
-            let storage = crate::utils::util::try_get_storage_path(None)
-                .map_err(|_| anyhow!("not a libra repository"))?;
+            let storage =
+                try_get_storage_path(None).map_err(|_| anyhow!("not a libra repository"))?;
             let (unseal_key, enc_token) = init_vault(&storage).await?;
             store_credentials(&unseal_key, &enc_token).await?;
             Ok(unseal_key)

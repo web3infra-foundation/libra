@@ -46,7 +46,7 @@ use crate::{
             history::HistoryManager,
             intentspec::{
                 IntentDraft, ResolveContext, RiskLevel, persist_intentspec, render_summary,
-                repair_intentspec, resolve_intentspec, validate_intentspec,
+                repair_intentspec, resolve_intentspec, types::ChangeType, validate_intentspec,
             },
             mcp::{
                 resource::{
@@ -58,10 +58,15 @@ use crate::{
                 },
                 server::LibraMcpServer,
             },
+            sandbox::ExecApprovalRequest,
+            tools::context::{PlanStep, StepStatus, UserInputRequest},
         },
         db,
         head::Head,
-        tui::{AssistantHistoryCell, HistoryCell, PlanUpdateHistoryCell},
+        tui::{
+            AgentEvent, AgentStatus, AppEvent, AssistantHistoryCell, HistoryCell,
+            PlanUpdateHistoryCell,
+        },
     },
     utils::{
         object::write_git_object, output::OutputConfig, storage::local::LocalStorage,
@@ -241,12 +246,12 @@ fn trimmed_nonempty_text(text: Option<String>) -> Option<String> {
         .filter(|text| !text.is_empty())
 }
 
-fn plan_steps_from_strings(steps: &[String]) -> Vec<crate::internal::ai::tools::context::PlanStep> {
+fn plan_steps_from_strings(steps: &[String]) -> Vec<PlanStep> {
     steps
         .iter()
-        .map(|step| crate::internal::ai::tools::context::PlanStep {
+        .map(|step| PlanStep {
             step: step.clone(),
-            status: crate::internal::ai::tools::context::StepStatus::Pending,
+            status: StepStatus::Pending,
         })
         .collect()
 }
@@ -276,35 +281,34 @@ fn build_plan_update_cell(
 }
 
 fn emit_history_cell(
-    app_event_tx: &tokio::sync::mpsc::UnboundedSender<crate::internal::tui::AppEvent>,
+    app_event_tx: &tokio::sync::mpsc::UnboundedSender<AppEvent>,
     turn_id: u64,
     cell: Box<dyn HistoryCell>,
 ) {
-    let _ = app_event_tx.send(crate::internal::tui::AppEvent::InsertHistoryCell { turn_id, cell });
+    let _ = app_event_tx.send(AppEvent::InsertHistoryCell { turn_id, cell });
 }
 
 fn emit_managed_note(
-    app_event_tx: &tokio::sync::mpsc::UnboundedSender<crate::internal::tui::AppEvent>,
+    app_event_tx: &tokio::sync::mpsc::UnboundedSender<AppEvent>,
     turn_id: u64,
     message: impl Into<String>,
 ) {
-    let _ = app_event_tx.send(crate::internal::tui::AppEvent::ManagedInfoNote {
+    let _ = app_event_tx.send(AppEvent::ManagedInfoNote {
         turn_id,
         message: message.into(),
     });
 }
 
 fn emit_agent_status(
-    app_event_tx: &tokio::sync::mpsc::UnboundedSender<crate::internal::tui::AppEvent>,
+    app_event_tx: &tokio::sync::mpsc::UnboundedSender<AppEvent>,
     turn_id: u64,
-    status: crate::internal::tui::AgentStatus,
+    status: AgentStatus,
 ) {
-    let _ =
-        app_event_tx.send(crate::internal::tui::AppEvent::AgentStatusUpdate { turn_id, status });
+    let _ = app_event_tx.send(AppEvent::AgentStatusUpdate { turn_id, status });
 }
 
 fn emit_intermediate_assistant_text(
-    app_event_tx: &tokio::sync::mpsc::UnboundedSender<crate::internal::tui::AppEvent>,
+    app_event_tx: &tokio::sync::mpsc::UnboundedSender<AppEvent>,
     turn_id: u64,
     text: Option<String>,
 ) {
@@ -318,10 +322,8 @@ fn emit_intermediate_assistant_text(
 }
 
 async fn prompt_for_visible_plan_checkpoint_decision(
-    app_event_tx: &tokio::sync::mpsc::UnboundedSender<crate::internal::tui::AppEvent>,
-    user_input_tx: &tokio::sync::mpsc::UnboundedSender<
-        crate::internal::ai::tools::context::UserInputRequest,
-    >,
+    app_event_tx: &tokio::sync::mpsc::UnboundedSender<AppEvent>,
+    user_input_tx: &tokio::sync::mpsc::UnboundedSender<UserInputRequest>,
     turn_id: u64,
     checkpoint_index: usize,
     assistant_text: Option<String>,
@@ -333,13 +335,9 @@ async fn prompt_for_visible_plan_checkpoint_decision(
 pub(crate) async fn run_tui_turn(
     mut runtime: ClaudecodeTuiRuntime,
     turn_id: u64,
-    app_event_tx: tokio::sync::mpsc::UnboundedSender<crate::internal::tui::AppEvent>,
-    user_input_tx: tokio::sync::mpsc::UnboundedSender<
-        crate::internal::ai::tools::context::UserInputRequest,
-    >,
-    exec_approval_tx: tokio::sync::mpsc::UnboundedSender<
-        crate::internal::ai::sandbox::ExecApprovalRequest,
-    >,
+    app_event_tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
+    user_input_tx: tokio::sync::mpsc::UnboundedSender<UserInputRequest>,
+    exec_approval_tx: tokio::sync::mpsc::UnboundedSender<ExecApprovalRequest>,
     prompt: String,
 ) -> Result<()> {
     let checkpoint_user_input_tx = user_input_tx.clone();
@@ -357,9 +355,9 @@ pub(crate) async fn run_tui_turn(
             .execute_turn(session_control.clone(), prompt, |event| match event {
                 ClaudecodeTuiEvent::AssistantDelta(delta) => {
                     if stream_assistant_deltas {
-                        let _ = app_event_tx.send(crate::internal::tui::AppEvent::AgentEvent {
+                        let _ = app_event_tx.send(AppEvent::AgentEvent {
                             turn_id,
-                            event: crate::internal::tui::AgentEvent::ResponseDelta { delta },
+                            event: AgentEvent::ResponseDelta { delta },
                         });
                     }
                 }
@@ -369,7 +367,7 @@ pub(crate) async fn run_tui_turn(
                     tool_name,
                     arguments,
                 } => {
-                    let _ = app_event_tx.send(crate::internal::tui::AppEvent::ToolCallBegin {
+                    let _ = app_event_tx.send(AppEvent::ToolCallBegin {
                         turn_id,
                         call_id,
                         tool_name,
@@ -381,7 +379,7 @@ pub(crate) async fn run_tui_turn(
                     tool_name,
                     result,
                 } => {
-                    let _ = app_event_tx.send(crate::internal::tui::AppEvent::ToolCallEnd {
+                    let _ = app_event_tx.send(AppEvent::ToolCallEnd {
                         turn_id,
                         call_id,
                         tool_name,
@@ -423,9 +421,9 @@ pub(crate) async fn run_tui_turn(
         if awaiting_plan_approval {
             if structured_plan.is_none() {
                 emit_managed_note(&app_event_tx, turn_id, PLAN_APPROVAL_MISSING_PLAN_WARNING);
-                let _ = app_event_tx.send(crate::internal::tui::AppEvent::AgentEvent {
+                let _ = app_event_tx.send(AppEvent::AgentEvent {
                     turn_id,
-                    event: crate::internal::tui::AgentEvent::ManagedResponseComplete {
+                    event: AgentEvent::ManagedResponseComplete {
                         text: assistant_text.unwrap_or_default(),
                         provider_session_id: provider_session_id.clone(),
                     },
@@ -444,11 +442,7 @@ pub(crate) async fn run_tui_turn(
             match decision {
                 PlanCheckpointDecision::Approve => {
                     emit_managed_note(&app_event_tx, turn_id, PLAN_APPROVED_NOTE);
-                    emit_agent_status(
-                        &app_event_tx,
-                        turn_id,
-                        crate::internal::tui::AgentStatus::Thinking,
-                    );
+                    emit_agent_status(&app_event_tx, turn_id, AgentStatus::Thinking);
                     session_control = ManagedSessionControl::followup(
                         provider_session_id.clone(),
                         "acceptEdits",
@@ -465,11 +459,7 @@ pub(crate) async fn run_tui_turn(
                 }
                 PlanCheckpointDecision::Refine { note } => {
                     emit_managed_note(&app_event_tx, turn_id, PLAN_REFINING_NOTE);
-                    emit_agent_status(
-                        &app_event_tx,
-                        turn_id,
-                        crate::internal::tui::AgentStatus::Thinking,
-                    );
+                    emit_agent_status(&app_event_tx, turn_id, AgentStatus::Thinking);
                     session_control =
                         ManagedSessionControl::followup(provider_session_id.clone(), "plan", true);
                     runtime.note_followup_provider_session_with_mode(
@@ -485,9 +475,9 @@ pub(crate) async fn run_tui_turn(
                     continue;
                 }
                 PlanCheckpointDecision::Cancel => {
-                    let _ = app_event_tx.send(crate::internal::tui::AppEvent::AgentEvent {
+                    let _ = app_event_tx.send(AppEvent::AgentEvent {
                         turn_id,
-                        event: crate::internal::tui::AgentEvent::ManagedResponseComplete {
+                        event: AgentEvent::ManagedResponseComplete {
                             text: PLAN_CANCELLED_NOTE.to_string(),
                             provider_session_id,
                         },
@@ -497,9 +487,9 @@ pub(crate) async fn run_tui_turn(
             }
         }
 
-        let _ = app_event_tx.send(crate::internal::tui::AppEvent::AgentEvent {
+        let _ = app_event_tx.send(AppEvent::AgentEvent {
             turn_id,
-            event: crate::internal::tui::AgentEvent::ManagedResponseComplete {
+            event: AgentEvent::ManagedResponseComplete {
                 text: assistant_text.unwrap_or_default(),
                 provider_session_id,
             },
@@ -2470,15 +2460,15 @@ fn derive_formal_task_description(audit_bundle: &ManagedAuditBundle) -> String {
 fn derive_goal_type(audit_bundle: &ManagedAuditBundle) -> Option<String> {
     let extraction = audit_bundle.bridge.intent_extraction_artifact.as_ref()?;
     let value = match extraction.extraction.intent.change_type {
-        crate::internal::ai::intentspec::types::ChangeType::Feature => "feature",
-        crate::internal::ai::intentspec::types::ChangeType::Bugfix => "bugfix",
-        crate::internal::ai::intentspec::types::ChangeType::Test => "test",
-        crate::internal::ai::intentspec::types::ChangeType::Refactor => "refactor",
-        crate::internal::ai::intentspec::types::ChangeType::Performance => "perf",
-        crate::internal::ai::intentspec::types::ChangeType::Security => "security",
-        crate::internal::ai::intentspec::types::ChangeType::Docs => "docs",
-        crate::internal::ai::intentspec::types::ChangeType::Chore => "chore",
-        crate::internal::ai::intentspec::types::ChangeType::Unknown => return None,
+        ChangeType::Feature => "feature",
+        ChangeType::Bugfix => "bugfix",
+        ChangeType::Test => "test",
+        ChangeType::Refactor => "refactor",
+        ChangeType::Performance => "perf",
+        ChangeType::Security => "security",
+        ChangeType::Docs => "docs",
+        ChangeType::Chore => "chore",
+        ChangeType::Unknown => return None,
     };
     Some(value.to_string())
 }

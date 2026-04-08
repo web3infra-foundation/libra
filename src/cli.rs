@@ -10,7 +10,9 @@ use clap::{
 use git_internal::hash::{HashKind, set_hash_kind};
 
 use crate::{
-    command, utils,
+    command,
+    internal::{config::ConfigKv, db},
+    utils,
     utils::{
         error::{CliError, CliResult},
         output::OutputConfig,
@@ -40,7 +42,7 @@ async fn set_local_hash_kind_for_storage(storage: &Path) -> CliResult<()> {
         )));
     }
 
-    let db_conn = crate::internal::db::get_db_conn_instance_for_path(&db_path)
+    let db_conn = db::get_db_conn_instance_for_path(&db_path)
         .await
         .map_err(|e| {
             CliError::fatal(format!(
@@ -49,13 +51,12 @@ async fn set_local_hash_kind_for_storage(storage: &Path) -> CliResult<()> {
                 e
             ))
         })?;
-    let object_format =
-        crate::internal::config::ConfigKv::get_with_conn(&db_conn, "core.objectformat")
-            .await
-            .ok()
-            .flatten()
-            .map(|e| e.value)
-            .unwrap_or_else(|| "sha1".to_string());
+    let object_format = ConfigKv::get_with_conn(&db_conn, "core.objectformat")
+        .await
+        .ok()
+        .flatten()
+        .map(|e| e.value)
+        .unwrap_or_else(|| "sha1".to_string());
 
     let hash_kind = match object_format.as_str() {
         "sha1" => HashKind::Sha1,

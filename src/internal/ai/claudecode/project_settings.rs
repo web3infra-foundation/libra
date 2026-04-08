@@ -278,8 +278,7 @@ pub(crate) async fn resolve_claude_project_settings(
 }
 
 fn resolve_project_root(storage_path: &Path) -> Result<PathBuf> {
-    if storage_path.file_name().and_then(|name| name.to_str()) == Some(crate::utils::util::ROOT_DIR)
-    {
+    if storage_path.file_name().and_then(|name| name.to_str()) == Some(util::ROOT_DIR) {
         return storage_path.parent().map(Path::to_path_buf).ok_or_else(|| {
             anyhow!(
                 "failed to resolve repository root from Libra storage path '{}'",

@@ -14,6 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use chrono::Utc;
 use crossterm::event::{KeyCode, KeyModifiers};
 use tokio::{
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
@@ -37,7 +38,8 @@ use crate::{
     cli_error,
     internal::ai::{
         agent::{
-            ToolLoopConfig, profile::AgentProfileRouter, run_tool_loop_with_history_and_observer,
+            ToolLoopConfig, ToolLoopObserver, profile::AgentProfileRouter,
+            run_tool_loop_with_history_and_observer,
         },
         claudecode::{self, ClaudecodeTuiRuntime},
         commands::CommandDispatcher,
@@ -46,19 +48,22 @@ use crate::{
             CompletionUsage, Message, RetryingCompletionModel,
         },
         intentspec::{
-            IntentDraft, ResolveContext, RiskLevel, render_summary, repair_intentspec,
-            resolve_intentspec, validate_intentspec,
+            IntentDraft, IntentSpec, ResolveContext, RiskLevel, persistence::persist_intentspec,
+            render_summary, repair_intentspec, resolve_intentspec, validate_intentspec,
         },
         mcp::{
             resource::{
                 CreateContextSnapshotParams, CreateDecisionParams, CreatePlanParams,
-                CreateRunParams, CreateTaskParams, CreateToolInvocationParams,
+                CreateRunParams, CreateTaskParams, CreateToolInvocationParams, PlanStepParams,
             },
             server::LibraMcpServer,
         },
         orchestrator::{
             planner::compile_execution_plan_spec,
-            types::{ExecutionPlanSpec, TaskRuntimeEvent, TaskRuntimeNoteLevel, TaskRuntimePhase},
+            types::{
+                DecisionOutcome, ExecutionPlanSpec, GateReport, OrchestratorResult, TaskKind,
+                TaskNodeStatus, TaskRuntimeEvent, TaskRuntimeNoteLevel, TaskRuntimePhase,
+            },
         },
         sandbox::{ExecApprovalRequest, ReviewDecision},
         session::{SessionState, SessionStore},
@@ -68,6 +73,12 @@ use crate::{
                 RequestUserInputArgs, SubmitIntentDraftArgs, UpdatePlanArgs, UserInputAnswer,
                 UserInputRequest, UserInputResponse,
             },
+        },
+        web::code_ui::{
+            CodeUiInteractionKind, CodeUiInteractionOption, CodeUiInteractionRequest,
+            CodeUiInteractionStatus, CodeUiPatchChange, CodeUiPatchsetSnapshot, CodeUiPlanSnapshot,
+            CodeUiPlanStep, CodeUiSession, CodeUiSessionStatus, CodeUiToolCallSnapshot,
+            CodeUiTranscriptEntry, CodeUiTranscriptEntryKind,
         },
         workflow_objects::{build_git_plan, parse_object_id},
     },
@@ -215,6 +226,8 @@ pub struct AppConfig {
     pub provider_name: String,
     /// MCP server instance for workflow tracking.
     pub mcp_server: Option<Arc<LibraMcpServer>>,
+    /// Optional Code UI session mirror for the browser UI.
+    pub code_ui_session: Option<Arc<CodeUiSession>>,
     /// Optional managed Claude runtime for `claudecode`.
     pub(crate) managed_claudecode: Option<ClaudecodeTuiRuntime>,
 }
@@ -297,6 +310,10 @@ pub struct App<M: CompletionModel> {
     active_turn_run_id: Option<Arc<Mutex<Option<String>>>>,
     /// Optional managed runtime state for the active provider.
     managed_claudecode: Option<ClaudecodeTuiRuntime>,
+    /// Provider-agnostic web snapshot state shared with the browser UI.
+    code_ui_session: Option<Arc<CodeUiSession>>,
+    /// Monotonic id source for browser transcript artifacts.
+    next_code_ui_item_id: u64,
 }
 
 impl<M: CompletionModel + Clone + 'static> App<M>
@@ -400,6 +417,8 @@ where
             running_tool_calls: 0,
             active_turn_run_id: None,
             managed_claudecode: app_config.managed_claudecode,
+            code_ui_session: app_config.code_ui_session,
+            next_code_ui_item_id: 1,
         }
     }
 
@@ -514,6 +533,20 @@ where
     fn clear_turn_tracking(&mut self) {
         self.clear_active_turn();
         self.clear_mcp_run_id();
+    }
+
+    fn next_code_ui_id(&mut self, prefix: &str) -> String {
+        let id = format!("{prefix}-{}", self.next_code_ui_item_id);
+        self.next_code_ui_item_id = self.next_code_ui_item_id.saturating_add(1);
+        id
+    }
+
+    fn code_ui_user_entry_id(turn_id: TurnId) -> String {
+        format!("turn-{turn_id}-user")
+    }
+
+    fn code_ui_assistant_entry_id(turn_id: TurnId) -> String {
+        format!("turn-{turn_id}-assistant")
     }
 
     fn is_active_turn(&self, turn_id: TurnId) -> bool {
@@ -898,6 +931,10 @@ where
 
     /// Submit the currently selected answer for the active question.
     fn submit_user_input_answer(&mut self) {
+        let interaction_id = self
+            .pending_user_input
+            .as_ref()
+            .map(|pending| pending.request.call_id.clone());
         let answer = if let Some(ref pending) = self.pending_user_input {
             let q = &pending.request.questions[pending.current_question];
             let options = q.options.as_deref().unwrap_or_default();
@@ -961,14 +998,30 @@ where
             self.sync_user_input_to_pane();
         }
         self.schedule_draw();
+        if let (Some(code_ui_session), Some(interaction_id)) =
+            (self.code_ui_session.clone(), interaction_id)
+        {
+            tokio::spawn(async move {
+                code_ui_session.resolve_interaction(&interaction_id).await;
+                code_ui_session
+                    .set_status(CodeUiSessionStatus::ExecutingTool)
+                    .await;
+            });
+        }
     }
 
     /// Cancel the pending user-input interaction (drops the oneshot sender).
     fn cancel_pending_user_input(&mut self) {
         if let Some(pending) = self.pending_user_input.take() {
+            let interaction_id = pending.request.call_id.clone();
             // Dropping response_tx signals cancellation to the handler.
             drop(pending.request.response_tx);
             self.widget.bottom_pane.set_user_input_questions(None);
+            if let Some(code_ui_session) = self.code_ui_session.clone() {
+                tokio::spawn(async move {
+                    code_ui_session.clear_interaction(&interaction_id).await;
+                });
+            }
         }
     }
 
@@ -984,6 +1037,53 @@ where
 
     /// Handle a user-input request from the tool handler.
     fn handle_user_input_request(&mut self, request: UserInputRequest) {
+        let interaction = CodeUiInteractionRequest {
+            id: request.call_id.clone(),
+            kind: CodeUiInteractionKind::RequestUserInput,
+            title: Some("User input required".to_string()),
+            description: None,
+            prompt: request
+                .questions
+                .first()
+                .map(|question| question.question.clone()),
+            options: request
+                .questions
+                .first()
+                .and_then(|question| question.options.as_ref())
+                .map(|options| {
+                    options
+                        .iter()
+                        .enumerate()
+                        .map(|(index, option)| CodeUiInteractionOption {
+                            id: format!("option-{index}"),
+                            label: option.label.clone(),
+                            description: Some(option.description.clone()),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            status: CodeUiInteractionStatus::Pending,
+            metadata: serde_json::to_value(
+                request
+                    .questions
+                    .iter()
+                    .map(|question| {
+                        serde_json::json!({
+                            "id": question.id,
+                            "header": question.header,
+                            "question": question.question,
+                            "isOther": question.is_other,
+                            "isSecret": question.is_secret,
+                            "options": question.options,
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap_or_else(|_| serde_json::json!([])),
+            requested_at: Utc::now(),
+            resolved_at: None,
+        };
+
         // Store question info for the bottom pane to render.
         self.widget
             .bottom_pane
@@ -1004,6 +1104,14 @@ where
         self.widget.bottom_pane.clear();
         self.sync_user_input_to_pane();
         self.schedule_draw();
+        if let Some(code_ui_session) = self.code_ui_session.clone() {
+            tokio::spawn(async move {
+                code_ui_session.upsert_interaction(interaction).await;
+                code_ui_session
+                    .set_status(CodeUiSessionStatus::AwaitingInteraction)
+                    .await;
+            });
+        }
     }
 
     fn handle_exec_approval_request(&mut self, request: ExecApprovalRequest) {
@@ -1011,6 +1119,46 @@ where
             let _ = request.response_tx.send(ReviewDecision::Denied);
             return;
         }
+
+        let interaction = CodeUiInteractionRequest {
+            id: request.call_id.clone(),
+            kind: CodeUiInteractionKind::SandboxApproval,
+            title: Some("Sandbox approval required".to_string()),
+            description: request.reason.clone(),
+            prompt: Some(request.command.clone()),
+            options: vec![
+                CodeUiInteractionOption {
+                    id: "approve".to_string(),
+                    label: "Approve".to_string(),
+                    description: Some("Run this command once".to_string()),
+                },
+                CodeUiInteractionOption {
+                    id: "approve_session".to_string(),
+                    label: "Approve Session".to_string(),
+                    description: Some("Approve matching commands for this session".to_string()),
+                },
+                CodeUiInteractionOption {
+                    id: "deny".to_string(),
+                    label: "Deny".to_string(),
+                    description: Some("Reject this command".to_string()),
+                },
+                CodeUiInteractionOption {
+                    id: "abort".to_string(),
+                    label: "Abort".to_string(),
+                    description: Some("Stop the current turn".to_string()),
+                },
+            ],
+            status: CodeUiInteractionStatus::Pending,
+            metadata: serde_json::json!({
+                "cwd": request.cwd,
+                "sandboxLabel": request.sandbox_label,
+                "networkAccess": request.network_access,
+                "writableRoots": request.writable_roots,
+                "isRetry": request.is_retry,
+            }),
+            requested_at: Utc::now(),
+            resolved_at: None,
+        };
 
         self.widget.bottom_pane.set_exec_approval(Some(&request));
         self.pending_exec_approval = Some(PendingExecApproval {
@@ -1023,6 +1171,14 @@ where
             .set_status(AgentStatus::AwaitingApproval);
         self.sync_mux_input_context();
         self.schedule_draw();
+        if let Some(code_ui_session) = self.code_ui_session.clone() {
+            tokio::spawn(async move {
+                code_ui_session.upsert_interaction(interaction).await;
+                code_ui_session
+                    .set_status(CodeUiSessionStatus::AwaitingInteraction)
+                    .await;
+            });
+        }
     }
 
     fn submit_exec_approval_decision(&mut self) {
@@ -1036,6 +1192,7 @@ where
             2 => ReviewDecision::Denied,
             _ => ReviewDecision::Abort,
         };
+        let interaction_id = pending.request.call_id.clone();
         let _ = pending.request.response_tx.send(decision);
 
         self.widget.bottom_pane.set_exec_approval(None);
@@ -1051,6 +1208,12 @@ where
             self.complete_streaming_assistant_cell("Interrupted.".to_string());
             self.complete_running_tool_cells_with_interrupt();
             self.schedule_draw();
+            if let Some(code_ui_session) = self.code_ui_session.clone() {
+                tokio::spawn(async move {
+                    code_ui_session.resolve_interaction(&interaction_id).await;
+                    code_ui_session.set_status(CodeUiSessionStatus::Idle).await;
+                });
+            }
             return;
         }
 
@@ -1059,11 +1222,28 @@ where
             .set_status(AgentStatus::ExecutingTool);
         self.sync_mux_input_context();
         self.schedule_draw();
+        if let Some(code_ui_session) = self.code_ui_session.clone() {
+            tokio::spawn(async move {
+                code_ui_session.resolve_interaction(&interaction_id).await;
+                code_ui_session
+                    .set_status(CodeUiSessionStatus::ExecutingTool)
+                    .await;
+            });
+        }
     }
 
     fn reject_pending_exec_approval(&mut self) {
         if let Some(pending) = self.pending_exec_approval.take() {
+            let interaction_id = pending.request.call_id.clone();
             let _ = pending.request.response_tx.send(ReviewDecision::Denied);
+            if let Some(code_ui_session) = self.code_ui_session.clone() {
+                tokio::spawn(async move {
+                    code_ui_session.resolve_interaction(&interaction_id).await;
+                    code_ui_session
+                        .set_status(CodeUiSessionStatus::ExecutingTool)
+                        .await;
+                });
+            }
         }
         self.widget.bottom_pane.set_exec_approval(None);
         self.widget
@@ -1075,7 +1255,13 @@ where
 
     fn cancel_pending_exec_approval(&mut self) {
         if let Some(pending) = self.pending_exec_approval.take() {
+            let interaction_id = pending.request.call_id.clone();
             let _ = pending.request.response_tx.send(ReviewDecision::Denied);
+            if let Some(code_ui_session) = self.code_ui_session.clone() {
+                tokio::spawn(async move {
+                    code_ui_session.clear_interaction(&interaction_id).await;
+                });
+            }
         }
         self.widget.bottom_pane.set_exec_approval(None);
     }
@@ -1111,6 +1297,30 @@ where
                 text,
                 allowed_tools,
             } => {
+                let browser_user_entry = CodeUiTranscriptEntry {
+                    id: Self::code_ui_user_entry_id(turn_id),
+                    kind: CodeUiTranscriptEntryKind::UserMessage,
+                    title: Some("Developer".to_string()),
+                    content: Some(text.clone()),
+                    status: None,
+                    streaming: false,
+                    metadata: serde_json::json!({
+                        "allowedTools": allowed_tools.clone(),
+                    }),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                };
+                let browser_assistant_entry = CodeUiTranscriptEntry {
+                    id: Self::code_ui_assistant_entry_id(turn_id),
+                    kind: CodeUiTranscriptEntryKind::AssistantMessage,
+                    title: Some("Assistant".to_string()),
+                    content: Some(String::new()),
+                    status: Some("thinking".to_string()),
+                    streaming: true,
+                    metadata: serde_json::json!({}),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                };
                 // Track in session
                 self.running_tool_calls = 0;
                 self.session.add_user_message(&text);
@@ -1125,6 +1335,17 @@ where
                 self.widget.bottom_pane.set_status(AgentStatus::Thinking);
                 self.sync_mux_input_context();
                 self.schedule_draw();
+                if let Some(code_ui_session) = self.code_ui_session.clone() {
+                    code_ui_session
+                        .upsert_transcript_entry(browser_user_entry)
+                        .await;
+                    code_ui_session
+                        .upsert_transcript_entry(browser_assistant_entry)
+                        .await;
+                    code_ui_session
+                        .set_status(CodeUiSessionStatus::Thinking)
+                        .await;
+                }
                 self.clear_mcp_run_id();
                 if let Some(run_id_slot) = self.active_turn_run_id.as_ref()
                     && let Ok(mut slot) = run_id_slot.lock()
@@ -1216,7 +1437,7 @@ where
                         turn_id: TurnId,
                     }
 
-                    impl crate::internal::ai::agent::ToolLoopObserver for UiObserver {
+                    impl ToolLoopObserver for UiObserver {
                         fn on_assistant_step_text(&mut self, text: &str) {
                             let cell = Box::new(AssistantHistoryCell::new(text.to_string()));
                             let _ = self.tx.send(AppEvent::InsertHistoryCell {
@@ -1375,6 +1596,28 @@ where
                         // Track in session
                         self.session.add_assistant_message(&text);
                         self.complete_streaming_assistant_cell(text);
+                        if let Some(code_ui_session) = self.code_ui_session.clone() {
+                            code_ui_session
+                                .upsert_transcript_entry(CodeUiTranscriptEntry {
+                                    id: Self::code_ui_assistant_entry_id(_turn_id),
+                                    kind: CodeUiTranscriptEntryKind::AssistantMessage,
+                                    title: Some("Assistant".to_string()),
+                                    content: Some(
+                                        self.session
+                                            .messages
+                                            .last()
+                                            .map(|message| message.content.clone())
+                                            .unwrap_or_default(),
+                                    ),
+                                    status: Some("completed".to_string()),
+                                    streaming: false,
+                                    metadata: serde_json::json!({}),
+                                    created_at: Utc::now(),
+                                    updated_at: Utc::now(),
+                                })
+                                .await;
+                            code_ui_session.set_status(CodeUiSessionStatus::Idle).await;
+                        }
                         self.set_idle_and_draw();
                     }
                     AgentEvent::Error { message } => {
@@ -1385,10 +1628,37 @@ where
                         self.finish_turn_state();
 
                         self.complete_streaming_assistant_cell(format!("Error: {}", message));
+                        if let Some(code_ui_session) = self.code_ui_session.clone() {
+                            code_ui_session
+                                .upsert_transcript_entry(CodeUiTranscriptEntry {
+                                    id: Self::code_ui_assistant_entry_id(_turn_id),
+                                    kind: CodeUiTranscriptEntryKind::AssistantMessage,
+                                    title: Some("Assistant".to_string()),
+                                    content: Some(format!("Error: {message}")),
+                                    status: Some("error".to_string()),
+                                    streaming: false,
+                                    metadata: serde_json::json!({}),
+                                    created_at: Utc::now(),
+                                    updated_at: Utc::now(),
+                                })
+                                .await;
+                            code_ui_session.set_status(CodeUiSessionStatus::Error).await;
+                        }
                         self.set_idle_and_draw();
                     }
                     AgentEvent::ResponseDelta { delta } => {
                         self.append_streaming_assistant_delta(&delta);
+                        if let Some(code_ui_session) = self.code_ui_session.clone() {
+                            code_ui_session
+                                .append_assistant_delta(
+                                    &Self::code_ui_assistant_entry_id(_turn_id),
+                                    &delta,
+                                )
+                                .await;
+                            code_ui_session
+                                .set_status(CodeUiSessionStatus::Thinking)
+                                .await;
+                        }
                         self.schedule_draw();
                     }
                     AgentEvent::ManagedResponseComplete {
@@ -1403,6 +1673,27 @@ where
                         self.history.push(Message::assistant(text.clone()));
                         self.session.add_assistant_message(&text);
                         self.complete_streaming_assistant_cell(text);
+                        if let Some(code_ui_session) = self.code_ui_session.clone() {
+                            code_ui_session
+                                .upsert_transcript_entry(CodeUiTranscriptEntry {
+                                    id: Self::code_ui_assistant_entry_id(_turn_id),
+                                    kind: CodeUiTranscriptEntryKind::AssistantMessage,
+                                    title: Some("Assistant".to_string()),
+                                    content: self
+                                        .session
+                                        .messages
+                                        .last()
+                                        .map(|message| Some(message.content.clone()))
+                                        .unwrap_or_else(|| Some(String::new())),
+                                    status: Some("completed".to_string()),
+                                    streaming: false,
+                                    metadata: serde_json::json!({}),
+                                    created_at: Utc::now(),
+                                    updated_at: Utc::now(),
+                                })
+                                .await;
+                            code_ui_session.set_status(CodeUiSessionStatus::Idle).await;
+                        }
                         self.set_idle_and_draw();
                     }
                     AgentEvent::Retrying {
@@ -1434,6 +1725,14 @@ where
                 self.finish_turn_state();
                 self.history = new_history;
                 self.session.add_assistant_message(&text);
+                let browser_plan_steps = plan
+                    .tasks
+                    .iter()
+                    .map(|task| CodeUiPlanStep {
+                        step: task.title().to_string(),
+                        status: "pending".to_string(),
+                    })
+                    .collect::<Vec<_>>();
                 self.session.metadata.insert(
                     LATEST_INTENTSPEC_JSON.to_string(),
                     serde_json::Value::String(spec_json.clone()),
@@ -1482,6 +1781,73 @@ where
                     plan_id.clone(),
                     warnings,
                 )));
+                if let Some(code_ui_session) = self.code_ui_session.clone() {
+                    let plan_snapshot = CodeUiPlanSnapshot {
+                        id: plan_id
+                            .clone()
+                            .unwrap_or_else(|| format!("plan-{_turn_id}")),
+                        title: Some("Execution Plan".to_string()),
+                        summary: Some(text.clone()),
+                        status: "ready".to_string(),
+                        steps: browser_plan_steps,
+                        updated_at: Utc::now(),
+                    };
+                    let transcript_entry = CodeUiTranscriptEntry {
+                        id: Self::code_ui_assistant_entry_id(_turn_id),
+                        kind: CodeUiTranscriptEntryKind::PlanSummary,
+                        title: Some("Plan Ready".to_string()),
+                        content: Some(text.clone()),
+                        status: Some("ready".to_string()),
+                        streaming: false,
+                        metadata: serde_json::json!({
+                            "intentId": intent_id,
+                            "planId": plan_id,
+                        }),
+                        created_at: Utc::now(),
+                        updated_at: Utc::now(),
+                    };
+                    let interaction = CodeUiInteractionRequest {
+                        id: plan_snapshot.id.clone(),
+                        kind: CodeUiInteractionKind::PostPlanChoice,
+                        title: Some("Choose next step".to_string()),
+                        description: Some(
+                            "The plan is ready. Execute it, revise it, or cancel.".to_string(),
+                        ),
+                        prompt: None,
+                        options: vec![
+                            CodeUiInteractionOption {
+                                id: "execute".to_string(),
+                                label: "Execute".to_string(),
+                                description: Some("Run the plan now".to_string()),
+                            },
+                            CodeUiInteractionOption {
+                                id: "modify".to_string(),
+                                label: "Modify".to_string(),
+                                description: Some("Revise the spec or plan".to_string()),
+                            },
+                            CodeUiInteractionOption {
+                                id: "cancel".to_string(),
+                                label: "Cancel".to_string(),
+                                description: Some("Leave the plan in place and stop".to_string()),
+                            },
+                        ],
+                        status: CodeUiInteractionStatus::Pending,
+                        metadata: serde_json::json!({
+                            "intentId": transcript_entry.metadata["intentId"].clone(),
+                            "planId": transcript_entry.metadata["planId"].clone(),
+                        }),
+                        requested_at: Utc::now(),
+                        resolved_at: None,
+                    };
+                    code_ui_session.upsert_plan(plan_snapshot).await;
+                    code_ui_session
+                        .upsert_transcript_entry(transcript_entry)
+                        .await;
+                    code_ui_session.upsert_interaction(interaction).await;
+                    code_ui_session
+                        .set_status(CodeUiSessionStatus::AwaitingInteraction)
+                        .await;
+                }
 
                 // Show post-plan dialog instead of returning to Idle
                 self.pending_post_plan = Some(PendingPostPlan {
@@ -1501,6 +1867,52 @@ where
                 turn_id: _turn_id,
                 cell,
             } => {
+                if let Some(code_ui_session) = self.code_ui_session.clone() {
+                    if let Some(assistant) = cell.as_any().downcast_ref::<AssistantHistoryCell>() {
+                        code_ui_session
+                            .upsert_transcript_entry(CodeUiTranscriptEntry {
+                                id: self.next_code_ui_id("assistant-note"),
+                                kind: CodeUiTranscriptEntryKind::AssistantMessage,
+                                title: Some("Assistant".to_string()),
+                                content: Some(assistant.content.clone()),
+                                status: Some(if assistant.is_streaming {
+                                    "streaming".to_string()
+                                } else {
+                                    "completed".to_string()
+                                }),
+                                streaming: assistant.is_streaming,
+                                metadata: serde_json::json!({}),
+                                created_at: Utc::now(),
+                                updated_at: Utc::now(),
+                            })
+                            .await;
+                    } else if let Some(plan_update) =
+                        cell.as_any().downcast_ref::<PlanUpdateHistoryCell>()
+                    {
+                        code_ui_session
+                            .upsert_transcript_entry(CodeUiTranscriptEntry {
+                                id: plan_update.call_id.clone(),
+                                kind: CodeUiTranscriptEntryKind::PlanSummary,
+                                title: Some("Plan Update".to_string()),
+                                content: plan_update.explanation.clone(),
+                                status: Some(if plan_update.is_running {
+                                    "in_progress".to_string()
+                                } else {
+                                    "completed".to_string()
+                                }),
+                                streaming: false,
+                                metadata: serde_json::json!({
+                                    "steps": plan_update.steps.iter().map(|step| serde_json::json!({
+                                        "step": step.step,
+                                        "status": format!("{:?}", step.status).to_lowercase(),
+                                    })).collect::<Vec<_>>(),
+                                }),
+                                created_at: Utc::now(),
+                                updated_at: Utc::now(),
+                            })
+                            .await;
+                    }
+                }
                 self.insert_before_streaming_assistant(cell);
                 self.schedule_draw();
             }
@@ -1508,6 +1920,21 @@ where
                 turn_id: _turn_id,
                 message,
             } => {
+                if let Some(code_ui_session) = self.code_ui_session.clone() {
+                    code_ui_session
+                        .upsert_transcript_entry(CodeUiTranscriptEntry {
+                            id: self.next_code_ui_id("info-note"),
+                            kind: CodeUiTranscriptEntryKind::InfoNote,
+                            title: Some("Info".to_string()),
+                            content: Some(message.clone()),
+                            status: None,
+                            streaming: false,
+                            metadata: serde_json::json!({}),
+                            created_at: Utc::now(),
+                            updated_at: Utc::now(),
+                        })
+                        .await;
+                }
                 self.insert_before_streaming_assistant(Box::new(AssistantHistoryCell::new(
                     format!("info> {message}"),
                 )));
@@ -1543,6 +1970,7 @@ where
                 tool_name,
                 arguments,
             } => {
+                let tool_summary = Self::tool_call_summary_for_browser(&tool_name, &arguments);
                 if tool_name == "update_plan" {
                     // Parse the plan arguments and render a specialised cell.
                     let (explanation, steps) =
@@ -1551,7 +1979,11 @@ where
                         } else {
                             (None, Vec::new())
                         };
-                    let cell = Box::new(PlanUpdateHistoryCell::new(call_id, explanation, steps));
+                    let cell = Box::new(PlanUpdateHistoryCell::new(
+                        call_id.clone(),
+                        explanation,
+                        steps,
+                    ));
                     self.insert_before_streaming_assistant(cell);
                 } else if !append_to_last_tool_group_cell(
                     &mut self.widget.cells,
@@ -1559,11 +1991,43 @@ where
                     tool_name.as_str(),
                     arguments.clone(),
                 ) {
-                    let cell = Box::new(ToolCallHistoryCell::new(call_id, tool_name, arguments));
+                    let cell = Box::new(ToolCallHistoryCell::new(
+                        call_id.clone(),
+                        tool_name.clone(),
+                        arguments,
+                    ));
                     self.insert_before_streaming_assistant(cell);
                 }
                 self.running_tool_calls = self.running_tool_calls.saturating_add(1);
                 self.update_status_after_tool_progress();
+                if let Some(code_ui_session) = self.code_ui_session.clone() {
+                    code_ui_session
+                        .upsert_tool_call(CodeUiToolCallSnapshot {
+                            id: call_id.clone(),
+                            tool_name: tool_name.clone(),
+                            status: "running".to_string(),
+                            summary: Some(tool_summary.clone()),
+                            details: None,
+                            updated_at: Utc::now(),
+                        })
+                        .await;
+                    code_ui_session
+                        .upsert_transcript_entry(CodeUiTranscriptEntry {
+                            id: call_id,
+                            kind: CodeUiTranscriptEntryKind::ToolCall,
+                            title: Some(tool_name),
+                            content: Some(tool_summary),
+                            status: Some("running".to_string()),
+                            streaming: false,
+                            metadata: serde_json::json!({}),
+                            created_at: Utc::now(),
+                            updated_at: Utc::now(),
+                        })
+                        .await;
+                    code_ui_session
+                        .set_status(CodeUiSessionStatus::ExecutingTool)
+                        .await;
+                }
                 self.schedule_draw();
             }
             AppEvent::ToolCallEnd {
@@ -1593,7 +2057,7 @@ where
                     }
                 }
                 if !found {
-                    let mut pending_result = Some(result);
+                    let mut pending_result = Some(result.clone());
                     for idx in (0..self.widget.cells.len()).rev() {
                         let Some(tool_cell) = self.widget.cells[idx]
                             .as_any_mut()
@@ -1612,6 +2076,56 @@ where
                 }
                 self.running_tool_calls = self.running_tool_calls.saturating_sub(1);
                 self.update_status_after_tool_progress();
+                if let Some(code_ui_session) = self.code_ui_session.clone() {
+                    let (status, details) = match &result {
+                        Ok(output) if output.is_success() => (
+                            "completed".to_string(),
+                            output.as_text().map(ToString::to_string),
+                        ),
+                        Ok(output) => (
+                            "failed".to_string(),
+                            output.as_text().map(ToString::to_string),
+                        ),
+                        Err(error) => ("failed".to_string(), Some(error.clone())),
+                    };
+                    code_ui_session
+                        .upsert_tool_call(CodeUiToolCallSnapshot {
+                            id: call_id.clone(),
+                            tool_name: tool_name.clone(),
+                            status: status.clone(),
+                            summary: None,
+                            details: details.clone(),
+                            updated_at: Utc::now(),
+                        })
+                        .await;
+                    code_ui_session
+                        .upsert_transcript_entry(CodeUiTranscriptEntry {
+                            id: call_id.clone(),
+                            kind: CodeUiTranscriptEntryKind::ToolCall,
+                            title: Some(tool_name.clone()),
+                            content: details.clone(),
+                            status: Some(status.clone()),
+                            streaming: false,
+                            metadata: serde_json::json!({}),
+                            created_at: Utc::now(),
+                            updated_at: Utc::now(),
+                        })
+                        .await;
+                    if tool_name == "apply_patch" {
+                        if let Some(patchset) =
+                            Self::patchset_snapshot_for_browser(&call_id, &status, &result)
+                        {
+                            code_ui_session.upsert_patchset(patchset).await;
+                        }
+                    }
+                    code_ui_session
+                        .set_status(if self.running_tool_calls > 0 {
+                            CodeUiSessionStatus::ExecutingTool
+                        } else {
+                            CodeUiSessionStatus::Thinking
+                        })
+                        .await;
+                }
                 self.schedule_draw();
             }
             AppEvent::AgentStatusUpdate {
@@ -1620,6 +2134,22 @@ where
             } => {
                 self.widget.bottom_pane.set_status(status);
                 self.sync_mux_input_context();
+                if let Some(code_ui_session) = self.code_ui_session.clone() {
+                    code_ui_session
+                        .set_status(match status {
+                            AgentStatus::Idle => CodeUiSessionStatus::Idle,
+                            AgentStatus::Thinking | AgentStatus::Retrying => {
+                                CodeUiSessionStatus::Thinking
+                            }
+                            AgentStatus::ExecutingTool => CodeUiSessionStatus::ExecutingTool,
+                            AgentStatus::AwaitingUserInput
+                            | AgentStatus::AwaitingApproval
+                            | AgentStatus::AwaitingPostPlanChoice => {
+                                CodeUiSessionStatus::AwaitingInteraction
+                            }
+                        })
+                        .await;
+                }
                 self.schedule_draw();
             }
             AppEvent::TaskRuntimeEvent {
@@ -1687,6 +2217,28 @@ where
                     ));
                 } else {
                     self.complete_streaming_assistant_cell(text);
+                }
+                if let Some(code_ui_session) = self.code_ui_session.clone() {
+                    code_ui_session
+                        .upsert_transcript_entry(CodeUiTranscriptEntry {
+                            id: Self::code_ui_assistant_entry_id(_turn_id),
+                            kind: CodeUiTranscriptEntryKind::AssistantMessage,
+                            title: Some("Assistant".to_string()),
+                            content: Some(
+                                self.session
+                                    .messages
+                                    .last()
+                                    .map(|message| message.content.clone())
+                                    .unwrap_or_default(),
+                            ),
+                            status: Some("completed".to_string()),
+                            streaming: false,
+                            metadata: serde_json::json!({}),
+                            created_at: Utc::now(),
+                            updated_at: Utc::now(),
+                        })
+                        .await;
+                    code_ui_session.set_status(CodeUiSessionStatus::Idle).await;
                 }
                 self.set_idle_and_draw();
             }
@@ -1951,6 +2503,11 @@ where
         self.widget.bottom_pane.set_status(AgentStatus::Idle);
         self.sync_mux_input_context();
         self.schedule_draw();
+        if let Some(code_ui_session) = self.code_ui_session.clone() {
+            tokio::spawn(async move {
+                code_ui_session.set_status(CodeUiSessionStatus::Idle).await;
+            });
+        }
     }
 
     fn sync_mux_input_context(&mut self) {
@@ -1991,6 +2548,10 @@ where
             Some(p) => p,
             None => return,
         };
+        let interaction_id = pending
+            .plan_id
+            .clone()
+            .unwrap_or_else(|| "post-plan-choice".to_string());
 
         match pending.selected {
             0 => {
@@ -2019,10 +2580,31 @@ where
                 self.sync_mux_input_context();
             }
         }
+        if let Some(code_ui_session) = self.code_ui_session.clone() {
+            let next_status = if pending.selected == 0 {
+                CodeUiSessionStatus::Thinking
+            } else {
+                CodeUiSessionStatus::Idle
+            };
+            tokio::spawn(async move {
+                code_ui_session.resolve_interaction(&interaction_id).await;
+                code_ui_session.set_status(next_status).await;
+            });
+        }
         self.schedule_draw();
     }
 
     fn dismiss_post_plan_dialog(&mut self) {
+        if let Some(interaction_id) = self
+            .pending_post_plan
+            .as_ref()
+            .and_then(|pending| pending.plan_id.clone())
+            && let Some(code_ui_session) = self.code_ui_session.clone()
+        {
+            tokio::spawn(async move {
+                code_ui_session.clear_interaction(&interaction_id).await;
+            });
+        }
         self.pending_post_plan = None;
         self.set_idle_and_draw();
     }
@@ -2114,21 +2696,21 @@ where
                             let _ = self.tx.send(AppEvent::DagTaskStatus {
                                 turn_id: self.turn_id,
                                 task_id: task.id(),
-                                status: crate::internal::ai::orchestrator::types::TaskNodeStatus::Running,
+                                status: TaskNodeStatus::Running,
                             });
                         }
                         TaskRuntimeEvent::Phase(TaskRuntimePhase::Completed) => {
                             let _ = self.tx.send(AppEvent::DagTaskStatus {
                                 turn_id: self.turn_id,
                                 task_id: task.id(),
-                                status: crate::internal::ai::orchestrator::types::TaskNodeStatus::Completed,
+                                status: TaskNodeStatus::Completed,
                             });
                         }
                         TaskRuntimeEvent::Phase(TaskRuntimePhase::Failed) => {
                             let _ = self.tx.send(AppEvent::DagTaskStatus {
                                 turn_id: self.turn_id,
                                 task_id: task.id(),
-                                status: crate::internal::ai::orchestrator::types::TaskNodeStatus::Failed,
+                                status: TaskNodeStatus::Failed,
                             });
                         }
                         TaskRuntimeEvent::WorkspaceReady {
@@ -2343,7 +2925,7 @@ where
                 }
             }
 
-            impl crate::internal::ai::agent::ToolLoopObserver for PlanObserver {
+            impl ToolLoopObserver for PlanObserver {
                 fn on_tool_call_begin(
                     &mut self,
                     call_id: &str,
@@ -2514,11 +3096,7 @@ where
 
             let mut persistence_warning = None;
             let intent_id = if let Some(ref mcp_server) = mcp_server {
-                match crate::internal::ai::intentspec::persistence::persist_intentspec(
-                    &spec, mcp_server,
-                )
-                .await
-                {
+                match persist_intentspec(&spec, mcp_server).await {
                     Ok(intent_id) => Some(intent_id),
                     Err(error) => {
                         persistence_warning =
@@ -2671,8 +3249,7 @@ where
             .metadata
             .get(LATEST_INTENTSPEC_JSON)
             .and_then(|v| v.as_str())
-            && let Ok(spec) =
-                serde_json::from_str::<crate::internal::ai::intentspec::IntentSpec>(json_text)
+            && let Ok(spec) = serde_json::from_str::<IntentSpec>(json_text)
         {
             if intentspec_matches_workspace(&spec, &binding.workspace_key, &binding.base_ref) {
                 return LatestIntentSpecLoad::Found(json_text.to_string());
@@ -2851,6 +3428,98 @@ where
         self.widget.add_cell(replacement);
     }
 
+    fn tool_call_summary_for_browser(tool_name: &str, arguments: &serde_json::Value) -> String {
+        if tool_name == "shell" {
+            return arguments
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "shell command".to_string());
+        }
+
+        if tool_name == "read_file" {
+            return arguments
+                .get("file_path")
+                .and_then(serde_json::Value::as_str)
+                .map(|path| format!("Read {path}"))
+                .unwrap_or_else(|| "Read file".to_string());
+        }
+
+        if tool_name == "list_dir" {
+            return arguments
+                .get("dir_path")
+                .and_then(serde_json::Value::as_str)
+                .map(|path| format!("List {path}"))
+                .unwrap_or_else(|| "List directory".to_string());
+        }
+
+        if tool_name == "grep_files" {
+            let pattern = arguments
+                .get("pattern")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("(pattern)");
+            return format!("Search {pattern}");
+        }
+
+        if tool_name == "apply_patch" {
+            return "Apply patch".to_string();
+        }
+
+        if tool_name == "request_user_input" {
+            return "Ask for user input".to_string();
+        }
+
+        if tool_name == "update_plan" {
+            return "Update plan".to_string();
+        }
+
+        tool_name.replace('_', " ")
+    }
+
+    fn patchset_snapshot_for_browser(
+        call_id: &str,
+        status: &str,
+        result: &Result<ToolOutput, String>,
+    ) -> Option<CodeUiPatchsetSnapshot> {
+        let Ok(output) = result else {
+            return None;
+        };
+        let ToolOutput::Function {
+            metadata: Some(meta),
+            ..
+        } = output
+        else {
+            return None;
+        };
+        let diffs = meta.get("diffs")?.as_array()?;
+        let changes = diffs
+            .iter()
+            .filter_map(|entry| {
+                Some(CodeUiPatchChange {
+                    path: entry.get("path")?.as_str()?.to_string(),
+                    change_type: entry
+                        .get("type")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("update")
+                        .to_string(),
+                    diff: entry
+                        .get("diff")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToString::to_string),
+                })
+            })
+            .collect::<Vec<_>>();
+        if changes.is_empty() {
+            return None;
+        }
+        Some(CodeUiPatchsetSnapshot {
+            id: call_id.to_string(),
+            status: status.to_string(),
+            changes,
+            updated_at: Utc::now(),
+        })
+    }
+
     fn complete_running_tool_cells_with_interrupt(&mut self) {
         for cell in self.widget.cells.iter_mut() {
             if let Some(tool_cell) = cell.as_any_mut().downcast_mut::<ToolCallHistoryCell>() {
@@ -2979,9 +3648,7 @@ fn append_to_last_tool_group_cell(
     true
 }
 
-fn format_orchestrator_result(
-    result: &crate::internal::ai::orchestrator::types::OrchestratorResult,
-) -> String {
+fn format_orchestrator_result(result: &OrchestratorResult) -> String {
     let mut lines = Vec::new();
     let decision_label = orchestrator_decision_label(&result.decision);
     let groups = result.execution_plan_spec.parallel_groups();
@@ -3091,9 +3758,9 @@ fn format_orchestrator_result(
             .iter()
             .find(|item| item.task_id == task.id());
         let kind = match task.kind {
-            crate::internal::ai::orchestrator::types::TaskKind::Implementation => "I",
-            crate::internal::ai::orchestrator::types::TaskKind::Analysis => "A",
-            crate::internal::ai::orchestrator::types::TaskKind::Gate => "G",
+            TaskKind::Implementation => "I",
+            TaskKind::Analysis => "A",
+            TaskKind::Gate => "G",
         };
         let label = format!("{kind}{:02} {}", idx + 1, task.title());
         let (status, retries, tools, violations, notes) = if let Some(task_result) = task_result {
@@ -3107,9 +3774,7 @@ fn format_orchestrator_result(
                     note.push_str(&format!(" | Issues: {}", review.issues.join("; ")));
                 }
                 note
-            } else if task_result.status
-                == crate::internal::ai::orchestrator::types::TaskNodeStatus::Failed
-            {
+            } else if task_result.status == TaskNodeStatus::Failed {
                 if let Some(reason) = task_result
                     .agent_output
                     .as_deref()
@@ -3211,31 +3876,25 @@ fn format_orchestrator_result(
     lines.join("\n")
 }
 
-fn orchestrator_decision_label(
-    decision: &crate::internal::ai::orchestrator::types::DecisionOutcome,
-) -> &'static str {
+fn orchestrator_decision_label(decision: &DecisionOutcome) -> &'static str {
     match decision {
-        crate::internal::ai::orchestrator::types::DecisionOutcome::Commit => "Commit",
-        crate::internal::ai::orchestrator::types::DecisionOutcome::HumanReviewRequired => {
-            "Human Review Required"
-        }
-        crate::internal::ai::orchestrator::types::DecisionOutcome::Abandon => "Abandon",
+        DecisionOutcome::Commit => "Commit",
+        DecisionOutcome::HumanReviewRequired => "Human Review Required",
+        DecisionOutcome::Abandon => "Abandon",
     }
 }
 
-fn orchestrator_status_label(
-    status: &crate::internal::ai::orchestrator::types::TaskNodeStatus,
-) -> &'static str {
+fn orchestrator_status_label(status: &TaskNodeStatus) -> &'static str {
     match status {
-        crate::internal::ai::orchestrator::types::TaskNodeStatus::Pending => "pending",
-        crate::internal::ai::orchestrator::types::TaskNodeStatus::Running => "running",
-        crate::internal::ai::orchestrator::types::TaskNodeStatus::Completed => "done",
-        crate::internal::ai::orchestrator::types::TaskNodeStatus::Failed => "failed",
-        crate::internal::ai::orchestrator::types::TaskNodeStatus::Skipped => "skipped",
+        TaskNodeStatus::Pending => "pending",
+        TaskNodeStatus::Running => "running",
+        TaskNodeStatus::Completed => "done",
+        TaskNodeStatus::Failed => "failed",
+        TaskNodeStatus::Skipped => "skipped",
     }
 }
 
-fn gate_report_summary(report: &crate::internal::ai::orchestrator::types::GateReport) -> String {
+fn gate_report_summary(report: &GateReport) -> String {
     if report.results.is_empty() {
         return "No checks".to_string();
     }
@@ -3581,7 +4240,7 @@ async fn persist_execution_plan(
     let steps = git_plan
         .steps()
         .iter()
-        .map(|step| crate::internal::ai::mcp::resource::PlanStepParams {
+        .map(|step| PlanStepParams {
             description: step.description().to_string(),
             inputs: step.inputs().cloned(),
             checks: step.checks().cloned(),
@@ -3781,7 +4440,7 @@ fn format_binding_branch(branch: Option<&str>) -> String {
 }
 
 fn intentspec_matches_workspace(
-    spec: &crate::internal::ai::intentspec::IntentSpec,
+    spec: &IntentSpec,
     workspace_locator: &str,
     head_sha: &str,
 ) -> bool {
@@ -4092,9 +4751,7 @@ fn task_status_heading(
     }
 }
 
-fn summarize_failed_gate_report(
-    gate_report: Option<&crate::internal::ai::orchestrator::types::GateReport>,
-) -> Option<String> {
+fn summarize_failed_gate_report(gate_report: Option<&GateReport>) -> Option<String> {
     let report = gate_report?;
     let failed_checks: Vec<_> = report
         .results
@@ -4139,14 +4796,14 @@ fn summarize_failed_gate_report(
 async fn fetch_intentspec_from_object_id(
     mcp: &Arc<LibraMcpServer>,
     object_id: &str,
-) -> Option<crate::internal::ai::intentspec::IntentSpec> {
+) -> Option<IntentSpec> {
     let uri = format!("libra://object/{object_id}");
     let resources = mcp.read_resource_impl(&uri).await.ok()?;
     let content = resources.first()?;
     let text = resource_text(content)?;
     let value: serde_json::Value = serde_json::from_str(&text).ok()?;
     let intent_content = extract_content_field(&value)?;
-    serde_json::from_str::<crate::internal::ai::intentspec::IntentSpec>(&intent_content).ok()
+    serde_json::from_str::<IntentSpec>(&intent_content).ok()
 }
 
 fn resource_text(content: &rmcp::model::ResourceContents) -> Option<String> {

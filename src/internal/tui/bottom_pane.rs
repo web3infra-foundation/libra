@@ -18,7 +18,7 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{app_event::AgentStatus, theme};
-use crate::internal::ai::sandbox::ExecApprovalRequest;
+use crate::internal::ai::{sandbox::ExecApprovalRequest, tools::context::UserInputQuestion};
 
 /// Snapshot of user-input question data for rendering (avoids borrowing the request).
 #[derive(Clone, Debug)]
@@ -132,10 +132,7 @@ impl BottomPane {
     }
 
     /// Store (or clear) the user-input questions to render.
-    pub fn set_user_input_questions(
-        &mut self,
-        questions: Option<&[crate::internal::ai::tools::context::UserInputQuestion]>,
-    ) {
+    pub fn set_user_input_questions(&mut self, questions: Option<&[UserInputQuestion]>) {
         self.user_input_questions = questions.map(|qs| {
             qs.iter()
                 .map(|q| UserInputQuestionSnapshot {

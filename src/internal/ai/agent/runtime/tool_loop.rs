@@ -7,7 +7,7 @@ use crate::internal::ai::{
         AssistantContent, CompletionError, CompletionModel, CompletionRequest, CompletionUsage,
         CompletionUsageSummary, Message, OneOrMany, ToolResult, UserContent,
     },
-    hooks::HookRunner,
+    hooks::{HookAction, HookRunner},
     tools::{
         FunctionParameters, ToolDefinition, ToolInvocation, ToolOutput, ToolPayload, ToolRegistry,
         ToolRuntimeContext,
@@ -231,7 +231,7 @@ where
                     let action = hook_runner
                         .run_pre_tool_use(&call.function.name, call.function.arguments.clone())
                         .await;
-                    if let crate::internal::ai::hooks::HookAction::Block(reason) = action {
+                    if let HookAction::Block(reason) = action {
                         let blocked_result: Result<ToolOutput, String> =
                             Err(format!("Blocked by hook: {reason}"));
                         observer.on_tool_call_end(&call.id, &call.function.name, &blocked_result);

@@ -9,7 +9,8 @@ use sea_orm::ConnectionTrait;
 use serde::Serialize;
 
 use crate::{
-    command::{get_target_commit, load_object},
+    command::{get_target_commit, load_object, log::get_reachable_commits},
+    info_println,
     internal::{
         branch::{self, Branch},
         config::ConfigKv,
@@ -20,6 +21,7 @@ use crate::{
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
         text::{levenshtein, short_display_hash},
+        util::require_repo,
     },
 };
 
@@ -555,10 +557,9 @@ async fn delete_branch_impl(branch_name: String, force: bool) -> Result<BranchOu
             Head::Detached(commit_hash) => commit_hash,
         };
 
-        let head_reachable =
-            crate::command::log::get_reachable_commits(head_commit.to_string(), None)
-                .await
-                .map_err(BranchError::DelegatedCli)?;
+        let head_reachable = get_reachable_commits(head_commit.to_string(), None)
+            .await
+            .map_err(BranchError::DelegatedCli)?;
         let head_commit_ids: std::collections::HashSet<_> =
             head_reachable.iter().map(|c| c.id).collect();
         if !head_commit_ids.contains(&branch.commit) {
@@ -699,7 +700,7 @@ async fn collect_branch_output(args: &BranchArgs) -> Result<BranchOutput, Branch
 }
 
 async fn run_branch(args: &BranchArgs) -> Result<BranchOutput, BranchError> {
-    crate::utils::util::require_repo().map_err(|_| BranchError::NotInRepo)?;
+    require_repo().map_err(|_| BranchError::NotInRepo)?;
 
     if let Some(new_branch) = args.new_branch.clone() {
         create_branch_impl(new_branch, args.commit_hash.clone()).await
@@ -844,7 +845,7 @@ pub async fn set_upstream_safe_with_output(
     set_upstream_impl(branch, upstream)
         .await
         .map_err(CliError::from)?;
-    crate::info_println!(
+    info_println!(
         output,
         "Branch '{branch}' set up to track remote branch '{upstream}'"
     );

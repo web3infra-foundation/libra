@@ -42,6 +42,7 @@ pub mod sandbox;
 pub mod session;
 pub mod tools;
 pub mod util;
+pub mod web;
 pub mod workflow_objects;
 pub mod workspace_snapshot;
 

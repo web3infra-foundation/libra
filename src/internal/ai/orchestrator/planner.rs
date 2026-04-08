@@ -14,7 +14,7 @@ use crate::internal::ai::{
     intentspec::{
         effective_forbidden_scope, effective_write_scope,
         types::{
-            ChangeType, ConflictResolution, DecompositionMode, DependencyPolicy, IntentSpec,
+            ChangeType, Check, ConflictResolution, DecompositionMode, DependencyPolicy, IntentSpec,
             NetworkPolicy, ObjectiveKind, PlanGenerationConfig, RiskLevel, TouchHints,
         },
     },
@@ -28,7 +28,7 @@ struct TaskSpecMeta {
     owner_role: Option<String>,
     scope_in: Vec<String>,
     scope_out: Vec<String>,
-    checks: Vec<crate::internal::ai::intentspec::types::Check>,
+    checks: Vec<Check>,
     contract: TaskContract,
 }
 

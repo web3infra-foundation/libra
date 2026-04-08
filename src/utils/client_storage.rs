@@ -27,8 +27,18 @@ use uuid::Uuid;
 
 use crate::{
     command::load_object,
-    internal::{branch::Branch, config::ConfigKv, db, head::Head, model::object_index},
-    utils::storage::{Storage, local::LocalStorage, remote::RemoteStorage, tiered::TieredStorage},
+    internal::{
+        branch::Branch,
+        config::{ConfigKv, decrypt_value},
+        db,
+        db::establish_connection_with_busy_timeout,
+        head::Head,
+        model::object_index,
+    },
+    utils::{
+        storage::{Storage, local::LocalStorage, remote::RemoteStorage, tiered::TieredStorage},
+        util::{DATABASE, try_get_storage_path},
+    },
 };
 
 // Dedicated runtime for storage operations to avoid blocking/deadlocks in the main runtime
@@ -614,7 +624,7 @@ impl ClientStorage {
     fn index_db_path_from_base(base_path: &Path) -> Option<PathBuf> {
         base_path
             .parent()
-            .map(|storage_path| storage_path.join(crate::utils::util::DATABASE))
+            .map(|storage_path| storage_path.join(DATABASE))
     }
 }
 
@@ -656,8 +666,8 @@ fn resolve_env_sync_worker(name: &str) -> Result<Option<String>, String> {
 async fn resolve_env_for_storage_init(name: &str) -> Result<Option<String>, String> {
     let vault_key = format!("vault.env.{name}");
 
-    if let Ok(storage_path) = crate::utils::util::try_get_storage_path(None) {
-        let local_db_path = storage_path.join(crate::utils::util::DATABASE);
+    if let Ok(storage_path) = try_get_storage_path(None) {
+        let local_db_path = storage_path.join(DATABASE);
         if local_db_path.exists()
             && let Some(value) =
                 read_config_env_value(name, &vault_key, &local_db_path, "local").await?
@@ -689,41 +699,36 @@ async fn read_config_env_value(
             db_path.display()
         )
     })?;
-    let conn = crate::internal::db::establish_connection_with_busy_timeout(
-        db_path_str,
-        Duration::from_millis(200),
-    )
-    .await
-    .map_err(|err| match scope {
-        "global" => format!(
-            "failed to connect to global config '{}': {}",
-            db_path.display(),
-            err
-        ),
-        _ => format!(
-            "failed to connect to local config '{}': {}",
-            db_path.display(),
-            err
-        ),
-    })?;
+    let conn = establish_connection_with_busy_timeout(db_path_str, Duration::from_millis(200))
+        .await
+        .map_err(|err| match scope {
+            "global" => format!(
+                "failed to connect to global config '{}': {}",
+                db_path.display(),
+                err
+            ),
+            _ => format!(
+                "failed to connect to local config '{}': {}",
+                db_path.display(),
+                err
+            ),
+        })?;
 
     let entry = ConfigKv::get_with_conn(&conn, vault_key)
         .await
         .map_err(|err| format!("failed to read '{env_name}' from {scope} config: {err}"))?;
 
     match entry {
-        Some(entry) if entry.encrypted => {
-            crate::internal::config::decrypt_value(&entry.value, scope)
-                .await
-                .map(Some)
-                .map_err(|err| {
-                    if scope == "global" {
-                        format!("failed to decrypt vault.env.{env_name} from global config: {err}")
-                    } else {
-                        format!("failed to decrypt vault.env.{env_name}: {err}")
-                    }
-                })
-        }
+        Some(entry) if entry.encrypted => decrypt_value(&entry.value, scope)
+            .await
+            .map(Some)
+            .map_err(|err| {
+                if scope == "global" {
+                    format!("failed to decrypt vault.env.{env_name} from global config: {err}")
+                } else {
+                    format!("failed to decrypt vault.env.{env_name}: {err}")
+                }
+            }),
         Some(entry) => Ok(Some(entry.value)),
         None => Ok(None),
     }
@@ -737,8 +742,8 @@ fn storage_global_config_path() -> Option<PathBuf> {
 }
 
 fn get_or_create_repo_id_for_prefix() -> Option<String> {
-    let storage_path = crate::utils::util::try_get_storage_path(None).ok()?;
-    let db_path = storage_path.join(crate::utils::util::DATABASE);
+    let storage_path = try_get_storage_path(None).ok()?;
+    let db_path = storage_path.join(DATABASE);
     if !db_path.exists() {
         return None;
     }

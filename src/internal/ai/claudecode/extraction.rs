@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use super::*;
+use crate::internal::ai::intentspec::IntentSpec;
 
 #[derive(Args, Debug)]
 pub(super) struct ResolveExtractionArgs {
@@ -116,7 +117,7 @@ struct ResolvedIntentSpecArtifact {
     #[serde(rename = "riskLevel")]
     risk_level: RiskLevel,
     summary: String,
-    intentspec: crate::internal::ai::intentspec::IntentSpec,
+    intentspec: IntentSpec,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -131,7 +132,7 @@ struct PersistedIntentResolutionArtifact {
     #[serde(rename = "riskLevel")]
     risk_level: RiskLevel,
     summary: String,
-    intentspec: crate::internal::ai::intentspec::IntentSpec,
+    intentspec: IntentSpec,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

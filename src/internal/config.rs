@@ -14,13 +14,17 @@ use sea_orm::{
     QueryFilter, QueryOrder, entity::ActiveModelTrait,
 };
 
-use crate::internal::{
-    db::{get_db_conn_instance, get_db_conn_instance_for_path},
-    head::Head,
-    model::{
-        config::{self, ActiveModel, Model},
-        config_kv,
+use crate::{
+    internal::{
+        db::{establish_connection, get_db_conn_instance, get_db_conn_instance_for_path},
+        head::Head,
+        model::{
+            config::{self, ActiveModel, Model},
+            config_kv,
+        },
+        vault::{decrypt_token, encrypt_token, load_unseal_key_for_scope},
     },
+    utils::util::{DATABASE, try_get_storage_path},
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -644,21 +648,21 @@ impl ConfigKv {
 /// Decrypt a hex-encoded ciphertext using the vault unseal key for the given scope.
 /// `scope` should be `"local"` or `"global"`.
 pub async fn decrypt_value(hex_ciphertext: &str, scope: &str) -> Result<String> {
-    let unseal_key = crate::internal::vault::load_unseal_key_for_scope(scope)
+    let unseal_key = load_unseal_key_for_scope(scope)
         .await
         .ok_or_else(|| anyhow!("vault not initialized for {scope} scope — cannot decrypt value"))?;
     let ciphertext =
         hex::decode(hex_ciphertext).context("failed to decode encrypted config value hex")?;
-    crate::internal::vault::decrypt_token(&unseal_key, &ciphertext)
+    decrypt_token(&unseal_key, &ciphertext)
 }
 
 /// Encrypt a value using the vault unseal key for the given scope.
 /// Returns the hex-encoded ciphertext.
 pub async fn encrypt_value(value: &str, scope: &str) -> Result<String> {
-    let unseal_key = crate::internal::vault::load_unseal_key_for_scope(scope)
+    let unseal_key = load_unseal_key_for_scope(scope)
         .await
         .ok_or_else(|| anyhow!("vault not initialized for {scope} scope — cannot encrypt value"))?;
-    let ciphertext = crate::internal::vault::encrypt_token(&unseal_key, value.as_bytes())?;
+    let ciphertext = encrypt_token(&unseal_key, value.as_bytes())?;
     Ok(hex::encode(ciphertext))
 }
 
@@ -698,7 +702,7 @@ pub async fn resolve_env(name: &str) -> Result<Option<String>> {
     if let Some(global_path) = global_config_path()
         && global_path.exists()
     {
-        let conn = crate::internal::db::establish_connection(&global_path.to_string_lossy())
+        let conn = establish_connection(&global_path.to_string_lossy())
             .await
             .with_context(|| {
                 format!(
@@ -813,9 +817,9 @@ async fn local_config_value_for_target(
 ) -> Result<Option<String>> {
     match local_target {
         LocalIdentityTarget::CurrentRepo => {
-            let storage = crate::utils::util::try_get_storage_path(None)
+            let storage = try_get_storage_path(None)
                 .context("failed to resolve current repository storage")?;
-            let db_path = storage.join(crate::utils::util::DATABASE);
+            let db_path = storage.join(DATABASE);
             read_config_value_from_db_path(&db_path, key).await
         }
         LocalIdentityTarget::ExplicitDb(db_path) => {

@@ -43,18 +43,20 @@ use crate::{
             },
             types::{FileChange, PatchStatus},
         },
+        completion::CompletionUsageSummary,
         intentspec::{persistence::persist_intentspec, types::IntentSpec},
         mcp::{
             resource::{
-                AgentInstanceParams, ContextItemParams, CreateContextSnapshotParams,
-                CreateDecisionParams, CreateEvidenceParams, CreatePatchSetParams, CreatePlanParams,
-                CreatePlanStepEventParams, CreateProvenanceParams, CreateRunParams,
-                CreateRunUsageParams, CreateTaskParams, CreateToolInvocationParams,
-                IoFootprintParams, PlanStepParams, TouchedFileParams,
+                AgentInstanceParams, ArtifactParams, ContextItemParams,
+                CreateContextSnapshotParams, CreateDecisionParams, CreateEvidenceParams,
+                CreatePatchSetParams, CreatePlanParams, CreatePlanStepEventParams,
+                CreateProvenanceParams, CreateRunParams, CreateRunUsageParams, CreateTaskParams,
+                CreateToolInvocationParams, IoFootprintParams, PlanStepParams, TouchedFileParams,
             },
             server::LibraMcpServer,
         },
-        workflow_objects::{build_git_plan, parse_object_id},
+        tools::ToolOutput,
+        workflow_objects::{build_git_intent, build_git_plan, parse_object_id},
     },
     utils::storage_ext::StorageExt,
 };
@@ -858,7 +860,7 @@ async fn persist_intent_snapshot(
     spec: &IntentSpec,
     intent_id: &str,
 ) -> Result<(), OrchestratorError> {
-    let intent = crate::internal::ai::workflow_objects::build_git_intent(spec)
+    let intent = build_git_intent(spec)
         .map_err(|e| OrchestratorError::ConfigError(format!("failed to build git intent: {e}")))?;
     let snapshot = IntentSnapshot {
         id: intent_id.to_string(),
@@ -1603,7 +1605,7 @@ async fn create_run_usage_from_task_results(
     run_id: &str,
     task_results: &[TaskResult],
 ) -> Result<Option<String>, OrchestratorError> {
-    let mut usage = crate::internal::ai::completion::CompletionUsageSummary::default();
+    let mut usage = CompletionUsageSummary::default();
     for result in task_results {
         if let Some(task_usage) = result.model_usage.as_ref() {
             usage.merge(task_usage);
@@ -1664,9 +1666,9 @@ fn build_patchset_snapshot_changes(tool_calls: &[ToolCallRecord]) -> Vec<FileCha
     changes
 }
 
-fn tool_output_to_json(output: &crate::internal::ai::tools::ToolOutput) -> serde_json::Value {
+fn tool_output_to_json(output: &ToolOutput) -> serde_json::Value {
     match output {
-        crate::internal::ai::tools::ToolOutput::Function {
+        ToolOutput::Function {
             content,
             success,
             metadata,
@@ -1676,7 +1678,7 @@ fn tool_output_to_json(output: &crate::internal::ai::tools::ToolOutput) -> serde
             "success": success,
             "metadata": metadata,
         }),
-        crate::internal::ai::tools::ToolOutput::Mcp { result } => json!({
+        ToolOutput::Mcp { result } => json!({
             "kind": "mcp",
             "result": result,
         }),
@@ -2637,14 +2639,12 @@ async fn create_patchset(
             request.task_title, request.task_objective
         )),
         diff_format: diff_text.as_ref().map(|_| "unified_diff".to_string()),
-        diff_artifact: diff_artifact.map(|artifact| {
-            crate::internal::ai::mcp::resource::ArtifactParams {
-                store: artifact.store().to_string(),
-                key: artifact.key().to_string(),
-                content_type: Some("text/x-diff".to_string()),
-                size_bytes: None,
-                hash: Some(artifact.key().to_string()),
-            }
+        diff_artifact: diff_artifact.map(|artifact| ArtifactParams {
+            store: artifact.store().to_string(),
+            key: artifact.key().to_string(),
+            content_type: Some("text/x-diff".to_string()),
+            size_bytes: None,
+            hash: Some(artifact.key().to_string()),
         }),
         tags: None,
         external_ids: None,

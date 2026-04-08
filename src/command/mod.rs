@@ -56,7 +56,7 @@ use rpassword::read_password;
 use crate::{
     internal::protocol::https_client::BasicAuth,
     utils,
-    utils::{client_storage::ClientStorage, object_ext::BlobExt, util},
+    utils::{client_storage::ClientStorage, error::emit_warning, object_ext::BlobExt, util},
 };
 
 // impl load for all objects
@@ -98,7 +98,7 @@ fn ask_username_password() -> (String, String) {
         // Normally your OS will buffer output by line when it's connected to a terminal,
         // which is why it usually flushes when a newline is written to stdout.
         if let Err(err) = io::stdout().flush() {
-            crate::utils::error::emit_warning(format!("failed to flush stdout: {err}"));
+            emit_warning(format!("failed to flush stdout: {err}"));
         }
 
         let mut value = String::new();
@@ -114,7 +114,7 @@ fn ask_username_password() -> (String, String) {
 
     print!("password: ");
     if let Err(err) = io::stdout().flush() {
-        crate::utils::error::emit_warning(format!("failed to flush stdout: {err}"));
+        emit_warning(format!("failed to flush stdout: {err}"));
     }
 
     let password = if std::env::var("LIBRA_NO_HIDE_PASSWORD").is_ok() {

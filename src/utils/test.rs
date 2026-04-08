@@ -13,6 +13,7 @@ use tracing::level_filters::LevelFilter;
 
 use crate::{
     command,
+    internal::config::ConfigKv,
     utils::{pager::LIBRA_TEST_ENV, util},
 };
 
@@ -157,11 +158,8 @@ fn mark_test_process_non_interactive() {
 /// switch to test dir and create a new .libra
 pub async fn setup_with_new_libra_in(temp_path: impl AsRef<Path>) {
     setup_clean_testing_env_in(temp_path.as_ref());
-    crate::utils::util::reset_objects_storage_cache_for_path(
-        &temp_path
-            .as_ref()
-            .join(crate::utils::util::ROOT_DIR)
-            .join("objects"),
+    util::reset_objects_storage_cache_for_path(
+        &temp_path.as_ref().join(util::ROOT_DIR).join("objects"),
     );
     let args = command::init::InitArgs {
         bare: false,
@@ -176,19 +174,15 @@ pub async fn setup_with_new_libra_in(temp_path: impl AsRef<Path>) {
         vault: false,
     };
     command::init::init(args).await.unwrap();
-    crate::utils::util::reset_objects_storage_cache_for_path(
-        &temp_path
-            .as_ref()
-            .join(crate::utils::util::ROOT_DIR)
-            .join("objects"),
+    util::reset_objects_storage_cache_for_path(
+        &temp_path.as_ref().join(util::ROOT_DIR).join("objects"),
     );
 
     // Most tests don't exercise identity flows. Seed a deterministic identity so
     // commit-related tests don't depend on host-level config.
     let _guard = ChangeDirGuard::new(temp_path.as_ref());
-    let _ = crate::internal::config::ConfigKv::set("user.name", "Libra Test User", false).await;
-    let _ =
-        crate::internal::config::ConfigKv::set("user.email", "libra-test@example.com", false).await;
+    let _ = ConfigKv::set("user.name", "Libra Test User", false).await;
+    let _ = ConfigKv::set("user.email", "libra-test@example.com", false).await;
 }
 /// change the log level to reduce verbose output.
 pub fn init_debug_logger() {

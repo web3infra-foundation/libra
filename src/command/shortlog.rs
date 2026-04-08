@@ -64,7 +64,7 @@ use crate::{
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
-        util::{self, CommitBaseError},
+        util::{self, CommitBaseError, require_repo},
     },
 };
 
@@ -152,7 +152,7 @@ struct ShortlogOutput {
 /// direct writer control. For the full CLI entry point that honours JSON /
 /// quiet modes, use [`execute_safe`].
 pub async fn execute_to(args: ShortlogArgs, writer: &mut impl Write) -> CliResult<()> {
-    crate::utils::util::require_repo().map_err(|_| CliError::repo_not_found())?;
+    require_repo().map_err(|_| CliError::repo_not_found())?;
     let shortlog_output = run_shortlog(&args).await?;
     render_shortlog_output(&shortlog_output, writer)
 }
@@ -186,7 +186,7 @@ pub async fn execute(args: ShortlogArgs) {
 /// errors and exiting. Summarises commit history by author, delegating to
 /// [`execute_to`] for formatted output.
 pub async fn execute_safe(args: ShortlogArgs, output: &OutputConfig) -> CliResult<()> {
-    crate::utils::util::require_repo().map_err(|_| CliError::repo_not_found())?;
+    require_repo().map_err(|_| CliError::repo_not_found())?;
     let shortlog_output = run_shortlog(&args).await?;
 
     if output.is_json() {

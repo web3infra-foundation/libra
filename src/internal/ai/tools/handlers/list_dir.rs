@@ -19,7 +19,7 @@ use tokio::fs;
 
 use super::parse_arguments;
 use crate::internal::ai::tools::{
-    context::{ListDirArgs, ToolInvocation, ToolKind, ToolOutput},
+    context::{ListDirArgs, ToolInvocation, ToolKind, ToolOutput, ToolPayload},
     error::ToolError,
     registry::ToolHandler,
     spec::{FunctionParameters, ToolSpec},
@@ -45,7 +45,7 @@ impl ToolHandler for ListDirHandler {
         } = invocation;
 
         let arguments = match payload {
-            crate::internal::ai::tools::context::ToolPayload::Function { arguments } => arguments,
+            ToolPayload::Function { arguments } => arguments,
             _ => {
                 return Err(ToolError::IncompatiblePayload(
                     "list_dir handler only accepts Function payloads".to_string(),

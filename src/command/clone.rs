@@ -28,7 +28,9 @@ use crate::{
     internal::{
         branch::{self, Branch},
         config::{ConfigKv, RemoteConfig},
+        db::get_db_conn_instance,
         head::Head,
+        protocol::DiscoveryResult,
         reflog::{ReflogAction, ReflogContext, with_reflog},
     },
     utils::{
@@ -642,7 +644,7 @@ async fn clone_into_destination(
     args: &CloneArgs,
     remote_url: &str,
     _remote_client: &fetch::RemoteClient,
-    discovery: &crate::internal::protocol::DiscoveryResult,
+    discovery: &DiscoveryResult,
     local_path: &Path,
     original_dir: &Path,
     output: &OutputConfig,
@@ -755,7 +757,7 @@ pub(crate) async fn setup_repository(
     specified_branch: Option<String>,
     checkout_worktree: bool,
 ) -> Result<SetupResult, CloneError> {
-    let db = crate::internal::db::get_db_conn_instance().await;
+    let db = get_db_conn_instance().await;
     let remote_head = Head::remote_current_with_conn(&db, &remote_config.name).await;
 
     let branch_to_checkout = match specified_branch {

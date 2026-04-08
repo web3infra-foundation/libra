@@ -38,11 +38,14 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use super::*;
 use crate::{
     internal::ai::{
-        mcp::resource::CreateToolInvocationParams,
+        mcp::resource::{CreateToolInvocationParams, IoFootprintParams},
         sandbox::{ExecApprovalRequest, ReviewDecision},
         tools::{
             ToolOutput,
-            context::{UserInputAnswer, UserInputQuestion, UserInputRequest, UserInputResponse},
+            context::{
+                UserInputAnswer, UserInputOption, UserInputQuestion, UserInputRequest,
+                UserInputResponse,
+            },
         },
     },
     utils::output::{JsonFormat, OutputConfig},
@@ -1071,7 +1074,7 @@ async fn sync_streaming_tool_invocations(
 
 fn infer_tool_invocation_io_footprint(
     invocation: &ManagedToolInvocation,
-) -> Option<crate::internal::ai::mcp::resource::IoFootprintParams> {
+) -> Option<IoFootprintParams> {
     let paths_written = invocation
         .tool_input
         .as_ref()
@@ -1081,7 +1084,7 @@ fn infer_tool_invocation_io_footprint(
     let has_data = paths_written
         .as_ref()
         .is_some_and(|paths| !paths.is_empty());
-    has_data.then_some(crate::internal::ai::mcp::resource::IoFootprintParams {
+    has_data.then_some(IoFootprintParams {
         paths_read: None,
         paths_written,
     })
@@ -2731,10 +2734,7 @@ fn build_user_input_questions(questions: Option<&Vec<Value>>) -> Vec<UserInputQu
                                 .and_then(Value::as_str)
                                 .unwrap_or_default()
                                 .to_string();
-                            Some(crate::internal::ai::tools::context::UserInputOption {
-                                label,
-                                description,
-                            })
+                            Some(UserInputOption { label, description })
                         })
                         .collect::<Vec<_>>()
                 });

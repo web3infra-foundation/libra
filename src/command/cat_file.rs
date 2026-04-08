@@ -27,6 +27,7 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 use crate::{
     command::load_object,
+    common_utils::parse_commit_msg,
     internal::{ai::history::HistoryManager, db, model::reference},
     utils::{
         client_storage::ClientStorage,
@@ -531,7 +532,7 @@ fn emit_pretty_print_json(
             let commit = load_object::<Commit>(hash)
                 .map_err(|e| CliError::fatal(format!("could not read commit {hash}: {e}")))?;
             if output.is_json() {
-                let (message, _) = crate::common_utils::parse_commit_msg(&commit.message);
+                let (message, _) = parse_commit_msg(&commit.message);
                 emit_json_data(
                     "cat-file",
                     &serde_json::json!({
@@ -838,7 +839,7 @@ fn print_commit(hash: &ObjectHash) {
         commit.committer.timezone,
     );
     println!();
-    let (msg, _) = crate::common_utils::parse_commit_msg(&commit.message);
+    let (msg, _) = parse_commit_msg(&commit.message);
     println!("{}", msg.trim());
 }
 

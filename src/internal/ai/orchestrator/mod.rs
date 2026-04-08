@@ -21,6 +21,7 @@ use std::sync::Arc;
 use types::{OrchestratorConfig, OrchestratorError, OrchestratorResult};
 
 use crate::internal::ai::{
+    agent::ToolLoopConfig,
     completion::{CompletionModel, CompletionUsage, ThrottledCompletionModel},
     intentspec::{repair_intentspec, types::IntentSpec, validate_intentspec},
     tools::registry::ToolRegistry,
@@ -118,7 +119,7 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
             }
         }
 
-        let tool_loop_config = crate::internal::ai::agent::ToolLoopConfig {
+        let tool_loop_config = ToolLoopConfig {
             preamble: self.config.coder_preamble.clone(),
             ..Default::default()
         };

@@ -21,14 +21,17 @@ use uuid::Uuid;
 
 use crate::{
     cli_error,
+    command::restore::{self as restore_cmd, RestoreArgs as RestoreWorktreeArgs},
     internal::{
-        config::ConfigKv,
+        branch::Branch,
+        config::{ConfigKv, resolve_env},
         db,
+        head::Head,
         model::{object_index, reference},
     },
     utils::{
         d1_client::D1Client,
-        error::{CliError, CliResult},
+        error::{CliError, CliResult, emit_warning},
         output::OutputConfig,
         path,
         storage::{Storage, local::LocalStorage, remote::RemoteStorage},
@@ -465,7 +468,7 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
     } else {
         // Restore metadata
         if let Err(e) = restore_metadata(&db_conn, &r2_storage).await {
-            crate::utils::error::emit_warning(format!("failed to restore metadata: {}", e));
+            emit_warning(format!("failed to restore metadata: {}", e));
         }
 
         // Post-restore: update HEAD and restore worktree if we're in a fresh repo state
@@ -473,7 +476,7 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
         // We try to find the latest commit and checkout to it
 
         // Check if HEAD has a commit (either restored or existing)
-        let head_commit = crate::internal::head::Head::current_commit_result()
+        let head_commit = Head::current_commit_result()
             .await
             .map_err(|error| format!("failed to resolve HEAD commit: {error}"))?;
 
@@ -485,7 +488,7 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
 
             // Try to find 'main' branch in references
             // We look for 'main' branch in the reference table as a fallback
-            let main_branch = crate::internal::branch::Branch::find_branch_result("main", None)
+            let main_branch = Branch::find_branch_result("main", None)
                 .await
                 .map_err(|error| format!("failed to resolve main branch: {error}"))?;
 
@@ -493,11 +496,7 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
                 println!("Found main branch: {}", branch.commit);
 
                 // Update HEAD to point to main
-                crate::internal::head::Head::update(
-                    crate::internal::head::Head::Branch("main".to_string()),
-                    None,
-                )
-                .await;
+                Head::update(Head::Branch("main".to_string()), None).await;
 
                 let _ = restore_worktree_to_head().await;
             } else {
@@ -510,15 +509,15 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
 }
 
 async fn restore_worktree_to_head() -> Result<(), String> {
-    let restore_args = crate::command::restore::RestoreArgs {
+    let restore_args = RestoreWorktreeArgs {
         pathspec: vec![".".to_string()], // restore everything
         source: Some("HEAD".to_string()),
         worktree: true,
         staged: true,
     };
 
-    if let Err(e) = crate::command::restore::execute_checked(restore_args).await {
-        crate::utils::error::emit_warning(format!("failed to restore worktree files: {}", e));
+    if let Err(e) = restore_cmd::execute_checked(restore_args).await {
+        emit_warning(format!("failed to restore worktree files: {}", e));
         Err(e.to_string())
     } else {
         println!("Successfully restored working directory files.");
@@ -592,7 +591,7 @@ async fn execute_status(args: StatusArgs) -> Result<(), String> {
 }
 
 async fn resolve_cloud_env(name: &str) -> Result<Option<String>, String> {
-    crate::internal::config::resolve_env(name)
+    resolve_env(name)
         .await
         .map_err(|e| format!("failed to resolve '{name}' from env or config: {e}"))
 }

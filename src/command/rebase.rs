@@ -27,7 +27,7 @@ use crate::{
         reflog::{ReflogAction, ReflogContext, ReflogError, with_reflog},
     },
     utils::{
-        error::{CliError, CliResult},
+        error::{CliError, CliResult, emit_warning},
         ignore::IgnorePolicy,
         object_ext::{BlobExt, TreeExt},
         output::OutputConfig,
@@ -291,7 +291,7 @@ impl RebaseState {
         let state = Self::load_from_legacy_dir()?;
         Self::save_with_conn(db, &state).await?;
         if let Err(e) = fs::remove_dir_all(&legacy_dir) {
-            crate::utils::error::emit_warning(format!("failed to remove legacy rebase state: {e}"));
+            emit_warning(format!("failed to remove legacy rebase state: {e}"));
         }
         Ok(Some(state))
     }
@@ -832,10 +832,7 @@ async fn continue_replay(state: &mut RebaseState, branch_name: &str, upstream_di
 
                 // Save state after each successful commit
                 if let Err(e) = state.save().await {
-                    crate::utils::error::emit_warning(format!(
-                        "failed to save rebase state: {}",
-                        e
-                    ));
+                    emit_warning(format!("failed to save rebase state: {}", e));
                 }
             }
             ReplayResult::Conflict { paths, message } => {
@@ -952,7 +949,7 @@ async fn finalize_rebase(state: &RebaseState) -> anyhow::Result<()> {
 
     // Clean up rebase state
     if let Err(e) = RebaseState::cleanup().await {
-        crate::utils::error::emit_warning(format!("failed to clean up rebase state: {}", e));
+        emit_warning(format!("failed to clean up rebase state: {}", e));
     }
 
     println!(
@@ -1066,7 +1063,7 @@ async fn rebase_continue() {
     Head::update_with_conn(&db, Head::Detached(state.current_head), None).await;
 
     if let Err(e) = state.save().await {
-        crate::utils::error::emit_warning(format!("failed to save state: {}", e));
+        emit_warning(format!("failed to save state: {}", e));
     }
 
     // Continue with remaining commits
@@ -1141,7 +1138,7 @@ async fn rebase_abort() {
     match reflog_result {
         Ok(()) => {}
         Err(e) => {
-            crate::utils::error::emit_warning(format!("failed to record reflog: {e}"));
+            emit_warning(format!("failed to record reflog: {e}"));
             // Continue anyway; ensure branch ref is corrected.
             if let Err(err) =
                 Branch::update_branch_with_conn(&db, &state.head_name, &orig_head_str, None).await
@@ -1196,7 +1193,7 @@ async fn rebase_abort() {
 
     // Clean up rebase state
     if let Err(e) = RebaseState::cleanup().await {
-        crate::utils::error::emit_warning(format!("failed to clean up rebase state: {}", e));
+        emit_warning(format!("failed to clean up rebase state: {}", e));
     }
 
     println!("Rebase aborted. Restored branch '{}'.", state.head_name);
@@ -1305,7 +1302,7 @@ async fn rebase_skip() {
     }
 
     if let Err(e) = state.save().await {
-        crate::utils::error::emit_warning(format!("failed to save state: {}", e));
+        emit_warning(format!("failed to save state: {}", e));
     }
 
     // Continue with remaining commits

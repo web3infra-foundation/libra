@@ -13,7 +13,7 @@
 
 use std::{env, fmt};
 
-use crate::internal::ai::client::Provider;
+use crate::internal::ai::client::{Client as HttpClient, Provider};
 
 /// Gemini API provider that carries the API key and injects the
 /// `x-goog-api-key` authentication header into every request.
@@ -52,7 +52,7 @@ impl Provider for GeminiProvider {
 
 /// Concrete Gemini client type, combining the generic HTTP client with
 /// [`GeminiProvider`] for authentication.
-pub type Client = crate::internal::ai::client::Client<GeminiProvider>;
+pub type Client = HttpClient<GeminiProvider>;
 
 impl Client {
     /// Creates a Gemini Client from environment variables.

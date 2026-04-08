@@ -10,18 +10,22 @@ use async_trait::async_trait;
 // SAFETY: The unwrap() and expect() calls in test code are acceptable as test
 // failures are expected to panic on assertion failures.
 use super::parse_arguments;
-use crate::internal::ai::{
-    tools::{
-        context::{ShellArgs, ToolInvocation, ToolKind, ToolOutput, ToolPayload},
-        error::{ToolError, ToolResult},
-        registry::ToolHandler,
-        spec::ToolSpec,
-        utils::validate_path,
+use crate::{
+    internal::ai::{
+        sandbox::{ShellCommandRequest, run_shell_command_with_approval},
+        tools::{
+            context::{ShellArgs, ToolInvocation, ToolKind, ToolOutput, ToolPayload},
+            error::{ToolError, ToolResult},
+            registry::ToolHandler,
+            spec::ToolSpec,
+            utils::validate_path,
+        },
+        workspace_snapshot::{
+            WorkspaceSnapshot, changed_paths_since_baseline as changed_workspace_paths,
+            snapshot_workspace,
+        },
     },
-    workspace_snapshot::{
-        WorkspaceSnapshot, changed_paths_since_baseline as changed_workspace_paths,
-        snapshot_workspace,
-    },
+    utils::util::is_sub_path,
 };
 
 /// Handler for executing shell commands.
@@ -87,19 +91,17 @@ impl ToolHandler for ShellHandler {
             ToolError::ExecutionFailed(format!("failed to snapshot workspace: {err}"))
         })?;
 
-        let output = crate::internal::ai::sandbox::run_shell_command_with_approval(
-            crate::internal::ai::sandbox::ShellCommandRequest {
-                call_id,
-                command: args.command,
-                cwd,
-                timeout_ms: args.timeout_ms,
-                max_output_bytes,
-                sandbox,
-                sandbox_runtime,
-                approval,
-                justification: args.justification,
-            },
-        )
+        let output = run_shell_command_with_approval(ShellCommandRequest {
+            call_id,
+            command: args.command,
+            cwd,
+            timeout_ms: args.timeout_ms,
+            max_output_bytes,
+            sandbox,
+            sandbox_runtime,
+            approval,
+            justification: args.justification,
+        })
         .await
         .map_err(ToolError::ExecutionFailed)?;
         let final_snapshot = snapshot_workspace(&working_dir).map_err(|err| {
@@ -177,7 +179,7 @@ fn resolve_workdir(requested_workdir: Option<&str>, working_dir: &Path) -> ToolR
         ))
     })?;
 
-    if !crate::utils::util::is_sub_path(&requested_canon, &working_dir_canon) {
+    if !is_sub_path(&requested_canon, &working_dir_canon) {
         return Err(ToolError::PathOutsideWorkingDir(requested.to_path_buf()));
     }
 
