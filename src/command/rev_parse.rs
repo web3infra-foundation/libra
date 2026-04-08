@@ -7,7 +7,10 @@ use git_internal::hash::ObjectHash;
 use serde::Serialize;
 
 use crate::{
-    internal::{branch::Branch, branch::BranchStoreError, head::Head},
+    internal::{
+        branch::{Branch, BranchStoreError},
+        head::Head,
+    },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
@@ -109,15 +112,19 @@ async fn resolve_abbrev_ref(spec: &str) -> CliResult<String> {
         };
     }
 
-    if let Some(branch) = Branch::find_branch(spec, None).await {
+    if let Some(branch) = Branch::find_branch_result(spec, None)
+        .await
+        .map_err(|error| map_symbolic_ref_resolution_error(spec, error))?
+    {
         return Ok(branch.name);
     }
 
     if let Some((remote, branch_name)) = spec.split_once('/')
         && !remote.is_empty()
         && !branch_name.is_empty()
-        && Branch::find_branch(branch_name, Some(remote))
+        && Branch::find_branch_result(branch_name, Some(remote))
             .await
+            .map_err(|error| map_symbolic_ref_resolution_error(spec, error))?
             .is_some()
     {
         return Ok(spec.to_string());
@@ -158,15 +165,19 @@ fn map_repo_path_error(err: std::io::Error) -> CliError {
 }
 
 fn map_head_resolution_error(error: BranchStoreError) -> CliError {
+    map_symbolic_ref_resolution_error("HEAD", error)
+}
+
+fn map_symbolic_ref_resolution_error(spec: &str, error: BranchStoreError) -> CliError {
     match error {
         BranchStoreError::Corrupt { detail, .. } => {
-            CliError::fatal(format!("failed to resolve symbolic HEAD: {detail}"))
+            CliError::fatal(format!("failed to resolve symbolic ref '{spec}': {detail}"))
                 .with_stable_code(StableErrorCode::RepoCorrupt)
         }
         BranchStoreError::Query(detail)
         | BranchStoreError::NotFound(detail)
         | BranchStoreError::Delete { detail, .. } => {
-            CliError::fatal(format!("failed to resolve symbolic HEAD: {detail}"))
+            CliError::fatal(format!("failed to resolve symbolic ref '{spec}': {detail}"))
                 .with_stable_code(StableErrorCode::IoReadFailed)
         }
     }

@@ -544,6 +544,7 @@ fn populate_repo_storage_with_link(
     }
 }
 
+#[cfg(any(windows, test))]
 fn copy_dir_all(source: &Path, target: &Path) -> io::Result<()> {
     fs::create_dir_all(target)?;
     for entry in fs::read_dir(source)? {
@@ -615,10 +616,12 @@ mod tests {
     use tempfile::tempdir;
     use uuid::Uuid;
 
-    use super::{cleanup_task_worktree, copy_dir_all, materialize_workspace, prepare_task_worktree,
-        sync_task_worktree_back};
     #[cfg(windows)]
     use super::populate_repo_storage_with_link;
+    use super::{
+        cleanup_task_worktree, copy_dir_all, materialize_workspace, prepare_task_worktree,
+        sync_task_worktree_back,
+    };
     use crate::{
         internal::ai::workspace_snapshot::{WorkspaceEntry, snapshot_workspace},
         utils::{test, util},
