@@ -806,7 +806,9 @@ async fn local_config_entry_for_target(
             let db_path = storage.join(crate::utils::util::DATABASE);
             read_config_entry_from_db_path(&db_path, key).await
         }
-        LocalIdentityTarget::ExplicitDb(db_path) => read_config_entry_from_db_path(db_path, key).await,
+        LocalIdentityTarget::ExplicitDb(db_path) => {
+            read_config_entry_from_db_path(db_path, key).await
+        }
         LocalIdentityTarget::None => Ok(None),
     }
 }
@@ -826,7 +828,9 @@ async fn global_env_value(name: &str, vault_key: &str) -> Result<Option<String>>
     if entry.encrypted {
         let plaintext = decrypt_value(&entry.value, "global")
             .await
-            .context(format!("failed to decrypt vault.env.{name} from global config"))?;
+            .context(format!(
+                "failed to decrypt vault.env.{name} from global config"
+            ))?;
         return Ok(Some(plaintext));
     }
 
@@ -844,7 +848,9 @@ async fn local_config_value_for_target(
             let db_path = storage.join(crate::utils::util::DATABASE);
             read_config_value_from_db_path(&db_path, key).await
         }
-        LocalIdentityTarget::ExplicitDb(db_path) => read_config_value_from_db_path(db_path, key).await,
+        LocalIdentityTarget::ExplicitDb(db_path) => {
+            read_config_value_from_db_path(db_path, key).await
+        }
         LocalIdentityTarget::None => Ok(None),
     }
 }
@@ -867,7 +873,10 @@ async fn read_config_value_from_db_path(db_path: &Path, key: &str) -> Result<Opt
     }))
 }
 
-async fn read_config_entry_from_db_path(db_path: &Path, key: &str) -> Result<Option<ConfigKvEntry>> {
+async fn read_config_entry_from_db_path(
+    db_path: &Path,
+    key: &str,
+) -> Result<Option<ConfigKvEntry>> {
     if !db_path.exists() {
         return Ok(None);
     }

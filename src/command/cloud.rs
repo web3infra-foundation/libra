@@ -598,7 +598,10 @@ fn cloud_local_db_path() -> Result<PathBuf, String> {
     Ok(storage.join(util::DATABASE))
 }
 
-async fn resolve_cloud_env(name: &str, local_db_path: Option<&std::path::Path>) -> Result<Option<String>, String> {
+async fn resolve_cloud_env(
+    name: &str,
+    local_db_path: Option<&std::path::Path>,
+) -> Result<Option<String>, String> {
     let local_target = match local_db_path {
         Some(db_path) => crate::internal::config::LocalIdentityTarget::ExplicitDb(db_path),
         None => crate::internal::config::LocalIdentityTarget::CurrentRepo,
@@ -629,7 +632,8 @@ async fn create_r2_storage_for_db_path(
     repo_id: &str,
     local_db_path: &std::path::Path,
 ) -> Result<RemoteStorage, String> {
-    let endpoint = resolve_required_cloud_env("LIBRA_STORAGE_ENDPOINT", Some(local_db_path)).await?;
+    let endpoint =
+        resolve_required_cloud_env("LIBRA_STORAGE_ENDPOINT", Some(local_db_path)).await?;
     let bucket = resolve_required_cloud_env("LIBRA_STORAGE_BUCKET", Some(local_db_path)).await?;
     let access_key =
         resolve_required_cloud_env("LIBRA_STORAGE_ACCESS_KEY", Some(local_db_path)).await?;
@@ -939,8 +943,11 @@ mod tests {
         let repo_db_path = repo.path().join(".libra").join(util::DATABASE);
         let _manifest_dir = ChangeDirGuard::new(env!("CARGO_MANIFEST_DIR"));
 
-        rt.block_on(create_r2_storage_for_db_path("repo-from-config", &repo_db_path))
-            .expect("R2 storage should initialize from local config values even after cwd drift");
+        rt.block_on(create_r2_storage_for_db_path(
+            "repo-from-config",
+            &repo_db_path,
+        ))
+        .expect("R2 storage should initialize from local config values even after cwd drift");
     }
 
     #[test]
