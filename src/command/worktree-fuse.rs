@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    env, fs, io,
+    fs, io,
     path::{Component, Path, PathBuf},
     process::Command,
     sync::{Mutex, OnceLock},
@@ -112,24 +112,6 @@ where
 {
     fn into_mount_handle_result(self) -> io::Result<MountHandle> {
         self.map_err(|e| io::Error::other(format!("failed to mount FUSE worktree: {e}")))
-    }
-}
-
-struct DirGuard {
-    old_dir: PathBuf,
-}
-
-impl DirGuard {
-    fn change_to(new_dir: &Path) -> io::Result<Self> {
-        let old_dir = env::current_dir()?;
-        env::set_current_dir(new_dir)?;
-        Ok(Self { old_dir })
-    }
-}
-
-impl Drop for DirGuard {
-    fn drop(&mut self) {
-        let _ = env::set_current_dir(&self.old_dir);
     }
 }
 
@@ -459,9 +441,8 @@ async fn add_fuse_worktree(
 
     let mut rollback_needed = true;
     if Head::current_commit().await.is_some() {
-        let _guard = DirGuard::change_to(&target)?;
         if let Err(err) = restore::execute_checked(RestoreArgs {
-            pathspec: vec![util::working_dir_string()],
+            pathspec: vec![target.to_string_lossy().to_string()],
             source: Some(checkout_branch.clone()),
             worktree: true,
             staged: false,
