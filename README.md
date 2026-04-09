@@ -537,7 +537,6 @@ The following Git top-level commands are currently **not implemented** in Libra 
 - `maintenance` – periodic maintenance tasks
 - `cat-file` – display raw object contents
 - `hash-object` – compute object hash for raw data
-- `rev-list` – list reachable commits
 - `describe` – human-readable description based on tags
 - `show-ref` – list all refs
 - `symbolic-ref` – read/write symbolic refs

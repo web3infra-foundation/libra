@@ -379,7 +379,11 @@ fn relative_or_display(path: PathBuf, working_dir: &Path) -> String {
         .strip_prefix(working_dir)
         .map(|rel| rel.to_string_lossy().to_string())
         .unwrap_or_else(|_| path.to_string_lossy().to_string());
-    rendered.replace('\\', "/")
+    if cfg!(windows) {
+        rendered.replace('\\', "/")
+    } else {
+        rendered
+    }
 }
 
 fn shell_looks_networked(arguments: &Value) -> bool {

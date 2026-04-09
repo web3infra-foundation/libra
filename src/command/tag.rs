@@ -510,31 +510,39 @@ mod tests {
             .await
             .unwrap();
         fs::write("test.txt", "hello").unwrap();
-        add::execute(AddArgs {
-            pathspec: vec!["test.txt".to_string()],
-            all: false,
-            update: false,
-            verbose: false,
-            dry_run: false,
-            ignore_errors: false,
-            refresh: false,
-            force: false,
-        })
-        .await;
-        commit::execute(CommitArgs {
-            message: Some("Initial commit".to_string()),
-            file: None,
-            allow_empty: false,
-            conventional: false,
-            no_edit: false,
-            amend: false,
-            signoff: false,
-            disable_pre: false,
-            all: false,
-            no_verify: true,
-            author: None,
-        })
-        .await;
+        add::execute_safe(
+            AddArgs {
+                pathspec: vec!["test.txt".to_string()],
+                all: false,
+                update: false,
+                verbose: false,
+                dry_run: false,
+                ignore_errors: false,
+                refresh: false,
+                force: false,
+            },
+            &Default::default(),
+        )
+        .await
+        .unwrap();
+        commit::execute_safe(
+            CommitArgs {
+                message: Some("Initial commit".to_string()),
+                file: None,
+                allow_empty: false,
+                conventional: false,
+                no_edit: false,
+                amend: false,
+                signoff: false,
+                disable_pre: false,
+                all: false,
+                no_verify: true,
+                author: None,
+            },
+            &Default::default(),
+        )
+        .await
+        .unwrap();
         (temp_dir, guard)
     }
 
