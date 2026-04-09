@@ -608,9 +608,9 @@ pub async fn load_unseal_key_for_scope(scope: &str) -> Option<Vec<u8>> {
 /// This is used when callers need to resolve local secrets for an explicit
 /// repository target instead of the current working directory repository.
 pub async fn load_unseal_key_for_db_path(db_path: &Path) -> Option<Vec<u8>> {
-    let repo_id = repo_id_for_db_path(db_path).await.ok()?;
-
-    if let Some(hex_key) = load_unseal_key_from_home_for_repo_id(&repo_id).await {
+    if let Ok(repo_id) = repo_id_for_db_path(db_path).await
+        && let Some(hex_key) = load_unseal_key_from_home_for_repo_id(&repo_id).await
+    {
         return hex::decode(hex_key).ok();
     }
 
@@ -989,4 +989,35 @@ async fn remove_unseal_key_from_home() -> Result<()> {
             .context("failed to remove unseal key file")?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use super::load_unseal_key_for_db_path;
+    use crate::internal::{
+        config::ConfigKv,
+        db::{create_database, reset_db_conn_instance_for_path},
+    };
+
+    #[tokio::test]
+    async fn load_unseal_key_for_db_path_falls_back_to_legacy_db_key_without_repo_id() {
+        let temp = tempdir().expect("failed to create temp dir");
+        let db_path = temp.path().join("libra.db");
+        let expected = vec![0x12, 0x34, 0x56, 0x78];
+
+        let conn = create_database(db_path.to_string_lossy().as_ref())
+            .await
+            .expect("failed to create test database");
+        ConfigKv::set_with_conn(&conn, "vault.unsealkey", &hex::encode(&expected), false)
+            .await
+            .expect("failed to seed legacy vault.unsealkey");
+        drop(conn);
+
+        let actual = load_unseal_key_for_db_path(&db_path).await;
+        assert_eq!(actual, Some(expected));
+
+        reset_db_conn_instance_for_path(&db_path).await;
+    }
 }

@@ -52,14 +52,17 @@ fn test_rev_parse_abbrev_ref_head_returns_branch_name() {
 }
 
 #[test]
-fn test_rev_parse_show_toplevel_returns_repo_root() {
+fn test_rev_parse_show_toplevel_rejects_spec() {
     let repo = create_committed_repo_via_cli();
 
-    let output = run_libra_command(&["rev-parse", "--show-toplevel"], repo.path());
-    assert_cli_success(&output, "rev-parse --show-toplevel");
+    let output = run_libra_command(&["rev-parse", "--show-toplevel", "HEAD"], repo.path());
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(stdout.trim(), repo.path().to_string_lossy());
+    assert!(!output.status.success(), "command unexpectedly succeeded");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot be used with") || stderr.contains("unexpected argument"),
+        "stderr: {stderr}"
+    );
 }
 
 #[test]

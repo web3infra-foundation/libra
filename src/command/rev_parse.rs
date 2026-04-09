@@ -30,7 +30,7 @@ pub struct RevParseArgs {
     pub abbrev_ref: bool,
 
     /// Show the absolute path of the top-level working tree.
-    #[clap(long = "show-toplevel", conflicts_with = "abbrev_ref")]
+    #[clap(long = "show-toplevel", conflicts_with_all = ["abbrev_ref", "spec"])]
     pub show_toplevel: bool,
 
     /// Revision to parse. Defaults to HEAD when omitted.
@@ -241,5 +241,16 @@ mod tests {
     fn test_rev_parse_args_show_toplevel() {
         let args = RevParseArgs::try_parse_from(["rev-parse", "--show-toplevel"]).unwrap();
         assert!(args.show_toplevel);
+    }
+
+    #[test]
+    fn test_rev_parse_args_show_toplevel_conflicts_with_spec() {
+        let err = RevParseArgs::try_parse_from(["rev-parse", "--show-toplevel", "HEAD"])
+            .expect_err("--show-toplevel should reject SPEC");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("cannot be used with") || rendered.contains("unexpected argument"),
+            "unexpected clap error: {rendered}"
+        );
     }
 }
