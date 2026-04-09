@@ -22,15 +22,15 @@ use crate::{
 #[derive(Parser, Debug)]
 pub struct RevParseArgs {
     /// Show a non-ambiguous short object name.
-    #[clap(long)]
+    #[clap(long, conflicts_with_all = ["abbrev_ref", "show_toplevel"])]
     pub short: bool,
 
     /// Show the branch name instead of the commit hash.
-    #[clap(long = "abbrev-ref", conflicts_with = "show_toplevel")]
+    #[clap(long = "abbrev-ref", conflicts_with_all = ["show_toplevel", "short"])]
     pub abbrev_ref: bool,
 
     /// Show the absolute path of the top-level working tree.
-    #[clap(long = "show-toplevel", conflicts_with_all = ["abbrev_ref", "spec"])]
+    #[clap(long = "show-toplevel", conflicts_with_all = ["abbrev_ref", "short", "spec"])]
     pub show_toplevel: bool,
 
     /// Revision to parse. Defaults to HEAD when omitted.
@@ -250,6 +250,28 @@ mod tests {
         let rendered = err.to_string();
         assert!(
             rendered.contains("cannot be used with") || rendered.contains("unexpected argument"),
+            "unexpected clap error: {rendered}"
+        );
+    }
+
+    #[test]
+    fn test_rev_parse_args_abbrev_ref_conflicts_with_short() {
+        let err = RevParseArgs::try_parse_from(["rev-parse", "--abbrev-ref", "--short", "HEAD"])
+            .expect_err("--abbrev-ref should reject --short");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("cannot be used with"),
+            "unexpected clap error: {rendered}"
+        );
+    }
+
+    #[test]
+    fn test_rev_parse_args_show_toplevel_conflicts_with_short() {
+        let err = RevParseArgs::try_parse_from(["rev-parse", "--show-toplevel", "--short"])
+            .expect_err("--show-toplevel should reject --short");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("cannot be used with"),
             "unexpected clap error: {rendered}"
         );
     }
