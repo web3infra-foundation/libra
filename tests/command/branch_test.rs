@@ -6,6 +6,8 @@
 
 use std::collections::HashSet;
 #[cfg(unix)]
+use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
 use git_internal::hash::{ObjectHash, get_hash_kind};
