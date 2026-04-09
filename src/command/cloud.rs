@@ -918,29 +918,69 @@ mod tests {
         let _secret = ClearedEnvVarGuard::new("LIBRA_STORAGE_SECRET_KEY");
         let _region = ClearedEnvVarGuard::new("LIBRA_STORAGE_REGION");
 
+        let repo_db_path = repo.path().join(".libra").join(util::DATABASE);
+
+        rt.block_on(crate::internal::vault::lazy_init_vault_for_scope("local"))
+            .unwrap();
+
+        let encrypted_endpoint = rt
+            .block_on(crate::internal::config::encrypt_value(
+                "https://storage.example.com",
+                "local",
+            ))
+            .unwrap();
+        let encrypted_bucket = rt
+            .block_on(crate::internal::config::encrypt_value(
+                "test-bucket",
+                "local",
+            ))
+            .unwrap();
+        let encrypted_access = rt
+            .block_on(crate::internal::config::encrypt_value(
+                "test-access",
+                "local",
+            ))
+            .unwrap();
+        let encrypted_secret = rt
+            .block_on(crate::internal::config::encrypt_value(
+                "test-secret",
+                "local",
+            ))
+            .unwrap();
+        let encrypted_region = rt
+            .block_on(crate::internal::config::encrypt_value("auto", "local"))
+            .unwrap();
+
         rt.block_on(async {
             ConfigKv::set(
                 "vault.env.LIBRA_STORAGE_ENDPOINT",
-                "https://storage.example.com",
-                false,
+                &encrypted_endpoint,
+                true,
             )
             .await
             .unwrap();
-            ConfigKv::set("vault.env.LIBRA_STORAGE_BUCKET", "test-bucket", false)
+            ConfigKv::set("vault.env.LIBRA_STORAGE_BUCKET", &encrypted_bucket, true)
                 .await
                 .unwrap();
-            ConfigKv::set("vault.env.LIBRA_STORAGE_ACCESS_KEY", "test-access", false)
-                .await
-                .unwrap();
-            ConfigKv::set("vault.env.LIBRA_STORAGE_SECRET_KEY", "test-secret", false)
-                .await
-                .unwrap();
-            ConfigKv::set("vault.env.LIBRA_STORAGE_REGION", "auto", false)
+            ConfigKv::set(
+                "vault.env.LIBRA_STORAGE_ACCESS_KEY",
+                &encrypted_access,
+                true,
+            )
+            .await
+            .unwrap();
+            ConfigKv::set(
+                "vault.env.LIBRA_STORAGE_SECRET_KEY",
+                &encrypted_secret,
+                true,
+            )
+            .await
+            .unwrap();
+            ConfigKv::set("vault.env.LIBRA_STORAGE_REGION", &encrypted_region, true)
                 .await
                 .unwrap();
         });
 
-        let repo_db_path = repo.path().join(".libra").join(util::DATABASE);
         let _manifest_dir = ChangeDirGuard::new(env!("CARGO_MANIFEST_DIR"));
 
         rt.block_on(create_r2_storage_for_db_path(

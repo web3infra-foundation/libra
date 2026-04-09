@@ -647,9 +647,31 @@ pub async fn decrypt_value(hex_ciphertext: &str, scope: &str) -> Result<String> 
     let unseal_key = crate::internal::vault::load_unseal_key_for_scope(scope)
         .await
         .ok_or_else(|| anyhow!("vault not initialized for {scope} scope — cannot decrypt value"))?;
+    decrypt_value_with_unseal_key(hex_ciphertext, &unseal_key)
+}
+
+async fn decrypt_value_for_local_target(
+    hex_ciphertext: &str,
+    local_target: LocalIdentityTarget<'_>,
+) -> Result<String> {
+    let unseal_key = match local_target {
+        LocalIdentityTarget::CurrentRepo => {
+            crate::internal::vault::load_unseal_key_for_scope("local").await
+        }
+        LocalIdentityTarget::ExplicitDb(db_path) => {
+            crate::internal::vault::load_unseal_key_for_db_path(db_path).await
+        }
+        LocalIdentityTarget::None => None,
+    }
+    .ok_or_else(|| anyhow!("vault not initialized for local scope — cannot decrypt value"))?;
+
+    decrypt_value_with_unseal_key(hex_ciphertext, &unseal_key)
+}
+
+fn decrypt_value_with_unseal_key(hex_ciphertext: &str, unseal_key: &[u8]) -> Result<String> {
     let ciphertext =
         hex::decode(hex_ciphertext).context("failed to decode encrypted config value hex")?;
-    crate::internal::vault::decrypt_token(&unseal_key, &ciphertext)
+    crate::internal::vault::decrypt_token(unseal_key, &ciphertext)
 }
 
 /// Encrypt a value using the vault unseal key for the given scope.
@@ -786,7 +808,7 @@ async fn local_env_value_for_target(
     };
 
     if entry.encrypted {
-        let plaintext = decrypt_value(&entry.value, "local")
+        let plaintext = decrypt_value_for_local_target(&entry.value, local_target)
             .await
             .context(format!("failed to decrypt {vault_key}"))?;
         return Ok(Some(plaintext));
