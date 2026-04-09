@@ -270,6 +270,7 @@ mod remote_test;
 mod remove_test;
 mod reset_test;
 mod restore_test;
+mod rev_list_test;
 mod rev_parse_test;
 mod revert_test;
 mod shortlog_test;

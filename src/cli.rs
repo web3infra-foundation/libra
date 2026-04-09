@@ -202,6 +202,8 @@ enum Commands {
     Reset(command::reset::ResetArgs),
     #[command(about = "Parse and normalize revision names and repository paths")]
     RevParse(command::rev_parse::RevParseArgs),
+    #[command(about = "List commit objects reachable from a revision")]
+    RevList(command::rev_list::RevListArgs),
     #[command(about = "Move or rename a file, a directory, or a symlink")]
     Mv(command::mv::MvArgs),
     #[command(
@@ -654,6 +656,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Merge(cmd_args) => command::merge::execute_safe(cmd_args, &output).await?,
         Commands::Reset(cmd_args) => command::reset::execute_safe(cmd_args, &output).await?,
         Commands::RevParse(cmd_args) => command::rev_parse::execute_safe(cmd_args, &output).await?,
+        Commands::RevList(cmd_args) => command::rev_list::execute_safe(cmd_args, &output).await?,
         Commands::Mv(cmd_args) => command::mv::execute_safe(cmd_args, &output).await?,
         Commands::Describe(cmd_args) => command::describe::execute_safe(cmd_args, &output).await?,
         Commands::CherryPick(cmd_args) => {
