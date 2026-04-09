@@ -491,53 +491,50 @@ mod tests {
 
     use super::*;
     use crate::{
-        cli::parse_async,
-        command::init::{self, InitArgs},
-        internal::tag,
-        utils::test::ChangeDirGuard,
+        command::{
+            add::{self, AddArgs},
+            commit::{self, CommitArgs},
+        },
+        internal::{config::ConfigKv, tag},
+        utils::test::{ChangeDirGuard, setup_with_new_libra_in},
     };
 
     async fn setup_repo_with_commit() -> (tempfile::TempDir, ChangeDirGuard) {
         let temp_dir = tempdir().unwrap();
+        setup_with_new_libra_in(temp_dir.path()).await;
         let guard = ChangeDirGuard::new(temp_dir.path());
-        init::init(InitArgs {
-            bare: false,
-            template: None,
-            initial_branch: None,
-            repo_directory: ".".to_string(),
-            quiet: false,
-            shared: None,
-            object_format: None,
-            ref_format: None,
-            from_git_repository: None,
-            vault: false,
-        })
-        .await
-        .unwrap();
-        parse_async(Some(&["libra", "config", "user.name", "Tag Test User"]))
+        ConfigKv::set("user.name", "Tag Test User", false)
             .await
             .unwrap();
-        parse_async(Some(&[
-            "libra",
-            "config",
-            "user.email",
-            "tag-test@example.com",
-        ]))
-        .await
-        .unwrap();
+        ConfigKv::set("user.email", "tag-test@example.com", false)
+            .await
+            .unwrap();
         fs::write("test.txt", "hello").unwrap();
-        parse_async(Some(&["libra", "add", "test.txt"]))
-            .await
-            .unwrap();
-        parse_async(Some(&[
-            "libra",
-            "commit",
-            "-m",
-            "Initial commit",
-            "--no-verify",
-        ]))
-        .await
-        .unwrap();
+        add::execute(AddArgs {
+            pathspec: vec!["test.txt".to_string()],
+            all: false,
+            update: false,
+            verbose: false,
+            dry_run: false,
+            ignore_errors: false,
+            refresh: false,
+            force: false,
+        })
+        .await;
+        commit::execute(CommitArgs {
+            message: Some("Initial commit".to_string()),
+            file: None,
+            allow_empty: false,
+            conventional: false,
+            no_edit: false,
+            amend: false,
+            signoff: false,
+            disable_pre: false,
+            all: false,
+            no_verify: true,
+            author: None,
+        })
+        .await;
         (temp_dir, guard)
     }
 
