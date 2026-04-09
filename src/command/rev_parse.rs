@@ -52,6 +52,9 @@ pub async fn execute(args: RevParseArgs) -> Result<(), String> {
 }
 
 pub async fn execute_safe(args: RevParseArgs, output: &OutputConfig) -> CliResult<()> {
+    if !args.show_toplevel {
+        util::require_repo().map_err(|_| CliError::repo_not_found())?;
+    }
     let result = resolve_rev_parse(&args).await?;
 
     if output.is_json() {

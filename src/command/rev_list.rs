@@ -35,6 +35,7 @@ pub async fn execute(args: RevListArgs) -> Result<(), String> {
 }
 
 pub async fn execute_safe(args: RevListArgs, output: &OutputConfig) -> CliResult<()> {
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
     let result = resolve_rev_list(&args).await?;
 
     if output.is_json() {
