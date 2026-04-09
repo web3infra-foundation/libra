@@ -250,10 +250,8 @@ async fn test_fuse_worktree_add_with_branch_and_create_branch() {
     fs::write(repo_dir.path().join("seed.txt"), "seed\n").expect("write seed");
     let add_output = run_libra_command(&["add", "seed.txt"], repo_dir.path());
     assert!(add_output.status.success(), "add should succeed");
-    let commit_output = run_libra_command(
-        &["commit", "-m", "seed", "--no-verify"],
-        repo_dir.path(),
-    );
+    let commit_output =
+        run_libra_command(&["commit", "-m", "seed", "--no-verify"], repo_dir.path());
     assert!(commit_output.status.success(), "commit should succeed");
 
     if let Err(err) = exec_async(vec![
