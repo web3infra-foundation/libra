@@ -279,7 +279,12 @@ fn load_vault_unseal_key_sync() -> Result<Option<Vec<u8>>, String> {
 }
 
 fn resolve_home_directory() -> Result<PathBuf, String> {
-    for key in ["HOME", "USERPROFILE"] {
+    #[cfg(windows)]
+    let env_keys = ["USERPROFILE", "HOME"];
+    #[cfg(not(windows))]
+    let env_keys = ["HOME", "USERPROFILE"];
+
+    for key in env_keys {
         if let Some(value) = std::env::var_os(key)
             && !value.is_empty()
         {
