@@ -14,6 +14,7 @@ use libra::{
     internal::ai::history::HistoryManager,
     utils::{storage::local::LocalStorage, storage_ext::StorageExt, test},
 };
+use serial_test::serial;
 use tempfile::tempdir;
 
 /// Integration test: Intent and Task objects share the single AI branch (refs/libra/intent).
@@ -24,6 +25,7 @@ use tempfile::tempdir;
 /// 3. Task objects share the same AI branch.
 /// 4. Both object types coexist under a single `refs/libra/intent` ref.
 #[tokio::test]
+#[serial]
 async fn test_intent_flow() {
     // 1. Setup Storage and Repo Environment
     let dir = tempdir().unwrap();
