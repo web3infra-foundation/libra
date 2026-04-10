@@ -603,6 +603,25 @@ pub async fn load_unseal_key_for_scope(scope: &str) -> Option<Vec<u8>> {
     }
 }
 
+/// Load the local unseal key for the repository backed by `db_path`.
+///
+/// This is used when callers need to resolve local secrets for an explicit
+/// repository target instead of the current working directory repository.
+pub async fn load_unseal_key_for_db_path(db_path: &Path) -> Option<Vec<u8>> {
+    if let Ok(repo_id) = repo_id_for_db_path(db_path).await
+        && let Some(hex_key) = load_unseal_key_from_home_for_repo_id(&repo_id).await
+    {
+        return hex::decode(hex_key).ok();
+    }
+
+    use crate::internal::{config::ConfigKv, db::get_db_conn_instance_for_path};
+    let conn = get_db_conn_instance_for_path(db_path).await.ok()?;
+    let entry = ConfigKv::get_with_conn(&conn, "vault.unsealkey")
+        .await
+        .ok()??;
+    hex::decode(entry.value).ok()
+}
+
 /// Load global unseal key from `~/.libra/vault-unseal-key`.
 async fn load_global_unseal_key() -> Option<Vec<u8>> {
     let home = dirs::home_dir()?;
@@ -879,19 +898,47 @@ async fn recover_root_token(unseal_key: &[u8]) -> Result<String> {
 
 /// Resolve the path `~/.libra/vault-keys/<repo-id>` for the current repo.
 async fn unseal_key_path() -> Result<std::path::PathBuf> {
+    let repo_id = current_repo_id().await?;
+    unseal_key_path_for_repo_id(&repo_id)
+}
+
+async fn current_repo_id() -> Result<String> {
     use crate::internal::config::ConfigKv;
-    let home = dirs::home_dir().ok_or_else(|| anyhow!("cannot determine home directory"))?;
-    let repo_id = ConfigKv::get("libra.repoid")
+    ConfigKv::get("libra.repoid")
         .await?
         .map(|e| e.value)
-        .ok_or_else(|| anyhow!("libra.repoid not set — was the repo initialized?"))?;
+        .ok_or_else(|| anyhow!("libra.repoid not set — was the repo initialized?"))
+}
+
+async fn repo_id_for_db_path(db_path: &Path) -> Result<String> {
+    use crate::internal::{config::ConfigKv, db::get_db_conn_instance_for_path};
+    let conn = get_db_conn_instance_for_path(db_path)
+        .await
+        .context("failed to open repository config database")?;
+    ConfigKv::get_with_conn(&conn, "libra.repoid")
+        .await?
+        .map(|e| e.value)
+        .ok_or_else(|| anyhow!("libra.repoid not set — was the repo initialized?"))
+}
+
+fn unseal_key_path_for_repo_id(repo_id: &str) -> Result<std::path::PathBuf> {
+    let home = dirs::home_dir().ok_or_else(|| anyhow!("cannot determine home directory"))?;
     Ok(home.join(".libra").join("vault-keys").join(repo_id))
 }
 
 /// Read the hex-encoded unseal key from `~/.libra/vault-keys/<repo-id>`.
 async fn load_unseal_key_from_home() -> Option<String> {
     let path = unseal_key_path().await.ok()?;
-    tokio::fs::read_to_string(&path)
+    load_unseal_key_from_home_for_repo_id_path(&path).await
+}
+
+async fn load_unseal_key_from_home_for_repo_id(repo_id: &str) -> Option<String> {
+    let path = unseal_key_path_for_repo_id(repo_id).ok()?;
+    load_unseal_key_from_home_for_repo_id_path(&path).await
+}
+
+async fn load_unseal_key_from_home_for_repo_id_path(path: &Path) -> Option<String> {
+    tokio::fs::read_to_string(path)
         .await
         .ok()
         .map(|s| s.trim().to_string())
@@ -942,4 +989,35 @@ async fn remove_unseal_key_from_home() -> Result<()> {
             .context("failed to remove unseal key file")?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use super::load_unseal_key_for_db_path;
+    use crate::internal::{
+        config::ConfigKv,
+        db::{create_database, reset_db_conn_instance_for_path},
+    };
+
+    #[tokio::test]
+    async fn load_unseal_key_for_db_path_falls_back_to_legacy_db_key_without_repo_id() {
+        let temp = tempdir().expect("failed to create temp dir");
+        let db_path = temp.path().join("libra.db");
+        let expected = vec![0x12, 0x34, 0x56, 0x78];
+
+        let conn = create_database(db_path.to_string_lossy().as_ref())
+            .await
+            .expect("failed to create test database");
+        ConfigKv::set_with_conn(&conn, "vault.unsealkey", &hex::encode(&expected), false)
+            .await
+            .expect("failed to seed legacy vault.unsealkey");
+        drop(conn);
+
+        let actual = load_unseal_key_for_db_path(&db_path).await;
+        assert_eq!(actual, Some(expected));
+
+        reset_db_conn_instance_for_path(&db_path).await;
+    }
 }
