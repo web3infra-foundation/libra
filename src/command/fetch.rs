@@ -278,8 +278,25 @@ fn load_vault_unseal_key_sync() -> Result<Option<Vec<u8>>, String> {
     }
 }
 
+fn resolve_home_directory() -> Result<PathBuf, String> {
+    #[cfg(windows)]
+    let env_keys = ["USERPROFILE", "HOME"];
+    #[cfg(not(windows))]
+    let env_keys = ["HOME", "USERPROFILE"];
+
+    for key in env_keys {
+        if let Some(value) = std::env::var_os(key)
+            && !value.is_empty()
+        {
+            return Ok(PathBuf::from(value));
+        }
+    }
+
+    dirs::home_dir().ok_or_else(|| "cannot determine home directory".to_string())
+}
+
 fn ensure_vault_ssh_tmp_dir() -> Result<PathBuf, String> {
-    let home = dirs::home_dir().ok_or_else(|| "cannot determine home directory".to_string())?;
+    let home = resolve_home_directory()?;
     let tmp_dir = home.join(".libra").join("tmp");
     std::fs::create_dir_all(&tmp_dir).map_err(|e| {
         format!(
