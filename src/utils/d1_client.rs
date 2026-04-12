@@ -597,7 +597,8 @@ mod tests {
         };
         assert_eq!(err.code, 1101);
         assert!(
-            err.message.contains("failed to connect to global config"),
+            err.message.contains("failed to open config database")
+                || err.message.contains("failed to connect to global config"),
             "unexpected error: {}",
             err.message
         );
