@@ -127,6 +127,7 @@ struct CommitFilter {
     since: Option<i64>,
     until: Option<i64>,
     paths: Vec<PathBuf>,
+    grep: Option<String>,
 }
 
 impl CommitFilter {
@@ -135,12 +136,14 @@ impl CommitFilter {
         since: Option<i64>,
         until: Option<i64>,
         paths: Vec<PathBuf>,
+        grep: Option<String>,
     ) -> Self {
         Self {
             author: author.map(|s| s.to_lowercase()),
             since,
             until,
             paths,
+            grep,
         }
     }
 
@@ -166,6 +169,12 @@ impl CommitFilter {
             && ts > until
         {
             return false;
+        }
+
+        if let Some(pattern) = &self.grep {
+            if !pattern.is_empty() && !commit.message.contains(pattern.as_str()) {
+                return false;
+            }
         }
 
         true
@@ -348,7 +357,13 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
         .transpose()
         .map_err(|e| CliError::fatal(e.to_string()))?;
     let path_filters: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
-    let filter = CommitFilter::new(args.author.clone(), since, until, path_filters.clone());
+    let filter = CommitFilter::new(
+        args.author.clone(),
+        since,
+        until,
+        path_filters.clone(),
+        args.grep.clone(),
+    );
 
     let decorate_option = determine_decorate_option(&args)
         .await
@@ -383,18 +398,19 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
         .to_string();
 
     let mut reachable_commits = get_reachable_commits(commit_hash.clone(), None).await?;
-    // default sort with signature time
-    reachable_commits.sort_by_key(|b| std::cmp::Reverse(b.committer.timestamp));
 
-    // Apply grep filtering
+    // Save full history for abbreviation length calculation (before filtering)
+    let full_history = reachable_commits.clone();
+
+    // Apply grep filtering before sorting (more efficient)
     if let Some(pattern) = &args.grep {
         if !pattern.is_empty() {
-            reachable_commits = reachable_commits
-                .into_iter()
-                .filter(|commit| commit.message.contains(pattern))
-                .collect();
+            reachable_commits.retain(|commit| commit.message.contains(pattern));
         }
     }
+
+    // default sort with signature time
+    reachable_commits.sort_by_key(|b| std::cmp::Reverse(b.committer.timestamp));
 
     if output.quiet {
         return Ok(());
@@ -419,8 +435,8 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     } else {
         None
     };
-    // Decide abbreviated hash length
-    let default_abbrev = util::get_min_unique_hash_length(&reachable_commits).max(7);
+    // Decide abbreviated hash length - use full history to ensure uniqueness
+    let default_abbrev = util::get_min_unique_hash_length(&full_history).max(7);
     let abbrev_len = if args.no_abbrev_commit {
         full_hash_len
     } else if let Some(n) = args.abbrev {
@@ -995,17 +1011,17 @@ mod tests {
     #[test]
     fn test_log_args_name_only() {
         // Test that the --name-only parameter is parsed correctly
-        let args = LogArgs::parse_from(["libra", "log", "--name-only"]);
+        let args = LogArgs::parse_from(["libra", "--name-only"]);
         assert!(args.name_only);
 
-        let args = LogArgs::parse_from(["libra", "log"]);
+        let args = LogArgs::parse_from(["libra"]);
         assert!(!args.name_only);
     }
 
     #[test]
     fn test_name_only_precedence_over_patch() {
         // Test --name-only takes precedence over --patch
-        let args = LogArgs::parse_from(["libra", "log", "--name-only", "--patch"]);
+        let args = LogArgs::parse_from(["libra", "--name-only", "--patch"]);
         assert!(args.name_only);
         assert!(args.patch);
         // In the execute function, patch should be ignored when name_only is true
@@ -1014,7 +1030,7 @@ mod tests {
     #[test]
     fn test_name_only_with_oneline() {
         // Test --name-only and --oneline combination
-        let args = LogArgs::parse_from(["libra", "log", "--name-only", "--oneline"]);
+        let args = LogArgs::parse_from(["libra", "--name-only", "--oneline"]);
         assert!(args.name_only);
         assert!(args.oneline);
     }
@@ -1022,7 +1038,7 @@ mod tests {
     #[test]
     fn test_name_only_with_number_limit() {
         // Test --name-only combined with quantity limit
-        let args = LogArgs::parse_from(["libra", "log", "--name-only", "-n", "5"]);
+        let args = LogArgs::parse_from(["libra", "--name-only", "-n", "5"]);
         assert!(args.name_only);
         assert_eq!(args.number, Some(5));
     }
@@ -1047,23 +1063,22 @@ mod tests {
     #[test]
     fn test_complex_arg_combinations() {
         // Test multiple parameter combinations
-        let args = LogArgs::parse_from(["libra", "log", "--name-only", "--oneline", "-n", "10"]);
+        let args = LogArgs::parse_from(["libra", "--name-only", "--oneline", "-n", "10"]);
         assert!(args.name_only);
         assert!(args.oneline);
         assert_eq!(args.number, Some(10));
 
         let args =
-            LogArgs::parse_from(["libra", "log", "--name-only", "src/main.rs", "src/lib.rs"]);
+            LogArgs::parse_from(["libra", "--name-only", "src/main.rs", "src/lib.rs"]);
         assert!(args.name_only);
         // Update expected pathspec value to include "log"
-        assert_eq!(args.pathspec, vec!["log", "src/main.rs", "src/lib.rs"]);
+        assert_eq!(args.pathspec, vec!["src/main.rs", "src/lib.rs"]);
     }
 
     #[test]
     fn test_new_filters_parsing() {
         let args = LogArgs::parse_from([
             "libra",
-            "log",
             "--author",
             "lvy",
             "--since",
@@ -1078,7 +1093,7 @@ mod tests {
 
     #[test]
     fn test_name_status_parsing() {
-        let args = LogArgs::parse_from(["libra", "log", "--name-status"]);
+        let args = LogArgs::parse_from(["libra", "--name-status"]);
         assert!(args.name_status);
         assert!(!args.name_only);
     }
@@ -1109,6 +1124,7 @@ mod tests {
             Some(1_766_000_000),
             Some(1_766_200_000),
             Vec::new(),
+            None,
         );
 
         assert!(filter.matches(&commit, None).await.unwrap());
@@ -1117,7 +1133,7 @@ mod tests {
     // Test parameter mutual exclusion logic
     #[test]
     fn test_parameter_mutual_exclusion() {
-        let args = LogArgs::parse_from(["libra", "log", "--name-only", "--patch"]);
+        let args = LogArgs::parse_from(["libra", "--name-only", "--patch"]);
 
         let name_status = args.name_status;
         let name_only = args.name_only && !name_status;
@@ -1126,7 +1142,7 @@ mod tests {
         assert!(name_only);
         assert!(!patch);
 
-        let args = LogArgs::parse_from(["libra", "log", "--name-status", "--patch"]);
+        let args = LogArgs::parse_from(["libra", "--name-status", "--patch"]);
         let name_status = args.name_status;
         let name_only = args.name_only && !name_status;
         let patch = args.patch && !name_only && !name_status;
@@ -1138,42 +1154,47 @@ mod tests {
     // Test grep parameter parsing
     #[test]
     fn test_log_args_grep() {
-        let args = LogArgs::parse_from(["libra", "log", "--grep", "fix"]);
+        let args = LogArgs::parse_from(["libra", "--grep", "fix"]);
         assert_eq!(args.grep, Some("fix".to_string()));
+        assert!(args.pathspec.is_empty());
 
-        let args = LogArgs::parse_from(["libra", "log"]);
+        let args = LogArgs::parse_from(["libra"]);
         assert_eq!(args.grep, None);
+        assert!(args.pathspec.is_empty());
     }
 
     // Test grep combined with other arguments
     #[test]
     fn test_grep_with_other_args() {
-        let args =
-            LogArgs::parse_from(["libra", "log", "--grep", "feature", "--oneline", "-n", "5"]);
+        let args = LogArgs::parse_from(["libra", "--grep", "feature", "--oneline", "-n", "5"]);
         assert_eq!(args.grep, Some("feature".to_string()));
         assert!(args.oneline);
         assert_eq!(args.number, Some(5));
+        assert!(args.pathspec.is_empty());
     }
 
     // Test case-sensitive matching
     #[test]
     fn test_grep_case_sensitive() {
-        let args = LogArgs::parse_from(["libra", "log", "--grep", "FIX"]);
+        let args = LogArgs::parse_from(["libra", "--grep", "FIX"]);
         assert_eq!(args.grep, Some("FIX".to_string()));
+        assert!(args.pathspec.is_empty());
     }
 
     // Test empty string grep
     #[test]
     fn test_grep_empty_string() {
-        let args = LogArgs::parse_from(["libra", "log", "--grep", ""]);
+        let args = LogArgs::parse_from(["libra", "--grep", ""]);
         assert_eq!(args.grep, Some("".to_string()));
+        assert!(args.pathspec.is_empty());
     }
 
     // Test graph with grep combination
     #[test]
     fn test_graph_with_grep() {
-        let args = LogArgs::parse_from(["libra", "log", "--graph", "--grep", "fix"]);
+        let args = LogArgs::parse_from(["libra", "--graph", "--grep", "fix"]);
         assert!(args.graph);
         assert_eq!(args.grep, Some("fix".to_string()));
+        assert!(args.pathspec.is_empty());
     }
 }

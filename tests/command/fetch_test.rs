@@ -2,6 +2,8 @@
 //!
 //! **Layer:** L1 (most tests). `test_fetch_invalid_remote` is L2 — requires `LIBRA_TEST_GITHUB_TOKEN`.
 
+use std::path::Path;
+
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
 use std::{
