@@ -295,14 +295,16 @@ Immutable incremental context fact.
 - replaces the old mutable `ContextPipeline` runtime concept
 - may be attached to intent analysis, planning, execution, or step-level
   context
+- readonly provider analysis in Phase 0 / Phase 1 should also emit
+  `ContextFrame`
 - Libra keeps only the current `live_context_window`
 
 ## Workflow Mapping
 
 | Phase | Libra runtime / projection | Snapshot writes (`git-internal`) | Event writes (`git-internal`) |
 |---|---|---|---|
-| Phase 0 | Thread bootstrap, Scheduler bootstrap, live context bootstrap | `Intent`, optional `ContextSnapshot` | none |
-| Phase 1 | selected plan head, ready queue, checkpoints | `Plan`, `Task` | none |
+| Phase 0 | Thread bootstrap, current intent revision, IntentSpec review, live context bootstrap | `Intent`, optional `ContextSnapshot` | `ToolInvocation`, `ContextFrame`, optional terminal `Decision` / `IntentEvent` |
+| Phase 1 | selected plan head, current plan heads, plan review, ready queue preview | `Plan`, `Task` | `ToolInvocation`, `ContextFrame`, optional terminal `Decision` / `IntentEvent` |
 | Phase 2 | live context window, retry / replan loop, staging area | `Run`, `PatchSet`, `Provenance` | `TaskEvent`, `RunEvent`, `PlanStepEvent`, `ToolInvocation`, `Evidence`, `ContextFrame`, `RunUsage` |
 | Phase 3 | audit indexing, release candidate view | optional final `ContextSnapshot` | `Evidence`, `Decision`, terminal `TaskEvent` / `RunEvent` / `IntentEvent` |
 | Phase 4 | review UI, current thread pointers | none | `Decision`, optional terminal `IntentEvent` |

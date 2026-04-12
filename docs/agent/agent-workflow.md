@@ -17,7 +17,7 @@ Libra split described in `docs/agent.md`.
   revisioned structure.
 - `git-internal` event objects store append-only execution facts.
 - Libra owns mutable runtime state: scheduler queues, thread /
-  workspace state, selected plan head, live context window, and reverse
+  workspace state, selected plan set heads, live context window, and reverse
   indexes.
 
 The workflow must not depend on rewriting parent snapshot objects to
@@ -27,18 +27,18 @@ append runtime history.
 
 | Phase | Libra runtime / projection | Snapshot writes (`git-internal`) | Event writes (`git-internal`) |
 |---|---|---|---|
-| Phase 0 | Thread / Workspace setup, live context bootstrap | `Intent`, optional `ContextSnapshot` | none |
-| Phase 1 | Scheduler plan selection, ready queue, checkpoints | `Plan`, `Task` | none |
-| Phase 2 | live context window, staging area, retry / replan loop | `Run`, `PatchSet`, `Provenance` | `TaskEvent`, `RunEvent`, `PlanStepEvent`, `ToolInvocation`, `Evidence`, `ContextFrame`, `RunUsage` |
-| Phase 3 | audit indexing, release candidate view | optional final `ContextSnapshot` | `Evidence`, `Decision`, terminal `TaskEvent` / `RunEvent` / `IntentEvent` |
+| Phase 0 | Thread bootstrap, current intent revision, IntentSpec review, live context bootstrap | `Intent`, optional `ContextSnapshot` | `ToolInvocation`, `ContextFrame`, optional terminal `Decision` / `IntentEvent` |
+| Phase 1 | selected plan set heads, current plan heads, plan-set review, ready queue preview | `Plan`, `Task` | `ToolInvocation`, `ContextFrame`, optional terminal `Decision` / `IntentEvent` |
+| Phase 2 | live context window, composite DAG staging area, retry / replan / rework loop | `Run`, `PatchSet`, `Provenance` | `TaskEvent`, `RunEvent`, `PlanStepEvent`, `ToolInvocation`, `Evidence`, `ContextFrame`, `RunUsage` |
+| Phase 3 | audit indexing, release candidate view, test-plan sufficiency routing | optional final `ContextSnapshot` | `Evidence`, `Decision`, terminal `TaskEvent` / `RunEvent` / `IntentEvent` |
 | Phase 4 | review UI, current thread / workspace pointers | none | `Decision`, optional terminal `IntentEvent` |
 
 ## Workflow Overview
 
 ```mermaid
 graph TD
-    UserQuery[User Query] --> Phase0[Phase 0: Input Preprocessing]
-    Phase0 --> Phase1[Phase 1: Planning]
+    UserQuery[User Query] --> Phase0[Phase 0: Intent Drafting & Review]
+    Phase0 --> Phase1[Phase 1: Plan Set Drafting & Review]
     Phase1 --> Phase2[Phase 2: Execution]
     Phase2 --> Phase3[Phase 3: Validation]
     Phase3 --> Phase4[Phase 4: Release]
@@ -46,34 +46,45 @@ graph TD
 
 ```text
 ══════════════════════════════════════════════════════════════════
- Phase 0: Input Preprocessing
+ Phase 0: Intent Drafting & Review
  ══════════════════════════════════════════════════════════════════
  User Query
  ↓
- ├─ Extract Intent, Constraints, Quality Goals
- ├─ Identify Risk Level
- ├─ Persist Intent snapshot (immutable request / spec revision)
- ├─ Create initial ContextSnapshot if a stable baseline is needed
- └─ Initialize Libra runtime context
-      - Thread / Workspace projection
+ ├─ Normalize input into local IntentSpec Draft
+ ├─ Persist root draft Intent or draft revision
+ ├─ Call provider to refine IntentSpec
+ │    - readonly tools only
+ │    - ToolInvocation / ContextFrame are persisted
+ ├─ Render IntentSpec Markdown review
+ │    - Confirm / Modify / Regenerate / Cancel
+ ├─ Optionally persist initial ContextSnapshot
+ └─ Initialize / refresh Libra runtime context
+      - Thread projection
+      - Scheduler bootstrap
       - live context window
       - reverse indexes for retrieval
 
 ══════════════════════════════════════════════════════════════════
- Phase 1: Planning
+ Phase 1: Plan Set Drafting & Review
  ══════════════════════════════════════════════════════════════════
- Intent[S] + runtime context[Libra]
+ confirmed Intent[S] + runtime context[Libra]
  ↓
  [Scheduler]
+ ├─ Call provider to generate plan set
+ │    - readonly tools only
+ │    - ToolInvocation / ContextFrame are persisted
  ├─ Create Plan snapshot(s)
  │    - Plan.parents expresses replan / merge history
  │    - Plan.steps captures immutable step structure
+ │    - At least one `implementation` plan and one `validation/test` plan
  ├─ Create Task snapshots for delegated work units
+ ├─ Render Plan Set Markdown review
+ │    - Execute / Modify Plan / Revise Intent / Cancel
  └─ Libra derives:
-      - ready queue
-      - parallel groups
+      - selected plan set heads
+      - current plan heads
+      - ready queue preview
       - checkpoints
-      - selected plan head
 
 ══════════════════════════════════════════════════════════════════
  Phase 2: Execution
@@ -83,6 +94,7 @@ graph TD
  │    - load prerequisite outputs
  │    - merge selected ContextFrame records
  │    - retrieve code/docs/history
+ │    - provision sandbox + task worktree
  │    - stage sandbox state
  │
  ├─ Persist Run snapshot + Provenance snapshot
@@ -148,7 +160,7 @@ execution view over immutable objects.
 
 | Field | Type | Description |
 |---|---|---|
-| `selected_plan_id` | `Option<Uuid>` | Current canonical Plan head in the UI. |
+| `selected_plan_ids` | `Vec<Uuid>` | Current canonical plan set heads in the UI, at minimum `implementation` + `validation/test`. |
 | `current_plan_heads` | `Vec<Uuid>` | Active plan leaves under review or execution. |
 | `active_task_id` | `Option<Uuid>` | Task currently emphasized by the scheduler / UI. |
 | `active_run_id` | `Option<Uuid>` | Live execution attempt, if any. |
@@ -162,7 +174,7 @@ Thread[L] --------latest_intent_id--> Intent[S]
 Thread[L] --------intents[].intent_id> Intent[S]
 Thread[L] --------intents[].is_head--> marks current branch heads
 
-Scheduler[L] ----selected_plan_id---> Plan[S]
+Scheduler[L] ----selected_plan_ids--> Plan[S]
 Scheduler[L] ----current_plan_heads-> Plan[S]
 Scheduler[L] ----active_task_id-----> Task[S]
 Scheduler[L] ----active_run_id------> Run[S]
@@ -178,43 +190,54 @@ Scheduler[L] ----live_context_window> ContextFrame[E]
 3. Missing projection rows must not block read access; Libra can rebuild
    from object history.
 
-## Phase 0: Input Preprocessing
+## Phase 0: Intent Drafting & Review
 
-The entry point transforms raw user input into a structured request and
-initial runtime context.
+The entry point transforms raw user input into a reviewed `IntentSpec`,
+not a final execution plan.
 
-1. **Intent Extraction**:
+1. **Local Draft Assembly**:
    - Analyze the `User Query` to identify the user goal, constraints,
-     and quality requirements.
-   - Produce `IntentSpec { goal, constraints, risk_level }`.
+     quality requirements, and initial risk view.
+   - Produce a local `IntentSpec Draft`.
 
-2. **Intent Snapshot Write**:
-   - Persist an immutable `Intent` snapshot for the initial request or
-     analyzed spec revision.
-   - If the request is refined later, create a new `Intent` revision and
-     link it through `Intent.parents`.
+2. **Intent Snapshot Bootstrap**:
+   - New threads persist a root draft `Intent` snapshot first; its UUID
+     becomes the canonical `thread_id`.
+   - Refinements persist new `Intent` revisions linked through
+     `Intent.parents`.
 
-3. **Risk Assessment**:
-   - Evaluate impact and sensitivity.
-   - Store the active risk view in Libra; terminal workflow outcomes are
-     later captured by `IntentEvent`.
+3. **Provider-Assisted Intent Refinement**:
+   - Send the draft + feedback to the provider to refine `IntentSpec`.
+   - Provider may call readonly tools only.
+   - Readonly analysis facts are persisted as `ToolInvocation` and
+     `ContextFrame` events.
 
-4. **Environment Setup**:
-   - Create an isolated sandbox.
+4. **Intent Review Loop**:
+   - Render the provider result as Markdown for developer review.
+   - Developer may `Confirm`, `Modify`, `Regenerate`, or `Cancel`.
+   - `Modify` and `Regenerate` stay inside Phase 0 and create new
+     `Intent` revisions.
+   - `Cancel` appends terminal `Decision` / `IntentEvent` and ends the
+     thread before planning.
+
+5. **Environment Setup**:
    - Persist an initial `ContextSnapshot` only when a stable baseline is
      worth keeping.
-   - Initialize Libra Thread state, Scheduler state, reverse indexes,
-     and the live context window. This replaces the old mutable
-     `ContextPipeline` model.
+   - Initialize or refresh Libra Thread state, Scheduler state, reverse
+     indexes, and the live context window using the confirmed `Intent`.
 
-## Phase 1: Planning
+## Phase 1: Plan Drafting & Review
 
-The Scheduler translates the current `Intent` revision into immutable
-plan and task definitions, while Libra derives the mutable scheduling
+The Scheduler translates the confirmed `Intent` revision into reviewed
+plan and task definitions, while Libra derives the mutable planning
 view.
 
 1. **Plan Construction**:
-   - Read the active `Intent` snapshot and relevant context material.
+   - Read the confirmed `Intent` snapshot and relevant context material.
+   - Call the provider to generate a plan candidate; provider may call
+     readonly tools only.
+   - Persist readonly analysis facts as `ToolInvocation` /
+     `ContextFrame`.
    - Persist a base `Plan` snapshot:
      - `Plan.intent` links the Plan to its `Intent`.
      - `Plan.parents` records replan or merge history.
@@ -228,25 +251,45 @@ view.
    - `Task.dependencies`, `Task.parent`, `Task.intent`, and
      `Task.origin_step_id` remain immutable provenance links.
 
-3. **Scheduler Projection**:
-   - Libra derives the runtime Task graph, parallel groups, checkpoints,
-     ready queue, and selected plan head from `Plan` + `Task`
-     snapshots.
+3. **Plan Review Loop**:
+   - Render the current `Plan` as Markdown for developer review.
+   - Developer may `Execute`, `Modify Plan`, `Revise Intent`, or
+     `Cancel`.
+   - `Modify Plan` stays inside Phase 1 and creates new `Plan` / `Task`
+     revisions.
+   - `Revise Intent` returns to Phase 0 to create a new `Intent`
+     revision.
+   - `Cancel` appends terminal `Decision` / `IntentEvent` and ends the
+     thread before execution.
+
+4. **Scheduler Projection**:
+   - Libra derives the runtime Task graph, checkpoints, ready queue
+     preview, and selected plan set heads from `Plan` + `Task` snapshots.
    - There is no mutable `ExecutionPlan` object in `git-internal`.
 
 ## Phase 2: Execution
 
-The Scheduler executes ready Tasks in topological order. Independent
-Tasks can run in parallel, but all mutable coordination remains in
-Libra.
+The Scheduler executes ready Tasks in topological order across a
+composite DAG built from the selected implementation and validation/test
+plans. Independent Tasks can run in parallel, but all mutable
+coordination remains in Libra.
 
 ### For each ready Task (or parallel group)
+
+0. **Composite Plan Set**:
+   - Phase 2 always starts with at least two selected plans:
+     `implementation` and `validation/test`.
+   - Libra compiles both plans into one composite DAG with explicit
+     cross-plan dependencies so work and testing can run in parallel when
+     safe.
 
 1. **Runtime Context Preparation**:
    - Load prerequisite outputs from immutable `PatchSet`,
      `ContextSnapshot`, and `ContextFrame` records.
    - Merge branch-local context in Libra when parallel branches
      converge.
+   - Provision task-local `Sandbox` and `Worktree` through Libra-owned
+     execution environment services.
    - Detect conflicts in Libra. Auto-resolve when safe; otherwise
      suspend for human review.
 
@@ -257,10 +300,13 @@ Libra.
      start.
 
 3. **Code Generation and Tool Use**:
-   - The Coder Agent invokes tools inside the sandbox.
+   - The Coder Agent invokes tools inside the Libra-provided sandbox and
+     task worktree.
    - Each tool call is stored as a `ToolInvocation` event.
    - New incremental context is stored as immutable `ContextFrame`
      events, not by mutating a shared pipeline object.
+   - Sandbox execution facts and worktree sync results are captured by
+     Libra and persisted into the immutable audit trail.
 
 4. **Verification Loop**:
    - Static checks, tests, logic review, and security checks produce
@@ -281,12 +327,20 @@ Libra.
 6. **Usage and Cost Capture**:
    - Persist `RunUsage` after the attempt or batch completes.
 
+7. **Phase 2 Rework Loop**:
+   - If Phase 3 reports that the validation/test plan is insufficient,
+     Libra routes back into Phase 2 with validator evidence.
+   - Libra may append new `Plan` / `Task` revisions for implementation or
+     validation/test work under the already confirmed Intent and rebuild
+     the composite DAG before re-running execution.
+
 ### Incremental Integration (Post-Batch)
 
 After a parallel group completes:
 
 1. **Batch Merge in Libra**:
-   - Libra merges staging PatchSets into the main sandbox view.
+   - Libra merges staging PatchSets from task worktrees into the main
+     sandbox view.
    - Libra validates interface contracts and runs batch integration
      tests.
 
@@ -301,6 +355,12 @@ After a parallel group completes:
 Once all planned work is complete, the system performs release-level
 validation and assembles the final audit chain.
 
+Boundary rule:
+- If the system is still executing a task to produce or repair a
+  candidate result, it remains in Phase 2.
+- Once the system starts evaluating the aggregated release candidate as
+  a whole, it has entered Phase 3.
+
 1. **Global Validation**:
    - Run end-to-end tests, performance benchmarks, and compatibility
      checks.
@@ -309,8 +369,13 @@ validation and assembles the final audit chain.
 2. **Security Audit**:
    - Run full SAST, full SCA, and focused security / compliance checks.
    - Record findings as `Evidence`.
-   - If issues are found, Libra routes control back to Phase 2 and
-     persists any resulting replan as new `Plan` snapshots.
+   - If issues are caused by insufficient testing or validator-detected
+     fixable gaps, Libra writes Phase 2 rework facts and re-enters the
+     Scheduler through Phase 2.
+   - If issues require broader replanning, Libra writes replan facts and
+     re-enters through Phase 1.
+   - If issues are blocking, Libra preserves the candidate and enters
+     Phase 4 human review instead of silently continuing execution.
 
 3. **Final Snapshot / Event Assembly**:
    - Persist a final `ContextSnapshot` when a stable release candidate
