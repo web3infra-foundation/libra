@@ -51,6 +51,39 @@ fn test_rev_parse_abbrev_ref_head_returns_branch_name() {
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "main");
 }
 
+#[tokio::test]
+#[serial]
+async fn test_rev_parse_abbrev_ref_remote_tracking_ref_returns_short_name() {
+    let repo = tempdir().expect("failed to create repository root");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = ChangeDirGuard::new(repo.path());
+
+    commit::execute(CommitArgs {
+        message: Some("base".to_string()),
+        allow_empty: true,
+        disable_pre: true,
+        no_verify: false,
+        ..Default::default()
+    })
+    .await;
+
+    let head = Head::current_commit().await.expect("expected HEAD commit");
+    Branch::update_branch(
+        "refs/remotes/origin/main",
+        &head.to_string(),
+        Some("origin"),
+    )
+    .await
+    .expect("failed to create remote-tracking ref");
+
+    let output = run_libra_command(&["rev-parse", "--abbrev-ref", "origin/main"], repo.path());
+    assert_cli_success(&output, "rev-parse --abbrev-ref origin/main");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "origin/main"
+    );
+}
+
 #[test]
 fn test_rev_parse_show_toplevel_rejects_spec() {
     let repo = create_committed_repo_via_cli();

@@ -125,12 +125,19 @@ async fn resolve_abbrev_ref(spec: &str) -> CliResult<String> {
     if let Some((remote, branch_name)) = spec.split_once('/')
         && !remote.is_empty()
         && !branch_name.is_empty()
-        && Branch::find_branch_result(branch_name, Some(remote))
+    {
+        let qualified_remote_ref = format!("refs/remotes/{remote}/{branch_name}");
+        if Branch::find_branch_result(&qualified_remote_ref, Some(remote))
             .await
             .map_err(|error| map_symbolic_ref_resolution_error(spec, error))?
             .is_some()
-    {
-        return Ok(spec.to_string());
+            || Branch::find_branch_result(branch_name, Some(remote))
+                .await
+                .map_err(|error| map_symbolic_ref_resolution_error(spec, error))?
+                .is_some()
+        {
+            return Ok(spec.to_string());
+        }
     }
 
     Err(CliError::failure(format!("not a symbolic ref: '{spec}'"))
