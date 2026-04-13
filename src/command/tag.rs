@@ -529,7 +529,7 @@ mod tests {
         parse_async(Some(&["libra", "add", "test.txt"]))
             .await
             .unwrap();
-        parse_async(Some(&["libra", "commit", "-m", "Initial commit"]))
+        parse_async(Some(&["libra", "commit", "--no-verify", "-m", "Initial commit"]))
             .await
             .unwrap();
         (temp_dir, guard)
