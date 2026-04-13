@@ -107,7 +107,7 @@ async fn resolve_rev_parse(args: &RevParseArgs) -> CliResult<RevParseOutput> {
 }
 
 async fn resolve_abbrev_ref(spec: &str) -> CliResult<String> {
-    if spec.eq_ignore_ascii_case("HEAD") {
+    if spec == "HEAD" {
         return match Head::current_result().await {
             Ok(Head::Branch(name)) => Ok(name),
             Ok(Head::Detached(_)) => Ok("HEAD".to_string()),
@@ -122,22 +122,14 @@ async fn resolve_abbrev_ref(spec: &str) -> CliResult<String> {
         return Ok(branch.name);
     }
 
-    if let Some((remote, branch_name)) = spec.split_once('/')
-        && !remote.is_empty()
-        && !branch_name.is_empty()
-    {
-        let qualified_remote_ref = format!("refs/remotes/{remote}/{branch_name}");
-        if Branch::find_branch_result(&qualified_remote_ref, Some(remote))
+    if spec.contains('/')
+        && Branch::search_branch_result(spec)
             .await
             .map_err(|error| map_symbolic_ref_resolution_error(spec, error))?
-            .is_some()
-            || Branch::find_branch_result(branch_name, Some(remote))
-                .await
-                .map_err(|error| map_symbolic_ref_resolution_error(spec, error))?
-                .is_some()
-        {
-            return Ok(spec.to_string());
-        }
+            .into_iter()
+            .any(|branch| branch.remote.is_some())
+    {
+        return Ok(spec.to_string());
     }
 
     Err(CliError::failure(format!("not a symbolic ref: '{spec}'"))
