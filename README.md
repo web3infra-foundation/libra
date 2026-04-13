@@ -35,6 +35,8 @@ Commands:
   rebase       Reapply commits on top of another base tip
   merge        Merge changes
   reset        Reset current HEAD to specified state
+  rev-parse    Parse and normalize revision names and repository paths
+  rev-list     List commit objects reachable from a revision
   cherry-pick  Apply the changes introduced by some existing commits
   push         Update remote refs along with associated objects
   fetch        Download objects and refs from another repository
@@ -537,8 +539,6 @@ The following Git top-level commands are currently **not implemented** in Libra 
 - `maintenance` – periodic maintenance tasks
 - `cat-file` – display raw object contents
 - `hash-object` – compute object hash for raw data
-- `rev-parse` – resolve revisions, refs, and object IDs
-- `rev-list` – list reachable commits
 - `describe` – human-readable description based on tags
 - `show-ref` – list all refs
 - `symbolic-ref` – read/write symbolic refs
