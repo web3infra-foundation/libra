@@ -39,6 +39,10 @@ pub mod shortlog;
 pub mod show;
 pub mod show_ref;
 pub mod tag;
+#[cfg(all(unix, feature = "worktree-fuse"))]
+#[path = "worktree-fuse.rs"]
+pub mod worktree;
+#[cfg(not(all(unix, feature = "worktree-fuse")))]
 pub mod worktree;
 
 pub mod stash;
