@@ -5,11 +5,16 @@
 
 pub mod contracts;
 pub mod environment;
+pub mod hardening;
 pub mod phase3;
 pub mod phase4;
 pub mod prompt_builders;
 
 pub use contracts::{PromptPackage, WorkflowPhase};
+pub use hardening::{
+    AuditEvent, AuditSink, BoundaryDecision, InMemoryAuditSink, PrincipalContext, PrincipalRole,
+    SecretRedactor, ToolBoundaryPolicy, ToolOperation,
+};
 pub use phase3::{
     ArtifactLedger, ValidationOutcome, ValidationReport, ValidationReportStore, ValidationStage,
     ValidationStageResult, ValidatorEngine,
