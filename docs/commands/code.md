@@ -9,14 +9,14 @@ libra code
 libra code --web-only [-p <PORT>] [--host <HOST>]
 libra code --stdio
 libra code --provider <PROVIDER> [--model <MODEL>]
-libra code --resume [--fork-session]
+libra code --resume
 ```
 
 ## Description
 
 `libra code` starts an interactive coding session that pairs a human developer with an AI agent. The default mode launches a terminal UI (TUI) built on ratatui/crossterm with a background web server. Two alternative modes are available: `--web-only` runs the web server without the TUI (useful for browser access or remote hosting), and `--stdio` runs an MCP server over standard input/output for integration with AI clients like Claude Desktop.
 
-The command supports eight AI provider backends (Gemini, OpenAI, Anthropic, Claude Code, DeepSeek, Zhipu, Ollama, Codex) and three operating contexts (dev, review, research) that tune the agent's behavior for different workflows. Sessions can be persisted and resumed, including forking a resumed session into a new branch of conversation.
+The command supports seven AI provider backends (Gemini, OpenAI, Anthropic, DeepSeek, Zhipu, Ollama, Codex) and three operating contexts (dev, review, research) that tune the agent's behavior for different workflows. Sessions can be persisted and resumed with Libra's canonical `--resume` flow.
 
 A sandboxed tool-execution layer enforces approval policies that control when the agent can run shell commands, apply patches, or perform other potentially destructive operations.
 
@@ -33,10 +33,6 @@ A sandboxed tool-execution layer enforces approval policies that control when th
 | Temperature | | `--temperature` | provider default | Sampling temperature for generation. |
 | Context | | `--context` | none | Operating context: `dev` (alias `development`), `review` (alias `code-review`), `research` (alias `explore`). |
 | Resume | | `--resume` | off | Resume the most recent session. |
-| Resume session | | `--resume-session <UUID>` | none | Resume a specific session by UUID. |
-| Fork session | | `--fork-session` | off | Fork into a new session when resuming. |
-| Session ID | | `--session-id <UUID>` | auto-generated | Use an explicit session UUID on the first turn. |
-| Resume at | | `--resume-at <UUID>` | none | Resume only up to a specific assistant message UUID. |
 | Approval policy | | `--approval-policy` | `on-request` | Tool approval policy (see Approval Policies below). |
 | MCP port | | `--mcp-port` | `6789` | MCP server listen port. |
 | Stdio | | `--stdio` / `--mcp-stdio` | off | Run MCP over stdio. Conflicts with `--web-only`. |
@@ -52,7 +48,6 @@ A sandboxed tool-execution layer enforces approval policies that control when th
 | `gemini` | Google Gemini (default: gemini-2.5-flash) | `GEMINI_API_KEY` | -- |
 | `openai` | OpenAI (default: gpt-4o-mini) | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
 | `anthropic` | Anthropic (default: claude-3.5-sonnet) | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
-| `claudecode` | Claude Code managed provider | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
 | `deepseek` | DeepSeek | `DEEPSEEK_API_KEY` | -- |
 | `zhipu` | Zhipu GLM (default: glm-5) | `ZHIPU_API_KEY` | `ZHIPU_BASE_URL` |
 | `ollama` | Ollama (local models) | -- | `OLLAMA_BASE_URL` or `--api-base` |
@@ -96,9 +91,6 @@ libra code --provider ollama --model llama3 --api-base http://localhost:11434/v1
 # Resume the most recent session
 libra code --resume
 
-# Resume a specific session, forking it
-libra code --resume-session abc123 --fork-session
-
 # Start in code review context with strict approval
 libra code --context review --approval-policy untrusted
 
@@ -134,7 +126,7 @@ AI agents executing shell commands on a developer's machine present real safety 
 
 ### Why session persistence and resume?
 
-Long coding sessions accumulate significant context: file edits, conversation history, tool outputs. Losing this context on an accidental terminal close is painful. Session persistence stores the full conversation and tool state, and `--resume` restores it. `--fork-session` enables branching a conversation -- try an approach, and if it fails, fork from an earlier point without losing the original thread.
+Long coding sessions accumulate significant context: file edits, conversation history, tool outputs. Losing this context on an accidental terminal close is painful. Session persistence stores the full conversation and tool state, and `--resume` restores the latest canonical Libra session.
 
 ## Parameter Comparison: Libra vs Git vs jj
 

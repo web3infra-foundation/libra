@@ -41,7 +41,6 @@ use crate::{
             ToolLoopConfig, ToolLoopObserver, profile::AgentProfileRouter,
             run_tool_loop_with_history_and_observer,
         },
-        claudecode::{self, ClaudecodeTuiRuntime},
         commands::CommandDispatcher,
         completion::{
             CompletionModel, CompletionRetryEvent, CompletionRetryObserver, CompletionRetryPolicy,
@@ -216,9 +215,7 @@ pub struct AppConfig {
     pub agent_router: AgentProfileRouter,
     pub session: SessionState,
     pub session_store: SessionStore,
-    pub user_input_tx: UnboundedSender<UserInputRequest>,
     pub user_input_rx: UnboundedReceiver<UserInputRequest>,
-    pub exec_approval_tx: UnboundedSender<ExecApprovalRequest>,
     pub exec_approval_rx: UnboundedReceiver<ExecApprovalRequest>,
     /// Display name of the active model (e.g. "gemini-2.5-flash").
     pub model_name: String,
@@ -228,8 +225,6 @@ pub struct AppConfig {
     pub mcp_server: Option<Arc<LibraMcpServer>>,
     /// Optional Code UI session mirror for the browser UI.
     pub code_ui_session: Option<Arc<CodeUiSession>>,
-    /// Optional managed Claude runtime for `claudecode`.
-    pub(crate) managed_claudecode: Option<ClaudecodeTuiRuntime>,
 }
 
 /// The main application struct.
@@ -273,10 +268,8 @@ pub struct App<M: CompletionModel> {
     /// Session store for saving/loading.
     session_store: SessionStore,
     /// Receiver for user-input requests from the `request_user_input` tool handler.
-    user_input_tx: UnboundedSender<UserInputRequest>,
     user_input_rx: UnboundedReceiver<UserInputRequest>,
     /// Receiver for exec-approval requests from sandbox-governed handlers.
-    exec_approval_tx: UnboundedSender<ExecApprovalRequest>,
     exec_approval_rx: UnboundedReceiver<ExecApprovalRequest>,
     /// Currently pending user-input interaction, if any.
     pending_user_input: Option<PendingUserInput>,
@@ -308,8 +301,6 @@ pub struct App<M: CompletionModel> {
     running_tool_calls: usize,
     /// Shared run-id slot for the active turn, backfilled by MCP tracking.
     active_turn_run_id: Option<Arc<Mutex<Option<String>>>>,
-    /// Optional managed runtime state for the active provider.
-    managed_claudecode: Option<ClaudecodeTuiRuntime>,
     /// Provider-agnostic web snapshot state shared with the browser UI.
     code_ui_session: Option<Arc<CodeUiSession>>,
     /// Monotonic id source for browser transcript artifacts.
@@ -397,9 +388,7 @@ where
             agent_router: app_config.agent_router,
             session: app_config.session,
             session_store: app_config.session_store,
-            user_input_tx: app_config.user_input_tx,
             user_input_rx: app_config.user_input_rx,
-            exec_approval_tx: app_config.exec_approval_tx,
             exec_approval_rx: app_config.exec_approval_rx,
             pending_user_input: None,
             pending_exec_approval: None,
@@ -416,7 +405,6 @@ where
             active_turn_signal,
             running_tool_calls: 0,
             active_turn_run_id: None,
-            managed_claudecode: app_config.managed_claudecode,
             code_ui_session: app_config.code_ui_session,
             next_code_ui_item_id: 1,
         }
@@ -1352,9 +1340,7 @@ where
                 {
                     *slot = None;
                 }
-                if should_start_mcp_turn_tracking(self.managed_claudecode.is_some())
-                    && let Some(mcp_server) = self.mcp_server.clone()
-                {
+                if let Some(mcp_server) = self.mcp_server.clone() {
                     let tx = self.app_event_tx.clone();
                     let working_dir = self.registry.working_dir().to_path_buf();
                     let plan_id = self.mcp_plan_id.clone();
@@ -1377,38 +1363,6 @@ where
                             }
                         }
                     });
-                }
-
-                if let Some(runtime) = self.managed_claudecode.as_ref() {
-                    self.history.push(Message::user(text.clone()));
-                    let tx = self.app_event_tx.clone();
-                    let user_input_tx = self.user_input_tx.clone();
-                    let exec_approval_tx = self.exec_approval_tx.clone();
-                    let runtime = runtime.clone();
-                    let prompt = text.clone();
-
-                    let handle = tokio::spawn(async move {
-                        if let Err(error) = claudecode::run_tui_turn(
-                            runtime,
-                            turn_id,
-                            tx.clone(),
-                            user_input_tx,
-                            exec_approval_tx,
-                            prompt,
-                        )
-                        .await
-                        {
-                            let _ = tx.send(AppEvent::AgentEvent {
-                                turn_id,
-                                event: AgentEvent::Error {
-                                    message: error.to_string(),
-                                },
-                            });
-                        }
-                    });
-
-                    self.agent_task = Some(handle);
-                    return Ok(());
                 }
 
                 // Prepare components for background task
@@ -2329,7 +2283,6 @@ where
                 self.mcp_plan_id = None;
                 self.mcp_run_id = None;
                 self.pending_plan_revision = None;
-                reset_managed_claudecode_session(self.managed_claudecode.as_mut());
                 self.sync_mux_input_context();
             }
             BuiltinCommand::Model => {
@@ -2351,14 +2304,6 @@ where
                     .add_cell(Box::new(AssistantHistoryCell::new(status)));
             }
             BuiltinCommand::Plan => {
-                if self.managed_claudecode.is_some() {
-                    self.widget.add_cell(Box::new(AssistantHistoryCell::new(
-                        "The /plan workflow is not available in the Claude managed runtime yet."
-                            .to_string(),
-                    )));
-                    self.schedule_draw();
-                    return;
-                }
                 if let Some(spec_json) = self.pending_plan_revision.take() {
                     match parse_pending_plan_revision_command(args) {
                         PendingPlanRevisionCommand::Modify(request) => {
@@ -3926,7 +3871,6 @@ mod tests {
         PendingPlanRevisionCommand, append_to_last_tool_group_cell, build_plan_revision_prompt,
         format_intentspec_target_mismatch, format_orchestrator_result,
         parse_pending_plan_revision_command, pending_plan_revision_help_message,
-        should_start_mcp_turn_tracking,
     };
     use crate::internal::{
         ai::orchestrator::types::{
@@ -4042,12 +3986,6 @@ mod tests {
             "list_dir",
             json!({"dir_path":"src"}),
         ));
-    }
-
-    #[test]
-    fn managed_claudecode_disables_background_mcp_turn_tracking() {
-        assert!(!should_start_mcp_turn_tracking(true));
-        assert!(should_start_mcp_turn_tracking(false));
     }
 
     #[test]
@@ -4483,16 +4421,6 @@ async fn current_head_sha_async(working_dir: std::path::PathBuf) -> String {
     tokio::task::spawn_blocking(move || current_head_sha(&working_dir))
         .await
         .unwrap_or_else(|_| "HEAD".to_string())
-}
-
-fn should_start_mcp_turn_tracking(has_managed_claudecode: bool) -> bool {
-    !has_managed_claudecode
-}
-
-fn reset_managed_claudecode_session(runtime: Option<&mut ClaudecodeTuiRuntime>) {
-    if let Some(runtime) = runtime {
-        runtime.reset_for_new_conversation();
-    }
 }
 
 #[derive(Debug, Clone, Default)]

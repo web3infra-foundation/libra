@@ -442,6 +442,52 @@ fn parse_error_hints(err: &clap::Error) -> Vec<String> {
     hints
 }
 
+const REMOVED_CODE_CLAUDECODE_FLAGS: &[&str] = &[
+    "--resume-session",
+    "--fork-session",
+    "--session-id",
+    "--resume-at",
+    "--helper-path",
+    "--python-binary",
+    "--timeout-seconds",
+    "--permission-mode",
+];
+
+fn removed_code_claudecode_hints(argv: &[String]) -> Vec<String> {
+    let Some((subcommand_index, _)) = find_subcommand_index(argv) else {
+        return Vec::new();
+    };
+    if !matches!(argv.get(subcommand_index).map(String::as_str), Some("code")) {
+        return Vec::new();
+    }
+
+    let mut hints = Vec::new();
+    let has_removed_provider = argv
+        .windows(2)
+        .any(|window| matches!(window, [flag, value] if flag == "--provider" && value == "claudecode"))
+        || argv.iter().any(|arg| arg == "--provider=claudecode");
+    if has_removed_provider {
+        hints.push(
+            "`libra code --provider claudecode` was removed; use `--provider codex` for the managed agent runtime or `--provider anthropic` for direct Anthropic chat completions."
+                .to_string(),
+        );
+    }
+
+    let has_removed_flag = argv.iter().any(|arg| {
+        REMOVED_CODE_CLAUDECODE_FLAGS
+            .iter()
+            .any(|flag| arg == flag || arg.starts_with(&format!("{flag}=")))
+    });
+    if has_removed_flag {
+        hints.push(
+            "Claude Code provider-session flags were removed with the managed runtime; start a new Codex or generic-provider session and use Libra's canonical `--resume` flow."
+                .to_string(),
+        );
+    }
+
+    hints
+}
+
 fn parse_error_components(err: &clap::Error) -> (String, Option<String>, Vec<String>) {
     let rendered = err.to_string();
     let mut message = None;
@@ -539,7 +585,8 @@ fn classify_parse_error(argv: &[String], err: &clap::Error) -> CliError {
         return cli_error;
     }
 
-    let (message, usage, hints) = parse_error_components(err);
+    let (message, usage, mut hints) = parse_error_components(err);
+    hints.extend(removed_code_claudecode_hints(argv));
     let mut cli_error = if find_subcommand_index(argv).is_some() {
         match err.kind() {
             ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => CliError::parse_usage(message),

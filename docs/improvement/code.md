@@ -1858,7 +1858,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_decision_proposal_latest
 
 其中，`Modify` 走 generic planner 路径，继续使用现有 `submit_intent_draft` 工作流；`Execute` 走 Codex runtime 直连执行，不经过 generic `Orchestrator<M>`。
 
-### 当前基线的核心缺陷
+### 初始基线的核心缺陷（Phase 0 前）
+
+本小节记录的是开始 `Implementation Timeline` 前的施工基线，用于解释后续 phase 的来源；每个 wave 合入后，实际代码状态以对应提交和验证结果为准。
 
 | 缺陷 | 严重性 | 说明 |
 |---|---|---|

@@ -2,8 +2,8 @@
 //!
 //! This module intentionally works from `git-internal` formal objects (`intent`,
 //! `task`, `run`, events, etc.) instead of provider-specific binding artifacts.
-//! The result is a provider-neutral read model that Claude Code can already feed
-//! with today's persisted formal bridge.
+//! The result is a provider-neutral read model that managed and generic
+//! providers can feed through persisted formal objects.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
@@ -1707,7 +1707,7 @@ mod tests {
     #[serial]
     async fn rebuild_materializes_run_state_and_indexes() {
         let (_dir, storage, history, db_conn) = setup_projection_history().await;
-        let actor = ActorRef::agent("claudecode-bridge").expect("actor");
+        let actor = ActorRef::agent("projection-rebuild-test").expect("actor");
 
         let intent = Intent::new(actor.clone(), "Implement thread materializer").expect("intent");
         storage

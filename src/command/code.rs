@@ -15,7 +15,7 @@
 //!   tools (read, grep, patch, shell, etc.) over Streamable HTTP or Stdio transport,
 //!   enabling integration with external AI clients such as Claude Desktop.
 //! - **AI Agent**: A tool-calling loop powered by configurable LLM providers (Gemini,
-//!   OpenAI, Anthropic, DeepSeek, Zhipu, Ollama) or managed runtimes (Claude Code, Codex).
+//!   OpenAI, Anthropic, DeepSeek, Zhipu, Ollama) or the managed Codex runtime.
 //!
 //! ## Supported Modes
 //!
@@ -34,8 +34,8 @@
 //! 2. Instantiate a completion model with the selected (or default) model name.
 //! 3. Pass the model into the shared `run_tui_with_model` function.
 //!
-//! Special providers (`claudecode`, `codex`) bypass the generic completion model path
-//! and use their own managed runtimes with dedicated execution flows.
+//! The `codex` provider bypasses the generic completion model path and uses its
+//! managed app-server runtime with a dedicated execution flow.
 //!
 //! ## Sandbox & Approval
 //!
@@ -52,7 +52,7 @@
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    io::{BufRead, IsTerminal, Write},
+    io::{BufRead, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
     process::Stdio,
@@ -84,14 +84,10 @@ use crate::{
                 ToolLoopConfig,
                 profile::{AgentProfileRouter, load_profiles},
             },
-            claudecode as agent_claudecode,
             client::CompletionClient,
             codex as agent_codex,
             commands::{CommandDispatcher, load_commands},
-            completion::{
-                CompletionError, CompletionModel, CompletionRequest, CompletionResponse,
-                CompletionUsage,
-            },
+            completion::{CompletionModel, CompletionUsage},
             history::HistoryManager,
             hooks::HookRunner,
             mcp::server::LibraMcpServer,
@@ -177,7 +173,6 @@ pub enum CodeProvider {
     Gemini,
     Openai,
     Anthropic,
-    Claudecode,
     Deepseek,
     Zhipu,
     Ollama,
@@ -284,22 +279,6 @@ pub struct CodeArgs {
     #[arg(long)]
     pub resume: bool,
 
-    /// Resume a specific Claude Code managed provider session UUID.
-    #[arg(long)]
-    pub resume_session: Option<String>,
-
-    /// Fork into a new Claude Code managed session when resuming a provider session.
-    #[arg(long, default_value_t = false)]
-    pub fork_session: bool,
-
-    /// Use an explicit Claude Code managed session UUID on the first turn.
-    #[arg(long)]
-    pub session_id: Option<String>,
-
-    /// Resume only up to and including a specific Claude Code assistant message UUID.
-    #[arg(long)]
-    pub resume_at: Option<String>,
-
     /// Tool approval policy:
     /// - `never`: no prompts, dangerous commands are rejected
     /// - `on-failure`: prompt only for retry outside sandbox after sandbox denial
@@ -319,22 +298,6 @@ pub struct CodeArgs {
     /// Provider API base URL (e.g. http://remote-host:11434/v1 for remote Ollama)
     #[arg(long)]
     pub api_base: Option<String>,
-
-    /// Optional custom Claude Code managed helper path.
-    #[arg(long, hide = true)]
-    pub helper_path: Option<PathBuf>,
-
-    /// Python executable used by the Claude Code managed helper.
-    #[arg(long, hide = true)]
-    pub python_binary: Option<String>,
-
-    /// Override the Claude Code managed helper timeout in seconds.
-    #[arg(long, hide = true)]
-    pub timeout_seconds: Option<u64>,
-
-    /// Override the Claude Code managed helper permission mode.
-    #[arg(long, hide = true)]
-    pub permission_mode: Option<String>,
 
     /// Codex executable used to launch the managed app-server.
     #[arg(long, default_value = DEFAULT_CODEX_BIN)]
@@ -551,7 +514,6 @@ async fn execute_tui(mut args: CodeArgs) -> CliResult<()> {
     let preamble = system_preamble(&working_dir, args.context);
     let temperature = args.temperature;
     let resume = args.resume;
-    let stdout_is_terminal = std::io::stdout().is_terminal();
     let host = args.host.clone();
 
     // Prepare MCP server instance shared between the HTTP transport and TUI bridge
@@ -593,12 +555,10 @@ async fn execute_tui(mut args: CodeArgs) -> CliResult<()> {
         context: args.context,
         resume,
         approval_policy: args.approval_policy.into(),
-        user_input_tx,
         user_input_rx,
         exec_approval_rx,
         exec_approval_tx,
         mcp_server,
-        managed_claudecode: None,
     };
 
     // Create agent based on provider
@@ -629,29 +589,6 @@ async fn execute_tui(mut args: CodeArgs) -> CliResult<()> {
             let model_name = args.model.unwrap_or_else(|| CLAUDE_3_5_SONNET.to_string());
             let model = client.completion_model(&model_name);
             run_tui_with_model(model, launch_config, model_name, provider_name).await?;
-        }
-        CodeProvider::Claudecode => {
-            if !stdout_is_terminal {
-                return execute_claudecode_mode(args, working_dir).await;
-            }
-
-            let claudecode_args = build_claudecode_code_args(&args, working_dir);
-            validate_claudecode_code_args(&claudecode_args)?;
-
-            let runtime = agent_claudecode::prepare_tui_runtime(claudecode_args)
-                .await
-                .map_err(map_claudecode_cli_error)?;
-
-            let model_name = runtime.model_name().to_string();
-            let mut launch_config = launch_config;
-            launch_config.managed_claudecode = Some(runtime);
-            run_tui_with_model(
-                UnsupportedCompletionModel,
-                launch_config,
-                model_name,
-                provider_name,
-            )
-            .await?;
         }
         CodeProvider::Deepseek => {
             let client = match DeepSeekClient::from_env() {
@@ -835,7 +772,7 @@ async fn build_placeholder_web_code_ui_runtime(
         patchsets: false,
         interactive_approvals: false,
         structured_questions: false,
-        provider_session_resume: matches!(args.provider, CodeProvider::Claudecode),
+        provider_session_resume: false,
     };
 
     let mut snapshot = initial_snapshot(
@@ -844,10 +781,7 @@ async fn build_placeholder_web_code_ui_runtime(
             provider: format!("{:?}", args.provider).to_lowercase(),
             model: args.model.clone(),
             mode: Some("web".to_string()),
-            managed: matches!(
-                args.provider,
-                CodeProvider::Claudecode | CodeProvider::Codex
-            ),
+            managed: matches!(args.provider, CodeProvider::Codex),
         },
         capabilities.clone(),
     );
@@ -1139,69 +1073,6 @@ async fn run_codex_cli_controller(runtime: Arc<CodeUiRuntimeHandle>) -> CliResul
 }
 
 // ---------------------------------------------------------------------------
-// Claude Code managed provider — headless (non-TUI) execution
-// ---------------------------------------------------------------------------
-
-/// Executes the Claude Code managed provider in non-interactive (non-TUI) mode.
-///
-/// This path is taken when stdout is not a terminal (e.g. piped output) and
-/// `--provider=claudecode` is selected. It delegates entirely to the
-/// `agent_claudecode` module.
-async fn execute_claudecode_mode(args: CodeArgs, working_dir: PathBuf) -> CliResult<()> {
-    println!("Starting Libra Code with Claude Code managed provider");
-    println!("Working directory: {}", working_dir.display());
-    if args.resume {
-        println!("Claude Code session continuity: resume latest provider session in cwd");
-    } else if let Some(resume_session) = &args.resume_session {
-        println!("Claude Code session continuity: resume {}", resume_session);
-    }
-
-    let claudecode_args = build_claudecode_code_args(&args, working_dir);
-    validate_claudecode_code_args(&claudecode_args)?;
-
-    agent_claudecode::execute(claudecode_args)
-        .await
-        .map_err(map_claudecode_cli_error)
-}
-
-/// Converts CLI [`CodeArgs`] into the internal `ClaudecodeCodeArgs` struct
-/// expected by the Claude Code managed runtime, mapping approval policies
-/// and session continuity flags.
-fn build_claudecode_code_args(
-    args: &CodeArgs,
-    working_dir: PathBuf,
-) -> agent_claudecode::ClaudecodeCodeArgs {
-    agent_claudecode::ClaudecodeCodeArgs {
-        working_dir,
-        model: args.model.clone(),
-        python_binary: args.python_binary.clone(),
-        helper_path: args.helper_path.clone(),
-        timeout_seconds: args.timeout_seconds,
-        interactive_approvals: approval_policy_enables_claudecode_interactive_approvals(
-            args.approval_policy,
-            args.permission_mode.as_deref(),
-        ),
-        permission_mode: Some(args.permission_mode.clone().unwrap_or_else(|| {
-            approval_policy_to_claudecode_managed_permission_mode(args.approval_policy).to_string()
-        })),
-        continue_session: args.resume,
-        resume: args.resume_session.clone(),
-        fork_session: args.fork_session,
-        session_id: args.session_id.clone(),
-        resume_session_at: args.resume_at.clone(),
-    }
-}
-
-/// Validates Claude Code managed runtime arguments (e.g. UUID format for
-/// `--resume-session`). Returns a [`CliError::CommandUsage`] on failure.
-fn validate_claudecode_code_args(
-    args: &agent_claudecode::ClaudecodeCodeArgs,
-) -> Result<(), CliError> {
-    agent_claudecode::validate_code_args(args, &OutputConfig::default())
-        .map_err(|error| CliError::command_usage(error.to_string()))
-}
-
-// ---------------------------------------------------------------------------
 // Approval policy mapping helpers
 // ---------------------------------------------------------------------------
 
@@ -1213,41 +1084,6 @@ fn approval_policy_to_codex(policy: CodeApprovalPolicy) -> &'static str {
         CodeApprovalPolicy::OnFailure
         | CodeApprovalPolicy::OnRequest
         | CodeApprovalPolicy::Untrusted => "ask",
-    }
-}
-
-/// Maps [`CodeApprovalPolicy`] to Claude Code's permission mode string.
-/// - `Never` → `"acceptEdits"` (auto-approve edits, no prompts)
-/// - Others → `"plan"` (require plan approval before execution)
-fn approval_policy_to_claudecode_managed_permission_mode(
-    policy: CodeApprovalPolicy,
-) -> &'static str {
-    match policy {
-        CodeApprovalPolicy::Never => "acceptEdits",
-        CodeApprovalPolicy::OnFailure
-        | CodeApprovalPolicy::OnRequest
-        | CodeApprovalPolicy::Untrusted => "plan",
-    }
-}
-
-/// Determines whether interactive approval prompts should be enabled for
-/// the Claude Code managed runtime. Disabled when the policy is `Never`
-/// or when the user has explicitly set `bypassPermissions`.
-fn approval_policy_enables_claudecode_interactive_approvals(
-    policy: CodeApprovalPolicy,
-    permission_mode_override: Option<&str>,
-) -> bool {
-    !matches!(policy, CodeApprovalPolicy::Never)
-        && !matches!(permission_mode_override, Some("bypassPermissions"))
-}
-
-/// Converts a Claude Code runtime error into a typed [`CliError`],
-/// distinguishing authentication errors from other fatal failures.
-fn map_claudecode_cli_error(error: anyhow::Error) -> CliError {
-    if agent_claudecode::is_auth_error(&error) {
-        CliError::auth(error.to_string())
-    } else {
-        CliError::fatal(error.to_string())
     }
 }
 
@@ -1457,26 +1293,21 @@ struct TuiLaunchConfig {
     resume: bool,
     approval_policy: AskForApproval,
     user_input_rx: tokio::sync::mpsc::UnboundedReceiver<UserInputRequest>,
-    user_input_tx: tokio::sync::mpsc::UnboundedSender<UserInputRequest>,
     exec_approval_rx: tokio::sync::mpsc::UnboundedReceiver<ExecApprovalRequest>,
     exec_approval_tx: tokio::sync::mpsc::UnboundedSender<ExecApprovalRequest>,
     mcp_server: Arc<LibraMcpServer>,
-    managed_claudecode: Option<agent_claudecode::ClaudecodeTuiRuntime>,
 }
 
-fn build_tui_code_ui_capabilities(
-    provider_name: &str,
-    managed_claudecode: bool,
-) -> CodeUiCapabilities {
+fn build_tui_code_ui_capabilities() -> CodeUiCapabilities {
     CodeUiCapabilities {
         message_input: true,
-        streaming_text: managed_claudecode,
+        streaming_text: false,
         plan_updates: true,
         tool_calls: true,
         patchsets: true,
         interactive_approvals: true,
         structured_questions: true,
-        provider_session_resume: provider_name == "claudecode",
+        provider_session_resume: false,
     }
 }
 
@@ -1514,16 +1345,15 @@ async fn build_tui_code_ui_runtime(
     session: &SessionState,
     provider_name: &str,
     model_name: &str,
-    managed_claudecode: bool,
 ) -> Arc<CodeUiRuntimeHandle> {
-    let capabilities = build_tui_code_ui_capabilities(provider_name, managed_claudecode);
+    let capabilities = build_tui_code_ui_capabilities();
     let mut snapshot = initial_snapshot(
         working_dir.to_string(),
         CodeUiProviderInfo {
             provider: provider_name.to_string(),
             model: Some(model_name.to_string()),
             mode: Some("tui".to_string()),
-            managed: managed_claudecode,
+            managed: false,
         },
         capabilities.clone(),
     );
@@ -1542,36 +1372,6 @@ async fn build_tui_code_ui_runtime(
         },
     )
     .await
-}
-
-/// Stub completion model used when the provider bypasses the generic completion
-/// path (e.g. Claude Code managed runtime). Any call to `completion()` returns
-/// `CompletionError::NotImplemented`. This allows the TUI to be launched with
-/// a uniform type signature while the actual AI interaction is handled by the
-/// managed runtime.
-#[derive(Clone, Debug, Default)]
-struct UnsupportedCompletionModel;
-
-/// Implementation of `CompletionModel` that unconditionally returns
-/// `CompletionError::NotImplemented`. This allows managed providers (Claude Code,
-/// Codex) — which drive the AI loop through their own runtime rather than the
-/// generic completion trait — to satisfy the type parameter required by
-/// [`run_tui_with_model`] without providing an actual LLM backend.
-impl CompletionModel for UnsupportedCompletionModel {
-    /// Uses `serde_json::Value` as a placeholder; never actually produced.
-    type Response = serde_json::Value;
-
-    /// Always returns `NotImplemented` — callers should never reach this path
-    /// when a managed provider runtime is active.
-    async fn completion(
-        &self,
-        _request: CompletionRequest,
-    ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
-        Err(CompletionError::NotImplemented(
-            "generic completion workflows are not available for the active managed provider"
-                .to_string(),
-        ))
-    }
 }
 
 /// Core TUI lifecycle: wires up the terminal, background servers, agent
@@ -1653,7 +1453,6 @@ where
         &session,
         &provider_name,
         &model_name,
-        params.managed_claudecode.is_some(),
     )
     .await;
     let code_ui_session = code_ui_runtime.adapter().session();
@@ -1714,14 +1513,11 @@ where
             session,
             session_store,
             user_input_rx: params.user_input_rx,
-            user_input_tx: params.user_input_tx,
             exec_approval_rx: params.exec_approval_rx,
-            exec_approval_tx: params.exec_approval_tx,
             model_name,
             provider_name,
             mcp_server: Some(params.mcp_server),
             code_ui_session: Some(code_ui_session),
-            managed_claudecode: params.managed_claudecode,
         },
     );
 
@@ -1997,8 +1793,7 @@ async fn execute_stdio(args: &CodeArgs) -> CliResult<()> {
 /// - TUI-specific flags (--model, --temperature, --resume, etc.) are rejected
 ///   in web-only and stdio modes.
 /// - Provider-specific flags are only accepted for their respective providers.
-/// - Claude Code managed flags have their own cross-flag consistency rules.
-fn validate_mode_args(args: &CodeArgs, output: &OutputConfig) -> Result<(), String> {
+fn validate_mode_args(args: &CodeArgs, _output: &OutputConfig) -> Result<(), String> {
     if !args.stdio && args.port == args.mcp_port {
         return Err(format!(
             "--port ({}) and --mcp-port ({}) must be different",
@@ -2029,95 +1824,8 @@ fn validate_mode_args(args: &CodeArgs, output: &OutputConfig) -> Result<(), Stri
         }
     }
 
-    if args.provider != CodeProvider::Claudecode && has_claudecode_managed_flags(args) {
-        return Err(
-            "Claude Code managed runtime flags are only supported with --provider=claudecode"
-                .to_string(),
-        );
-    }
-
     if args.provider == CodeProvider::Codex && args.api_base.is_some() {
         return Err("--api-base is not supported with --provider=codex".to_string());
-    }
-
-    if args.provider == CodeProvider::Claudecode {
-        reject_mode_flag(
-            args.temperature.is_some(),
-            "--temperature",
-            "--provider=claudecode",
-        )?;
-        reject_mode_flag(args.context.is_some(), "--context", "--provider=claudecode")?;
-        reject_mode_flag(
-            args.api_base.is_some(),
-            "--api-base",
-            "--provider=claudecode",
-        )?;
-        if output.is_json() || output.quiet {
-            return Err(
-                "--json, --machine, and --quiet are not supported with --provider=claudecode"
-                    .to_string(),
-            );
-        }
-        validate_claudecode_managed_flags(args)?;
-    }
-
-    Ok(())
-}
-
-/// Returns `true` if any Claude Code managed runtime–specific flags are set.
-/// Used to reject these flags when a non-Claude Code provider is selected.
-fn has_claudecode_managed_flags(args: &CodeArgs) -> bool {
-    args.resume_session.is_some()
-        || args.fork_session
-        || args.session_id.is_some()
-        || args.resume_at.is_some()
-        || args.helper_path.is_some()
-        || args.python_binary.is_some()
-        || args.timeout_seconds.is_some()
-        || args.permission_mode.is_some()
-}
-
-/// Validates cross-flag consistency for Claude Code managed runtime flags.
-///
-/// Enforces rules such as:
-/// - `--resume` and `--resume-session` are mutually exclusive.
-/// - `--fork-session` and `--resume-at` require `--resume-session`.
-/// - `--session-id` with `--resume-session` requires `--fork-session`.
-/// - `--permission-mode` must be one of the recognized values.
-fn validate_claudecode_managed_flags(args: &CodeArgs) -> Result<(), String> {
-    if args.resume && args.resume_session.is_some() {
-        return Err("--resume cannot be combined with --resume-session".to_string());
-    }
-    if args.resume && args.fork_session {
-        return Err("--fork-session requires --resume-session".to_string());
-    }
-    if args.resume && args.resume_at.is_some() {
-        return Err("--resume-at requires --resume-session".to_string());
-    }
-    if args.resume && args.session_id.is_some() {
-        return Err("--session-id requires --resume-session when resuming".to_string());
-    }
-    if args.resume_at.is_some() && args.resume_session.is_none() {
-        return Err("--resume-at requires --resume-session".to_string());
-    }
-    if args.fork_session && args.resume_session.is_none() {
-        return Err("--fork-session requires --resume-session".to_string());
-    }
-    if args.session_id.is_some() && args.resume_session.is_some() && !args.fork_session {
-        return Err(
-            "--session-id requires --fork-session when combined with --resume-session".to_string(),
-        );
-    }
-
-    if let Some(permission_mode) = args.permission_mode.as_deref() {
-        match permission_mode {
-            "default" | "acceptEdits" | "plan" | "bypassPermissions" => {}
-            _ => {
-                return Err(format!(
-                    "--permission-mode must be one of default, acceptEdits, plan, bypassPermissions (got {permission_mode})"
-                ));
-            }
-        }
     }
 
     Ok(())
@@ -2140,20 +1848,12 @@ fn reject_non_tui_flags(args: &CodeArgs, mode: &str) -> Result<(), String> {
     reject_mode_flag(args.temperature.is_some(), "--temperature", mode)?;
     reject_mode_flag(args.context.is_some(), "--context", mode)?;
     reject_mode_flag(args.resume, "--resume", mode)?;
-    reject_mode_flag(args.resume_session.is_some(), "--resume-session", mode)?;
-    reject_mode_flag(args.fork_session, "--fork-session", mode)?;
-    reject_mode_flag(args.session_id.is_some(), "--session-id", mode)?;
-    reject_mode_flag(args.resume_at.is_some(), "--resume-at", mode)?;
     reject_mode_flag(
         args.approval_policy != CodeApprovalPolicy::OnRequest,
         "--approval-policy",
         mode,
     )?;
     reject_mode_flag(args.api_base.is_some(), "--api-base", mode)?;
-    reject_mode_flag(args.helper_path.is_some(), "--helper-path", mode)?;
-    reject_mode_flag(args.python_binary.is_some(), "--python-binary", mode)?;
-    reject_mode_flag(args.timeout_seconds.is_some(), "--timeout-seconds", mode)?;
-    reject_mode_flag(args.permission_mode.is_some(), "--permission-mode", mode)?;
     Ok(())
 }
 
@@ -2168,10 +1868,6 @@ mod tests {
     use tokio::sync::mpsc::unbounded_channel;
 
     use super::*;
-    use crate::utils::{
-        error::{CliErrorKind, StableErrorCode as StableCode},
-        output::JsonFormat,
-    };
 
     fn base_args() -> CodeArgs {
         CodeArgs {
@@ -2185,18 +1881,10 @@ mod tests {
             temperature: None,
             context: None,
             resume: false,
-            resume_session: None,
-            fork_session: false,
-            session_id: None,
-            resume_at: None,
             approval_policy: CodeApprovalPolicy::OnRequest,
             mcp_port: DEFAULT_MCP_PORT,
             stdio: false,
             api_base: None,
-            helper_path: None,
-            python_binary: None,
-            timeout_seconds: None,
-            permission_mode: None,
             codex_bin: DEFAULT_CODEX_BIN.to_string(),
             codex_port: None,
             plan_mode: false,
@@ -2237,129 +1925,6 @@ mod tests {
         let mut args = base_args();
         args.provider = CodeProvider::Anthropic;
         assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
-    }
-
-    #[test]
-    fn maps_never_approval_to_accept_edits_for_claudecode_managed_runtime() {
-        assert_eq!(
-            approval_policy_to_claudecode_managed_permission_mode(CodeApprovalPolicy::Never),
-            "acceptEdits"
-        );
-        assert_eq!(
-            approval_policy_to_claudecode_managed_permission_mode(CodeApprovalPolicy::OnRequest),
-            "plan"
-        );
-        assert_eq!(
-            approval_policy_to_claudecode_managed_permission_mode(CodeApprovalPolicy::Untrusted),
-            "plan"
-        );
-    }
-
-    #[test]
-    fn claudecode_interactive_approvals_follow_approval_policy() {
-        assert!(!approval_policy_enables_claudecode_interactive_approvals(
-            CodeApprovalPolicy::Never,
-            None
-        ));
-        assert!(approval_policy_enables_claudecode_interactive_approvals(
-            CodeApprovalPolicy::OnRequest,
-            None
-        ));
-        assert!(!approval_policy_enables_claudecode_interactive_approvals(
-            CodeApprovalPolicy::OnRequest,
-            Some("bypassPermissions")
-        ));
-    }
-
-    #[test]
-    fn accepts_claudecode_provider_in_tui_mode() {
-        let mut args = base_args();
-        args.provider = CodeProvider::Claudecode;
-        assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
-    }
-
-    #[test]
-    fn rejects_resume_and_resume_session_together_for_claudecode() {
-        let mut args = base_args();
-        args.provider = CodeProvider::Claudecode;
-        args.resume = true;
-        args.resume_session = Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string());
-        assert!(validate_mode_args(&args, &OutputConfig::default()).is_err());
-    }
-
-    #[test]
-    fn rejects_resume_at_without_resume_session_for_claudecode() {
-        let mut args = base_args();
-        args.provider = CodeProvider::Claudecode;
-        args.resume_at = Some("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".to_string());
-        assert!(validate_mode_args(&args, &OutputConfig::default()).is_err());
-    }
-
-    #[test]
-    fn rejects_fork_without_resume_session_for_claudecode() {
-        let mut args = base_args();
-        args.provider = CodeProvider::Claudecode;
-        args.fork_session = true;
-        assert!(validate_mode_args(&args, &OutputConfig::default()).is_err());
-    }
-
-    #[test]
-    fn rejects_session_id_without_fork_when_resuming_explicit_claudecode_session() {
-        let mut args = base_args();
-        args.provider = CodeProvider::Claudecode;
-        args.resume_session = Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string());
-        args.session_id = Some("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".to_string());
-        assert!(validate_mode_args(&args, &OutputConfig::default()).is_err());
-    }
-
-    #[test]
-    fn rejects_claudecode_managed_flags_for_non_claudecode_provider() {
-        let mut args = base_args();
-        args.resume_session = Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string());
-        assert!(validate_mode_args(&args, &OutputConfig::default()).is_err());
-    }
-
-    #[test]
-    fn rejects_json_output_for_claudecode() {
-        let mut args = base_args();
-        args.provider = CodeProvider::Claudecode;
-        let output = OutputConfig {
-            json_format: Some(JsonFormat::Pretty),
-            ..OutputConfig::default()
-        };
-        assert!(validate_mode_args(&args, &output).is_err());
-    }
-
-    #[test]
-    fn rejects_quiet_output_for_claudecode() {
-        let mut args = base_args();
-        args.provider = CodeProvider::Claudecode;
-        let output = OutputConfig {
-            quiet: true,
-            ..OutputConfig::default()
-        };
-        assert!(validate_mode_args(&args, &output).is_err());
-    }
-
-    #[test]
-    fn invalid_claudecode_resume_session_is_reported_as_command_usage() {
-        let mut args = base_args();
-        args.provider = CodeProvider::Claudecode;
-        args.resume_session = Some("not-a-uuid".to_string());
-
-        let cli = validate_claudecode_code_args(&build_claudecode_code_args(
-            &args,
-            PathBuf::from("/tmp/libra-claudecode"),
-        ))
-        .expect_err("invalid resume UUID should be rejected");
-
-        assert_eq!(cli.kind(), CliErrorKind::CommandUsage);
-        assert_eq!(cli.stable_code(), StableCode::CliInvalidArguments);
-        assert!(
-            cli.message().contains("--resume must be a valid UUID"),
-            "unexpected usage message: {}",
-            cli.message()
-        );
     }
 
     #[test]
