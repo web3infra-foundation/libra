@@ -105,6 +105,7 @@ use crate::{
         ai::{
             history::HistoryManager,
             mcp::server::LibraMcpServer,
+            runtime::PlanningPromptBuilder,
             web::code_ui::{
                 CodeUiApplyToFuture, CodeUiCapabilities, CodeUiInitialController,
                 CodeUiInteractionKind, CodeUiInteractionOption, CodeUiInteractionRequest,
@@ -1062,35 +1063,7 @@ pub struct AgentCodexArgs {
 /// formatting, and guides the model to use `fileChange`-emitting edit paths
 /// rather than `apply_patch`-style shell commands.
 fn plan_mode_developer_instructions() -> &'static str {
-    concat!(
-        "You are in strict plan-first mode. ",
-        "Your first responsibility is to generate a structured plan update for the task. ",
-        "Do not treat a normal conversational response as sufficient planning output. ",
-        "You are replying in a plain terminal interface without Markdown rendering. ",
-        "Do not use Markdown headings, bullet markers like '-' or '*', fenced code blocks, tables, or emphasis markers such as '**'. ",
-        "Use plain text only. ",
-        "Rules: ",
-        "First produce a structured step-by-step plan/checklist. ",
-        "Do not only explain the plan in prose. ",
-        "Use the planning mechanism as the primary planning output whenever possible. ",
-        "Do not execute tools, run commands, edit files, or create patches before the user approves the plan. ",
-        "After the plan is produced, wait for explicit approval. ",
-        "After approval, when files must be created or modified, choose Codex's structured file editing mode that emits fileChange callbacks/events. ",
-        "Do not frame this as calling a fileChange tool; instead, choose the editing path that causes the session to produce item.type=fileChange updates. ",
-        "Do not use patch-apply style editing or any path that emits apply_patch style events for file edits. ",
-        "Prefer the structured edit path that produces fileChange events over commandExecution-based writes. ",
-        "CommandExecution may still be used when necessary, but file edits should preferentially use the path that emits fileChange callbacks/events. ",
-        "Use commandExecution primarily for inspection, validation, or running the project/tests. ",
-        "If you need to change files, prefer the structured edit path that produces fileChange events rather than apply_patch. ",
-        "Do not speculate that fileChange is unavailable just because no tool list is shown. ",
-        "When the user approves execution and file edits are needed, attempt the structured edit path that should produce fileChange callbacks/events. ",
-        "Only say that file writing is blocked if the system explicitly rejects the edit or explicitly reports that the structured fileChange-style path is unavailable. ",
-        "Do not ask the user to manually copy code into files unless a real fileChange failure has already happened. ",
-        "If the task appears simple, still provide a short structured plan first. ",
-        "If you are uncertain, favor planning before acting. ",
-        "Keep replies compact, readable, and suitable for direct CLI display. ",
-        "The user must see a plan before any execution begins."
-    )
+    PlanningPromptBuilder::codex_plan_mode_developer_instructions()
 }
 
 /// 生成面向基础角色的计划模式系统提示（简洁版）。
@@ -1104,16 +1077,7 @@ fn plan_mode_developer_instructions() -> &'static str {
 /// non-developer role contexts. Same constraints apply: structured plan before
 /// execution, plain text only, prefer `fileChange`-emitting edit paths.
 fn plan_mode_base_instructions() -> &'static str {
-    concat!(
-        "Current mode: strict structured planning first. ",
-        "Produce a structured plan before execution, prefer the planning system over prose-only planning, ",
-        "wait for user approval before taking action, ",
-        "and when modifying files choose the structured editing path that emits fileChange callbacks/events. ",
-        "Do not use apply_patch-style editing. ",
-        "Prefer the fileChange-emitting path over commandExecution-based file writes. ",
-        "Do not claim that the fileChange-style path is unavailable unless the system explicitly reports that failure. ",
-        "Reply in plain text without Markdown."
-    )
+    PlanningPromptBuilder::codex_plan_mode_base_instructions()
 }
 
 // ---------------------------------------------------------------------------
