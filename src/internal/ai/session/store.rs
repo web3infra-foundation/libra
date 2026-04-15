@@ -13,6 +13,7 @@ use super::state::SessionState;
 const SESSION_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 const SESSION_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const STALE_SESSION_LOCK_AGE: Duration = Duration::from_secs(30);
+const THREAD_ID_METADATA_KEYS: &[&str] = &["thread_id", "threadId", "canonical_thread_id"];
 
 /// Manages session persistence on disk.
 ///
@@ -125,6 +126,46 @@ impl SessionStore {
         for info in sessions {
             match self.load(&info.id) {
                 Ok(session) if session.working_dir == working_dir => {
+                    let path = self.session_path(&info.id);
+                    let modified = fs::metadata(&path)
+                        .and_then(|m| m.modified())
+                        .unwrap_or(SystemTime::UNIX_EPOCH);
+
+                    if latest
+                        .as_ref()
+                        .is_none_or(|(_, best_time)| modified > *best_time)
+                    {
+                        latest = Some((session, modified));
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(session_id = %info.id, error = %e, "skipping corrupt session file");
+                }
+            }
+        }
+
+        Ok(latest.map(|(session, _)| session))
+    }
+
+    /// Load the most recently updated session for a canonical Libra thread_id.
+    pub fn load_for_thread_id(
+        &self,
+        thread_id: &str,
+        working_dir: &str,
+    ) -> io::Result<Option<SessionState>> {
+        let sessions = self.list()?;
+        if sessions.is_empty() {
+            return Ok(None);
+        }
+
+        let mut latest: Option<(SessionState, SystemTime)> = None;
+        for info in sessions {
+            match self.load(&info.id) {
+                Ok(session)
+                    if session.working_dir == working_dir
+                        && session_matches_thread_id(&session, thread_id) =>
+                {
                     let path = self.session_path(&info.id);
                     let modified = fs::metadata(&path)
                         .and_then(|m| m.modified())
@@ -382,6 +423,20 @@ impl SessionStore {
     }
 }
 
+fn session_matches_thread_id(session: &SessionState, thread_id: &str) -> bool {
+    if session.id == thread_id {
+        return true;
+    }
+
+    THREAD_ID_METADATA_KEYS.iter().any(|key| {
+        session
+            .metadata
+            .get(*key)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| value == thread_id)
+    })
+}
+
 /// Brief info about a saved session.
 #[derive(Debug, Clone)]
 pub struct SessionInfo {
@@ -514,6 +569,35 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(latest_for_b.summary, "b-latest");
+    }
+
+    #[test]
+    fn test_load_for_thread_id_uses_canonical_metadata_and_working_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = SessionStore::from_storage_path(tmp.path());
+        let thread_id = "11111111-1111-4111-8111-111111111111";
+
+        let mut wrong_worktree = SessionState::new("/repo/other");
+        wrong_worktree.summary = "wrong".to_string();
+        wrong_worktree
+            .metadata
+            .insert("thread_id".to_string(), serde_json::json!(thread_id));
+        store.save(&wrong_worktree).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        let mut canonical = SessionState::new("/repo/main");
+        canonical.summary = "canonical".to_string();
+        canonical
+            .metadata
+            .insert("thread_id".to_string(), serde_json::json!(thread_id));
+        store.save(&canonical).unwrap();
+
+        let loaded = store
+            .load_for_thread_id(thread_id, "/repo/main")
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.summary, "canonical");
     }
 
     #[test]

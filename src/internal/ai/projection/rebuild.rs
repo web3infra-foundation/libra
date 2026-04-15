@@ -42,7 +42,8 @@ use crate::{
         model::{
             ai_index_intent_context_frame, ai_index_intent_plan, ai_index_intent_task,
             ai_index_plan_step_task, ai_index_run_event, ai_index_run_patchset, ai_index_task_run,
-            ai_live_context_window, ai_scheduler_plan_head, ai_scheduler_state,
+            ai_live_context_window, ai_scheduler_plan_head, ai_scheduler_selected_plan,
+            ai_scheduler_state,
         },
     },
     utils::{storage::Storage, storage_ext::StorageExt},
@@ -284,9 +285,20 @@ impl<'a> ProjectionRebuilder<'a> {
         let active_run_id = latest_active_run(&selected_runs, &run_statuses);
         let active_plan_step_id = latest_active_plan_step(&selected_plan_step_events);
 
+        let selected_plan_id = selected_plan_id(&selected_runs, &selected_plans, &plan_heads);
+        let selected_plan_ids = selected_plan_id
+            .map(|plan_id| {
+                vec![PlanHeadRef {
+                    plan_id,
+                    ordinal: 0,
+                }]
+            })
+            .unwrap_or_default();
+
         let scheduler = SchedulerState {
             thread_id: thread.thread_id,
-            selected_plan_id: selected_plan_id(&selected_runs, &selected_plans, &plan_heads),
+            selected_plan_id,
+            selected_plan_ids,
             current_plan_heads: plan_heads,
             active_task_id,
             active_run_id,
@@ -428,6 +440,17 @@ impl<'a> ProjectionRebuilder<'a> {
                 )
             })?;
 
+        ai_scheduler_selected_plan::Entity::delete_many()
+            .filter(ai_scheduler_selected_plan::Column::ThreadId.eq(thread_id.clone()))
+            .exec(db)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to clear selected scheduler plans for thread {}",
+                    scheduler.thread_id
+                )
+            })?;
+
         ai_scheduler_state::Entity::delete_many()
             .filter(ai_scheduler_state::Column::ThreadId.eq(thread_id.clone()))
             .exec(db)
@@ -474,6 +497,22 @@ impl<'a> ProjectionRebuilder<'a> {
                 format!(
                     "Failed to insert scheduler plan head {} for thread {}",
                     plan_head.plan_id, scheduler.thread_id
+                )
+            })?;
+        }
+
+        for selected_plan in &scheduler.selected_plan_ids {
+            ai_scheduler_selected_plan::ActiveModel {
+                thread_id: Set(thread_id.clone()),
+                plan_id: Set(selected_plan.plan_id.to_string()),
+                ordinal: Set(selected_plan.ordinal),
+            }
+            .insert(db)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to insert selected scheduler plan {} for thread {}",
+                    selected_plan.plan_id, scheduler.thread_id
                 )
             })?;
         }

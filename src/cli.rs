@@ -480,7 +480,7 @@ fn removed_code_claudecode_hints(argv: &[String]) -> Vec<String> {
     });
     if has_removed_flag {
         hints.push(
-            "Claude Code provider-session flags were removed with the managed runtime; start a new Codex or generic-provider session and use Libra's canonical `--resume` flow."
+            "Claude Code provider-session flags were removed with the managed runtime; start a new Codex or generic-provider session and use Libra's canonical `--resume <thread_id>` flow."
                 .to_string(),
         );
     }

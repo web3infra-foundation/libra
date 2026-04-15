@@ -48,7 +48,7 @@
 //! ## Session Persistence
 //!
 //! Conversation history is persisted via `SessionStore` under the `.libra/` storage
-//! directory, supporting `--resume` to continue the latest session.
+//! directory, supporting `--resume <thread_id>` to continue a canonical Libra thread.
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -75,6 +75,7 @@ use tokio::{
 };
 use tokio_tungstenite::connect_async;
 use url::Url;
+use uuid::Uuid;
 
 use crate::{
     cli_error,
@@ -275,9 +276,9 @@ pub struct CodeArgs {
     #[arg(long, value_enum)]
     pub context: Option<CodeContext>,
 
-    /// Resume the most recent session
-    #[arg(long)]
-    pub resume: bool,
+    /// Resume a canonical Libra thread by thread_id.
+    #[arg(long, value_name = "THREAD_ID")]
+    pub resume: Option<String>,
 
     /// Tool approval policy:
     /// - `never`: no prompts, dangerous commands are rejected
@@ -513,7 +514,7 @@ async fn execute_tui(mut args: CodeArgs) -> CliResult<()> {
 
     let preamble = system_preamble(&working_dir, args.context);
     let temperature = args.temperature;
-    let resume = args.resume;
+    let resume_thread_id = args.resume.clone();
     let host = args.host.clone();
 
     // Prepare MCP server instance shared between the HTTP transport and TUI bridge
@@ -553,7 +554,7 @@ async fn execute_tui(mut args: CodeArgs) -> CliResult<()> {
         preamble,
         temperature,
         context: args.context,
-        resume,
+        resume_thread_id,
         approval_policy: args.approval_policy.into(),
         user_input_rx,
         exec_approval_rx,
@@ -1290,7 +1291,7 @@ struct TuiLaunchConfig {
     preamble: String,
     temperature: Option<f64>,
     context: Option<CodeContext>,
-    resume: bool,
+    resume_thread_id: Option<String>,
     approval_policy: AskForApproval,
     user_input_rx: tokio::sync::mpsc::UnboundedReceiver<UserInputRequest>,
     exec_approval_rx: tokio::sync::mpsc::UnboundedReceiver<ExecApprovalRequest>,
@@ -1439,10 +1440,24 @@ where
     let working_dir_str = registry.working_dir().to_string_lossy().to_string();
     let storage_root = resolve_storage_root(registry.working_dir());
     let session_store = SessionStore::from_storage_path(&storage_root);
-    let session = if params.resume {
-        match session_store.load_latest_for_working_dir(&working_dir_str) {
-            Ok(Some(s)) => s,
-            _ => SessionState::new(&working_dir_str),
+    let session = if let Some(thread_id) = params.resume_thread_id.as_deref() {
+        Uuid::parse_str(thread_id).map_err(|error| {
+            CliError::command_usage(format!(
+                "--resume expects a canonical thread_id UUID (got '{thread_id}': {error})"
+            ))
+        })?;
+        match session_store.load_for_thread_id(thread_id, &working_dir_str) {
+            Ok(Some(session)) => session,
+            Ok(None) => {
+                return Err(CliError::fatal(format!(
+                    "no Libra Code session found for thread_id '{thread_id}' in working directory '{working_dir_str}'"
+                )));
+            }
+            Err(error) => {
+                return Err(CliError::io(format!(
+                    "failed to load Libra Code session for thread_id '{thread_id}': {error}"
+                )));
+            }
         }
     } else {
         SessionState::new(&working_dir_str)
@@ -1847,7 +1862,7 @@ fn reject_non_tui_flags(args: &CodeArgs, mode: &str) -> Result<(), String> {
     reject_mode_flag(args.model.is_some(), "--model", mode)?;
     reject_mode_flag(args.temperature.is_some(), "--temperature", mode)?;
     reject_mode_flag(args.context.is_some(), "--context", mode)?;
-    reject_mode_flag(args.resume, "--resume", mode)?;
+    reject_mode_flag(args.resume.is_some(), "--resume", mode)?;
     reject_mode_flag(
         args.approval_policy != CodeApprovalPolicy::OnRequest,
         "--approval-policy",
@@ -1880,7 +1895,7 @@ mod tests {
             model: None,
             temperature: None,
             context: None,
-            resume: false,
+            resume: None,
             approval_policy: CodeApprovalPolicy::OnRequest,
             mcp_port: DEFAULT_MCP_PORT,
             stdio: false,

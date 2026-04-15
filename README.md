@@ -158,7 +158,8 @@ The legacy `claudecode` provider was removed. Use `libra code --provider codex`
 for Libra's managed agent runtime, or `libra code --provider anthropic` for
 direct Anthropic chat completions. Claude provider-session flags such as
 `--resume-session`, `--fork-session`, `--session-id`, and `--resume-at` are no
-longer accepted; use Libra's canonical `--resume` flow for persisted sessions.
+longer accepted; use Libra's canonical `--resume <thread_id>` flow for persisted
+sessions.
 
 Useful inspection commands:
 

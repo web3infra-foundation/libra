@@ -9,14 +9,14 @@ libra code
 libra code --web-only [-p <PORT>] [--host <HOST>]
 libra code --stdio
 libra code --provider <PROVIDER> [--model <MODEL>]
-libra code --resume
+libra code --resume <THREAD_ID>
 ```
 
 ## Description
 
 `libra code` starts an interactive coding session that pairs a human developer with an AI agent. The default mode launches a terminal UI (TUI) built on ratatui/crossterm with a background web server. Two alternative modes are available: `--web-only` runs the web server without the TUI (useful for browser access or remote hosting), and `--stdio` runs an MCP server over standard input/output for integration with AI clients like Claude Desktop.
 
-The command supports seven AI provider backends (Gemini, OpenAI, Anthropic, DeepSeek, Zhipu, Ollama, Codex) and three operating contexts (dev, review, research) that tune the agent's behavior for different workflows. Sessions can be persisted and resumed with Libra's canonical `--resume` flow.
+The command supports seven AI provider backends (Gemini, OpenAI, Anthropic, DeepSeek, Zhipu, Ollama, Codex) and three operating contexts (dev, review, research) that tune the agent's behavior for different workflows. Sessions can be persisted and resumed with Libra's canonical `--resume <thread_id>` flow.
 
 A sandboxed tool-execution layer enforces approval policies that control when the agent can run shell commands, apply patches, or perform other potentially destructive operations.
 
@@ -32,7 +32,7 @@ A sandboxed tool-execution layer enforces approval policies that control when th
 | Model | | `--model` | provider default | Provider-specific model ID. |
 | Temperature | | `--temperature` | provider default | Sampling temperature for generation. |
 | Context | | `--context` | none | Operating context: `dev` (alias `development`), `review` (alias `code-review`), `research` (alias `explore`). |
-| Resume | | `--resume` | off | Resume the most recent session. |
+| Resume | | `--resume <THREAD_ID>` | none | Resume a canonical Libra thread by thread ID. |
 | Approval policy | | `--approval-policy` | `on-request` | Tool approval policy (see Approval Policies below). |
 | MCP port | | `--mcp-port` | `6789` | MCP server listen port. |
 | Stdio | | `--stdio` / `--mcp-stdio` | off | Run MCP over stdio. Conflicts with `--web-only`. |
@@ -88,8 +88,8 @@ libra code --stdio
 # Use a local Ollama model
 libra code --provider ollama --model llama3 --api-base http://localhost:11434/v1
 
-# Resume the most recent session
-libra code --resume
+# Resume a canonical Libra thread
+libra code --resume 11111111-1111-4111-8111-111111111111
 
 # Start in code review context with strict approval
 libra code --context review --approval-policy untrusted
@@ -126,7 +126,7 @@ AI agents executing shell commands on a developer's machine present real safety 
 
 ### Why session persistence and resume?
 
-Long coding sessions accumulate significant context: file edits, conversation history, tool outputs. Losing this context on an accidental terminal close is painful. Session persistence stores the full conversation and tool state, and `--resume` restores the latest canonical Libra session.
+Long coding sessions accumulate significant context: file edits, conversation history, tool outputs. Losing this context on an accidental terminal close is painful. Session persistence stores the full conversation and tool state, and `--resume <thread_id>` restores a canonical Libra thread.
 
 ## Parameter Comparison: Libra vs Git vs jj
 
@@ -137,7 +137,7 @@ Long coding sessions accumulate significant context: file edits, conversation hi
 | Web mode | `--web-only` | Not available | Not available |
 | MCP/stdio mode | `--stdio` | Not available | Not available |
 | AI provider selection | `--provider` | Not available | Not available |
-| Session resume | `--resume` | Not available | Not available |
+| Session resume | `--resume <thread_id>` | Not available | Not available |
 | Tool approval policy | `--approval-policy` | Not available | Not available |
 
 Note: Neither Git nor jj have an equivalent to `libra code`. This command represents Libra's core differentiation as an AI-agent-native version control system. The closest analogs in the Git ecosystem are third-party tools like GitHub Copilot CLI or aider, which are separate applications rather than integrated VCS commands.
