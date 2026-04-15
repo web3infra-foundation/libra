@@ -172,10 +172,9 @@
 | **32** | `merge` / `rebase` | 状态机复杂，风险高 | merge / rebase 状态结构化、冲突契约、typed error |
 | **33** | `lfs` / `cloud` | 外部系统耦合高 | JSON / progress 契约、网络/权限错误分层 |
 
-**不纳入改进计划的模块：**
+**不纳入命令级批次改进的模块：**
 - `web_assets.rs`（11 行）：纯资源嵌入模块，无命令逻辑
-- `claudecode/`（模块）：Claude Code managed runtime，属于独立子系统，改进节奏由 Claude Code 自身演进决定
-- `code.rs`（1,153 行）：`libra code` TUI/Web/MCP 入口，已有 StableErrorCode，改进节奏由 AI Agent 子系统自身演进决定
+- `claudecode/` 与 `code.rs` **不在上面的命令批次表中推进**，但已由 [code.md](code.md) 作为 AI Agent / `libra code` 专项计划统一跟踪；后续涉及 shared runtime、workflow phase、provider formal writes、SQL projection 与 `claudecode` 清退的改动，以该计划为准
 
 ### 全局层面改进（贯穿所有命令）
 
@@ -227,13 +226,17 @@
 - [Index-Pack 命令改进详细计划](index-pack.md) ✅ 已落地
 - [Cat-File 命令改进详细计划](cat-file.md) ✅ 已落地
 
+## AI Agent 子系统专项计划
+
+- [Code 命令改进详细计划](code.md) — 进行中；覆盖 `src/command/code.rs`、共享 Runtime、Implementation Phase 0 contract stabilization、Phase 0-4 工作流、formal object / projection 存储分层、`--resume <thread_id>` 合同以及 `claudecode` 清退
+
 ## 命令改进实施记录
 
 - [Clone 命令改进实施记录](commands/clone.md)
 
 ---
 
-## 收尾工作（所有命令改进完成后）
+## 收尾工作（命令批次完成后的遗留清理）
 
 以下工作依赖所有命令批次全部完成，作为改进计划的最终收口：
 
@@ -246,16 +249,18 @@
 | 删除旧 SeaORM entity | 移除 `src/internal/model/config.rs` 中标记 `#[deprecated]` 的 `Model`/`Entity`/`Column`/`ActiveModel` | config.md 验证方式 |
 | 原始 SQL 最终清扫 | `rg -i '(FROM\|INTO\|UPDATE\|DELETE\s+FROM)\s+["\x60]?config["\x60]?\b' src/ --type rust` 确认零结果（deprecated 定义文件一并删除后不再有例外） | config.md 验证方式 |
 
-### AI Provider `from_env()` → `resolve_env()` 改造
-
-config.md 设计原则 #5 明确将 `src/internal/ai/providers/*/client.rs` 的 `from_env()` → `resolve_env()` 改造**留到后续批次**。当前涉及 6 个 provider（gemini、openai、anthropic、deepseek、zhipu、ollama）共 12 个文件。所有命令改进完成后，应统一将 AI provider 的 API key / base URL 读取切换到 `resolve_env()`，使 `vault.env.*` 配置对 AI provider 生效。
-
 ### 验收标准
 
 - `cargo clippy --all-targets --all-features -- -D warnings` 通过（旧 API 删除后不再有 deprecated 引用）
 - 原始 SQL 检查零结果
 - `cargo test --all` 全部通过
 - 旧 `config` 表在新建仓库中不再被创建
+
+## 跨子系统后续事项
+
+### AI Provider `from_env()` → `resolve_env()` 改造
+
+`config.md` 设计原则 #5 只说明这项改造**不属于 config 批次本身**；该 follow-up 现已并入 [code.md](code.md) 的 AI Agent / `libra code` 专项计划，不再作为“命令批次全部结束后再处理”的独立尾项。当前涉及 6 个 provider（gemini、openai、anthropic、deepseek、zhipu、ollama）共 12 个文件。实施时应与 `libra code` 的 provider bootstrap、vault/env 优先级、diagnostics 和 Runtime 启动路径一起收口，使 `vault.env.*` 配置对 AI provider 生效且不再与 `from_env()` 双轨并存。
 
 ---
 

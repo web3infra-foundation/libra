@@ -29,7 +29,7 @@ append runtime history.
 |---|---|---|---|
 | Phase 0 | Thread bootstrap, current intent revision, IntentSpec review, live context bootstrap | `Intent`, optional `ContextSnapshot` | `ToolInvocation`, `ContextFrame`, optional terminal `Decision` / `IntentEvent` |
 | Phase 1 | selected plan set heads, current plan heads, plan-set review, ready queue preview | `Plan`, `Task` | `ToolInvocation`, `ContextFrame`, optional terminal `Decision` / `IntentEvent` |
-| Phase 2 | live context window, composite DAG staging area, retry / replan / rework loop | `Run`, `PatchSet`, `Provenance` | `TaskEvent`, `RunEvent`, `PlanStepEvent`, `ToolInvocation`, `Evidence`, `ContextFrame`, `RunUsage` |
+| Phase 2 | live context window, stage-gated DAG staging area, retry / replan / rework loop | `Run`, `PatchSet`, `Provenance` | `TaskEvent`, `RunEvent`, `PlanStepEvent`, `ToolInvocation`, `Evidence`, `ContextFrame`, `RunUsage` |
 | Phase 3 | audit indexing, release candidate view, test-plan sufficiency routing | optional final `ContextSnapshot` | `Evidence`, `Decision`, terminal `TaskEvent` / `RunEvent` / `IntentEvent` |
 | Phase 4 | review UI, current thread / workspace pointers | none | `Decision`, optional terminal `IntentEvent` |
 
@@ -56,7 +56,7 @@ graph TD
  │    - readonly tools only
  │    - ToolInvocation / ContextFrame are persisted
  ├─ Render IntentSpec Markdown review
- │    - Confirm / Modify / Regenerate / Cancel
+ │    - Confirm / Modify / Cancel
  ├─ Optionally persist initial ContextSnapshot
  └─ Initialize / refresh Libra runtime context
       - Thread projection
@@ -76,7 +76,7 @@ graph TD
  ├─ Create Plan snapshot(s)
  │    - Plan.parents expresses replan / merge history
  │    - Plan.steps captures immutable step structure
- │    - At least one `implementation` plan and one `validation/test` plan
+ │    - Exactly one `execution` plan and one `test` plan
  ├─ Create Task snapshots for delegated work units
  ├─ Render Plan Set Markdown review
  │    - Execute / Modify Plan / Revise Intent / Cancel
@@ -160,7 +160,7 @@ execution view over immutable objects.
 
 | Field | Type | Description |
 |---|---|---|
-| `selected_plan_ids` | `Vec<Uuid>` | Current canonical plan set heads in the UI, at minimum `implementation` + `validation/test`. |
+| `selected_plan_ids` | `Vec<Uuid>` | Current canonical plan set heads in the UI; exactly two ids in stable order: `[execution_plan_id, test_plan_id]`. |
 | `current_plan_heads` | `Vec<Uuid>` | Active plan leaves under review or execution. |
 | `active_task_id` | `Option<Uuid>` | Task currently emphasized by the scheduler / UI. |
 | `active_run_id` | `Option<Uuid>` | Live execution attempt, if any. |
@@ -214,9 +214,11 @@ not a final execution plan.
 
 4. **Intent Review Loop**:
    - Render the provider result as Markdown for developer review.
-   - Developer may `Confirm`, `Modify`, `Regenerate`, or `Cancel`.
-   - `Modify` and `Regenerate` stay inside Phase 0 and create new
-     `Intent` revisions.
+   - Developer may `Confirm`, `Modify`, or `Cancel`.
+   - `Modify` stays inside Phase 0 and creates a new `Intent`
+     revision.
+   - If the UI offers "try again" / "regenerate" affordances, they are
+     modeled as `Modify` without introducing a separate workflow state.
    - `Cancel` appends terminal `Decision` / `IntentEvent` and ends the
      thread before planning.
 
@@ -238,13 +240,13 @@ view.
      readonly tools only.
    - Persist readonly analysis facts as `ToolInvocation` /
      `ContextFrame`.
-   - Persist a base `Plan` snapshot:
+   - Persist base `Plan` snapshots:
      - `Plan.intent` links the Plan to its `Intent`.
      - `Plan.parents` records replan or merge history.
      - `Plan.steps` defines immutable step structure.
-   - If planning branches into multiple candidates, each candidate is a
-     separate `Plan` snapshot. Their current visibility belongs to
-     Libra's `current_plan_heads`.
+   - The reviewable current set must contain exactly two heads:
+     one `execution` plan and one `test` plan. Revisions replace one side
+     or both sides of that pair without introducing additional plan roles.
 
 2. **Task Construction**:
    - Persist `Task` snapshots for delegated work units.
@@ -252,7 +254,7 @@ view.
      `Task.origin_step_id` remain immutable provenance links.
 
 3. **Plan Review Loop**:
-   - Render the current `Plan` as Markdown for developer review.
+   - Render the current dual plan (`execution` + `test`) as Markdown for developer review.
    - Developer may `Execute`, `Modify Plan`, `Revise Intent`, or
      `Cancel`.
    - `Modify Plan` stays inside Phase 1 and creates new `Plan` / `Task`
@@ -264,29 +266,31 @@ view.
 
 4. **Scheduler Projection**:
    - Libra derives the runtime Task graph, checkpoints, ready queue
-     preview, and selected plan set heads from `Plan` + `Task` snapshots.
+     preview, and the selected execution/test plan heads from `Plan` + `Task` snapshots.
    - There is no mutable `ExecutionPlan` object in `git-internal`.
 
 ## Phase 2: Execution
 
-The Scheduler executes ready Tasks in topological order across a
-composite DAG built from the selected implementation and validation/test
-plans. Independent Tasks can run in parallel, but all mutable
-coordination remains in Libra.
+The Scheduler executes ready Tasks in topological order using a
+conservative two-stage policy: first run `execution_dag` built from the
+selected `execution` plan, then cross a stage barrier, then run
+`test_dag` built from the selected `test` plan. All mutable coordination
+remains in Libra.
 
-### For each ready Task (or parallel group)
+### For each ready Task
 
-0. **Composite Plan Set**:
-   - Phase 2 always starts with at least two selected plans:
-     `implementation` and `validation/test`.
-   - Libra compiles both plans into one composite DAG with explicit
-     cross-plan dependencies so work and testing can run in parallel when
-     safe.
+0. **Stage-Gated Plan Set**:
+   - Phase 2 always starts with exactly two selected plans:
+     `execution` and `test`.
+   - Libra compiles and runs `execution_dag` first.
+   - Only after required execution work completes does Libra compile and
+     run `test_dag`.
+   - No cross-plan DAG edges are allowed in this baseline policy.
 
 1. **Runtime Context Preparation**:
    - Load prerequisite outputs from immutable `PatchSet`,
      `ContextSnapshot`, and `ContextFrame` records.
-   - Merge branch-local context in Libra when parallel branches
+   - Merge branch-local context in Libra when branches inside the current stage
      converge.
    - Provision task-local `Sandbox` and `Worktree` through Libra-owned
      execution environment services.
@@ -328,15 +332,15 @@ coordination remains in Libra.
    - Persist `RunUsage` after the attempt or batch completes.
 
 7. **Phase 2 Rework Loop**:
-   - If Phase 3 reports that the validation/test plan is insufficient,
+   - If Phase 3 reports that the test plan is insufficient,
      Libra routes back into Phase 2 with validator evidence.
-   - Libra may append new `Plan` / `Task` revisions for implementation or
-     validation/test work under the already confirmed Intent and rebuild
-     the composite DAG before re-running execution.
+   - Libra may append new `Plan` / `Task` revisions for execution or test
+     work under the already confirmed Intent and restart the
+     `execution_dag -> test_dag` sequence before re-running execution.
 
 ### Incremental Integration (Post-Batch)
 
-After a parallel group completes:
+After a stage batch completes:
 
 1. **Batch Merge in Libra**:
    - Libra merges staging PatchSets from task worktrees into the main
@@ -360,6 +364,8 @@ Boundary rule:
   candidate result, it remains in Phase 2.
 - Once the system starts evaluating the aggregated release candidate as
   a whole, it has entered Phase 3.
+- Phase 3 does not build or execute a planner-defined DAG; it runs a
+  fixed validator pipeline over the release candidate.
 
 1. **Global Validation**:
    - Run end-to-end tests, performance benchmarks, and compatibility
