@@ -1526,26 +1526,24 @@ impl CodeUiProviderAdapter for CodexCodeUiAdapter {
         interaction_id: &str,
         response: CodeUiInteractionResponse,
     ) -> anyhow::Result<()> {
-        if let Some(apply_to_future) = response.apply_to_future.as_ref() {
-            if let Some(mut approval_mode) =
+        if let Some(apply_to_future) = response.apply_to_future.as_ref()
+            && let Some(mut approval_mode) =
                 lock_or_warn(&self.approval_mode, "codex code ui approval mode write")
-            {
-                *approval_mode = match apply_to_future {
-                    CodeUiApplyToFuture::No => "ask".to_string(),
-                    CodeUiApplyToFuture::AcceptAll => "accept".to_string(),
-                    CodeUiApplyToFuture::DeclineAll => "decline".to_string(),
-                };
-            }
+        {
+            *approval_mode = match apply_to_future {
+                CodeUiApplyToFuture::No => "ask".to_string(),
+                CodeUiApplyToFuture::AcceptAll => "accept".to_string(),
+                CodeUiApplyToFuture::DeclineAll => "decline".to_string(),
+            };
         }
 
-        let Some(approved) =
-            response
-                .approved
-                .or_else(|| match response.selected_option.as_deref() {
-                    Some("approve") | Some("approve_all") => Some(true),
-                    Some("decline") | Some("decline_all") => Some(false),
-                    _ => None,
-                })
+        let Some(approved) = response
+            .approved
+            .or(match response.selected_option.as_deref() {
+                Some("approve") | Some("approve_all") => Some(true),
+                Some("decline") | Some("decline_all") => Some(false),
+                _ => None,
+            })
         else {
             return Err(anyhow!("Codex approvals require an explicit decision"));
         };
@@ -1896,14 +1894,12 @@ pub async fn start_code_ui_runtime(
                                 &codex_session_clone,
                                 "code ui agent message delta update",
                             )
-                        {
-                            if let Some(message) = session
+                            && let Some(message) = session
                                 .agent_messages
                                 .iter_mut()
                                 .find(|message| message.id == item_id)
-                            {
-                                message.content.push_str(delta);
-                            }
+                        {
+                            message.content.push_str(delta);
                         }
                     }
                     MethodKind::PlanUpdated | MethodKind::PlanDelta => {
@@ -2007,10 +2003,7 @@ pub async fn start_code_ui_runtime(
                                 &working_dir_clone,
                             )
                             .await;
-                            match oneshot_rx.await {
-                                Ok(approved) => approved,
-                                Err(_) => true,
-                            }
+                            oneshot_rx.await.unwrap_or(true)
                         };
 
                         if let Some(mut session) =
@@ -2121,10 +2114,9 @@ pub async fn start_code_ui_runtime(
                 .get("threadId")
                 .and_then(|value: &serde_json::Value| value.as_str())
         })
+        && let Some(mut current_thread_id) = lock_or_warn(&thread_id, "code ui thread id init")
     {
-        if let Some(mut current_thread_id) = lock_or_warn(&thread_id, "code ui thread id init") {
-            *current_thread_id = id.to_string();
-        }
+        *current_thread_id = id.to_string();
     }
 
     let adapter: Arc<dyn CodeUiProviderAdapter> = Arc::new(CodexCodeUiAdapter {

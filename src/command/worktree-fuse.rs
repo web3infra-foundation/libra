@@ -440,25 +440,24 @@ async fn add_fuse_worktree(
     }
 
     let mut rollback_needed = true;
-    if Head::current_commit().await.is_some() {
-        if let Err(err) = restore::execute_checked(RestoreArgs {
+    if Head::current_commit().await.is_some()
+        && let Err(err) = restore::execute_checked(RestoreArgs {
             pathspec: vec![target.to_string_lossy().to_string()],
             source: Some(checkout_branch.clone()),
             worktree: true,
             staged: false,
         })
         .await
-        {
-            let _ = mount_handle.unmount().await;
-            let _ = fs::remove_dir_all(&upper_dir);
-            if created_target {
-                let _ = fs::remove_dir_all(&target);
-            }
-            return Err(io::Error::other(format!(
-                "failed to populate FUSE worktree from '{}': {err}",
-                checkout_branch
-            )));
+    {
+        let _ = mount_handle.unmount().await;
+        let _ = fs::remove_dir_all(&upper_dir);
+        if created_target {
+            let _ = fs::remove_dir_all(&target);
         }
+        return Err(io::Error::other(format!(
+            "failed to populate FUSE worktree from '{}': {err}",
+            checkout_branch
+        )));
     }
 
     if let Ok(mut mounts) = active_mounts().lock() {
@@ -617,10 +616,10 @@ async fn remove_fuse_worktree(path: &str) -> io::Result<bool> {
         return Err(io::Error::other("cannot remove locked worktree"));
     }
 
-    if let Err(err) = unmount_path(&target).await {
-        if is_mount_active(&target) {
-            return Err(err);
-        }
+    if let Err(err) = unmount_path(&target).await
+        && is_mount_active(&target)
+    {
+        return Err(err);
     }
     if Path::new(&entry.upper_dir).exists() {
         fs::remove_dir_all(&entry.upper_dir)?;
@@ -676,13 +675,15 @@ fn repair_fuse_worktrees() -> io::Result<()> {
 }
 
 async fn unmount_path(path: &Path) -> io::Result<()> {
-    if let Ok(mut mounts) = active_mounts().lock()
-        && let Some(handle) = mounts.remove(&path.to_string_lossy().to_string())
-    {
+    let handle = active_mounts()
+        .lock()
+        .ok()
+        .and_then(|mut mounts| mounts.remove(&path.to_string_lossy().to_string()));
+    if let Some(handle) = handle {
         match handle.unmount().await {
             Ok(()) => return Ok(()),
             Err(e) => {
-                let ioe: io::Error = e.into();
+                let ioe: io::Error = e;
                 if matches!(
                     ioe.raw_os_error(),
                     Some(libc::ENOTCONN | libc::EINVAL | libc::ENOENT | libc::EPERM)

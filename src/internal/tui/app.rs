@@ -2111,12 +2111,11 @@ where
                             updated_at: Utc::now(),
                         })
                         .await;
-                    if tool_name == "apply_patch" {
-                        if let Some(patchset) =
+                    if tool_name == "apply_patch"
+                        && let Some(patchset) =
                             Self::patchset_snapshot_for_browser(&call_id, &status, &result)
-                        {
-                            code_ui_session.upsert_patchset(patchset).await;
-                        }
+                    {
+                        code_ui_session.upsert_patchset(patchset).await;
                     }
                     code_ui_session
                         .set_status(if self.running_tool_calls > 0 {

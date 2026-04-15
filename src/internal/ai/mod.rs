@@ -38,6 +38,7 @@ pub mod orchestrator;
 pub mod projection;
 pub mod prompt;
 pub mod providers;
+pub mod runtime;
 pub mod sandbox;
 pub mod session;
 pub mod tools;

@@ -70,6 +70,13 @@ pub async fn establish_connection_with_busy_timeout(
     ensure_ai_projection_schema(&conn)
         .await
         .map_err(|err| IOError::other(format!("Failed to ensure AI projection schema: {err}")))?;
+    ensure_ai_runtime_contract_schema(&conn)
+        .await
+        .map_err(|err| {
+            IOError::other(format!(
+                "Failed to ensure AI runtime contract schema: {err}"
+            ))
+        })?;
     Ok(conn)
 }
 // #[cfg(not(test))]
@@ -193,6 +200,8 @@ async fn setup_database_model(conn: &DatabaseConnection) -> Result<(), Transacti
 }
 
 const BOOTSTRAP_SQL: &str = include_str!("../../sql/sqlite_20260309_init.sql");
+const AI_RUNTIME_CONTRACT_MIGRATION_SQL: &str =
+    include_str!("../../sql/sqlite_20260415_ai_runtime_contract.sql");
 const AI_PROJECTION_SCHEMA_START: &str = "-- BEGIN AI PROJECTION SCHEMA";
 const AI_PROJECTION_SCHEMA_END: &str = "-- END AI PROJECTION SCHEMA";
 
@@ -309,6 +318,22 @@ async fn ensure_ai_projection_schema(conn: &DatabaseConnection) -> Result<(), IO
     conn.execute(Statement::from_string(backend, ai_projection_sql()?))
         .await
         .map_err(|err| IOError::other(format!("Failed to apply AI projection schema: {err}")))?;
+    Ok(())
+}
+
+/// Ensure Phase 0 AI runtime contract read-model tables exist.
+///
+/// This migration is safe to run repeatedly. Fresh databases get the same DDL
+/// from the bootstrap schema; deployed databases get the idempotent migration
+/// here on first connection.
+pub async fn ensure_ai_runtime_contract_schema(conn: &DatabaseConnection) -> Result<(), IOError> {
+    let backend = conn.get_database_backend();
+    conn.execute(Statement::from_string(
+        backend,
+        AI_RUNTIME_CONTRACT_MIGRATION_SQL,
+    ))
+    .await
+    .map_err(|err| IOError::other(format!("Failed to apply AI runtime contract schema: {err}")))?;
     Ok(())
 }
 

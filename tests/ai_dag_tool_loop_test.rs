@@ -65,8 +65,8 @@ impl Action for InputGenerator {
     }
 }
 
-#[test]
-fn test_dag_tool_loop_action_applies_patch() {
+#[tokio::test]
+async fn test_dag_tool_loop_action_applies_patch() {
     let temp_dir = TempDir::new().unwrap();
     let file_path = temp_dir.path().join("target.txt");
     std::fs::write(&file_path, "line 1\nline 2\nline 3\n").unwrap();
@@ -121,11 +121,11 @@ fn test_dag_tool_loop_action_applies_patch() {
     let b_id = b.id();
 
     let mut graph = Graph::new();
-    graph.add_node(a);
-    graph.add_node(b);
-    graph.add_edge(a_id, vec![b_id]);
+    graph.add_node(a).expect("add input node");
+    graph.add_node(b).expect("add ai node");
+    graph.add_edge(a_id, vec![b_id]).expect("add edge");
 
-    let result = graph.start();
+    let result = graph.async_start().await;
     assert!(result.is_ok(), "Graph execution failed: {:?}", result.err());
 
     let content = std::fs::read_to_string(&file_path).unwrap();

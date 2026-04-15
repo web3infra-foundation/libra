@@ -8,8 +8,8 @@ use std::{
 
 use async_trait::async_trait;
 use dagrs::{
-    Action, CheckpointConfig, DefaultNode, EnvVar, FileCheckpointStore, Graph, InChannels, Node,
-    NodeTable, OutChannels, Output, event::GraphEvent,
+    Action, CheckpointConfig, CompletionStatus, DefaultNode, EnvVar, FileCheckpointStore, Graph,
+    InChannels, Node, NodeTable, OutChannels, Output, event::GraphEvent,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -915,7 +915,7 @@ where
                 )
                 .await;
                 broadcast_dependency_signal(out_channels, false).await;
-                return Output::error(message);
+                return Output::execution_failed(message);
             }
         };
 
@@ -941,7 +941,7 @@ where
                 )
                 .await;
                 broadcast_dependency_signal(out_channels, false).await;
-                return Output::error(message);
+                return Output::execution_failed(message);
             }
 
             let remaining = max_cost_units.saturating_sub(consumed);
@@ -968,7 +968,7 @@ where
                     )
                     .await;
                     broadcast_dependency_signal(out_channels, false).await;
-                    return Output::error(message);
+                    return Output::execution_failed(message);
                 }
                 cost_budget_guard = Some(guard);
             }
@@ -1050,7 +1050,7 @@ where
             }
             TaskNodeStatus::Failed => {
                 broadcast_dependency_signal(out_channels, false).await;
-                Output::error(
+                Output::execution_failed(
                     result
                         .agent_output
                         .clone()
@@ -1063,7 +1063,7 @@ where
             }
             TaskNodeStatus::Pending | TaskNodeStatus::Running => {
                 broadcast_dependency_signal(out_channels, false).await;
-                Output::error(format!(
+                Output::execution_failed(format!(
                     "task {} returned invalid terminal state",
                     self.task.title()
                 ))
@@ -1102,7 +1102,12 @@ where
         let dagrs_node =
             DefaultNode::with_action(task_spec.id().to_string(), action, &mut node_table);
         let dagrs_id = dagrs_node.id();
-        graph.add_node(dagrs_node);
+        graph.add_node(dagrs_node).map_err(|err| {
+            OrchestratorError::PlanningFailed(format!(
+                "failed to add dagrs node for task {}: {err}",
+                task_spec.id()
+            ))
+        })?;
         dagrs_ids.insert(task_spec.id(), dagrs_id);
     }
 
@@ -1119,7 +1124,12 @@ where
                     "missing dagrs node for dependency {dep}"
                 ))
             })?;
-            graph.add_edge(from_id, vec![to_id]);
+            graph.add_edge(from_id, vec![to_id]).map_err(|err| {
+                OrchestratorError::PlanningFailed(format!(
+                    "failed to add dagrs edge {dep} -> {}: {err}",
+                    task_spec.id()
+                ))
+            })?;
         }
     }
 
@@ -1202,7 +1212,7 @@ async fn monitor_graph_events(
                     observer.on_graph_checkpoint_restored(&checkpoint_id, pc);
                 }
             }
-            Ok(GraphEvent::GraphFinished) => break,
+            Ok(GraphEvent::ExecutionTerminated { .. }) => break,
             Ok(_) => {}
             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -1305,10 +1315,24 @@ where
         tracing::warn!("dagrs event monitor terminated unexpectedly: {}", err);
     }
 
-    let execution_error = execution_result.err().map(|err| {
-        tracing::warn!("dagrs execution terminated with error: {}", err);
-        err.to_string()
-    });
+    let (execution_report, execution_error) = match execution_result {
+        Ok(report) => {
+            tracing::debug!(
+                run_id = %report.run_id,
+                node_total = report.node_total,
+                node_succeeded = report.node_succeeded,
+                node_failed = report.node_failed,
+                node_skipped = report.node_skipped,
+                status = ?report.status,
+                "dagrs execution completed"
+            );
+            (Some(report), None)
+        }
+        Err(err) => {
+            tracing::warn!("dagrs execution terminated with error: {}", err);
+            (None, Some(err.to_string()))
+        }
+    };
 
     let snapshot = run_state.snapshot(plan_spec).await;
     let incomplete_tasks = plan_spec
@@ -1331,6 +1355,14 @@ where
             "dagrs execution ended with incomplete tasks: {}{}",
             incomplete_tasks.join(", "),
             detail
+        )));
+    }
+    if let Some(report) = execution_report
+        && matches!(report.status, CompletionStatus::Aborted)
+    {
+        return Err(OrchestratorError::AgentError(format!(
+            "dagrs execution aborted: run_id={}, succeeded={}, failed={}, skipped={}",
+            report.run_id, report.node_succeeded, report.node_failed, report.node_skipped
         )));
     }
     Ok(snapshot)

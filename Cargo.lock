@@ -1460,9 +1460,9 @@ dependencies = [
 
 [[package]]
 name = "dagrs"
-version = "0.6.0"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6c632bdf30957acccd4cba417682cf88c1ff4a291434515108e20ecfb44683d"
+checksum = "122ff3bfcd3c2d146f0bb2f7fcc287d0f9a98dc4f19294567e21d1274c64b63f"
 dependencies = [
  "async-trait",
  "dagrs-derive",
@@ -1475,9 +1475,9 @@ dependencies = [
 
 [[package]]
 name = "dagrs-derive"
-version = "0.4.3"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "351bda7042e6c437e5b18c4638de6206ae7913434c03dad0ac57c4f0841500f9"
+checksum = "996a94ebdb3d92b237e2ef290067a19054d59e8cb39ad69560c34f0273f6c4ba"
 dependencies = [
  "proc-macro2",
  "quote",
