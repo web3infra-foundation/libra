@@ -462,10 +462,9 @@ fn removed_code_claudecode_hints(argv: &[String]) -> Vec<String> {
     }
 
     let mut hints = Vec::new();
-    let has_removed_provider = argv
-        .windows(2)
-        .any(|window| matches!(window, [flag, value] if flag == "--provider" && value == "claudecode"))
-        || argv.iter().any(|arg| arg == "--provider=claudecode");
+    let has_removed_provider = argv.windows(2).any(
+        |window| matches!(window, [flag, value] if flag == "--provider" && value == "claudecode"),
+    ) || argv.iter().any(|arg| arg == "--provider=claudecode");
     if has_removed_provider {
         hints.push(
             "`libra code --provider claudecode` was removed; use `--provider codex` for the managed agent runtime or `--provider anthropic` for direct Anthropic chat completions."

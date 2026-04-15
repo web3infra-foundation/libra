@@ -1,18 +1,29 @@
 //! Phase B projection resolver and scheduler repository contract tests.
 
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
-use git_internal::internal::object::types::ActorRef;
-use libra::internal::ai::{
-    projection::{
-        LiveContextFrameRef, LiveContextPinKind, LiveContextSourceKind, PlanHeadRef,
-        ProjectionResolver, SchedulerState, SchedulerStateCasError, SchedulerStateRepository,
-        ThreadIntentLinkReason, ThreadIntentRef, ThreadParticipant, ThreadParticipantRole,
-        ThreadProjection,
+use git_internal::internal::object::{intent::Intent, task::Task, types::ActorRef};
+use libra::{
+    internal::{
+        ai::{
+            history::HistoryManager,
+            projection::{
+                LiveContextFrameRef, LiveContextPinKind, LiveContextSourceKind, PlanHeadRef,
+                ProjectionRebuilder, ProjectionResolver, SchedulerState, SchedulerStateCasError,
+                SchedulerStateRepository, ThreadIntentLinkReason, ThreadIntentRef,
+                ThreadParticipant, ThreadParticipantRole, ThreadProjection,
+            },
+            runtime::contracts::ProjectionFreshness,
+        },
+        db,
     },
-    runtime::contracts::ProjectionFreshness,
+    utils::{storage::local::LocalStorage, storage_ext::StorageExt, test},
 };
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement};
 use serde_json::json;
+use serial_test::serial;
+use tempfile::tempdir;
 use uuid::Uuid;
 
 const BOOTSTRAP_SQL: &str = include_str!("../sql/sqlite_20260309_init.sql");
@@ -26,6 +37,27 @@ async fn setup_db() -> DatabaseConnection {
     .await
     .unwrap();
     db
+}
+
+async fn setup_projection_history() -> (
+    tempfile::TempDir,
+    Arc<LocalStorage>,
+    HistoryManager,
+    Arc<DatabaseConnection>,
+) {
+    let dir = tempdir().unwrap();
+    let _guard = test::ChangeDirGuard::new(dir.path());
+    test::setup_with_new_libra_in(dir.path()).await;
+
+    let libra_dir = dir.path().join(".libra");
+    let storage = Arc::new(LocalStorage::new(libra_dir.join("objects")));
+    let db_conn = Arc::new(
+        db::establish_connection(libra_dir.join("libra.db").to_str().unwrap())
+            .await
+            .unwrap(),
+    );
+    let history = HistoryManager::new(storage.clone(), libra_dir, db_conn.clone());
+    (dir, storage, history, db_conn)
 }
 
 fn ts(seconds: i64) -> DateTime<Utc> {
@@ -107,23 +139,39 @@ async fn scheduler_repository_loads_selected_plan_set_and_enforces_cas() {
     sample_thread(thread_id).create(&db).await.unwrap();
 
     let repo = SchedulerStateRepository::new(db.clone());
-    repo.insert_initial(&sample_scheduler(thread_id)).await.unwrap();
+    repo.insert_initial(&sample_scheduler(thread_id))
+        .await
+        .unwrap();
 
-    let loaded = repo.load(thread_id).await.unwrap().expect("scheduler state");
+    let loaded = repo
+        .load(thread_id)
+        .await
+        .unwrap()
+        .expect("scheduler state");
     assert_eq!(loaded.version, 1);
     assert_eq!(loaded.selected_plan_ids.len(), 2);
-    assert_eq!(loaded.live_context_window[0].source_kind, LiveContextSourceKind::Planning);
+    assert_eq!(
+        loaded.live_context_window[0].source_kind,
+        LiveContextSourceKind::Planning
+    );
 
     let mut next = loaded.clone();
     next.version = 2;
     next.active_task_id = Some(id("66666666-6666-4666-8666-666666666666"));
     repo.compare_and_swap(1, &next).await.unwrap();
 
-    let after = repo.load(thread_id).await.unwrap().expect("updated scheduler state");
+    let after = repo
+        .load(thread_id)
+        .await
+        .unwrap()
+        .expect("updated scheduler state");
     assert_eq!(after.version, 2);
     assert_eq!(after.active_task_id, next.active_task_id);
 
-    let stale = repo.compare_and_swap(1, &next).await.expect_err("stale CAS must fail");
+    let stale = repo
+        .compare_and_swap(1, &next)
+        .await
+        .expect_err("stale CAS must fail");
     assert!(matches!(
         stale,
         SchedulerStateCasError::VersionConflict {
@@ -150,4 +198,37 @@ async fn projection_resolver_returns_stale_read_only_when_scheduler_row_is_missi
     assert_eq!(bundle.thread.thread_id, thread_id);
     assert_eq!(bundle.freshness, ProjectionFreshness::StaleReadOnly);
     assert!(bundle.scheduler.selected_plan_ids.is_empty());
+}
+
+#[tokio::test]
+#[serial]
+async fn projection_resolver_rebuilds_missing_thread_projection_from_history() {
+    let (_dir, storage, history, db_conn) = setup_projection_history().await;
+    let actor = ActorRef::human("projection-rebuild").unwrap();
+    let intent = Intent::new(actor.clone(), "Recover missing projection").unwrap();
+    storage.put_tracked(&intent, &history).await.unwrap();
+    let mut task = Task::new(actor, "Recovered task", None).unwrap();
+    task.set_intent(Some(intent.header().object_id()));
+    storage.put_tracked(&task, &history).await.unwrap();
+
+    let resolver = ProjectionResolver::new(db_conn.as_ref().clone());
+    assert!(
+        resolver
+            .load_thread_bundle(intent.header().object_id())
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let rebuilder = ProjectionRebuilder::new(storage.as_ref(), &history);
+    let bundle = resolver
+        .load_or_rebuild_thread_bundle(intent.header().object_id(), &rebuilder)
+        .await
+        .unwrap()
+        .expect("rebuilt thread bundle");
+
+    assert_eq!(bundle.freshness, ProjectionFreshness::Fresh);
+    assert_eq!(bundle.thread.thread_id, intent.header().object_id());
+    assert_eq!(bundle.thread.intents.len(), 1);
+    assert_eq!(bundle.scheduler.thread_id, intent.header().object_id());
 }

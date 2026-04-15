@@ -1463,13 +1463,8 @@ where
         SessionState::new(&working_dir_str)
     };
 
-    let code_ui_runtime = build_tui_code_ui_runtime(
-        &working_dir_str,
-        &session,
-        &provider_name,
-        &model_name,
-    )
-    .await;
+    let code_ui_runtime =
+        build_tui_code_ui_runtime(&working_dir_str, &session, &provider_name, &model_name).await;
     let code_ui_session = code_ui_runtime.adapter().session();
 
     let (web_handle, web_line) = match start_web_server(

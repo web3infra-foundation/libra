@@ -232,7 +232,10 @@ impl SchedulerStateRepository {
                 ai_scheduler_state::Column::MetadataJson,
                 Expr::value(metadata_to_row(next.metadata.as_ref(), next.thread_id)?),
             )
-            .col_expr(ai_scheduler_state::Column::Version, Expr::value(next.version))
+            .col_expr(
+                ai_scheduler_state::Column::Version,
+                Expr::value(next.version),
+            )
             .col_expr(
                 ai_scheduler_state::Column::UpdatedAt,
                 Expr::value(next.updated_at.timestamp()),
@@ -483,7 +486,10 @@ async fn replace_child_rows_with_conn<C: ConnectionTrait>(
             context_frame_id: Set(frame.context_frame_id.to_string()),
             position: Set(frame.position),
             source_kind: Set(frame.source_kind.as_row_value().to_string()),
-            pin_kind: Set(frame.pin_kind.as_ref().map(|pin| pin.as_row_value().to_string())),
+            pin_kind: Set(frame
+                .pin_kind
+                .as_ref()
+                .map(|pin| pin.as_row_value().to_string())),
             inserted_at: Set(frame.inserted_at.timestamp()),
         }
         .insert(db)

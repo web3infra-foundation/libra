@@ -206,9 +206,7 @@ impl SessionStore {
     }
 
     /// Preview non-destructive legacy metadata backfill for existing sessions.
-    pub fn preview_legacy_metadata_backfill(
-        &self,
-    ) -> io::Result<SessionMetadataBackfillReport> {
+    pub fn preview_legacy_metadata_backfill(&self) -> io::Result<SessionMetadataBackfillReport> {
         self.legacy_metadata_backfill_report(false)
     }
 

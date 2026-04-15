@@ -87,22 +87,18 @@ impl<'a> ProjectionRebuilder<'a> {
     }
 
     pub async fn rebuild_latest_thread(&self) -> Result<Option<MaterializedProjection>> {
-        let objects = HistoryObjects {
-            intents: self.read_objects::<Intent>("intent").await?,
-            intent_events: self.read_objects::<IntentEvent>("intent_event").await?,
-            plans: self.read_objects::<Plan>("plan").await?,
-            tasks: self.read_objects::<Task>("task").await?,
-            task_events: self.read_objects::<TaskEvent>("task_event").await?,
-            runs: self.read_objects::<Run>("run").await?,
-            run_events: self.read_objects::<RunEvent>("run_event").await?,
-            patchsets: self.read_objects::<PatchSet>("patchset").await?,
-            plan_step_events: self
-                .read_objects::<PlanStepEvent>("plan_step_event")
-                .await?,
-            context_frames: self.read_objects::<ContextFrame>("context_frame").await?,
-        };
+        let objects = self.read_history_objects().await?;
 
         self.rebuild_latest_thread_from_data(&objects)
+    }
+
+    pub async fn rebuild_thread(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<Option<MaterializedProjection>> {
+        let objects = self.read_history_objects().await?;
+
+        self.rebuild_thread_from_data(&objects, thread_id)
     }
 
     pub async fn materialize_latest_thread(
@@ -113,12 +109,34 @@ impl<'a> ProjectionRebuilder<'a> {
             return Ok(None);
         };
 
+        self.materialize_rebuild(db, &rebuild).await?;
+        Ok(Some(rebuild))
+    }
+
+    pub async fn materialize_thread(
+        &self,
+        db: &DatabaseConnection,
+        thread_id: ThreadId,
+    ) -> Result<Option<MaterializedProjection>> {
+        let Some(rebuild) = self.rebuild_thread(thread_id).await? else {
+            return Ok(None);
+        };
+
+        self.materialize_rebuild(db, &rebuild).await?;
+        Ok(Some(rebuild))
+    }
+
+    async fn materialize_rebuild(
+        &self,
+        db: &DatabaseConnection,
+        rebuild: &MaterializedProjection,
+    ) -> Result<()> {
         let txn = db
             .begin()
             .await
             .context("Failed to start projection materialization transaction")?;
 
-        if let Err(err) = self.materialize_with_conn(&txn, &rebuild).await {
+        if let Err(err) = self.materialize_with_conn(&txn, rebuild).await {
             if let Err(rollback_err) = txn.rollback().await {
                 return Err(anyhow::Error::new(rollback_err).context(format!(
                     "Failed to rollback projection materialization after: {err:#}"
@@ -130,7 +148,7 @@ impl<'a> ProjectionRebuilder<'a> {
         txn.commit()
             .await
             .context("Failed to commit projection materialization transaction")?;
-        Ok(Some(rebuild))
+        Ok(())
     }
 
     fn rebuild_latest_thread_from_data(
@@ -147,6 +165,33 @@ impl<'a> ProjectionRebuilder<'a> {
             return Ok(None);
         };
 
+        self.rebuild_selected_thread_from_data(objects, &selection)
+    }
+
+    fn rebuild_thread_from_data(
+        &self,
+        objects: &HistoryObjects,
+        thread_id: ThreadId,
+    ) -> Result<Option<MaterializedProjection>> {
+        let selected = select_thread_by_id(
+            &objects.intents,
+            &objects.plans,
+            &objects.tasks,
+            &objects.runs,
+            thread_id,
+        );
+        let Some(selection) = selected else {
+            return Ok(None);
+        };
+
+        self.rebuild_selected_thread_from_data(objects, &selection)
+    }
+
+    fn rebuild_selected_thread_from_data(
+        &self,
+        objects: &HistoryObjects,
+        selection: &SelectedThread,
+    ) -> Result<Option<MaterializedProjection>> {
         let intent_map: HashMap<Uuid, &Intent> = objects
             .intents
             .iter()
@@ -267,7 +312,7 @@ impl<'a> ProjectionRebuilder<'a> {
             .map(|intent| intent.header().object_id());
 
         let thread = build_thread_projection(
-            &selection,
+            selection,
             &selected_intents,
             current_intent_id,
             latest_intent_id,
@@ -386,6 +431,23 @@ impl<'a> ProjectionRebuilder<'a> {
             run_patchset_index,
             intent_context_frame_index,
         }))
+    }
+
+    async fn read_history_objects(&self) -> Result<HistoryObjects> {
+        Ok(HistoryObjects {
+            intents: self.read_objects::<Intent>("intent").await?,
+            intent_events: self.read_objects::<IntentEvent>("intent_event").await?,
+            plans: self.read_objects::<Plan>("plan").await?,
+            tasks: self.read_objects::<Task>("task").await?,
+            task_events: self.read_objects::<TaskEvent>("task_event").await?,
+            runs: self.read_objects::<Run>("run").await?,
+            run_events: self.read_objects::<RunEvent>("run_event").await?,
+            patchsets: self.read_objects::<PatchSet>("patchset").await?,
+            plan_step_events: self
+                .read_objects::<PlanStepEvent>("plan_step_event")
+                .await?,
+            context_frames: self.read_objects::<ContextFrame>("context_frame").await?,
+        })
     }
 
     async fn materialize_with_conn<C: ConnectionTrait>(
@@ -784,35 +846,9 @@ fn select_latest_thread(
             sort_key(intent.header().created_at(), intent.header().object_id())
         })?;
         let intent_ids = connected_intent_component(intents, latest_intent.header().object_id());
-        let plan_ids = plans
-            .iter()
-            .filter(|plan| intent_ids.contains(&plan.intent()))
-            .map(|plan| plan.header().object_id())
-            .collect::<HashSet<_>>();
-        let plan_step_to_plan = build_plan_step_index(
-            &plans
-                .iter()
-                .filter(|plan| plan_ids.contains(&plan.header().object_id()))
-                .collect::<Vec<_>>(),
-        );
-        let task_ids = tasks
-            .iter()
-            .filter(|task| {
-                task.intent()
-                    .is_some_and(|intent_id| intent_ids.contains(&intent_id))
-                    || task
-                        .origin_step_id()
-                        .is_some_and(|step_id| plan_step_to_plan.contains_key(&step_id))
-            })
-            .map(|task| task.header().object_id())
-            .collect::<HashSet<_>>();
-        let roots = component_roots(intents, &intent_ids);
-        return Some(SelectedThread {
-            thread_id: derive_thread_id(&roots, None),
-            intent_ids,
-            plan_ids,
-            task_ids,
-        });
+        return Some(selected_thread_from_intent_ids(
+            intents, plans, tasks, intent_ids,
+        ));
     }
 
     let latest_task_id = tasks
@@ -831,6 +867,89 @@ fn select_latest_thread(
         plan_ids: HashSet::new(),
         task_ids: HashSet::from([latest_task_id]),
     })
+}
+
+fn select_thread_by_id(
+    intents: &[Intent],
+    plans: &[Plan],
+    tasks: &[Task],
+    runs: &[Run],
+    thread_id: ThreadId,
+) -> Option<SelectedThread> {
+    if !intents.is_empty() {
+        let mut sorted_intents = intents.iter().collect::<Vec<_>>();
+        sorted_intents.sort_by_key(|intent| {
+            sort_key(intent.header().created_at(), intent.header().object_id())
+        });
+
+        let mut visited = HashSet::new();
+        for intent in sorted_intents {
+            let intent_id = intent.header().object_id();
+            if visited.contains(&intent_id) {
+                continue;
+            }
+
+            let component_ids = connected_intent_component(intents, intent_id);
+            visited.extend(component_ids.iter().copied());
+
+            let selected = selected_thread_from_intent_ids(intents, plans, tasks, component_ids);
+            if selected.thread_id == thread_id {
+                return Some(selected);
+            }
+        }
+    }
+
+    if tasks
+        .iter()
+        .any(|task| task.header().object_id() == thread_id)
+        || runs.iter().any(|run| run.task() == thread_id)
+    {
+        return Some(SelectedThread {
+            thread_id,
+            intent_ids: HashSet::new(),
+            plan_ids: HashSet::new(),
+            task_ids: HashSet::from([thread_id]),
+        });
+    }
+
+    None
+}
+
+fn selected_thread_from_intent_ids(
+    intents: &[Intent],
+    plans: &[Plan],
+    tasks: &[Task],
+    intent_ids: HashSet<Uuid>,
+) -> SelectedThread {
+    let plan_ids = plans
+        .iter()
+        .filter(|plan| intent_ids.contains(&plan.intent()))
+        .map(|plan| plan.header().object_id())
+        .collect::<HashSet<_>>();
+    let selected_plans = plans
+        .iter()
+        .filter(|plan| plan_ids.contains(&plan.header().object_id()))
+        .collect::<Vec<_>>();
+    let plan_step_to_plan = build_plan_step_index(&selected_plans);
+    let task_ids = tasks
+        .iter()
+        .filter(|task| {
+            task.intent()
+                .is_some_and(|intent_id| intent_ids.contains(&intent_id))
+                || task
+                    .origin_step_id()
+                    .is_some_and(|step_id| plan_step_to_plan.contains_key(&step_id))
+        })
+        .map(|task| task.header().object_id())
+        .collect::<HashSet<_>>();
+    let roots = component_roots(intents, &intent_ids);
+
+    SelectedThread {
+        thread_id: derive_thread_id(&roots, None),
+        intent_ids,
+        plan_ids,
+        task_ids,
+    }
 }
 
 fn connected_intent_component(intents: &[Intent], seed: Uuid) -> HashSet<Uuid> {
@@ -1595,6 +1714,7 @@ mod tests {
     use serde_json::{Value, json};
     use serial_test::serial;
     use tempfile::tempdir;
+    use uuid::Uuid;
 
     use super::ProjectionRebuilder;
     use crate::{
@@ -1740,6 +1860,75 @@ mod tests {
                 .expect("load thread")
                 .expect("stored thread");
         assert_eq!(stored_thread.intents.len(), 3);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn targeted_rebuild_materializes_only_requested_thread() {
+        let (_dir, storage, history, db_conn) = setup_projection_history().await;
+        let actor = ActorRef::human("alice").expect("actor");
+
+        let first = Intent::new(actor.clone(), "First canonical thread").expect("first intent");
+        storage
+            .put_tracked(&first, &history)
+            .await
+            .expect("store first intent");
+        let mut first_task = Task::new(actor.clone(), "First task", None).expect("first task");
+        first_task.set_intent(Some(first.header().object_id()));
+        storage
+            .put_tracked(&first_task, &history)
+            .await
+            .expect("store first task");
+
+        let second = Intent::new(actor.clone(), "Second canonical thread").expect("second intent");
+        storage
+            .put_tracked(&second, &history)
+            .await
+            .expect("store second intent");
+        let mut second_task = Task::new(actor, "Second task", None).expect("second task");
+        second_task.set_intent(Some(second.header().object_id()));
+        storage
+            .put_tracked(&second_task, &history)
+            .await
+            .expect("store second task");
+
+        let rebuilder = ProjectionRebuilder::new(storage.as_ref(), &history);
+        let first_rebuild = rebuilder
+            .materialize_thread(db_conn.as_ref(), first.header().object_id())
+            .await
+            .expect("materialize first thread")
+            .expect("first projection");
+
+        assert_eq!(first_rebuild.thread.thread_id, first.header().object_id());
+        assert_eq!(first_rebuild.thread.intents.len(), 1);
+        assert_eq!(
+            first_rebuild.thread.intents[0].intent_id,
+            first.header().object_id()
+        );
+        assert_eq!(first_rebuild.intent_task_index.len(), 1);
+        assert_eq!(
+            first_rebuild.intent_task_index[0].task_id,
+            first_task.header().object_id()
+        );
+
+        let second_rebuild = rebuilder
+            .rebuild_thread(second.header().object_id())
+            .await
+            .expect("rebuild second thread")
+            .expect("second projection");
+        assert_eq!(second_rebuild.thread.thread_id, second.header().object_id());
+        assert_eq!(second_rebuild.thread.intents.len(), 1);
+        assert_eq!(second_rebuild.intent_task_index.len(), 1);
+        assert_eq!(
+            second_rebuild.intent_task_index[0].task_id,
+            second_task.header().object_id()
+        );
+
+        let missing = rebuilder
+            .rebuild_thread(Uuid::new_v4())
+            .await
+            .expect("rebuild missing thread");
+        assert!(missing.is_none());
     }
 
     #[tokio::test]

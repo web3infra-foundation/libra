@@ -4,7 +4,9 @@ use anyhow::{Context, Result};
 use sea_orm::DatabaseConnection;
 use uuid::Uuid;
 
-use super::{SchedulerState, SchedulerStateRepository, ThreadId, ThreadProjection};
+use super::{
+    ProjectionRebuilder, SchedulerState, SchedulerStateRepository, ThreadId, ThreadProjection,
+};
 use crate::internal::ai::runtime::contracts::ProjectionFreshness;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -52,6 +54,35 @@ impl ProjectionResolver {
             scheduler,
             freshness: ProjectionFreshness::Fresh,
         }))
+    }
+
+    pub async fn load_or_rebuild_thread_bundle(
+        &self,
+        thread_id: ThreadId,
+        rebuilder: &ProjectionRebuilder<'_>,
+    ) -> Result<Option<ThreadBundle>> {
+        let existing = self.load_thread_bundle(thread_id).await?;
+        if existing
+            .as_ref()
+            .is_some_and(|bundle| bundle.freshness == ProjectionFreshness::Fresh)
+        {
+            return Ok(existing);
+        }
+
+        match rebuilder.materialize_thread(&self.db, thread_id).await {
+            Ok(Some(_)) => self.load_thread_bundle(thread_id).await,
+            Ok(None) => Ok(existing),
+            Err(error) => {
+                if let Some(mut bundle) = existing {
+                    bundle.freshness = ProjectionFreshness::Unavailable;
+                    Ok(Some(bundle))
+                } else {
+                    Err(error.context(format!(
+                        "Failed to rebuild missing projection for thread {thread_id}"
+                    )))
+                }
+            }
+        }
     }
 }
 

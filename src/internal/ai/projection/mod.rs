@@ -19,8 +19,8 @@ pub use index::{
 pub use rebuild::{MaterializedProjection, ProjectionRebuilder};
 pub use resolver::{ProjectionResolver, ThreadBundle};
 pub use scheduler::{
-    LiveContextFrameRef, LiveContextPinKind, LiveContextSourceKind, PlanHeadRef,
-    SchedulerState, SchedulerStateCasError, SchedulerStateRepository,
+    LiveContextFrameRef, LiveContextPinKind, LiveContextSourceKind, PlanHeadRef, SchedulerState,
+    SchedulerStateCasError, SchedulerStateRepository,
 };
 pub use thread::{
     ThreadId, ThreadIntentLinkReason, ThreadIntentRef, ThreadParticipant, ThreadParticipantRole,
