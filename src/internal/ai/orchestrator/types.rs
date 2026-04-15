@@ -440,6 +440,14 @@ pub struct PersistedCheckpoint {
     pub dagrs_checkpoint_id: Option<String>,
 }
 
+/// Runtime-owned derived records emitted from validation and decision stages.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PersistedDerivedRecords {
+    pub validation_report_id: Uuid,
+    pub risk_score_breakdown_id: Uuid,
+    pub decision_proposal_id: Uuid,
+}
+
 /// Persisted execution object chain for an orchestrator run.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PersistedExecution {
@@ -458,6 +466,8 @@ pub struct PersistedExecution {
     pub checkpoints: Vec<PersistedCheckpoint>,
     #[serde(default)]
     pub tasks: Vec<PersistedTaskArtifacts>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived_records: Option<PersistedDerivedRecords>,
 }
 
 /// Best-effort observer for surfacing orchestrator runtime progress.
@@ -754,6 +764,7 @@ mod tests {
                     patchset_id: Some("patch-1".into()),
                     evidence_ids: vec!["ev-1".into()],
                 }],
+                derived_records: None,
             }),
         };
         let json = serde_json::to_string(&result).unwrap();

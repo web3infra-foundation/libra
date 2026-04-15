@@ -29,9 +29,9 @@ use super::{
     checkpoint_policy::{checkpoint_before_replan, checkpoint_on_replan},
     run_state::RunStateSnapshot,
     types::{
-        DecisionOutcome, ExecutionPlanSpec, GateStage, OrchestratorError, PersistedCheckpoint,
-        PersistedExecution, PersistedTaskArtifacts, SystemReport, TaskKind, TaskResult,
-        ToolCallRecord,
+        DecisionOutcome, ExecutionPlanSpec, GateReport, GateStage, OrchestratorError,
+        PersistedCheckpoint, PersistedDerivedRecords, PersistedExecution, PersistedTaskArtifacts,
+        SystemReport, TaskKind, TaskResult, ToolCallRecord,
     },
 };
 use crate::{
@@ -54,6 +54,11 @@ use crate::{
                 CreateToolInvocationParams, IoFootprintParams, PlanStepParams, TouchedFileParams,
             },
             server::LibraMcpServer,
+        },
+        runtime::{
+            DecisionPolicy, DecisionProposalStore, ValidationOutcome, ValidationReportStore,
+            ValidationStage, ValidationStageResult, ValidatorEngine, aggregate_risk_score,
+            build_decision_proposal, contracts::EvidenceKind,
         },
         tools::ToolOutput,
         workflow_objects::{build_git_intent, build_git_plan, parse_object_id},
@@ -608,6 +613,18 @@ impl ExecutionAuditSession {
             })
             .await?,
         );
+        let derived_records = Some(
+            persist_validation_decision_derivatives(
+                &self.mcp_server,
+                &{
+                    let state = self.state.lock().await;
+                    state.thread_id.clone()
+                },
+                &run_id,
+                request.system_report,
+            )
+            .await?,
+        );
         if let Some(snapshot_id) = final_checkpoint_id {
             checkpoints.push(PersistedCheckpoint {
                 revision: request.execution_plan_spec.revision,
@@ -668,6 +685,7 @@ impl ExecutionAuditSession {
             plan_ids,
             checkpoints,
             tasks: persisted_tasks,
+            derived_records,
         })
     }
 
@@ -2069,6 +2087,15 @@ pub async fn persist_execution(
         })
         .await?,
     );
+    let derived_records = Some(
+        persist_validation_decision_derivatives(
+            request.mcp_server,
+            &intent_id,
+            &run_id,
+            request.system_report,
+        )
+        .await?,
+    );
     if let Some(snapshot_id) = final_checkpoint_id {
         checkpoints.push(PersistedCheckpoint {
             revision: request.execution_plan_spec.revision,
@@ -2111,6 +2138,7 @@ pub async fn persist_execution(
         plan_ids,
         checkpoints,
         tasks: persisted_tasks,
+        derived_records,
     })
 }
 
@@ -2753,6 +2781,180 @@ async fn create_decision(request: FinalDecisionRequest<'_>) -> Result<String, Or
     parse_created_id("decision", &result)
 }
 
+async fn persist_validation_decision_derivatives(
+    mcp_server: &Arc<LibraMcpServer>,
+    thread_id: &str,
+    run_id: &str,
+    system_report: &SystemReport,
+) -> Result<PersistedDerivedRecords, OrchestratorError> {
+    let history = mcp_server.intent_history_manager.as_ref().ok_or_else(|| {
+        OrchestratorError::ConfigError(
+            "cannot persist validation decision records without AI history manager".to_string(),
+        )
+    })?;
+    let thread_id = Uuid::parse_str(thread_id).map_err(|error| {
+        OrchestratorError::ConfigError(format!(
+            "cannot persist validation decision records because thread id '{thread_id}' is not a UUID: {error}"
+        ))
+    })?;
+    let run_id = Uuid::parse_str(run_id).map_err(|error| {
+        OrchestratorError::ConfigError(format!(
+            "cannot persist validation decision records because run id '{run_id}' is not a UUID: {error}"
+        ))
+    })?;
+
+    let validator = ValidatorEngine::default_policy();
+    let report = validator.build_report(
+        thread_id,
+        Some(run_id),
+        validation_stages_from_system_report(system_report),
+    );
+    let policy = DecisionPolicy::default();
+    let risk = aggregate_risk_score(&report, &policy);
+    let proposal = build_decision_proposal(&report, &risk, &policy);
+
+    let db = history.database_connection();
+    ValidationReportStore::new(db.clone())
+        .write_latest(&report)
+        .await
+        .map_err(|error| {
+            OrchestratorError::ConfigError(format!(
+                "failed to persist validation report {} for thread {}: {error}",
+                report.report_id, report.thread_id
+            ))
+        })?;
+    DecisionProposalStore::new(db)
+        .write_latest(&risk, &proposal)
+        .await
+        .map_err(|error| {
+            OrchestratorError::ConfigError(format!(
+                "failed to persist decision proposal {} for thread {}: {error}",
+                proposal.proposal_id, proposal.thread_id
+            ))
+        })?;
+
+    Ok(PersistedDerivedRecords {
+        validation_report_id: report.report_id,
+        risk_score_breakdown_id: risk.breakdown_id,
+        decision_proposal_id: proposal.proposal_id,
+    })
+}
+
+fn validation_stages_from_system_report(
+    system_report: &SystemReport,
+) -> Vec<ValidationStageResult> {
+    vec![
+        validation_stage_from_gate_report(
+            ValidationStage::Integration,
+            &system_report.integration,
+            system_report.integration.all_required_passed,
+            Vec::new(),
+        ),
+        validation_stage_from_gate_report(
+            ValidationStage::Security,
+            &system_report.security,
+            system_report.security.all_required_passed,
+            Vec::new(),
+        ),
+        validation_stage_from_gate_report(
+            ValidationStage::Release,
+            &system_report.release,
+            system_report.release.all_required_passed
+                && system_report.review_passed
+                && system_report.artifacts_complete,
+            release_stage_blockers(system_report),
+        ),
+    ]
+}
+
+fn validation_stage_from_gate_report(
+    stage: ValidationStage,
+    report: &GateReport,
+    passed: bool,
+    extra_blockers: Vec<String>,
+) -> ValidationStageResult {
+    let evidence = validation_stage_evidence(report, &extra_blockers);
+    let outcome = if report.results.iter().any(|result| result.timed_out) {
+        ValidationOutcome::InfrastructureFailed
+    } else if passed {
+        ValidationOutcome::Passed
+    } else {
+        ValidationOutcome::BlockingFailed
+    };
+    let summary = Some(validation_stage_summary(report, &extra_blockers));
+
+    ValidationStageResult {
+        stage,
+        outcome,
+        evidence,
+        summary,
+    }
+}
+
+fn validation_stage_evidence(report: &GateReport, extra_blockers: &[String]) -> Vec<EvidenceKind> {
+    let mut evidence = report
+        .results
+        .iter()
+        .map(|result| evidence_kind_from_gate_result(&result.kind, result.timed_out))
+        .collect::<Vec<_>>();
+    evidence.extend(
+        extra_blockers
+            .iter()
+            .map(|_| EvidenceKind::ValidationBlockingFailed),
+    );
+    evidence
+}
+
+fn evidence_kind_from_gate_result(kind: &str, timed_out: bool) -> EvidenceKind {
+    if timed_out {
+        return EvidenceKind::Timeout;
+    }
+
+    match kind {
+        "test" => EvidenceKind::Test,
+        "lint" => EvidenceKind::Lint,
+        "build" => EvidenceKind::Build,
+        "security" => EvidenceKind::Security,
+        "performance" => EvidenceKind::Performance,
+        other => EvidenceKind::Other(other.to_string()),
+    }
+}
+
+fn release_stage_blockers(system_report: &SystemReport) -> Vec<String> {
+    let mut blockers = Vec::new();
+    if !system_report.review_passed {
+        if system_report.review_findings.is_empty() {
+            blockers.push("review did not pass".to_string());
+        } else {
+            blockers.extend(system_report.review_findings.iter().cloned());
+        }
+    }
+    if !system_report.artifacts_complete {
+        if system_report.missing_artifacts.is_empty() {
+            blockers.push("required artifacts are incomplete".to_string());
+        } else {
+            blockers.push(format!(
+                "missing artifacts: {}",
+                system_report.missing_artifacts.join(", ")
+            ));
+        }
+    }
+    blockers
+}
+
+fn validation_stage_summary(report: &GateReport, extra_blockers: &[String]) -> String {
+    let passed = report.results.iter().filter(|result| result.passed).count();
+    let failed = report.results.len().saturating_sub(passed);
+    let mut parts = vec![format!(
+        "{passed}/{} gate checks passed; {failed} failed",
+        report.results.len()
+    )];
+    if !extra_blockers.is_empty() {
+        parts.push(extra_blockers.join("; "));
+    }
+    parts.join("; ")
+}
+
 fn build_patchset_payload(
     tool_calls: &[ToolCallRecord],
 ) -> (Vec<TouchedFileParams>, Option<String>) {
@@ -3135,7 +3337,7 @@ mod tests {
     use git_internal::internal::object::{
         plan::Plan as GitPlan, task::Task as GitTask, types::ActorRef,
     };
-    use sea_orm::{ConnectionTrait, Database, Schema};
+    use sea_orm::{ConnectionTrait, Database, EntityTrait, Schema};
     use tempfile::tempdir;
 
     use super::*;
@@ -3153,7 +3355,9 @@ mod tests {
                     },
                 },
             },
-            model::reference,
+            model::{
+                ai_decision_proposal, ai_risk_score_breakdown, ai_validation_report, reference,
+            },
         },
         utils::{storage::local::LocalStorage, storage_ext::StorageExt},
     };
@@ -3163,6 +3367,12 @@ mod tests {
         let builder = db.get_database_backend();
         let schema = Schema::new(builder);
         let stmt = schema.create_table_from_entity(reference::Entity);
+        db.execute(builder.build(&stmt)).await.unwrap();
+        let stmt = schema.create_table_from_entity(ai_validation_report::Entity);
+        db.execute(builder.build(&stmt)).await.unwrap();
+        let stmt = schema.create_table_from_entity(ai_risk_score_breakdown::Entity);
+        db.execute(builder.build(&stmt)).await.unwrap();
+        let stmt = schema.create_table_from_entity(ai_decision_proposal::Entity);
         db.execute(builder.build(&stmt)).await.unwrap();
 
         let temp_dir = tempdir().unwrap();
@@ -3490,8 +3700,36 @@ mod tests {
         assert_eq!(persisted.tasks[0].tool_invocation_ids.len(), 1);
         assert!(persisted.tasks[0].patchset_id.is_some());
         assert_eq!(persisted.tasks[1].evidence_ids.len(), 1);
+        let derived = persisted
+            .derived_records
+            .as_ref()
+            .expect("validation decision derived records");
 
         let history = server.intent_history_manager.as_ref().unwrap();
+        let db = history.database_connection();
+        assert!(
+            ai_validation_report::Entity::find_by_id(derived.validation_report_id.to_string())
+                .one(&db)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            ai_risk_score_breakdown::Entity::find_by_id(
+                derived.risk_score_breakdown_id.to_string()
+            )
+            .one(&db)
+            .await
+            .unwrap()
+            .is_some()
+        );
+        assert!(
+            ai_decision_proposal::Entity::find_by_id(derived.decision_proposal_id.to_string())
+                .one(&db)
+                .await
+                .unwrap()
+                .is_some()
+        );
         assert_eq!(history.list_objects("task").await.unwrap().len(), 3);
         assert_eq!(history.list_objects("run").await.unwrap().len(), 1);
         assert_eq!(history.list_objects("patchset").await.unwrap().len(), 1);
@@ -3658,6 +3896,7 @@ mod tests {
             .unwrap();
         assert!(!persisted.run_id.is_empty());
         assert!(persisted.run_usage_id.is_some());
+        assert!(persisted.derived_records.is_some());
 
         let history = server.intent_history_manager.as_ref().unwrap();
         assert_eq!(
