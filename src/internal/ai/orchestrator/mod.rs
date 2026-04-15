@@ -10,7 +10,7 @@ pub mod replan;
 pub mod run_state;
 pub mod types;
 pub mod verifier;
-mod workspace;
+pub(crate) mod workspace;
 
 // SAFETY: The unwrap() and expect() calls in this module are documented with safety
 // justifications where used. Test code uses unwrap for test assertions. Production code

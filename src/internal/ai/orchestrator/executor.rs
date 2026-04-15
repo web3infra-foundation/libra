@@ -26,13 +26,13 @@ use super::{
         TaskKind, TaskNodeStatus, TaskResult, TaskRuntimeEvent, TaskRuntimeNoteLevel,
         TaskRuntimePhase, TaskSpec, ToolCallRecord,
     },
-    workspace::{cleanup_task_worktree, prepare_task_worktree, sync_task_worktree_back},
 };
 use crate::internal::ai::{
     agent::{ToolLoopConfig, ToolLoopObserver, run_tool_loop_with_history_and_observer},
     completion::{CompletionError, CompletionModel, CompletionUsage, CompletionUsageSummary},
     hooks::HookRunner,
     intentspec::types::{IntentSpec, NetworkPolicy, ToolAcl},
+    runtime::environment::{ExecutionEnvironmentProvider, SyncBackRequest},
     sandbox::{
         NetworkAccess, SandboxPermissions, SandboxPolicy, ToolRuntimeContext, ToolSandboxContext,
     },
@@ -495,47 +495,35 @@ async fn execute_gate_task_in_task_worktree(
     inherited_runtime: Option<&ToolRuntimeContext>,
     observer: Option<&Arc<dyn OrchestratorObserver>>,
 ) -> TaskResult {
-    let prepared = match tokio::task::spawn_blocking({
-        let working_dir = working_dir.to_path_buf();
-        let task_id = task.id();
-        move || prepare_task_worktree(&working_dir, task_id)
-    })
-    .await
+    let environment_provider = ExecutionEnvironmentProvider;
+    let environment = match environment_provider
+        .provision_task_worktree(working_dir.to_path_buf(), task.id())
+        .await
     {
-        Ok(Ok(worktree)) => worktree,
-        Ok(Err(err)) => return task_workspace_failure(task, err),
-        Err(err) => {
-            return task_workspace_failure(
-                task,
-                io::Error::other(format!(
-                    "failed to prepare isolated worktree for verification: {err}"
-                )),
-            );
-        }
+        Ok(environment) => environment,
+        Err(err) => return task_workspace_failure(task, err),
     };
+    let task_worktree_root = environment.root().to_path_buf();
 
     if let Some(observer) = observer {
         observer.on_task_runtime_event(
             task,
             TaskRuntimeEvent::WorkspaceReady {
-                working_dir: prepared.root.clone(),
+                working_dir: task_worktree_root.clone(),
                 isolated: true,
             },
         );
     }
 
-    let result = execute_gate_task(task, &prepared.root, spec, inherited_runtime, observer).await;
+    let result =
+        execute_gate_task(task, &task_worktree_root, spec, inherited_runtime, observer).await;
 
-    let cleanup_root = prepared.root.clone();
-    let cleanup_result = tokio::task::spawn_blocking(move || cleanup_task_worktree(prepared)).await;
-    match cleanup_result {
-        Err(err) => tracing::warn!("gate worktree cleanup worker failed: {}", err),
-        Ok(Err(err)) => tracing::warn!(
-            path = %cleanup_root.display(),
+    if let Err(err) = environment_provider.cleanup(environment).await {
+        tracing::warn!(
+            path = %task_worktree_root.display(),
             "failed to clean up gate worktree: {}",
             err
-        ),
-        Ok(Ok(())) => {}
+        );
     }
 
     result
@@ -680,33 +668,26 @@ async fn execute_task_in_task_worktree<M: CompletionModel>(
 where
     M::Response: CompletionUsage,
 {
-    let prepared = match tokio::task::spawn_blocking({
-        let working_dir = config.working_dir.clone();
-        let task_id = task.id();
-        move || prepare_task_worktree(&working_dir, task_id)
-    })
-    .await
+    let environment_provider = ExecutionEnvironmentProvider;
+    let environment = match environment_provider
+        .provision_task_worktree(config.working_dir.clone(), task.id())
+        .await
     {
-        Ok(Ok(worktree)) => worktree,
-        Ok(Err(err)) => return task_workspace_failure(task, err),
-        Err(err) => {
-            return task_workspace_failure(
-                task,
-                io::Error::other(format!("failed to prepare task worktree: {err}")),
-            );
-        }
+        Ok(environment) => environment,
+        Err(err) => return task_workspace_failure(task, err),
     };
+    let task_worktree_root = environment.root().to_path_buf();
 
-    let task_registry = Arc::new(registry.clone_with_working_dir(prepared.root.clone()));
+    let task_registry = Arc::new(registry.clone_with_working_dir(task_worktree_root.clone()));
     let mut task_config = config.clone();
-    task_config.working_dir = prepared.root.clone();
+    task_config.working_dir = task_worktree_root.clone();
     task_config.tool_loop_config =
-        clone_tool_loop_config_for_workdir(&config.tool_loop_config, &prepared.root);
+        clone_tool_loop_config_for_workdir(&config.tool_loop_config, &task_worktree_root);
     if let Some(observer) = &config.observer {
         observer.on_task_runtime_event(
             task,
             TaskRuntimeEvent::WorkspaceReady {
-                working_dir: prepared.root.clone(),
+                working_dir: task_worktree_root.clone(),
                 isolated: true,
             },
         );
@@ -717,54 +698,36 @@ where
     if result.status == TaskNodeStatus::Completed {
         let sync_result = {
             let _guard = workspace_sync.lock().await;
-            tokio::task::spawn_blocking({
-                let main_working_dir = config.working_dir.clone();
-                let task_worktree_dir = prepared.root.clone();
-                let baseline = prepared.baseline.clone();
-                let touch_files = task.contract.touch_files.clone();
-                let scope_in = task.scope_in.clone();
-                let scope_out = task.scope_out.clone();
-                move || {
-                    sync_task_worktree_back(
-                        &main_working_dir,
-                        &task_worktree_dir,
-                        &baseline,
-                        &touch_files,
-                        &scope_in,
-                        &scope_out,
-                    )
-                }
-            })
-            .await
+            environment_provider
+                .sync_back(
+                    &environment,
+                    SyncBackRequest {
+                        main_working_dir: config.working_dir.clone(),
+                        touch_files: task.contract.touch_files.clone(),
+                        scope_in: task.scope_in.clone(),
+                        scope_out: task.scope_out.clone(),
+                    },
+                )
+                .await
         };
 
         match sync_result {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => {
+            Ok(()) => {}
+            Err(err) => {
                 result.status = TaskNodeStatus::Failed;
                 result.agent_output = Some(format!(
                     "task completed in isolated worktree but failed to sync changes back: {err}"
                 ));
             }
-            Err(err) => {
-                result.status = TaskNodeStatus::Failed;
-                result.agent_output = Some(format!(
-                    "task completed in isolated worktree but sync worker failed: {err}"
-                ));
-            }
         }
     }
 
-    let cleanup_root = prepared.root.clone();
-    let cleanup_result = tokio::task::spawn_blocking(move || cleanup_task_worktree(prepared)).await;
-    match cleanup_result {
-        Err(err) => tracing::warn!("task worktree cleanup worker failed: {}", err),
-        Ok(Err(err)) => tracing::warn!(
-            path = %cleanup_root.display(),
+    if let Err(err) = environment_provider.cleanup(environment).await {
+        tracing::warn!(
+            path = %task_worktree_root.display(),
             "failed to clean up task worktree: {}",
             err
-        ),
-        Ok(Ok(())) => {}
+        );
     }
 
     result

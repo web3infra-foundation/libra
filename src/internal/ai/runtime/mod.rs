@@ -4,6 +4,7 @@
 //! to one stable surface before scheduler and provider cutover starts.
 
 pub mod contracts;
+pub mod environment;
 pub mod prompt_builders;
 
 pub use contracts::{PromptPackage, WorkflowPhase};
