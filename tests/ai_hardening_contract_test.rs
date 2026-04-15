@@ -59,6 +59,36 @@ fn mutating_tool_requires_runtime_mediated_approval_for_humans() {
 }
 
 #[test]
+fn mcp_read_and_write_tool_prefixes_are_classified() {
+    let policy = ToolBoundaryPolicy::default_runtime();
+
+    let list_decisions = policy.decide(
+        &PrincipalContext::system(),
+        &ToolOperation {
+            tool_name: "list_decisions".to_string(),
+            mutates_state: false,
+            requires_network: false,
+        },
+    );
+    assert!(list_decisions.allowed);
+    assert!(!list_decisions.approval_required);
+
+    let create_decision = policy.decide(
+        &PrincipalContext {
+            principal_id: "alice".to_string(),
+            role: PrincipalRole::Owner,
+        },
+        &ToolOperation {
+            tool_name: "create_decision".to_string(),
+            mutates_state: true,
+            requires_network: false,
+        },
+    );
+    assert!(create_decision.allowed);
+    assert!(create_decision.approval_required);
+}
+
+#[test]
 fn secret_redactor_removes_common_token_shapes() {
     let redactor = SecretRedactor::default_runtime();
     let redacted = redactor.redact(

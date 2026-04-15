@@ -9,6 +9,7 @@ use super::{
     error::{ToolError, ToolResult},
     spec::ToolSpec,
 };
+use crate::internal::ai::runtime::{ToolBoundaryRuntime, ToolOperation};
 
 /// Handler trait that all tools must implement.
 ///
@@ -35,6 +36,11 @@ pub trait ToolHandler: Send + Sync {
         false
     }
 
+    /// Returns `true` if the invocation requires direct network access.
+    async fn requires_network(&self, _invocation: &ToolInvocation) -> bool {
+        false
+    }
+
     /// Execute the tool with the given invocation context.
     ///
     /// Returns a ToolOutput containing the result to send back to the model.
@@ -54,6 +60,8 @@ pub struct ToolRegistry {
     handlers: HashMap<String, Arc<dyn ToolHandler>>,
     /// Working directory for file operations.
     working_dir: std::path::PathBuf,
+    /// Optional runtime boundary policy and audit pipeline.
+    hardening: Option<ToolBoundaryRuntime>,
 }
 
 impl ToolRegistry {
@@ -69,6 +77,7 @@ impl ToolRegistry {
         Ok(Self {
             handlers: HashMap::new(),
             working_dir: std::env::current_dir()?,
+            hardening: None,
         })
     }
 
@@ -77,6 +86,7 @@ impl ToolRegistry {
         Self {
             handlers: HashMap::new(),
             working_dir,
+            hardening: None,
         }
     }
 
@@ -85,7 +95,14 @@ impl ToolRegistry {
         Self {
             handlers: self.handlers.clone(),
             working_dir,
+            hardening: self.hardening.clone(),
         }
+    }
+
+    /// Attach runtime tool-boundary policy, audit, and redaction.
+    pub fn with_hardening(mut self, hardening: ToolBoundaryRuntime) -> Self {
+        self.hardening = Some(hardening);
+        self
     }
 
     /// Register a tool handler with the given name.
@@ -150,6 +167,61 @@ impl ToolRegistry {
         // Ignore any caller-provided working_dir to prevent sandbox bypass.
         invocation.working_dir = self.working_dir.clone();
 
+        let mutates_state = handler.is_mutating(&invocation).await;
+        let requires_network = handler.requires_network(&invocation).await;
+
+        if let Some(hardening) = &self.hardening {
+            let operation = ToolOperation {
+                tool_name: tool_name.clone(),
+                mutates_state,
+                requires_network,
+            };
+            let decision = hardening.decide(&operation);
+            hardening
+                .append_audit(
+                    format!("tool_boundary.{}", tool_name),
+                    format!(
+                        "decision={} approval_required={} reason={} payload={}",
+                        if decision.allowed { "allow" } else { "deny" },
+                        decision.approval_required,
+                        decision.reason,
+                        invocation.log_payload()
+                    ),
+                )
+                .await
+                .map_err(|error| {
+                    ToolError::ExecutionFailed(format!(
+                        "failed to persist tool boundary audit event: {error}"
+                    ))
+                })?;
+
+            if !decision.allowed {
+                return Err(ToolError::ExecutionFailed(decision.reason));
+            }
+
+            let result = handler.handle(invocation).await;
+            let summary = match &result {
+                Ok(output) => format!(
+                    "success={} output={}",
+                    output.is_success(),
+                    output.log_preview()
+                ),
+                Err(error) => format!("error={error}"),
+            };
+            hardening
+                .append_audit(format!("tool_result.{}", tool_name), summary)
+                .await
+                .map_err(|error| {
+                    ToolError::ExecutionFailed(format!(
+                        "failed to persist tool result audit event: {error}"
+                    ))
+                })?;
+            hardening.flush_audit().await.map_err(|error| {
+                ToolError::ExecutionFailed(format!("failed to flush tool audit sink: {error}"))
+            })?;
+            return result;
+        }
+
         handler.handle(invocation).await
     }
 
@@ -161,6 +233,11 @@ impl ToolRegistry {
     /// Set the working directory.
     pub fn set_working_dir(&mut self, dir: std::path::PathBuf) {
         self.working_dir = dir;
+    }
+
+    /// Replace or install runtime hardening policy for subsequent dispatch calls.
+    pub fn set_hardening(&mut self, hardening: ToolBoundaryRuntime) {
+        self.hardening = Some(hardening);
     }
 
     /// Check if a tool is registered.
@@ -226,6 +303,12 @@ impl ToolRegistryBuilder {
         self
     }
 
+    /// Attach runtime hardening policy to the built registry.
+    pub fn hardening(mut self, hardening: ToolBoundaryRuntime) -> Self {
+        self.registry.set_hardening(hardening);
+        self
+    }
+
     /// Build the ToolRegistry.
     pub fn build(self) -> ToolRegistry {
         self.registry
@@ -263,6 +346,27 @@ mod tests {
 
         fn schema(&self) -> ToolSpec {
             ToolSpec::new("mock", "A mock tool")
+        }
+    }
+
+    struct MutatingMockHandler;
+
+    #[async_trait]
+    impl ToolHandler for MutatingMockHandler {
+        fn kind(&self) -> ToolKind {
+            ToolKind::Function
+        }
+
+        async fn is_mutating(&self, _invocation: &ToolInvocation) -> bool {
+            true
+        }
+
+        async fn handle(&self, _invocation: ToolInvocation) -> ToolResult<ToolOutput> {
+            Ok(ToolOutput::success("token=handler-secret"))
+        }
+
+        fn schema(&self) -> ToolSpec {
+            ToolSpec::new("mutating_mock", "A mutating mock tool")
         }
     }
 
@@ -413,5 +517,75 @@ mod tests {
 
         let list_result = registry.dispatch(list_invocation).await;
         assert!(list_result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn registry_hardening_denies_observer_mutating_tools() {
+        let sink = Arc::new(crate::internal::ai::runtime::InMemoryAuditSink::default());
+        let hardening = ToolBoundaryRuntime::new(
+            uuid::Uuid::new_v4(),
+            crate::internal::ai::runtime::PrincipalContext {
+                principal_id: "observer".to_string(),
+                role: crate::internal::ai::runtime::PrincipalRole::Observer,
+            },
+            crate::internal::ai::runtime::ToolBoundaryPolicy::default_runtime(),
+            crate::internal::ai::runtime::SecretRedactor::default_runtime(),
+            sink.clone(),
+        );
+        let mut registry = ToolRegistry::with_working_dir(std::path::PathBuf::from("/tmp"))
+            .with_hardening(hardening);
+        registry.register("apply_patch", Arc::new(MutatingMockHandler));
+
+        let result = registry
+            .dispatch(ToolInvocation::new(
+                "call-1",
+                "apply_patch",
+                ToolPayload::Function {
+                    arguments: "{}".to_string(),
+                },
+                std::path::PathBuf::from("/tmp"),
+            ))
+            .await;
+
+        assert!(matches!(result, Err(ToolError::ExecutionFailed(_))));
+        let events = sink.events().await;
+        assert_eq!(events.len(), 1);
+        assert!(events[0].redacted_summary.contains("decision=deny"));
+    }
+
+    #[tokio::test]
+    async fn registry_hardening_audits_and_redacts_tool_payload_and_result() {
+        let sink = Arc::new(crate::internal::ai::runtime::InMemoryAuditSink::default());
+        let hardening = ToolBoundaryRuntime::system(uuid::Uuid::new_v4(), sink.clone());
+        let mut registry = ToolRegistry::with_working_dir(std::path::PathBuf::from("/tmp"))
+            .with_hardening(hardening);
+        registry.register("shell", Arc::new(MutatingMockHandler));
+
+        let result = registry
+            .dispatch(ToolInvocation::new(
+                "call-1",
+                "shell",
+                ToolPayload::Function {
+                    arguments: serde_json::json!({"command":"echo token=payload-secret"})
+                        .to_string(),
+                },
+                std::path::PathBuf::from("/tmp"),
+            ))
+            .await
+            .unwrap();
+
+        assert!(result.is_success());
+        let events = sink.events().await;
+        assert_eq!(events.len(), 2);
+        assert!(
+            events
+                .iter()
+                .all(|event| !event.redacted_summary.contains("secret"))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.redacted_summary.contains("[REDACTED]"))
+        );
     }
 }

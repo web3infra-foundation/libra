@@ -1,6 +1,6 @@
 //! Phase E hardening contracts for authorization, tool boundary, redaction, and audit.
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -58,14 +58,26 @@ pub struct ToolBoundaryPolicy {
 impl ToolBoundaryPolicy {
     pub fn default_runtime() -> Self {
         Self {
-            readonly_tools: ["read_file", "list_dir", "grep_files", "mcp_read"]
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-            mutating_tools: ["shell", "apply_patch", "mcp_write"]
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
+            readonly_tools: [
+                "read_file",
+                "list_dir",
+                "grep_files",
+                "request_user_input",
+                "mcp_read",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+            mutating_tools: [
+                "shell",
+                "apply_patch",
+                "update_plan",
+                "submit_intent_draft",
+                "mcp_write",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
             allow_network: false,
             policy_version: "tool-boundary:v1".to_string(),
         }
@@ -96,7 +108,13 @@ impl ToolBoundaryPolicy {
             };
         }
 
-        if self.readonly_tools.contains(&operation.tool_name) && !operation.mutates_state {
+        let known_readonly = self.readonly_tools.contains(&operation.tool_name)
+            || operation.tool_name.starts_with("list_");
+        let known_mutating = self.mutating_tools.contains(&operation.tool_name)
+            || operation.tool_name.starts_with("create_")
+            || operation.tool_name.starts_with("update_");
+
+        if known_readonly && !operation.mutates_state {
             return BoundaryDecision {
                 allowed: true,
                 approval_required: false,
@@ -104,7 +122,7 @@ impl ToolBoundaryPolicy {
             };
         }
 
-        if self.mutating_tools.contains(&operation.tool_name) || operation.mutates_state {
+        if known_mutating || operation.mutates_state {
             return BoundaryDecision {
                 allowed: true,
                 approval_required: principal.role != PrincipalRole::System,
@@ -166,6 +184,90 @@ pub struct AuditEvent {
 pub trait AuditSink: Send + Sync {
     async fn append(&self, event: AuditEvent) -> Result<()>;
     async fn flush(&self) -> Result<()>;
+}
+
+#[derive(Clone)]
+pub struct ToolBoundaryRuntime {
+    trace_id: Uuid,
+    principal: PrincipalContext,
+    policy: ToolBoundaryPolicy,
+    redactor: SecretRedactor,
+    audit_sink: Arc<dyn AuditSink>,
+}
+
+impl ToolBoundaryRuntime {
+    pub fn new(
+        trace_id: Uuid,
+        principal: PrincipalContext,
+        policy: ToolBoundaryPolicy,
+        redactor: SecretRedactor,
+        audit_sink: Arc<dyn AuditSink>,
+    ) -> Self {
+        Self {
+            trace_id,
+            principal,
+            policy,
+            redactor,
+            audit_sink,
+        }
+    }
+
+    pub fn system(trace_id: Uuid, audit_sink: Arc<dyn AuditSink>) -> Self {
+        Self::new(
+            trace_id,
+            PrincipalContext::system(),
+            ToolBoundaryPolicy::default_runtime(),
+            SecretRedactor::default_runtime(),
+            audit_sink,
+        )
+    }
+
+    pub fn decide(&self, operation: &ToolOperation) -> BoundaryDecision {
+        self.policy.decide(&self.principal, operation)
+    }
+
+    pub async fn append_audit(
+        &self,
+        action: impl Into<String>,
+        summary: impl AsRef<str>,
+    ) -> Result<()> {
+        self.audit_sink
+            .append(AuditEvent {
+                trace_id: self.trace_id,
+                principal_id: self.principal.principal_id.clone(),
+                action: action.into(),
+                policy_version: self.policy.policy_version().to_string(),
+                redacted_summary: self.redactor.redact(summary.as_ref()),
+                at: Utc::now(),
+            })
+            .await
+    }
+
+    pub async fn flush_audit(&self) -> Result<()> {
+        self.audit_sink.flush().await
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct TracingAuditSink;
+
+#[async_trait]
+impl AuditSink for TracingAuditSink {
+    async fn append(&self, event: AuditEvent) -> Result<()> {
+        tracing::info!(
+            trace_id = %event.trace_id,
+            principal = %event.principal_id,
+            action = %event.action,
+            policy_version = %event.policy_version,
+            summary = %event.redacted_summary,
+            "ai runtime audit event"
+        );
+        Ok(())
+    }
+
+    async fn flush(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default)]

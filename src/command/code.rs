@@ -102,6 +102,7 @@ use crate::{
                 openai::{Client as OpenAIClient, GPT_4O_MINI},
                 zhipu::{Client as ZhipuClient, GLM_5},
             },
+            runtime::{ToolBoundaryRuntime, TracingAuditSink},
             sandbox::{
                 ApprovalStore, AskForApproval, ExecApprovalRequest, SandboxPermissions,
                 SandboxPolicy, ToolApprovalContext, ToolRuntimeContext, ToolSandboxContext,
@@ -517,6 +518,10 @@ async fn execute_tui(mut args: CodeArgs) -> CliResult<()> {
     let temperature = args.temperature;
     let resume_thread_id = args.resume.clone();
     let host = args.host.clone();
+    let trace_id = resume_thread_id
+        .as_deref()
+        .and_then(|thread_id| Uuid::parse_str(thread_id).ok())
+        .unwrap_or_else(Uuid::new_v4);
 
     // Prepare MCP server instance shared between the HTTP transport and TUI bridge
     let mcp_server = init_mcp_server(&working_dir).await;
@@ -528,6 +533,10 @@ async fn execute_tui(mut args: CodeArgs) -> CliResult<()> {
 
     // Build registry: basic file tools + MCP workflow tools
     let mut builder = ToolRegistryBuilder::with_working_dir(working_dir.clone())
+        .hardening(ToolBoundaryRuntime::system(
+            trace_id,
+            Arc::new(TracingAuditSink),
+        ))
         .register("read_file", Arc::new(ReadFileHandler))
         .register("list_dir", Arc::new(ListDirHandler))
         .register("grep_files", Arc::new(GrepFilesHandler))

@@ -13,7 +13,7 @@ pub mod prompt_builders;
 pub use contracts::{PromptPackage, WorkflowPhase};
 pub use hardening::{
     AuditEvent, AuditSink, BoundaryDecision, InMemoryAuditSink, PrincipalContext, PrincipalRole,
-    SecretRedactor, ToolBoundaryPolicy, ToolOperation,
+    SecretRedactor, ToolBoundaryPolicy, ToolBoundaryRuntime, ToolOperation, TracingAuditSink,
 };
 pub use phase3::{
     ArtifactLedger, ValidationOutcome, ValidationReport, ValidationReportStore, ValidationStage,
