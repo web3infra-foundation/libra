@@ -92,6 +92,7 @@ use crate::{
             history::HistoryManager,
             hooks::HookRunner,
             mcp::server::LibraMcpServer,
+            projection::{ProjectionRebuilder, ProjectionResolver, ThreadBundle},
             prompt::{ContextMode, SystemPromptBuilder},
             providers::{
                 anthropic::{CLAUDE_3_5_SONNET, Client as AnthropicClient},
@@ -122,7 +123,7 @@ use crate::{
                     CodeUiInitialController, CodeUiInteractionResponse, CodeUiProviderInfo,
                     CodeUiRuntimeHandle, CodeUiSession, CodeUiSessionSnapshot, CodeUiSessionStatus,
                     CodeUiTranscriptEntry, CodeUiTranscriptEntryKind, ReadOnlyCodeUiAdapter,
-                    initial_snapshot, snapshot_from_event,
+                    initial_snapshot, snapshot_from_event, snapshot_from_thread_bundle,
                 },
                 start as start_web_server,
             },
@@ -1358,20 +1359,29 @@ async fn build_tui_code_ui_runtime(
     session: &SessionState,
     provider_name: &str,
     model_name: &str,
+    projection_bundle: Option<&ThreadBundle>,
 ) -> Arc<CodeUiRuntimeHandle> {
     let capabilities = build_tui_code_ui_capabilities();
-    let mut snapshot = initial_snapshot(
-        working_dir.to_string(),
-        CodeUiProviderInfo {
-            provider: provider_name.to_string(),
-            model: Some(model_name.to_string()),
-            mode: Some("tui".to_string()),
-            managed: false,
-        },
-        capabilities.clone(),
-    );
-    snapshot.session_id = session.id.clone();
-    snapshot.thread_id = session_canonical_thread_id(session);
+    let provider = CodeUiProviderInfo {
+        provider: provider_name.to_string(),
+        model: Some(model_name.to_string()),
+        mode: Some("tui".to_string()),
+        managed: false,
+    };
+    let mut snapshot = if let Some(bundle) = projection_bundle {
+        snapshot_from_thread_bundle(
+            working_dir.to_string(),
+            provider,
+            capabilities.clone(),
+            bundle,
+        )
+    } else {
+        initial_snapshot(working_dir.to_string(), provider, capabilities.clone())
+    };
+    if projection_bundle.is_none() {
+        snapshot.session_id = session.id.clone();
+        snapshot.thread_id = session_canonical_thread_id(session);
+    }
     snapshot.transcript = build_tui_code_ui_transcript(session);
     snapshot.updated_at = Utc::now();
 
@@ -1386,6 +1396,25 @@ async fn build_tui_code_ui_runtime(
         },
     )
     .await
+}
+
+async fn load_code_ui_projection_bundle(
+    working_dir: &Path,
+    thread_id: Uuid,
+) -> anyhow::Result<Option<ThreadBundle>> {
+    let storage_root = resolve_storage_root(working_dir);
+    let db_path = storage_root.join("libra.db");
+    let db_path = db_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("database path is not valid UTF-8"))?;
+    let db_conn = establish_connection(db_path).await?;
+    let storage = Arc::new(LocalStorage::new(storage_root.join("objects")));
+    let history = HistoryManager::new(storage.clone(), storage_root, Arc::new(db_conn.clone()));
+    let rebuilder = ProjectionRebuilder::new(storage.as_ref(), &history);
+    let resolver = ProjectionResolver::new(db_conn);
+    resolver
+        .load_or_rebuild_thread_bundle(thread_id, &rebuilder)
+        .await
 }
 
 /// Core TUI lifecycle: wires up the terminal, background servers, agent
@@ -1476,8 +1505,28 @@ where
         SessionState::new(&working_dir_str)
     };
 
-    let code_ui_runtime =
-        build_tui_code_ui_runtime(&working_dir_str, &session, &provider_name, &model_name).await;
+    let projection_bundle = session_canonical_thread_id(&session)
+        .and_then(|thread_id| Uuid::parse_str(&thread_id).ok());
+    let projection_bundle = match projection_bundle {
+        Some(thread_id) => {
+            match load_code_ui_projection_bundle(registry.working_dir(), thread_id).await {
+                Ok(bundle) => bundle,
+                Err(error) => {
+                    tracing::warn!(%thread_id, error = %error, "failed to load projection-backed code ui snapshot; falling back to session state");
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+    let code_ui_runtime = build_tui_code_ui_runtime(
+        &working_dir_str,
+        &session,
+        &provider_name,
+        &model_name,
+        projection_bundle.as_ref(),
+    )
+    .await;
     let code_ui_session = code_ui_runtime.adapter().session();
 
     let (web_handle, web_line) = match start_web_server(
@@ -1963,6 +2012,60 @@ mod tests {
             session_canonical_thread_id(&session).as_deref(),
             Some("11111111-1111-4111-8111-111111111111")
         );
+    }
+
+    #[tokio::test]
+    async fn tui_code_ui_runtime_prefers_projection_bundle_identity() {
+        let thread_id = Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap();
+        let actor = git_internal::internal::object::types::ActorRef::human("tester").unwrap();
+        let bundle = ThreadBundle {
+            thread: crate::internal::ai::projection::ThreadProjection {
+                thread_id,
+                title: Some("projection thread".to_string()),
+                owner: actor.clone(),
+                participants: vec![crate::internal::ai::projection::ThreadParticipant {
+                    actor,
+                    role: crate::internal::ai::projection::ThreadParticipantRole::Owner,
+                    joined_at: Utc::now(),
+                }],
+                current_intent_id: None,
+                latest_intent_id: None,
+                intents: Vec::new(),
+                metadata: None,
+                archived: false,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                version: 1,
+            },
+            scheduler: crate::internal::ai::projection::SchedulerState {
+                thread_id,
+                selected_plan_id: None,
+                selected_plan_ids: Vec::new(),
+                current_plan_heads: Vec::new(),
+                active_task_id: None,
+                active_run_id: None,
+                live_context_window: Vec::new(),
+                metadata: None,
+                updated_at: Utc::now(),
+                version: 1,
+            },
+            freshness: crate::internal::ai::runtime::contracts::ProjectionFreshness::Fresh,
+        };
+        let mut session = SessionState::new("/tmp/workspace");
+        session.id = "legacy-session".to_string();
+
+        let runtime = build_tui_code_ui_runtime(
+            "/tmp/workspace",
+            &session,
+            "ollama",
+            "gemma4:31b",
+            Some(&bundle),
+        )
+        .await;
+        let snapshot = runtime.snapshot().await;
+
+        assert_eq!(snapshot.session_id, thread_id.to_string());
+        assert_eq!(snapshot.thread_id, Some(thread_id.to_string()));
     }
 
     #[test]
