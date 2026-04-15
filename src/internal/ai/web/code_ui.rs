@@ -14,6 +14,8 @@ use serde_json::json;
 use tokio::sync::{Mutex, RwLock, broadcast};
 use uuid::Uuid;
 
+use crate::internal::ai::projection::{PlanHeadRef, ThreadBundle};
+
 const DEFAULT_BROWSER_CONTROLLER_LEASE_SECS: i64 = 120;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -250,6 +252,8 @@ pub struct CodeUiPatchsetSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct CodeUiSessionSnapshot {
     pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
     pub working_dir: String,
     pub provider: CodeUiProviderInfo,
     pub capabilities: CodeUiCapabilities,
@@ -268,6 +272,7 @@ impl Default for CodeUiSessionSnapshot {
     fn default() -> Self {
         Self {
             session_id: Uuid::new_v4().to_string(),
+            thread_id: None,
             working_dir: String::new(),
             provider: CodeUiProviderInfo::default(),
             capabilities: CodeUiCapabilities::default(),
@@ -504,10 +509,8 @@ where
 }
 
 #[async_trait]
-pub trait CodeUiProviderAdapter: Send + Sync {
+pub trait CodeUiReadModel: Send + Sync {
     fn session(&self) -> Arc<CodeUiSession>;
-
-    fn capabilities(&self) -> CodeUiCapabilities;
 
     async fn snapshot(&self) -> CodeUiSessionSnapshot {
         self.session().snapshot().await
@@ -516,6 +519,11 @@ pub trait CodeUiProviderAdapter: Send + Sync {
     fn subscribe(&self) -> broadcast::Receiver<CodeUiEventEnvelope> {
         self.session().subscribe()
     }
+}
+
+#[async_trait]
+pub trait CodeUiCommandAdapter: Send + Sync {
+    fn capabilities(&self) -> CodeUiCapabilities;
 
     async fn submit_message(&self, text: String) -> anyhow::Result<()>;
 
@@ -529,6 +537,10 @@ pub trait CodeUiProviderAdapter: Send + Sync {
         Ok(())
     }
 }
+
+pub trait CodeUiProviderAdapter: CodeUiReadModel + CodeUiCommandAdapter {}
+
+impl<T> CodeUiProviderAdapter for T where T: CodeUiReadModel + CodeUiCommandAdapter {}
 
 #[derive(Debug, Clone)]
 pub enum CodeUiInitialController {
@@ -885,11 +897,14 @@ impl ReadOnlyCodeUiAdapter {
 }
 
 #[async_trait]
-impl CodeUiProviderAdapter for ReadOnlyCodeUiAdapter {
+impl CodeUiReadModel for ReadOnlyCodeUiAdapter {
     fn session(&self) -> Arc<CodeUiSession> {
         self.session.clone()
     }
+}
 
+#[async_trait]
+impl CodeUiCommandAdapter for ReadOnlyCodeUiAdapter {
     fn capabilities(&self) -> CodeUiCapabilities {
         self.capabilities.clone()
     }
@@ -918,6 +933,7 @@ pub fn initial_snapshot(
 ) -> CodeUiSessionSnapshot {
     CodeUiSessionSnapshot {
         session_id: Uuid::new_v4().to_string(),
+        thread_id: None,
         working_dir: working_dir.into(),
         provider,
         capabilities,
@@ -931,6 +947,61 @@ pub fn initial_snapshot(
         interactions: Vec::new(),
         updated_at: Utc::now(),
     }
+}
+
+pub fn snapshot_from_thread_bundle(
+    working_dir: impl Into<String>,
+    provider: CodeUiProviderInfo,
+    capabilities: CodeUiCapabilities,
+    bundle: &ThreadBundle,
+) -> CodeUiSessionSnapshot {
+    let mut snapshot = initial_snapshot(working_dir, provider, capabilities);
+    apply_thread_bundle_to_snapshot(&mut snapshot, bundle);
+    snapshot
+}
+
+pub fn apply_thread_bundle_to_snapshot(
+    snapshot: &mut CodeUiSessionSnapshot,
+    bundle: &ThreadBundle,
+) {
+    let thread_id = bundle.thread.thread_id.to_string();
+    snapshot.session_id = thread_id.clone();
+    snapshot.thread_id = Some(thread_id);
+    snapshot.status = if bundle.scheduler.active_run_id.is_some() {
+        CodeUiSessionStatus::ExecutingTool
+    } else if bundle.scheduler.active_task_id.is_some() {
+        CodeUiSessionStatus::Thinking
+    } else {
+        CodeUiSessionStatus::Idle
+    };
+    snapshot.plans = code_ui_plan_snapshots(&bundle.scheduler.selected_plan_ids);
+    snapshot.tasks = bundle
+        .scheduler
+        .active_task_id
+        .map(|task_id| CodeUiTaskSnapshot {
+            id: task_id.to_string(),
+            title: None,
+            status: "active".to_string(),
+            details: Some("Active scheduler task".to_string()),
+            updated_at: bundle.scheduler.updated_at,
+        })
+        .into_iter()
+        .collect();
+    snapshot.updated_at = bundle.thread.updated_at.max(bundle.scheduler.updated_at);
+}
+
+fn code_ui_plan_snapshots(plan_heads: &[PlanHeadRef]) -> Vec<CodeUiPlanSnapshot> {
+    plan_heads
+        .iter()
+        .map(|plan| CodeUiPlanSnapshot {
+            id: plan.plan_id.to_string(),
+            title: None,
+            summary: Some(format!("Selected plan ordinal {}", plan.ordinal)),
+            status: "selected".to_string(),
+            steps: Vec::new(),
+            updated_at: Utc::now(),
+        })
+        .collect()
 }
 
 pub fn browser_controller_token_from_headers(headers: &axum::http::HeaderMap) -> Option<String> {

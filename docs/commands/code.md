@@ -128,6 +128,8 @@ AI agents executing shell commands on a developer's machine present real safety 
 
 Long coding sessions accumulate significant context: file edits, conversation history, tool outputs. Losing this context on an accidental terminal close is painful. Session persistence stores the full conversation and tool state, and `--resume <thread_id>` restores a canonical Libra thread.
 
+The embedded Code UI exposes the same canonical identifier as `threadId` in its session snapshot. Older `session_id` fields remain present for compatibility, but new integrations should key resume, Web, MCP, and diagnostics flows by `threadId`.
+
 ## Parameter Comparison: Libra vs Git vs jj
 
 | Parameter | Libra | Git | jj |
@@ -150,4 +152,4 @@ Note: Neither Git nor jj have an equivalent to `libra code`. This command repres
 | Missing API key for selected provider | Fatal error with provider name and expected env var | non-zero |
 | Port already in use | Fatal error with port number | non-zero |
 | No terminal available in TUI mode | Falls back or reports error | non-zero |
-| Session UUID not found on resume | Fatal error with UUID | non-zero |
+| Thread ID not found on resume | Fatal error with canonical `thread_id` | non-zero |

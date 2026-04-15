@@ -107,13 +107,14 @@ use crate::{
             mcp::server::LibraMcpServer,
             runtime::PlanningPromptBuilder,
             web::code_ui::{
-                CodeUiApplyToFuture, CodeUiCapabilities, CodeUiInitialController,
-                CodeUiInteractionKind, CodeUiInteractionOption, CodeUiInteractionRequest,
-                CodeUiInteractionResponse, CodeUiInteractionStatus, CodeUiPatchChange,
-                CodeUiPatchsetSnapshot, CodeUiPlanSnapshot, CodeUiPlanStep, CodeUiProviderAdapter,
-                CodeUiProviderInfo, CodeUiRuntimeHandle, CodeUiSession, CodeUiSessionSnapshot,
-                CodeUiSessionStatus, CodeUiTaskSnapshot, CodeUiToolCallSnapshot,
-                CodeUiTranscriptEntry, CodeUiTranscriptEntryKind, initial_snapshot,
+                CodeUiApplyToFuture, CodeUiCapabilities, CodeUiCommandAdapter,
+                CodeUiInitialController, CodeUiInteractionKind, CodeUiInteractionOption,
+                CodeUiInteractionRequest, CodeUiInteractionResponse, CodeUiInteractionStatus,
+                CodeUiPatchChange, CodeUiPatchsetSnapshot, CodeUiPlanSnapshot, CodeUiPlanStep,
+                CodeUiProviderAdapter, CodeUiProviderInfo, CodeUiReadModel, CodeUiRuntimeHandle,
+                CodeUiSession, CodeUiSessionSnapshot, CodeUiSessionStatus, CodeUiTaskSnapshot,
+                CodeUiToolCallSnapshot, CodeUiTranscriptEntry, CodeUiTranscriptEntryKind,
+                initial_snapshot,
             },
         },
         db,
@@ -1237,6 +1238,11 @@ fn build_code_ui_snapshot_from_codex_session(
 
     CodeUiSessionSnapshot {
         session_id: current.session_id.clone(),
+        thread_id: if session.thread.id.is_empty() {
+            current.thread_id.clone()
+        } else {
+            Some(session.thread.id.clone())
+        },
         working_dir: working_dir.to_string(),
         provider: current.provider.clone(),
         capabilities: current.capabilities.clone(),
@@ -1444,11 +1450,14 @@ struct CodexCodeUiAdapter {
 }
 
 #[async_trait::async_trait]
-impl CodeUiProviderAdapter for CodexCodeUiAdapter {
+impl CodeUiReadModel for CodexCodeUiAdapter {
     fn session(&self) -> Arc<CodeUiSession> {
         self.browser_session.clone()
     }
+}
 
+#[async_trait::async_trait]
+impl CodeUiCommandAdapter for CodexCodeUiAdapter {
     fn capabilities(&self) -> CodeUiCapabilities {
         codex_code_ui_capabilities()
     }

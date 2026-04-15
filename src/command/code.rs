@@ -1341,6 +1341,18 @@ fn build_tui_code_ui_transcript(session: &SessionState) -> Vec<CodeUiTranscriptE
         .collect()
 }
 
+fn session_canonical_thread_id(session: &SessionState) -> Option<String> {
+    ["thread_id", "threadId", "canonical_thread_id"]
+        .iter()
+        .find_map(|key| session.metadata.get(*key).and_then(|value| value.as_str()))
+        .map(str::to_string)
+        .or_else(|| {
+            Uuid::parse_str(&session.id)
+                .ok()
+                .map(|thread_id| thread_id.to_string())
+        })
+}
+
 async fn build_tui_code_ui_runtime(
     working_dir: &str,
     session: &SessionState,
@@ -1359,6 +1371,7 @@ async fn build_tui_code_ui_runtime(
         capabilities.clone(),
     );
     snapshot.session_id = session.id.clone();
+    snapshot.thread_id = session_canonical_thread_id(session);
     snapshot.transcript = build_tui_code_ui_transcript(session);
     snapshot.updated_at = Utc::now();
 
@@ -1935,6 +1948,21 @@ mod tests {
         let mut args = base_args();
         args.provider = CodeProvider::Anthropic;
         assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn code_ui_runtime_uses_canonical_thread_id_metadata() {
+        let mut session = SessionState::new("/tmp/workspace");
+        session.id = "legacy-session".to_string();
+        session.metadata.insert(
+            "thread_id".to_string(),
+            serde_json::json!("11111111-1111-4111-8111-111111111111"),
+        );
+
+        assert_eq!(
+            session_canonical_thread_id(&session).as_deref(),
+            Some("11111111-1111-4111-8111-111111111111")
+        );
     }
 
     #[test]
