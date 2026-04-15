@@ -564,6 +564,18 @@ fn split_revision_navigation(name: &str) -> Option<(&str, &str)> {
         .map(|(index, _)| name.split_at(index))
 }
 
+pub(crate) fn remote_tracking_candidates(name: &str) -> impl Iterator<Item = (&str, &str)> + '_ {
+    name.char_indices().filter_map(|(index, ch)| {
+        if ch != '/' {
+            return None;
+        }
+
+        let remote = &name[..index];
+        let branch_name = &name[index + 1..];
+        (!remote.is_empty() && !branch_name.is_empty()).then_some((remote, branch_name))
+    })
+}
+
 fn nth_parent_commit_typed(
     commit_id: &ObjectHash,
     n: usize,
@@ -660,11 +672,8 @@ async fn resolve_commit_base_atom_typed(name: &str) -> Result<ObjectHash, Commit
 
     // Support both short remote branches (`main` with `remote = origin`) and
     // fetched remote-tracking refs (`refs/remotes/origin/main`) for inputs such
-    // as `origin/main`.
-    if let Some((remote, branch_name)) = name.split_once('/')
-        && !remote.is_empty()
-        && !branch_name.is_empty()
-    {
+    // as `origin/main` and multi-segment remotes like `upstream/origin/main`.
+    for (remote, branch_name) in remote_tracking_candidates(name) {
         if let Some(commit) = resolve_branch_commit_typed(
             &format!("refs/remotes/{remote}/{branch_name}"),
             Some(remote),
