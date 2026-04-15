@@ -5,9 +5,19 @@
 
 pub mod contracts;
 pub mod environment;
+pub mod phase3;
+pub mod phase4;
 pub mod prompt_builders;
 
 pub use contracts::{PromptPackage, WorkflowPhase};
+pub use phase3::{
+    ArtifactLedger, ValidationOutcome, ValidationReport, ValidationReportStore, ValidationStage,
+    ValidationStageResult, ValidatorEngine,
+};
+pub use phase4::{
+    DecisionPolicy, DecisionProposal, DecisionProposalRoute, DecisionProposalStore,
+    RiskScoreBreakdown, aggregate_risk_score, build_decision_proposal,
+};
 pub use prompt_builders::{IntentPromptBuilder, PlanningPromptBuilder, TaskPromptBuilder};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
