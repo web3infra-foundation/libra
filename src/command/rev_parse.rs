@@ -1,6 +1,6 @@
 //! Implements `rev-parse` to resolve revision names and print basic repository paths.
 
-use std::io::Write;
+use std::{ffi::OsStr, io::Write, path::PathBuf};
 
 use clap::Parser;
 use git_internal::hash::ObjectHash;
@@ -71,7 +71,7 @@ pub async fn execute_safe(args: RevParseArgs, output: &OutputConfig) -> CliResul
 
 async fn resolve_rev_parse(args: &RevParseArgs) -> CliResult<RevParseOutput> {
     if args.show_toplevel {
-        let workdir = util::try_working_dir().map_err(map_repo_path_error)?;
+        let workdir = resolve_show_toplevel_path().map_err(map_repo_path_error)?;
         return Ok(RevParseOutput {
             mode: "show_toplevel",
             input: None,
@@ -167,6 +167,19 @@ async fn resolve_short_commit(commit: &ObjectHash) -> CliResult<String> {
     }
 
     Ok(full)
+}
+
+fn resolve_show_toplevel_path() -> std::io::Result<PathBuf> {
+    let workdir = util::try_working_dir()?;
+    if workdir.file_name() == Some(OsStr::new(util::ROOT_DIR)) {
+        return workdir.parent().map(PathBuf::from).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("failed to determine worktree root from '{}'", workdir.display()),
+            )
+        });
+    }
+    Ok(workdir)
 }
 
 fn map_repo_path_error(err: std::io::Error) -> CliError {

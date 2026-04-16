@@ -147,6 +147,33 @@ async fn test_rev_parse_abbrev_ref_lowercase_head_resolves_branch_name() {
 }
 
 #[test]
+fn test_rev_parse_show_toplevel_returns_repo_root() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["rev-parse", "--show-toplevel"], repo.path());
+    assert_cli_success(&output, "rev-parse --show-toplevel from repo root");
+
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        repo.path().to_string_lossy()
+    );
+}
+
+#[test]
+fn test_rev_parse_show_toplevel_from_storage_dir_returns_repo_root() {
+    let repo = create_committed_repo_via_cli();
+    let storage = repo.path().join(libra::utils::util::ROOT_DIR);
+
+    let output = run_libra_command(&["rev-parse", "--show-toplevel"], &storage);
+    assert_cli_success(&output, "rev-parse --show-toplevel from .libra");
+
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        repo.path().to_string_lossy()
+    );
+}
+
+#[test]
 fn test_rev_parse_show_toplevel_rejects_spec() {
     let repo = create_committed_repo_via_cli();
 
