@@ -1,6 +1,6 @@
 //! Implements `rev-parse` to resolve revision names and print basic repository paths.
 
-use std::{ffi::OsStr, io::Write, path::PathBuf};
+use std::{io::Write, path::PathBuf};
 
 use clap::Parser;
 use git_internal::hash::ObjectHash;
@@ -115,6 +115,21 @@ async fn resolve_abbrev_ref(spec: &str) -> CliResult<String> {
         };
     }
 
+    if let Some(branch_name) = spec.strip_prefix("refs/heads/") {
+        if let Some(branch) = Branch::find_branch_result(branch_name, None)
+            .await
+            .map_err(|error| map_symbolic_ref_resolution_error(spec, error))?
+        {
+            return Ok(branch.name);
+        }
+    }
+
+    if let Some(short_name) = spec.strip_prefix("refs/remotes/")
+        && resolve_remote_tracking_ref(spec, short_name).await?
+    {
+        return Ok(short_name.to_string());
+    }
+
     if let Some(branch) = Branch::find_branch_result(spec, None)
         .await
         .map_err(|error| map_symbolic_ref_resolution_error(spec, error))?
@@ -122,16 +137,33 @@ async fn resolve_abbrev_ref(spec: &str) -> CliResult<String> {
         return Ok(branch.name);
     }
 
-    for (remote, branch_name) in util::remote_tracking_candidates(spec) {
-        if Branch::find_branch_result(
-            &format!("refs/remotes/{remote}/{branch_name}"),
-            Some(remote),
-        )
-        .await
-        .map_err(|error| map_symbolic_ref_resolution_error(spec, error))?
-        .is_some()
+    if resolve_remote_tracking_ref(spec, spec).await? {
+        return Ok(spec.to_string());
+    }
+
+    Err(CliError::failure(format!("not a symbolic ref: '{spec}'"))
+        .with_stable_code(StableErrorCode::CliInvalidTarget)
+        .with_hint("use 'libra rev-parse <rev>' to resolve it to a commit hash."))
+}
+
+async fn resolve_remote_tracking_ref(spec: &str, short_name: &str) -> CliResult<bool> {
+    for (remote, branch_name) in util::remote_tracking_candidates(short_name) {
+        let full_ref = format!("refs/remotes/{remote}/{branch_name}");
+
+        if Branch::find_branch_result(&full_ref, Some(remote))
+            .await
+            .map_err(|error| map_symbolic_ref_resolution_error(spec, error))?
+            .is_some()
         {
-            return Ok(spec.to_string());
+            return Ok(true);
+        }
+
+        if Branch::find_branch_result(&full_ref, None)
+            .await
+            .map_err(|error| map_symbolic_ref_resolution_error(spec, error))?
+            .is_some()
+        {
+            return Ok(true);
         }
 
         if Branch::find_branch_result(branch_name, Some(remote))
@@ -139,13 +171,11 @@ async fn resolve_abbrev_ref(spec: &str) -> CliResult<String> {
             .map_err(|error| map_symbolic_ref_resolution_error(spec, error))?
             .is_some()
         {
-            return Ok(spec.to_string());
+            return Ok(true);
         }
     }
 
-    Err(CliError::failure(format!("not a symbolic ref: '{spec}'"))
-        .with_stable_code(StableErrorCode::CliInvalidTarget)
-        .with_hint("use 'libra rev-parse <rev>' to resolve it to a commit hash."))
+    Ok(false)
 }
 
 async fn resolve_short_commit(commit: &ObjectHash) -> CliResult<String> {
@@ -171,7 +201,8 @@ async fn resolve_short_commit(commit: &ObjectHash) -> CliResult<String> {
 
 fn resolve_show_toplevel_path() -> std::io::Result<PathBuf> {
     let workdir = util::try_working_dir()?;
-    if workdir.file_name() == Some(OsStr::new(util::ROOT_DIR)) {
+    let storage = util::try_get_storage_path(None)?;
+    if workdir == storage {
         return workdir.parent().map(PathBuf::from).ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::NotFound,

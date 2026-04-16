@@ -43,7 +43,8 @@ fn test_rev_parse_short_head_returns_non_ambiguous_hash() {
 
 #[test]
 fn test_rev_parse_abbrev_ref_head_returns_branch_name() {
-    let repo = create_committed_repo_via_cli();
+    let repo = tempdir().expect("failed to create repository root");
+    init_repo_via_cli(repo.path());
 
     let output = run_libra_command(&["rev-parse", "--abbrev-ref", "HEAD"], repo.path());
     assert_cli_success(&output, "rev-parse --abbrev-ref HEAD");
@@ -146,9 +147,88 @@ async fn test_rev_parse_abbrev_ref_lowercase_head_resolves_branch_name() {
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "head");
 }
 
+#[tokio::test]
+#[serial]
+async fn test_rev_parse_abbrev_ref_refs_heads_returns_short_name() {
+    let repo = tempdir().expect("failed to create repository root");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = ChangeDirGuard::new(repo.path());
+
+    commit::execute(CommitArgs {
+        message: Some("base".to_string()),
+        allow_empty: true,
+        disable_pre: true,
+        no_verify: false,
+        ..Default::default()
+    })
+    .await;
+
+    let output = run_libra_command(
+        &["rev-parse", "--abbrev-ref", "refs/heads/main"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "rev-parse --abbrev-ref refs/heads/main");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "main");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_rev_parse_abbrev_ref_refs_remotes_returns_short_name() {
+    let repo = tempdir().expect("failed to create repository root");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = ChangeDirGuard::new(repo.path());
+
+    commit::execute(CommitArgs {
+        message: Some("base".to_string()),
+        allow_empty: true,
+        disable_pre: true,
+        no_verify: false,
+        ..Default::default()
+    })
+    .await;
+
+    let head = Head::current_commit().await.expect("expected HEAD commit");
+    Branch::update_branch(
+        "refs/remotes/origin/main",
+        &head.to_string(),
+        Some("origin"),
+    )
+    .await
+    .expect("failed to create remote-tracking ref");
+
+    let output = run_libra_command(
+        &["rev-parse", "--abbrev-ref", "refs/remotes/origin/main"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "rev-parse --abbrev-ref refs/remotes/origin/main");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "origin/main"
+    );
+}
+
+#[test]
+fn test_rev_parse_show_toplevel_repo_named_storage_dir_returns_repo_root() {
+    let parent = tempdir().expect("failed to create parent directory");
+    let repo_path = parent.path().join(libra::utils::util::ROOT_DIR);
+    init_repo_via_cli(&repo_path);
+
+    let output = run_libra_command(&["rev-parse", "--show-toplevel"], &repo_path);
+    assert_cli_success(
+        &output,
+        "rev-parse --show-toplevel from repo root named .libra",
+    );
+
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        repo_path.to_string_lossy()
+    );
+}
+
 #[test]
 fn test_rev_parse_show_toplevel_returns_repo_root() {
-    let repo = create_committed_repo_via_cli();
+    let repo = tempdir().expect("failed to create repository root");
+    init_repo_via_cli(repo.path());
 
     let output = run_libra_command(&["rev-parse", "--show-toplevel"], repo.path());
     assert_cli_success(&output, "rev-parse --show-toplevel from repo root");
@@ -161,7 +241,8 @@ fn test_rev_parse_show_toplevel_returns_repo_root() {
 
 #[test]
 fn test_rev_parse_show_toplevel_from_storage_dir_returns_repo_root() {
-    let repo = create_committed_repo_via_cli();
+    let repo = tempdir().expect("failed to create repository root");
+    init_repo_via_cli(repo.path());
     let storage = repo.path().join(libra::utils::util::ROOT_DIR);
 
     let output = run_libra_command(&["rev-parse", "--show-toplevel"], &storage);
@@ -175,7 +256,8 @@ fn test_rev_parse_show_toplevel_from_storage_dir_returns_repo_root() {
 
 #[test]
 fn test_rev_parse_show_toplevel_rejects_spec() {
-    let repo = create_committed_repo_via_cli();
+    let repo = tempdir().expect("failed to create repository root");
+    init_repo_via_cli(repo.path());
 
     let output = run_libra_command(&["rev-parse", "--show-toplevel", "HEAD"], repo.path());
 
