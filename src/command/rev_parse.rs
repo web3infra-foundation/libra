@@ -175,7 +175,10 @@ fn resolve_show_toplevel_path() -> std::io::Result<PathBuf> {
         return workdir.parent().map(PathBuf::from).ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                format!("failed to determine worktree root from '{}'", workdir.display()),
+                format!(
+                    "failed to determine worktree root from '{}'",
+                    workdir.display()
+                ),
             )
         });
     }
