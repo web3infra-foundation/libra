@@ -1831,7 +1831,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_decision_proposal_latest
 | 能力 | 现状 |
 |---|---|
 | Native plan collaboration mode | Codex `turn/start` 已携带 `collaborationMode: {"mode":"plan"}` |
-| 强制 Plan 审查入口 | Codex TUI 可在 Codex 响应后进入 `Execute / Modify / Cancel` 审查流 |
+| 强制 Plan 审查入口 | Codex TUI 可在 Codex 响应后进入 `Execute Plan / Modify Plan / Cancel` 审查流 |
 | Early intercept | `response_text >= 100` 或已有 plan summary 时可提前合成 IntentSpec |
 | Timeout fallback | 30 秒无有效响应时，可从 prompt 合成 IntentSpec |
 | IntentSpec 合成 | Codex 响应可转为以易读 Markdown 展示的 IntentSpec review，进入现有审查工作流 |

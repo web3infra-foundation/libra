@@ -79,7 +79,9 @@ impl StatusIndicator {
             AgentStatus::ExecutingTool => "Executing tool",
             AgentStatus::AwaitingUserInput => "Awaiting input",
             AgentStatus::AwaitingApproval => "Awaiting approval",
-            AgentStatus::Idle | AgentStatus::AwaitingPostPlanChoice => return,
+            AgentStatus::Idle
+            | AgentStatus::AwaitingPostPlanChoice
+            | AgentStatus::AwaitingIntentReviewChoice => return,
         };
 
         let spinner = self.spinner_frame();

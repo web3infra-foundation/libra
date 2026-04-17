@@ -1046,6 +1046,10 @@ pub struct AgentCodexArgs {
     /// Debug mode: print collected data
     #[arg(long, default_value = "false")]
     pub debug: bool,
+
+    /// UI mode for the embedded Code UI read model.
+    #[arg(skip)]
+    pub ui_mode: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1563,7 +1567,7 @@ pub async fn start_code_ui_runtime(
         CodeUiProviderInfo {
             provider: "codex".to_string(),
             model: args.model.clone(),
-            mode: Some("web".to_string()),
+            mode: Some(args.ui_mode.clone().unwrap_or_else(|| "web".to_string())),
             managed: true,
         },
         codex_code_ui_capabilities(),

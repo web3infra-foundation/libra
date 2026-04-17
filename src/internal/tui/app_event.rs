@@ -61,8 +61,10 @@ pub enum AgentStatus {
     AwaitingUserInput,
     /// Agent is waiting for sandbox permission approval.
     AwaitingApproval,
-    /// Waiting for user to choose post-plan action (Execute / Modify / Cancel).
+    /// Waiting for user to choose post-plan action (Execute Plan / Modify Plan / Cancel).
     AwaitingPostPlanChoice,
+    /// Waiting for user to confirm, modify, or cancel a generated IntentSpec.
+    AwaitingIntentReviewChoice,
 }
 
 /// Application-level events.
@@ -88,6 +90,15 @@ pub enum AppEvent {
         spec_json: String,
         spec: Box<IntentSpec>,
         plan: Box<ExecutionPlanSpec>,
+        warnings: Vec<String>,
+    },
+    /// Complete result for the Phase 0 IntentSpec review gate.
+    IntentSpecReviewReady {
+        turn_id: TurnId,
+        text: String,
+        new_history: Vec<Message>,
+        intent_id: Option<String>,
+        spec_json: String,
         warnings: Vec<String>,
     },
     /// Insert a history cell into the chat.
@@ -159,6 +170,7 @@ impl AppEvent {
             AppEvent::AgentEvent { turn_id, .. }
             | AppEvent::SubmitUserMessage { turn_id, .. }
             | AppEvent::PlanWorkflowComplete { turn_id, .. }
+            | AppEvent::IntentSpecReviewReady { turn_id, .. }
             | AppEvent::InsertHistoryCell { turn_id, .. }
             | AppEvent::ManagedInfoNote { turn_id, .. }
             | AppEvent::ToolCallBegin { turn_id, .. }

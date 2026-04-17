@@ -51,8 +51,6 @@
 //! directory, supporting `--resume <thread_id>` to continue a canonical Libra thread.
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    io::{BufRead, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
     process::Stdio,
@@ -70,7 +68,7 @@ use rmcp::transport::streamable_http_server::{
 };
 use tokio::{
     process::{Child, Command},
-    sync::{mpsc, oneshot},
+    sync::oneshot,
     time::{Duration, Instant, sleep},
 };
 use tokio_tungstenite::connect_async;
@@ -88,7 +86,10 @@ use crate::{
             client::CompletionClient,
             codex as agent_codex,
             commands::{CommandDispatcher, load_commands},
-            completion::{CompletionModel, CompletionUsage},
+            completion::{
+                CompletionError, CompletionModel, CompletionRequest, CompletionResponse,
+                CompletionUsage,
+            },
             history::HistoryManager,
             hooks::HookRunner,
             mcp::server::LibraMcpServer,
@@ -113,18 +114,17 @@ use crate::{
                 context::UserInputRequest,
                 handlers::{
                     ApplyPatchHandler, GrepFilesHandler, ListDirHandler, McpBridgeHandler,
-                    PlanHandler, ReadFileHandler, RequestUserInputHandler, ShellHandler,
-                    SubmitIntentDraftHandler,
+                    PlanHandler, ReadFileHandler, RequestUserInputHandler, SearchFilesHandler,
+                    ShellHandler, SubmitIntentDraftHandler,
                 },
             },
             web::{
                 WebServerHandle, WebServerOptions,
                 code_ui::{
-                    CodeUiApplyToFuture, CodeUiCapabilities, CodeUiControllerKind,
-                    CodeUiInitialController, CodeUiInteractionResponse, CodeUiProviderInfo,
-                    CodeUiRuntimeHandle, CodeUiSession, CodeUiSessionSnapshot, CodeUiSessionStatus,
+                    CodeUiCapabilities, CodeUiControllerKind, CodeUiInitialController,
+                    CodeUiProviderInfo, CodeUiRuntimeHandle, CodeUiSession, CodeUiSessionStatus,
                     CodeUiTranscriptEntry, CodeUiTranscriptEntryKind, ReadOnlyCodeUiAdapter,
-                    initial_snapshot, snapshot_from_event, snapshot_from_thread_bundle,
+                    initial_snapshot, snapshot_from_thread_bundle,
                 },
                 start as start_web_server,
             },
@@ -486,18 +486,18 @@ async fn execute_tui(mut args: CodeArgs) -> CliResult<()> {
 
     let working_dir = resolve_code_working_dir(&args)?;
 
-    if args.provider == CodeProvider::Codex {
-        return execute_codex_mode(args, working_dir).await;
-    }
-
     // Validate --api-base: only honored for Ollama via CLI flag. Other providers
     // accept custom base URLs through their respective environment variables.
-    if args.api_base.is_some() && args.provider != CodeProvider::Ollama {
+    if args.api_base.is_some()
+        && !matches!(args.provider, CodeProvider::Ollama | CodeProvider::Codex)
+    {
         eprintln!(
             "warning: --api-base is only honored for the ollama provider; \
              use provider-specific env vars (e.g. OPENAI_BASE_URL) for others; ignoring"
         );
-    } else if let Some(ref base_url) = args.api_base {
+    } else if args.provider == CodeProvider::Ollama
+        && let Some(ref base_url) = args.api_base
+    {
         match Url::parse(base_url) {
             Ok(u) if u.scheme() == "http" || u.scheme() == "https" => {}
             Ok(u) => {
@@ -540,6 +540,7 @@ async fn execute_tui(mut args: CodeArgs) -> CliResult<()> {
         .register("read_file", Arc::new(ReadFileHandler))
         .register("list_dir", Arc::new(ListDirHandler))
         .register("grep_files", Arc::new(GrepFilesHandler))
+        .register("search_files", Arc::new(SearchFilesHandler))
         .register("apply_patch", Arc::new(ApplyPatchHandler))
         .register("shell", Arc::new(ShellHandler))
         .register("update_plan", Arc::new(PlanHandler))
@@ -637,9 +638,38 @@ async fn execute_tui(mut args: CodeArgs) -> CliResult<()> {
             run_tui_with_model(model, launch_config, model_name, provider_name).await?;
         }
         CodeProvider::Codex => {
-            return Err(CliError::internal(
-                "codex provider reached unexpected TUI provider dispatch",
-            ));
+            let mut server =
+                start_managed_codex_server(&args.codex_bin, args.codex_port, &working_dir).await?;
+            let code_ui_runtime = match start_codex_code_ui_runtime(
+                &args,
+                &working_dir,
+                &server.ws_url,
+                launch_config.mcp_server.clone(),
+                false,
+                CodeUiInitialController::Fixed {
+                    kind: CodeUiControllerKind::Tui,
+                    owner_label: "Terminal UI".to_string(),
+                    reason: Some("The terminal UI controls this live Codex run".to_string()),
+                },
+            )
+            .await
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    server.shutdown().await;
+                    return Err(error);
+                }
+            };
+            let model_name = args.model.clone().unwrap_or_else(|| "codex".to_string());
+            let result = run_tui_with_managed_code_runtime(
+                code_ui_runtime,
+                launch_config,
+                model_name,
+                provider_name,
+            )
+            .await;
+            server.shutdown().await;
+            result?;
         }
     }
 
@@ -673,85 +703,6 @@ impl ManagedCodexServer {
         let _ = self.child.start_kill();
         let _ = tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await;
     }
-}
-
-/// Executes the Codex provider mode: starts a managed Codex app-server,
-/// MCP HTTP server, and web server, then runs the agent loop over WebSocket.
-///
-/// The MCP server instance is created here and shared with the Codex agent
-/// so that all AI object writes go through the same `LibraMcpServer` that is
-/// served over HTTP at `http://{host}:{mcp_port}`.
-/// All servers are gracefully shut down on exit.
-async fn execute_codex_mode(args: CodeArgs, working_dir: PathBuf) -> CliResult<()> {
-    let mut server =
-        start_managed_codex_server(&args.codex_bin, args.codex_port, &working_dir).await?;
-    println!("Starting Libra Code with Codex provider");
-    println!("Working directory: {}", working_dir.display());
-    println!("Codex WebSocket: {}", server.ws_url);
-    println!("Codex app-server: auto-started");
-    if args.plan_mode {
-        println!("Plan Mode: enabled (plan required before execution)");
-    }
-
-    let mcp_server = init_mcp_server(&working_dir).await;
-    let code_ui_runtime = start_codex_code_ui_runtime(
-        &args,
-        &working_dir,
-        &server.ws_url,
-        mcp_server.clone(),
-        false,
-        CodeUiInitialController::Fixed {
-            kind: CodeUiControllerKind::Cli,
-            owner_label: "Terminal".to_string(),
-            reason: Some("The terminal session controls this live Codex run".to_string()),
-        },
-    )
-    .await?;
-
-    // Start embedded web server
-    let web_handle = match start_web_server(
-        &args.host,
-        args.port,
-        working_dir.clone(),
-        WebServerOptions {
-            code_ui: Some(code_ui_runtime.clone()),
-        },
-    )
-    .await
-    {
-        Ok(handle) => {
-            println!("Web: http://{}", handle.addr);
-            Some(handle)
-        }
-        Err(err) => {
-            eprintln!("warning: failed to start web server: {err}");
-            None
-        }
-    };
-
-    // Initialize the MCP server instance and serve it over HTTP.
-    let mcp_handle = match start_mcp_server(&args.host, args.mcp_port, mcp_server.clone()).await {
-        Ok(handle) => {
-            println!("MCP: http://{}", handle.addr);
-            Some(handle)
-        }
-        Err(err) => {
-            eprintln!("warning: failed to start MCP server: {err}");
-            None
-        }
-    };
-
-    let result = run_codex_cli_controller(code_ui_runtime).await;
-
-    let _ = mcp_server;
-    server.shutdown().await;
-    if let Some(handle) = web_handle {
-        handle.shutdown().await;
-    }
-    if let Some(handle) = mcp_handle {
-        handle.shutdown().await;
-    }
-    result
 }
 
 fn ensure_loopback_browser_control_host(host: &str) -> CliResult<()> {
@@ -829,6 +780,17 @@ async fn start_codex_code_ui_runtime(
     browser_write_enabled: bool,
     initial_controller: CodeUiInitialController,
 ) -> CliResult<Arc<CodeUiRuntimeHandle>> {
+    let ui_mode = match &initial_controller {
+        CodeUiInitialController::Fixed {
+            kind: CodeUiControllerKind::Tui,
+            ..
+        } => Some("tui".to_string()),
+        CodeUiInitialController::Fixed {
+            kind: CodeUiControllerKind::Cli,
+            ..
+        } => Some("cli".to_string()),
+        _ => Some("web".to_string()),
+    };
     let agent_args = agent_codex::AgentCodexArgs {
         url: ws_url.to_string(),
         cwd: working_dir.to_string_lossy().to_string(),
@@ -839,6 +801,7 @@ async fn start_codex_code_ui_runtime(
         model: args.model.clone(),
         plan_mode: args.plan_mode,
         debug: false,
+        ui_mode,
     };
 
     agent_codex::start_code_ui_runtime(
@@ -849,238 +812,6 @@ async fn start_codex_code_ui_runtime(
     )
     .await
     .map_err(|error| CliError::fatal(error.to_string()))
-}
-
-#[derive(Default)]
-struct CodexCliRenderState {
-    transcript_content: HashMap<String, String>,
-    completed_assistant_entries: HashSet<String>,
-    pending_queue: VecDeque<String>,
-    responding_interactions: HashSet<String>,
-    active_interaction: Option<String>,
-}
-
-fn render_codex_cli_snapshot(snapshot: &CodeUiSessionSnapshot, state: &mut CodexCliRenderState) {
-    for entry in &snapshot.transcript {
-        render_codex_cli_transcript_entry(entry, state);
-    }
-
-    let pending_ids = snapshot
-        .interactions
-        .iter()
-        .map(|interaction| interaction.id.clone())
-        .collect::<HashSet<_>>();
-    state
-        .responding_interactions
-        .retain(|interaction_id| pending_ids.contains(interaction_id));
-    state
-        .pending_queue
-        .retain(|interaction_id| pending_ids.contains(interaction_id));
-
-    if let Some(active_interaction) = state.active_interaction.clone()
-        && !pending_ids.contains(&active_interaction)
-    {
-        state.active_interaction = None;
-    }
-
-    for interaction in &snapshot.interactions {
-        let already_active = state.active_interaction.as_deref() == Some(interaction.id.as_str());
-        let already_queued = state
-            .pending_queue
-            .iter()
-            .any(|interaction_id| interaction_id == &interaction.id);
-        if !already_active
-            && !already_queued
-            && !state.responding_interactions.contains(&interaction.id)
-        {
-            state.pending_queue.push_back(interaction.id.clone());
-        }
-    }
-
-    if state.active_interaction.is_none()
-        && let Some(next_interaction_id) = state.pending_queue.pop_front()
-        && let Some(interaction) = snapshot
-            .interactions
-            .iter()
-            .find(|interaction| interaction.id == next_interaction_id)
-    {
-        print_codex_cli_interaction_prompt(interaction);
-        state.active_interaction = Some(interaction.id.clone());
-    }
-}
-
-fn render_codex_cli_transcript_entry(
-    entry: &CodeUiTranscriptEntry,
-    state: &mut CodexCliRenderState,
-) {
-    let content = entry.content.clone().unwrap_or_default();
-
-    match entry.kind {
-        CodeUiTranscriptEntryKind::UserMessage => {
-            if state.transcript_content.contains_key(&entry.id) {
-                return;
-            }
-            println!();
-            println!("Developer: {}", content);
-            state.transcript_content.insert(entry.id.clone(), content);
-        }
-        CodeUiTranscriptEntryKind::AssistantMessage => {
-            let previous = state
-                .transcript_content
-                .get(&entry.id)
-                .cloned()
-                .unwrap_or_default();
-            if previous.is_empty() && !content.is_empty() {
-                print!("\nAssistant: ");
-            }
-
-            if content.starts_with(&previous) {
-                let delta = &content[previous.len()..];
-                if !delta.is_empty() {
-                    print!("{delta}");
-                    let _ = std::io::stdout().flush();
-                }
-            } else if previous != content {
-                print!("\nAssistant: {content}");
-                let _ = std::io::stdout().flush();
-            }
-
-            if !entry.streaming && !state.completed_assistant_entries.contains(&entry.id) {
-                println!();
-                state.completed_assistant_entries.insert(entry.id.clone());
-            }
-
-            state.transcript_content.insert(entry.id.clone(), content);
-        }
-        CodeUiTranscriptEntryKind::InfoNote | CodeUiTranscriptEntryKind::PlanSummary => {
-            if state.transcript_content.contains_key(&entry.id) {
-                return;
-            }
-            println!();
-            if let Some(title) = &entry.title {
-                println!("{title}: {}", content);
-            } else {
-                println!("{content}");
-            }
-            state.transcript_content.insert(entry.id.clone(), content);
-        }
-        CodeUiTranscriptEntryKind::ToolCall | CodeUiTranscriptEntryKind::Diff => {}
-    }
-}
-
-fn print_codex_cli_interaction_prompt(
-    interaction: &crate::internal::ai::web::code_ui::CodeUiInteractionRequest,
-) {
-    println!();
-    println!(
-        "{}",
-        interaction.title.as_deref().unwrap_or("Approval required")
-    );
-    if let Some(description) = &interaction.description {
-        println!("{description}");
-    }
-    if let Some(prompt) = &interaction.prompt {
-        println!("Request: {prompt}");
-    }
-    println!("Reply with `y` / `ya` / `n` / `na`");
-}
-
-fn parse_codex_cli_interaction_response(input: &str) -> Option<CodeUiInteractionResponse> {
-    match input.trim().to_lowercase().as_str() {
-        "y" | "yes" | "approve" => Some(CodeUiInteractionResponse {
-            approved: Some(true),
-            ..CodeUiInteractionResponse::default()
-        }),
-        "ya" | "yes-all" | "approve-all" | "all" => Some(CodeUiInteractionResponse {
-            approved: Some(true),
-            apply_to_future: Some(CodeUiApplyToFuture::AcceptAll),
-            ..CodeUiInteractionResponse::default()
-        }),
-        "n" | "no" | "decline" => Some(CodeUiInteractionResponse {
-            approved: Some(false),
-            ..CodeUiInteractionResponse::default()
-        }),
-        "na" | "no-all" | "decline-all" | "never" => Some(CodeUiInteractionResponse {
-            approved: Some(false),
-            apply_to_future: Some(CodeUiApplyToFuture::DeclineAll),
-            ..CodeUiInteractionResponse::default()
-        }),
-        _ => None,
-    }
-}
-
-async fn run_codex_cli_controller(runtime: Arc<CodeUiRuntimeHandle>) -> CliResult<()> {
-    let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel::<String>();
-    std::thread::spawn(move || {
-        let stdin = std::io::stdin();
-        let reader = std::io::BufReader::new(stdin);
-        for line in reader.lines().map_while(Result::ok) {
-            if stdin_tx.send(line).is_err() {
-                break;
-            }
-        }
-    });
-
-    let mut state = CodexCliRenderState::default();
-    let initial_snapshot = runtime.snapshot().await;
-    render_codex_cli_snapshot(&initial_snapshot, &mut state);
-    println!("Type your message and press Enter. Ctrl-C exits.");
-
-    let adapter = runtime.adapter();
-    let mut events = runtime.subscribe();
-    loop {
-        tokio::select! {
-            line = stdin_rx.recv() => {
-                let Some(line) = line else {
-                    break;
-                };
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-
-                if let Some(interaction_id) = state.active_interaction.clone() {
-                    let Some(response) = parse_codex_cli_interaction_response(trimmed) else {
-                        println!("Reply with `y` / `ya` / `n` / `na`");
-                        continue;
-                    };
-                    adapter
-                        .respond_interaction(&interaction_id, response)
-                        .await
-                        .map_err(|error| CliError::fatal(error.to_string()))?;
-                    state.responding_interactions.insert(interaction_id);
-                    state.active_interaction = None;
-                    continue;
-                }
-
-                adapter
-                    .submit_message(trimmed.to_string())
-                    .await
-                    .map_err(|error| CliError::fatal(error.to_string()))?;
-            }
-            event = events.recv() => {
-                match event {
-                    Ok(event) => {
-                        let snapshot = snapshot_from_event(&event)
-                            .map_err(|error| CliError::fatal(error.to_string()))?;
-                        render_codex_cli_snapshot(&snapshot, &mut state);
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        let snapshot = runtime.snapshot().await;
-                        render_codex_cli_snapshot(&snapshot, &mut state);
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-            _ = tokio::signal::ctrl_c() => {
-                println!();
-                break;
-            }
-        }
-    }
-
-    let _ = runtime.shutdown().await;
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1247,6 +978,27 @@ async fn wait_for_codex_ready(ws_url: &str) -> CliResult<()> {
 /// Priority: `--cwd` > `--repo` > current working directory.
 /// Validates that the resolved path exists and is a directory.
 /// `--cwd` and `--repo` are mutually exclusive.
+pub(crate) fn resolve_code_preflight_working_dir(args: &CodeArgs) -> CliResult<PathBuf> {
+    if args.provider == CodeProvider::Codex
+        && let Some(cwd_path) = args.cwd.as_ref()
+        && cwd_path.exists()
+        && cwd_path.is_file()
+    {
+        let working_dir = args
+            .repo
+            .clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let flag = if args.repo.is_some() {
+            "--repo"
+        } else {
+            "--cwd"
+        };
+        return validate_code_working_dir(working_dir, flag);
+    }
+
+    resolve_code_working_dir(args)
+}
+
 fn resolve_code_working_dir(args: &CodeArgs) -> CliResult<PathBuf> {
     if args.cwd.is_some() && args.repo.is_some() {
         return Err(CliError::command_usage(
@@ -1259,23 +1011,22 @@ fn resolve_code_working_dir(args: &CodeArgs) -> CliResult<PathBuf> {
         .clone()
         .or_else(|| args.repo.clone())
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let flag = if args.repo.is_some() {
+        "--repo"
+    } else {
+        "--cwd"
+    };
+    validate_code_working_dir(working_dir, flag)
+}
+
+fn validate_code_working_dir(working_dir: PathBuf, flag: &str) -> CliResult<PathBuf> {
     if !working_dir.exists() {
-        let flag = if args.repo.is_some() {
-            "--repo"
-        } else {
-            "--cwd"
-        };
         return Err(CliError::command_usage(format!(
             "{flag} path does not exist: {}",
             working_dir.display()
         )));
     }
     if !working_dir.is_dir() {
-        let flag = if args.repo.is_some() {
-            "--repo"
-        } else {
-            "--cwd"
-        };
         return Err(CliError::command_usage(format!(
             "{flag} must point to a directory: {}",
             working_dir.display()
@@ -1307,6 +1058,22 @@ struct TuiLaunchConfig {
     exec_approval_rx: tokio::sync::mpsc::UnboundedReceiver<ExecApprovalRequest>,
     exec_approval_tx: tokio::sync::mpsc::UnboundedSender<ExecApprovalRequest>,
     mcp_server: Arc<LibraMcpServer>,
+}
+
+#[derive(Clone)]
+struct ManagedCodeRuntimeModel;
+
+impl CompletionModel for ManagedCodeRuntimeModel {
+    type Response = ();
+
+    async fn completion(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+        Err(CompletionError::NotImplemented(
+            "managed code runtime handles turns outside the generic completion model".to_string(),
+        ))
+    }
 }
 
 fn build_tui_code_ui_capabilities() -> CodeUiCapabilities {
@@ -1450,6 +1217,36 @@ where
     M: CompletionModel + Clone + 'static,
     M::Response: CompletionUsage,
 {
+    run_tui_with_model_inner(model, params, model_name, provider_name, None).await
+}
+
+async fn run_tui_with_managed_code_runtime(
+    code_ui_runtime: Arc<CodeUiRuntimeHandle>,
+    params: TuiLaunchConfig,
+    model_name: String,
+    provider_name: String,
+) -> CliResult<()> {
+    run_tui_with_model_inner(
+        ManagedCodeRuntimeModel,
+        params,
+        model_name,
+        provider_name,
+        Some(code_ui_runtime),
+    )
+    .await
+}
+
+async fn run_tui_with_model_inner<M>(
+    model: M,
+    params: TuiLaunchConfig,
+    model_name: String,
+    provider_name: String,
+    managed_code_ui_runtime: Option<Arc<CodeUiRuntimeHandle>>,
+) -> CliResult<()>
+where
+    M: CompletionModel + Clone + 'static,
+    M::Response: CompletionUsage,
+{
     let registry = params.registry;
     let hook_runner = {
         let runner = HookRunner::load(registry.working_dir());
@@ -1514,28 +1311,32 @@ where
         SessionState::new(&working_dir_str)
     };
 
-    let projection_bundle = session_canonical_thread_id(&session)
-        .and_then(|thread_id| Uuid::parse_str(&thread_id).ok());
-    let projection_bundle = match projection_bundle {
-        Some(thread_id) => {
-            match load_code_ui_projection_bundle(registry.working_dir(), thread_id).await {
-                Ok(bundle) => bundle,
-                Err(error) => {
-                    tracing::warn!(%thread_id, error = %error, "failed to load projection-backed code ui snapshot; falling back to session state");
-                    None
+    let code_ui_runtime = if let Some(runtime) = managed_code_ui_runtime.clone() {
+        runtime
+    } else {
+        let projection_bundle = session_canonical_thread_id(&session)
+            .and_then(|thread_id| Uuid::parse_str(&thread_id).ok());
+        let projection_bundle = match projection_bundle {
+            Some(thread_id) => {
+                match load_code_ui_projection_bundle(registry.working_dir(), thread_id).await {
+                    Ok(bundle) => bundle,
+                    Err(error) => {
+                        tracing::warn!(%thread_id, error = %error, "failed to load projection-backed code ui snapshot; falling back to session state");
+                        None
+                    }
                 }
             }
-        }
-        None => None,
+            None => None,
+        };
+        build_tui_code_ui_runtime(
+            &working_dir_str,
+            &session,
+            &provider_name,
+            &model_name,
+            projection_bundle.as_ref(),
+        )
+        .await
     };
-    let code_ui_runtime = build_tui_code_ui_runtime(
-        &working_dir_str,
-        &session,
-        &provider_name,
-        &model_name,
-        projection_bundle.as_ref(),
-    )
-    .await;
     let code_ui_session = code_ui_runtime.adapter().session();
 
     let (web_handle, web_line) = match start_web_server(
@@ -1568,10 +1369,12 @@ where
             Err(err) => (None, format!("MCP: failed to start ({err})")),
         };
 
-    let welcome = format!(
-        "Welcome to Libra Code! Type your message and press Enter to chat with the AI assistant.\n{}\n{}",
-        web_line, mcp_line
-    );
+    let input_guidance = if managed_code_ui_runtime.is_some() {
+        "Type your message and press Enter to work with the managed provider."
+    } else {
+        "Type a development request and press Enter to generate a reviewable plan before execution."
+    };
+    let welcome = format!("Welcome to Libra Code! {input_guidance}\n{web_line}\n{mcp_line}");
 
     // Load slash commands
     let commands = load_commands(registry.working_dir());
@@ -1580,6 +1383,7 @@ where
     // Load agent profiles
     let profiles = load_profiles(registry.working_dir());
     let agent_router = AgentProfileRouter::new(profiles);
+    let managed_runtime_for_shutdown = managed_code_ui_runtime.clone();
 
     // Create and run app
     let mut app = App::new(
@@ -1599,6 +1403,7 @@ where
             provider_name,
             mcp_server: Some(params.mcp_server),
             code_ui_session: Some(code_ui_session),
+            managed_code_ui_runtime,
         },
     );
 
@@ -1618,6 +1423,9 @@ where
     }
     if let Some(handle) = mcp_handle {
         handle.shutdown().await;
+    }
+    if let Some(runtime) = managed_runtime_for_shutdown {
+        let _ = runtime.shutdown().await;
     }
 
     Ok(())

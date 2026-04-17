@@ -71,7 +71,7 @@ impl ToolHandler for ListDirHandler {
             ));
         }
 
-        let path = resolve_path(Path::new(&args.dir_path), &working_dir)?;
+        let path = resolve_list_dir_path(&args.dir_path, &working_dir)?;
 
         let entries = list_dir_slice(&path, args.offset, args.limit, args.depth).await?;
 
@@ -96,6 +96,38 @@ impl ToolHandler for ListDirHandler {
             ],
             [("dir_path", true)],
         ))
+    }
+}
+
+fn resolve_list_dir_path(raw_dir_path: &str, working_dir: &Path) -> Result<PathBuf, ToolError> {
+    let path = resolve_path(Path::new(raw_dir_path), working_dir)?;
+    if path.exists() {
+        return Ok(path);
+    }
+
+    let Some(cleaned) = trim_prompt_question_suffix(raw_dir_path) else {
+        return Ok(path);
+    };
+    let cleaned_path = resolve_path(Path::new(cleaned), working_dir)?;
+    if cleaned_path.is_dir() {
+        return Ok(cleaned_path);
+    }
+
+    Ok(path)
+}
+
+fn trim_prompt_question_suffix(path: &str) -> Option<&str> {
+    let trimmed = path.trim_end();
+    let without_questions = trimmed.trim_end_matches(['?', '？']);
+    if without_questions == trimmed {
+        return None;
+    }
+
+    let cleaned = without_questions.trim_end();
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
     }
 }
 
@@ -522,6 +554,45 @@ mod tests {
             "Absolute path: {}",
             temp.path().join("relative").display()
         )));
+    }
+
+    #[tokio::test]
+    async fn test_missing_dir_path_defaults_to_working_dir() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("Cargo.toml"), "").unwrap();
+
+        let result = ListDirHandler
+            .handle(make_invocation(
+                serde_json::json!({ "depth": 1 }),
+                temp.path().to_path_buf(),
+            ))
+            .await
+            .unwrap();
+
+        let text = result.as_text().unwrap();
+        assert!(text.contains(&format!("Absolute path: {}", temp.path().display())));
+        assert!(text.contains("Cargo.toml"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn test_trailing_question_mark_from_model_is_ignored_when_listing_directory() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("Cargo.toml"), "").unwrap();
+
+        let result = ListDirHandler
+            .handle(make_invocation(
+                serde_json::json!({ "dir_path": "./?", "depth": 1 }),
+                temp.path().to_path_buf(),
+            ))
+            .await
+            .unwrap();
+
+        let text = result.as_text().unwrap();
+        assert!(text.contains(&format!(
+            "Absolute path: {}",
+            temp.path().join(".").display()
+        )));
+        assert!(text.contains("Cargo.toml"), "{text}");
     }
 
     #[tokio::test]

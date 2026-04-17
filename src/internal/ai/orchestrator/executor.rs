@@ -328,6 +328,16 @@ where
                         format!("review rejected: {}", review.summary),
                         Some(review.clone()),
                     )
+                } else if let Some(reason) =
+                    implementation_missing_write_output(task, &accumulated_tool_calls)
+                {
+                    (
+                        Some(reason.clone()),
+                        tool_calls,
+                        policy_violations,
+                        reason,
+                        review.clone(),
+                    )
                 } else {
                     return TaskResult {
                         task_id: task.id(),
@@ -404,6 +414,24 @@ where
             .await;
         }
     }
+}
+
+fn implementation_missing_write_output(
+    task: &TaskSpec,
+    tool_calls: &[ToolCallRecord],
+) -> Option<String> {
+    if task.kind != TaskKind::Implementation {
+        return None;
+    }
+
+    let has_successful_write = tool_calls
+        .iter()
+        .any(|call| call.success && (!call.paths_written.is_empty() || !call.diffs.is_empty()));
+
+    (!has_successful_write).then(|| {
+        "implementation task completed without writing any files; use apply_patch or an allowed shell write to create or modify the expected project files before reporting completion"
+            .to_string()
+    })
 }
 
 async fn execute_gate_task(
@@ -1475,6 +1503,7 @@ fn allowed_tools_for_task(spec: &IntentSpec, task: &TaskSpec) -> Vec<String> {
             "read_file".to_string(),
             "list_dir".to_string(),
             "grep_files".to_string(),
+            "search_files".to_string(),
         ]);
     }
 
@@ -1499,6 +1528,7 @@ fn allowed_tools_for_reviewer(spec: &IntentSpec) -> Vec<String> {
             "read_file".to_string(),
             "list_dir".to_string(),
             "grep_files".to_string(),
+            "search_files".to_string(),
         ]
     } else {
         Vec::new()
@@ -1862,6 +1892,47 @@ mod tests {
                     function: Function {
                         name: "apply_patch".to_string(),
                         arguments: serde_json::json!({ "input": patch }),
+                    },
+                })],
+                raw_response: (),
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct SrcMainPatchModel;
+
+    impl CompletionModel for SrcMainPatchModel {
+        type Response = ();
+
+        async fn completion(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+            let has_tool_result = request.chat_history.iter().any(|message| match message {
+                Message::User { content } => content
+                    .iter()
+                    .any(|item| matches!(item, UserContent::ToolResult(_))),
+                _ => false,
+            });
+            if has_tool_result {
+                return Ok(CompletionResponse {
+                    content: vec![AssistantContent::Text(Text {
+                        text: "done".to_string(),
+                    })],
+                    raw_response: (),
+                });
+            }
+
+            Ok(CompletionResponse {
+                content: vec![AssistantContent::ToolCall(ToolCall {
+                    id: "call_src_main".to_string(),
+                    name: "apply_patch".to_string(),
+                    function: Function {
+                        name: "apply_patch".to_string(),
+                        arguments: serde_json::json!({
+                            "input": "*** Begin Patch\n*** Update File: src/main.rs\n@@\n-fn main() {}\n+fn main() { println!(\"hello\"); }\n*** End Patch"
+                        }),
                     },
                 })],
                 raw_response: (),
@@ -2282,11 +2353,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_implementation_task() {
-        let model = MockModel {
-            final_text: "done".into(),
-        };
         let dir = tempfile::tempdir().unwrap();
-        let registry = Arc::new(ToolRegistry::with_working_dir(dir.path().to_path_buf()));
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        let mut registry = ToolRegistry::with_working_dir(dir.path().to_path_buf());
+        registry.register("apply_patch", Arc::new(ApplyPatchHandler));
+        let registry = Arc::new(registry);
         let config = ExecutorConfig {
             tool_loop_config: ToolLoopConfig::default(),
             max_retries: 1,
@@ -2298,9 +2370,81 @@ mod tests {
             observer: None,
         };
         let task = implementation_task();
-        let result = execute_task(&task, &model, &registry, &config).await;
+        let result = execute_task(&task, &SrcMainPatchModel, &registry, &config).await;
         assert_eq!(result.status, TaskNodeStatus::Completed);
         assert_eq!(result.retry_count, 0);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("src/main.rs")).unwrap(),
+            "fn main() { println!(\"hello\"); }\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_implementation_task_requires_file_write() {
+        let model = MockModel {
+            final_text: "done".into(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Arc::new(ToolRegistry::with_working_dir(dir.path().to_path_buf()));
+        let config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig::default(),
+            max_retries: 0,
+            backoff_seconds: 0,
+            working_dir: dir.path().to_path_buf(),
+            spec: spec(),
+            reviewer_preamble: None,
+            dagrs_resume_checkpoint_id: None,
+            observer: None,
+        };
+        let task = implementation_task();
+
+        let result = execute_task(&task, &model, &registry, &config).await;
+
+        assert_eq!(result.status, TaskNodeStatus::Failed);
+        assert!(
+            result
+                .agent_output
+                .as_deref()
+                .is_some_and(|output| output.contains("without writing any files"))
+        );
+        assert!(result.tool_calls.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn execute_dag_fails_noop_implementation_task() {
+        let repo = tempfile::tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+
+        let registry = Arc::new(ToolRegistry::with_working_dir(repo.path().to_path_buf()));
+        let config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig::default(),
+            max_retries: 0,
+            backoff_seconds: 0,
+            working_dir: repo.path().to_path_buf(),
+            spec: spec(),
+            reviewer_preamble: None,
+            dagrs_resume_checkpoint_id: None,
+            observer: None,
+        };
+        let plan = plan_for_tasks(vec![implementation_task()], 1);
+        let model = MockModel {
+            final_text: "done".into(),
+        };
+
+        let run_state = execute_dag(&plan, &model, &registry, &config)
+            .await
+            .unwrap();
+
+        let result = &run_state.ordered_task_results()[0];
+        assert_eq!(result.status, TaskNodeStatus::Failed);
+        assert!(
+            result
+                .agent_output
+                .as_deref()
+                .is_some_and(|output| output.contains("without writing any files"))
+        );
+        assert!(!repo.path().join("src/main.rs").exists());
     }
 
     #[tokio::test]

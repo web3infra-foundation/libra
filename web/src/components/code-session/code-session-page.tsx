@@ -45,6 +45,7 @@ type InteractionKind =
   | "approval"
   | "sandbox_approval"
   | "request_user_input"
+  | "intent_review_choice"
   | "post_plan_choice";
 
 type CodeUiSessionSnapshot = {

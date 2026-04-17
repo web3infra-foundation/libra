@@ -11,7 +11,7 @@ pub mod shell;
 pub mod submit_intent_draft;
 
 pub use apply_patch::ApplyPatchHandler;
-pub use grep_files::GrepFilesHandler;
+pub use grep_files::{GrepFilesHandler, SearchFilesHandler};
 pub use list_dir::ListDirHandler;
 pub use mcp_bridge::McpBridgeHandler;
 pub use plan::PlanHandler;

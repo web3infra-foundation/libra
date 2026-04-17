@@ -29,13 +29,14 @@ use libra::{
                 },
                 server::LibraMcpServer,
             },
+            util::normalize_commit_anchor,
         },
         model::reference,
     },
     utils::{storage::local::LocalStorage, storage_ext::StorageExt},
 };
 use rmcp::{ServerHandler, handler::server::wrapper::Parameters};
-use sea_orm::{ConnectionTrait, Database, Schema};
+use sea_orm::{ActiveModelTrait, ConnectionTrait, Database, Schema, Set};
 use tempfile::tempdir;
 use uuid::Uuid;
 
@@ -46,6 +47,34 @@ async fn setup_test_db() -> sea_orm::DatabaseConnection {
     let stmt = schema.create_table_from_entity(reference::Entity);
     db.execute(builder.build(&stmt)).await.unwrap();
     db
+}
+
+async fn seed_detached_head(history_manager: &HistoryManager, commit: &str) {
+    let db = history_manager.database_connection();
+    reference::ActiveModel {
+        name: Set(None),
+        kind: Set(reference::ConfigKind::Head),
+        commit: Set(Some(commit.to_string())),
+        remote: Set(None),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+}
+
+async fn seed_unborn_branch_head(history_manager: &HistoryManager, branch: &str) {
+    let db = history_manager.database_connection();
+    reference::ActiveModel {
+        name: Set(Some(branch.to_string())),
+        kind: Set(reference::ConfigKind::Head),
+        commit: Set(None),
+        remote: Set(None),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -199,6 +228,117 @@ async fn test_create_run_requires_existing_task() {
         err.message.contains("task_id not found"),
         "unexpected error: {}",
         err.message
+    );
+}
+
+#[tokio::test]
+async fn test_create_run_accepts_head_base_commit() {
+    let (server, storage, history_manager, _temp_dir) = setup_server().await;
+    let actor = ActorRef::human("tester").unwrap();
+    let head_commit = "b".repeat(40);
+    seed_detached_head(&history_manager, &head_commit).await;
+
+    let task = Task::new(actor.clone(), "task with HEAD base commit", None).unwrap();
+    storage.put_tracked(&task, &history_manager).await.unwrap();
+
+    let result = server
+        .create_run_impl(
+            CreateRunParams {
+                task_id: task.header().object_id().to_string(),
+                base_commit_sha: "HEAD".to_string(),
+                plan_id: None,
+                status: None,
+                context_snapshot_id: None,
+                error: None,
+                agent_instances: None,
+                metrics_json: None,
+                reason: None,
+                orchestrator_version: None,
+                tags: None,
+                external_ids: None,
+                actor_kind: None,
+                actor_id: None,
+            },
+            actor,
+        )
+        .await
+        .unwrap();
+
+    let content = serde_json::to_value(&result.content[0]).unwrap();
+    let run_id = content
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .split("ID: ")
+        .nth(1)
+        .unwrap()
+        .trim();
+    let run_hash = history_manager
+        .get_object_hash("run", run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let run: Run = storage.get_json(&run_hash).await.unwrap();
+
+    assert_eq!(
+        run.commit().to_string(),
+        normalize_commit_anchor(&head_commit).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn test_create_run_accepts_unborn_head_base_commit() {
+    let (server, storage, history_manager, _temp_dir) = setup_server().await;
+    let actor = ActorRef::human("tester").unwrap();
+    seed_unborn_branch_head(&history_manager, "main").await;
+
+    let task = Task::new(actor.clone(), "task with unborn HEAD base commit", None).unwrap();
+    storage.put_tracked(&task, &history_manager).await.unwrap();
+
+    let result = server
+        .create_run_impl(
+            CreateRunParams {
+                task_id: task.header().object_id().to_string(),
+                base_commit_sha: "HEAD".to_string(),
+                plan_id: None,
+                status: None,
+                context_snapshot_id: None,
+                error: None,
+                agent_instances: None,
+                metrics_json: None,
+                reason: None,
+                orchestrator_version: None,
+                tags: None,
+                external_ids: None,
+                actor_kind: None,
+                actor_id: None,
+            },
+            actor,
+        )
+        .await
+        .unwrap();
+
+    let content = serde_json::to_value(&result.content[0]).unwrap();
+    let run_id = content
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .split("ID: ")
+        .nth(1)
+        .unwrap()
+        .trim();
+    let run_hash = history_manager
+        .get_object_hash("run", run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let run: Run = storage.get_json(&run_hash).await.unwrap();
+
+    assert_eq!(
+        run.commit().to_string(),
+        normalize_commit_anchor(&"0".repeat(40)).unwrap()
     );
 }
 

@@ -9,7 +9,10 @@ use sea_orm::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use uuid::Uuid;
 
-use crate::internal::{ai::runtime::contracts::EvidenceKind, model::ai_validation_report};
+use crate::internal::{
+    ai::runtime::{contracts::EvidenceKind, derived_records::ensure_runtime_thread},
+    model::ai_validation_report,
+};
 
 pub const DEFAULT_VALIDATION_POLICY_VERSION: &str = "validation:v1";
 
@@ -143,6 +146,8 @@ impl ValidationReportStore {
             .begin()
             .await
             .context("Failed to start validation report transaction")?;
+
+        ensure_runtime_thread(&txn, report.thread_id).await?;
 
         ai_validation_report::Entity::update_many()
             .col_expr(ai_validation_report::Column::IsLatest, Expr::value(0))

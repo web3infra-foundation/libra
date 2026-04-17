@@ -4,6 +4,7 @@
 //! to one stable surface before scheduler and provider cutover starts.
 
 pub mod contracts;
+mod derived_records;
 pub mod environment;
 pub mod hardening;
 pub mod phase3;

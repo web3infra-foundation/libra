@@ -145,4 +145,83 @@ mod tests {
                 .contains("intent.changeType cannot be 'analysis'")
         );
     }
+
+    #[tokio::test]
+    async fn test_draft_check_missing_id_is_accepted() {
+        let handler = SubmitIntentDraftHandler;
+        let inv = make_invocation(
+            r#"{
+                "draft": {
+                    "intent": {
+                        "summary": "Initialize cargo project",
+                        "problemStatement": "The project needs a cargo-based Rust layout",
+                        "changeType": "feature",
+                        "objectives": [{"title": "create cargo project", "kind": "implementation"}],
+                        "inScope": ["."],
+                        "outOfScope": []
+                    },
+                    "acceptance": {
+                        "successCriteria": ["cargo check succeeds"],
+                        "fastChecks": [{
+                            "kind": "command",
+                            "command": "cargo check",
+                            "timeoutSeconds": 120,
+                            "expectedExitCode": 0,
+                            "required": true,
+                            "artifactsProduced": []
+                        }],
+                        "integrationChecks": [],
+                        "securityChecks": [],
+                        "releaseChecks": []
+                    },
+                    "risk": {
+                        "rationale": "new project scaffold"
+                    }
+                }
+            }"#,
+        );
+
+        let result = handler.handle(inv).await;
+
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn test_draft_check_missing_kind_is_accepted_when_command_is_present() {
+        let handler = SubmitIntentDraftHandler;
+        let inv = make_invocation(
+            r#"{
+                "draft": {
+                    "intent": {
+                        "summary": "Initialize cargo project",
+                        "problemStatement": "The project needs a cargo-based Rust layout without VCS",
+                        "changeType": "feature",
+                        "objectives": [{"title": "create cargo project", "kind": "implementation"}],
+                        "inScope": ["."],
+                        "outOfScope": []
+                    },
+                    "acceptance": {
+                        "successCriteria": ["cargo check succeeds"],
+                        "fastChecks": [{
+                            "command": "cargo check",
+                            "timeoutSeconds": 120,
+                            "expectedExitCode": 0,
+                            "required": true,
+                            "artifactsProduced": []
+                        }],
+                        "integrationChecks": [],
+                        "securityChecks": [],
+                        "releaseChecks": []
+                    },
+                    "risk": {
+                        "rationale": "new project scaffold"
+                    }
+                }
+            }"#,
+        );
+
+        let result = handler.handle(inv).await;
+
+        assert!(result.is_ok(), "{result:?}");
+    }
 }

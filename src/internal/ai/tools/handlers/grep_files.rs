@@ -24,6 +24,7 @@ use crate::internal::ai::tools::{
 };
 
 pub struct GrepFilesHandler;
+pub struct SearchFilesHandler;
 
 const MAX_LIMIT: usize = 2000;
 const GREP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -35,58 +36,7 @@ impl ToolHandler for GrepFilesHandler {
     }
 
     async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, ToolError> {
-        let ToolInvocation {
-            payload,
-            working_dir,
-            ..
-        } = invocation;
-
-        let arguments = match payload {
-            ToolPayload::Function { arguments } => arguments,
-            _ => {
-                return Err(ToolError::IncompatiblePayload(
-                    "grep_files handler only accepts Function payloads".to_string(),
-                ));
-            }
-        };
-
-        let args: GrepFilesArgs = parse_arguments(&arguments)?;
-
-        let pattern = args.pattern.trim();
-        if pattern.is_empty() {
-            return Err(ToolError::InvalidArguments(
-                "pattern must not be empty".to_string(),
-            ));
-        }
-
-        if args.limit == 0 {
-            return Err(ToolError::InvalidArguments(
-                "limit must be greater than zero".to_string(),
-            ));
-        }
-
-        let limit = args.limit.min(MAX_LIMIT);
-
-        // Resolve path: use provided path or fall back to working_dir.
-        let search_path = match &args.path {
-            Some(p) => resolve_path(Path::new(p), &working_dir)?,
-            None => working_dir.clone(),
-        };
-
-        let include = args
-            .include
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-
-        let results = run_grep_search(pattern, include.as_deref(), &search_path, limit).await?;
-
-        if results.is_empty() {
-            Ok(ToolOutput::success("No matches found.".to_string()))
-        } else {
-            Ok(ToolOutput::success(results.join("\n")))
-        }
+        handle_search_invocation(invocation, "grep_files").await
     }
 
     fn schema(&self) -> ToolSpec {
@@ -103,6 +53,91 @@ impl ToolHandler for GrepFilesHandler {
             ],
             [("pattern", true)],
         ))
+    }
+}
+
+#[async_trait]
+impl ToolHandler for SearchFilesHandler {
+    fn kind(&self) -> ToolKind {
+        ToolKind::Function
+    }
+
+    async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, ToolError> {
+        handle_search_invocation(invocation, "search_files").await
+    }
+
+    fn schema(&self) -> ToolSpec {
+        ToolSpec::new(
+            "search_files",
+            "Searches file contents with a regular expression and returns matching file paths sorted by modification time.",
+        )
+        .with_parameters(FunctionParameters::object(
+            [
+                ("query", "string", "Regular expression pattern to search for"),
+                ("include", "string", "Optional glob limiting which files are searched (e.g. \"*.rs\" or \"*.{ts,tsx}\")"),
+                ("path", "string", "Directory or file path to search, absolute or relative to the working directory (defaults to the working directory)"),
+                ("limit", "integer", "Maximum number of file paths to return (default: 100, max: 2000)"),
+            ],
+            [("query", true)],
+        ))
+    }
+}
+
+async fn handle_search_invocation(
+    invocation: ToolInvocation,
+    tool_name: &str,
+) -> Result<ToolOutput, ToolError> {
+    let ToolInvocation {
+        payload,
+        working_dir,
+        ..
+    } = invocation;
+
+    let arguments = match payload {
+        ToolPayload::Function { arguments } => arguments,
+        _ => {
+            return Err(ToolError::IncompatiblePayload(format!(
+                "{tool_name} handler only accepts Function payloads"
+            )));
+        }
+    };
+
+    let args: GrepFilesArgs = parse_arguments(&arguments)?;
+
+    let pattern = args.pattern.trim();
+    if pattern.is_empty() {
+        return Err(ToolError::InvalidArguments(
+            "query must not be empty".to_string(),
+        ));
+    }
+
+    if args.limit == 0 {
+        return Err(ToolError::InvalidArguments(
+            "limit must be greater than zero".to_string(),
+        ));
+    }
+
+    let limit = args.limit.min(MAX_LIMIT);
+
+    // Resolve path: use provided path or fall back to working_dir.
+    let search_path = match &args.path {
+        Some(p) => resolve_path(Path::new(p), &working_dir)?,
+        None => working_dir.clone(),
+    };
+
+    let include = args
+        .include
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    let results = run_grep_search(pattern, include.as_deref(), &search_path, limit).await?;
+
+    if results.is_empty() {
+        Ok(ToolOutput::success("No matches found.".to_string()))
+    } else {
+        Ok(ToolOutput::success(results.join("\n")))
     }
 }
 
@@ -377,5 +412,41 @@ mod tests {
             .unwrap();
         assert!(required.iter().any(|v| v == "pattern"));
         assert!(!required.iter().any(|v| v == "path"));
+    }
+
+    #[tokio::test]
+    async fn test_search_files_handler_accepts_query_alias() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path().to_path_buf();
+        fs::write(dir.join("found.rs"), "struct SearchTarget;").unwrap();
+        fs::write(dir.join("miss.rs"), "struct Other;").unwrap();
+
+        let result = SearchFilesHandler
+            .handle(ToolInvocation::new(
+                "call-1",
+                "search_files",
+                ToolPayload::Function {
+                    arguments: serde_json::json!({ "query": "SearchTarget" }).to_string(),
+                },
+                dir.clone(),
+            ))
+            .await
+            .unwrap();
+
+        let text = result.as_text().unwrap();
+        assert!(text.contains("found.rs"), "{text}");
+        assert!(!text.contains("miss.rs"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn test_search_files_kind_and_schema() {
+        assert_eq!(SearchFilesHandler.kind(), ToolKind::Function);
+        let schema = SearchFilesHandler.schema();
+        assert_eq!(schema.function.name, "search_files");
+        let json = schema.to_json();
+        let required = json["function"]["parameters"]["required"]
+            .as_array()
+            .unwrap();
+        assert!(required.iter().any(|v| v == "query"));
     }
 }

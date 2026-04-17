@@ -181,7 +181,7 @@ pub fn evaluate_tool_result(
 
 fn acl_tool_alias(tool_name: &str) -> &str {
     match tool_name {
-        "read_file" | "list_dir" | "grep_files" | "apply_patch" => "workspace.fs",
+        "read_file" | "list_dir" | "grep_files" | "search_files" | "apply_patch" => "workspace.fs",
         "request_user_input" => "interaction",
         "submit_intent_draft" => "planning",
         _ => tool_name,
@@ -308,7 +308,7 @@ fn derive_tool_footprint(
                 Vec::new(),
             ))
         }
-        "grep_files" => {
+        "grep_files" | "search_files" => {
             let path = arguments
                 .get("path")
                 .and_then(Value::as_str)

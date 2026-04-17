@@ -62,6 +62,7 @@ impl ToolBoundaryPolicy {
                 "read_file",
                 "list_dir",
                 "grep_files",
+                "search_files",
                 "request_user_input",
                 "mcp_read",
             ]

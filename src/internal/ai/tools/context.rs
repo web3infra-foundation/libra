@@ -2,7 +2,8 @@
 
 use std::{collections::HashMap, fmt, path::PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
+use serde_json::{Map, Value};
 use tokio::sync::oneshot;
 
 use crate::internal::ai::{
@@ -251,6 +252,13 @@ fn default_limit() -> usize {
 #[derive(Clone, Deserialize, Debug)]
 pub struct ListDirArgs {
     /// Absolute path to the directory to list.
+    #[serde(
+        default = "default_dir_path",
+        alias = "path",
+        alias = "directory",
+        alias = "dir",
+        alias = "directory_path"
+    )]
     pub dir_path: String,
     /// 1-indexed entry number to start listing from (default: 1).
     #[serde(default = "default_dir_offset")]
@@ -261,6 +269,10 @@ pub struct ListDirArgs {
     /// Maximum directory depth to traverse (default: 2, must be >= 1).
     #[serde(default = "default_depth")]
     pub depth: usize,
+}
+
+fn default_dir_path() -> String {
+    ".".to_string()
 }
 
 fn default_dir_offset() -> usize {
@@ -299,12 +311,13 @@ pub struct ShellArgs {
 #[derive(Clone, Deserialize, Debug)]
 pub struct GrepFilesArgs {
     /// Regular expression pattern to search for.
+    #[serde(alias = "query", alias = "search", alias = "regex")]
     pub pattern: String,
     /// Optional glob limiting which files are searched (e.g. "*.rs" or "*.{ts,tsx}").
-    #[serde(default)]
+    #[serde(default, alias = "glob")]
     pub include: Option<String>,
     /// Directory or file path to search. Defaults to the working directory.
-    #[serde(default)]
+    #[serde(default, alias = "dir_path", alias = "directory", alias = "dir")]
     pub path: Option<String>,
     /// Maximum number of file paths to return (default: 100, max: 2000).
     #[serde(default = "default_grep_limit")]
@@ -357,7 +370,7 @@ pub struct SubmitIntentDraftArgs {
 // ── request_user_input types ───────────────────────────────────────────
 
 /// A selectable option presented to the user.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct UserInputOption {
     /// Short label for the option (1-5 words).
     pub label: String,
@@ -365,8 +378,80 @@ pub struct UserInputOption {
     pub description: String,
 }
 
+impl<'de> Deserialize<'de> for UserInputOption {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        user_input_option_from_value(value).map_err(D::Error::custom)
+    }
+}
+
+fn user_input_option_from_value(value: Value) -> Result<UserInputOption, String> {
+    match value {
+        Value::String(label) => Ok(UserInputOption {
+            label,
+            description: String::new(),
+        }),
+        Value::Number(number) => Ok(UserInputOption {
+            label: number.to_string(),
+            description: String::new(),
+        }),
+        Value::Bool(flag) => Ok(UserInputOption {
+            label: flag.to_string(),
+            description: String::new(),
+        }),
+        Value::Array(items) => {
+            let label = items
+                .first()
+                .and_then(scalar_value_to_string)
+                .unwrap_or_else(|| "Option".to_string());
+            let description = items
+                .get(1)
+                .and_then(scalar_value_to_string)
+                .unwrap_or_default();
+            Ok(UserInputOption { label, description })
+        }
+        Value::Object(map) => user_input_option_from_object(&map),
+        Value::Null => Err("option must not be null".to_string()),
+    }
+}
+
+fn user_input_option_from_object(map: &Map<String, Value>) -> Result<UserInputOption, String> {
+    let label = first_object_string(
+        map,
+        ["label", "value", "text", "name", "title", "id", "key"],
+    )
+    .ok_or_else(|| {
+        "option object must include a label, value, text, name, title, id, or key".to_string()
+    })?;
+    let description =
+        first_object_string(map, ["description", "desc", "detail", "help"]).unwrap_or_default();
+    Ok(UserInputOption { label, description })
+}
+
+fn first_object_string<const N: usize>(
+    map: &Map<String, Value>,
+    keys: [&str; N],
+) -> Option<String> {
+    keys.into_iter()
+        .filter_map(|key| map.get(key))
+        .find_map(scalar_value_to_string)
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn scalar_value_to_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(flag) => Some(flag.to_string()),
+        Value::Null | Value::Array(_) | Value::Object(_) => None,
+    }
+}
+
 /// A single question to present to the user.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct UserInputQuestion {
     /// Machine-readable identifier for the question (unique within a request).
     pub id: String,
@@ -384,6 +469,96 @@ pub struct UserInputQuestion {
     /// When `None` or empty, the question is freeform (text input only).
     #[serde(default)]
     pub options: Option<Vec<UserInputOption>>,
+}
+
+impl<'de> Deserialize<'de> for UserInputQuestion {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct UserInputQuestionInput {
+            #[serde(default)]
+            id: Option<String>,
+            #[serde(default)]
+            header: Option<String>,
+            #[serde(default, alias = "title")]
+            title: Option<String>,
+            #[serde(default)]
+            question: Option<String>,
+            #[serde(default, alias = "message")]
+            prompt: Option<String>,
+            #[serde(default)]
+            is_other: bool,
+            #[serde(default)]
+            is_secret: bool,
+            #[serde(default)]
+            options: Option<Vec<UserInputOption>>,
+        }
+
+        let input = UserInputQuestionInput::deserialize(deserializer)?;
+        let id = first_non_empty([input.id.as_deref()])
+            .map(str::to_string)
+            .unwrap_or_else(|| "input".to_string());
+        let header = first_non_empty([input.header.as_deref(), input.title.as_deref()])
+            .map(str::to_string)
+            .unwrap_or_else(|| humanize_question_id(&id));
+        let question = first_non_empty([
+            input.question.as_deref(),
+            input.prompt.as_deref(),
+            input.title.as_deref(),
+        ])
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("Please provide {}.", header.to_ascii_lowercase()));
+
+        Ok(Self {
+            id,
+            header: truncate_chars(&header, 12),
+            question,
+            is_other: input.is_other,
+            is_secret: input.is_secret,
+            options: input.options,
+        })
+    }
+}
+
+fn first_non_empty<const N: usize>(values: [Option<&str>; N]) -> Option<&str> {
+    values
+        .into_iter()
+        .flatten()
+        .find(|value| !value.trim().is_empty())
+}
+
+fn humanize_question_id(id: &str) -> String {
+    let mut out = String::new();
+    for (index, part) in id
+        .split(['_', '-', ' '])
+        .filter(|part| !part.is_empty())
+        .enumerate()
+    {
+        if index > 0 {
+            out.push(' ');
+        }
+        if index == 0 {
+            let mut chars = part.chars();
+            if let Some(first) = chars.next() {
+                out.extend(first.to_uppercase());
+                out.push_str(chars.as_str());
+            }
+        } else {
+            out.push_str(part);
+        }
+    }
+
+    if out.is_empty() {
+        "Input".to_string()
+    } else {
+        out
+    }
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
 }
 
 /// Arguments for the `request_user_input` tool.

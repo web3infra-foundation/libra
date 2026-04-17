@@ -531,6 +531,25 @@ fn repo_not_found_error() -> CliError {
     CliError::repo_not_found()
 }
 
+fn command_preflight_storage(command: &Commands) -> CliResult<Option<std::path::PathBuf>> {
+    match command {
+        Commands::Init(_) | Commands::Clone(_) | Commands::Open(_) => Ok(None),
+        // Config global/system scopes don't require a repository.
+        Commands::Config(cfg) if cfg.global || cfg.system => Ok(None),
+        Commands::Code(code_args) => {
+            let working_dir = command::code::resolve_code_preflight_working_dir(code_args)?;
+            let storage = utils::util::try_get_storage_path(Some(working_dir))
+                .map_err(|_| repo_not_found_error())?;
+            Ok(Some(storage))
+        }
+        _ => {
+            let storage =
+                utils::util::try_get_storage_path(None).map_err(|_| repo_not_found_error())?;
+            Ok(Some(storage))
+        }
+    }
+}
+
 fn is_error_codes_help_topic(argv: &[String]) -> bool {
     let Some((index, _)) = find_subcommand_index(argv) else {
         return false;
@@ -631,15 +650,8 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
     if let Commands::Tag(tag_args) = &args.command {
         command::tag::validate_cli_args(tag_args)?;
     }
-    match &args.command {
-        Commands::Init(_) | Commands::Clone(_) | Commands::Open(_) => {}
-        // Config global/system scopes don't require a repository
-        Commands::Config(cfg) if cfg.global || cfg.system => {}
-        _ => {
-            let storage =
-                utils::util::try_get_storage_path(None).map_err(|_| repo_not_found_error())?;
-            set_local_hash_kind_for_storage(&storage).await?;
-        }
+    if let Some(storage) = command_preflight_storage(&args.command)? {
+        set_local_hash_kind_for_storage(&storage).await?;
     }
     // Resolve global output flags into a single config before dispatching.
     let output = OutputConfig::resolve(
@@ -740,10 +752,12 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use serial_test::serial;
 
     use super::*;
-    use crate::utils::output;
+    use crate::utils::{output, test};
 
     /// this test is to verify that the CLI can be built without panicking
     /// according [clap dock](https://docs.rs/clap/latest/clap/_derive/_tutorial/chapter_4/index.html)
@@ -805,6 +819,42 @@ mod tests {
         assert!(
             !output::warning_was_emitted(),
             "top-level CLI dispatch should clear stale warning state before running"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
+    async fn code_repo_flag_uses_target_repo_during_preflight() {
+        let root = tempfile::tempdir().expect("failed to create test root");
+        let repo = root.path().join("linked");
+        let outside = root.path().join("outside");
+        fs::create_dir_all(&repo).expect("failed to create repo dir");
+        fs::create_dir_all(&outside).expect("failed to create outside dir");
+        test::setup_with_new_libra_in(&repo).await;
+
+        let _guard = test::ChangeDirGuard::new(&outside);
+        let repo_arg = repo
+            .to_str()
+            .expect("temporary repo path should be valid UTF-8");
+        let err = parse_async(Some(&[
+            "libra",
+            "code",
+            "--repo",
+            repo_arg,
+            "--provider",
+            "ollama",
+        ]))
+        .await
+        .expect_err("missing ollama model should stop after repository preflight");
+        let rendered = err.render();
+
+        assert!(
+            rendered.contains("--model is required when using --provider ollama"),
+            "expected provider validation after --repo preflight, got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("not a libra repository"),
+            "--repo should be honored before checking the process cwd, got: {rendered}"
         );
     }
 

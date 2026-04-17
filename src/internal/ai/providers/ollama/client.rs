@@ -1,7 +1,8 @@
 //! Ollama API client for libra.
 //!
-//! Ollama exposes an OpenAI-compatible chat completions API locally, so the
-//! request and response payloads follow the same schema as the OpenAI provider.
+//! Ollama exposes a native local chat API. The completion implementation
+//! converts native `/api/chat` payloads into Libra's OpenAI-compatible internal
+//! chat shape.
 //! Unlike cloud providers, Ollama does not require authentication -- no API key
 //! or bearer token is sent with requests.
 //!
@@ -15,7 +16,7 @@ use reqwest::Client as HttpClient;
 
 use crate::internal::ai::client::{Client as GenericClient, Provider};
 
-const DEFAULT_BASE_URL: &str = "http://localhost:11434/v1";
+const DEFAULT_BASE_URL: &str = "http://127.0.0.1:11434/v1";
 
 /// Default timeout for Ollama requests (5 minutes).
 /// Local inference on large models can be significantly slower than cloud APIs.
@@ -70,7 +71,7 @@ impl Client {
     /// Creates an Ollama client from environment variables.
     ///
     /// Reads the optional `OLLAMA_BASE_URL` environment variable (defaults to
-    /// `http://localhost:11434/v1`).
+    /// `http://127.0.0.1:11434/v1`).
     pub fn from_env() -> Self {
         let base_url =
             std::env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
@@ -102,7 +103,7 @@ mod tests {
     #[test]
     fn test_client_new_local() {
         let client = Client::new_local();
-        assert_eq!(client.base_url, DEFAULT_BASE_URL);
+        assert_eq!(client.base_url, "http://127.0.0.1:11434/v1");
     }
 
     #[test]

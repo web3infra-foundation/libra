@@ -156,3 +156,51 @@ async fn validation_reports_and_decision_proposals_are_latest_derived_records() 
         .unwrap();
     assert_eq!(latest_rows.len(), 1);
 }
+
+#[tokio::test]
+async fn derived_records_create_missing_runtime_thread_anchor() {
+    let db = setup_db().await;
+    let thread_id = Uuid::new_v4();
+    let validator = ValidatorEngine::default_policy();
+    let validation_store = ValidationReportStore::new(db.clone());
+    let decision_store = DecisionProposalStore::new(db.clone());
+    let policy = DecisionPolicy::default();
+
+    let report = validator.build_report(
+        thread_id,
+        None,
+        vec![ValidationStageResult {
+            stage: ValidationStage::Integration,
+            outcome: ValidationOutcome::Passed,
+            evidence: vec![EvidenceKind::Test],
+            summary: Some("integration passed".to_string()),
+        }],
+    );
+
+    validation_store.write_latest(&report).await.unwrap();
+    let risk = aggregate_risk_score(&report, &policy);
+    let proposal = build_decision_proposal(&report, &risk, &policy);
+    decision_store.write_latest(&risk, &proposal).await.unwrap();
+
+    let anchor = ai_thread::Entity::find_by_id(thread_id.to_string())
+        .one(&db)
+        .await
+        .unwrap()
+        .expect("runtime thread anchor");
+    assert_eq!(anchor.owner_kind, "system");
+    assert_eq!(anchor.owner_id, "libra-runtime");
+
+    let loaded_report = validation_store
+        .load_latest(thread_id)
+        .await
+        .unwrap()
+        .expect("latest validation report");
+    assert_eq!(loaded_report.report_id, report.report_id);
+
+    let loaded_proposal = decision_store
+        .load_latest_proposal(thread_id)
+        .await
+        .unwrap()
+        .expect("latest decision proposal");
+    assert_eq!(loaded_proposal.proposal_id, proposal.proposal_id);
+}

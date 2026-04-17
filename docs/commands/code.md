@@ -14,7 +14,7 @@ libra code --resume <THREAD_ID>
 
 ## Description
 
-`libra code` starts an interactive coding session that pairs a human developer with an AI agent. The default mode launches a terminal UI (TUI) built on ratatui/crossterm with a background web server. Two alternative modes are available: `--web-only` runs the web server without the TUI (useful for browser access or remote hosting), and `--stdio` runs an MCP server over standard input/output for integration with AI clients like Claude Desktop.
+`libra code` starts an interactive coding session that pairs a human developer with an AI agent. The default mode launches a terminal UI (TUI) built on ratatui/crossterm with a background web server. Plain developer requests in the generic provider TUI are routed through the built-in planning workflow first: Libra generates a reviewable IntentSpec and execution plan, then waits for Execute Plan / Modify Plan / Cancel before running mutating tools. Two alternative modes are available: `--web-only` runs the web server without the TUI (useful for browser access or remote hosting), and `--stdio` runs an MCP server over standard input/output for integration with AI clients like Claude Desktop.
 
 The command supports seven AI provider backends (Gemini, OpenAI, Anthropic, DeepSeek, Zhipu, Ollama, Codex) and three operating contexts (dev, review, research) that tune the agent's behavior for different workflows. Sessions can be persisted and resumed with Libra's canonical `--resume <thread_id>` flow.
 
@@ -85,8 +85,13 @@ libra code --web-only --port 8080 --host 0.0.0.0
 # Run MCP over stdio for Claude Desktop integration
 libra code --stdio
 
-# Use a local Ollama model
-libra code --provider ollama --model llama3 --api-base http://localhost:11434/v1
+# Use a local Ollama model; plain requests generate a reviewable plan first
+libra code --provider ollama --model llama3 --api-base http://127.0.0.1:11434/v1
+
+# Capture provider/TUI diagnostics while using a local Ollama model
+LIBRA_LOG='libra::internal::ai=debug,libra::internal::tui=debug' \
+LIBRA_LOG_FILE=/tmp/libra-code.log \
+libra code --repo=/Volumes/Data/linked --provider ollama --model gemma4:31b
 
 # Resume a canonical Libra thread
 libra code --resume 11111111-1111-4111-8111-111111111111
@@ -100,7 +105,27 @@ libra code --provider codex --plan-mode
 
 ## Human Output
 
-Output is delivered through the TUI, web interface, or MCP protocol depending on the mode. There is no line-oriented stdout in the default TUI mode. The web server serves an embedded Next.js application. The stdio mode communicates via JSON-RPC messages following the Model Context Protocol.
+Output is delivered through the TUI, web interface, or MCP protocol depending on the mode. There is no line-oriented stdout in the default TUI mode. In the generic provider TUI, a normal plain-text request starts the plan workflow automatically; explicit slash commands keep their command-specific behavior. The web server serves an embedded Next.js application. The stdio mode communicates via JSON-RPC messages following the Model Context Protocol.
+
+## Diagnostics
+
+`libra code` supports tracing through `RUST_LOG` or `LIBRA_LOG`. For TUI sessions, prefer `LIBRA_LOG_FILE=<path>` so diagnostics are written to a plain log file instead of the alternate-screen terminal. When `LIBRA_LOG_FILE` is set without an explicit log filter, Libra defaults to `libra=debug`.
+
+For Ollama provider failures, useful diagnostics are:
+
+```bash
+mkdir -p /tmp/libra-logs
+LIBRA_LOG='libra::internal::ai=debug,libra::internal::tui=debug' \
+LIBRA_LOG_FILE=/tmp/libra-logs/libra-code-ollama.log \
+libra code --repo=/Volumes/Data/linked --provider ollama --model gemma4:31b
+```
+
+If the TUI reports an Ollama 503, also capture the local server state:
+
+```bash
+ollama ps >> /tmp/libra-logs/libra-code-ollama.log
+ollama list >> /tmp/libra-logs/libra-code-ollama.log
+```
 
 ## Design Rationale
 

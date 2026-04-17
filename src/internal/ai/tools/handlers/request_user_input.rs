@@ -172,6 +172,211 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_request_accepts_string_options_from_lenient_models() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<UserInputRequest>();
+        let handler = RequestUserInputHandler::new(tx);
+
+        let inv = make_invocation(
+            r#"{
+                "questions": [{
+                    "id": "risk",
+                    "header": "Risk",
+                    "question": "What risk level should be used?",
+                    "options": ["Low", "Medium", "High"]
+                }]
+            }"#,
+        );
+
+        let handle = tokio::spawn(async move { handler.handle(inv).await });
+
+        let request = rx.recv().await.expect("should receive request");
+        let options = request.questions[0]
+            .options
+            .as_ref()
+            .expect("options should be normalized");
+        assert_eq!(options[0].label, "Low");
+        assert_eq!(options[0].description, "");
+        assert!(request.questions[0].is_other);
+
+        let mut answers = HashMap::new();
+        answers.insert(
+            "risk".to_string(),
+            UserInputAnswer {
+                answers: vec!["Low".to_string()],
+            },
+        );
+        request
+            .response_tx
+            .send(UserInputResponse { answers })
+            .unwrap();
+
+        assert!(handle.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_request_accepts_option_without_description() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<UserInputRequest>();
+        let handler = RequestUserInputHandler::new(tx);
+
+        let inv = make_invocation(
+            r#"{
+                "questions": [{
+                    "id": "mode",
+                    "header": "Mode",
+                    "question": "Which mode should be used?",
+                    "options": [
+                        {"label": "Fast"},
+                        {"label": "Careful", "description": "Run extra checks"}
+                    ]
+                }]
+            }"#,
+        );
+
+        let handle = tokio::spawn(async move { handler.handle(inv).await });
+
+        let request = rx.recv().await.expect("should receive request");
+        let options = request.questions[0]
+            .options
+            .as_ref()
+            .expect("options should be normalized");
+        assert_eq!(options[0].label, "Fast");
+        assert_eq!(options[0].description, "");
+        assert_eq!(options[1].description, "Run extra checks");
+
+        let mut answers = HashMap::new();
+        answers.insert(
+            "mode".to_string(),
+            UserInputAnswer {
+                answers: vec!["Fast".to_string()],
+            },
+        );
+        request
+            .response_tx
+            .send(UserInputResponse { answers })
+            .unwrap();
+
+        assert!(handle.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_request_accepts_lenient_option_shapes() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<UserInputRequest>();
+        let handler = RequestUserInputHandler::new(tx);
+
+        let inv = make_invocation(
+            r#"{
+                "questions": [{
+                    "id": "risk_profile",
+                    "header": "Risk",
+                    "question": "Which risk profile?",
+                    "options": [
+                        {"label": "Low", "description": null},
+                        {"value": "Medium"},
+                        {"text": "High", "description": 3}
+                    ]
+                }]
+            }"#,
+        );
+
+        let handle = tokio::spawn(async move { handler.handle(inv).await });
+
+        let request = rx.recv().await.expect("should receive request");
+        let options = request.questions[0]
+            .options
+            .as_ref()
+            .expect("options should be normalized");
+        assert_eq!(options[0].label, "Low");
+        assert_eq!(options[0].description, "");
+        assert_eq!(options[1].label, "Medium");
+        assert_eq!(options[2].label, "High");
+        assert_eq!(options[2].description, "3");
+
+        let mut answers = HashMap::new();
+        answers.insert(
+            "risk_profile".to_string(),
+            UserInputAnswer {
+                answers: vec!["Medium".to_string()],
+            },
+        );
+        request
+            .response_tx
+            .send(UserInputResponse { answers })
+            .unwrap();
+
+        assert!(handle.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_request_defaults_missing_header() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<UserInputRequest>();
+        let handler = RequestUserInputHandler::new(tx);
+
+        let inv = make_invocation(
+            r#"{
+                "questions": [{
+                    "id": "risk_profile",
+                    "question": "Which risk profile should be used?",
+                    "options": ["Low", "Medium", "High"]
+                }]
+            }"#,
+        );
+
+        let handle = tokio::spawn(async move { handler.handle(inv).await });
+
+        let request = rx.recv().await.expect("should receive request");
+        assert_eq!(request.questions[0].header, "Risk profile");
+
+        let mut answers = HashMap::new();
+        answers.insert(
+            "risk_profile".to_string(),
+            UserInputAnswer {
+                answers: vec!["Low".to_string()],
+            },
+        );
+        request
+            .response_tx
+            .send(UserInputResponse { answers })
+            .unwrap();
+
+        assert!(handle.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_request_defaults_missing_question() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<UserInputRequest>();
+        let handler = RequestUserInputHandler::new(tx);
+
+        let inv = make_invocation(
+            r#"{
+                "questions": [{
+                    "id": "risk_profile",
+                    "header": "Risk",
+                    "options": ["Low", "Medium", "High"]
+                }]
+            }"#,
+        );
+
+        let handle = tokio::spawn(async move { handler.handle(inv).await });
+
+        let request = rx.recv().await.expect("should receive request");
+        assert_eq!(request.questions[0].question, "Please provide risk.");
+
+        let mut answers = HashMap::new();
+        answers.insert(
+            "risk_profile".to_string(),
+            UserInputAnswer {
+                answers: vec!["Low".to_string()],
+            },
+        );
+        request
+            .response_tx
+            .send(UserInputResponse { answers })
+            .unwrap();
+
+        assert!(handle.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
     async fn test_freeform_question() {
         let (tx, mut rx) = mpsc::unbounded_channel::<UserInputRequest>();
         let handler = RequestUserInputHandler::new(tx);

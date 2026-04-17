@@ -117,6 +117,7 @@ pub enum CodeUiInteractionKind {
     Approval,
     SandboxApproval,
     RequestUserInput,
+    IntentReviewChoice,
     PostPlanChoice,
 }
 

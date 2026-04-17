@@ -1,6 +1,6 @@
 //! Phase 4 risk aggregation, decision proposals, and derived-record persistence.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter,
@@ -12,6 +12,7 @@ use uuid::Uuid;
 use crate::internal::{
     ai::runtime::{
         contracts::FinalDecisionVerdict,
+        derived_records::ensure_runtime_thread,
         phase3::{
             ValidationReport, ValidationStatus, bool_to_row, deserialize_summary, parse_uuid,
             serialize_summary, timestamp_from_row,
@@ -202,6 +203,15 @@ impl DecisionProposalStore {
             .begin()
             .await
             .context("Failed to start decision proposal transaction")?;
+
+        if risk.thread_id != proposal.thread_id {
+            bail!(
+                "Risk score thread {} does not match decision proposal thread {}",
+                risk.thread_id,
+                proposal.thread_id
+            );
+        }
+        ensure_runtime_thread(&txn, proposal.thread_id).await?;
 
         ai_risk_score_breakdown::Entity::update_many()
             .col_expr(ai_risk_score_breakdown::Column::IsLatest, Expr::value(0))

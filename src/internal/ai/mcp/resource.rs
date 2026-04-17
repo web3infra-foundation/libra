@@ -57,9 +57,14 @@ use serde::{Serialize, de::DeserializeOwned};
 use uuid::Uuid;
 
 use crate::{
-    internal::ai::{mcp::server::LibraMcpServer, util::normalize_commit_anchor},
+    internal::{
+        ai::{mcp::server::LibraMcpServer, util::normalize_commit_anchor},
+        head::Head,
+    },
     utils::storage_ext::{Identifiable, StorageExt},
 };
+
+const ZERO_COMMIT_SHA: &str = "0000000000000000000000000000000000000000";
 
 impl LibraMcpServer {
     /// Default actor for MCP tool calls. Extracted for testability.
@@ -198,6 +203,42 @@ impl LibraMcpServer {
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
         Ok(Some(object))
+    }
+
+    async fn resolve_base_commit_anchor(&self, base_commit_sha: &str) -> Result<String, ErrorData> {
+        let input = base_commit_sha.trim();
+        if input.eq_ignore_ascii_case("HEAD") {
+            return self.resolve_head_commit_anchor().await;
+        }
+
+        normalize_commit_anchor(input).map_err(|e| ErrorData::invalid_params(e, None))
+    }
+
+    async fn resolve_head_commit_anchor(&self) -> Result<String, ErrorData> {
+        let history = self.intent_history_manager.as_ref().ok_or_else(|| {
+            ErrorData::invalid_params(
+                "base_commit_sha=HEAD requires repository history to be available",
+                None,
+            )
+        })?;
+        let db = history.database_connection();
+        let commit = Head::current_commit_result_with_conn(&db)
+            .await
+            .map_err(|e| {
+                ErrorData::invalid_params(
+                    format!("failed to resolve base_commit_sha=HEAD: {e}"),
+                    None,
+                )
+            })?;
+        let commit_sha = commit
+            .map(|commit| commit.to_string())
+            .unwrap_or_else(|| ZERO_COMMIT_SHA.to_string());
+        normalize_commit_anchor(&commit_sha).map_err(|e| {
+            ErrorData::internal_error(
+                format!("resolved HEAD produced an invalid commit hash: {e}"),
+                None,
+            )
+        })
     }
 
     pub(super) async fn latest_task_events(
@@ -1259,8 +1300,9 @@ impl LibraMcpServer {
             .load_tracked_object::<Task>("task", task_id, "task_id")
             .await?;
 
-        let base_commit_sha = normalize_commit_anchor(&params.base_commit_sha)
-            .map_err(|e| ErrorData::invalid_params(e, None))?;
+        let base_commit_sha = self
+            .resolve_base_commit_anchor(&params.base_commit_sha)
+            .await?;
 
         let mut run = Run::new(actor.clone(), task_id, &base_commit_sha)
             .map_err(|e| ErrorData::invalid_params(e, None))?;
@@ -1640,8 +1682,9 @@ impl LibraMcpServer {
         let run_id = parse_uuid(&params.run_id, "run_id")?;
         self.ensure_object_exists("run", run_id, "run_id").await?;
 
-        let base_commit_sha = normalize_commit_anchor(&params.base_commit_sha)
-            .map_err(|e| ErrorData::invalid_params(e, None))?;
+        let base_commit_sha = self
+            .resolve_base_commit_anchor(&params.base_commit_sha)
+            .await?;
 
         let mut patchset = PatchSet::new(actor, run_id, &base_commit_sha)
             .map_err(|e| ErrorData::invalid_params(e, None))?;
