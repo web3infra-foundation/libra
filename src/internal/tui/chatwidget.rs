@@ -1154,11 +1154,13 @@ impl ChatWidget {
             .style(style)
             .render(inner, buf);
 
-        if render_state.selected && task_mux.mode == TaskMuxMode::Overview && inner.width > 2 {
-            if let Some(cell) = buf.cell_mut((inner.x, inner.y)) {
-                cell.set_symbol("›")
-                    .set_style(theme::interactive::selected_option());
-            }
+        if render_state.selected
+            && task_mux.mode == TaskMuxMode::Overview
+            && inner.width > 2
+            && let Some(cell) = buf.cell_mut((inner.x, inner.y))
+        {
+            cell.set_symbol("›")
+                .set_style(theme::interactive::selected_option());
         }
     }
 

@@ -443,7 +443,7 @@ fn libra_vcs_action(command: &str) -> Result<&'static str, String> {
     match command.trim() {
         "status" | "diff" | "branch" | "log" | "show" | "show-ref" => Ok("read"),
         "add" | "commit" | "switch" => Ok("write"),
-        other if other.is_empty() => Err("missing run_libra_vcs command".to_string()),
+        "" => Err("missing run_libra_vcs command".to_string()),
         other => Err(format!(
             "unsupported run_libra_vcs command '{other}'; use an allowlisted Libra VCS command"
         )),
