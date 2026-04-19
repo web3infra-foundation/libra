@@ -66,8 +66,8 @@ use crate::{
         orchestrator::{
             planner::compile_execution_plan_spec,
             types::{
-                DecisionOutcome, ExecutionPlanSpec, GateReport, OrchestratorResult, TaskKind,
-                TaskNodeStatus, TaskRuntimeEvent, TaskRuntimeNoteLevel, TaskRuntimePhase,
+                DecisionOutcome, ExecutionPlanSpec, GateReport, OrchestratorResult, SystemReport,
+                TaskKind, TaskNodeStatus, TaskRuntimeEvent, TaskRuntimeNoteLevel, TaskRuntimePhase,
             },
         },
         projection::ProjectionRebuilder,
@@ -2083,6 +2083,8 @@ where
                 warnings,
             } => {
                 self.finish_turn_state();
+                self.widget.clear_task_mux();
+                self.sync_mux_input_context();
                 self.history = new_history;
                 self.session.add_assistant_message(&text);
                 self.session.metadata.insert(
@@ -2295,6 +2297,11 @@ where
                 total,
             } => {
                 self.widget.update_dag_progress(completed, total);
+                self.schedule_draw();
+            }
+            AppEvent::DagTaskMuxClear { turn_id: _turn_id } => {
+                self.widget.clear_task_mux();
+                self.sync_mux_input_context();
                 self.schedule_draw();
             }
             AppEvent::ToolCallBegin {
@@ -2611,6 +2618,8 @@ where
                 result,
             } => {
                 self.finish_turn_state();
+                self.widget.clear_task_mux();
+                self.sync_mux_input_context();
                 self.history = new_history;
                 self.session.add_assistant_message(&text);
                 if let Some(result) = result {
@@ -3739,6 +3748,9 @@ where
             struct UiOrchestratorObserver {
                 tx: UnboundedSender<AppEvent>,
                 turn_id: TurnId,
+                task_revisions: Arc<Mutex<HashMap<uuid::Uuid, u32>>>,
+                plan_task_counts: Arc<Mutex<HashMap<u32, usize>>>,
+                execution_notes_sent: Arc<Mutex<HashSet<u32>>>,
             }
 
             impl UiOrchestratorObserver {
@@ -3752,19 +3764,61 @@ where
                 fn scoped_call_id(task: &TaskSpec, call_id: &str) -> String {
                     format!("{}:{call_id}", task.id())
                 }
+
+                fn remember_plan(&self, plan: &ExecutionPlanSpec) {
+                    if let Ok(mut task_revisions) = self.task_revisions.lock() {
+                        for task in &plan.tasks {
+                            task_revisions.insert(task.id(), plan.revision);
+                        }
+                    }
+                    if let Ok(mut plan_task_counts) = self.plan_task_counts.lock() {
+                        plan_task_counts.insert(plan.revision, plan.tasks.len());
+                    }
+                }
+
+                fn send_execution_note_once(&self, task: &TaskSpec) {
+                    let revision = self
+                        .task_revisions
+                        .lock()
+                        .ok()
+                        .and_then(|task_revisions| task_revisions.get(&task.id()).copied());
+                    let Some(revision) = revision else {
+                        return;
+                    };
+
+                    let should_send = self
+                        .execution_notes_sent
+                        .lock()
+                        .map(|mut sent| sent.insert(revision))
+                        .unwrap_or(false);
+                    if !should_send {
+                        return;
+                    }
+
+                    let task_count = self
+                        .plan_task_counts
+                        .lock()
+                        .ok()
+                        .and_then(|plan_task_counts| plan_task_counts.get(&revision).copied())
+                        .unwrap_or(0);
+                    self.send_note(format_plan_execution_stage_note(revision, task_count));
+                }
             }
 
             impl OrchestratorObserver for UiOrchestratorObserver {
                 fn on_plan_compiled(&self, plan: &ExecutionPlanSpec) {
+                    self.remember_plan(plan);
                     let _ = self.tx.send(AppEvent::DagGraphBegin {
                         turn_id: self.turn_id,
                         plan: plan.clone(),
                     });
+                    self.send_note(format_plan_compiled_stage_note(plan));
                 }
 
                 fn on_task_runtime_event(&self, task: &TaskSpec, event: TaskRuntimeEvent) {
                     match &event {
                         TaskRuntimeEvent::Phase(TaskRuntimePhase::Starting) => {
+                            self.send_execution_note_once(task);
                             let _ = self.tx.send(AppEvent::AgentStatusUpdate {
                                 turn_id: self.turn_id,
                                 status: AgentStatus::Thinking,
@@ -3858,13 +3912,33 @@ where
 
                 fn on_graph_checkpoint_restored(&self, _checkpoint_id: &str, _pc: usize) {}
 
+                fn on_system_verification(&self, plan: &ExecutionPlanSpec, report: &SystemReport) {
+                    let _ = self.tx.send(AppEvent::DagTaskMuxClear {
+                        turn_id: self.turn_id,
+                    });
+                    self.send_note(format_system_verification_stage_note(plan, report));
+                }
+
+                fn on_decision(&self, plan: &ExecutionPlanSpec, decision: &DecisionOutcome) {
+                    self.send_note(format_decision_stage_note(plan, decision));
+                }
+
                 fn on_replan(
                     &self,
-                    _current_revision: u32,
-                    _next_revision: u32,
-                    _reason: &str,
-                    _diff_summary: &str,
+                    current_revision: u32,
+                    next_revision: u32,
+                    reason: &str,
+                    diff_summary: &str,
                 ) {
+                    let _ = self.tx.send(AppEvent::DagTaskMuxClear {
+                        turn_id: self.turn_id,
+                    });
+                    self.send_note(format_replan_stage_note(
+                        current_revision,
+                        next_revision,
+                        reason,
+                        diff_summary,
+                    ));
                 }
 
                 fn on_persistence_complete(&self, _execution: &PersistedExecution) {}
@@ -3873,6 +3947,9 @@ where
             let observer: Arc<dyn OrchestratorObserver> = Arc::new(UiOrchestratorObserver {
                 tx: tx.clone(),
                 turn_id,
+                task_revisions: Arc::new(Mutex::new(HashMap::new())),
+                plan_task_counts: Arc::new(Mutex::new(HashMap::new())),
+                execution_notes_sent: Arc::new(Mutex::new(HashSet::new())),
             });
             let config = OrchestratorConfig {
                 working_dir,
@@ -4831,6 +4908,72 @@ fn update_visible_tool_call_preview(
     false
 }
 
+fn format_plan_compiled_stage_note(plan: &ExecutionPlanSpec) -> String {
+    let groups = plan.parallel_groups();
+    let layer_count = groups.len();
+    let lane_count = groups.iter().map(Vec::len).max().unwrap_or(0);
+    format!(
+        "Phase 1 · Plan r{} compiled  \n{} tasks, {} layers, {} max lanes.",
+        plan.revision,
+        plan.tasks.len(),
+        layer_count,
+        lane_count
+    )
+}
+
+fn format_plan_execution_stage_note(revision: u32, task_count: usize) -> String {
+    let task_label = if task_count == 1 { "task" } else { "tasks" };
+    format!(
+        "Phase 2 · Executing Plan r{revision}  \nRunning {task_count} {task_label} through the workflow DAG."
+    )
+}
+
+fn format_system_verification_stage_note(
+    plan: &ExecutionPlanSpec,
+    report: &SystemReport,
+) -> String {
+    format!(
+        "Phase 3 · Verifying Plan r{}  \nIntegration: {} ({}) · Security: {} ({}) · Release: {} ({}) · Review: {} · Artifacts: {}.",
+        plan.revision,
+        bool_label(report.integration.all_required_passed),
+        gate_report_summary(&report.integration),
+        bool_label(report.security.all_required_passed),
+        gate_report_summary(&report.security),
+        bool_label(report.release.all_required_passed),
+        gate_report_summary(&report.release),
+        bool_label(report.review_passed),
+        bool_label(report.artifacts_complete)
+    )
+}
+
+fn format_replan_stage_note(
+    current_revision: u32,
+    next_revision: u32,
+    reason: &str,
+    diff_summary: &str,
+) -> String {
+    let mut lines = vec![format!(
+        "Replan · Plan r{current_revision} -> r{next_revision}"
+    )];
+    let reason = reason.trim();
+    if !reason.is_empty() {
+        lines.push(format!("Reason: {reason}"));
+    }
+    let diff_summary = diff_summary.trim();
+    if !diff_summary.is_empty() {
+        lines.push(format!("Change: {diff_summary}"));
+    }
+    lines.join("  \n")
+}
+
+fn format_decision_stage_note(plan: &ExecutionPlanSpec, decision: &DecisionOutcome) -> String {
+    format!(
+        "Phase 4 · Decision for Plan r{}: {}",
+        plan.revision,
+        orchestrator_decision_label(decision)
+    )
+}
+
 fn format_orchestrator_result(result: &OrchestratorResult) -> String {
     let mut lines = Vec::new();
     let decision_label = orchestrator_decision_label(&result.decision);
@@ -5110,12 +5253,14 @@ mod tests {
         PendingPlanRevisionCommand, append_to_last_tool_group_cell,
         append_to_last_tool_group_preview_cell, build_execution_plan_prompt,
         build_execution_plan_revision_prompt, build_plan_prompt, build_plan_revision_prompt,
-        code_ui_response_from_managed_selection, format_intentspec_target_mismatch,
-        format_orchestrator_result, intentspec_with_llm_plan_objectives,
-        is_global_quit_command_input, mark_visible_tool_call_running,
-        newest_managed_assistant_text, parse_pending_plan_revision_command,
-        pending_execution_plan_revision_help_message, pending_plan_revision_help_message,
-        should_route_plain_message_to_plan,
+        code_ui_response_from_managed_selection, format_decision_stage_note,
+        format_intentspec_target_mismatch, format_orchestrator_result,
+        format_plan_compiled_stage_note, format_plan_execution_stage_note,
+        format_replan_stage_note, format_system_verification_stage_note,
+        intentspec_with_llm_plan_objectives, is_global_quit_command_input,
+        mark_visible_tool_call_running, newest_managed_assistant_text,
+        parse_pending_plan_revision_command, pending_execution_plan_revision_help_message,
+        pending_plan_revision_help_message, should_route_plain_message_to_plan,
     };
     use crate::internal::{
         ai::{
@@ -5435,6 +5580,29 @@ mod tests {
         assert!(rendered.contains("## Verification"));
         assert!(rendered.contains("| Task | Status | Retries | Tools | Violations | Notes |"));
         assert!(rendered.contains("### Missing Artifacts"));
+    }
+
+    #[test]
+    fn orchestrator_stage_notes_surface_later_phases() {
+        let result = orchestrator_fixture();
+        let plan = &result.execution_plan_spec;
+        let report = &result.system_report;
+
+        let compiled = format_plan_compiled_stage_note(plan);
+        let executing = format_plan_execution_stage_note(plan.revision, plan.tasks.len());
+        let verifying = format_system_verification_stage_note(plan, report);
+        let replanning = format_replan_stage_note(1, 2, "gate failed", "split verification");
+        let decision = format_decision_stage_note(plan, &result.decision);
+
+        assert!(compiled.contains("Phase 1"));
+        assert!(executing.contains("Phase 2"));
+        assert!(executing.contains("Plan r4"));
+        assert!(verifying.contains("Phase 3"));
+        assert!(verifying.contains("Review: Fail"));
+        assert!(replanning.contains("Plan r1 -> r2"));
+        assert!(replanning.contains("split verification"));
+        assert!(decision.contains("Phase 4"));
+        assert!(decision.contains("Abandon"));
     }
 
     #[test]

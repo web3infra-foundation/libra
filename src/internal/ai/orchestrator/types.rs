@@ -524,6 +524,10 @@ pub trait OrchestratorObserver: Send + Sync {
 
     fn on_graph_checkpoint_restored(&self, _checkpoint_id: &str, _pc: usize) {}
 
+    fn on_system_verification(&self, _plan: &ExecutionPlanSpec, _report: &SystemReport) {}
+
+    fn on_decision(&self, _plan: &ExecutionPlanSpec, _decision: &DecisionOutcome) {}
+
     fn on_replan(
         &self,
         _current_revision: u32,

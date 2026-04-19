@@ -542,6 +542,7 @@ impl ChatWidget {
     pub fn show_dag_panel(&mut self, plan: ExecutionPlanSpec) {
         self.task_mux = TaskMuxState::new(&plan);
         self.dag_panel = Some(DagPanelState::new(plan));
+        self.clear_stale_task_mux();
     }
 
     pub fn show_dag_preview(&mut self, plan: ExecutionPlanSpec) {
@@ -550,6 +551,7 @@ impl ChatWidget {
     }
 
     pub fn update_dag_task_status(&mut self, task_id: Uuid, status: TaskNodeStatus) {
+        self.clear_stale_task_mux();
         if let Some(panel) = self.dag_panel.as_mut() {
             panel.update_task_status(task_id, status.clone());
         }
@@ -569,7 +571,12 @@ impl ChatWidget {
         self.task_mux = None;
     }
 
+    pub fn clear_task_mux(&mut self) {
+        self.task_mux = None;
+    }
+
     pub fn apply_task_runtime_event(&mut self, task_id: Uuid, event: TaskRuntimeEvent) {
+        self.clear_stale_task_mux();
         if let Some(task_mux) = self.task_mux.as_mut() {
             task_mux.apply_runtime_event(task_id, event);
         }
@@ -583,6 +590,17 @@ impl ChatWidget {
 
     pub fn has_task_mux(&self) -> bool {
         self.task_mux.is_some()
+    }
+
+    fn clear_stale_task_mux(&mut self) {
+        let stale = match (&self.task_mux, &self.dag_panel) {
+            (Some(task_mux), Some(dag_panel)) => task_mux.revision != dag_panel.revision,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        if stale {
+            self.task_mux = None;
+        }
     }
 
     pub fn task_mux_next(&mut self) -> bool {
@@ -739,6 +757,7 @@ impl ChatWidget {
     }
 
     fn render_chat_area(&mut self, area: Rect, buf: &mut Buffer) {
+        self.clear_stale_task_mux();
         if let Some(task_mux) = self.task_mux.as_mut() {
             task_mux.finish_transition_if_ready();
         }
@@ -1820,6 +1839,20 @@ mod tests {
         }
     }
 
+    fn sample_serial_replan(revision: u32) -> ExecutionPlanSpec {
+        let first = make_task("Inspect replan", TaskKind::Implementation, vec![]);
+        let second = make_task("Verify replan", TaskKind::Gate, vec![first.id()]);
+        ExecutionPlanSpec {
+            intent_spec_id: "intent-replan".into(),
+            revision,
+            parent_revision: Some(revision.saturating_sub(1)),
+            replan_reason: Some("parallel task failed".into()),
+            tasks: vec![first, second],
+            max_parallel: 1,
+            checkpoints: vec![],
+        }
+    }
+
     #[test]
     fn dag_panel_uses_side_column_when_wide() {
         let mut widget = ChatWidget::new();
@@ -1931,6 +1964,58 @@ mod tests {
         assert!(rendered.contains("Running command"));
         assert!(rendered.contains("cargo test"));
         assert!(!rendered.contains("transcript sentinel"));
+    }
+
+    #[test]
+    fn serial_replan_clears_previous_parallel_task_mux() {
+        let mut widget = ChatWidget::new();
+        widget.add_cell(Box::new(AssistantHistoryCell::new(
+            "new revision transcript".to_string(),
+        )));
+        widget.show_dag_panel(sample_parallel_plan());
+        assert!(widget.has_task_mux());
+
+        widget.show_dag_panel(sample_serial_replan(3));
+
+        let area = Rect::new(0, 0, 140, 32);
+        let mut buf = Buffer::empty(area);
+        widget.render_chat_area(area, &mut buf);
+
+        let rendered = (0..area.height)
+            .map(|y| row_text(&buf, y, area.width))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(!widget.has_task_mux());
+        assert!(rendered.contains("Workflow r3"));
+        assert!(rendered.contains("new revision transcript"));
+        assert!(!rendered.contains("Mux r2"));
+        assert!(!rendered.contains("Implement A"));
+    }
+
+    #[test]
+    fn clearing_task_mux_keeps_workflow_dag_visible() {
+        let mut widget = ChatWidget::new();
+        widget.add_cell(Box::new(AssistantHistoryCell::new(
+            "verification stage".to_string(),
+        )));
+        widget.show_dag_panel(sample_parallel_plan());
+
+        widget.clear_task_mux();
+
+        let area = Rect::new(0, 0, 140, 32);
+        let mut buf = Buffer::empty(area);
+        widget.render_chat_area(area, &mut buf);
+
+        let rendered = (0..area.height)
+            .map(|y| row_text(&buf, y, area.width))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(!widget.has_task_mux());
+        assert!(rendered.contains("Workflow r2"));
+        assert!(rendered.contains("verification stage"));
+        assert!(!rendered.contains("Mux r2"));
     }
 
     #[test]

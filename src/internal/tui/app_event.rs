@@ -163,6 +163,8 @@ pub enum AppEvent {
         completed: usize,
         total: usize,
     },
+    /// The task mux should leave focus mode while keeping the workflow DAG visible.
+    DagTaskMuxClear { turn_id: TurnId },
     /// Orchestrator workflow completed.
     ExecuteWorkflowComplete {
         turn_id: TurnId,
@@ -190,6 +192,7 @@ impl AppEvent {
             | AppEvent::DagGraphBegin { turn_id, .. }
             | AppEvent::DagTaskStatus { turn_id, .. }
             | AppEvent::DagGraphProgress { turn_id, .. }
+            | AppEvent::DagTaskMuxClear { turn_id }
             | AppEvent::ExecuteWorkflowComplete { turn_id, .. } => *turn_id,
         }
     }

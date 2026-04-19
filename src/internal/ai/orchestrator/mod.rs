@@ -76,6 +76,22 @@ impl types::OrchestratorObserver for FanoutObserver {
         }
     }
 
+    fn on_system_verification(
+        &self,
+        plan: &types::ExecutionPlanSpec,
+        report: &types::SystemReport,
+    ) {
+        for observer in &self.observers {
+            observer.on_system_verification(plan, report);
+        }
+    }
+
+    fn on_decision(&self, plan: &types::ExecutionPlanSpec, decision: &types::DecisionOutcome) {
+        for observer in &self.observers {
+            observer.on_decision(plan, decision);
+        }
+    }
+
     fn on_replan(
         &self,
         current_revision: u32,
@@ -206,6 +222,9 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
 
             // Phase 3: System verification
             let system_report = verifier::build_system_report(&spec, &plan_spec, &run_state);
+            if let Some(observer) = &observer {
+                observer.on_system_verification(&plan_spec, &system_report);
+            }
 
             if replan_count < max_replans
                 && let Some(directive) =
@@ -232,6 +251,9 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
                 &spec.risk.level,
                 spec.risk.human_in_loop.required,
             );
+            if let Some(observer) = &observer {
+                observer.on_decision(&plan_spec, &decision);
+            }
             plan_revision_specs.push(plan_spec.clone());
             break (plan_spec, run_state, system_report, decision);
         };
@@ -322,6 +344,24 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("graph:{completed}/{total}"));
+        }
+
+        fn on_system_verification(
+            &self,
+            plan: &types::ExecutionPlanSpec,
+            report: &types::SystemReport,
+        ) {
+            self.events.lock().unwrap().push(format!(
+                "verify:{}:{}",
+                plan.revision, report.overall_passed
+            ));
+        }
+
+        fn on_decision(&self, plan: &types::ExecutionPlanSpec, decision: &types::DecisionOutcome) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("decision:{}:{decision:?}", plan.revision));
         }
     }
 
@@ -584,11 +624,31 @@ mod tests {
         let result = orchestrator.run(test_spec()).await.unwrap();
         let events = events.lock().unwrap().clone();
         assert!(!events.is_empty());
-        assert!(events.iter().any(|event| event.starts_with("plan:")));
-        assert!(events.iter().any(|event| event.starts_with("start:")));
-        assert!(events.iter().any(|event| event.starts_with("done:")));
-        assert!(events.iter().any(|event| event.starts_with("graph:")));
-        assert_eq!(result.decision, types::DecisionOutcome::Commit);
+        assert!(
+            events.iter().any(|event| event.starts_with("plan:")),
+            "{events:?}"
+        );
+        assert!(
+            events.iter().any(|event| event.starts_with("start:")),
+            "{events:?}"
+        );
+        assert!(
+            events.iter().any(|event| event.starts_with("graph:")),
+            "{events:?}"
+        );
+        assert!(
+            events.iter().any(|event| event.starts_with("verify:")),
+            "{events:?}"
+        );
+        assert!(
+            events.iter().any(|event| event.starts_with("decision:")),
+            "{events:?}"
+        );
+        let expected_decision = format!(
+            "decision:{}:{:?}",
+            result.execution_plan_spec.revision, result.decision
+        );
+        assert!(events.contains(&expected_decision), "{events:?}");
     }
 
     #[tokio::test]
