@@ -951,7 +951,11 @@ pub async fn init_mcp_server(working_dir: &Path) -> Arc<LibraMcpServer> {
             "Warning: Failed to create storage directory: {}. Running in read-only mode.",
             objects_dir.display()
         );
-        return Arc::new(LibraMcpServer::new(None, None));
+        return Arc::new(LibraMcpServer::new_with_working_dir(
+            None,
+            None,
+            working_dir.to_path_buf(),
+        ));
     }
 
     // Connect to DB
@@ -971,7 +975,11 @@ pub async fn init_mcp_server(working_dir: &Path) -> Arc<LibraMcpServer> {
                 db_path.display(),
                 e
             );
-            return Arc::new(LibraMcpServer::new(None, None));
+            return Arc::new(LibraMcpServer::new_with_working_dir(
+                None,
+                None,
+                working_dir.to_path_buf(),
+            ));
         }
     };
 
@@ -984,9 +992,10 @@ pub async fn init_mcp_server(working_dir: &Path) -> Arc<LibraMcpServer> {
         Arc::new(db_conn),
     ));
 
-    Arc::new(LibraMcpServer::new(
+    Arc::new(LibraMcpServer::new_with_working_dir(
         Some(intent_history_manager),
         Some(storage),
+        working_dir.to_path_buf(),
     ))
 }
 

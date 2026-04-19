@@ -18,7 +18,7 @@ use crate::{
             error::{ToolError, ToolResult},
             registry::ToolHandler,
             spec::ToolSpec,
-            utils::validate_path,
+            utils::{command_invokes_git_version_control, validate_path},
         },
         workspace_snapshot::{
             WorkspaceSnapshot, changed_paths_since_baseline as changed_workspace_paths,
@@ -67,6 +67,12 @@ impl ToolHandler for ShellHandler {
         };
 
         let args: ShellArgs = parse_arguments(&arguments)?;
+        if command_invokes_git_version_control(&args.command) {
+            return Err(ToolError::ExecutionFailed(
+                "git is not allowed for Libra-managed agent execution; use the run_libra_vcs tool or a libra command instead"
+                    .to_string(),
+            ));
+        }
 
         // Resolve and validate the execution working directory.
         let cwd = resolve_workdir(args.workdir.as_deref(), &working_dir)?;
@@ -218,6 +224,22 @@ mod tests {
             },
             working_dir,
         )
+    }
+
+    #[tokio::test]
+    async fn rejects_git_version_control_commands() {
+        let temp = TempDir::new().unwrap();
+        let inv = make_invocation(
+            serde_json::json!({ "command": "git status" }),
+            temp.path().to_path_buf(),
+        );
+
+        let error = ShellHandler
+            .handle(inv)
+            .await
+            .expect_err("git shell command should be rejected");
+
+        assert!(error.to_string().contains("git is not allowed"));
     }
 
     // ── Basic execution ───────────────────────────────────────────────────────

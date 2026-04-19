@@ -96,11 +96,18 @@ pub fn default_evidence(risk_level: RiskLevel) -> EvidencePolicy {
 pub fn default_security() -> SecurityPolicy {
     SecurityPolicy {
         tool_acl: ToolAcl {
-            allow: vec![ToolRule {
-                tool: "workspace.fs".to_string(),
-                actions: vec!["read".to_string(), "write".to_string()],
-                constraints: BTreeMap::new(),
-            }],
+            allow: vec![
+                ToolRule {
+                    tool: "workspace.fs".to_string(),
+                    actions: vec!["read".to_string(), "write".to_string()],
+                    constraints: BTreeMap::new(),
+                },
+                ToolRule {
+                    tool: "libra.vcs".to_string(),
+                    actions: vec!["read".to_string(), "write".to_string()],
+                    constraints: BTreeMap::new(),
+                },
+            ],
             deny: Vec::new(),
         },
         secrets: SecretPolicy {

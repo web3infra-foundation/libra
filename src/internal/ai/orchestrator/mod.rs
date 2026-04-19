@@ -157,7 +157,15 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
         };
         let (execution_plan_spec, run_state, system_report, decision) = loop {
             // Phase 1: Compile execution plan
-            let mut plan_spec = planner::compile_execution_plan_spec(&spec)?;
+            let mut plan_spec = if replan_count == 0 {
+                self.config
+                    .initial_plan
+                    .clone()
+                    .map(Ok)
+                    .unwrap_or_else(|| planner::compile_execution_plan_spec(&spec))?
+            } else {
+                planner::compile_execution_plan_spec(&spec)?
+            };
             plan_spec.revision = replan_count + 1;
             plan_spec.parent_revision = (replan_count > 0).then_some(replan_count);
             plan_spec.replan_reason = spec
@@ -491,6 +499,7 @@ mod tests {
             base_commit: None,
             persisted_intent_id: None,
             persisted_plan_id: None,
+            initial_plan: None,
             dagrs_resume_checkpoint_id: None,
             coder_preamble: None,
             reviewer_preamble: None,
@@ -507,6 +516,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_orchestrator_uses_approved_initial_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = MockOrchestratorModel;
+        let registry = Arc::new(ToolRegistry::new());
+        let spec = test_spec();
+        let mut planned_spec = spec.clone();
+        planned_spec.intent.objectives = vec![
+            Objective {
+                title: "LLM step one".into(),
+                kind: ObjectiveKind::Implementation,
+            },
+            Objective {
+                title: "LLM step two".into(),
+                kind: ObjectiveKind::Implementation,
+            },
+        ];
+        let initial_plan = planner::compile_execution_plan_spec(&planned_spec).unwrap();
+        let config = OrchestratorConfig {
+            working_dir: dir.path().to_path_buf(),
+            base_commit: None,
+            persisted_intent_id: None,
+            persisted_plan_id: None,
+            initial_plan: Some(initial_plan),
+            dagrs_resume_checkpoint_id: None,
+            coder_preamble: None,
+            reviewer_preamble: None,
+            mcp_server: None,
+            observer: None,
+        };
+
+        let orchestrator = Orchestrator::new(model, registry, config);
+        let result = orchestrator.run(spec).await.unwrap();
+        let task_titles = result
+            .execution_plan_spec
+            .tasks
+            .iter()
+            .map(|task| task.title().to_string())
+            .collect::<Vec<_>>();
+
+        assert!(task_titles.contains(&"LLM step one".to_string()));
+        assert!(task_titles.contains(&"LLM step two".to_string()));
+    }
+
+    #[tokio::test]
     async fn test_orchestrator_emits_progress_events() {
         let dir = tempfile::tempdir().unwrap();
         let model = MockOrchestratorModel;
@@ -520,6 +573,7 @@ mod tests {
             base_commit: None,
             persisted_intent_id: None,
             persisted_plan_id: None,
+            initial_plan: None,
             dagrs_resume_checkpoint_id: None,
             coder_preamble: None,
             reviewer_preamble: None,
@@ -547,6 +601,7 @@ mod tests {
             base_commit: None,
             persisted_intent_id: None,
             persisted_plan_id: None,
+            initial_plan: None,
             dagrs_resume_checkpoint_id: None,
             coder_preamble: None,
             reviewer_preamble: None,
@@ -572,6 +627,7 @@ mod tests {
             base_commit: None,
             persisted_intent_id: None,
             persisted_plan_id: None,
+            initial_plan: None,
             dagrs_resume_checkpoint_id: None,
             coder_preamble: None,
             reviewer_preamble: None,
@@ -625,6 +681,7 @@ mod tests {
             base_commit: None,
             persisted_intent_id: None,
             persisted_plan_id: None,
+            initial_plan: None,
             dagrs_resume_checkpoint_id: None,
             coder_preamble: None,
             reviewer_preamble: None,
@@ -650,6 +707,7 @@ mod tests {
             base_commit: None,
             persisted_intent_id: None,
             persisted_plan_id: None,
+            initial_plan: None,
             dagrs_resume_checkpoint_id: None,
             coder_preamble: None,
             reviewer_preamble: None,

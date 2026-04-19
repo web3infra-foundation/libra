@@ -13,7 +13,7 @@ use crate::internal::ai::{
     orchestrator::types::{
         ExecutionPlanSpec, OrchestratorResult, TaskNodeStatus, TaskRuntimeEvent,
     },
-    tools::ToolOutput,
+    tools::{ToolOutput, context::UpdatePlanArgs},
 };
 
 /// Logical turn identifier for isolating async event streams.
@@ -90,6 +90,7 @@ pub enum AppEvent {
         spec_json: String,
         spec: Box<IntentSpec>,
         plan: Box<ExecutionPlanSpec>,
+        llm_plan: UpdatePlanArgs,
         warnings: Vec<String>,
     },
     /// Complete result for the Phase 0 IntentSpec review gate.
@@ -110,6 +111,13 @@ pub enum AppEvent {
     ManagedInfoNote { turn_id: TurnId, message: String },
     /// Tool call is starting.
     ToolCallBegin {
+        turn_id: TurnId,
+        call_id: String,
+        tool_name: String,
+        arguments: Value,
+    },
+    /// Tool call appeared in a streamed model chunk but is not executing yet.
+    ToolCallPreview {
         turn_id: TurnId,
         call_id: String,
         tool_name: String,
@@ -174,6 +182,7 @@ impl AppEvent {
             | AppEvent::InsertHistoryCell { turn_id, .. }
             | AppEvent::ManagedInfoNote { turn_id, .. }
             | AppEvent::ToolCallBegin { turn_id, .. }
+            | AppEvent::ToolCallPreview { turn_id, .. }
             | AppEvent::ToolCallEnd { turn_id, .. }
             | AppEvent::TaskRuntimeEvent { turn_id, .. }
             | AppEvent::AgentStatusUpdate { turn_id, .. }

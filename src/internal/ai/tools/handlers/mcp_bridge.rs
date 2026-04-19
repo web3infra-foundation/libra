@@ -150,6 +150,12 @@ impl McpBridgeHandler {
     /// Returns `(tool_name, handler)` pairs.
     pub fn all_handlers(server: Arc<LibraMcpServer>) -> Vec<(String, Arc<dyn ToolHandler>)> {
         let defs: Vec<(&str, &str, FunctionParameters)> = vec![
+            // ---- Libra version-control tools ----
+            (
+                "run_libra_vcs",
+                "Run an allowlisted Libra version-control command without invoking git",
+                schema_to_params::<RunLibraVcsParams>(),
+            ),
             // ---- create tools ----
             (
                 "create_intent",
@@ -277,7 +283,9 @@ impl ToolHandler for McpBridgeHandler {
     }
 
     async fn is_mutating(&self, _invocation: &ToolInvocation) -> bool {
-        self.tool_name.starts_with("create_") || self.tool_name.starts_with("update_")
+        self.tool_name == "run_libra_vcs"
+            || self.tool_name.starts_with("create_")
+            || self.tool_name.starts_with("update_")
     }
 
     async fn handle(&self, invocation: ToolInvocation) -> ToolResult<ToolOutput> {
@@ -291,6 +299,10 @@ impl ToolHandler for McpBridgeHandler {
         };
 
         let result: Result<CallToolResult, rmcp::model::ErrorData> = match self.tool_name.as_str() {
+            "run_libra_vcs" => {
+                let params: RunLibraVcsParams = parse_args(&arguments)?;
+                self.server.run_libra_vcs_impl(params).await
+            }
             // ---- create tools ----
             "create_intent" => {
                 let params: CreateIntentParams = parse_args(&arguments)?;
@@ -461,5 +473,21 @@ impl ToolHandler for McpBridgeHandler {
     fn schema(&self) -> ToolSpec {
         ToolSpec::new(&self.tool_name, &self.description)
             .with_parameters(self.params_schema.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_handlers_exposes_libra_vcs_tool() {
+        let server = Arc::new(LibraMcpServer::new(None, None));
+        let handlers = McpBridgeHandler::all_handlers(server);
+        assert!(
+            handlers
+                .iter()
+                .any(|(name, _handler)| name == "run_libra_vcs")
+        );
     }
 }

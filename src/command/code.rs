@@ -88,7 +88,7 @@ use crate::{
             commands::{CommandDispatcher, load_commands},
             completion::{
                 CompletionError, CompletionModel, CompletionRequest, CompletionResponse,
-                CompletionUsage,
+                CompletionThinking, CompletionUsage,
             },
             history::HistoryManager,
             hooks::HookRunner,
@@ -197,6 +197,36 @@ pub enum CodeContext {
     Research,
 }
 
+/// Ollama-specific thinking/reasoning mode.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum OllamaThinkingArg {
+    /// Let Ollama decide by omitting the `think` field.
+    Auto,
+    /// Disable thinking for faster local tool-calling responses.
+    Off,
+    /// Enable thinking without specifying a depth.
+    On,
+    /// Request low thinking depth.
+    Low,
+    /// Request medium thinking depth.
+    Medium,
+    /// Request high thinking depth.
+    High,
+}
+
+impl From<OllamaThinkingArg> for CompletionThinking {
+    fn from(value: OllamaThinkingArg) -> Self {
+        match value {
+            OllamaThinkingArg::Auto => CompletionThinking::Auto,
+            OllamaThinkingArg::Off => CompletionThinking::Disabled,
+            OllamaThinkingArg::On => CompletionThinking::Enabled,
+            OllamaThinkingArg::Low => CompletionThinking::Low,
+            OllamaThinkingArg::Medium => CompletionThinking::Medium,
+            OllamaThinkingArg::High => CompletionThinking::High,
+        }
+    }
+}
+
 /// User-facing approval policy controlling when tool execution requires
 /// explicit human confirmation in the TUI.
 ///
@@ -274,6 +304,12 @@ pub struct CodeArgs {
     #[arg(long)]
     pub temperature: Option<f64>,
 
+    /// Ollama thinking mode: auto, off, on, low, medium, or high.
+    ///
+    /// If omitted, Ollama uses OLLAMA_THINK and then defaults to `off`.
+    #[arg(long = "ollama-thinking", alias = "thinking", value_enum)]
+    pub ollama_thinking: Option<OllamaThinkingArg>,
+
     /// Operating context mode (dev, review, research)
     #[arg(long, value_enum)]
     pub context: Option<CodeContext>,
@@ -298,7 +334,11 @@ pub struct CodeArgs {
     #[arg(long, alias = "mcp-stdio", conflicts_with = "web_only")]
     pub stdio: bool,
 
-    /// Provider API base URL (e.g. http://remote-host:11434/v1 for remote Ollama)
+    /// Provider API base URL.
+    ///
+    /// For Ollama, use a local/remote daemon URL such as
+    /// `http://remote-host:11434/v1`, or `https://ollama.com` for direct
+    /// Ollama Cloud API access with `OLLAMA_API_KEY`.
     #[arg(long)]
     pub api_base: Option<String>,
 
@@ -516,6 +556,7 @@ async fn execute_tui(mut args: CodeArgs) -> CliResult<()> {
 
     let preamble = system_preamble(&working_dir, args.context);
     let temperature = args.temperature;
+    let thinking = args.ollama_thinking.map(CompletionThinking::from);
     let resume_thread_id = args.resume.clone();
     let host = args.host.clone();
     let trace_id = resume_thread_id
@@ -564,6 +605,7 @@ async fn execute_tui(mut args: CodeArgs) -> CliResult<()> {
         registry,
         preamble,
         temperature,
+        thinking,
         context: args.context,
         resume_thread_id,
         approval_policy: args.approval_policy.into(),
@@ -626,6 +668,11 @@ async fn execute_tui(mut args: CodeArgs) -> CliResult<()> {
             } else {
                 OllamaClient::from_env()
             };
+            if client.missing_required_cloud_api_key() {
+                return Err(CliError::auth(
+                    "OLLAMA_API_KEY is required when using Ollama Cloud directly (set --api-base https://ollama.com or OLLAMA_BASE_URL=https://ollama.com)",
+                ));
+            }
             let model_name = match args.model {
                 Some(m) => m,
                 None => {
@@ -1051,6 +1098,7 @@ struct TuiLaunchConfig {
     registry: Arc<ToolRegistry>,
     preamble: String,
     temperature: Option<f64>,
+    thinking: Option<CompletionThinking>,
     context: Option<CodeContext>,
     resume_thread_id: Option<String>,
     approval_policy: AskForApproval,
@@ -1079,7 +1127,7 @@ impl CompletionModel for ManagedCodeRuntimeModel {
 fn build_tui_code_ui_capabilities() -> CodeUiCapabilities {
     CodeUiCapabilities {
         message_input: true,
-        streaming_text: false,
+        streaming_text: true,
         plan_updates: true,
         tool_calls: true,
         patchsets: true,
@@ -1260,6 +1308,7 @@ where
     let config = ToolLoopConfig {
         preamble: Some(params.preamble),
         temperature: params.temperature,
+        thinking: params.thinking,
         hook_runner,
         allowed_tools: None,
         runtime_context: Some(default_tui_runtime_context(
@@ -1407,16 +1456,17 @@ where
         },
     );
 
-    match app.run().await {
+    let graph_thread_hint = match app.run().await {
         Ok(exit_info) => {
             if let ExitReason::Fatal(msg) = exit_info.reason {
                 return Err(
                     CliError::fatal(msg).with_stable_code(StableErrorCode::InternalInvariant)
                 );
             }
+            exit_info.thread_id
         }
         Err(e) => return Err(CliError::internal(format!("TUI exited unexpectedly: {e}"))),
-    }
+    };
 
     if let Some(handle) = web_handle {
         handle.shutdown().await;
@@ -1426,6 +1476,9 @@ where
     }
     if let Some(runtime) = managed_runtime_for_shutdown {
         let _ = runtime.shutdown().await;
+    }
+    if let Some(thread_id) = graph_thread_hint {
+        println!("Inspect this thread graph with: libra graph {thread_id}");
     }
 
     Ok(())
@@ -1586,7 +1639,11 @@ async fn init_mcp_server(working_dir: &std::path::Path) -> Arc<LibraMcpServer> {
             objects_dir.display(),
             e
         );
-        return Arc::new(LibraMcpServer::new(None, None));
+        return Arc::new(LibraMcpServer::new_with_working_dir(
+            None,
+            None,
+            working_dir.to_path_buf(),
+        ));
     }
 
     // Connect to DB
@@ -1596,7 +1653,11 @@ async fn init_mcp_server(working_dir: &std::path::Path) -> Arc<LibraMcpServer> {
             "Warning: Database path is not valid UTF-8: {}. History disabled.",
             db_path.display()
         );
-        return Arc::new(LibraMcpServer::new(None, None));
+        return Arc::new(LibraMcpServer::new_with_working_dir(
+            None,
+            None,
+            working_dir.to_path_buf(),
+        ));
     };
 
     #[cfg(target_os = "windows")]
@@ -1611,15 +1672,20 @@ async fn init_mcp_server(working_dir: &std::path::Path) -> Arc<LibraMcpServer> {
                 "Warning: Failed to connect to database: {}. History disabled.",
                 e
             );
-            return Arc::new(LibraMcpServer::new(None, None));
+            return Arc::new(LibraMcpServer::new_with_working_dir(
+                None,
+                None,
+                working_dir.to_path_buf(),
+            ));
         }
     };
 
     let storage = Arc::new(LocalStorage::new(objects_dir));
     let intent_history_manager = Arc::new(HistoryManager::new(storage.clone(), dot_libra, db_conn));
-    Arc::new(LibraMcpServer::new(
+    Arc::new(LibraMcpServer::new_with_working_dir(
         Some(intent_history_manager),
         Some(storage),
+        working_dir.to_path_buf(),
     ))
 }
 
@@ -1717,6 +1783,12 @@ fn validate_mode_args(args: &CodeArgs, _output: &OutputConfig) -> Result<(), Str
         return Err("--api-base is not supported with --provider=codex".to_string());
     }
 
+    if args.provider != CodeProvider::Ollama && args.ollama_thinking.is_some() {
+        return Err(
+            "--ollama-thinking/--thinking is only supported with --provider=ollama".to_string(),
+        );
+    }
+
     Ok(())
 }
 
@@ -1735,6 +1807,7 @@ fn reject_non_tui_flags(args: &CodeArgs, mode: &str) -> Result<(), String> {
     reject_mode_flag(args.provider != CodeProvider::Gemini, "--provider", mode)?;
     reject_mode_flag(args.model.is_some(), "--model", mode)?;
     reject_mode_flag(args.temperature.is_some(), "--temperature", mode)?;
+    reject_mode_flag(args.ollama_thinking.is_some(), "--ollama-thinking", mode)?;
     reject_mode_flag(args.context.is_some(), "--context", mode)?;
     reject_mode_flag(args.resume.is_some(), "--resume", mode)?;
     reject_mode_flag(
@@ -1768,6 +1841,7 @@ mod tests {
             provider: CodeProvider::Gemini,
             model: None,
             temperature: None,
+            ollama_thinking: None,
             context: None,
             resume: None,
             approval_policy: CodeApprovalPolicy::OnRequest,
@@ -1813,6 +1887,21 @@ mod tests {
     fn accepts_anthropic_provider_in_tui_mode() {
         let mut args = base_args();
         args.provider = CodeProvider::Anthropic;
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn rejects_ollama_thinking_for_non_ollama_provider() {
+        let mut args = base_args();
+        args.ollama_thinking = Some(OllamaThinkingArg::High);
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_err());
+    }
+
+    #[test]
+    fn accepts_ollama_thinking_for_ollama_provider() {
+        let mut args = base_args();
+        args.provider = CodeProvider::Ollama;
+        args.ollama_thinking = Some(OllamaThinkingArg::High);
         assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
     }
 

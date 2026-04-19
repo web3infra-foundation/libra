@@ -10,6 +10,7 @@ libra code --web-only [-p <PORT>] [--host <HOST>]
 libra code --stdio
 libra code --provider <PROVIDER> [--model <MODEL>]
 libra code --resume <THREAD_ID>
+libra graph <THREAD_ID> [--repo <PATH>]
 ```
 
 ## Description
@@ -19,6 +20,8 @@ libra code --resume <THREAD_ID>
 The command supports seven AI provider backends (Gemini, OpenAI, Anthropic, DeepSeek, Zhipu, Ollama, Codex) and three operating contexts (dev, review, research) that tune the agent's behavior for different workflows. Sessions can be persisted and resumed with Libra's canonical `--resume <thread_id>` flow.
 
 A sandboxed tool-execution layer enforces approval policies that control when the agent can run shell commands, apply patches, or perform other potentially destructive operations.
+
+When the TUI exits and Libra can derive the canonical thread ID, `libra code` prints a follow-up `libra graph <thread_id>` command so the thread's Intent/Plan/Task/Run/PatchSet version graph can be inspected in a separate TUI. Use `libra graph <thread_id> --repo <path>` when inspecting a repository other than the current directory.
 
 ## Options
 
@@ -31,6 +34,7 @@ A sandboxed tool-execution layer enforces approval policies that control when th
 | Provider | | `--provider` | `gemini` | AI provider backend (see Provider Backends below). |
 | Model | | `--model` | provider default | Provider-specific model ID. |
 | Temperature | | `--temperature` | provider default | Sampling temperature for generation. |
+| Ollama thinking | | `--ollama-thinking` / `--thinking` | `OLLAMA_THINK`, then `off` | Ollama thinking mode: `auto`, `off`, `on`, `low`, `medium`, or `high`. |
 | Context | | `--context` | none | Operating context: `dev` (alias `development`), `review` (alias `code-review`), `research` (alias `explore`). |
 | Resume | | `--resume <THREAD_ID>` | none | Resume a canonical Libra thread by thread ID. |
 | Approval policy | | `--approval-policy` | `on-request` | Tool approval policy (see Approval Policies below). |
@@ -50,8 +54,10 @@ A sandboxed tool-execution layer enforces approval policies that control when th
 | `anthropic` | Anthropic (default: claude-3.5-sonnet) | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
 | `deepseek` | DeepSeek | `DEEPSEEK_API_KEY` | -- |
 | `zhipu` | Zhipu GLM (default: glm-5) | `ZHIPU_API_KEY` | `ZHIPU_BASE_URL` |
-| `ollama` | Ollama (local models) | -- | `OLLAMA_BASE_URL` or `--api-base` |
+| `ollama` | Ollama (local models and direct Cloud API) | `OLLAMA_API_KEY` for direct Cloud API | `OLLAMA_BASE_URL`, `OLLAMA_THINK`, `--api-base`, or `--ollama-thinking` |
 | `codex` | Codex app-server | -- | `--codex-bin` / `--codex-port` |
+
+Ollama requests stream `/api/chat` responses by default and add a per-request `request_id` to debug logs. They also default to `think:false` so reasoning-capable local models do not spend several minutes generating hidden reasoning before tool calls. Use `--ollama-thinking high` for a single run, or set `OLLAMA_THINK=true`, `low`, `medium`, `high`, or `auto` as the environment default. `auto` omits the `think` field and lets Ollama decide.
 
 ### Approval Policies
 
@@ -88,6 +94,9 @@ libra code --stdio
 # Use a local Ollama model; plain requests generate a reviewable plan first
 libra code --provider ollama --model llama3 --api-base http://127.0.0.1:11434/v1
 
+# Enable high thinking for one Ollama run
+libra code --provider ollama --model qwen3.6 --ollama-thinking high
+
 # Capture provider/TUI diagnostics while using a local Ollama model
 LIBRA_LOG='libra::internal::ai=debug,libra::internal::tui=debug' \
 LIBRA_LOG_FILE=/tmp/libra-code.log \
@@ -95,6 +104,12 @@ libra code --repo=/Volumes/Data/linked --provider ollama --model gemma4:31b
 
 # Resume a canonical Libra thread
 libra code --resume 11111111-1111-4111-8111-111111111111
+
+# Inspect the same thread's version graph
+libra graph 11111111-1111-4111-8111-111111111111
+
+# Inspect a thread graph from outside that repository
+libra graph 11111111-1111-4111-8111-111111111111 --repo /Volumes/Data/linked
 
 # Start in code review context with strict approval
 libra code --context review --approval-policy untrusted
@@ -105,7 +120,7 @@ libra code --provider codex --plan-mode
 
 ## Human Output
 
-Output is delivered through the TUI, web interface, or MCP protocol depending on the mode. There is no line-oriented stdout in the default TUI mode. In the generic provider TUI, a normal plain-text request starts the plan workflow automatically; explicit slash commands keep their command-specific behavior. The web server serves an embedded Next.js application. The stdio mode communicates via JSON-RPC messages following the Model Context Protocol.
+Output is delivered through the TUI, web interface, or MCP protocol depending on the mode. There is no line-oriented stdout in the default TUI mode. In the generic provider TUI, a normal plain-text request starts the plan workflow automatically; explicit slash commands keep their command-specific behavior. Generic provider planning uses a two-step review: the LLM first drafts an IntentSpec for confirmation, then the confirmed IntentSpec is sent back to the LLM to generate a reviewable execution plan before any execution starts. The web server serves an embedded Next.js application. The stdio mode communicates via JSON-RPC messages following the Model Context Protocol.
 
 ## Diagnostics
 
@@ -139,7 +154,7 @@ Different providers excel at different tasks and have different cost/latency pro
 
 ### Why MCP integration?
 
-The Model Context Protocol (MCP) is an open standard for connecting AI clients to tool servers. By supporting `--stdio` mode, Libra can act as a tool server for any MCP-compatible client (e.g., Claude Desktop). This turns Libra's version-control tools -- status, diff, commit, branch -- into first-class tools that an external AI agent can invoke without reimplementing them.
+The Model Context Protocol (MCP) is an open standard for connecting AI clients to tool servers. By supporting `--stdio` mode, Libra can act as a tool server for any MCP-compatible client (e.g., Claude Desktop). Libra exposes an allowlisted `run_libra_vcs` tool for version-control operations such as status, diff, add, commit, branch, log, show, and switch, so external AI agents use Libra directly instead of invoking Git. Libra-managed execution also rejects direct `git` shell commands.
 
 ### Why approval policies?
 

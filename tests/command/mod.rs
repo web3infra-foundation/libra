@@ -246,6 +246,7 @@ mod config_test;
 mod describe_test;
 mod diff_test;
 mod fetch_test;
+mod graph_test;
 mod grep_test;
 mod index_pack_test;
 mod init_from_git_test;

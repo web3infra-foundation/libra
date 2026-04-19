@@ -547,6 +547,8 @@ pub struct OrchestratorConfig {
     pub base_commit: Option<String>,
     pub persisted_intent_id: Option<String>,
     pub persisted_plan_id: Option<String>,
+    /// Optional user-approved plan to execute instead of compiling the first plan locally.
+    pub initial_plan: Option<ExecutionPlanSpec>,
     /// Placeholder for checkpoint/resume functionality.
     ///
     /// Note: This field is currently unused. The checkpoint/resume feature needs to be

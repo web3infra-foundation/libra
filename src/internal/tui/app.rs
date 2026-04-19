@@ -44,11 +44,16 @@ use crate::{
         commands::CommandDispatcher,
         completion::{
             CompletionModel, CompletionRetryEvent, CompletionRetryObserver, CompletionRetryPolicy,
-            CompletionUsage, Message, RetryingCompletionModel,
+            CompletionStreamEvent, CompletionUsage, Message, RetryingCompletionModel,
         },
         intentspec::{
             IntentDraft, IntentSpec, ResolveContext, RiskLevel, build_intentspec_review,
-            persistence::persist_intentspec, render_summary, repair_intentspec, resolve_intentspec,
+            persistence::persist_intentspec,
+            render_summary, repair_intentspec, resolve_intentspec,
+            types::{
+                ConflictResolution, DecompositionMode, LibraBinding, Objective, ObjectiveKind,
+                PlanGenerationConfig,
+            },
             validate_intentspec,
         },
         mcp::{
@@ -65,14 +70,16 @@ use crate::{
                 TaskNodeStatus, TaskRuntimeEvent, TaskRuntimeNoteLevel, TaskRuntimePhase,
             },
         },
+        projection::ProjectionRebuilder,
         sandbox::{ExecApprovalRequest, ReviewDecision},
         session::{SessionState, SessionStore},
         tools::{
             ToolOutput, ToolRegistry,
             context::{
-                RequestUserInputArgs, SubmitIntentDraftArgs, UpdatePlanArgs, UserInputAnswer,
+                RequestUserInputArgs, StepStatus, UpdatePlanArgs, UserInputAnswer,
                 UserInputRequest, UserInputResponse,
             },
+            handlers::submit_intent_draft::parse_submit_intent_draft_value,
         },
         web::code_ui::{
             CodeUiApplyToFuture, CodeUiEventEnvelope, CodeUiInteractionKind,
@@ -135,6 +142,28 @@ const LATEST_INTENTSPEC_BRANCH_LABEL: &str = "latest_intentspec_branch_label";
 const MAX_INTENTSPEC_REPAIR_ATTEMPTS: usize = 2;
 const MCP_WRITE_TIMEOUT: Duration = Duration::from_secs(8);
 const MCP_TURN_TRACKING_TIMEOUT: Duration = Duration::from_secs(3);
+const GRAPH_THREAD_ID_METADATA_KEYS: &[&str] = &["thread_id", "threadId", "canonical_thread_id"];
+
+fn session_graph_thread_id(session: &SessionState) -> Option<String> {
+    GRAPH_THREAD_ID_METADATA_KEYS
+        .iter()
+        .find_map(|key| session.metadata.get(*key).and_then(|value| value.as_str()))
+        .filter(|thread_id| uuid::Uuid::parse_str(thread_id).is_ok())
+        .map(str::to_string)
+        .or_else(|| {
+            session
+                .metadata
+                .get(LATEST_INTENTSPEC_INTENT_ID)
+                .and_then(|value| value.as_str())
+                .filter(|intent_id| uuid::Uuid::parse_str(intent_id).is_ok())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            uuid::Uuid::parse_str(&session.id)
+                .ok()
+                .map(|thread_id| thread_id.to_string())
+        })
+}
 
 fn summarize_mcp_content(content: &[rmcp::model::Content]) -> Option<String> {
     let mut parts = Vec::new();
@@ -179,6 +208,8 @@ pub enum ExitReason {
 pub struct AppExitInfo {
     /// The reason for exiting.
     pub reason: ExitReason,
+    /// Canonical thread id that can be inspected with `libra graph`, when known.
+    pub thread_id: Option<String>,
 }
 
 /// Pending user-input state while the TUI waits for the user to answer.
@@ -202,7 +233,18 @@ struct PendingPostPlan {
     spec_json: String,
     intent_id: Option<String>,
     plan_id: Option<String>,
+    plan: ExecutionPlanSpec,
+    llm_plan: UpdatePlanArgs,
+    warnings: Vec<String>,
     selected: usize, // 0=Execute, 1=Modify, 2=Cancel
+}
+
+/// Execution-plan revision state after the user chooses Modify on the plan review.
+struct PendingExecutionPlanRevision {
+    spec_json: String,
+    intent_id: Option<String>,
+    current_plan: UpdatePlanArgs,
+    warnings: Vec<String>,
 }
 
 /// IntentSpec review dialog state: stores the spec and user selection.
@@ -303,6 +345,8 @@ pub struct App<M: CompletionModel> {
     pending_intent_review: Option<PendingIntentReview>,
     /// Base IntentSpec JSON for the next spec-revision request, if the user chose Modify.
     pending_plan_revision: Option<String>,
+    /// Base execution plan for the next plan-revision request, if the user chose Modify Plan.
+    pending_execution_plan_revision: Option<PendingExecutionPlanRevision>,
     /// Display name of the active model.
     model_name: String,
     /// Provider identifier.
@@ -422,6 +466,7 @@ where
             pending_post_plan: None,
             pending_intent_review: None,
             pending_plan_revision: None,
+            pending_execution_plan_revision: None,
             model_name: app_config.model_name,
             provider_name: app_config.provider_name,
             mcp_server: app_config.mcp_server,
@@ -550,10 +595,14 @@ where
             task.abort();
         }
         self.mcp_write_tracker.drain().await;
-        let exit_info = self.exit_info.clone().unwrap_or(AppExitInfo {
+        let mut exit_info = self.exit_info.clone().unwrap_or(AppExitInfo {
             reason: ExitReason::UserRequested,
+            thread_id: None,
         });
         self.create_mcp_exit_decision(&exit_info.reason).await;
+        if exit_info.thread_id.is_none() {
+            exit_info.thread_id = self.graph_thread_id_hint().await;
+        }
 
         Ok(exit_info)
     }
@@ -1566,6 +1615,35 @@ where
                     }
 
                     impl ToolLoopObserver for UiObserver {
+                        fn on_model_stream_event(&mut self, event: &CompletionStreamEvent) {
+                            match event {
+                                CompletionStreamEvent::TextDelta { delta, .. }
+                                    if !delta.is_empty() =>
+                                {
+                                    let _ = self.tx.send(AppEvent::AgentEvent {
+                                        turn_id: self.turn_id,
+                                        event: AgentEvent::ResponseDelta {
+                                            delta: delta.clone(),
+                                        },
+                                    });
+                                }
+                                CompletionStreamEvent::ToolCallPreview {
+                                    call_id,
+                                    tool_name,
+                                    arguments,
+                                    ..
+                                } => {
+                                    let _ = self.tx.send(AppEvent::ToolCallPreview {
+                                        turn_id: self.turn_id,
+                                        call_id: call_id.clone(),
+                                        tool_name: tool_name.clone(),
+                                        arguments: arguments.clone(),
+                                    });
+                                }
+                                _ => {}
+                            }
+                        }
+
                         fn on_assistant_step_text(&mut self, text: &str) {
                             let cell = Box::new(AssistantHistoryCell::new(text.to_string()));
                             let _ = self.tx.send(AppEvent::InsertHistoryCell {
@@ -1848,6 +1926,7 @@ where
                 spec_json,
                 spec,
                 plan,
+                llm_plan,
                 warnings,
             } => {
                 self.finish_turn_state();
@@ -1901,13 +1980,14 @@ where
                     self.mcp_plan_id = None;
                 }
 
-                self.widget.show_dag_preview((*plan).clone());
+                let execution_plan = (*plan).clone();
+                self.widget.show_dag_preview(execution_plan.clone());
                 self.replace_streaming_assistant_cell(Box::new(PlanSummaryHistoryCell::new(
                     *spec,
-                    *plan,
+                    execution_plan.clone(),
                     intent_id.clone(),
                     plan_id.clone(),
-                    warnings,
+                    warnings.clone(),
                 )));
                 if let Some(code_ui_session) = self.code_ui_session.clone() {
                     let plan_snapshot = CodeUiPlanSnapshot {
@@ -1982,6 +2062,9 @@ where
                     spec_json,
                     intent_id,
                     plan_id,
+                    plan: execution_plan,
+                    llm_plan,
+                    warnings,
                     selected: 0,
                 });
                 self.widget.bottom_pane.reset_post_plan_selection();
@@ -2221,32 +2304,35 @@ where
                 arguments,
             } => {
                 let tool_summary = Self::tool_call_summary_for_browser(&tool_name, &arguments);
-                if tool_name == "update_plan" {
-                    // Parse the plan arguments and render a specialised cell.
-                    let (explanation, steps) =
-                        if let Ok(args) = serde_json::from_value::<UpdatePlanArgs>(arguments) {
-                            (args.explanation, args.plan)
-                        } else {
-                            (None, Vec::new())
-                        };
-                    let cell = Box::new(PlanUpdateHistoryCell::new(
-                        call_id.clone(),
-                        explanation,
-                        steps,
-                    ));
-                    self.insert_before_streaming_assistant(cell);
-                } else if !append_to_last_tool_group_cell(
+                let already_visible = mark_visible_tool_call_running(
                     &mut self.widget.cells,
-                    call_id.clone(),
-                    tool_name.as_str(),
-                    arguments.clone(),
-                ) {
-                    let cell = Box::new(ToolCallHistoryCell::new(
+                    &call_id,
+                    &tool_name,
+                    &arguments,
+                );
+                if !already_visible {
+                    if tool_name == "update_plan" {
+                        // Parse the plan arguments and render a specialised cell.
+                        let (explanation, steps) = parse_update_plan_arguments(&arguments);
+                        let cell = Box::new(PlanUpdateHistoryCell::new(
+                            call_id.clone(),
+                            explanation,
+                            steps,
+                        ));
+                        self.insert_before_streaming_assistant(cell);
+                    } else if !append_to_last_tool_group_cell(
+                        &mut self.widget.cells,
                         call_id.clone(),
-                        tool_name.clone(),
-                        arguments,
-                    ));
-                    self.insert_before_streaming_assistant(cell);
+                        tool_name.as_str(),
+                        arguments.clone(),
+                    ) {
+                        let cell = Box::new(ToolCallHistoryCell::new(
+                            call_id.clone(),
+                            tool_name.clone(),
+                            arguments,
+                        ));
+                        self.insert_before_streaming_assistant(cell);
+                    }
                 }
                 self.running_tool_calls = self.running_tool_calls.saturating_add(1);
                 self.update_status_after_tool_progress();
@@ -2276,6 +2362,72 @@ where
                         .await;
                     code_ui_session
                         .set_status(CodeUiSessionStatus::ExecutingTool)
+                        .await;
+                }
+                self.schedule_draw();
+            }
+            AppEvent::ToolCallPreview {
+                turn_id: _turn_id,
+                call_id,
+                tool_name,
+                arguments,
+            } => {
+                let tool_summary = Self::tool_call_summary_for_browser(&tool_name, &arguments);
+                if !update_visible_tool_call_preview(
+                    &mut self.widget.cells,
+                    &call_id,
+                    &tool_name,
+                    &arguments,
+                ) {
+                    if tool_name == "update_plan" {
+                        let (explanation, steps) = parse_update_plan_arguments(&arguments);
+                        let cell = Box::new(PlanUpdateHistoryCell::new(
+                            call_id.clone(),
+                            explanation,
+                            steps,
+                        ));
+                        self.insert_before_streaming_assistant(cell);
+                    } else if !append_to_last_tool_group_preview_cell(
+                        &mut self.widget.cells,
+                        call_id.clone(),
+                        tool_name.as_str(),
+                        arguments.clone(),
+                    ) {
+                        let cell = Box::new(ToolCallHistoryCell::new_preview(
+                            call_id.clone(),
+                            tool_name.clone(),
+                            arguments,
+                        ));
+                        self.insert_before_streaming_assistant(cell);
+                    }
+                }
+
+                if let Some(code_ui_session) = self.code_ui_session.clone() {
+                    code_ui_session
+                        .upsert_tool_call(CodeUiToolCallSnapshot {
+                            id: call_id.clone(),
+                            tool_name: tool_name.clone(),
+                            status: "preview".to_string(),
+                            summary: Some(tool_summary.clone()),
+                            details: None,
+                            updated_at: Utc::now(),
+                        })
+                        .await;
+                    code_ui_session
+                        .upsert_transcript_entry(CodeUiTranscriptEntry {
+                            id: call_id,
+                            kind: CodeUiTranscriptEntryKind::ToolCall,
+                            title: Some(tool_name),
+                            content: Some(tool_summary),
+                            status: Some("preview".to_string()),
+                            streaming: true,
+                            metadata: serde_json::json!({}),
+                            created_at: Utc::now(),
+                            updated_at: Utc::now(),
+                        })
+                        .await;
+                    code_ui_session
+                        .set_status(CodeUiSessionStatus::Thinking)
                         .await;
                 }
                 self.schedule_draw();
@@ -2703,6 +2855,21 @@ where
             return;
         }
 
+        if let Some(pending) = self.pending_execution_plan_revision.take() {
+            if text.trim_start().starts_with('/') {
+                self.pending_execution_plan_revision = Some(pending);
+                self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                    pending_execution_plan_revision_help_message(),
+                )));
+                self.sync_mux_input_context();
+                self.schedule_draw();
+                return;
+            }
+            self.begin_execution_plan_revision_flow(pending, &text)
+                .await;
+            return;
+        }
+
         if let Some(spec_json) = self.pending_plan_revision.take() {
             if text.trim_start().starts_with('/') {
                 self.pending_plan_revision = Some(spec_json);
@@ -2783,6 +2950,7 @@ where
                 self.mcp_plan_id = None;
                 self.mcp_run_id = None;
                 self.pending_plan_revision = None;
+                self.pending_execution_plan_revision = None;
                 self.sync_mux_input_context();
             }
             BuiltinCommand::Model => {
@@ -2804,7 +2972,30 @@ where
                     .add_cell(Box::new(AssistantHistoryCell::new(status)));
             }
             BuiltinCommand::Plan => {
-                if let Some(spec_json) = self.pending_plan_revision.take() {
+                if let Some(pending) = self.pending_execution_plan_revision.take() {
+                    match parse_pending_plan_revision_command(args) {
+                        PendingPlanRevisionCommand::Modify(request) => {
+                            self.begin_execution_plan_revision_flow(pending, request)
+                                .await;
+                        }
+                        PendingPlanRevisionCommand::Cancel => {
+                            self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                                "Execution plan revision canceled.".to_string(),
+                            )));
+                            self.widget.bottom_pane.set_status(AgentStatus::Idle);
+                            self.sync_mux_input_context();
+                            self.schedule_draw();
+                        }
+                        PendingPlanRevisionCommand::Invalid => {
+                            self.pending_execution_plan_revision = Some(pending);
+                            self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                                pending_execution_plan_revision_help_message(),
+                            )));
+                            self.sync_mux_input_context();
+                            self.schedule_draw();
+                        }
+                    }
+                } else if let Some(spec_json) = self.pending_plan_revision.take() {
                     match parse_pending_plan_revision_command(args) {
                         PendingPlanRevisionCommand::Modify(request) => {
                             self.begin_plan_revision_flow(spec_json, request).await;
@@ -2867,6 +3058,8 @@ where
         if self.pending_intent_review.is_some() {
             self.dismiss_intent_review_dialog();
         }
+        self.pending_execution_plan_revision = None;
+        self.pending_plan_revision = None;
         self.interrupt_agent_task();
         self.clear_mcp_run_id();
         self.widget.bottom_pane.clear();
@@ -2875,7 +3068,49 @@ where
         self.sync_mux_input_context();
         self.exit_info = Some(AppExitInfo {
             reason: ExitReason::UserRequested,
+            thread_id: None,
         });
+    }
+
+    async fn graph_thread_id_hint(&self) -> Option<String> {
+        if let Some(thread_id) = session_graph_thread_id(&self.session) {
+            return Some(thread_id);
+        }
+
+        if let Some(code_ui_session) = self.code_ui_session.as_ref() {
+            let snapshot = code_ui_session.snapshot().await;
+            if let Some(thread_id) = snapshot
+                .thread_id
+                .as_deref()
+                .filter(|thread_id| uuid::Uuid::parse_str(thread_id).is_ok())
+            {
+                return Some(thread_id.to_string());
+            }
+            if uuid::Uuid::parse_str(&snapshot.session_id).is_ok() {
+                return Some(snapshot.session_id);
+            }
+        }
+
+        let (Some(history), Some(storage)) = (
+            self.mcp_server
+                .as_ref()
+                .and_then(|server| server.intent_history_manager.as_ref()),
+            self.mcp_server
+                .as_ref()
+                .and_then(|server| server.storage.as_ref()),
+        ) else {
+            return None;
+        };
+
+        let rebuilder = ProjectionRebuilder::new(storage.as_ref(), history);
+        match rebuilder.rebuild_latest_thread().await {
+            Ok(Some(rebuild)) => Some(rebuild.thread.thread_id.to_string()),
+            Ok(None) => None,
+            Err(error) => {
+                tracing::warn!(error = %error, "failed to derive graph thread id hint");
+                None
+            }
+        }
     }
 
     fn handle_mux_command(&mut self, args: &str) -> bool {
@@ -2998,6 +3233,15 @@ where
             self.widget
                 .bottom_pane
                 .set_input_hint(self.widget.task_mux_input_hint());
+        } else if self.pending_execution_plan_revision.is_some()
+            && matches!(self.widget.bottom_pane.status, AgentStatus::Idle)
+        {
+            self.widget
+                .bottom_pane
+                .set_input_context_label(Some("Revise Plan".to_string()));
+            self.widget.bottom_pane.set_input_hint(Some(
+                "Describe plan changes, or use /plan modify <changes> or /plan cancel".to_string(),
+            ));
         } else if self.pending_plan_revision.is_some()
             && matches!(self.widget.bottom_pane.status, AgentStatus::Idle)
         {
@@ -3082,7 +3326,49 @@ where
         &mut self,
         spec_json: String,
         intent_id: Option<String>,
+        warnings: Vec<String>,
+    ) {
+        let prompt = build_execution_plan_prompt(&spec_json);
+        self.begin_llm_execution_plan_workflow(spec_json, intent_id, warnings, prompt)
+            .await;
+    }
+
+    async fn begin_execution_plan_revision_flow(
+        &mut self,
+        pending: PendingExecutionPlanRevision,
+        request: &str,
+    ) {
+        let request = request.trim();
+        if request.is_empty() {
+            self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                pending_execution_plan_revision_help_message(),
+            )));
+            self.pending_execution_plan_revision = Some(pending);
+            self.sync_mux_input_context();
+            self.schedule_draw();
+            return;
+        }
+
+        let prompt = build_execution_plan_revision_prompt(
+            &pending.spec_json,
+            &pending.current_plan,
+            request,
+        );
+        self.begin_llm_execution_plan_workflow(
+            pending.spec_json,
+            pending.intent_id,
+            pending.warnings,
+            prompt,
+        )
+        .await;
+    }
+
+    async fn begin_llm_execution_plan_workflow(
+        &mut self,
+        spec_json: String,
+        intent_id: Option<String>,
         mut warnings: Vec<String>,
+        prompt: String,
     ) {
         let spec = match serde_json::from_str::<IntentSpec>(&spec_json) {
             Ok(spec) => spec,
@@ -3106,12 +3392,156 @@ where
         self.sync_mux_input_context();
         self.schedule_draw();
 
+        let model = self.model.clone();
+        let registry = self.registry.clone();
+        let mut config = self.config.clone();
+        config.allowed_tools = Some(vec![
+            "read_file".to_string(),
+            "list_dir".to_string(),
+            "grep_files".to_string(),
+            "search_files".to_string(),
+            "update_plan".to_string(),
+        ]);
         let tx = self.app_event_tx.clone();
         let mcp_server = self.mcp_server.clone();
         let fallback_history = self.history.clone();
 
         let handle = tokio::spawn(async move {
-            let execution_plan = match compile_execution_plan_spec(&spec) {
+            struct ExecutionPlanObserver {
+                tx: UnboundedSender<AppEvent>,
+                turn_id: TurnId,
+                plan: Option<UpdatePlanArgs>,
+            }
+
+            impl ToolLoopObserver for ExecutionPlanObserver {
+                fn on_model_stream_event(&mut self, event: &CompletionStreamEvent) {
+                    match event {
+                        CompletionStreamEvent::TextDelta { delta, .. } if !delta.is_empty() => {
+                            let _ = self.tx.send(AppEvent::AgentEvent {
+                                turn_id: self.turn_id,
+                                event: AgentEvent::ResponseDelta {
+                                    delta: delta.clone(),
+                                },
+                            });
+                        }
+                        CompletionStreamEvent::ToolCallPreview {
+                            call_id,
+                            tool_name,
+                            arguments,
+                            ..
+                        } => {
+                            let _ = self.tx.send(AppEvent::ToolCallPreview {
+                                turn_id: self.turn_id,
+                                call_id: call_id.clone(),
+                                tool_name: tool_name.clone(),
+                                arguments: arguments.clone(),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+
+                fn on_tool_call_begin(
+                    &mut self,
+                    call_id: &str,
+                    tool_name: &str,
+                    arguments: &serde_json::Value,
+                ) {
+                    let _ = self.tx.send(AppEvent::ToolCallBegin {
+                        turn_id: self.turn_id,
+                        call_id: call_id.to_string(),
+                        tool_name: tool_name.to_string(),
+                        arguments: arguments.clone(),
+                    });
+
+                    if tool_name == "update_plan"
+                        && let Ok(args) =
+                            serde_json::from_value::<UpdatePlanArgs>(arguments.clone())
+                    {
+                        self.plan = Some(args);
+                    }
+                }
+
+                fn on_tool_call_end(
+                    &mut self,
+                    call_id: &str,
+                    tool_name: &str,
+                    result: &Result<ToolOutput, String>,
+                ) {
+                    let _ = self.tx.send(AppEvent::ToolCallEnd {
+                        turn_id: self.turn_id,
+                        call_id: call_id.to_string(),
+                        tool_name: tool_name.to_string(),
+                        result: result.clone(),
+                    });
+                }
+            }
+
+            let mut observer = ExecutionPlanObserver {
+                tx: tx.clone(),
+                turn_id,
+                plan: None,
+            };
+            let run_result = run_tool_loop_with_history_and_observer(
+                &model,
+                fallback_history.clone(),
+                prompt,
+                &registry,
+                config,
+                &mut observer,
+            )
+            .await;
+
+            let turn = match run_result {
+                Ok(turn) => Some(turn),
+                Err(e) if observer.plan.is_some() => {
+                    let _ = tx.send(AppEvent::InsertHistoryCell {
+                        turn_id,
+                        cell: Box::new(AssistantHistoryCell::new(format!(
+                            "Planner response failed after plan submission. Continuing with the submitted plan.\nReason: {}",
+                            e
+                        ))),
+                    });
+                    None
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::AgentEvent {
+                        turn_id,
+                        event: AgentEvent::Error {
+                            message: format!("Plan failed: LLM did not produce a usable plan: {e}"),
+                        },
+                    });
+                    return;
+                }
+            };
+
+            let llm_plan = match observer.plan.take() {
+                Some(plan) => plan,
+                None => {
+                    let _ = tx.send(AppEvent::AgentEvent {
+                        turn_id,
+                        event: AgentEvent::Error {
+                            message: "Plan failed: LLM did not call update_plan.".to_string(),
+                        },
+                    });
+                    return;
+                }
+            };
+
+            let spec_for_plan = match intentspec_with_llm_plan_objectives(&spec, &llm_plan) {
+                Ok(spec) => spec,
+                Err(error) => {
+                    let _ = tx.send(AppEvent::AgentEvent {
+                        turn_id,
+                        event: AgentEvent::Error {
+                            message: format!("Plan failed: {error}"),
+                        },
+                    });
+                    return;
+                }
+            };
+
+            let execution_plan = match compile_execution_plan_spec(&spec_for_plan) {
                 Ok(plan) => plan,
                 Err(e) => {
                     let _ = tx.send(AppEvent::AgentEvent {
@@ -3124,7 +3554,12 @@ where
                 }
             };
 
-            let mut summary = render_summary(&spec, intent_id.as_deref());
+            let mut summary = render_summary(&spec_for_plan, intent_id.as_deref());
+            if let Some(explanation) = llm_plan.explanation.as_deref()
+                && !explanation.trim().is_empty()
+            {
+                summary.push_str(&format!("\nPlan rationale: {}", explanation.trim()));
+            }
             let mut plan_warning = None;
             let plan_id = if let (Some(mcp_server), Some(intent_id)) =
                 (mcp_server.as_ref(), intent_id.as_ref())
@@ -3156,7 +3591,7 @@ where
                 warnings.push(warning);
             }
 
-            let mut new_history = fallback_history;
+            let mut new_history = turn.map(|turn| turn.history).unwrap_or(fallback_history);
             new_history.push(Message::assistant(summary.clone()));
 
             let _ = tx.send(AppEvent::PlanWorkflowComplete {
@@ -3166,8 +3601,9 @@ where
                 intent_id,
                 plan_id,
                 spec_json,
-                spec: Box::new(spec),
+                spec: Box::new(spec_for_plan),
                 plan: Box::new(execution_plan),
+                llm_plan,
                 warnings,
             });
         });
@@ -3186,24 +3622,29 @@ where
             .plan_id
             .clone()
             .unwrap_or_else(|| "post-plan-choice".to_string());
+        let selected = pending.selected;
 
-        match pending.selected {
+        match selected {
             0 => {
-                // Execute: validate spec and show placeholder
                 self.start_execute_workflow(
                     &pending.spec_json,
                     pending.intent_id.clone(),
                     pending.plan_id.clone(),
+                    Some(pending.plan.clone()),
                 )
                 .await;
             }
             _ => {
-                // Modify (1) or Cancel (2+)
                 if pending.selected == 1 {
-                    self.pending_plan_revision = Some(pending.spec_json);
+                    self.pending_execution_plan_revision = Some(PendingExecutionPlanRevision {
+                        spec_json: pending.spec_json,
+                        intent_id: pending.intent_id.clone(),
+                        current_plan: pending.llm_plan,
+                        warnings: pending.warnings,
+                    });
                     let msg = format!(
-                        "{} Your next plain-text message will revise the current spec.",
-                        pending_plan_revision_help_message()
+                        "{} Your next plain-text message will revise the current execution plan.",
+                        pending_execution_plan_revision_help_message()
                     );
                     self.widget
                         .add_cell(Box::new(AssistantHistoryCell::new(msg.clone())));
@@ -3215,7 +3656,7 @@ where
             }
         }
         if let Some(code_ui_session) = self.code_ui_session.clone() {
-            let next_status = if pending.selected == 0 {
+            let next_status = if selected == 0 {
                 CodeUiSessionStatus::Thinking
             } else {
                 CodeUiSessionStatus::Idle
@@ -3248,6 +3689,7 @@ where
         spec_json: &str,
         persisted_intent_id: Option<String>,
         persisted_plan_id: Option<String>,
+        approved_plan: Option<ExecutionPlanSpec>,
     ) {
         use crate::internal::ai::{
             intentspec::types::IntentSpec,
@@ -3437,6 +3879,7 @@ where
                 base_commit: None,
                 persisted_intent_id,
                 persisted_plan_id,
+                initial_plan: approved_plan,
                 dagrs_resume_checkpoint_id: None,
                 coder_preamble,
                 reviewer_preamble,
@@ -3572,6 +4015,33 @@ where
             }
 
             impl ToolLoopObserver for PlanObserver {
+                fn on_model_stream_event(&mut self, event: &CompletionStreamEvent) {
+                    match event {
+                        CompletionStreamEvent::TextDelta { delta, .. } if !delta.is_empty() => {
+                            let _ = self.tx.send(AppEvent::AgentEvent {
+                                turn_id: self.turn_id,
+                                event: AgentEvent::ResponseDelta {
+                                    delta: delta.clone(),
+                                },
+                            });
+                        }
+                        CompletionStreamEvent::ToolCallPreview {
+                            call_id,
+                            tool_name,
+                            arguments,
+                            ..
+                        } => {
+                            let _ = self.tx.send(AppEvent::ToolCallPreview {
+                                turn_id: self.turn_id,
+                                call_id: call_id.clone(),
+                                tool_name: tool_name.clone(),
+                                arguments: arguments.clone(),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+
                 fn on_tool_call_begin(
                     &mut self,
                     call_id: &str,
@@ -3597,8 +4067,7 @@ where
                     }
 
                     if tool_name == "submit_intent_draft"
-                        && let Ok(args) =
-                            parse_value_or_json_string::<SubmitIntentDraftArgs>(arguments)
+                        && let Ok(args) = parse_submit_intent_draft_value(arguments)
                     {
                         self.draft = Some(args.draft);
                     }
@@ -3805,6 +4274,7 @@ where
                             .get(LATEST_EXECUTION_PLAN_ID)
                             .and_then(serde_json::Value::as_str)
                             .map(ToString::to_string),
+                        None,
                     )
                     .await;
                 }
@@ -4125,6 +4595,11 @@ where
             if let Some(tool_cell) = cell.as_any_mut().downcast_mut::<ToolCallHistoryCell>() {
                 tool_cell.interrupt_running();
             }
+            if let Some(plan_cell) = cell.as_any_mut().downcast_mut::<PlanUpdateHistoryCell>()
+                && plan_cell.is_running
+            {
+                plan_cell.complete();
+            }
         }
         self.widget.interrupt_task_mux_tool_calls();
     }
@@ -4213,6 +4688,10 @@ fn pending_plan_revision_help_message() -> String {
     "Revise mode is active. Describe changes in plain text, use `/plan modify <changes>` to keep revising, or `/plan cancel` to exit.".to_string()
 }
 
+fn pending_execution_plan_revision_help_message() -> String {
+    "Plan revise mode is active. Describe execution-plan changes in plain text, use `/plan modify <changes>` to keep revising, or `/plan cancel` to exit.".to_string()
+}
+
 fn append_to_last_tool_group_cell(
     cells: &mut Vec<Box<dyn super::history_cell::HistoryCell>>,
     call_id: String,
@@ -4246,6 +4725,110 @@ fn append_to_last_tool_group_cell(
 
     tool_cell.append_call(call_id, tool_name.to_string(), arguments);
     true
+}
+
+fn append_to_last_tool_group_preview_cell(
+    cells: &mut Vec<Box<dyn super::history_cell::HistoryCell>>,
+    call_id: String,
+    tool_name: &str,
+    arguments: serde_json::Value,
+) -> bool {
+    let anchor_index = if let Some(streaming_index) = cells.iter().rposition(|cell| {
+        cell.as_any()
+            .downcast_ref::<AssistantHistoryCell>()
+            .is_some_and(|assistant| assistant.is_streaming)
+    }) {
+        streaming_index.checked_sub(1)
+    } else {
+        cells.len().checked_sub(1)
+    };
+
+    let Some(anchor_index) = anchor_index else {
+        return false;
+    };
+
+    let Some(tool_cell) = cells[anchor_index]
+        .as_any_mut()
+        .downcast_mut::<ToolCallHistoryCell>()
+    else {
+        return false;
+    };
+
+    if !tool_cell.can_merge(tool_name) {
+        return false;
+    }
+
+    tool_cell.append_preview_call(call_id, tool_name.to_string(), arguments);
+    true
+}
+
+fn parse_update_plan_arguments(
+    arguments: &serde_json::Value,
+) -> (
+    Option<String>,
+    Vec<crate::internal::ai::tools::context::PlanStep>,
+) {
+    if let Ok(args) = serde_json::from_value::<UpdatePlanArgs>(arguments.clone()) {
+        (args.explanation, args.plan)
+    } else {
+        (None, Vec::new())
+    }
+}
+
+fn mark_visible_tool_call_running(
+    cells: &mut [Box<dyn super::history_cell::HistoryCell>],
+    call_id: &str,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+) -> bool {
+    for cell in cells.iter_mut().rev() {
+        if let Some(plan_cell) = cell.as_any_mut().downcast_mut::<PlanUpdateHistoryCell>()
+            && plan_cell.call_id == call_id
+        {
+            let (explanation, steps) = parse_update_plan_arguments(arguments);
+            plan_cell.update(explanation, steps);
+            plan_cell.is_running = true;
+            return true;
+        }
+
+        if let Some(tool_cell) = cell.as_any_mut().downcast_mut::<ToolCallHistoryCell>()
+            && tool_cell.mark_call_running(call_id, tool_name, arguments)
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn update_visible_tool_call_preview(
+    cells: &mut [Box<dyn super::history_cell::HistoryCell>],
+    call_id: &str,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+) -> bool {
+    for cell in cells.iter_mut().rev() {
+        if let Some(plan_cell) = cell.as_any_mut().downcast_mut::<PlanUpdateHistoryCell>()
+            && plan_cell.call_id == call_id
+        {
+            let (explanation, steps) = parse_update_plan_arguments(arguments);
+            plan_cell.update(explanation, steps);
+            return true;
+        }
+
+        if let Some(tool_cell) = cell.as_any_mut().downcast_mut::<ToolCallHistoryCell>()
+            && tool_cell.contains_call_id(call_id)
+        {
+            tool_cell.append_preview_call(
+                call_id.to_string(),
+                tool_name.to_string(),
+                arguments.clone(),
+            );
+            return true;
+        }
+    }
+
+    false
 }
 
 fn format_orchestrator_result(result: &OrchestratorResult) -> String {
@@ -4524,18 +5107,32 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        PendingPlanRevisionCommand, append_to_last_tool_group_cell, build_plan_prompt,
-        build_plan_revision_prompt, code_ui_response_from_managed_selection,
-        format_intentspec_target_mismatch, format_orchestrator_result,
-        is_global_quit_command_input, newest_managed_assistant_text,
-        parse_pending_plan_revision_command, pending_plan_revision_help_message,
+        PendingPlanRevisionCommand, append_to_last_tool_group_cell,
+        append_to_last_tool_group_preview_cell, build_execution_plan_prompt,
+        build_execution_plan_revision_prompt, build_plan_prompt, build_plan_revision_prompt,
+        code_ui_response_from_managed_selection, format_intentspec_target_mismatch,
+        format_orchestrator_result, intentspec_with_llm_plan_objectives,
+        is_global_quit_command_input, mark_visible_tool_call_running,
+        newest_managed_assistant_text, parse_pending_plan_revision_command,
+        pending_execution_plan_revision_help_message, pending_plan_revision_help_message,
         should_route_plain_message_to_plan,
     };
     use crate::internal::{
         ai::{
+            intentspec::{
+                ResolveContext,
+                draft::{DraftAcceptance, DraftIntent, DraftRisk, IntentDraft},
+                resolve_intentspec,
+                types::{
+                    ChangeType, DecompositionMode, IntentSpec, Objective, ObjectiveKind, RiskLevel,
+                },
+            },
             orchestrator::types::{
                 DecisionOutcome, ExecutionPlanSpec, GateReport, OrchestratorResult, SystemReport,
                 TaskContract, TaskKind, TaskNodeStatus, TaskResult, TaskSpec,
+            },
+            tools::context::{
+                PlanStep as ToolPlanStep, StepStatus as ToolStepStatus, UpdatePlanArgs,
             },
             web::code_ui::{
                 CodeUiApplyToFuture, CodeUiCapabilities, CodeUiInteractionKind,
@@ -4609,6 +5206,119 @@ mod tests {
         }
     }
 
+    fn minimal_intentspec(objectives: Vec<Objective>) -> IntentSpec {
+        resolve_intentspec(
+            IntentDraft {
+                intent: DraftIntent {
+                    summary: "Implement workflow".to_string(),
+                    problem_statement: "Need a plan workflow".to_string(),
+                    change_type: ChangeType::Feature,
+                    objectives,
+                    in_scope: vec!["src".to_string()],
+                    out_of_scope: vec![],
+                    touch_hints: None,
+                },
+                acceptance: DraftAcceptance {
+                    success_criteria: vec!["workflow is implemented".to_string()],
+                    fast_checks: vec![],
+                    integration_checks: vec![],
+                    security_checks: vec![],
+                    release_checks: vec![],
+                },
+                risk: DraftRisk {
+                    rationale: "test".to_string(),
+                    factors: vec![],
+                    level: Some(RiskLevel::Low),
+                },
+            },
+            RiskLevel::Low,
+            ResolveContext {
+                working_dir: ".".to_string(),
+                base_ref: "HEAD".to_string(),
+                created_by_id: "tester".to_string(),
+            },
+        )
+    }
+
+    fn update_plan_args(steps: &[&str]) -> UpdatePlanArgs {
+        UpdatePlanArgs {
+            explanation: Some("Plan generated from confirmed IntentSpec".to_string()),
+            plan: steps
+                .iter()
+                .map(|step| ToolPlanStep {
+                    step: (*step).to_string(),
+                    status: ToolStepStatus::Pending,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn llm_plan_steps_replace_objectives_for_execution_plan_compile() {
+        let spec = minimal_intentspec(vec![Objective {
+            title: "original broad objective".to_string(),
+            kind: ObjectiveKind::Implementation,
+        }]);
+        let plan = update_plan_args(&["Inspect current flow", "Add LLM plan review"]);
+
+        let planned_spec = intentspec_with_llm_plan_objectives(&spec, &plan).unwrap();
+
+        let titles = planned_spec
+            .intent
+            .objectives
+            .iter()
+            .map(|objective| objective.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(titles, vec!["Inspect current flow", "Add LLM plan review"]);
+        assert!(
+            planned_spec
+                .intent
+                .objectives
+                .iter()
+                .all(|objective| objective.kind == ObjectiveKind::Implementation)
+        );
+        assert_eq!(
+            planned_spec
+                .libra
+                .as_ref()
+                .and_then(|binding| binding.plan_generation.as_ref())
+                .map(|config| &config.decomposition_mode),
+            Some(&DecompositionMode::PerObjective)
+        );
+    }
+
+    #[test]
+    fn execution_plan_prompt_requires_update_plan_after_intentspec_confirmation() {
+        let prompt = build_execution_plan_prompt("{\"kind\":\"IntentSpec\"}");
+
+        assert!(prompt.contains("already confirmed IntentSpec"));
+        assert!(prompt.contains("call update_plan exactly once"));
+        assert!(prompt.contains("Do not call submit_intent_draft"));
+    }
+
+    #[test]
+    fn execution_plan_revision_prompt_includes_existing_plan_and_change_request() {
+        let plan = update_plan_args(&["Inspect current flow"]);
+        let prompt = build_execution_plan_revision_prompt(
+            "{\"kind\":\"IntentSpec\"}",
+            &plan,
+            "split implementation and tests",
+        );
+
+        assert!(prompt.contains("Current execution plan"));
+        assert!(prompt.contains("Inspect current flow"));
+        assert!(prompt.contains("split implementation and tests"));
+        assert!(prompt.contains("call update_plan exactly once"));
+    }
+
+    #[test]
+    fn execution_plan_revision_help_is_plan_specific() {
+        let help = pending_execution_plan_revision_help_message();
+
+        assert!(help.contains("Plan revise mode"));
+        assert!(help.contains("/plan modify <changes>"));
+    }
+
     #[test]
     fn appends_to_last_matching_tool_group_before_streaming_cell() {
         let mut cells: Vec<Box<dyn HistoryCell>> = vec![
@@ -4653,6 +5363,66 @@ mod tests {
             "list_dir",
             json!({"dir_path":"src"}),
         ));
+    }
+
+    #[test]
+    fn appends_preview_to_last_matching_tool_group_before_streaming_cell() {
+        let mut cells: Vec<Box<dyn HistoryCell>> = vec![
+            Box::new(ToolCallHistoryCell::new_preview(
+                "1".to_string(),
+                "read_file".to_string(),
+                json!({"file_path":"src/main.rs"}),
+            )),
+            Box::new(AssistantHistoryCell::streaming()),
+        ];
+
+        assert!(append_to_last_tool_group_preview_cell(
+            &mut cells,
+            "2".to_string(),
+            "list_dir",
+            json!({"dir_path":"src"}),
+        ));
+
+        let tool_cell = cells[0]
+            .as_any()
+            .downcast_ref::<ToolCallHistoryCell>()
+            .expect("expected grouped tool cell");
+        assert!(tool_cell.contains_call_id("1"));
+        assert!(tool_cell.contains_call_id("2"));
+    }
+
+    #[test]
+    fn marks_preview_tool_call_running_without_duplication() {
+        let mut cells: Vec<Box<dyn HistoryCell>> =
+            vec![Box::new(ToolCallHistoryCell::new_preview(
+                "call_1".to_string(),
+                "read_file".to_string(),
+                json!({"file_path":"src/main.rs"}),
+            ))];
+
+        assert!(
+            cells[0]
+                .as_any()
+                .downcast_ref::<ToolCallHistoryCell>()
+                .expect("expected tool call cell")
+                .contains_call_id("call_1")
+        );
+        assert!(mark_visible_tool_call_running(
+            &mut cells,
+            "call_1",
+            "read_file",
+            &json!({"file_path":"src/main.rs"}),
+        ));
+
+        let rendered = cells[0]
+            .display_lines(100)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Exploring"));
+        assert!(!rendered.contains("Preparing explore"));
     }
 
     #[test]
@@ -5121,6 +5891,98 @@ Do not output a plain-text plan; finalize by submitting the draft tool call.\n\n
 Current IntentSpec:\n```json\n{spec_json}\n```\n\n\
 Requested changes:\n{request}"
     )
+}
+
+fn build_execution_plan_prompt(spec_json: &str) -> String {
+    format!(
+        "You are generating an execution plan for an already confirmed IntentSpec.\n\
+Use read-only repository tools if needed, then call update_plan exactly once with the full ordered plan.\n\
+Every plan step must be a concrete execution task the agent can perform. Use status=pending for every step.\n\
+Do not call submit_intent_draft. Do not modify the IntentSpec. Do not execute commands that change files.\n\
+After calling update_plan, stop; the developer must confirm the plan before execution.\n\n\
+Confirmed IntentSpec:\n```json\n{spec_json}\n```"
+    )
+}
+
+fn build_execution_plan_revision_prompt(
+    spec_json: &str,
+    current_plan: &UpdatePlanArgs,
+    request: &str,
+) -> String {
+    let current_plan_json = update_plan_args_json(current_plan);
+    format!(
+        "You are revising an execution plan for an already confirmed IntentSpec.\n\
+Use the current plan as the baseline, apply only the developer's requested changes, then call update_plan exactly once with the complete revised ordered plan.\n\
+Every plan step must be a concrete execution task the agent can perform. Use status=pending for every step.\n\
+Do not call submit_intent_draft. Do not revise the IntentSpec. Do not execute commands that change files.\n\
+After calling update_plan, stop; the developer must confirm the revised plan before execution.\n\n\
+Confirmed IntentSpec:\n```json\n{spec_json}\n```\n\n\
+Current execution plan:\n```json\n{current_plan_json}\n```\n\n\
+Requested plan changes:\n{request}"
+    )
+}
+
+fn update_plan_args_json(args: &UpdatePlanArgs) -> serde_json::Value {
+    serde_json::json!({
+        "explanation": args.explanation.clone(),
+        "plan": args.plan.iter().map(|step| {
+            serde_json::json!({
+                "step": step.step.as_str(),
+                "status": step_status_label(&step.status),
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
+fn step_status_label(status: &StepStatus) -> &'static str {
+    match status {
+        StepStatus::Pending => "pending",
+        StepStatus::InProgress => "in_progress",
+        StepStatus::Completed => "completed",
+    }
+}
+
+fn intentspec_with_llm_plan_objectives(
+    spec: &IntentSpec,
+    llm_plan: &UpdatePlanArgs,
+) -> Result<IntentSpec, String> {
+    let objectives = llm_plan
+        .plan
+        .iter()
+        .filter_map(|step| {
+            let title = step.step.trim();
+            (!title.is_empty()).then(|| Objective {
+                title: title.to_string(),
+                kind: if spec.intent.has_implementation_objectives() {
+                    ObjectiveKind::Implementation
+                } else {
+                    ObjectiveKind::Analysis
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if objectives.is_empty() {
+        return Err("LLM plan did not include any non-empty steps".to_string());
+    }
+
+    let mut planned_spec = spec.clone();
+    planned_spec.intent.objectives = objectives;
+    let mut libra = planned_spec.libra.take().unwrap_or(LibraBinding {
+        object_store: None,
+        context_pipeline: None,
+        plan_generation: None,
+        run_policy: None,
+        actor_mapping: None,
+        decision_policy: None,
+    });
+    let plan_generation = libra
+        .plan_generation
+        .get_or_insert_with(PlanGenerationConfig::default);
+    plan_generation.decomposition_mode = DecompositionMode::PerObjective;
+    plan_generation.conflict_resolution = ConflictResolution::ForceSerial;
+    planned_spec.libra = Some(libra);
+    Ok(planned_spec)
 }
 
 fn should_route_plain_message_to_plan(text: &str) -> bool {

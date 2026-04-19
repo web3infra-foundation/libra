@@ -19,6 +19,7 @@ Commands:
   init         Initialize a new repository
   clone        Clone a repository into a new directory
   code         Start Libra Code interactive TUI (with background web server)
+  graph        Inspect an AI thread version graph in a TUI
   add          Add file contents to the index
   rm           Remove files from the working tree and from the index
   restore      Restore working tree files
@@ -164,6 +165,7 @@ sessions.
 Useful inspection commands:
 
 ```bash
+libra graph <thread_id> [--repo /path/to/repo]
 libra cat-file --ai-list ai_session
 libra cat-file --ai-list run
 libra cat-file --ai-list task
@@ -199,9 +201,13 @@ libra code --provider ollama --model codellama
 
 # Ollama with a remote instance
 libra code --provider ollama --model llama3.2 --api-base http://remote-host:11434/v1
+
+# Ollama thinking control for reasoning models
+OLLAMA_THINK=false libra code --provider ollama --model qwen3.6
+libra code --provider ollama --model qwen3.6 --ollama-thinking high
 ```
 
-> **Note**: The `--api-base` CLI flag is only honored for the `ollama` provider. Other providers accept custom base URLs through their respective environment variables (e.g. `OPENAI_BASE_URL`).
+> **Note**: The `--api-base` CLI flag is only honored for the `ollama` provider. Other providers accept custom base URLs through their respective environment variables (e.g. `OPENAI_BASE_URL`). Ollama requests stream `/api/chat` responses by default, include a per-request `request_id` in debug logs, and default to `think:false` to keep tool calls responsive; use `--ollama-thinking auto|off|on|low|medium|high` for one run, or set `OLLAMA_THINK=true`, `low`, `medium`, `high`, or `auto` as the environment default. `auto` omits the `think` field and lets Ollama decide.
 
 | Provider | Default Model | Auth Env Variable | Base URL Override |
 |----------|--------------|-------------------|-------------------|
@@ -210,7 +216,7 @@ libra code --provider ollama --model llama3.2 --api-base http://remote-host:1143
 | `anthropic` | `claude-sonnet-4-6` | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
 | `deepseek` | `deepseek-chat` | `DEEPSEEK_API_KEY` | *(programmatic only)* |
 | `zhipu` | `glm-5` | `ZHIPU_API_KEY` | `ZHIPU_BASE_URL` |
-| `ollama` | *(requires `--model`)* | — | `OLLAMA_BASE_URL` or `--api-base` |
+| `ollama` | *(requires `--model`)* | `OLLAMA_API_KEY` for direct Cloud API | `OLLAMA_BASE_URL`, `OLLAMA_THINK`, `--api-base`, or `--ollama-thinking` |
 
 ---
 

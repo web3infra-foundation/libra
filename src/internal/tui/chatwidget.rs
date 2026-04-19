@@ -705,6 +705,12 @@ impl ChatWidget {
 
     /// Render the chat widget.
     pub fn render(&mut self, area: Rect, buf: &mut Buffer) -> Option<Position> {
+        let area = area.intersection(*buf.area());
+        if area.width == 0 || area.height == 0 {
+            self.last_input_area = None;
+            return None;
+        }
+
         let (chat_area, bottom_area) = self.split_areas(area);
 
         // Render chat area
@@ -721,6 +727,12 @@ impl ChatWidget {
     }
 
     pub fn render_bottom_pane_only(&mut self, area: Rect, buf: &mut Buffer) -> Option<Position> {
+        let area = area.intersection(*buf.area());
+        if area.width == 0 || area.height == 0 {
+            self.last_input_area = None;
+            return None;
+        }
+
         let (_, bottom_area) = self.split_areas(area);
         self.last_input_area = self.bottom_pane.input_hitbox(bottom_area);
         self.bottom_pane.render(bottom_area, buf)
@@ -1143,9 +1155,10 @@ impl ChatWidget {
             .render(inner, buf);
 
         if render_state.selected && task_mux.mode == TaskMuxMode::Overview && inner.width > 2 {
-            buf[(inner.x, inner.y)]
-                .set_symbol("›")
-                .set_style(theme::interactive::selected_option());
+            if let Some(cell) = buf.cell_mut((inner.x, inner.y)) {
+                cell.set_symbol("›")
+                    .set_style(theme::interactive::selected_option());
+            }
         }
     }
 
@@ -1271,8 +1284,11 @@ impl ChatWidget {
             } else {
                 theme::text::subtle().fg.unwrap_or(Color::Reset)
             };
-            if x <= u16::MAX as usize && y <= u16::MAX as usize {
-                buf[(x as u16, y as u16)]
+            if x <= u16::MAX as usize
+                && y <= u16::MAX as usize
+                && let Some(cell_ref) = buf.cell_mut((x as u16, y as u16))
+            {
+                cell_ref
                     .set_symbol(panel_edge_glyph(cell.mask).encode_utf8(&mut [0; 4]))
                     .set_style(Style::default().fg(color));
             }
@@ -1289,9 +1305,11 @@ impl ChatWidget {
             let glyph = panel_node_glyph(node);
             let x = x as u16;
             let y = y as u16;
-            buf[(x, y)]
-                .set_symbol(glyph.encode_utf8(&mut [0; 4]))
-                .set_style(node_style.add_modifier(Modifier::BOLD));
+            if let Some(cell_ref) = buf.cell_mut((x, y)) {
+                cell_ref
+                    .set_symbol(glyph.encode_utf8(&mut [0; 4]))
+                    .set_style(node_style.add_modifier(Modifier::BOLD));
+            }
 
             let label = format!("{:02}", node.ordinal);
             let label_x = x.saturating_add(2);
@@ -1301,9 +1319,11 @@ impl ChatWidget {
                     if cell_x >= inner.right() {
                         break;
                     }
-                    buf[(cell_x, y)]
-                        .set_symbol(ch.encode_utf8(&mut [0; 4]))
-                        .set_style(theme::text::muted());
+                    if let Some(cell_ref) = buf.cell_mut((cell_x, y)) {
+                        cell_ref
+                            .set_symbol(ch.encode_utf8(&mut [0; 4]))
+                            .set_style(theme::text::muted());
+                    }
                 }
             }
         }
@@ -1327,9 +1347,11 @@ impl ChatWidget {
                 '●' | '■' => theme::text::primary().add_modifier(Modifier::BOLD),
                 _ => theme::text::muted(),
             };
-            buf[(x, layout.summary_y)]
-                .set_symbol(ch.encode_utf8(&mut [0; 4]))
-                .set_style(style);
+            if let Some(cell_ref) = buf.cell_mut((x, layout.summary_y)) {
+                cell_ref
+                    .set_symbol(ch.encode_utf8(&mut [0; 4]))
+                    .set_style(style);
+            }
         }
     }
 }
@@ -1709,7 +1731,7 @@ mod tests {
         ai::orchestrator::types::{
             ExecutionPlanSpec, TaskContract, TaskKind, TaskNodeStatus, TaskRuntimeEvent, TaskSpec,
         },
-        tui::history_cell::AssistantHistoryCell,
+        tui::{history_cell::AssistantHistoryCell, welcome_shader},
     };
 
     fn row_text(buf: &Buffer, y: u16, width: u16) -> String {
@@ -1718,6 +1740,29 @@ mod tests {
             out.push_str(buf[(x, y)].symbol());
         }
         out
+    }
+
+    #[test]
+    fn initial_welcome_render_clamps_to_reported_release_buffer_size() {
+        let buffer_area = Rect::new(0, 0, 122, 35);
+        let oversized_frame_area = Rect::new(0, 0, 122, 37);
+        let mut buf = Buffer::empty(buffer_area);
+        let mut widget = ChatWidget::new();
+        widget
+            .bottom_pane
+            .set_cwd(std::path::PathBuf::from("/Volumes/Data/linked"));
+        widget.bottom_pane.set_git_branch(Some("main".to_string()));
+
+        let chat_area = widget.chat_area_rect(oversized_frame_area);
+        let welcome = welcome_shader::WelcomeView {
+            welcome_message: "Welcome to Libra Code!\nWeb: http://127.0.0.1:3000\nMCP: http://127.0.0.1:6789",
+            model_name: "glm-5.1:cloud",
+            provider_name: "ollama",
+            cwd: std::path::Path::new("/Volumes/Data/linked"),
+        };
+
+        welcome_shader::render(chat_area, &mut buf, welcome);
+        let _ = widget.render_bottom_pane_only(oversized_frame_area, &mut buf);
     }
 
     fn make_task(title: &str, kind: TaskKind, dependencies: Vec<uuid::Uuid>) -> TaskSpec {

@@ -175,6 +175,7 @@ impl<M: CompletionModel> ToolLoopAction<M> {
             config: ToolLoopConfig {
                 preamble,
                 temperature,
+                thinking: None,
                 hook_runner: None,
                 allowed_tools: None,
                 runtime_context: None,

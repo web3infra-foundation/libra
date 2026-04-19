@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use serde_json::Value;
 
+use super::{parse_argument_value, unwrap_json_string_value};
 use crate::internal::ai::tools::{
     ToolResult,
     context::{SubmitIntentDraftArgs, ToolInvocation, ToolKind, ToolOutput, ToolPayload},
@@ -32,25 +33,51 @@ impl ToolHandler for SubmitIntentDraftHandler {
             }
         };
 
-        let value: Value = serde_json::from_str(&arguments)
-            .map_err(|e| ToolError::ParseError(format!("Failed to parse arguments: {e}")))?;
-        if value
-            .pointer("/draft/intent/changeType")
-            .and_then(Value::as_str)
-            == Some("analysis")
-        {
-            return Err(ToolError::ParseError(
-                "intent.changeType cannot be 'analysis'; use intent.objectives[*].kind='analysis' and set changeType='unknown' for read-only plans".into(),
-            ));
-        }
-
-        let _args: SubmitIntentDraftArgs = serde_json::from_value(value)
-            .map_err(|e| ToolError::ParseError(format!("Failed to parse arguments: {e}")))?;
+        let _args = parse_submit_intent_draft_arguments(&arguments)?;
         Ok(ToolOutput::success("Intent draft submitted"))
     }
 
     fn schema(&self) -> ToolSpec {
         ToolSpec::submit_intent_draft()
+    }
+}
+
+pub(crate) fn parse_submit_intent_draft_arguments(
+    arguments: &str,
+) -> ToolResult<SubmitIntentDraftArgs> {
+    let value = parse_argument_value(arguments)?;
+    parse_submit_intent_draft_value(&value)
+}
+
+pub(crate) fn parse_submit_intent_draft_value(value: &Value) -> ToolResult<SubmitIntentDraftArgs> {
+    let value = unwrap_json_string_value(value.clone())?;
+    let value = normalize_submit_intent_draft_value(value);
+
+    if value
+        .pointer("/draft/intent/changeType")
+        .and_then(Value::as_str)
+        == Some("analysis")
+    {
+        return Err(ToolError::ParseError(
+            "intent.changeType cannot be 'analysis'; use intent.objectives[*].kind='analysis' and set changeType='unknown' for read-only plans".into(),
+        ));
+    }
+
+    serde_json::from_value(value)
+        .map_err(|e| ToolError::ParseError(format!("Failed to parse arguments: {e}")))
+}
+
+fn normalize_submit_intent_draft_value(value: Value) -> Value {
+    match &value {
+        Value::Object(map)
+            if !map.contains_key("draft")
+                && map.contains_key("intent")
+                && map.contains_key("acceptance")
+                && map.contains_key("risk") =>
+        {
+            serde_json::json!({ "draft": value })
+        }
+        _ => value,
     }
 }
 
@@ -69,6 +96,29 @@ mod tests {
             },
             PathBuf::from("/tmp"),
         )
+    }
+
+    fn valid_draft_value() -> Value {
+        serde_json::json!({
+            "intent": {
+                "summary": "Initialize cargo project",
+                "problemStatement": "The project needs a cargo-based Rust layout",
+                "changeType": "feature",
+                "objectives": [{"title": "create cargo project", "kind": "implementation"}],
+                "inScope": ["."],
+                "outOfScope": []
+            },
+            "acceptance": {
+                "successCriteria": ["cargo check succeeds"],
+                "fastChecks": [],
+                "integrationChecks": [],
+                "securityChecks": [],
+                "releaseChecks": []
+            },
+            "risk": {
+                "rationale": "new project scaffold"
+            }
+        })
     }
 
     #[tokio::test]
@@ -101,6 +151,27 @@ mod tests {
         let result = handler.handle(inv).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().as_text(), Some("Intent draft submitted"));
+    }
+
+    #[tokio::test]
+    async fn test_direct_draft_submission_is_accepted() {
+        let handler = SubmitIntentDraftHandler;
+        let inv = make_invocation(&valid_draft_value().to_string());
+
+        let result = handler.handle(inv).await;
+
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn test_json_string_encoded_draft_submission_is_accepted() {
+        let handler = SubmitIntentDraftHandler;
+        let encoded = serde_json::to_string(&valid_draft_value().to_string()).unwrap();
+        let inv = make_invocation(&encoded);
+
+        let result = handler.handle(inv).await;
+
+        assert!(result.is_ok(), "{result:?}");
     }
 
     #[tokio::test]

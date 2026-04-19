@@ -157,6 +157,8 @@ enum Commands {
     Clone(command::clone::CloneArgs),
     #[command(about = "Start Libra Code interactive TUI (with background web server)")]
     Code(command::code::CodeArgs),
+    #[command(about = "Inspect an AI thread version graph in a TUI")]
+    Graph(command::graph::GraphArgs),
     // The rest of the commands require a repository to be present
     #[command(about = "Add file contents to the index")]
     Add(command::add::AddArgs),
@@ -542,6 +544,11 @@ fn command_preflight_storage(command: &Commands) -> CliResult<Option<std::path::
                 .map_err(|_| repo_not_found_error())?;
             Ok(Some(storage))
         }
+        Commands::Graph(graph_args) => {
+            let storage = utils::util::try_get_storage_path(graph_args.repo.clone())
+                .map_err(|_| repo_not_found_error())?;
+            Ok(Some(storage))
+        }
         _ => {
             let storage =
                 utils::util::try_get_storage_path(None).map_err(|_| repo_not_found_error())?;
@@ -692,6 +699,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         }
         Commands::Clone(cmd_args) => command::clone::execute_safe(cmd_args, &output).await?,
         Commands::Code(cmd_args) => command::code::execute(cmd_args, &output).await?,
+        Commands::Graph(cmd_args) => command::graph::execute_safe(cmd_args, &output).await?,
         Commands::Add(cmd_args) => command::add::execute_safe(cmd_args, &output).await?,
         Commands::Rm(cmd_args) => command::remove::execute_safe(cmd_args, &output).await?,
         Commands::Restore(cmd_args) => command::restore::execute_safe(cmd_args, &output).await?,

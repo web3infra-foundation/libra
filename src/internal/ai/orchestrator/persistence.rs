@@ -330,7 +330,23 @@ impl ExecutionAuditSession {
                 .flatten()
         };
         let persisted_plan = if let Some(plan_id) = preview_plan_id {
-            bind_existing_plan_revision(&self.mcp_server, &plan_id, plan).await?
+            match bind_existing_plan_revision(&self.mcp_server, &plan_id, plan).await {
+                Ok(persisted_plan) => persisted_plan,
+                Err(error) if is_missing_persisted_plan_error(&error) => {
+                    tracing::warn!(
+                        plan_id = %plan_id,
+                        "preview plan was not found during execution; creating a new plan revision"
+                    );
+                    create_plan_revision(
+                        &self.mcp_server,
+                        &intent_id,
+                        parent_plan_id.as_deref(),
+                        plan,
+                    )
+                    .await?
+                }
+                Err(error) => return Err(error),
+            }
         } else {
             create_plan_revision(
                 &self.mcp_server,
@@ -2433,6 +2449,14 @@ async fn create_plan_revision(
     })
 }
 
+fn is_missing_persisted_plan_error(error: &OrchestratorError) -> bool {
+    matches!(
+        error,
+        OrchestratorError::ConfigError(message)
+            if message.starts_with("persisted plan not found:")
+    )
+}
+
 async fn load_persisted_plan(
     mcp_server: &Arc<LibraMcpServer>,
     plan_id: &str,
@@ -3356,7 +3380,8 @@ mod tests {
                 },
             },
             model::{
-                ai_decision_proposal, ai_risk_score_breakdown, ai_validation_report, reference,
+                ai_decision_proposal, ai_risk_score_breakdown, ai_thread, ai_validation_report,
+                reference,
             },
         },
         utils::{storage::local::LocalStorage, storage_ext::StorageExt},
@@ -3367,6 +3392,8 @@ mod tests {
         let builder = db.get_database_backend();
         let schema = Schema::new(builder);
         let stmt = schema.create_table_from_entity(reference::Entity);
+        db.execute(builder.build(&stmt)).await.unwrap();
+        let stmt = schema.create_table_from_entity(ai_thread::Entity);
         db.execute(builder.build(&stmt)).await.unwrap();
         let stmt = schema.create_table_from_entity(ai_validation_report::Entity);
         db.execute(builder.build(&stmt)).await.unwrap();
@@ -4039,5 +4066,58 @@ mod tests {
         let history = server.intent_history_manager.as_ref().unwrap();
         assert_eq!(history.list_objects("intent").await.unwrap().len(), 1);
         assert_eq!(history.list_objects("plan").await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn execution_audit_session_creates_new_plan_when_preview_plan_is_missing() {
+        let server = setup_server().await;
+        let spec = test_spec(vec![]);
+        let analysis_task = {
+            let actor = ActorRef::agent("test-missing-preview").unwrap();
+            GitTask::new(actor, "Analyze repository", None).unwrap()
+        };
+        let plan_spec = ExecutionPlanSpec {
+            intent_spec_id: "intent-preview".to_string(),
+            revision: 1,
+            parent_revision: None,
+            replan_reason: None,
+            tasks: vec![TaskSpec {
+                step: git_internal::internal::object::plan::PlanStep::new("Analyze repository"),
+                task: analysis_task,
+                objective: "Summarize repository state".to_string(),
+                kind: TaskKind::Analysis,
+                gate_stage: None,
+                owner_role: Some("analyst".to_string()),
+                scope_in: vec!["src/".to_string()],
+                scope_out: vec![],
+                checks: vec![],
+                contract: TaskContract::default(),
+            }],
+            max_parallel: 1,
+            checkpoints: vec![],
+        };
+        let intent_id = persist_intentspec(&spec, &server).await.unwrap();
+        let missing_plan_id = Uuid::new_v4().to_string();
+        let session = ExecutionAuditSession::start(
+            server.clone(),
+            &spec,
+            Path::new("."),
+            Some(&intent_id),
+            Some(&missing_plan_id),
+        )
+        .await
+        .unwrap();
+
+        session.record_plan_compiled(&plan_spec).await.unwrap();
+
+        let history = server.intent_history_manager.as_ref().unwrap();
+        assert_eq!(history.list_objects("plan").await.unwrap().len(), 1);
+        assert!(
+            history
+                .get_object_hash("plan", &missing_plan_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

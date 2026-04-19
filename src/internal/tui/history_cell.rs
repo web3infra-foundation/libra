@@ -263,14 +263,29 @@ impl ToolCallGroup {
         }
     }
 
-    fn labels(&self) -> (&'static str, &'static str, &'static str) {
+    fn labels(&self) -> (&'static str, &'static str, &'static str, &'static str) {
         match self {
-            Self::Explore => ("Exploring", "Explored", "Explore failed"),
-            Self::Edit => ("Editing", "Edited", "Edit failed"),
-            Self::Shell => ("Running command", "Ran command", "Command failed"),
-            Self::Input => ("Waiting for input", "Input received", "Input cancelled"),
-            Self::Draft => ("Drafting", "Drafted", "Draft failed"),
-            Self::Other(_) => ("Working", "Completed", "Failed"),
+            Self::Explore => (
+                "Preparing explore",
+                "Exploring",
+                "Explored",
+                "Explore failed",
+            ),
+            Self::Edit => ("Preparing edit", "Editing", "Edited", "Edit failed"),
+            Self::Shell => (
+                "Preparing command",
+                "Running command",
+                "Ran command",
+                "Command failed",
+            ),
+            Self::Input => (
+                "Preparing input",
+                "Waiting for input",
+                "Input received",
+                "Input cancelled",
+            ),
+            Self::Draft => ("Preparing draft", "Drafting", "Drafted", "Draft failed"),
+            Self::Other(_) => ("Preparing", "Working", "Completed", "Failed"),
         }
     }
 
@@ -288,6 +303,7 @@ impl ToolCallGroup {
 
 #[derive(Debug, Clone)]
 enum ToolCallEntryStatus {
+    Preview,
     Running,
     Success,
     Failed(String),
@@ -326,20 +342,77 @@ impl ToolCallHistoryCell {
         }
     }
 
+    /// Create a new preview-only tool call cell.
+    pub fn new_preview(call_id: String, tool_name: String, arguments: Value) -> Self {
+        Self {
+            group: ToolCallGroup::for_tool(&tool_name),
+            entries: vec![ToolCallEntry {
+                call_id,
+                summary: summarize_tool_call(&tool_name, &arguments),
+                status: ToolCallEntryStatus::Preview,
+            }],
+        }
+    }
+
     pub fn can_merge(&self, tool_name: &str) -> bool {
         self.group == ToolCallGroup::for_tool(tool_name)
     }
 
     pub fn append_call(&mut self, call_id: String, tool_name: String, arguments: Value) {
+        let summary = summarize_tool_call(&tool_name, &arguments);
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.call_id == call_id)
+        {
+            entry.summary = summary;
+            entry.status = ToolCallEntryStatus::Running;
+            return;
+        }
+
         self.entries.push(ToolCallEntry {
             call_id,
-            summary: summarize_tool_call(&tool_name, &arguments),
+            summary,
             status: ToolCallEntryStatus::Running,
+        });
+    }
+
+    pub fn append_preview_call(&mut self, call_id: String, tool_name: String, arguments: Value) {
+        let summary = summarize_tool_call(&tool_name, &arguments);
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.call_id == call_id)
+        {
+            if matches!(entry.status, ToolCallEntryStatus::Preview) {
+                entry.summary = summary;
+            }
+            return;
+        }
+
+        self.entries.push(ToolCallEntry {
+            call_id,
+            summary,
+            status: ToolCallEntryStatus::Preview,
         });
     }
 
     pub fn contains_call_id(&self, call_id: &str) -> bool {
         self.entries.iter().any(|entry| entry.call_id == call_id)
+    }
+
+    pub fn mark_call_running(&mut self, call_id: &str, tool_name: &str, arguments: &Value) -> bool {
+        let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.call_id == call_id)
+        else {
+            return false;
+        };
+
+        entry.summary = summarize_tool_call(tool_name, arguments);
+        entry.status = ToolCallEntryStatus::Running;
+        true
     }
 
     /// Complete a single tool call inside the group.
@@ -359,7 +432,10 @@ impl ToolCallHistoryCell {
 
     pub fn interrupt_running(&mut self) {
         for entry in &mut self.entries {
-            if matches!(entry.status, ToolCallEntryStatus::Running) {
+            if matches!(
+                entry.status,
+                ToolCallEntryStatus::Preview | ToolCallEntryStatus::Running
+            ) {
                 entry.status = ToolCallEntryStatus::Failed("Interrupted".to_string());
             }
         }
@@ -371,8 +447,15 @@ impl ToolCallHistoryCell {
             .any(|entry| matches!(entry.status, ToolCallEntryStatus::Running))
     }
 
+    pub fn has_preview(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| matches!(entry.status, ToolCallEntryStatus::Preview))
+    }
+
     pub fn is_success(&self) -> bool {
         !self.has_running()
+            && !self.has_preview()
             && self
                 .entries
                 .iter()
@@ -390,17 +473,19 @@ impl HistoryCell for ToolCallHistoryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines: Vec<Line<'static>> = Vec::new();
         let phase = animation_phase(120);
-        let (running_label, done_label, failed_label) = self.group.labels();
+        let (preview_label, running_label, done_label, failed_label) = self.group.labels();
 
         // Tool state summary line
         let summary = if self.has_running() {
             running_label
+        } else if self.has_preview() {
+            preview_label
         } else if self.has_failure() {
             failed_label
         } else {
             done_label
         };
-        if self.has_running() {
+        if self.has_running() || self.has_preview() {
             lines.push(gradient_line(
                 &format!("● {summary}"),
                 &theme::animation::active_gradient(),
@@ -550,7 +635,9 @@ fn group_tool_entries(entries: &[ToolCallEntry]) -> Vec<ToolEntryRun<'_>> {
         let (action, detail) = split_tool_summary(&entry.summary);
         let failure = match &entry.status {
             ToolCallEntryStatus::Failed(error) => Some(error.as_str()),
-            ToolCallEntryStatus::Running | ToolCallEntryStatus::Success => None,
+            ToolCallEntryStatus::Preview
+            | ToolCallEntryStatus::Running
+            | ToolCallEntryStatus::Success => None,
         };
 
         if let Some(last) = grouped.last_mut()
@@ -723,6 +810,12 @@ impl PlanUpdateHistoryCell {
     /// Mark the tool call as complete.
     pub fn complete(&mut self) {
         self.is_running = false;
+    }
+
+    /// Refresh previewed plan arguments when the real tool call starts.
+    pub fn update(&mut self, explanation: Option<String>, steps: Vec<PlanStep>) {
+        self.explanation = explanation;
+        self.steps = steps;
     }
 }
 

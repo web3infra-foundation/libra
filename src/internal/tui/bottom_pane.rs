@@ -484,6 +484,11 @@ impl BottomPane {
 
     /// Render the bottom pane.
     pub fn render(&self, area: Rect, buf: &mut Buffer) -> Option<Position> {
+        let area = area.intersection(*buf.area());
+        if area.width == 0 || area.height == 0 {
+            return None;
+        }
+
         if self.status == AgentStatus::AwaitingUserInput {
             return self.render_user_input_mode(area, buf);
         }
@@ -895,7 +900,10 @@ impl BottomPane {
         Paragraph::new(display).block(block).render(area, buf);
 
         if self.user_input_notes_focused && inner.width > 0 && inner.height > 0 {
-            let cursor_x = self.user_input_notes_text.width().min(inner.width as usize) as u16;
+            let cursor_x = self
+                .user_input_notes_text
+                .width()
+                .min(inner.width.saturating_sub(1) as usize) as u16;
             Some(Position {
                 x: inner.x.saturating_add(cursor_x),
                 y: inner.y,
@@ -1092,12 +1100,15 @@ impl BottomPane {
         let x = area
             .x
             .saturating_add(area.width.saturating_sub(badge_width + 3));
+        let Some(max_width) = writable_line_width(buf, x, y, area) else {
+            return;
+        };
 
         let spans = vec![
             Span::styled("┤", border_style),
             Span::styled(badge, theme::badge::workspace()),
         ];
-        buf.set_line(x, y, &Line::from(spans), area.width.saturating_sub(x));
+        buf.set_line(x, y, &Line::from(spans), max_width);
     }
 
     fn render_help_text(&self, area: Rect, buf: &mut Buffer) {
@@ -1269,6 +1280,17 @@ fn format_workspace_badge(path: &Path, git_branch: Option<&str>, max_width: usiz
     )
 }
 
+fn writable_line_width(buf: &Buffer, x: u16, y: u16, area: Rect) -> Option<u16> {
+    let buf_area = *buf.area();
+    if !buf_area.contains(Position { x, y }) {
+        return None;
+    }
+
+    let area_right = area.right().min(buf_area.right());
+    let max_width = area_right.saturating_sub(x);
+    (max_width > 0).then_some(max_width)
+}
+
 fn truncate_from_left(text: &str, max_width: usize) -> String {
     if max_width == 0 {
         return String::new();
@@ -1401,6 +1423,18 @@ mod tests {
         assert!(bottom_of_box.contains("(main)"));
         assert!(bottom_of_box.contains("┤"));
         assert!(bottom_of_box.ends_with("─╯"));
+    }
+
+    #[test]
+    fn render_clamps_workspace_badge_to_buffer_area() {
+        let mut pane = BottomPane::new();
+        pane.set_cwd(PathBuf::from("/Volumes/Data/linked"));
+
+        let buffer_area = Rect::new(0, 0, 122, 35);
+        let oversized_bottom_area = Rect::new(0, 31, 122, 6);
+        let mut buf = Buffer::empty(buffer_area);
+
+        let _ = pane.render(oversized_bottom_area, &mut buf);
     }
 
     #[test]

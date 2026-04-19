@@ -23,7 +23,7 @@ use crate::internal::ai::tools::{
     error::ToolError,
     registry::ToolHandler,
     spec::{FunctionParameters, ToolSpec},
-    utils::resolve_path,
+    utils::{is_reserved_metadata_path, resolve_path},
 };
 
 pub struct ListDirHandler;
@@ -73,7 +73,8 @@ impl ToolHandler for ListDirHandler {
 
         let path = resolve_list_dir_path(&args.dir_path, &working_dir)?;
 
-        let entries = list_dir_slice(&path, args.offset, args.limit, args.depth).await?;
+        let entries =
+            list_dir_slice(&path, &working_dir, args.offset, args.limit, args.depth).await?;
 
         let mut output = Vec::with_capacity(entries.len() + 1);
         output.push(format!("Absolute path: {}", path.display()));
@@ -167,12 +168,13 @@ struct DirEntry {
 
 async fn list_dir_slice(
     root: &Path,
+    working_dir: &Path,
     offset: usize,
     limit: usize,
     max_depth: usize,
 ) -> Result<Vec<String>, ToolError> {
     let mut entries = Vec::new();
-    collect_entries(root, Path::new(""), max_depth, &mut entries).await?;
+    collect_entries(root, working_dir, Path::new(""), max_depth, &mut entries).await?;
 
     if entries.is_empty() {
         return Ok(Vec::new());
@@ -209,6 +211,7 @@ async fn list_dir_slice(
 
 async fn collect_entries(
     dir: &Path,
+    working_dir: &Path,
     prefix: &Path,
     depth: usize,
     out: &mut Vec<DirEntry>,
@@ -240,6 +243,10 @@ async fn collect_entries(
             } else {
                 current_prefix.join(&file_name)
             };
+
+            if is_reserved_metadata_path(&entry.path(), working_dir) {
+                continue;
+            }
 
             let display_depth = current_prefix.components().count();
             let sort_key = truncate_path(&relative);
@@ -572,6 +579,33 @@ mod tests {
         let text = result.as_text().unwrap();
         assert!(text.contains(&format!("Absolute path: {}", temp.path().display())));
         assert!(text.contains("Cargo.toml"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn test_reserved_metadata_directory_is_hidden_from_recursive_listing() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir_all(temp.path().join(".libra").join("objects")).unwrap();
+        fs::write(
+            temp.path().join(".libra").join("objects").join("secret"),
+            "",
+        )
+        .unwrap();
+        fs::create_dir_all(temp.path().join("src")).unwrap();
+        fs::write(temp.path().join("src").join("main.rs"), "").unwrap();
+
+        let result = ListDirHandler
+            .handle(make_invocation(
+                serde_json::json!({ "dir_path": ".", "depth": 3 }),
+                temp.path().to_path_buf(),
+            ))
+            .await
+            .unwrap();
+
+        let text = result.as_text().unwrap();
+        assert!(!text.contains(".libra"), "{text}");
+        assert!(!text.contains("secret"), "{text}");
+        assert!(text.contains("src/"), "{text}");
+        assert!(text.contains("main.rs"), "{text}");
     }
 
     #[tokio::test]
