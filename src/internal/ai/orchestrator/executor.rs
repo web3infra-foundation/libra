@@ -1862,6 +1862,12 @@ mod tests {
                     _ => None,
                 })
                 .unwrap_or_default();
+            let has_tool_result = request.chat_history.iter().any(|message| match message {
+                Message::User { content } => content
+                    .iter()
+                    .any(|item| matches!(item, UserContent::ToolResult(_))),
+                _ => false,
+            });
 
             if prompt.contains("## Task\nB") {
                 tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1869,6 +1875,14 @@ mod tests {
 
             if prompt.contains("Fail first") {
                 Err(CompletionError::ResponseError("intentional failure".into()))
+            } else if !has_tool_result && prompt.contains("apply_patch") {
+                Ok(CompletionResponse {
+                    content: vec![AssistantContent::ToolCall(add_file_patch_call(
+                        &prompt,
+                        "conditional",
+                    ))],
+                    raw_response: (),
+                })
             } else {
                 Ok(CompletionResponse {
                     content: vec![AssistantContent::Text(Text {
@@ -1878,6 +1892,91 @@ mod tests {
                 })
             }
         }
+    }
+
+    #[derive(Clone)]
+    struct AddFilePatchModel;
+
+    impl CompletionModel for AddFilePatchModel {
+        type Response = ();
+
+        async fn completion(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+            let has_tool_result = request.chat_history.iter().any(|message| match message {
+                Message::User { content } => content
+                    .iter()
+                    .any(|item| matches!(item, UserContent::ToolResult(_))),
+                _ => false,
+            });
+            if has_tool_result {
+                return Ok(CompletionResponse {
+                    content: vec![AssistantContent::Text(Text {
+                        text: "done".to_string(),
+                    })],
+                    raw_response: (),
+                });
+            }
+
+            let prompt = request
+                .chat_history
+                .iter()
+                .rev()
+                .find_map(|message| match message {
+                    Message::User { content } => content.iter().find_map(|item| match item {
+                        UserContent::Text(text) => Some(text.text.clone()),
+                        _ => None,
+                    }),
+                    _ => None,
+                })
+                .unwrap_or_default();
+
+            Ok(CompletionResponse {
+                content: vec![AssistantContent::ToolCall(add_file_patch_call(
+                    &prompt, "budget",
+                ))],
+                raw_response: (),
+            })
+        }
+    }
+
+    fn add_file_patch_call(prompt: &str, prefix: &str) -> ToolCall {
+        let slug = prompt
+            .split("## Task\n")
+            .nth(1)
+            .and_then(|tail| tail.lines().next())
+            .map(slugify_task_title)
+            .filter(|slug| !slug.is_empty())
+            .unwrap_or_else(|| "task".to_string());
+        let path = match slug.as_str() {
+            "do_thing" | "second" => "src/main.rs".to_string(),
+            _ => format!("src/{slug}.txt"),
+        };
+        let patch = format!("*** Begin Patch\n*** Add File: {path}\n+done\n*** End Patch");
+        ToolCall {
+            id: format!("call_{prefix}_{slug}"),
+            name: "apply_patch".to_string(),
+            function: Function {
+                name: "apply_patch".to_string(),
+                arguments: serde_json::json!({ "input": patch }),
+            },
+        }
+    }
+
+    fn slugify_task_title(title: &str) -> String {
+        title
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() {
+                    ch.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>()
+            .trim_matches('_')
+            .to_string()
     }
 
     #[derive(Clone)]
@@ -2810,8 +2909,11 @@ mod tests {
     #[tokio::test]
     async fn execute_dag_uses_real_dependencies_without_batch_barriers() {
         let model = ConditionalModel;
-        let registry = Arc::new(ToolRegistry::new());
         let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        let mut registry = ToolRegistry::with_working_dir(dir.path().to_path_buf());
+        registry.register("apply_patch", Arc::new(ApplyPatchHandler));
+        let registry = Arc::new(registry);
         let events = Arc::new(Mutex::new(Vec::new()));
         let config = ExecutorConfig {
             tool_loop_config: ToolLoopConfig::default(),
@@ -2826,39 +2928,11 @@ mod tests {
             })),
         };
 
-        let mut a = implementation_task();
-        a.task = {
-            let actor = ActorRef::agent("test-executor").unwrap();
-            let mut task = GitTask::new(actor, "A", None).unwrap();
-            task.set_description(Some("Implement change".into()));
-            task.add_constraint("network:allow");
-            task.add_acceptance_criterion("tests pass");
-            task
-        };
-        a.objective = "A".into();
-
-        let mut c = implementation_task();
-        c.task = {
-            let actor = ActorRef::agent("test-executor").unwrap();
-            let mut task = GitTask::new(actor, "C", None).unwrap();
-            task.set_description(Some("Implement change".into()));
-            task.add_constraint("network:allow");
-            task.add_acceptance_criterion("tests pass");
-            task
-        };
-        c.objective = "C".into();
+        let a = scoped_implementation_task("A", "src/a.txt");
+        let mut c = scoped_implementation_task("C", "src/c.txt");
         c.task.add_dependency(a.id());
 
-        let mut b = implementation_task();
-        b.task = {
-            let actor = ActorRef::agent("test-executor").unwrap();
-            let mut task = GitTask::new(actor, "B", None).unwrap();
-            task.set_description(Some("Implement change".into()));
-            task.add_constraint("network:allow");
-            task.add_acceptance_criterion("tests pass");
-            task
-        };
-        b.objective = "B".into();
+        let b = scoped_implementation_task("B", "src/b.txt");
 
         let plan = plan_for_tasks(vec![a, c, b], 2);
 
@@ -2893,8 +2967,11 @@ mod tests {
     #[tokio::test]
     async fn execute_dag_skips_dependent_tasks_after_failure() {
         let model = ConditionalModel;
-        let registry = Arc::new(ToolRegistry::new());
         let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        let mut registry = ToolRegistry::with_working_dir(dir.path().to_path_buf());
+        registry.register("apply_patch", Arc::new(ApplyPatchHandler));
+        let registry = Arc::new(registry);
         let events = Arc::new(Mutex::new(Vec::new()));
         let config = ExecutorConfig {
             tool_loop_config: ToolLoopConfig::default(),
@@ -2956,11 +3033,11 @@ mod tests {
 
     #[tokio::test]
     async fn execute_dag_records_cost_budget_abort_as_failure() {
-        let model = MockModel {
-            final_text: "done".into(),
-        };
-        let registry = Arc::new(ToolRegistry::new());
         let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        let mut registry = ToolRegistry::with_working_dir(dir.path().to_path_buf());
+        registry.register("apply_patch", Arc::new(ApplyPatchHandler));
+        let registry = Arc::new(registry);
         let mut spec = (*spec()).clone();
         spec.constraints.resources.max_cost_units = 1;
         spec.execution.concurrency.max_parallel_tasks = 1;
@@ -2988,7 +3065,7 @@ mod tests {
         second.objective = "Second".into();
 
         let plan = plan_for_tasks(vec![first.clone(), second.clone()], 1);
-        let run_state = execute_dag(&plan, &model, &registry, &config)
+        let run_state = execute_dag(&plan, &AddFilePatchModel, &registry, &config)
             .await
             .unwrap();
 

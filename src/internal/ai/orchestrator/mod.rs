@@ -299,6 +299,7 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
 mod tests {
     use std::{
         collections::BTreeMap,
+        path::Path,
         sync::{Arc, Mutex},
     };
 
@@ -306,9 +307,10 @@ mod tests {
     use crate::internal::ai::{
         completion::{
             CompletionError, CompletionRequest, CompletionResponse,
-            message::{AssistantContent, Text},
+            message::{AssistantContent, Function, Message, Text, ToolCall, UserContent},
         },
         intentspec::types::*,
+        tools::handlers::ApplyPatchHandler,
     };
 
     #[derive(Clone)]
@@ -368,22 +370,94 @@ mod tests {
     impl CompletionModel for MockOrchestratorModel {
         type Response = ();
 
-        #[allow(clippy::manual_async_fn)]
-        fn completion(
+        async fn completion(
             &self,
-            _request: CompletionRequest,
-        ) -> impl std::future::Future<
-            Output = Result<CompletionResponse<Self::Response>, CompletionError>,
-        > + Send {
-            async {
-                Ok(CompletionResponse {
-                    content: vec![AssistantContent::Text(Text {
-                        text: "task complete".into(),
-                    })],
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+            let prompt = latest_user_text(&request);
+            if !has_tool_result(&request) && prompt.contains("apply_patch") {
+                return Ok(CompletionResponse {
+                    content: vec![AssistantContent::ToolCall(add_file_patch_call(
+                        &prompt,
+                        "orchestrator",
+                    ))],
                     raw_response: (),
-                })
+                });
             }
+
+            Ok(CompletionResponse {
+                content: vec![AssistantContent::Text(Text {
+                    text: "task complete".into(),
+                })],
+                raw_response: (),
+            })
         }
+    }
+
+    fn has_tool_result(request: &CompletionRequest) -> bool {
+        request.chat_history.iter().any(|message| match message {
+            Message::User { content } => content
+                .iter()
+                .any(|item| matches!(item, UserContent::ToolResult(_))),
+            _ => false,
+        })
+    }
+
+    fn latest_user_text(request: &CompletionRequest) -> String {
+        request
+            .chat_history
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                Message::User { content } => content.iter().find_map(|item| match item {
+                    UserContent::Text(text) => Some(text.text.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    fn add_file_patch_call(prompt: &str, prefix: &str) -> ToolCall {
+        let slug = prompt
+            .split("## Task\n")
+            .nth(1)
+            .and_then(|tail| tail.lines().next())
+            .map(slugify_task_title)
+            .filter(|slug| !slug.is_empty())
+            .unwrap_or_else(|| "task".to_string());
+        let path = format!("src/{prefix}_{slug}.txt");
+        let patch = format!("*** Begin Patch\n*** Add File: {path}\n+done\n*** End Patch");
+        ToolCall {
+            id: format!("call_{prefix}_{slug}"),
+            name: "apply_patch".to_string(),
+            function: Function {
+                name: "apply_patch".to_string(),
+                arguments: serde_json::json!({ "input": patch }),
+            },
+        }
+    }
+
+    fn slugify_task_title(title: &str) -> String {
+        title
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() {
+                    ch.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>()
+            .trim_matches('_')
+            .to_string()
+    }
+
+    fn test_registry(working_dir: &Path) -> Arc<ToolRegistry> {
+        std::fs::create_dir_all(working_dir.join("src")).unwrap();
+        let mut registry = ToolRegistry::with_working_dir(working_dir.to_path_buf());
+        registry.register("apply_patch", Arc::new(ApplyPatchHandler));
+        Arc::new(registry)
     }
 
     fn test_spec() -> IntentSpec {
@@ -533,7 +607,7 @@ mod tests {
     async fn test_orchestrator_full_pipeline() {
         let dir = tempfile::tempdir().unwrap();
         let model = MockOrchestratorModel;
-        let registry = Arc::new(ToolRegistry::new());
+        let registry = test_registry(dir.path());
         let config = OrchestratorConfig {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
@@ -559,7 +633,7 @@ mod tests {
     async fn test_orchestrator_uses_approved_initial_plan() {
         let dir = tempfile::tempdir().unwrap();
         let model = MockOrchestratorModel;
-        let registry = Arc::new(ToolRegistry::new());
+        let registry = test_registry(dir.path());
         let spec = test_spec();
         let mut planned_spec = spec.clone();
         planned_spec.intent.objectives = vec![
@@ -603,7 +677,7 @@ mod tests {
     async fn test_orchestrator_emits_progress_events() {
         let dir = tempfile::tempdir().unwrap();
         let model = MockOrchestratorModel;
-        let registry = Arc::new(ToolRegistry::new());
+        let registry = test_registry(dir.path());
         let events = Arc::new(Mutex::new(Vec::new()));
         let observer: Arc<dyn types::OrchestratorObserver> = Arc::new(RecordingObserver {
             events: Arc::clone(&events),
@@ -655,7 +729,7 @@ mod tests {
     async fn test_orchestrator_high_risk_human_review() {
         let dir = tempfile::tempdir().unwrap();
         let model = MockOrchestratorModel;
-        let registry = Arc::new(ToolRegistry::new());
+        let registry = test_registry(dir.path());
         let config = OrchestratorConfig {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
@@ -681,7 +755,7 @@ mod tests {
     async fn test_orchestrator_analysis_only_pipeline_commits_without_patchset_or_gates() {
         let dir = tempfile::tempdir().unwrap();
         let model = MockOrchestratorModel;
-        let registry = Arc::new(ToolRegistry::new());
+        let registry = test_registry(dir.path());
         let config = OrchestratorConfig {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
@@ -735,7 +809,7 @@ mod tests {
     async fn test_orchestrator_validation_failure() {
         let dir = tempfile::tempdir().unwrap();
         let model = MockOrchestratorModel;
-        let registry = Arc::new(ToolRegistry::new());
+        let registry = test_registry(dir.path());
         let config = OrchestratorConfig {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
@@ -761,7 +835,7 @@ mod tests {
     async fn test_orchestrator_replans_after_security_gate_failure() {
         let dir = tempfile::tempdir().unwrap();
         let model = MockOrchestratorModel;
-        let registry = Arc::new(ToolRegistry::new());
+        let registry = test_registry(dir.path());
         let config = OrchestratorConfig {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
