@@ -2451,7 +2451,7 @@ dependencies = [
  "serde_json",
  "sha1 0.11.0",
  "sha2 0.11.0",
- "similar 2.7.0",
+ "similar",
  "tempfile",
  "thiserror 2.0.18",
  "threadpool",
@@ -3384,7 +3384,6 @@ dependencies = [
  "serial_test",
  "sha1 0.11.0",
  "shlex",
- "similar 3.1.0",
  "tempfile",
  "testcontainers",
  "thiserror 2.0.18",
@@ -6295,15 +6294,6 @@ name = "similar"
 version = "2.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
-
-[[package]]
-name = "similar"
-version = "3.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04d93e861ede2e497b47833469b8ec9d5c07fa4c78ce7a00f6eb7dd8168b4b3f"
-dependencies = [
- "bstr",
-]
 
 [[package]]
 name = "siphasher"

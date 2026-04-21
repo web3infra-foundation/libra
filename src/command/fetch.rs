@@ -1120,6 +1120,8 @@ async fn read_fetch_stream(
                     });
                 }
                 _ => {
+                    // Preserve unknown/non-side-band frames as-is: the leading byte may be
+                    // payload data rather than a channel discriminator.
                     print_remote_progress(&data, render_progress, bar.as_ref());
                 }
             }
@@ -1136,19 +1138,30 @@ async fn read_fetch_stream(
 }
 
 fn print_remote_progress(payload: &[u8], render_progress: bool, bar: Option<&ProgressBar>) {
+    emit_remote_progress(payload, render_progress, bar, |text| {
+        eprint!("{text}");
+        let _ = io::stderr().flush();
+    });
+}
+
+fn emit_remote_progress<F>(
+    payload: &[u8],
+    render_progress: bool,
+    bar: Option<&ProgressBar>,
+    emit: F,
+) where
+    F: FnOnce(&str),
+{
     if render_progress {
         let text = String::from_utf8_lossy(payload);
-        let write_progress = || {
-            eprint!("{text}");
-            let _ = io::stderr().flush();
-        };
+        let emit_text = || emit(text.as_ref());
         // Remote side-band progress writes raw terminal control characters.
         // Hide the local receiving spinner while printing it so the two
         // streams do not leave stale or shifted lines in an interactive TTY.
         if let Some(bar) = bar {
-            bar.suspend(write_progress);
+            bar.suspend(emit_text);
         } else {
-            write_progress();
+            emit_text();
         }
     }
 }
@@ -1444,13 +1457,49 @@ mod tests {
         time::{Duration, SystemTime},
     };
 
+    use indicatif::ProgressBar;
     use tempfile::tempdir;
 
     use super::{
         FetchError, SSH_KEY_TEMP_FILE_MAX_AGE, cleanup_expired_vault_ssh_temp_files_in,
-        ensure_vault_ssh_tmp_dir,
+        emit_remote_progress, ensure_vault_ssh_tmp_dir,
     };
     use crate::utils::test::ScopedEnvVar;
+
+    fn capture_remote_progress(
+        payload: &[u8],
+        render_progress: bool,
+        bar: Option<&ProgressBar>,
+    ) -> String {
+        let mut captured = String::new();
+        emit_remote_progress(payload, render_progress, bar, |text| {
+            captured.push_str(text);
+        });
+        captured
+    }
+
+    #[test]
+    fn print_remote_progress_writes_payload_without_spinner() {
+        let captured = capture_remote_progress(b"\rReceiving objects: 42%", true, None);
+
+        assert_eq!(captured, "\rReceiving objects: 42%");
+    }
+
+    #[test]
+    fn print_remote_progress_writes_payload_while_spinner_is_suspended() {
+        let bar = ProgressBar::hidden();
+
+        let captured = capture_remote_progress(b"\rReceiving objects: 100%", true, Some(&bar));
+
+        assert_eq!(captured, "\rReceiving objects: 100%");
+    }
+
+    #[test]
+    fn print_remote_progress_is_silent_when_rendering_is_disabled() {
+        let captured = capture_remote_progress(b"\rReceiving objects: 42%", false, None);
+
+        assert!(captured.is_empty());
+    }
 
     #[test]
     fn test_cleanup_expired_vault_ssh_temp_files_removes_old_tmp_files() {
