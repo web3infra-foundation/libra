@@ -4,6 +4,7 @@ use std::{
     sync::Arc,
 };
 
+use async_trait::async_trait;
 use git_internal::internal::object::{plan::PlanStep, task::Task as GitTask};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -413,6 +414,50 @@ pub struct OrchestratorResult {
     pub persistence: Option<PersistedExecution>,
 }
 
+/// Runtime phase gates that require explicit user confirmation before continuing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OrchestratorPhase {
+    SystemVerification,
+    Decision,
+}
+
+impl OrchestratorPhase {
+    pub fn number(&self) -> u8 {
+        match self {
+            Self::SystemVerification => 3,
+            Self::Decision => 4,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::SystemVerification => "Phase 3 system validation",
+            Self::Decision => "Phase 4 decision",
+        }
+    }
+}
+
+/// A human-readable confirmation request emitted before entering a gated phase.
+#[derive(Clone, Debug)]
+pub struct PhaseConfirmationPrompt {
+    pub phase: OrchestratorPhase,
+    pub title: String,
+    pub summary: String,
+    pub details: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PhaseConfirmationDecision {
+    Continue,
+    Reject,
+    Abort,
+}
+
+#[async_trait]
+pub trait OrchestratorPhaseConfirmer: Send + Sync {
+    async fn confirm(&self, prompt: PhaseConfirmationPrompt) -> PhaseConfirmationDecision;
+}
+
 /// MCP object IDs emitted during orchestrator persistence.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PersistedTaskArtifacts {
@@ -440,6 +485,14 @@ pub struct PersistedCheckpoint {
     pub dagrs_checkpoint_id: Option<String>,
 }
 
+/// Runtime-owned derived records emitted from validation and decision stages.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PersistedDerivedRecords {
+    pub validation_report_id: Uuid,
+    pub risk_score_breakdown_id: Uuid,
+    pub decision_proposal_id: Uuid,
+}
+
 /// Persisted execution object chain for an orchestrator run.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PersistedExecution {
@@ -458,6 +511,8 @@ pub struct PersistedExecution {
     pub checkpoints: Vec<PersistedCheckpoint>,
     #[serde(default)]
     pub tasks: Vec<PersistedTaskArtifacts>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived_records: Option<PersistedDerivedRecords>,
 }
 
 /// Best-effort observer for surfacing orchestrator runtime progress.
@@ -514,6 +569,10 @@ pub trait OrchestratorObserver: Send + Sync {
 
     fn on_graph_checkpoint_restored(&self, _checkpoint_id: &str, _pc: usize) {}
 
+    fn on_system_verification(&self, _plan: &ExecutionPlanSpec, _report: &SystemReport) {}
+
+    fn on_decision(&self, _plan: &ExecutionPlanSpec, _decision: &DecisionOutcome) {}
+
     fn on_replan(
         &self,
         _current_revision: u32,
@@ -537,6 +596,8 @@ pub struct OrchestratorConfig {
     pub base_commit: Option<String>,
     pub persisted_intent_id: Option<String>,
     pub persisted_plan_id: Option<String>,
+    /// Optional user-approved plan to execute instead of compiling the first plan locally.
+    pub initial_plan: Option<ExecutionPlanSpec>,
     /// Placeholder for checkpoint/resume functionality.
     ///
     /// Note: This field is currently unused. The checkpoint/resume feature needs to be
@@ -550,6 +611,8 @@ pub struct OrchestratorConfig {
     pub mcp_server: Option<Arc<LibraMcpServer>>,
     /// Optional observer used to surface runtime progress.
     pub observer: Option<Arc<dyn OrchestratorObserver>>,
+    /// Optional user confirmation gate before Phase 3 and Phase 4.
+    pub phase_confirmer: Option<Arc<dyn OrchestratorPhaseConfirmer>>,
 }
 
 #[cfg(test)]
@@ -754,6 +817,7 @@ mod tests {
                     patchset_id: Some("patch-1".into()),
                     evidence_ids: vec!["ev-1".into()],
                 }],
+                derived_records: None,
             }),
         };
         let json = serde_json::to_string(&result).unwrap();

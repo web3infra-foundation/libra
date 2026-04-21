@@ -28,9 +28,12 @@ use serde::Serialize;
 
 use crate::{
     cli::Stash,
-    command::reset::{
-        rebuild_index_from_tree, remove_empty_directories, reset_index_to_commit,
-        restore_working_directory_from_tree,
+    command::{
+        load_object,
+        reset::{
+            rebuild_index_from_tree, remove_empty_directories, reset_index_to_commit,
+            restore_working_directory_from_tree,
+        },
     },
     internal::head::Head,
     utils::{
@@ -787,9 +790,9 @@ async fn perform_hard_reset(target_commit_id: &ObjectHash) -> Result<(), String>
         .map(|e| PathBuf::from(&e.name))
         .collect();
 
-    let target_commit: Commit = crate::command::load_object(target_commit_id)
-        .map_err(|e| format!("failed to load target commit: {e}"))?;
-    let target_tree: Tree = crate::command::load_object(&target_commit.tree_id)
+    let target_commit: Commit =
+        load_object(target_commit_id).map_err(|e| format!("failed to load target commit: {e}"))?;
+    let target_tree: Tree = load_object(&target_commit.tree_id)
         .map_err(|e| format!("failed to load target tree: {e}"))?;
     let files_in_target_tree: HashSet<PathBuf> = target_tree
         .get_plain_items()

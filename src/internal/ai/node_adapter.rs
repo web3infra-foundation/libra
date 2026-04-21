@@ -111,7 +111,7 @@ impl<M: CompletionModel> Action for AgentAction<M> {
     ) -> Output {
         let input = match collect_upstream_prompt(in_channels).await {
             Ok(input) => input,
-            Err(e) => return Output::Err(e),
+            Err(e) => return Output::execution_failed(e),
         };
 
         // Step 2: Run the agent with the assembled prompt
@@ -124,7 +124,7 @@ impl<M: CompletionModel> Action for AgentAction<M> {
             }
             Err(e) => {
                 tracing::error!("Agent Execution Error: {}", e);
-                Output::Err(e.to_string())
+                Output::execution_failed(e.to_string())
             }
         }
     }
@@ -175,6 +175,7 @@ impl<M: CompletionModel> ToolLoopAction<M> {
             config: ToolLoopConfig {
                 preamble,
                 temperature,
+                thinking: None,
                 hook_runner: None,
                 allowed_tools: None,
                 runtime_context: None,
@@ -208,7 +209,7 @@ where
     ) -> Output {
         let prompt = match collect_upstream_prompt(in_channels).await {
             Ok(prompt) => prompt,
-            Err(e) => return Output::Err(e),
+            Err(e) => return Output::execution_failed(e),
         };
 
         // Run the iterative tool-calling loop with the assembled prompt
@@ -221,7 +222,7 @@ where
             }
             Err(e) => {
                 tracing::error!("Agent Tool Loop Error: {}", e);
-                Output::Err(e.to_string())
+                Output::execution_failed(e.to_string())
             }
         }
     }

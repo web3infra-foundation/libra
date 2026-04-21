@@ -264,10 +264,16 @@ impl ToolSpec {
                             "check".to_string(),
                             json!({
                                 "type": "object",
-                                "required": ["id", "kind"],
                                 "properties": {
-                                    "id": {"type": "string"},
-                                    "kind": {"type": "string", "enum": ["command", "testSuite", "policy"]},
+                                    "id": {
+                                        "type": "string",
+                                        "description": "Optional stable check id. If omitted, Libra derives one from command or kind."
+                                    },
+                                    "kind": {
+                                        "type": "string",
+                                        "description": "Check type. Optional when command is present; omitted command checks default to command.",
+                                        "enum": ["command", "testSuite", "policy"]
+                                    },
                                     "command": {"type": "string"},
                                     "timeoutSeconds": {"type": "integer"},
                                     "expectedExitCode": {"type": "integer"},
@@ -748,6 +754,23 @@ mod tests {
         assert!(
             acceptance.get("$defs").is_none(),
             "$defs should not be nested in acceptance"
+        );
+    }
+
+    #[test]
+    fn test_submit_intent_draft_check_definition_allows_inferred_check_fields() {
+        let spec = ToolSpec::submit_intent_draft();
+        let json_str = serde_json::to_string(&spec).unwrap();
+        let parsed: Value = serde_json::from_str(&json_str).unwrap();
+        let check = &parsed["function"]["parameters"]["$defs"]["check"];
+
+        assert!(
+            check.get("required").is_none(),
+            "check id/kind can be inferred from command in IntentDraft submissions"
+        );
+        assert_eq!(
+            check["properties"]["kind"]["description"],
+            "Check type. Optional when command is present; omitted command checks default to command."
         );
     }
 }

@@ -8,8 +8,8 @@ use std::{
 
 use async_trait::async_trait;
 use dagrs::{
-    Action, CheckpointConfig, DefaultNode, EnvVar, FileCheckpointStore, Graph, InChannels, Node,
-    NodeTable, OutChannels, Output, event::GraphEvent,
+    Action, CheckpointConfig, CompletionStatus, DefaultNode, EnvVar, FileCheckpointStore, Graph,
+    InChannels, Node, NodeTable, OutChannels, Output, event::GraphEvent,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -26,14 +26,16 @@ use super::{
         TaskKind, TaskNodeStatus, TaskResult, TaskRuntimeEvent, TaskRuntimeNoteLevel,
         TaskRuntimePhase, TaskSpec, ToolCallRecord,
     },
-    workspace::{cleanup_task_worktree, prepare_task_worktree, sync_task_worktree_back},
 };
 use crate::internal::ai::{
     agent::{ToolLoopConfig, ToolLoopObserver, run_tool_loop_with_history_and_observer},
     completion::{CompletionError, CompletionModel, CompletionUsage, CompletionUsageSummary},
     hooks::HookRunner,
-    intentspec::types::{IntentSpec, NetworkPolicy},
-    sandbox::{SandboxPermissions, SandboxPolicy, ToolRuntimeContext, ToolSandboxContext},
+    intentspec::types::{IntentSpec, NetworkPolicy, ToolAcl},
+    runtime::environment::{ExecutionEnvironmentProvider, SyncBackRequest},
+    sandbox::{
+        NetworkAccess, SandboxPermissions, SandboxPolicy, ToolRuntimeContext, ToolSandboxContext,
+    },
     tools::{ToolOutput, registry::ToolRegistry},
 };
 
@@ -246,6 +248,7 @@ where
     let mut accumulated_policy_violations = Vec::new();
     let mut accumulated_model_usage = CompletionUsageSummary::default();
     let mut last_review = None;
+    let mut retry_feedback: Option<String> = None;
 
     loop {
         let mut observer = TaskExecutionObserver::new(
@@ -259,10 +262,16 @@ where
             runtime_context: Some(runtime_context.clone()),
             ..config.tool_loop_config.clone()
         };
+        let attempt_prompt = match retry_feedback.as_deref() {
+            Some(feedback) => format!(
+                "{prompt}\n\n## Previous Attempt Failure\n{feedback}\nCorrect this failure before reporting completion."
+            ),
+            None => prompt.clone(),
+        };
         let agent_result = run_tool_loop_with_history_and_observer(
             model,
             Vec::new(),
-            &prompt,
+            &attempt_prompt,
             registry,
             tool_loop_config,
             &mut observer,
@@ -277,68 +286,88 @@ where
 
         let retryable_failure = match agent_result {
             Ok(turn) if policy_violations.is_empty() => {
-                let review_artifacts = run_reviewer_pass(
-                    task,
-                    &turn.final_text,
-                    &accumulated_tool_calls,
-                    model,
-                    registry,
-                    config,
-                )
-                .await;
-                accumulated_tool_calls.extend(review_artifacts.tool_calls.iter().cloned());
-                accumulated_policy_violations
-                    .extend(review_artifacts.policy_violations.iter().cloned());
-                if let Some(usage) = review_artifacts.model_usage.as_ref() {
-                    accumulated_model_usage.merge(usage);
+                if let Some(observer) = &config.observer
+                    && !turn.final_text.trim().is_empty()
+                {
+                    observer.on_task_runtime_event(
+                        task,
+                        TaskRuntimeEvent::AssistantMessage(turn.final_text.clone()),
+                    );
                 }
-                let review = match review_artifacts.outcome {
-                    Ok(review) => review,
-                    Err(message) => {
-                        if let Some(observer) = &config.observer {
-                            observer.on_task_runtime_event(
-                                task,
-                                TaskRuntimeEvent::Phase(TaskRuntimePhase::Failed),
-                            );
+                if let Some(reason) =
+                    implementation_missing_write_output(task, &accumulated_tool_calls)
+                {
+                    (
+                        Some(reason.clone()),
+                        tool_calls,
+                        policy_violations,
+                        reason,
+                        None,
+                    )
+                } else {
+                    let review_artifacts = run_reviewer_pass(
+                        task,
+                        &turn.final_text,
+                        &accumulated_tool_calls,
+                        model,
+                        registry,
+                        config,
+                    )
+                    .await;
+                    accumulated_tool_calls.extend(review_artifacts.tool_calls.iter().cloned());
+                    accumulated_policy_violations
+                        .extend(review_artifacts.policy_violations.iter().cloned());
+                    if let Some(usage) = review_artifacts.model_usage.as_ref() {
+                        accumulated_model_usage.merge(usage);
+                    }
+                    let review = match review_artifacts.outcome {
+                        Ok(review) => review,
+                        Err(message) => {
+                            if let Some(observer) = &config.observer {
+                                observer.on_task_runtime_event(
+                                    task,
+                                    TaskRuntimeEvent::Phase(TaskRuntimePhase::Failed),
+                                );
+                            }
+                            return TaskResult {
+                                task_id: task.id(),
+                                status: TaskNodeStatus::Failed,
+                                gate_report: None,
+                                agent_output: Some(message),
+                                retry_count,
+                                tool_calls: accumulated_tool_calls,
+                                policy_violations: accumulated_policy_violations,
+                                model_usage: (!accumulated_model_usage.is_zero())
+                                    .then_some(accumulated_model_usage),
+                                review: None,
+                            };
                         }
+                    };
+                    if let Some(review) = review.as_ref()
+                        && !review.approved
+                    {
+                        last_review = Some(review.clone());
+                        (
+                            Some(turn.final_text),
+                            tool_calls,
+                            policy_violations,
+                            format!("review rejected: {}", review.summary),
+                            Some(review.clone()),
+                        )
+                    } else {
                         return TaskResult {
                             task_id: task.id(),
-                            status: TaskNodeStatus::Failed,
+                            status: TaskNodeStatus::Completed,
                             gate_report: None,
-                            agent_output: Some(message),
+                            agent_output: Some(turn.final_text),
                             retry_count,
                             tool_calls: accumulated_tool_calls,
                             policy_violations: accumulated_policy_violations,
                             model_usage: (!accumulated_model_usage.is_zero())
                                 .then_some(accumulated_model_usage),
-                            review: None,
+                            review,
                         };
                     }
-                };
-                if let Some(review) = review.as_ref()
-                    && !review.approved
-                {
-                    last_review = Some(review.clone());
-                    (
-                        Some(turn.final_text),
-                        tool_calls,
-                        policy_violations,
-                        format!("review rejected: {}", review.summary),
-                        Some(review.clone()),
-                    )
-                } else {
-                    return TaskResult {
-                        task_id: task.id(),
-                        status: TaskNodeStatus::Completed,
-                        gate_report: None,
-                        agent_output: Some(turn.final_text),
-                        retry_count,
-                        tool_calls: accumulated_tool_calls,
-                        policy_violations: accumulated_policy_violations,
-                        model_usage: (!accumulated_model_usage.is_zero())
-                            .then_some(accumulated_model_usage),
-                        review,
-                    };
                 }
             }
             Ok(turn) => {
@@ -395,6 +424,7 @@ where
         }
 
         tracing::warn!(task_id = %task.id(), "retrying task after failure: {}", failure_reason);
+        retry_feedback = Some(failure_reason);
         if config.backoff_seconds > 0 {
             tokio::time::sleep(std::time::Duration::from_secs(
                 config.backoff_seconds as u64,
@@ -402,6 +432,24 @@ where
             .await;
         }
     }
+}
+
+fn implementation_missing_write_output(
+    task: &TaskSpec,
+    tool_calls: &[ToolCallRecord],
+) -> Option<String> {
+    if task.kind != TaskKind::Implementation {
+        return None;
+    }
+
+    let has_successful_write = tool_calls
+        .iter()
+        .any(|call| call.success && (!call.paths_written.is_empty() || !call.diffs.is_empty()));
+
+    (!has_successful_write).then(|| {
+        "implementation task completed without writing any files; use apply_patch or an allowed shell write to create or modify the expected project files before reporting completion"
+            .to_string()
+    })
 }
 
 async fn execute_gate_task(
@@ -493,47 +541,35 @@ async fn execute_gate_task_in_task_worktree(
     inherited_runtime: Option<&ToolRuntimeContext>,
     observer: Option<&Arc<dyn OrchestratorObserver>>,
 ) -> TaskResult {
-    let prepared = match tokio::task::spawn_blocking({
-        let working_dir = working_dir.to_path_buf();
-        let task_id = task.id();
-        move || prepare_task_worktree(&working_dir, task_id)
-    })
-    .await
+    let environment_provider = ExecutionEnvironmentProvider;
+    let environment = match environment_provider
+        .provision_task_worktree(working_dir.to_path_buf(), task.id())
+        .await
     {
-        Ok(Ok(worktree)) => worktree,
-        Ok(Err(err)) => return task_workspace_failure(task, err),
-        Err(err) => {
-            return task_workspace_failure(
-                task,
-                io::Error::other(format!(
-                    "failed to prepare isolated worktree for verification: {err}"
-                )),
-            );
-        }
+        Ok(environment) => environment,
+        Err(err) => return task_workspace_failure(task, err),
     };
+    let task_worktree_root = environment.root().to_path_buf();
 
     if let Some(observer) = observer {
         observer.on_task_runtime_event(
             task,
             TaskRuntimeEvent::WorkspaceReady {
-                working_dir: prepared.root.clone(),
+                working_dir: task_worktree_root.clone(),
                 isolated: true,
             },
         );
     }
 
-    let result = execute_gate_task(task, &prepared.root, spec, inherited_runtime, observer).await;
+    let result =
+        execute_gate_task(task, &task_worktree_root, spec, inherited_runtime, observer).await;
 
-    let cleanup_root = prepared.root.clone();
-    let cleanup_result = tokio::task::spawn_blocking(move || cleanup_task_worktree(prepared)).await;
-    match cleanup_result {
-        Err(err) => tracing::warn!("gate worktree cleanup worker failed: {}", err),
-        Ok(Err(err)) => tracing::warn!(
-            path = %cleanup_root.display(),
+    if let Err(err) = environment_provider.cleanup(environment).await {
+        tracing::warn!(
+            path = %task_worktree_root.display(),
             "failed to clean up gate worktree: {}",
             err
-        ),
-        Ok(Ok(())) => {}
+        );
     }
 
     result
@@ -678,33 +714,26 @@ async fn execute_task_in_task_worktree<M: CompletionModel>(
 where
     M::Response: CompletionUsage,
 {
-    let prepared = match tokio::task::spawn_blocking({
-        let working_dir = config.working_dir.clone();
-        let task_id = task.id();
-        move || prepare_task_worktree(&working_dir, task_id)
-    })
-    .await
+    let environment_provider = ExecutionEnvironmentProvider;
+    let environment = match environment_provider
+        .provision_task_worktree(config.working_dir.clone(), task.id())
+        .await
     {
-        Ok(Ok(worktree)) => worktree,
-        Ok(Err(err)) => return task_workspace_failure(task, err),
-        Err(err) => {
-            return task_workspace_failure(
-                task,
-                io::Error::other(format!("failed to prepare task worktree: {err}")),
-            );
-        }
+        Ok(environment) => environment,
+        Err(err) => return task_workspace_failure(task, err),
     };
+    let task_worktree_root = environment.root().to_path_buf();
 
-    let task_registry = Arc::new(registry.clone_with_working_dir(prepared.root.clone()));
+    let task_registry = Arc::new(registry.clone_with_working_dir(task_worktree_root.clone()));
     let mut task_config = config.clone();
-    task_config.working_dir = prepared.root.clone();
+    task_config.working_dir = task_worktree_root.clone();
     task_config.tool_loop_config =
-        clone_tool_loop_config_for_workdir(&config.tool_loop_config, &prepared.root);
+        clone_tool_loop_config_for_workdir(&config.tool_loop_config, &task_worktree_root);
     if let Some(observer) = &config.observer {
         observer.on_task_runtime_event(
             task,
             TaskRuntimeEvent::WorkspaceReady {
-                working_dir: prepared.root.clone(),
+                working_dir: task_worktree_root.clone(),
                 isolated: true,
             },
         );
@@ -715,54 +744,36 @@ where
     if result.status == TaskNodeStatus::Completed {
         let sync_result = {
             let _guard = workspace_sync.lock().await;
-            tokio::task::spawn_blocking({
-                let main_working_dir = config.working_dir.clone();
-                let task_worktree_dir = prepared.root.clone();
-                let baseline = prepared.baseline.clone();
-                let touch_files = task.contract.touch_files.clone();
-                let scope_in = task.scope_in.clone();
-                let scope_out = task.scope_out.clone();
-                move || {
-                    sync_task_worktree_back(
-                        &main_working_dir,
-                        &task_worktree_dir,
-                        &baseline,
-                        &touch_files,
-                        &scope_in,
-                        &scope_out,
-                    )
-                }
-            })
-            .await
+            environment_provider
+                .sync_back(
+                    &environment,
+                    SyncBackRequest {
+                        main_working_dir: config.working_dir.clone(),
+                        touch_files: task.contract.touch_files.clone(),
+                        scope_in: task.scope_in.clone(),
+                        scope_out: task.scope_out.clone(),
+                    },
+                )
+                .await
         };
 
         match sync_result {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => {
+            Ok(()) => {}
+            Err(err) => {
                 result.status = TaskNodeStatus::Failed;
                 result.agent_output = Some(format!(
                     "task completed in isolated worktree but failed to sync changes back: {err}"
                 ));
             }
-            Err(err) => {
-                result.status = TaskNodeStatus::Failed;
-                result.agent_output = Some(format!(
-                    "task completed in isolated worktree but sync worker failed: {err}"
-                ));
-            }
         }
     }
 
-    let cleanup_root = prepared.root.clone();
-    let cleanup_result = tokio::task::spawn_blocking(move || cleanup_task_worktree(prepared)).await;
-    match cleanup_result {
-        Err(err) => tracing::warn!("task worktree cleanup worker failed: {}", err),
-        Ok(Err(err)) => tracing::warn!(
-            path = %cleanup_root.display(),
+    if let Err(err) = environment_provider.cleanup(environment).await {
+        tracing::warn!(
+            path = %task_worktree_root.display(),
             "failed to clean up task worktree: {}",
             err
-        ),
-        Ok(Ok(())) => {}
+        );
     }
 
     result
@@ -913,7 +924,7 @@ where
                 )
                 .await;
                 broadcast_dependency_signal(out_channels, false).await;
-                return Output::error(message);
+                return Output::execution_failed(message);
             }
         };
 
@@ -939,7 +950,7 @@ where
                 )
                 .await;
                 broadcast_dependency_signal(out_channels, false).await;
-                return Output::error(message);
+                return Output::execution_failed(message);
             }
 
             let remaining = max_cost_units.saturating_sub(consumed);
@@ -966,7 +977,7 @@ where
                     )
                     .await;
                     broadcast_dependency_signal(out_channels, false).await;
-                    return Output::error(message);
+                    return Output::execution_failed(message);
                 }
                 cost_budget_guard = Some(guard);
             }
@@ -1048,7 +1059,7 @@ where
             }
             TaskNodeStatus::Failed => {
                 broadcast_dependency_signal(out_channels, false).await;
-                Output::error(
+                Output::execution_failed(
                     result
                         .agent_output
                         .clone()
@@ -1061,7 +1072,7 @@ where
             }
             TaskNodeStatus::Pending | TaskNodeStatus::Running => {
                 broadcast_dependency_signal(out_channels, false).await;
-                Output::error(format!(
+                Output::execution_failed(format!(
                     "task {} returned invalid terminal state",
                     self.task.title()
                 ))
@@ -1100,7 +1111,12 @@ where
         let dagrs_node =
             DefaultNode::with_action(task_spec.id().to_string(), action, &mut node_table);
         let dagrs_id = dagrs_node.id();
-        graph.add_node(dagrs_node);
+        graph.add_node(dagrs_node).map_err(|err| {
+            OrchestratorError::PlanningFailed(format!(
+                "failed to add dagrs node for task {}: {err}",
+                task_spec.id()
+            ))
+        })?;
         dagrs_ids.insert(task_spec.id(), dagrs_id);
     }
 
@@ -1117,7 +1133,12 @@ where
                     "missing dagrs node for dependency {dep}"
                 ))
             })?;
-            graph.add_edge(from_id, vec![to_id]);
+            graph.add_edge(from_id, vec![to_id]).map_err(|err| {
+                OrchestratorError::PlanningFailed(format!(
+                    "failed to add dagrs edge {dep} -> {}: {err}",
+                    task_spec.id()
+                ))
+            })?;
         }
     }
 
@@ -1200,7 +1221,7 @@ async fn monitor_graph_events(
                     observer.on_graph_checkpoint_restored(&checkpoint_id, pc);
                 }
             }
-            Ok(GraphEvent::GraphFinished) => break,
+            Ok(GraphEvent::ExecutionTerminated { .. }) => break,
             Ok(_) => {}
             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -1303,10 +1324,24 @@ where
         tracing::warn!("dagrs event monitor terminated unexpectedly: {}", err);
     }
 
-    let execution_error = execution_result.err().map(|err| {
-        tracing::warn!("dagrs execution terminated with error: {}", err);
-        err.to_string()
-    });
+    let (execution_report, execution_error) = match execution_result {
+        Ok(report) => {
+            tracing::debug!(
+                run_id = %report.run_id,
+                node_total = report.node_total,
+                node_succeeded = report.node_succeeded,
+                node_failed = report.node_failed,
+                node_skipped = report.node_skipped,
+                status = ?report.status,
+                "dagrs execution completed"
+            );
+            (Some(report), None)
+        }
+        Err(err) => {
+            tracing::warn!("dagrs execution terminated with error: {}", err);
+            (None, Some(err.to_string()))
+        }
+    };
 
     let snapshot = run_state.snapshot(plan_spec).await;
     let incomplete_tasks = plan_spec
@@ -1329,6 +1364,14 @@ where
             "dagrs execution ended with incomplete tasks: {}{}",
             incomplete_tasks.join(", "),
             detail
+        )));
+    }
+    if let Some(report) = execution_report
+        && matches!(report.status, CompletionStatus::Aborted)
+    {
+        return Err(OrchestratorError::AgentError(format!(
+            "dagrs execution aborted: run_id={}, succeeded={}, failed={}, skipped={}",
+            report.run_id, report.node_succeeded, report.node_failed, report.node_skipped
         )));
     }
     Ok(snapshot)
@@ -1355,11 +1398,20 @@ fn build_task_prompt(task: &TaskSpec, working_dir: &Path, allowed_tools: &[Strin
     parts.push(
         "## Path Rules\nUse repository-relative paths for read_file, list_dir, and grep_files. The runtime will resolve them from the working directory. Never invent or use paths outside the current workspace.".to_string(),
     );
+    parts.push(
+        "## Version Control\nDo not use git for status, diff, add, commit, branch, log, show, or switch operations. Use Libra version-control only; when the run_libra_vcs tool is available, call it for those operations."
+            .to_string(),
+    );
 
     if !task.contract.touch_files.is_empty() {
         parts.push(format!(
-            "## Touch Hints\nFiles: {}",
-            task.contract.touch_files.join(", ")
+            "## Write Contract\nOnly modify these files/patterns:\n{}\nTreat this list as a hard boundary. If the task requires another file, explain the mismatch instead of editing it.",
+            task.contract
+                .touch_files
+                .iter()
+                .map(|path| format!("- {path}"))
+                .collect::<Vec<_>>()
+                .join("\n")
         ));
     }
 
@@ -1407,6 +1459,13 @@ fn build_task_prompt(task: &TaskSpec, working_dir: &Path, allowed_tools: &[Strin
                 .collect::<Vec<_>>()
                 .join("\n")
         ));
+    }
+
+    if task.kind == TaskKind::Implementation {
+        parts.push(
+            "## Completion Requirement\nBefore reporting completion, use apply_patch or an allowed shell command that creates or modifies at least one in-scope project file. If no file change is needed or the write scope is wrong, report the mismatch instead of claiming the task is complete."
+                .to_string(),
+        );
     }
 
     if !task.constraints().is_empty() {
@@ -1460,6 +1519,18 @@ fn build_reviewer_prompt(
         parts.push(format!("## Touched Files\n{}", touched_files.join(", ")));
     }
 
+    if !task.contract.touch_files.is_empty() {
+        parts.push(format!(
+            "## Write Contract\nOnly these paths may be modified:\n{}\nReject the candidate if Touched Files contains any path outside this list.",
+            task.contract
+                .touch_files
+                .iter()
+                .map(|path| format!("- {path}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+
     if !task.acceptance_criteria().is_empty() {
         parts.push(format!(
             "## Acceptance Criteria\n{}",
@@ -1478,6 +1549,7 @@ fn allowed_tools_for_task(spec: &IntentSpec, task: &TaskSpec) -> Vec<String> {
             "read_file".to_string(),
             "list_dir".to_string(),
             "grep_files".to_string(),
+            "search_files".to_string(),
         ]);
     }
 
@@ -1485,6 +1557,13 @@ fn allowed_tools_for_task(spec: &IntentSpec, task: &TaskSpec) -> Vec<String> {
         && acl_allows(&spec.security.tool_acl, "workspace.fs", "write")
     {
         tools.push("apply_patch".to_string());
+    }
+
+    if matches!(task.kind, TaskKind::Implementation | TaskKind::Analysis)
+        && (acl_allows(&spec.security.tool_acl, "libra.vcs", "read")
+            || acl_allows(&spec.security.tool_acl, "libra.vcs", "write"))
+    {
+        tools.push("run_libra_vcs".to_string());
     }
 
     if matches!(task.kind, TaskKind::Implementation | TaskKind::Analysis)
@@ -1502,17 +1581,14 @@ fn allowed_tools_for_reviewer(spec: &IntentSpec) -> Vec<String> {
             "read_file".to_string(),
             "list_dir".to_string(),
             "grep_files".to_string(),
+            "search_files".to_string(),
         ]
     } else {
         Vec::new()
     }
 }
 
-fn acl_allows(
-    acl: &crate::internal::ai::intentspec::types::ToolAcl,
-    tool: &str,
-    action: &str,
-) -> bool {
+fn acl_allows(acl: &ToolAcl, tool: &str, action: &str) -> bool {
     matches!(check_tool_acl(acl, tool, action), AclVerdict::Allow)
 }
 
@@ -1592,7 +1668,7 @@ fn runtime_context_for_reviewer(
         NetworkPolicy::Allow
     ) {
         SandboxPolicy::ExternalSandbox {
-            network_access: crate::internal::ai::sandbox::NetworkAccess::Enabled,
+            network_access: NetworkAccess::Enabled,
         }
     } else {
         SandboxPolicy::ReadOnly
@@ -1695,11 +1771,7 @@ fn push_unique_root(roots: &mut Vec<PathBuf>, root: PathBuf) {
     roots.push(normalized);
 }
 
-fn max_output_limit(
-    acl: &crate::internal::ai::intentspec::types::ToolAcl,
-    tool_name: &str,
-    action: &str,
-) -> Option<usize> {
+fn max_output_limit(acl: &ToolAcl, tool_name: &str, action: &str) -> Option<usize> {
     acl.allow
         .iter()
         .filter(|rule| {
@@ -1798,6 +1870,12 @@ mod tests {
                     _ => None,
                 })
                 .unwrap_or_default();
+            let has_tool_result = request.chat_history.iter().any(|message| match message {
+                Message::User { content } => content
+                    .iter()
+                    .any(|item| matches!(item, UserContent::ToolResult(_))),
+                _ => false,
+            });
 
             if prompt.contains("## Task\nB") {
                 tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1805,6 +1883,14 @@ mod tests {
 
             if prompt.contains("Fail first") {
                 Err(CompletionError::ResponseError("intentional failure".into()))
+            } else if !has_tool_result && prompt.contains("apply_patch") {
+                Ok(CompletionResponse {
+                    content: vec![AssistantContent::ToolCall(add_file_patch_call(
+                        &prompt,
+                        "conditional",
+                    ))],
+                    raw_response: (),
+                })
             } else {
                 Ok(CompletionResponse {
                     content: vec![AssistantContent::Text(Text {
@@ -1814,6 +1900,91 @@ mod tests {
                 })
             }
         }
+    }
+
+    #[derive(Clone)]
+    struct AddFilePatchModel;
+
+    impl CompletionModel for AddFilePatchModel {
+        type Response = ();
+
+        async fn completion(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+            let has_tool_result = request.chat_history.iter().any(|message| match message {
+                Message::User { content } => content
+                    .iter()
+                    .any(|item| matches!(item, UserContent::ToolResult(_))),
+                _ => false,
+            });
+            if has_tool_result {
+                return Ok(CompletionResponse {
+                    content: vec![AssistantContent::Text(Text {
+                        text: "done".to_string(),
+                    })],
+                    raw_response: (),
+                });
+            }
+
+            let prompt = request
+                .chat_history
+                .iter()
+                .rev()
+                .find_map(|message| match message {
+                    Message::User { content } => content.iter().find_map(|item| match item {
+                        UserContent::Text(text) => Some(text.text.clone()),
+                        _ => None,
+                    }),
+                    _ => None,
+                })
+                .unwrap_or_default();
+
+            Ok(CompletionResponse {
+                content: vec![AssistantContent::ToolCall(add_file_patch_call(
+                    &prompt, "budget",
+                ))],
+                raw_response: (),
+            })
+        }
+    }
+
+    fn add_file_patch_call(prompt: &str, prefix: &str) -> ToolCall {
+        let slug = prompt
+            .split("## Task\n")
+            .nth(1)
+            .and_then(|tail| tail.lines().next())
+            .map(slugify_task_title)
+            .filter(|slug| !slug.is_empty())
+            .unwrap_or_else(|| "task".to_string());
+        let path = match slug.as_str() {
+            "do_thing" | "second" => "src/main.rs".to_string(),
+            _ => format!("src/{slug}.txt"),
+        };
+        let patch = format!("*** Begin Patch\n*** Add File: {path}\n+done\n*** End Patch");
+        ToolCall {
+            id: format!("call_{prefix}_{slug}"),
+            name: "apply_patch".to_string(),
+            function: Function {
+                name: "apply_patch".to_string(),
+                arguments: serde_json::json!({ "input": patch }),
+            },
+        }
+    }
+
+    fn slugify_task_title(title: &str) -> String {
+        title
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() {
+                    ch.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>()
+            .trim_matches('_')
+            .to_string()
     }
 
     #[derive(Clone)]
@@ -1874,6 +2045,110 @@ mod tests {
                         name: "apply_patch".to_string(),
                         arguments: serde_json::json!({ "input": patch }),
                     },
+                })],
+                raw_response: (),
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct SrcMainPatchModel;
+
+    impl CompletionModel for SrcMainPatchModel {
+        type Response = ();
+
+        async fn completion(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+            let has_tool_result = request.chat_history.iter().any(|message| match message {
+                Message::User { content } => content
+                    .iter()
+                    .any(|item| matches!(item, UserContent::ToolResult(_))),
+                _ => false,
+            });
+            if has_tool_result {
+                return Ok(CompletionResponse {
+                    content: vec![AssistantContent::Text(Text {
+                        text: "done".to_string(),
+                    })],
+                    raw_response: (),
+                });
+            }
+
+            Ok(CompletionResponse {
+                content: vec![AssistantContent::ToolCall(ToolCall {
+                    id: "call_src_main".to_string(),
+                    name: "apply_patch".to_string(),
+                    function: Function {
+                        name: "apply_patch".to_string(),
+                        arguments: serde_json::json!({
+                            "input": "*** Begin Patch\n*** Update File: src/main.rs\n@@\n-fn main() {}\n+fn main() { println!(\"hello\"); }\n*** End Patch"
+                        }),
+                    },
+                })],
+                raw_response: (),
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct RetryAfterNoWriteModel;
+
+    impl CompletionModel for RetryAfterNoWriteModel {
+        type Response = ();
+
+        async fn completion(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+            let has_tool_result = request.chat_history.iter().any(|message| match message {
+                Message::User { content } => content
+                    .iter()
+                    .any(|item| matches!(item, UserContent::ToolResult(_))),
+                _ => false,
+            });
+            if has_tool_result {
+                return Ok(CompletionResponse {
+                    content: vec![AssistantContent::Text(Text {
+                        text: "done".to_string(),
+                    })],
+                    raw_response: (),
+                });
+            }
+
+            let prompt = request
+                .chat_history
+                .iter()
+                .rev()
+                .find_map(|message| match message {
+                    Message::User { content } => content.iter().find_map(|item| match item {
+                        UserContent::Text(text) => Some(text.text.clone()),
+                        _ => None,
+                    }),
+                    _ => None,
+                })
+                .unwrap_or_default();
+
+            if prompt.contains("## Previous Attempt Failure") {
+                return Ok(CompletionResponse {
+                    content: vec![AssistantContent::ToolCall(ToolCall {
+                        id: "call_retry_patch".to_string(),
+                        name: "apply_patch".to_string(),
+                        function: Function {
+                            name: "apply_patch".to_string(),
+                            arguments: serde_json::json!({
+                                "input": "*** Begin Patch\n*** Update File: src/main.rs\n@@\n-fn main() {}\n+fn main() { println!(\"fixed\"); }\n*** End Patch"
+                            }),
+                        },
+                    })],
+                    raw_response: (),
+                });
+            }
+
+            Ok(CompletionResponse {
+                content: vec![AssistantContent::Text(Text {
+                    text: "done without edits".to_string(),
                 })],
                 raw_response: (),
             })
@@ -2293,11 +2568,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_implementation_task() {
-        let model = MockModel {
-            final_text: "done".into(),
-        };
         let dir = tempfile::tempdir().unwrap();
-        let registry = Arc::new(ToolRegistry::with_working_dir(dir.path().to_path_buf()));
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        let mut registry = ToolRegistry::with_working_dir(dir.path().to_path_buf());
+        registry.register("apply_patch", Arc::new(ApplyPatchHandler));
+        let registry = Arc::new(registry);
         let config = ExecutorConfig {
             tool_loop_config: ToolLoopConfig::default(),
             max_retries: 1,
@@ -2309,9 +2585,116 @@ mod tests {
             observer: None,
         };
         let task = implementation_task();
-        let result = execute_task(&task, &model, &registry, &config).await;
+        let result = execute_task(&task, &SrcMainPatchModel, &registry, &config).await;
         assert_eq!(result.status, TaskNodeStatus::Completed);
         assert_eq!(result.retry_count, 0);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("src/main.rs")).unwrap(),
+            "fn main() { println!(\"hello\"); }\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_implementation_task_requires_file_write() {
+        let model = MockModel {
+            final_text: "done".into(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Arc::new(ToolRegistry::with_working_dir(dir.path().to_path_buf()));
+        let config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig::default(),
+            max_retries: 0,
+            backoff_seconds: 0,
+            working_dir: dir.path().to_path_buf(),
+            spec: spec(),
+            reviewer_preamble: None,
+            dagrs_resume_checkpoint_id: None,
+            observer: None,
+        };
+        let task = implementation_task();
+
+        let result = execute_task(&task, &model, &registry, &config).await;
+
+        assert_eq!(result.status, TaskNodeStatus::Failed);
+        assert!(
+            result
+                .agent_output
+                .as_deref()
+                .is_some_and(|output| output.contains("without writing any files"))
+        );
+        assert!(result.tool_calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn execute_implementation_task_retries_with_missing_write_feedback() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        let mut registry = ToolRegistry::with_working_dir(dir.path().to_path_buf());
+        registry.register("apply_patch", Arc::new(ApplyPatchHandler));
+        let registry = Arc::new(registry);
+        let config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig::default(),
+            max_retries: 1,
+            backoff_seconds: 0,
+            working_dir: dir.path().to_path_buf(),
+            spec: spec(),
+            reviewer_preamble: None,
+            dagrs_resume_checkpoint_id: None,
+            observer: None,
+        };
+
+        let result = execute_task(
+            &implementation_task(),
+            &RetryAfterNoWriteModel,
+            &registry,
+            &config,
+        )
+        .await;
+
+        assert_eq!(result.status, TaskNodeStatus::Completed);
+        assert_eq!(result.retry_count, 1);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("src/main.rs")).unwrap(),
+            "fn main() { println!(\"fixed\"); }\n"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn execute_dag_fails_noop_implementation_task() {
+        let repo = tempfile::tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+
+        let registry = Arc::new(ToolRegistry::with_working_dir(repo.path().to_path_buf()));
+        let config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig::default(),
+            max_retries: 0,
+            backoff_seconds: 0,
+            working_dir: repo.path().to_path_buf(),
+            spec: spec(),
+            reviewer_preamble: None,
+            dagrs_resume_checkpoint_id: None,
+            observer: None,
+        };
+        let plan = plan_for_tasks(vec![implementation_task()], 1);
+        let model = MockModel {
+            final_text: "done".into(),
+        };
+
+        let run_state = execute_dag(&plan, &model, &registry, &config)
+            .await
+            .unwrap();
+
+        let result = &run_state.ordered_task_results()[0];
+        assert_eq!(result.status, TaskNodeStatus::Failed);
+        assert!(
+            result
+                .agent_output
+                .as_deref()
+                .is_some_and(|output| output.contains("without writing any files"))
+        );
+        assert!(!repo.path().join("src/main.rs").exists());
     }
 
     #[tokio::test]
@@ -2415,6 +2798,43 @@ mod tests {
     }
 
     #[test]
+    fn task_prompt_marks_touch_files_as_hard_write_contract() {
+        let prompt = build_task_prompt(
+            &implementation_task(),
+            Path::new("/tmp/workspace"),
+            &["read_file".into(), "apply_patch".into()],
+        );
+
+        assert!(prompt.contains("## Write Contract"));
+        assert!(prompt.contains("Only modify these files"));
+        assert!(prompt.contains("## Version Control"));
+        assert!(prompt.contains("Do not use git"));
+        assert!(prompt.contains("run_libra_vcs"));
+        assert!(prompt.contains("## Completion Requirement"));
+        assert!(prompt.contains("Before reporting completion"));
+        assert!(prompt.contains("src/main.rs"));
+    }
+
+    #[test]
+    fn reviewer_prompt_includes_write_contract() {
+        let record = ToolCallRecord {
+            paths_written: vec!["src/main.rs".into()],
+            ..ToolCallRecord::default()
+        };
+        let prompt = build_reviewer_prompt(
+            &implementation_task(),
+            "done",
+            &[record],
+            Path::new("/tmp/workspace"),
+            &["read_file".into()],
+        );
+
+        assert!(prompt.contains("## Write Contract"));
+        assert!(prompt.contains("Only these paths may be modified"));
+        assert!(prompt.contains("src/main.rs"));
+    }
+
+    #[test]
     fn default_acl_does_not_expose_shell_to_coder() {
         let task = implementation_task();
         let mut spec = (*spec()).clone();
@@ -2422,6 +2842,7 @@ mod tests {
         let tools = allowed_tools_for_task(&spec, &task);
         assert!(tools.contains(&"read_file".to_string()));
         assert!(tools.contains(&"apply_patch".to_string()));
+        assert!(tools.contains(&"run_libra_vcs".to_string()));
         assert!(!tools.contains(&"shell".to_string()));
     }
 
@@ -2489,14 +2910,18 @@ mod tests {
         spec.security = profiles::default_security();
         let tools = allowed_tools_for_task(&spec, &task);
         assert!(tools.contains(&"read_file".to_string()));
+        assert!(tools.contains(&"run_libra_vcs".to_string()));
         assert!(!tools.contains(&"apply_patch".to_string()));
     }
 
     #[tokio::test]
     async fn execute_dag_uses_real_dependencies_without_batch_barriers() {
         let model = ConditionalModel;
-        let registry = Arc::new(ToolRegistry::new());
         let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        let mut registry = ToolRegistry::with_working_dir(dir.path().to_path_buf());
+        registry.register("apply_patch", Arc::new(ApplyPatchHandler));
+        let registry = Arc::new(registry);
         let events = Arc::new(Mutex::new(Vec::new()));
         let config = ExecutorConfig {
             tool_loop_config: ToolLoopConfig::default(),
@@ -2511,39 +2936,11 @@ mod tests {
             })),
         };
 
-        let mut a = implementation_task();
-        a.task = {
-            let actor = ActorRef::agent("test-executor").unwrap();
-            let mut task = GitTask::new(actor, "A", None).unwrap();
-            task.set_description(Some("Implement change".into()));
-            task.add_constraint("network:allow");
-            task.add_acceptance_criterion("tests pass");
-            task
-        };
-        a.objective = "A".into();
-
-        let mut c = implementation_task();
-        c.task = {
-            let actor = ActorRef::agent("test-executor").unwrap();
-            let mut task = GitTask::new(actor, "C", None).unwrap();
-            task.set_description(Some("Implement change".into()));
-            task.add_constraint("network:allow");
-            task.add_acceptance_criterion("tests pass");
-            task
-        };
-        c.objective = "C".into();
+        let a = scoped_implementation_task("A", "src/a.txt");
+        let mut c = scoped_implementation_task("C", "src/c.txt");
         c.task.add_dependency(a.id());
 
-        let mut b = implementation_task();
-        b.task = {
-            let actor = ActorRef::agent("test-executor").unwrap();
-            let mut task = GitTask::new(actor, "B", None).unwrap();
-            task.set_description(Some("Implement change".into()));
-            task.add_constraint("network:allow");
-            task.add_acceptance_criterion("tests pass");
-            task
-        };
-        b.objective = "B".into();
+        let b = scoped_implementation_task("B", "src/b.txt");
 
         let plan = plan_for_tasks(vec![a, c, b], 2);
 
@@ -2578,8 +2975,11 @@ mod tests {
     #[tokio::test]
     async fn execute_dag_skips_dependent_tasks_after_failure() {
         let model = ConditionalModel;
-        let registry = Arc::new(ToolRegistry::new());
         let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        let mut registry = ToolRegistry::with_working_dir(dir.path().to_path_buf());
+        registry.register("apply_patch", Arc::new(ApplyPatchHandler));
+        let registry = Arc::new(registry);
         let events = Arc::new(Mutex::new(Vec::new()));
         let config = ExecutorConfig {
             tool_loop_config: ToolLoopConfig::default(),
@@ -2641,11 +3041,11 @@ mod tests {
 
     #[tokio::test]
     async fn execute_dag_records_cost_budget_abort_as_failure() {
-        let model = MockModel {
-            final_text: "done".into(),
-        };
-        let registry = Arc::new(ToolRegistry::new());
         let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        let mut registry = ToolRegistry::with_working_dir(dir.path().to_path_buf());
+        registry.register("apply_patch", Arc::new(ApplyPatchHandler));
+        let registry = Arc::new(registry);
         let mut spec = (*spec()).clone();
         spec.constraints.resources.max_cost_units = 1;
         spec.execution.concurrency.max_parallel_tasks = 1;
@@ -2673,7 +3073,7 @@ mod tests {
         second.objective = "Second".into();
 
         let plan = plan_for_tasks(vec![first.clone(), second.clone()], 1);
-        let run_state = execute_dag(&plan, &model, &registry, &config)
+        let run_state = execute_dag(&plan, &AddFilePatchModel, &registry, &config)
             .await
             .unwrap();
 

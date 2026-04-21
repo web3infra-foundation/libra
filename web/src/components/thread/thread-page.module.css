@@ -1,0 +1,69 @@
+.scrollRegion {
+  scrollbar-width: thin;
+  scrollbar-color: #333 #0a0a0a;
+}
+
+.scrollRegion::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.scrollRegion::-webkit-scrollbar-track {
+  background: #0a0a0a;
+}
+
+.scrollRegion::-webkit-scrollbar-thumb {
+  background: #333;
+  border-radius: 9999px;
+}
+
+.scrollRegion::-webkit-scrollbar-thumb:hover {
+  background: #444;
+}
+
+.topologyLine {
+  position: absolute;
+  inset-block: 0;
+  left: 0.5rem;
+  width: 1px;
+  background: #d4d4d4;
+}
+
+.topologyNode {
+  position: absolute;
+  top: 0.375rem;
+  left: 0.375rem;
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background: #d4d4d4;
+}
+
+.topologyNodeMuted {
+  background: #a3a3a3;
+}
+
+.topologyNodeSoft {
+  background: #d4d4d4;
+}
+
+.topologyNodeActive {
+  top: 0.3rem;
+  left: 0.3rem;
+  width: 8px;
+  height: 8px;
+  border: 2px solid #262626;
+  background: #000;
+}
+
+.featuredArticle:hover .featureRail {
+  background: #a3a3a3;
+}
+
+.featureRail {
+  transition: background-color 180ms ease;
+}
+
+.glitchHover:hover {
+  text-shadow: 2px 0 #ff0000, -2px 0 #00ff00;
+}

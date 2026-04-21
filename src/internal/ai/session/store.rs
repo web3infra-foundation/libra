@@ -8,11 +8,14 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use serde::{Deserialize, Serialize};
+
 use super::state::SessionState;
 
 const SESSION_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 const SESSION_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const STALE_SESSION_LOCK_AGE: Duration = Duration::from_secs(30);
+const THREAD_ID_METADATA_KEYS: &[&str] = &["thread_id", "threadId", "canonical_thread_id"];
 
 /// Manages session persistence on disk.
 ///
@@ -24,6 +27,21 @@ pub struct SessionStore {
 #[derive(Debug)]
 pub struct SessionFileLock {
     lock_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionMetadataBackfillReport {
+    pub scanned: usize,
+    pub updates: Vec<SessionMetadataBackfillUpdate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionMetadataBackfillUpdate {
+    pub session_id: String,
+    pub working_dir: String,
+    pub legacy_session_id: String,
+    pub canonical_thread_id: Option<String>,
+    pub provider_thread_id: Option<String>,
 }
 
 impl Drop for SessionFileLock {
@@ -145,6 +163,56 @@ impl SessionStore {
         }
 
         Ok(latest.map(|(session, _)| session))
+    }
+
+    /// Load the most recently updated session for a canonical Libra thread_id.
+    pub fn load_for_thread_id(
+        &self,
+        thread_id: &str,
+        working_dir: &str,
+    ) -> io::Result<Option<SessionState>> {
+        let sessions = self.list()?;
+        if sessions.is_empty() {
+            return Ok(None);
+        }
+
+        let mut latest: Option<(SessionState, SystemTime)> = None;
+        for info in sessions {
+            match self.load(&info.id) {
+                Ok(session)
+                    if session.working_dir == working_dir
+                        && session_matches_thread_id(&session, thread_id) =>
+                {
+                    let path = self.session_path(&info.id);
+                    let modified = fs::metadata(&path)
+                        .and_then(|m| m.modified())
+                        .unwrap_or(SystemTime::UNIX_EPOCH);
+
+                    if latest
+                        .as_ref()
+                        .is_none_or(|(_, best_time)| modified > *best_time)
+                    {
+                        latest = Some((session, modified));
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(session_id = %info.id, error = %e, "skipping corrupt session file");
+                }
+            }
+        }
+
+        Ok(latest.map(|(session, _)| session))
+    }
+
+    /// Preview non-destructive legacy metadata backfill for existing sessions.
+    pub fn preview_legacy_metadata_backfill(&self) -> io::Result<SessionMetadataBackfillReport> {
+        self.legacy_metadata_backfill_report(false)
+    }
+
+    /// Apply non-destructive legacy metadata backfill for existing sessions.
+    pub fn apply_legacy_metadata_backfill(&self) -> io::Result<SessionMetadataBackfillReport> {
+        self.legacy_metadata_backfill_report(true)
     }
 
     /// List all saved sessions (basic info only).
@@ -286,6 +354,66 @@ impl SessionStore {
         }
     }
 
+    fn legacy_metadata_backfill_report(
+        &self,
+        apply: bool,
+    ) -> io::Result<SessionMetadataBackfillReport> {
+        let sessions = self.list()?;
+        let mut updates = Vec::new();
+
+        for info in &sessions {
+            let mut session = match self.load(&info.id) {
+                Ok(session) => session,
+                Err(error) => {
+                    tracing::warn!(session_id = %info.id, error = %error, "skipping corrupt session file");
+                    continue;
+                }
+            };
+            if session.metadata.contains_key("legacy_session_id") {
+                continue;
+            }
+
+            let canonical_thread_id = first_metadata_string(&session, THREAD_ID_METADATA_KEYS)
+                .or_else(|| uuid_session_id(&session.id));
+            let provider_thread_id =
+                first_metadata_string(&session, &["provider_thread_id", "providerThreadId"]);
+            let update = SessionMetadataBackfillUpdate {
+                session_id: session.id.clone(),
+                working_dir: session.working_dir.clone(),
+                legacy_session_id: session.id.clone(),
+                canonical_thread_id,
+                provider_thread_id,
+            };
+
+            if apply {
+                session.metadata.insert(
+                    "legacy_session_id".to_string(),
+                    serde_json::json!(update.legacy_session_id),
+                );
+                if let Some(thread_id) = update.canonical_thread_id.as_ref() {
+                    session
+                        .metadata
+                        .entry("thread_id".to_string())
+                        .or_insert_with(|| serde_json::json!(thread_id));
+                }
+                if let Some(provider_thread_id) = update.provider_thread_id.as_ref() {
+                    session
+                        .metadata
+                        .entry("provider_thread_id".to_string())
+                        .or_insert_with(|| serde_json::json!(provider_thread_id));
+                }
+                self.save(&session)?;
+            }
+
+            updates.push(update);
+        }
+
+        Ok(SessionMetadataBackfillReport {
+            scanned: sessions.len(),
+            updates,
+        })
+    }
+
     fn session_path(&self, id: &str) -> PathBuf {
         self.sessions_dir.join(format!("{id}.json"))
     }
@@ -380,6 +508,36 @@ impl SessionStore {
             )
         })
     }
+}
+
+fn session_matches_thread_id(session: &SessionState, thread_id: &str) -> bool {
+    if session.id == thread_id {
+        return true;
+    }
+
+    THREAD_ID_METADATA_KEYS.iter().any(|key| {
+        session
+            .metadata
+            .get(*key)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| value == thread_id)
+    })
+}
+
+fn first_metadata_string(session: &SessionState, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        session
+            .metadata
+            .get(*key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    })
+}
+
+fn uuid_session_id(session_id: &str) -> Option<String> {
+    uuid::Uuid::parse_str(session_id)
+        .ok()
+        .map(|id| id.to_string())
 }
 
 /// Brief info about a saved session.
@@ -514,6 +672,79 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(latest_for_b.summary, "b-latest");
+    }
+
+    #[test]
+    fn test_load_for_thread_id_uses_canonical_metadata_and_working_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = SessionStore::from_storage_path(tmp.path());
+        let thread_id = "11111111-1111-4111-8111-111111111111";
+
+        let mut wrong_worktree = SessionState::new("/repo/other");
+        wrong_worktree.summary = "wrong".to_string();
+        wrong_worktree
+            .metadata
+            .insert("thread_id".to_string(), serde_json::json!(thread_id));
+        store.save(&wrong_worktree).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        let mut canonical = SessionState::new("/repo/main");
+        canonical.summary = "canonical".to_string();
+        canonical
+            .metadata
+            .insert("thread_id".to_string(), serde_json::json!(thread_id));
+        store.save(&canonical).unwrap();
+
+        let loaded = store
+            .load_for_thread_id(thread_id, "/repo/main")
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.summary, "canonical");
+    }
+
+    #[test]
+    fn test_legacy_metadata_backfill_preview_and_apply_are_non_destructive() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = SessionStore::from_storage_path(tmp.path());
+        let thread_id = "11111111-1111-4111-8111-111111111111";
+
+        let mut session = SessionState::new("/repo/main");
+        let session_id = session.id.clone();
+        session
+            .metadata
+            .insert("thread_id".to_string(), serde_json::json!(thread_id));
+        store.save(&session).unwrap();
+
+        let preview = store.preview_legacy_metadata_backfill().unwrap();
+        assert_eq!(preview.scanned, 1);
+        assert_eq!(preview.updates.len(), 1);
+        assert_eq!(preview.updates[0].legacy_session_id, session_id);
+        assert_eq!(
+            preview.updates[0].canonical_thread_id.as_deref(),
+            Some(thread_id)
+        );
+        assert!(
+            !store
+                .load(&session_id)
+                .unwrap()
+                .metadata
+                .contains_key("legacy_session_id")
+        );
+
+        let applied = store.apply_legacy_metadata_backfill().unwrap();
+        assert_eq!(applied.updates.len(), 1);
+        let loaded = store.load(&session_id).unwrap();
+        assert_eq!(
+            loaded
+                .metadata
+                .get("legacy_session_id")
+                .and_then(serde_json::Value::as_str),
+            Some(session_id.as_str())
+        );
+
+        let second = store.preview_legacy_metadata_backfill().unwrap();
+        assert!(second.updates.is_empty());
     }
 
     #[test]

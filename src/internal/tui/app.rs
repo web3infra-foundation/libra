@@ -4,7 +4,7 @@
 //! user input, agent execution, and UI rendering.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     future::Future,
     path::PathBuf,
     sync::{
@@ -14,6 +14,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use async_trait::async_trait;
+use chrono::Utc;
 use crossterm::event::{KeyCode, KeyModifiers};
 use tokio::{
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
@@ -37,37 +39,59 @@ use crate::{
     cli_error,
     internal::ai::{
         agent::{
-            ToolLoopConfig, profile::AgentProfileRouter, run_tool_loop_with_history_and_observer,
+            ToolLoopConfig, ToolLoopObserver, profile::AgentProfileRouter,
+            run_tool_loop_with_history_and_observer,
         },
-        claudecode::{self, ClaudecodeTuiRuntime},
         commands::CommandDispatcher,
         completion::{
             CompletionModel, CompletionRetryEvent, CompletionRetryObserver, CompletionRetryPolicy,
-            CompletionUsage, Message, RetryingCompletionModel,
+            CompletionStreamEvent, CompletionUsage, Message, RetryingCompletionModel,
         },
         intentspec::{
-            IntentDraft, ResolveContext, RiskLevel, render_summary, repair_intentspec,
-            resolve_intentspec, validate_intentspec,
+            IntentDraft, IntentSpec, ResolveContext, RiskLevel, build_intentspec_review,
+            persistence::persist_intentspec,
+            render_summary, repair_intentspec, resolve_intentspec,
+            types::{
+                ConflictResolution, DecompositionMode, LibraBinding, Objective, ObjectiveKind,
+                PlanGenerationConfig,
+            },
+            validate_intentspec,
         },
         mcp::{
             resource::{
-                CreateContextSnapshotParams, CreateDecisionParams, CreatePlanParams,
-                CreateRunParams, CreateTaskParams, CreateToolInvocationParams,
+                CreateContextFrameParams, CreateContextSnapshotParams, CreateDecisionParams,
+                CreatePlanParams, CreateRunParams, CreateTaskParams, CreateToolInvocationParams,
+                PlanStepParams,
             },
             server::LibraMcpServer,
         },
         orchestrator::{
             planner::compile_execution_plan_spec,
-            types::{ExecutionPlanSpec, TaskRuntimeEvent, TaskRuntimeNoteLevel, TaskRuntimePhase},
+            types::{
+                DecisionOutcome, ExecutionPlanSpec, GateReport, OrchestratorPhaseConfirmer,
+                OrchestratorResult, PhaseConfirmationDecision, PhaseConfirmationPrompt,
+                SystemReport, TaskKind, TaskNodeStatus, TaskRuntimeEvent, TaskRuntimeNoteLevel,
+                TaskRuntimePhase,
+            },
         },
+        projection::ProjectionRebuilder,
         sandbox::{ExecApprovalRequest, ReviewDecision},
         session::{SessionState, SessionStore},
         tools::{
             ToolOutput, ToolRegistry,
             context::{
-                RequestUserInputArgs, SubmitIntentDraftArgs, UpdatePlanArgs, UserInputAnswer,
+                RequestUserInputArgs, StepStatus, UpdatePlanArgs, UserInputAnswer,
                 UserInputRequest, UserInputResponse,
             },
+            handlers::submit_intent_draft::parse_submit_intent_draft_value,
+        },
+        web::code_ui::{
+            CodeUiApplyToFuture, CodeUiEventEnvelope, CodeUiInteractionKind,
+            CodeUiInteractionOption, CodeUiInteractionRequest, CodeUiInteractionResponse,
+            CodeUiInteractionStatus, CodeUiPatchChange, CodeUiPatchsetSnapshot, CodeUiPlanSnapshot,
+            CodeUiPlanStep, CodeUiRuntimeHandle, CodeUiSession, CodeUiSessionSnapshot,
+            CodeUiSessionStatus, CodeUiToolCallSnapshot, CodeUiTranscriptEntry,
+            CodeUiTranscriptEntryKind, snapshot_from_event,
         },
         workflow_objects::{build_git_plan, parse_object_id},
     },
@@ -122,6 +146,28 @@ const LATEST_INTENTSPEC_BRANCH_LABEL: &str = "latest_intentspec_branch_label";
 const MAX_INTENTSPEC_REPAIR_ATTEMPTS: usize = 2;
 const MCP_WRITE_TIMEOUT: Duration = Duration::from_secs(8);
 const MCP_TURN_TRACKING_TIMEOUT: Duration = Duration::from_secs(3);
+const GRAPH_THREAD_ID_METADATA_KEYS: &[&str] = &["thread_id", "threadId", "canonical_thread_id"];
+
+fn session_graph_thread_id(session: &SessionState) -> Option<String> {
+    GRAPH_THREAD_ID_METADATA_KEYS
+        .iter()
+        .find_map(|key| session.metadata.get(*key).and_then(|value| value.as_str()))
+        .filter(|thread_id| uuid::Uuid::parse_str(thread_id).is_ok())
+        .map(str::to_string)
+        .or_else(|| {
+            session
+                .metadata
+                .get(LATEST_INTENTSPEC_INTENT_ID)
+                .and_then(|value| value.as_str())
+                .filter(|intent_id| uuid::Uuid::parse_str(intent_id).is_ok())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            uuid::Uuid::parse_str(&session.id)
+                .ok()
+                .map(|thread_id| thread_id.to_string())
+        })
+}
 
 fn summarize_mcp_content(content: &[rmcp::model::Content]) -> Option<String> {
     let mut parts = Vec::new();
@@ -166,6 +212,8 @@ pub enum ExitReason {
 pub struct AppExitInfo {
     /// The reason for exiting.
     pub reason: ExitReason,
+    /// Canonical thread id that can be inspected with `libra graph`, when known.
+    pub thread_id: Option<String>,
 }
 
 /// Pending user-input state while the TUI waits for the user to answer.
@@ -189,13 +237,47 @@ struct PendingPostPlan {
     spec_json: String,
     intent_id: Option<String>,
     plan_id: Option<String>,
+    plan: ExecutionPlanSpec,
+    llm_plan: UpdatePlanArgs,
+    warnings: Vec<String>,
     selected: usize, // 0=Execute, 1=Modify, 2=Cancel
+}
+
+/// Execution-plan revision state after the user chooses Modify on the plan review.
+struct PendingExecutionPlanRevision {
+    spec_json: String,
+    intent_id: Option<String>,
+    current_plan: UpdatePlanArgs,
+    warnings: Vec<String>,
+}
+
+/// IntentSpec review dialog state: stores the spec and user selection.
+struct PendingIntentReview {
+    spec_json: String,
+    intent_id: Option<String>,
+    warnings: Vec<String>,
+    interaction_id: String,
+    selected: usize, // 0=Confirm, 1=Modify, 2=Cancel
 }
 
 /// Pending sandbox approval state.
 struct PendingExecApproval {
     request: ExecApprovalRequest,
     selected: usize, // 0=Approve, 1=Approve Session, 2=Deny, 3=Abort
+}
+
+/// Pending managed-provider interaction mirrored into the approval dialog.
+struct PendingManagedInteraction {
+    interaction: CodeUiInteractionRequest,
+    selected: usize,
+}
+
+/// Pending orchestrator Phase 3 / Phase 4 confirmation.
+struct PendingPhaseConfirmation {
+    prompt: PhaseConfirmationPrompt,
+    response_tx: tokio::sync::oneshot::Sender<PhaseConfirmationDecision>,
+    interaction_id: String,
+    selected: usize,
 }
 
 /// Configuration for creating an App.
@@ -205,9 +287,7 @@ pub struct AppConfig {
     pub agent_router: AgentProfileRouter,
     pub session: SessionState,
     pub session_store: SessionStore,
-    pub user_input_tx: UnboundedSender<UserInputRequest>,
     pub user_input_rx: UnboundedReceiver<UserInputRequest>,
-    pub exec_approval_tx: UnboundedSender<ExecApprovalRequest>,
     pub exec_approval_rx: UnboundedReceiver<ExecApprovalRequest>,
     /// Display name of the active model (e.g. "gemini-2.5-flash").
     pub model_name: String,
@@ -215,8 +295,10 @@ pub struct AppConfig {
     pub provider_name: String,
     /// MCP server instance for workflow tracking.
     pub mcp_server: Option<Arc<LibraMcpServer>>,
-    /// Optional managed Claude runtime for `claudecode`.
-    pub(crate) managed_claudecode: Option<ClaudecodeTuiRuntime>,
+    /// Optional Code UI session mirror for the browser UI.
+    pub code_ui_session: Option<Arc<CodeUiSession>>,
+    /// Optional managed provider runtime controlled through the same TUI.
+    pub managed_code_ui_runtime: Option<Arc<CodeUiRuntimeHandle>>,
 }
 
 /// The main application struct.
@@ -260,19 +342,25 @@ pub struct App<M: CompletionModel> {
     /// Session store for saving/loading.
     session_store: SessionStore,
     /// Receiver for user-input requests from the `request_user_input` tool handler.
-    user_input_tx: UnboundedSender<UserInputRequest>,
     user_input_rx: UnboundedReceiver<UserInputRequest>,
     /// Receiver for exec-approval requests from sandbox-governed handlers.
-    exec_approval_tx: UnboundedSender<ExecApprovalRequest>,
     exec_approval_rx: UnboundedReceiver<ExecApprovalRequest>,
     /// Currently pending user-input interaction, if any.
     pending_user_input: Option<PendingUserInput>,
     /// Currently pending exec approval interaction, if any.
     pending_exec_approval: Option<PendingExecApproval>,
+    /// Currently pending managed-provider approval interaction, if any.
+    pending_managed_interaction: Option<PendingManagedInteraction>,
+    /// Currently pending Phase 3 / Phase 4 confirmation, if any.
+    pending_phase_confirmation: Option<PendingPhaseConfirmation>,
     /// Post-plan dialog state (present when user is choosing Execute/Modify/Cancel).
     pending_post_plan: Option<PendingPostPlan>,
+    /// IntentSpec dialog state (present when user is choosing Confirm/Modify/Cancel).
+    pending_intent_review: Option<PendingIntentReview>,
     /// Base IntentSpec JSON for the next spec-revision request, if the user chose Modify.
     pending_plan_revision: Option<String>,
+    /// Base execution plan for the next plan-revision request, if the user chose Modify Plan.
+    pending_execution_plan_revision: Option<PendingExecutionPlanRevision>,
     /// Display name of the active model.
     model_name: String,
     /// Provider identifier.
@@ -295,8 +383,12 @@ pub struct App<M: CompletionModel> {
     running_tool_calls: usize,
     /// Shared run-id slot for the active turn, backfilled by MCP tracking.
     active_turn_run_id: Option<Arc<Mutex<Option<String>>>>,
-    /// Optional managed runtime state for the active provider.
-    managed_claudecode: Option<ClaudecodeTuiRuntime>,
+    /// Provider-agnostic web snapshot state shared with the browser UI.
+    code_ui_session: Option<Arc<CodeUiSession>>,
+    /// Managed provider runtime for providers that own their own tool loop.
+    managed_code_ui_runtime: Option<Arc<CodeUiRuntimeHandle>>,
+    /// Monotonic id source for browser transcript artifacts.
+    next_code_ui_item_id: u64,
 }
 
 impl<M: CompletionModel + Clone + 'static> App<M>
@@ -380,14 +472,16 @@ where
             agent_router: app_config.agent_router,
             session: app_config.session,
             session_store: app_config.session_store,
-            user_input_tx: app_config.user_input_tx,
             user_input_rx: app_config.user_input_rx,
-            exec_approval_tx: app_config.exec_approval_tx,
             exec_approval_rx: app_config.exec_approval_rx,
             pending_user_input: None,
             pending_exec_approval: None,
+            pending_managed_interaction: None,
+            pending_phase_confirmation: None,
             pending_post_plan: None,
+            pending_intent_review: None,
             pending_plan_revision: None,
+            pending_execution_plan_revision: None,
             model_name: app_config.model_name,
             provider_name: app_config.provider_name,
             mcp_server: app_config.mcp_server,
@@ -399,7 +493,9 @@ where
             active_turn_signal,
             running_tool_calls: 0,
             active_turn_run_id: None,
-            managed_claudecode: app_config.managed_claudecode,
+            code_ui_session: app_config.code_ui_session,
+            managed_code_ui_runtime: app_config.managed_code_ui_runtime,
+            next_code_ui_item_id: 1,
         }
     }
 
@@ -444,6 +540,24 @@ where
         // Get the event stream
         let mut event_stream = self.tui.event_stream();
         let mut animation_tick = interval(Duration::from_millis(120));
+        let (managed_event_tx, mut managed_event_rx) =
+            mpsc::unbounded_channel::<CodeUiEventEnvelope>();
+        let managed_event_task = self.managed_code_ui_runtime.as_ref().map(|runtime| {
+            let mut events = runtime.subscribe();
+            tokio::spawn(async move {
+                loop {
+                    match events.recv().await {
+                        Ok(event) => {
+                            if managed_event_tx.send(event).is_err() {
+                                break;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            })
+        });
 
         loop {
             // Check if we should exit
@@ -460,6 +574,11 @@ where
                 // Handle app events
                 Some(event) = self.app_event_rx.recv() => {
                     self.handle_app_event(event).await?;
+                }
+
+                // Mirror managed provider snapshots into the local TUI.
+                Some(event) = managed_event_rx.recv(), if self.managed_code_ui_runtime.is_some() => {
+                    self.handle_managed_code_ui_event(event).await?;
                 }
 
                 // Handle user-input requests from the tool handler
@@ -487,11 +606,18 @@ where
         }
 
         self.interrupt_agent_task();
+        if let Some(task) = managed_event_task {
+            task.abort();
+        }
         self.mcp_write_tracker.drain().await;
-        let exit_info = self.exit_info.clone().unwrap_or(AppExitInfo {
+        let mut exit_info = self.exit_info.clone().unwrap_or(AppExitInfo {
             reason: ExitReason::UserRequested,
+            thread_id: None,
         });
         self.create_mcp_exit_decision(&exit_info.reason).await;
+        if exit_info.thread_id.is_none() {
+            exit_info.thread_id = self.graph_thread_id_hint().await;
+        }
 
         Ok(exit_info)
     }
@@ -514,6 +640,20 @@ where
     fn clear_turn_tracking(&mut self) {
         self.clear_active_turn();
         self.clear_mcp_run_id();
+    }
+
+    fn next_code_ui_id(&mut self, prefix: &str) -> String {
+        let id = format!("{prefix}-{}", self.next_code_ui_item_id);
+        self.next_code_ui_item_id = self.next_code_ui_item_id.saturating_add(1);
+        id
+    }
+
+    fn code_ui_user_entry_id(turn_id: TurnId) -> String {
+        format!("turn-{turn_id}-user")
+    }
+
+    fn code_ui_assistant_entry_id(turn_id: TurnId) -> String {
+        format!("turn-{turn_id}-assistant")
     }
 
     fn is_active_turn(&self, turn_id: TurnId) -> bool {
@@ -555,13 +695,14 @@ where
     async fn handle_key_event(&mut self, key: crossterm::event::KeyEvent) -> anyhow::Result<()> {
         // Check for Ctrl+C first (always handled)
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            self.cancel_pending_user_input();
-            self.cancel_pending_exec_approval();
-            self.dismiss_post_plan_dialog();
-            self.interrupt_agent_task();
-            self.exit_info = Some(AppExitInfo {
-                reason: ExitReason::UserRequested,
-            });
+            self.request_user_exit();
+            return Ok(());
+        }
+
+        // `/quit` is a local TUI command and must preempt every interaction
+        // state, including a running workflow mux. Otherwise it is treated as
+        // ordinary shared-input text while the orchestrator keeps running.
+        if key.code == KeyCode::Enter && self.try_handle_global_quit_command() {
             return Ok(());
         }
 
@@ -669,24 +810,45 @@ where
             }
             AgentStatus::AwaitingApproval => match key.code {
                 KeyCode::Up => {
-                    if let Some(ref mut pending) = self.pending_exec_approval {
+                    if let Some(ref mut pending) = self.pending_phase_confirmation {
+                        pending.selected = pending.selected.saturating_sub(1);
+                        self.widget.bottom_pane.exec_approval_selected = pending.selected;
+                    } else if let Some(ref mut pending) = self.pending_managed_interaction {
+                        pending.selected = pending.selected.saturating_sub(1);
+                        self.widget.bottom_pane.exec_approval_selected = pending.selected;
+                    } else if let Some(ref mut pending) = self.pending_exec_approval {
                         pending.selected = pending.selected.saturating_sub(1);
                         self.widget.bottom_pane.exec_approval_selected = pending.selected;
                     }
                     self.schedule_draw();
                 }
                 KeyCode::Down => {
-                    if let Some(ref mut pending) = self.pending_exec_approval {
+                    if let Some(ref mut pending) = self.pending_phase_confirmation {
+                        pending.selected = (pending.selected + 1).min(2);
+                        self.widget.bottom_pane.exec_approval_selected = pending.selected;
+                    } else if let Some(ref mut pending) = self.pending_managed_interaction {
+                        let max = pending.interaction.options.len().saturating_sub(1);
+                        pending.selected = (pending.selected + 1).min(max);
+                        self.widget.bottom_pane.exec_approval_selected = pending.selected;
+                    } else if let Some(ref mut pending) = self.pending_exec_approval {
                         pending.selected = (pending.selected + 1).min(3);
                         self.widget.bottom_pane.exec_approval_selected = pending.selected;
                     }
                     self.schedule_draw();
                 }
                 KeyCode::Enter => {
-                    self.submit_exec_approval_decision();
+                    if self.pending_phase_confirmation.is_some() {
+                        self.submit_phase_confirmation_decision();
+                    } else {
+                        self.submit_exec_approval_decision();
+                    }
                 }
                 KeyCode::Esc => {
-                    self.reject_pending_exec_approval();
+                    if self.pending_phase_confirmation.is_some() {
+                        self.reject_pending_phase_confirmation();
+                    } else {
+                        self.reject_pending_exec_approval();
+                    }
                 }
                 _ => {}
             },
@@ -710,6 +872,29 @@ where
                 }
                 KeyCode::Esc => {
                     self.dismiss_post_plan_dialog();
+                }
+                _ => {}
+            },
+            AgentStatus::AwaitingIntentReviewChoice => match key.code {
+                KeyCode::Up => {
+                    if let Some(ref mut p) = self.pending_intent_review {
+                        p.selected = p.selected.saturating_sub(1);
+                        self.widget.bottom_pane.post_plan_selected = p.selected;
+                    }
+                    self.schedule_draw();
+                }
+                KeyCode::Down => {
+                    if let Some(ref mut p) = self.pending_intent_review {
+                        p.selected = (p.selected + 1).min(2);
+                        self.widget.bottom_pane.post_plan_selected = p.selected;
+                    }
+                    self.schedule_draw();
+                }
+                KeyCode::Enter => {
+                    self.handle_intent_review_choice().await;
+                }
+                KeyCode::Esc => {
+                    self.dismiss_intent_review_dialog();
                 }
                 _ => {}
             },
@@ -750,7 +935,7 @@ where
                             }
                         } else {
                             self.widget.add_cell(Box::new(AssistantHistoryCell::new(
-                                "Workflow is running. Only local `/mux ...` commands are accepted in the shared input box right now.".to_string(),
+                                "Workflow is running. Use `/mux ...` to control the workflow view, `/quit` to exit, or Esc to interrupt the current turn.".to_string(),
                             )));
                         }
                         self.schedule_draw();
@@ -898,6 +1083,10 @@ where
 
     /// Submit the currently selected answer for the active question.
     fn submit_user_input_answer(&mut self) {
+        let interaction_id = self
+            .pending_user_input
+            .as_ref()
+            .map(|pending| pending.request.call_id.clone());
         let answer = if let Some(ref pending) = self.pending_user_input {
             let q = &pending.request.questions[pending.current_question];
             let options = q.options.as_deref().unwrap_or_default();
@@ -961,14 +1150,30 @@ where
             self.sync_user_input_to_pane();
         }
         self.schedule_draw();
+        if let (Some(code_ui_session), Some(interaction_id)) =
+            (self.code_ui_session.clone(), interaction_id)
+        {
+            tokio::spawn(async move {
+                code_ui_session.resolve_interaction(&interaction_id).await;
+                code_ui_session
+                    .set_status(CodeUiSessionStatus::ExecutingTool)
+                    .await;
+            });
+        }
     }
 
     /// Cancel the pending user-input interaction (drops the oneshot sender).
     fn cancel_pending_user_input(&mut self) {
         if let Some(pending) = self.pending_user_input.take() {
+            let interaction_id = pending.request.call_id.clone();
             // Dropping response_tx signals cancellation to the handler.
             drop(pending.request.response_tx);
             self.widget.bottom_pane.set_user_input_questions(None);
+            if let Some(code_ui_session) = self.code_ui_session.clone() {
+                tokio::spawn(async move {
+                    code_ui_session.clear_interaction(&interaction_id).await;
+                });
+            }
         }
     }
 
@@ -984,6 +1189,53 @@ where
 
     /// Handle a user-input request from the tool handler.
     fn handle_user_input_request(&mut self, request: UserInputRequest) {
+        let interaction = CodeUiInteractionRequest {
+            id: request.call_id.clone(),
+            kind: CodeUiInteractionKind::RequestUserInput,
+            title: Some("User input required".to_string()),
+            description: None,
+            prompt: request
+                .questions
+                .first()
+                .map(|question| question.question.clone()),
+            options: request
+                .questions
+                .first()
+                .and_then(|question| question.options.as_ref())
+                .map(|options| {
+                    options
+                        .iter()
+                        .enumerate()
+                        .map(|(index, option)| CodeUiInteractionOption {
+                            id: format!("option-{index}"),
+                            label: option.label.clone(),
+                            description: Some(option.description.clone()),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            status: CodeUiInteractionStatus::Pending,
+            metadata: serde_json::to_value(
+                request
+                    .questions
+                    .iter()
+                    .map(|question| {
+                        serde_json::json!({
+                            "id": question.id,
+                            "header": question.header,
+                            "question": question.question,
+                            "isOther": question.is_other,
+                            "isSecret": question.is_secret,
+                            "options": question.options,
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap_or_else(|_| serde_json::json!([])),
+            requested_at: Utc::now(),
+            resolved_at: None,
+        };
+
         // Store question info for the bottom pane to render.
         self.widget
             .bottom_pane
@@ -1004,6 +1256,14 @@ where
         self.widget.bottom_pane.clear();
         self.sync_user_input_to_pane();
         self.schedule_draw();
+        if let Some(code_ui_session) = self.code_ui_session.clone() {
+            tokio::spawn(async move {
+                code_ui_session.upsert_interaction(interaction).await;
+                code_ui_session
+                    .set_status(CodeUiSessionStatus::AwaitingInteraction)
+                    .await;
+            });
+        }
     }
 
     fn handle_exec_approval_request(&mut self, request: ExecApprovalRequest) {
@@ -1011,6 +1271,46 @@ where
             let _ = request.response_tx.send(ReviewDecision::Denied);
             return;
         }
+
+        let interaction = CodeUiInteractionRequest {
+            id: request.call_id.clone(),
+            kind: CodeUiInteractionKind::SandboxApproval,
+            title: Some("Sandbox approval required".to_string()),
+            description: request.reason.clone(),
+            prompt: Some(request.command.clone()),
+            options: vec![
+                CodeUiInteractionOption {
+                    id: "approve".to_string(),
+                    label: "Approve".to_string(),
+                    description: Some("Run this command once".to_string()),
+                },
+                CodeUiInteractionOption {
+                    id: "approve_session".to_string(),
+                    label: "Approve Session".to_string(),
+                    description: Some("Approve matching commands for this session".to_string()),
+                },
+                CodeUiInteractionOption {
+                    id: "deny".to_string(),
+                    label: "Deny".to_string(),
+                    description: Some("Reject this command".to_string()),
+                },
+                CodeUiInteractionOption {
+                    id: "abort".to_string(),
+                    label: "Abort".to_string(),
+                    description: Some("Stop the current turn".to_string()),
+                },
+            ],
+            status: CodeUiInteractionStatus::Pending,
+            metadata: serde_json::json!({
+                "cwd": request.cwd,
+                "sandboxLabel": request.sandbox_label,
+                "networkAccess": request.network_access,
+                "writableRoots": request.writable_roots,
+                "isRetry": request.is_retry,
+            }),
+            requested_at: Utc::now(),
+            resolved_at: None,
+        };
 
         self.widget.bottom_pane.set_exec_approval(Some(&request));
         self.pending_exec_approval = Some(PendingExecApproval {
@@ -1023,9 +1323,175 @@ where
             .set_status(AgentStatus::AwaitingApproval);
         self.sync_mux_input_context();
         self.schedule_draw();
+        if let Some(code_ui_session) = self.code_ui_session.clone() {
+            tokio::spawn(async move {
+                code_ui_session.upsert_interaction(interaction).await;
+                code_ui_session
+                    .set_status(CodeUiSessionStatus::AwaitingInteraction)
+                    .await;
+            });
+        }
+    }
+
+    fn handle_phase_confirmation_request(
+        &mut self,
+        prompt: PhaseConfirmationPrompt,
+        response_tx: tokio::sync::oneshot::Sender<PhaseConfirmationDecision>,
+    ) {
+        let interaction_id = format!(
+            "phase-{}-confirmation-{}",
+            prompt.phase.number(),
+            self.next_code_ui_item_id
+        );
+        self.next_code_ui_item_id = self.next_code_ui_item_id.saturating_add(1);
+        let details = (!prompt.details.is_empty()).then(|| prompt.details.join(" | "));
+
+        self.widget.bottom_pane.set_approval_dialog(
+            prompt.title.clone(),
+            prompt.summary.clone(),
+            self.registry.working_dir().to_path_buf(),
+            details.clone(),
+            false,
+            "orchestrator phase gate".to_string(),
+            false,
+            Vec::new(),
+            vec![
+                (
+                    "Continue".to_string(),
+                    format!("Enter {}", prompt.phase.label()),
+                ),
+                (
+                    "Reject".to_string(),
+                    "Stop this phase and report rejection".to_string(),
+                ),
+                ("Abort".to_string(), "Stop the workflow".to_string()),
+            ],
+        );
+        self.pending_phase_confirmation = Some(PendingPhaseConfirmation {
+            prompt: prompt.clone(),
+            response_tx,
+            interaction_id: interaction_id.clone(),
+            selected: 0,
+        });
+        self.widget.bottom_pane.exec_approval_selected = 0;
+        self.widget
+            .bottom_pane
+            .set_status(AgentStatus::AwaitingApproval);
+        self.sync_mux_input_context();
+        self.schedule_draw();
+
+        if let Some(code_ui_session) = self.code_ui_session.clone() {
+            let interaction = CodeUiInteractionRequest {
+                id: interaction_id,
+                kind: CodeUiInteractionKind::Approval,
+                title: Some(prompt.title),
+                description: details,
+                prompt: Some(prompt.summary),
+                options: vec![
+                    CodeUiInteractionOption {
+                        id: "continue".to_string(),
+                        label: "Continue".to_string(),
+                        description: Some("Continue to the next phase".to_string()),
+                    },
+                    CodeUiInteractionOption {
+                        id: "reject".to_string(),
+                        label: "Reject".to_string(),
+                        description: Some("Reject this phase".to_string()),
+                    },
+                    CodeUiInteractionOption {
+                        id: "abort".to_string(),
+                        label: "Abort".to_string(),
+                        description: Some("Stop the workflow".to_string()),
+                    },
+                ],
+                status: CodeUiInteractionStatus::Pending,
+                metadata: serde_json::json!({
+                    "phase": prompt.phase.number(),
+                    "phaseLabel": prompt.phase.label(),
+                    "details": prompt.details,
+                }),
+                requested_at: Utc::now(),
+                resolved_at: None,
+            };
+            tokio::spawn(async move {
+                code_ui_session.upsert_interaction(interaction).await;
+                code_ui_session
+                    .set_status(CodeUiSessionStatus::AwaitingInteraction)
+                    .await;
+            });
+        }
+    }
+
+    fn submit_phase_confirmation_decision(&mut self) {
+        let Some(pending) = self.pending_phase_confirmation.take() else {
+            return;
+        };
+        let decision = match pending.selected {
+            0 => PhaseConfirmationDecision::Continue,
+            1 => PhaseConfirmationDecision::Reject,
+            _ => PhaseConfirmationDecision::Abort,
+        };
+        tracing::debug!(
+            target: "libra::internal::tui::app",
+            phase = pending.prompt.phase.number(),
+            decision = ?decision,
+            "tui phase confirmation resolved"
+        );
+        let interaction_id = pending.interaction_id;
+        let _ = pending.response_tx.send(decision);
+        self.widget.bottom_pane.set_exec_approval(None);
+        self.widget.bottom_pane.set_status(AgentStatus::Thinking);
+        self.sync_mux_input_context();
+        self.schedule_draw();
+        if let Some(code_ui_session) = self.code_ui_session.clone() {
+            tokio::spawn(async move {
+                code_ui_session.resolve_interaction(&interaction_id).await;
+                code_ui_session
+                    .set_status(CodeUiSessionStatus::Thinking)
+                    .await;
+            });
+        }
+    }
+
+    fn reject_pending_phase_confirmation(&mut self) {
+        let Some(pending) = self.pending_phase_confirmation.take() else {
+            return;
+        };
+        let interaction_id = pending.interaction_id;
+        let _ = pending.response_tx.send(PhaseConfirmationDecision::Abort);
+        self.widget.bottom_pane.set_exec_approval(None);
+        self.widget.bottom_pane.set_status(AgentStatus::Thinking);
+        self.sync_mux_input_context();
+        self.schedule_draw();
+        if let Some(code_ui_session) = self.code_ui_session.clone() {
+            tokio::spawn(async move {
+                code_ui_session.resolve_interaction(&interaction_id).await;
+                code_ui_session
+                    .set_status(CodeUiSessionStatus::Thinking)
+                    .await;
+            });
+        }
+    }
+
+    fn cancel_pending_phase_confirmation(&mut self) {
+        if let Some(pending) = self.pending_phase_confirmation.take() {
+            let interaction_id = pending.interaction_id;
+            let _ = pending.response_tx.send(PhaseConfirmationDecision::Abort);
+            if let Some(code_ui_session) = self.code_ui_session.clone() {
+                tokio::spawn(async move {
+                    code_ui_session.clear_interaction(&interaction_id).await;
+                });
+            }
+        }
+        self.widget.bottom_pane.set_exec_approval(None);
     }
 
     fn submit_exec_approval_decision(&mut self) {
+        if self.pending_managed_interaction.is_some() {
+            self.submit_managed_interaction_decision();
+            return;
+        }
+
         let Some(pending) = self.pending_exec_approval.take() else {
             return;
         };
@@ -1036,6 +1502,7 @@ where
             2 => ReviewDecision::Denied,
             _ => ReviewDecision::Abort,
         };
+        let interaction_id = pending.request.call_id.clone();
         let _ = pending.request.response_tx.send(decision);
 
         self.widget.bottom_pane.set_exec_approval(None);
@@ -1051,6 +1518,12 @@ where
             self.complete_streaming_assistant_cell("Interrupted.".to_string());
             self.complete_running_tool_cells_with_interrupt();
             self.schedule_draw();
+            if let Some(code_ui_session) = self.code_ui_session.clone() {
+                tokio::spawn(async move {
+                    code_ui_session.resolve_interaction(&interaction_id).await;
+                    code_ui_session.set_status(CodeUiSessionStatus::Idle).await;
+                });
+            }
             return;
         }
 
@@ -1059,11 +1532,33 @@ where
             .set_status(AgentStatus::ExecutingTool);
         self.sync_mux_input_context();
         self.schedule_draw();
+        if let Some(code_ui_session) = self.code_ui_session.clone() {
+            tokio::spawn(async move {
+                code_ui_session.resolve_interaction(&interaction_id).await;
+                code_ui_session
+                    .set_status(CodeUiSessionStatus::ExecutingTool)
+                    .await;
+            });
+        }
     }
 
     fn reject_pending_exec_approval(&mut self) {
+        if self.pending_managed_interaction.is_some() {
+            self.reject_pending_managed_interaction();
+            return;
+        }
+
         if let Some(pending) = self.pending_exec_approval.take() {
+            let interaction_id = pending.request.call_id.clone();
             let _ = pending.request.response_tx.send(ReviewDecision::Denied);
+            if let Some(code_ui_session) = self.code_ui_session.clone() {
+                tokio::spawn(async move {
+                    code_ui_session.resolve_interaction(&interaction_id).await;
+                    code_ui_session
+                        .set_status(CodeUiSessionStatus::ExecutingTool)
+                        .await;
+                });
+            }
         }
         self.widget.bottom_pane.set_exec_approval(None);
         self.widget
@@ -1074,10 +1569,89 @@ where
     }
 
     fn cancel_pending_exec_approval(&mut self) {
+        if self.pending_managed_interaction.is_some() {
+            self.reject_pending_managed_interaction();
+            return;
+        }
+
         if let Some(pending) = self.pending_exec_approval.take() {
+            let interaction_id = pending.request.call_id.clone();
             let _ = pending.request.response_tx.send(ReviewDecision::Denied);
+            if let Some(code_ui_session) = self.code_ui_session.clone() {
+                tokio::spawn(async move {
+                    code_ui_session.clear_interaction(&interaction_id).await;
+                });
+            }
         }
         self.widget.bottom_pane.set_exec_approval(None);
+    }
+
+    fn submit_managed_interaction_decision(&mut self) {
+        let Some(pending) = self.pending_managed_interaction.take() else {
+            return;
+        };
+        self.respond_to_managed_interaction(pending, false);
+    }
+
+    fn reject_pending_managed_interaction(&mut self) {
+        let Some(mut pending) = self.pending_managed_interaction.take() else {
+            return;
+        };
+        pending.selected = pending
+            .interaction
+            .options
+            .iter()
+            .position(|option| {
+                matches!(
+                    option.id.as_str(),
+                    "decline" | "deny" | "reject" | "decline_all"
+                )
+            })
+            .unwrap_or(pending.selected);
+        self.respond_to_managed_interaction(pending, true);
+    }
+
+    fn respond_to_managed_interaction(
+        &mut self,
+        pending: PendingManagedInteraction,
+        rejected_by_escape: bool,
+    ) {
+        let Some(runtime) = self.managed_code_ui_runtime.clone() else {
+            return;
+        };
+        let interaction_id = pending.interaction.id.clone();
+        let response =
+            code_ui_response_from_managed_selection(&pending.interaction, pending.selected);
+        let tx = self.app_event_tx.clone();
+        let turn_id = self.active_turn_id.unwrap_or(0);
+        tokio::spawn(async move {
+            if let Err(error) = runtime
+                .adapter()
+                .respond_interaction(&interaction_id, response)
+                .await
+            {
+                let _ = tx.send(AppEvent::AgentEvent {
+                    turn_id,
+                    event: AgentEvent::Error {
+                        message: error.to_string(),
+                    },
+                });
+            }
+        });
+
+        self.widget.bottom_pane.set_exec_approval(None);
+        self.widget
+            .bottom_pane
+            .set_status(AgentStatus::ExecutingTool);
+        self.sync_mux_input_context();
+        self.schedule_draw();
+        if rejected_by_escape && let Some(code_ui_session) = self.code_ui_session.clone() {
+            tokio::spawn(async move {
+                code_ui_session
+                    .set_status(CodeUiSessionStatus::ExecutingTool)
+                    .await;
+            });
+        }
     }
 
     fn handle_mouse_event(&mut self, mouse: crossterm::event::MouseEvent) {
@@ -1111,6 +1685,30 @@ where
                 text,
                 allowed_tools,
             } => {
+                let browser_user_entry = CodeUiTranscriptEntry {
+                    id: Self::code_ui_user_entry_id(turn_id),
+                    kind: CodeUiTranscriptEntryKind::UserMessage,
+                    title: Some("Developer".to_string()),
+                    content: Some(text.clone()),
+                    status: None,
+                    streaming: false,
+                    metadata: serde_json::json!({
+                        "allowedTools": allowed_tools.clone(),
+                    }),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                };
+                let browser_assistant_entry = CodeUiTranscriptEntry {
+                    id: Self::code_ui_assistant_entry_id(turn_id),
+                    kind: CodeUiTranscriptEntryKind::AssistantMessage,
+                    title: Some("Assistant".to_string()),
+                    content: Some(String::new()),
+                    status: Some("thinking".to_string()),
+                    streaming: true,
+                    metadata: serde_json::json!({}),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                };
                 // Track in session
                 self.running_tool_calls = 0;
                 self.session.add_user_message(&text);
@@ -1125,15 +1723,24 @@ where
                 self.widget.bottom_pane.set_status(AgentStatus::Thinking);
                 self.sync_mux_input_context();
                 self.schedule_draw();
+                if let Some(code_ui_session) = self.code_ui_session.clone() {
+                    code_ui_session
+                        .upsert_transcript_entry(browser_user_entry)
+                        .await;
+                    code_ui_session
+                        .upsert_transcript_entry(browser_assistant_entry)
+                        .await;
+                    code_ui_session
+                        .set_status(CodeUiSessionStatus::Thinking)
+                        .await;
+                }
                 self.clear_mcp_run_id();
                 if let Some(run_id_slot) = self.active_turn_run_id.as_ref()
                     && let Ok(mut slot) = run_id_slot.lock()
                 {
                     *slot = None;
                 }
-                if should_start_mcp_turn_tracking(self.managed_claudecode.is_some())
-                    && let Some(mcp_server) = self.mcp_server.clone()
-                {
+                if let Some(mcp_server) = self.mcp_server.clone() {
                     let tx = self.app_event_tx.clone();
                     let working_dir = self.registry.working_dir().to_path_buf();
                     let plan_id = self.mcp_plan_id.clone();
@@ -1158,35 +1765,8 @@ where
                     });
                 }
 
-                if let Some(runtime) = self.managed_claudecode.as_ref() {
-                    self.history.push(Message::user(text.clone()));
-                    let tx = self.app_event_tx.clone();
-                    let user_input_tx = self.user_input_tx.clone();
-                    let exec_approval_tx = self.exec_approval_tx.clone();
-                    let runtime = runtime.clone();
-                    let prompt = text.clone();
-
-                    let handle = tokio::spawn(async move {
-                        if let Err(error) = claudecode::run_tui_turn(
-                            runtime,
-                            turn_id,
-                            tx.clone(),
-                            user_input_tx,
-                            exec_approval_tx,
-                            prompt,
-                        )
-                        .await
-                        {
-                            let _ = tx.send(AppEvent::AgentEvent {
-                                turn_id,
-                                event: AgentEvent::Error {
-                                    message: error.to_string(),
-                                },
-                            });
-                        }
-                    });
-
-                    self.agent_task = Some(handle);
+                if self.managed_code_ui_runtime.is_some() {
+                    self.start_managed_code_turn(turn_id, text).await;
                     return Ok(());
                 }
 
@@ -1216,7 +1796,36 @@ where
                         turn_id: TurnId,
                     }
 
-                    impl crate::internal::ai::agent::ToolLoopObserver for UiObserver {
+                    impl ToolLoopObserver for UiObserver {
+                        fn on_model_stream_event(&mut self, event: &CompletionStreamEvent) {
+                            match event {
+                                CompletionStreamEvent::TextDelta { delta, .. }
+                                    if !delta.is_empty() =>
+                                {
+                                    let _ = self.tx.send(AppEvent::AgentEvent {
+                                        turn_id: self.turn_id,
+                                        event: AgentEvent::ResponseDelta {
+                                            delta: delta.clone(),
+                                        },
+                                    });
+                                }
+                                CompletionStreamEvent::ToolCallPreview {
+                                    call_id,
+                                    tool_name,
+                                    arguments,
+                                    ..
+                                } => {
+                                    let _ = self.tx.send(AppEvent::ToolCallPreview {
+                                        turn_id: self.turn_id,
+                                        call_id: call_id.clone(),
+                                        tool_name: tool_name.clone(),
+                                        arguments: arguments.clone(),
+                                    });
+                                }
+                                _ => {}
+                            }
+                        }
+
                         fn on_assistant_step_text(&mut self, text: &str) {
                             let cell = Box::new(AssistantHistoryCell::new(text.to_string()));
                             let _ = self.tx.send(AppEvent::InsertHistoryCell {
@@ -1375,6 +1984,28 @@ where
                         // Track in session
                         self.session.add_assistant_message(&text);
                         self.complete_streaming_assistant_cell(text);
+                        if let Some(code_ui_session) = self.code_ui_session.clone() {
+                            code_ui_session
+                                .upsert_transcript_entry(CodeUiTranscriptEntry {
+                                    id: Self::code_ui_assistant_entry_id(_turn_id),
+                                    kind: CodeUiTranscriptEntryKind::AssistantMessage,
+                                    title: Some("Assistant".to_string()),
+                                    content: Some(
+                                        self.session
+                                            .messages
+                                            .last()
+                                            .map(|message| message.content.clone())
+                                            .unwrap_or_default(),
+                                    ),
+                                    status: Some("completed".to_string()),
+                                    streaming: false,
+                                    metadata: serde_json::json!({}),
+                                    created_at: Utc::now(),
+                                    updated_at: Utc::now(),
+                                })
+                                .await;
+                            code_ui_session.set_status(CodeUiSessionStatus::Idle).await;
+                        }
                         self.set_idle_and_draw();
                     }
                     AgentEvent::Error { message } => {
@@ -1385,10 +2016,37 @@ where
                         self.finish_turn_state();
 
                         self.complete_streaming_assistant_cell(format!("Error: {}", message));
+                        if let Some(code_ui_session) = self.code_ui_session.clone() {
+                            code_ui_session
+                                .upsert_transcript_entry(CodeUiTranscriptEntry {
+                                    id: Self::code_ui_assistant_entry_id(_turn_id),
+                                    kind: CodeUiTranscriptEntryKind::AssistantMessage,
+                                    title: Some("Assistant".to_string()),
+                                    content: Some(format!("Error: {message}")),
+                                    status: Some("error".to_string()),
+                                    streaming: false,
+                                    metadata: serde_json::json!({}),
+                                    created_at: Utc::now(),
+                                    updated_at: Utc::now(),
+                                })
+                                .await;
+                            code_ui_session.set_status(CodeUiSessionStatus::Error).await;
+                        }
                         self.set_idle_and_draw();
                     }
                     AgentEvent::ResponseDelta { delta } => {
                         self.append_streaming_assistant_delta(&delta);
+                        if let Some(code_ui_session) = self.code_ui_session.clone() {
+                            code_ui_session
+                                .append_assistant_delta(
+                                    &Self::code_ui_assistant_entry_id(_turn_id),
+                                    &delta,
+                                )
+                                .await;
+                            code_ui_session
+                                .set_status(CodeUiSessionStatus::Thinking)
+                                .await;
+                        }
                         self.schedule_draw();
                     }
                     AgentEvent::ManagedResponseComplete {
@@ -1403,6 +2061,27 @@ where
                         self.history.push(Message::assistant(text.clone()));
                         self.session.add_assistant_message(&text);
                         self.complete_streaming_assistant_cell(text);
+                        if let Some(code_ui_session) = self.code_ui_session.clone() {
+                            code_ui_session
+                                .upsert_transcript_entry(CodeUiTranscriptEntry {
+                                    id: Self::code_ui_assistant_entry_id(_turn_id),
+                                    kind: CodeUiTranscriptEntryKind::AssistantMessage,
+                                    title: Some("Assistant".to_string()),
+                                    content: self
+                                        .session
+                                        .messages
+                                        .last()
+                                        .map(|message| Some(message.content.clone()))
+                                        .unwrap_or_else(|| Some(String::new())),
+                                    status: Some("completed".to_string()),
+                                    streaming: false,
+                                    metadata: serde_json::json!({}),
+                                    created_at: Utc::now(),
+                                    updated_at: Utc::now(),
+                                })
+                                .await;
+                            code_ui_session.set_status(CodeUiSessionStatus::Idle).await;
+                        }
                         self.set_idle_and_draw();
                     }
                     AgentEvent::Retrying {
@@ -1423,17 +2102,34 @@ where
             AppEvent::PlanWorkflowComplete {
                 turn_id: _turn_id,
                 text,
+                llm_output,
                 new_history,
                 intent_id,
                 plan_id,
                 spec_json,
                 spec,
                 plan,
+                llm_plan,
                 warnings,
             } => {
                 self.finish_turn_state();
                 self.history = new_history;
                 self.session.add_assistant_message(&text);
+                self.enqueue_llm_context_frame(
+                    "step_summary",
+                    "Phase 1 plan",
+                    intent_id.clone(),
+                    plan_id.clone(),
+                    llm_output.clone().unwrap_or_else(|| text.clone()),
+                );
+                let browser_plan_steps = plan
+                    .tasks
+                    .iter()
+                    .map(|task| CodeUiPlanStep {
+                        step: task.title().to_string(),
+                        status: "pending".to_string(),
+                    })
+                    .collect::<Vec<_>>();
                 self.session.metadata.insert(
                     LATEST_INTENTSPEC_JSON.to_string(),
                     serde_json::Value::String(spec_json.clone()),
@@ -1474,20 +2170,97 @@ where
                     self.mcp_plan_id = None;
                 }
 
-                self.widget.show_dag_preview((*plan).clone());
-                self.replace_streaming_assistant_cell(Box::new(PlanSummaryHistoryCell::new(
+                let execution_plan = (*plan).clone();
+                self.widget.show_dag_preview(execution_plan.clone());
+                let plan_summary_cell = Box::new(PlanSummaryHistoryCell::new(
                     *spec,
-                    *plan,
+                    execution_plan.clone(),
                     intent_id.clone(),
                     plan_id.clone(),
-                    warnings,
-                )));
+                    warnings.clone(),
+                ));
+                if let Some(raw) = llm_output.filter(|text| !text.trim().is_empty()) {
+                    self.complete_streaming_assistant_cell(raw);
+                    self.widget.add_cell(plan_summary_cell);
+                } else {
+                    self.replace_streaming_assistant_cell(plan_summary_cell);
+                }
+                if let Some(code_ui_session) = self.code_ui_session.clone() {
+                    let plan_snapshot = CodeUiPlanSnapshot {
+                        id: plan_id
+                            .clone()
+                            .unwrap_or_else(|| format!("plan-{_turn_id}")),
+                        title: Some("Execution Plan".to_string()),
+                        summary: Some(text.clone()),
+                        status: "ready".to_string(),
+                        steps: browser_plan_steps,
+                        updated_at: Utc::now(),
+                    };
+                    let transcript_entry = CodeUiTranscriptEntry {
+                        id: Self::code_ui_assistant_entry_id(_turn_id),
+                        kind: CodeUiTranscriptEntryKind::PlanSummary,
+                        title: Some("Plan Ready".to_string()),
+                        content: Some(text.clone()),
+                        status: Some("ready".to_string()),
+                        streaming: false,
+                        metadata: serde_json::json!({
+                            "intentId": intent_id,
+                            "planId": plan_id,
+                        }),
+                        created_at: Utc::now(),
+                        updated_at: Utc::now(),
+                    };
+                    let interaction = CodeUiInteractionRequest {
+                        id: plan_snapshot.id.clone(),
+                        kind: CodeUiInteractionKind::PostPlanChoice,
+                        title: Some("Choose next step".to_string()),
+                        description: Some(
+                            "The plan is ready. Execute it, revise it, or cancel.".to_string(),
+                        ),
+                        prompt: None,
+                        options: vec![
+                            CodeUiInteractionOption {
+                                id: "execute".to_string(),
+                                label: "Execute Plan".to_string(),
+                                description: Some("Run the approved plan now".to_string()),
+                            },
+                            CodeUiInteractionOption {
+                                id: "modify".to_string(),
+                                label: "Modify Plan".to_string(),
+                                description: Some("Revise the execution plan".to_string()),
+                            },
+                            CodeUiInteractionOption {
+                                id: "cancel".to_string(),
+                                label: "Cancel".to_string(),
+                                description: Some("Leave the plan in place and stop".to_string()),
+                            },
+                        ],
+                        status: CodeUiInteractionStatus::Pending,
+                        metadata: serde_json::json!({
+                            "intentId": transcript_entry.metadata["intentId"].clone(),
+                            "planId": transcript_entry.metadata["planId"].clone(),
+                        }),
+                        requested_at: Utc::now(),
+                        resolved_at: None,
+                    };
+                    code_ui_session.upsert_plan(plan_snapshot).await;
+                    code_ui_session
+                        .upsert_transcript_entry(transcript_entry)
+                        .await;
+                    code_ui_session.upsert_interaction(interaction).await;
+                    code_ui_session
+                        .set_status(CodeUiSessionStatus::AwaitingInteraction)
+                        .await;
+                }
 
                 // Show post-plan dialog instead of returning to Idle
                 self.pending_post_plan = Some(PendingPostPlan {
                     spec_json,
                     intent_id,
                     plan_id,
+                    plan: execution_plan,
+                    llm_plan,
+                    warnings,
                     selected: 0,
                 });
                 self.widget.bottom_pane.reset_post_plan_selection();
@@ -1497,10 +2270,194 @@ where
                 self.sync_mux_input_context();
                 self.schedule_draw();
             }
+            AppEvent::IntentSpecReviewReady {
+                turn_id: _turn_id,
+                text,
+                llm_output,
+                new_history,
+                intent_id,
+                spec_json,
+                warnings,
+            } => {
+                self.finish_turn_state();
+                self.widget.clear_task_mux();
+                self.sync_mux_input_context();
+                self.history = new_history;
+                self.session.add_assistant_message(&text);
+                self.enqueue_llm_context_frame(
+                    "intent_analysis",
+                    "Phase 0 IntentSpec",
+                    intent_id.clone(),
+                    None,
+                    llm_output.clone().unwrap_or_else(|| text.clone()),
+                );
+                self.session.metadata.insert(
+                    LATEST_INTENTSPEC_JSON.to_string(),
+                    serde_json::Value::String(spec_json.clone()),
+                );
+                let binding = current_intentspec_binding(self.registry.working_dir());
+                self.session.metadata.insert(
+                    LATEST_INTENTSPEC_WORKSPACE_KEY.to_string(),
+                    serde_json::Value::String(binding.workspace_key),
+                );
+                self.session.metadata.insert(
+                    LATEST_INTENTSPEC_BASE_REF.to_string(),
+                    serde_json::Value::String(binding.base_ref),
+                );
+                if let Some(branch_label) = binding.branch_label {
+                    self.session.metadata.insert(
+                        LATEST_INTENTSPEC_BRANCH_LABEL.to_string(),
+                        serde_json::Value::String(branch_label),
+                    );
+                } else {
+                    self.session.metadata.remove(LATEST_INTENTSPEC_BRANCH_LABEL);
+                }
+                if let Some(ref id) = intent_id {
+                    self.session.metadata.insert(
+                        LATEST_INTENTSPEC_INTENT_ID.to_string(),
+                        serde_json::Value::String(id.clone()),
+                    );
+                } else {
+                    self.session.metadata.remove(LATEST_INTENTSPEC_INTENT_ID);
+                }
+                self.session.metadata.remove(LATEST_EXECUTION_PLAN_ID);
+                self.mcp_plan_id = None;
+
+                self.widget.clear_dag_panel();
+                if let Some(raw) = llm_output.filter(|text| !text.trim().is_empty()) {
+                    self.complete_streaming_assistant_cell(raw);
+                    self.widget
+                        .add_cell(Box::new(AssistantHistoryCell::new(text.clone())));
+                } else {
+                    self.replace_streaming_assistant_cell(Box::new(AssistantHistoryCell::new(
+                        text.clone(),
+                    )));
+                }
+                let interaction_id = intent_id
+                    .clone()
+                    .unwrap_or_else(|| format!("intent-review-{_turn_id}"));
+                if let Some(code_ui_session) = self.code_ui_session.clone() {
+                    let transcript_entry = CodeUiTranscriptEntry {
+                        id: Self::code_ui_assistant_entry_id(_turn_id),
+                        kind: CodeUiTranscriptEntryKind::AssistantMessage,
+                        title: Some("IntentSpec Review".to_string()),
+                        content: Some(text.clone()),
+                        status: Some("ready".to_string()),
+                        streaming: false,
+                        metadata: serde_json::json!({
+                            "intentId": intent_id,
+                        }),
+                        created_at: Utc::now(),
+                        updated_at: Utc::now(),
+                    };
+                    let interaction = CodeUiInteractionRequest {
+                        id: interaction_id.clone(),
+                        kind: CodeUiInteractionKind::IntentReviewChoice,
+                        title: Some("Review IntentSpec".to_string()),
+                        description: Some(
+                            "Confirm this IntentSpec before Libra generates an execution plan."
+                                .to_string(),
+                        ),
+                        prompt: None,
+                        options: vec![
+                            CodeUiInteractionOption {
+                                id: "confirm".to_string(),
+                                label: "Confirm".to_string(),
+                                description: Some("Generate the execution plan".to_string()),
+                            },
+                            CodeUiInteractionOption {
+                                id: "modify".to_string(),
+                                label: "Modify".to_string(),
+                                description: Some("Revise the IntentSpec".to_string()),
+                            },
+                            CodeUiInteractionOption {
+                                id: "cancel".to_string(),
+                                label: "Cancel".to_string(),
+                                description: Some(
+                                    "Leave the IntentSpec in place and stop".to_string(),
+                                ),
+                            },
+                        ],
+                        status: CodeUiInteractionStatus::Pending,
+                        metadata: serde_json::json!({
+                            "intentId": transcript_entry.metadata["intentId"].clone(),
+                        }),
+                        requested_at: Utc::now(),
+                        resolved_at: None,
+                    };
+                    code_ui_session
+                        .upsert_transcript_entry(transcript_entry)
+                        .await;
+                    code_ui_session.upsert_interaction(interaction).await;
+                    code_ui_session
+                        .set_status(CodeUiSessionStatus::AwaitingInteraction)
+                        .await;
+                }
+
+                self.pending_intent_review = Some(PendingIntentReview {
+                    spec_json,
+                    intent_id,
+                    warnings,
+                    interaction_id,
+                    selected: 0,
+                });
+                self.widget.bottom_pane.reset_post_plan_selection();
+                self.widget
+                    .bottom_pane
+                    .set_status(AgentStatus::AwaitingIntentReviewChoice);
+                self.sync_mux_input_context();
+                self.schedule_draw();
+            }
             AppEvent::InsertHistoryCell {
                 turn_id: _turn_id,
                 cell,
             } => {
+                if let Some(code_ui_session) = self.code_ui_session.clone() {
+                    if let Some(assistant) = cell.as_any().downcast_ref::<AssistantHistoryCell>() {
+                        code_ui_session
+                            .upsert_transcript_entry(CodeUiTranscriptEntry {
+                                id: self.next_code_ui_id("assistant-note"),
+                                kind: CodeUiTranscriptEntryKind::AssistantMessage,
+                                title: Some("Assistant".to_string()),
+                                content: Some(assistant.content.clone()),
+                                status: Some(if assistant.is_streaming {
+                                    "streaming".to_string()
+                                } else {
+                                    "completed".to_string()
+                                }),
+                                streaming: assistant.is_streaming,
+                                metadata: serde_json::json!({}),
+                                created_at: Utc::now(),
+                                updated_at: Utc::now(),
+                            })
+                            .await;
+                    } else if let Some(plan_update) =
+                        cell.as_any().downcast_ref::<PlanUpdateHistoryCell>()
+                    {
+                        code_ui_session
+                            .upsert_transcript_entry(CodeUiTranscriptEntry {
+                                id: plan_update.call_id.clone(),
+                                kind: CodeUiTranscriptEntryKind::PlanSummary,
+                                title: Some("Plan Update".to_string()),
+                                content: plan_update.explanation.clone(),
+                                status: Some(if plan_update.is_running {
+                                    "in_progress".to_string()
+                                } else {
+                                    "completed".to_string()
+                                }),
+                                streaming: false,
+                                metadata: serde_json::json!({
+                                    "steps": plan_update.steps.iter().map(|step| serde_json::json!({
+                                        "step": step.step,
+                                        "status": format!("{:?}", step.status).to_lowercase(),
+                                    })).collect::<Vec<_>>(),
+                                }),
+                                created_at: Utc::now(),
+                                updated_at: Utc::now(),
+                            })
+                            .await;
+                    }
+                }
                 self.insert_before_streaming_assistant(cell);
                 self.schedule_draw();
             }
@@ -1508,6 +2465,21 @@ where
                 turn_id: _turn_id,
                 message,
             } => {
+                if let Some(code_ui_session) = self.code_ui_session.clone() {
+                    code_ui_session
+                        .upsert_transcript_entry(CodeUiTranscriptEntry {
+                            id: self.next_code_ui_id("info-note"),
+                            kind: CodeUiTranscriptEntryKind::InfoNote,
+                            title: Some("Info".to_string()),
+                            content: Some(message.clone()),
+                            status: None,
+                            streaming: false,
+                            metadata: serde_json::json!({}),
+                            created_at: Utc::now(),
+                            updated_at: Utc::now(),
+                        })
+                        .await;
+                }
                 self.insert_before_streaming_assistant(Box::new(AssistantHistoryCell::new(
                     format!("info> {message}"),
                 )));
@@ -1537,33 +2509,152 @@ where
                 self.widget.update_dag_progress(completed, total);
                 self.schedule_draw();
             }
+            AppEvent::DagTaskMuxClear { turn_id: _turn_id } => {
+                self.widget.clear_task_mux();
+                self.sync_mux_input_context();
+                self.schedule_draw();
+            }
             AppEvent::ToolCallBegin {
                 turn_id: _turn_id,
                 call_id,
                 tool_name,
                 arguments,
             } => {
-                if tool_name == "update_plan" {
-                    // Parse the plan arguments and render a specialised cell.
-                    let (explanation, steps) =
-                        if let Ok(args) = serde_json::from_value::<UpdatePlanArgs>(arguments) {
-                            (args.explanation, args.plan)
-                        } else {
-                            (None, Vec::new())
-                        };
-                    let cell = Box::new(PlanUpdateHistoryCell::new(call_id, explanation, steps));
-                    self.insert_before_streaming_assistant(cell);
-                } else if !append_to_last_tool_group_cell(
+                tracing::debug!(
+                    target: "libra::internal::tui::app",
+                    turn_id = _turn_id,
+                    call_id = %call_id,
+                    tool = %tool_name,
+                    arguments = %log_preview_text(&arguments.to_string()),
+                    "tui tool call displayed"
+                );
+                let tool_summary = Self::tool_call_summary_for_browser(&tool_name, &arguments);
+                let already_visible = mark_visible_tool_call_running(
                     &mut self.widget.cells,
-                    call_id.clone(),
-                    tool_name.as_str(),
-                    arguments.clone(),
-                ) {
-                    let cell = Box::new(ToolCallHistoryCell::new(call_id, tool_name, arguments));
-                    self.insert_before_streaming_assistant(cell);
+                    &call_id,
+                    &tool_name,
+                    &arguments,
+                );
+                if !already_visible {
+                    if tool_name == "update_plan" {
+                        // Parse the plan arguments and render a specialised cell.
+                        let (explanation, steps) = parse_update_plan_arguments(&arguments);
+                        let cell = Box::new(PlanUpdateHistoryCell::new(
+                            call_id.clone(),
+                            explanation,
+                            steps,
+                        ));
+                        self.insert_before_streaming_assistant(cell);
+                    } else if !append_to_last_tool_group_cell(
+                        &mut self.widget.cells,
+                        call_id.clone(),
+                        tool_name.as_str(),
+                        arguments.clone(),
+                    ) {
+                        let cell = Box::new(ToolCallHistoryCell::new(
+                            call_id.clone(),
+                            tool_name.clone(),
+                            arguments,
+                        ));
+                        self.insert_before_streaming_assistant(cell);
+                    }
                 }
                 self.running_tool_calls = self.running_tool_calls.saturating_add(1);
                 self.update_status_after_tool_progress();
+                if let Some(code_ui_session) = self.code_ui_session.clone() {
+                    code_ui_session
+                        .upsert_tool_call(CodeUiToolCallSnapshot {
+                            id: call_id.clone(),
+                            tool_name: tool_name.clone(),
+                            status: "running".to_string(),
+                            summary: Some(tool_summary.clone()),
+                            details: None,
+                            updated_at: Utc::now(),
+                        })
+                        .await;
+                    code_ui_session
+                        .upsert_transcript_entry(CodeUiTranscriptEntry {
+                            id: call_id,
+                            kind: CodeUiTranscriptEntryKind::ToolCall,
+                            title: Some(tool_name),
+                            content: Some(tool_summary),
+                            status: Some("running".to_string()),
+                            streaming: false,
+                            metadata: serde_json::json!({}),
+                            created_at: Utc::now(),
+                            updated_at: Utc::now(),
+                        })
+                        .await;
+                    code_ui_session
+                        .set_status(CodeUiSessionStatus::ExecutingTool)
+                        .await;
+                }
+                self.schedule_draw();
+            }
+            AppEvent::ToolCallPreview {
+                turn_id: _turn_id,
+                call_id,
+                tool_name,
+                arguments,
+            } => {
+                let tool_summary = Self::tool_call_summary_for_browser(&tool_name, &arguments);
+                if !update_visible_tool_call_preview(
+                    &mut self.widget.cells,
+                    &call_id,
+                    &tool_name,
+                    &arguments,
+                ) {
+                    if tool_name == "update_plan" {
+                        let (explanation, steps) = parse_update_plan_arguments(&arguments);
+                        let cell = Box::new(PlanUpdateHistoryCell::new(
+                            call_id.clone(),
+                            explanation,
+                            steps,
+                        ));
+                        self.insert_before_streaming_assistant(cell);
+                    } else if !append_to_last_tool_group_preview_cell(
+                        &mut self.widget.cells,
+                        call_id.clone(),
+                        tool_name.as_str(),
+                        arguments.clone(),
+                    ) {
+                        let cell = Box::new(ToolCallHistoryCell::new_preview(
+                            call_id.clone(),
+                            tool_name.clone(),
+                            arguments,
+                        ));
+                        self.insert_before_streaming_assistant(cell);
+                    }
+                }
+
+                if let Some(code_ui_session) = self.code_ui_session.clone() {
+                    code_ui_session
+                        .upsert_tool_call(CodeUiToolCallSnapshot {
+                            id: call_id.clone(),
+                            tool_name: tool_name.clone(),
+                            status: "preview".to_string(),
+                            summary: Some(tool_summary.clone()),
+                            details: None,
+                            updated_at: Utc::now(),
+                        })
+                        .await;
+                    code_ui_session
+                        .upsert_transcript_entry(CodeUiTranscriptEntry {
+                            id: call_id,
+                            kind: CodeUiTranscriptEntryKind::ToolCall,
+                            title: Some(tool_name),
+                            content: Some(tool_summary),
+                            status: Some("preview".to_string()),
+                            streaming: true,
+                            metadata: serde_json::json!({}),
+                            created_at: Utc::now(),
+                            updated_at: Utc::now(),
+                        })
+                        .await;
+                    code_ui_session
+                        .set_status(CodeUiSessionStatus::Thinking)
+                        .await;
+                }
                 self.schedule_draw();
             }
             AppEvent::ToolCallEnd {
@@ -1572,6 +2663,18 @@ where
                 tool_name,
                 result,
             } => {
+                let result_preview = match &result {
+                    Ok(output) => output.log_preview(),
+                    Err(error) => error.clone(),
+                };
+                tracing::debug!(
+                    target: "libra::internal::tui::app",
+                    turn_id = _turn_id,
+                    call_id = %call_id,
+                    tool = %tool_name,
+                    result = %log_preview_text(&result_preview),
+                    "tui tool call result displayed"
+                );
                 // For successful apply_patch, insert a visual diff cell.
                 if tool_name == "apply_patch"
                     && let Ok(ref output) = result
@@ -1593,7 +2696,7 @@ where
                     }
                 }
                 if !found {
-                    let mut pending_result = Some(result);
+                    let mut pending_result = Some(result.clone());
                     for idx in (0..self.widget.cells.len()).rev() {
                         let Some(tool_cell) = self.widget.cells[idx]
                             .as_any_mut()
@@ -1612,6 +2715,55 @@ where
                 }
                 self.running_tool_calls = self.running_tool_calls.saturating_sub(1);
                 self.update_status_after_tool_progress();
+                if let Some(code_ui_session) = self.code_ui_session.clone() {
+                    let (status, details) = match &result {
+                        Ok(output) if output.is_success() => (
+                            "completed".to_string(),
+                            output.as_text().map(ToString::to_string),
+                        ),
+                        Ok(output) => (
+                            "failed".to_string(),
+                            output.as_text().map(ToString::to_string),
+                        ),
+                        Err(error) => ("failed".to_string(), Some(error.clone())),
+                    };
+                    code_ui_session
+                        .upsert_tool_call(CodeUiToolCallSnapshot {
+                            id: call_id.clone(),
+                            tool_name: tool_name.clone(),
+                            status: status.clone(),
+                            summary: None,
+                            details: details.clone(),
+                            updated_at: Utc::now(),
+                        })
+                        .await;
+                    code_ui_session
+                        .upsert_transcript_entry(CodeUiTranscriptEntry {
+                            id: call_id.clone(),
+                            kind: CodeUiTranscriptEntryKind::ToolCall,
+                            title: Some(tool_name.clone()),
+                            content: details.clone(),
+                            status: Some(status.clone()),
+                            streaming: false,
+                            metadata: serde_json::json!({}),
+                            created_at: Utc::now(),
+                            updated_at: Utc::now(),
+                        })
+                        .await;
+                    if tool_name == "apply_patch"
+                        && let Some(patchset) =
+                            Self::patchset_snapshot_for_browser(&call_id, &status, &result)
+                    {
+                        code_ui_session.upsert_patchset(patchset).await;
+                    }
+                    code_ui_session
+                        .set_status(if self.running_tool_calls > 0 {
+                            CodeUiSessionStatus::ExecutingTool
+                        } else {
+                            CodeUiSessionStatus::Thinking
+                        })
+                        .await;
+                }
                 self.schedule_draw();
             }
             AppEvent::AgentStatusUpdate {
@@ -1620,7 +2772,38 @@ where
             } => {
                 self.widget.bottom_pane.set_status(status);
                 self.sync_mux_input_context();
+                if let Some(code_ui_session) = self.code_ui_session.clone() {
+                    code_ui_session
+                        .set_status(match status {
+                            AgentStatus::Idle => CodeUiSessionStatus::Idle,
+                            AgentStatus::Thinking | AgentStatus::Retrying => {
+                                CodeUiSessionStatus::Thinking
+                            }
+                            AgentStatus::ExecutingTool => CodeUiSessionStatus::ExecutingTool,
+                            AgentStatus::AwaitingUserInput
+                            | AgentStatus::AwaitingApproval
+                            | AgentStatus::AwaitingPostPlanChoice
+                            | AgentStatus::AwaitingIntentReviewChoice => {
+                                CodeUiSessionStatus::AwaitingInteraction
+                            }
+                        })
+                        .await;
+                }
                 self.schedule_draw();
+            }
+            AppEvent::PhaseConfirmationRequired {
+                turn_id: _turn_id,
+                prompt,
+                response_tx,
+            } => {
+                tracing::debug!(
+                    target: "libra::internal::tui::app",
+                    phase = prompt.phase.number(),
+                    title = %prompt.title,
+                    summary = %log_preview_text(&prompt.summary),
+                    "tui phase confirmation displayed"
+                );
+                self.handle_phase_confirmation_request(prompt, response_tx);
             }
             AppEvent::TaskRuntimeEvent {
                 turn_id,
@@ -1679,6 +2862,8 @@ where
                 result,
             } => {
                 self.finish_turn_state();
+                self.widget.clear_task_mux();
+                self.sync_mux_input_context();
                 self.history = new_history;
                 self.session.add_assistant_message(&text);
                 if let Some(result) = result {
@@ -1688,6 +2873,28 @@ where
                 } else {
                     self.complete_streaming_assistant_cell(text);
                 }
+                if let Some(code_ui_session) = self.code_ui_session.clone() {
+                    code_ui_session
+                        .upsert_transcript_entry(CodeUiTranscriptEntry {
+                            id: Self::code_ui_assistant_entry_id(_turn_id),
+                            kind: CodeUiTranscriptEntryKind::AssistantMessage,
+                            title: Some("Assistant".to_string()),
+                            content: Some(
+                                self.session
+                                    .messages
+                                    .last()
+                                    .map(|message| message.content.clone())
+                                    .unwrap_or_default(),
+                            ),
+                            status: Some("completed".to_string()),
+                            streaming: false,
+                            metadata: serde_json::json!({}),
+                            created_at: Utc::now(),
+                            updated_at: Utc::now(),
+                        })
+                        .await;
+                    code_ui_session.set_status(CodeUiSessionStatus::Idle).await;
+                }
                 self.set_idle_and_draw();
             }
         }
@@ -1695,11 +2902,224 @@ where
         Ok(())
     }
 
+    async fn start_managed_code_turn(&mut self, turn_id: TurnId, text: String) {
+        let Some(runtime) = self.managed_code_ui_runtime.clone() else {
+            return;
+        };
+        let baseline = runtime.snapshot().await;
+        let baseline_assistant_ids = assistant_entry_ids(&baseline);
+        let adapter = runtime.adapter();
+        let mut events = runtime.subscribe();
+        let tx = self.app_event_tx.clone();
+
+        let handle = tokio::spawn(async move {
+            if let Err(error) = adapter.submit_message(text).await {
+                let _ = tx.send(AppEvent::AgentEvent {
+                    turn_id,
+                    event: AgentEvent::Error {
+                        message: error.to_string(),
+                    },
+                });
+                return;
+            }
+
+            let mut previous_text = String::new();
+            let mut saw_activity = false;
+
+            loop {
+                let snapshot = match events.recv().await {
+                    Ok(event) => match snapshot_from_event(&event) {
+                        Ok(snapshot) => snapshot,
+                        Err(error) => {
+                            let _ = tx.send(AppEvent::AgentEvent {
+                                turn_id,
+                                event: AgentEvent::Error {
+                                    message: error.to_string(),
+                                },
+                            });
+                            return;
+                        }
+                    },
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        runtime.snapshot().await
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        let _ = tx.send(AppEvent::AgentEvent {
+                            turn_id,
+                            event: AgentEvent::Error {
+                                message: "managed provider session closed".to_string(),
+                            },
+                        });
+                        return;
+                    }
+                };
+
+                if matches!(
+                    snapshot.status,
+                    CodeUiSessionStatus::Thinking
+                        | CodeUiSessionStatus::ExecutingTool
+                        | CodeUiSessionStatus::AwaitingInteraction
+                ) {
+                    saw_activity = true;
+                }
+
+                if let Some(text) =
+                    newest_managed_assistant_text(&snapshot, &baseline_assistant_ids)
+                {
+                    if !text.is_empty() {
+                        saw_activity = true;
+                    }
+                    if let Some(delta) = text.strip_prefix(&previous_text)
+                        && !delta.is_empty()
+                    {
+                        let _ = tx.send(AppEvent::AgentEvent {
+                            turn_id,
+                            event: AgentEvent::ResponseDelta {
+                                delta: delta.to_string(),
+                            },
+                        });
+                    }
+                    previous_text = text;
+                }
+
+                if saw_activity && managed_snapshot_is_terminal(&snapshot) {
+                    let event = if snapshot.status == CodeUiSessionStatus::Error {
+                        AgentEvent::Error {
+                            message: if previous_text.trim().is_empty() {
+                                "managed provider turn failed".to_string()
+                            } else {
+                                previous_text.clone()
+                            },
+                        }
+                    } else {
+                        AgentEvent::ManagedResponseComplete {
+                            text: previous_text,
+                            provider_session_id: snapshot.thread_id.unwrap_or_default(),
+                        }
+                    };
+                    let _ = tx.send(AppEvent::AgentEvent { turn_id, event });
+                    return;
+                }
+            }
+        });
+
+        self.agent_task = Some(handle);
+    }
+
+    async fn handle_managed_code_ui_event(
+        &mut self,
+        event: CodeUiEventEnvelope,
+    ) -> anyhow::Result<()> {
+        let snapshot = snapshot_from_event(&event)?;
+        self.sync_managed_interaction(&snapshot);
+        Ok(())
+    }
+
+    fn sync_managed_interaction(&mut self, snapshot: &CodeUiSessionSnapshot) {
+        if self.managed_code_ui_runtime.is_none() {
+            return;
+        }
+
+        let pending = snapshot
+            .interactions
+            .iter()
+            .find(|interaction| interaction.status == CodeUiInteractionStatus::Pending)
+            .cloned();
+
+        if let Some(current) = self.pending_managed_interaction.as_ref() {
+            let still_pending = pending
+                .as_ref()
+                .is_some_and(|interaction| interaction.id == current.interaction.id);
+            if still_pending {
+                return;
+            }
+            self.pending_managed_interaction = None;
+            self.widget.bottom_pane.set_exec_approval(None);
+        }
+
+        if let Some(interaction) = pending {
+            self.begin_managed_interaction(interaction);
+        } else if matches!(
+            self.widget.bottom_pane.status,
+            AgentStatus::AwaitingApproval
+        ) && self.pending_exec_approval.is_none()
+        {
+            self.widget
+                .bottom_pane
+                .set_status(managed_agent_status(snapshot.status));
+            self.sync_mux_input_context();
+            self.schedule_draw();
+        }
+    }
+
+    fn begin_managed_interaction(&mut self, mut interaction: CodeUiInteractionRequest) {
+        if interaction.options.is_empty() {
+            interaction.options = default_managed_interaction_options();
+        }
+
+        let options = interaction
+            .options
+            .iter()
+            .map(|option| {
+                (
+                    option.label.clone(),
+                    option.description.clone().unwrap_or_default(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let title = interaction
+            .title
+            .clone()
+            .unwrap_or_else(|| "Approval required".to_string());
+        let command = interaction
+            .prompt
+            .clone()
+            .or_else(|| interaction.description.clone())
+            .unwrap_or_else(|| title.clone());
+        let cwd = self.registry.working_dir().to_path_buf();
+        self.widget.bottom_pane.set_approval_dialog(
+            title,
+            command,
+            cwd,
+            interaction.description.clone(),
+            false,
+            "codex managed runtime".to_string(),
+            true,
+            vec![self.registry.working_dir().to_path_buf()],
+            options,
+        );
+        self.pending_managed_interaction = Some(PendingManagedInteraction {
+            interaction,
+            selected: 0,
+        });
+        self.widget.bottom_pane.exec_approval_selected = 0;
+        self.widget
+            .bottom_pane
+            .set_status(AgentStatus::AwaitingApproval);
+        self.sync_mux_input_context();
+        self.schedule_draw();
+    }
+
     /// Submit a user message, expanding slash commands and applying agent context.
     async fn submit_message(&mut self, text: String) {
         // 1. Check for built-in TUI commands first.
         if let Some((cmd, args)) = super::slash_command::parse_builtin(&text) {
             self.handle_builtin_command(cmd, args).await;
+            return;
+        }
+
+        if let Some(pending) = self.pending_execution_plan_revision.take() {
+            if text.trim_start().starts_with('/') {
+                self.pending_execution_plan_revision = Some(pending);
+                self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                    pending_execution_plan_revision_help_message(),
+                )));
+                self.sync_mux_input_context();
+                self.schedule_draw();
+                return;
+            }
+            self.begin_execution_plan_revision_flow(pending, &text)
+                .await;
             return;
         }
 
@@ -1714,6 +3134,11 @@ where
                 return;
             }
             self.begin_plan_revision_flow(spec_json, &text).await;
+            return;
+        }
+
+        if self.managed_code_ui_runtime.is_none() && should_route_plain_message_to_plan(&text) {
+            self.start_plan_workflow_from_plain_message(&text).await;
             return;
         }
 
@@ -1778,7 +3203,7 @@ where
                 self.mcp_plan_id = None;
                 self.mcp_run_id = None;
                 self.pending_plan_revision = None;
-                reset_managed_claudecode_session(self.managed_claudecode.as_mut());
+                self.pending_execution_plan_revision = None;
                 self.sync_mux_input_context();
             }
             BuiltinCommand::Model => {
@@ -1800,15 +3225,30 @@ where
                     .add_cell(Box::new(AssistantHistoryCell::new(status)));
             }
             BuiltinCommand::Plan => {
-                if self.managed_claudecode.is_some() {
-                    self.widget.add_cell(Box::new(AssistantHistoryCell::new(
-                        "The /plan workflow is not available in the Claude managed runtime yet."
-                            .to_string(),
-                    )));
-                    self.schedule_draw();
-                    return;
-                }
-                if let Some(spec_json) = self.pending_plan_revision.take() {
+                if let Some(pending) = self.pending_execution_plan_revision.take() {
+                    match parse_pending_plan_revision_command(args) {
+                        PendingPlanRevisionCommand::Modify(request) => {
+                            self.begin_execution_plan_revision_flow(pending, request)
+                                .await;
+                        }
+                        PendingPlanRevisionCommand::Cancel => {
+                            self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                                "Execution plan revision canceled.".to_string(),
+                            )));
+                            self.widget.bottom_pane.set_status(AgentStatus::Idle);
+                            self.sync_mux_input_context();
+                            self.schedule_draw();
+                        }
+                        PendingPlanRevisionCommand::Invalid => {
+                            self.pending_execution_plan_revision = Some(pending);
+                            self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                                pending_execution_plan_revision_help_message(),
+                            )));
+                            self.sync_mux_input_context();
+                            self.schedule_draw();
+                        }
+                    }
+                } else if let Some(spec_json) = self.pending_plan_revision.take() {
                     match parse_pending_plan_revision_command(args) {
                         PendingPlanRevisionCommand::Modify(request) => {
                             self.begin_plan_revision_flow(spec_json, request).await;
@@ -1847,9 +3287,82 @@ where
                 self.schedule_draw();
             }
             BuiltinCommand::Quit => {
-                self.exit_info = Some(AppExitInfo {
-                    reason: ExitReason::UserRequested,
-                });
+                self.request_user_exit();
+            }
+        }
+    }
+
+    fn try_handle_global_quit_command(&mut self) -> bool {
+        if !is_global_quit_command_input(&self.widget.bottom_pane.input) {
+            return false;
+        }
+        self.widget.bottom_pane.take_input();
+        self.widget.bottom_pane.sync_command_popup();
+        self.request_user_exit();
+        true
+    }
+
+    fn request_user_exit(&mut self) {
+        self.cancel_pending_user_input();
+        self.cancel_pending_phase_confirmation();
+        self.cancel_pending_exec_approval();
+        if self.pending_post_plan.is_some() {
+            self.dismiss_post_plan_dialog();
+        }
+        if self.pending_intent_review.is_some() {
+            self.dismiss_intent_review_dialog();
+        }
+        self.pending_execution_plan_revision = None;
+        self.pending_plan_revision = None;
+        self.interrupt_agent_task();
+        self.clear_mcp_run_id();
+        self.widget.bottom_pane.clear();
+        self.widget.bottom_pane.sync_command_popup();
+        self.widget.bottom_pane.set_status(AgentStatus::Idle);
+        self.sync_mux_input_context();
+        self.exit_info = Some(AppExitInfo {
+            reason: ExitReason::UserRequested,
+            thread_id: None,
+        });
+    }
+
+    async fn graph_thread_id_hint(&self) -> Option<String> {
+        if let Some(thread_id) = session_graph_thread_id(&self.session) {
+            return Some(thread_id);
+        }
+
+        if let Some(code_ui_session) = self.code_ui_session.as_ref() {
+            let snapshot = code_ui_session.snapshot().await;
+            if let Some(thread_id) = snapshot
+                .thread_id
+                .as_deref()
+                .filter(|thread_id| uuid::Uuid::parse_str(thread_id).is_ok())
+            {
+                return Some(thread_id.to_string());
+            }
+            if uuid::Uuid::parse_str(&snapshot.session_id).is_ok() {
+                return Some(snapshot.session_id);
+            }
+        }
+
+        let (Some(history), Some(storage)) = (
+            self.mcp_server
+                .as_ref()
+                .and_then(|server| server.intent_history_manager.as_ref()),
+            self.mcp_server
+                .as_ref()
+                .and_then(|server| server.storage.as_ref()),
+        ) else {
+            return None;
+        };
+
+        let rebuilder = ProjectionRebuilder::new(storage.as_ref(), history);
+        match rebuilder.rebuild_latest_thread().await {
+            Ok(Some(rebuild)) => Some(rebuild.thread.thread_id.to_string()),
+            Ok(None) => None,
+            Err(error) => {
+                tracing::warn!(error = %error, "failed to derive graph thread id hint");
+                None
             }
         }
     }
@@ -1926,6 +3439,60 @@ where
         });
     }
 
+    fn enqueue_llm_context_frame(
+        &self,
+        kind: &'static str,
+        phase: &'static str,
+        intent_id: Option<String>,
+        plan_id: Option<String>,
+        text: String,
+    ) {
+        let Some(mcp_server) = self.mcp_server.clone() else {
+            return;
+        };
+        let summary = format!(
+            "{phase} LLM output: {}",
+            summarize_llm_output_for_context(&text, 96)
+        );
+        let output_summary = summarize_llm_output_for_context(&text, 240);
+        let content_chars = text.chars().count();
+        self.mcp_write_tracker.spawn(async move {
+            let params = CreateContextFrameParams {
+                kind: kind.to_string(),
+                summary,
+                intent_id,
+                run_id: None,
+                plan_id,
+                step_id: None,
+                data: Some(serde_json::json!({
+                    "event": "agent_message",
+                    "phase": phase,
+                    "summary": output_summary,
+                    "contentChars": content_chars,
+                    "fullTextStored": false,
+                })),
+                token_estimate: Some(((content_chars.max(1) as u64) / 4).max(1)),
+                actor_kind: Some("agent".to_string()),
+                actor_id: Some("libra-planner".to_string()),
+            };
+            let actor = match mcp_server
+                .resolve_actor_from_params(params.actor_kind.as_deref(), params.actor_id.as_deref())
+            {
+                Ok(actor) => actor,
+                Err(error) => {
+                    cli_error!(
+                        error,
+                        "error: failed to resolve actor for LLM context frame"
+                    );
+                    return;
+                }
+            };
+            if let Err(error) = mcp_server.create_context_frame_impl(params, actor).await {
+                cli_error!(error, "error: failed to record LLM context frame");
+            }
+        });
+    }
+
     fn clear_mcp_run_id(&mut self) {
         self.mcp_run_id = None;
     }
@@ -1938,6 +3505,7 @@ where
     }
 
     fn finish_turn_state(&mut self) {
+        self.cancel_pending_phase_confirmation();
         self.cancel_pending_exec_approval();
         self.agent_task = None;
         self.running_tool_calls = 0;
@@ -1951,6 +3519,11 @@ where
         self.widget.bottom_pane.set_status(AgentStatus::Idle);
         self.sync_mux_input_context();
         self.schedule_draw();
+        if let Some(code_ui_session) = self.code_ui_session.clone() {
+            tokio::spawn(async move {
+                code_ui_session.set_status(CodeUiSessionStatus::Idle).await;
+            });
+        }
     }
 
     fn sync_mux_input_context(&mut self) {
@@ -1969,6 +3542,15 @@ where
             self.widget
                 .bottom_pane
                 .set_input_hint(self.widget.task_mux_input_hint());
+        } else if self.pending_execution_plan_revision.is_some()
+            && matches!(self.widget.bottom_pane.status, AgentStatus::Idle)
+        {
+            self.widget
+                .bottom_pane
+                .set_input_context_label(Some("Revise Plan".to_string()));
+            self.widget.bottom_pane.set_input_hint(Some(
+                "Describe plan changes, or use /plan modify <changes> or /plan cancel".to_string(),
+            ));
         } else if self.pending_plan_revision.is_some()
             && matches!(self.widget.bottom_pane.status, AgentStatus::Idle)
         {
@@ -1984,30 +3566,30 @@ where
         }
     }
 
-    // ── Post-plan dialog ────────────────────────────────────────────
+    // ── IntentSpec review dialog ────────────────────────────────────
 
-    async fn handle_post_plan_choice(&mut self) {
-        let pending = match self.pending_post_plan.take() {
+    async fn handle_intent_review_choice(&mut self) {
+        let pending = match self.pending_intent_review.take() {
             Some(p) => p,
             None => return,
         };
+        let interaction_id = pending.interaction_id.clone();
+        let selected = pending.selected;
 
-        match pending.selected {
+        match selected {
             0 => {
-                // Execute: validate spec and show placeholder
-                self.start_execute_workflow(
-                    &pending.spec_json,
-                    pending.intent_id.clone(),
-                    pending.plan_id.clone(),
+                self.begin_confirmed_intentspec_plan_workflow(
+                    pending.spec_json,
+                    pending.intent_id,
+                    pending.warnings,
                 )
                 .await;
             }
             _ => {
-                // Modify (1) or Cancel (2+)
-                if pending.selected == 1 {
+                if selected == 1 {
                     self.pending_plan_revision = Some(pending.spec_json);
                     let msg = format!(
-                        "{} Your next plain-text message will revise the current spec.",
+                        "{} Your next plain-text message will revise the current IntentSpec.",
                         pending_plan_revision_help_message()
                     );
                     self.widget
@@ -2019,10 +3601,399 @@ where
                 self.sync_mux_input_context();
             }
         }
+
+        if let Some(code_ui_session) = self.code_ui_session.clone() {
+            let next_status = if selected == 0 {
+                CodeUiSessionStatus::Thinking
+            } else {
+                CodeUiSessionStatus::Idle
+            };
+            tokio::spawn(async move {
+                code_ui_session.resolve_interaction(&interaction_id).await;
+                code_ui_session.set_status(next_status).await;
+            });
+        }
+        self.schedule_draw();
+    }
+
+    fn dismiss_intent_review_dialog(&mut self) {
+        if let Some(interaction_id) = self
+            .pending_intent_review
+            .as_ref()
+            .map(|pending| pending.interaction_id.clone())
+            && let Some(code_ui_session) = self.code_ui_session.clone()
+        {
+            tokio::spawn(async move {
+                code_ui_session.clear_interaction(&interaction_id).await;
+            });
+        }
+        self.pending_intent_review = None;
+        self.set_idle_and_draw();
+    }
+
+    async fn begin_confirmed_intentspec_plan_workflow(
+        &mut self,
+        spec_json: String,
+        intent_id: Option<String>,
+        warnings: Vec<String>,
+    ) {
+        let prompt = build_execution_plan_prompt(&spec_json);
+        self.begin_llm_execution_plan_workflow(spec_json, intent_id, warnings, prompt)
+            .await;
+    }
+
+    async fn begin_execution_plan_revision_flow(
+        &mut self,
+        pending: PendingExecutionPlanRevision,
+        request: &str,
+    ) {
+        let request = request.trim();
+        if request.is_empty() {
+            self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                pending_execution_plan_revision_help_message(),
+            )));
+            self.pending_execution_plan_revision = Some(pending);
+            self.sync_mux_input_context();
+            self.schedule_draw();
+            return;
+        }
+
+        let prompt = build_execution_plan_revision_prompt(
+            &pending.spec_json,
+            &pending.current_plan,
+            request,
+        );
+        self.begin_llm_execution_plan_workflow(
+            pending.spec_json,
+            pending.intent_id,
+            pending.warnings,
+            prompt,
+        )
+        .await;
+    }
+
+    async fn begin_llm_execution_plan_workflow(
+        &mut self,
+        spec_json: String,
+        intent_id: Option<String>,
+        mut warnings: Vec<String>,
+        prompt: String,
+    ) {
+        let spec = match serde_json::from_str::<IntentSpec>(&spec_json) {
+            Ok(spec) => spec,
+            Err(error) => {
+                let msg = format!("Plan failed: stored IntentSpec JSON is invalid: {error}");
+                self.widget
+                    .add_cell(Box::new(AssistantHistoryCell::new(msg.clone())));
+                self.history.push(Message::assistant(msg.clone()));
+                self.session.add_assistant_message(&msg);
+                self.set_idle_and_draw();
+                return;
+            }
+        };
+
+        let turn_id = self.begin_turn();
+        self.running_tool_calls = 0;
+        self.widget.clear_dag_panel();
+        self.widget
+            .add_cell(Box::new(AssistantHistoryCell::streaming()));
+        self.widget.bottom_pane.set_status(AgentStatus::Thinking);
+        self.sync_mux_input_context();
+        self.schedule_draw();
+
+        let model = self.model.clone();
+        let registry = self.registry.clone();
+        let mut config = self.config.clone();
+        config.allowed_tools = Some(vec![
+            "read_file".to_string(),
+            "list_dir".to_string(),
+            "grep_files".to_string(),
+            "search_files".to_string(),
+            "update_plan".to_string(),
+        ]);
+        let tx = self.app_event_tx.clone();
+        let mcp_server = self.mcp_server.clone();
+        let fallback_history = self.history.clone();
+
+        let handle = tokio::spawn(async move {
+            struct ExecutionPlanObserver {
+                tx: UnboundedSender<AppEvent>,
+                turn_id: TurnId,
+                plan: Option<UpdatePlanArgs>,
+            }
+
+            impl ToolLoopObserver for ExecutionPlanObserver {
+                fn on_model_stream_event(&mut self, event: &CompletionStreamEvent) {
+                    match event {
+                        CompletionStreamEvent::TextDelta { delta, .. } if !delta.is_empty() => {
+                            let _ = self.tx.send(AppEvent::AgentEvent {
+                                turn_id: self.turn_id,
+                                event: AgentEvent::ResponseDelta {
+                                    delta: delta.clone(),
+                                },
+                            });
+                        }
+                        CompletionStreamEvent::ToolCallPreview {
+                            call_id,
+                            tool_name,
+                            arguments,
+                            ..
+                        } => {
+                            let _ = self.tx.send(AppEvent::ToolCallPreview {
+                                turn_id: self.turn_id,
+                                call_id: call_id.clone(),
+                                tool_name: tool_name.clone(),
+                                arguments: arguments.clone(),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+
+                fn on_tool_call_begin(
+                    &mut self,
+                    call_id: &str,
+                    tool_name: &str,
+                    arguments: &serde_json::Value,
+                ) {
+                    let _ = self.tx.send(AppEvent::ToolCallBegin {
+                        turn_id: self.turn_id,
+                        call_id: call_id.to_string(),
+                        tool_name: tool_name.to_string(),
+                        arguments: arguments.clone(),
+                    });
+
+                    if tool_name == "update_plan"
+                        && let Ok(args) =
+                            serde_json::from_value::<UpdatePlanArgs>(arguments.clone())
+                    {
+                        self.plan = Some(args);
+                    }
+                }
+
+                fn on_tool_call_end(
+                    &mut self,
+                    call_id: &str,
+                    tool_name: &str,
+                    result: &Result<ToolOutput, String>,
+                ) {
+                    let _ = self.tx.send(AppEvent::ToolCallEnd {
+                        turn_id: self.turn_id,
+                        call_id: call_id.to_string(),
+                        tool_name: tool_name.to_string(),
+                        result: result.clone(),
+                    });
+                }
+            }
+
+            let mut observer = ExecutionPlanObserver {
+                tx: tx.clone(),
+                turn_id,
+                plan: None,
+            };
+            let run_result = run_tool_loop_with_history_and_observer(
+                &model,
+                fallback_history.clone(),
+                prompt,
+                &registry,
+                config,
+                &mut observer,
+            )
+            .await;
+
+            let turn = match run_result {
+                Ok(turn) => Some(turn),
+                Err(e) if observer.plan.is_some() => {
+                    let _ = tx.send(AppEvent::InsertHistoryCell {
+                        turn_id,
+                        cell: Box::new(AssistantHistoryCell::new(format!(
+                            "Planner response failed after plan submission. Continuing with the submitted plan.\nReason: {}",
+                            e
+                        ))),
+                    });
+                    None
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::AgentEvent {
+                        turn_id,
+                        event: AgentEvent::Error {
+                            message: format!("Plan failed: LLM did not produce a usable plan: {e}"),
+                        },
+                    });
+                    return;
+                }
+            };
+
+            let llm_plan = match observer.plan.take() {
+                Some(plan) => plan,
+                None => {
+                    let _ = tx.send(AppEvent::AgentEvent {
+                        turn_id,
+                        event: AgentEvent::Error {
+                            message: "Plan failed: LLM did not call update_plan.".to_string(),
+                        },
+                    });
+                    return;
+                }
+            };
+
+            let spec_for_plan = match intentspec_with_llm_plan_objectives(&spec, &llm_plan) {
+                Ok(spec) => spec,
+                Err(error) => {
+                    let _ = tx.send(AppEvent::AgentEvent {
+                        turn_id,
+                        event: AgentEvent::Error {
+                            message: format!("Plan failed: {error}"),
+                        },
+                    });
+                    return;
+                }
+            };
+
+            let execution_plan = match compile_execution_plan_spec(&spec_for_plan) {
+                Ok(plan) => plan,
+                Err(e) => {
+                    let _ = tx.send(AppEvent::AgentEvent {
+                        turn_id,
+                        event: AgentEvent::Error {
+                            message: format!("Plan failed: cannot compile execution plan: {e}"),
+                        },
+                    });
+                    return;
+                }
+            };
+
+            let mut summary = render_summary(&spec_for_plan, intent_id.as_deref());
+            if let Some(explanation) = llm_plan.explanation.as_deref()
+                && !explanation.trim().is_empty()
+            {
+                summary.push_str(&format!("\nPlan rationale: {}", explanation.trim()));
+            }
+            let mut plan_warning = None;
+            let plan_id = if let (Some(mcp_server), Some(intent_id)) =
+                (mcp_server.as_ref(), intent_id.as_ref())
+            {
+                match persist_execution_plan(&execution_plan, intent_id, mcp_server).await {
+                    Ok(id) => Some(id),
+                    Err(e) => {
+                        plan_warning = Some(format!("failed to persist execution plan: {e}"));
+                        None
+                    }
+                }
+            } else if mcp_server.is_some() {
+                plan_warning = Some(
+                    "intent persistence unavailable; execution plan not persisted.".to_string(),
+                );
+                None
+            } else {
+                plan_warning =
+                    Some("MCP server unavailable; execution plan not persisted.".to_string());
+                None
+            };
+
+            if let Some(ref warn) = plan_warning {
+                summary.push_str(&format!("\nWarning: {warn}"));
+            }
+            summary.push_str("\n\nExecution plan ready. Review the workflow card and choose Execute Plan / Modify Plan / Cancel below.");
+
+            if let Some(warning) = plan_warning {
+                warnings.push(warning);
+            }
+
+            let llm_output = turn
+                .as_ref()
+                .map(|turn| turn.final_text.clone())
+                .filter(|text| !text.trim().is_empty());
+            let mut new_history = turn.map(|turn| turn.history).unwrap_or(fallback_history);
+            new_history.push(Message::assistant(summary.clone()));
+
+            let _ = tx.send(AppEvent::PlanWorkflowComplete {
+                turn_id,
+                text: summary,
+                llm_output,
+                new_history,
+                intent_id,
+                plan_id,
+                spec_json,
+                spec: Box::new(spec_for_plan),
+                plan: Box::new(execution_plan),
+                llm_plan,
+                warnings,
+            });
+        });
+
+        self.agent_task = Some(handle);
+    }
+
+    // ── Post-plan dialog ────────────────────────────────────────────
+
+    async fn handle_post_plan_choice(&mut self) {
+        let pending = match self.pending_post_plan.take() {
+            Some(p) => p,
+            None => return,
+        };
+        let interaction_id = pending
+            .plan_id
+            .clone()
+            .unwrap_or_else(|| "post-plan-choice".to_string());
+        let selected = pending.selected;
+
+        match selected {
+            0 => {
+                self.start_execute_workflow(
+                    &pending.spec_json,
+                    pending.intent_id.clone(),
+                    pending.plan_id.clone(),
+                    Some(pending.plan.clone()),
+                )
+                .await;
+            }
+            _ => {
+                if pending.selected == 1 {
+                    self.pending_execution_plan_revision = Some(PendingExecutionPlanRevision {
+                        spec_json: pending.spec_json,
+                        intent_id: pending.intent_id.clone(),
+                        current_plan: pending.llm_plan,
+                        warnings: pending.warnings,
+                    });
+                    let msg = format!(
+                        "{} Your next plain-text message will revise the current execution plan.",
+                        pending_execution_plan_revision_help_message()
+                    );
+                    self.widget
+                        .add_cell(Box::new(AssistantHistoryCell::new(msg.clone())));
+                    self.history.push(Message::assistant(msg.clone()));
+                    self.session.add_assistant_message(&msg);
+                }
+                self.widget.bottom_pane.set_status(AgentStatus::Idle);
+                self.sync_mux_input_context();
+            }
+        }
+        if let Some(code_ui_session) = self.code_ui_session.clone() {
+            let next_status = if selected == 0 {
+                CodeUiSessionStatus::Thinking
+            } else {
+                CodeUiSessionStatus::Idle
+            };
+            tokio::spawn(async move {
+                code_ui_session.resolve_interaction(&interaction_id).await;
+                code_ui_session.set_status(next_status).await;
+            });
+        }
         self.schedule_draw();
     }
 
     fn dismiss_post_plan_dialog(&mut self) {
+        if let Some(interaction_id) = self
+            .pending_post_plan
+            .as_ref()
+            .and_then(|pending| pending.plan_id.clone())
+            && let Some(code_ui_session) = self.code_ui_session.clone()
+        {
+            tokio::spawn(async move {
+                code_ui_session.clear_interaction(&interaction_id).await;
+            });
+        }
         self.pending_post_plan = None;
         self.set_idle_and_draw();
     }
@@ -2032,6 +4003,7 @@ where
         spec_json: &str,
         persisted_intent_id: Option<String>,
         persisted_plan_id: Option<String>,
+        approved_plan: Option<ExecutionPlanSpec>,
     ) {
         use crate::internal::ai::{
             intentspec::types::IntentSpec,
@@ -2081,6 +4053,9 @@ where
             struct UiOrchestratorObserver {
                 tx: UnboundedSender<AppEvent>,
                 turn_id: TurnId,
+                task_revisions: Arc<Mutex<HashMap<uuid::Uuid, u32>>>,
+                plan_task_counts: Arc<Mutex<HashMap<u32, usize>>>,
+                execution_notes_sent: Arc<Mutex<HashSet<u32>>>,
             }
 
             impl UiOrchestratorObserver {
@@ -2094,19 +4069,61 @@ where
                 fn scoped_call_id(task: &TaskSpec, call_id: &str) -> String {
                     format!("{}:{call_id}", task.id())
                 }
+
+                fn remember_plan(&self, plan: &ExecutionPlanSpec) {
+                    if let Ok(mut task_revisions) = self.task_revisions.lock() {
+                        for task in &plan.tasks {
+                            task_revisions.insert(task.id(), plan.revision);
+                        }
+                    }
+                    if let Ok(mut plan_task_counts) = self.plan_task_counts.lock() {
+                        plan_task_counts.insert(plan.revision, plan.tasks.len());
+                    }
+                }
+
+                fn send_execution_note_once(&self, task: &TaskSpec) {
+                    let revision = self
+                        .task_revisions
+                        .lock()
+                        .ok()
+                        .and_then(|task_revisions| task_revisions.get(&task.id()).copied());
+                    let Some(revision) = revision else {
+                        return;
+                    };
+
+                    let should_send = self
+                        .execution_notes_sent
+                        .lock()
+                        .map(|mut sent| sent.insert(revision))
+                        .unwrap_or(false);
+                    if !should_send {
+                        return;
+                    }
+
+                    let task_count = self
+                        .plan_task_counts
+                        .lock()
+                        .ok()
+                        .and_then(|plan_task_counts| plan_task_counts.get(&revision).copied())
+                        .unwrap_or(0);
+                    self.send_note(format_plan_execution_stage_note(revision, task_count));
+                }
             }
 
             impl OrchestratorObserver for UiOrchestratorObserver {
                 fn on_plan_compiled(&self, plan: &ExecutionPlanSpec) {
+                    self.remember_plan(plan);
                     let _ = self.tx.send(AppEvent::DagGraphBegin {
                         turn_id: self.turn_id,
                         plan: plan.clone(),
                     });
+                    self.send_note(format_plan_compiled_stage_note(plan));
                 }
 
                 fn on_task_runtime_event(&self, task: &TaskSpec, event: TaskRuntimeEvent) {
                     match &event {
                         TaskRuntimeEvent::Phase(TaskRuntimePhase::Starting) => {
+                            self.send_execution_note_once(task);
                             let _ = self.tx.send(AppEvent::AgentStatusUpdate {
                                 turn_id: self.turn_id,
                                 status: AgentStatus::Thinking,
@@ -2114,21 +4131,21 @@ where
                             let _ = self.tx.send(AppEvent::DagTaskStatus {
                                 turn_id: self.turn_id,
                                 task_id: task.id(),
-                                status: crate::internal::ai::orchestrator::types::TaskNodeStatus::Running,
+                                status: TaskNodeStatus::Running,
                             });
                         }
                         TaskRuntimeEvent::Phase(TaskRuntimePhase::Completed) => {
                             let _ = self.tx.send(AppEvent::DagTaskStatus {
                                 turn_id: self.turn_id,
                                 task_id: task.id(),
-                                status: crate::internal::ai::orchestrator::types::TaskNodeStatus::Completed,
+                                status: TaskNodeStatus::Completed,
                             });
                         }
                         TaskRuntimeEvent::Phase(TaskRuntimePhase::Failed) => {
                             let _ = self.tx.send(AppEvent::DagTaskStatus {
                                 turn_id: self.turn_id,
                                 task_id: task.id(),
-                                status: crate::internal::ai::orchestrator::types::TaskNodeStatus::Failed,
+                                status: TaskNodeStatus::Failed,
                             });
                         }
                         TaskRuntimeEvent::WorkspaceReady {
@@ -2200,13 +4217,33 @@ where
 
                 fn on_graph_checkpoint_restored(&self, _checkpoint_id: &str, _pc: usize) {}
 
+                fn on_system_verification(&self, plan: &ExecutionPlanSpec, report: &SystemReport) {
+                    let _ = self.tx.send(AppEvent::DagTaskMuxClear {
+                        turn_id: self.turn_id,
+                    });
+                    self.send_note(format_system_verification_stage_note(plan, report));
+                }
+
+                fn on_decision(&self, plan: &ExecutionPlanSpec, decision: &DecisionOutcome) {
+                    self.send_note(format_decision_stage_note(plan, decision));
+                }
+
                 fn on_replan(
                     &self,
-                    _current_revision: u32,
-                    _next_revision: u32,
-                    _reason: &str,
-                    _diff_summary: &str,
+                    current_revision: u32,
+                    next_revision: u32,
+                    reason: &str,
+                    diff_summary: &str,
                 ) {
+                    let _ = self.tx.send(AppEvent::DagTaskMuxClear {
+                        turn_id: self.turn_id,
+                    });
+                    self.send_note(format_replan_stage_note(
+                        current_revision,
+                        next_revision,
+                        reason,
+                        diff_summary,
+                    ));
                 }
 
                 fn on_persistence_complete(&self, _execution: &PersistedExecution) {}
@@ -2215,17 +4252,54 @@ where
             let observer: Arc<dyn OrchestratorObserver> = Arc::new(UiOrchestratorObserver {
                 tx: tx.clone(),
                 turn_id,
+                task_revisions: Arc::new(Mutex::new(HashMap::new())),
+                plan_task_counts: Arc::new(Mutex::new(HashMap::new())),
+                execution_notes_sent: Arc::new(Mutex::new(HashSet::new())),
             });
+            struct TuiPhaseConfirmer {
+                tx: UnboundedSender<AppEvent>,
+                turn_id: TurnId,
+            }
+
+            #[async_trait]
+            impl OrchestratorPhaseConfirmer for TuiPhaseConfirmer {
+                async fn confirm(
+                    &self,
+                    prompt: PhaseConfirmationPrompt,
+                ) -> PhaseConfirmationDecision {
+                    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+                    if self
+                        .tx
+                        .send(AppEvent::PhaseConfirmationRequired {
+                            turn_id: self.turn_id,
+                            prompt,
+                            response_tx,
+                        })
+                        .is_err()
+                    {
+                        return PhaseConfirmationDecision::Abort;
+                    }
+                    response_rx
+                        .await
+                        .unwrap_or(PhaseConfirmationDecision::Abort)
+                }
+            }
+
             let config = OrchestratorConfig {
                 working_dir,
                 base_commit: None,
                 persisted_intent_id,
                 persisted_plan_id,
+                initial_plan: approved_plan,
                 dagrs_resume_checkpoint_id: None,
                 coder_preamble,
                 reviewer_preamble,
                 mcp_server,
                 observer: Some(observer),
+                phase_confirmer: Some(Arc::new(TuiPhaseConfirmer {
+                    tx: tx.clone(),
+                    turn_id,
+                })),
             };
             let orchestrator = Orchestrator::new(model, registry, config);
 
@@ -2252,6 +4326,18 @@ where
 
     async fn start_plan_workflow(&mut self, request: &str) {
         let request = request.trim();
+        let user_text = format!("/plan {request}");
+        self.start_plan_workflow_with_user_text(request, user_text)
+            .await;
+    }
+
+    async fn start_plan_workflow_from_plain_message(&mut self, request: &str) {
+        self.start_plan_workflow_with_user_text(request, request.trim().to_string())
+            .await;
+    }
+
+    async fn start_plan_workflow_with_user_text(&mut self, request: &str, user_text: String) {
+        let request = request.trim();
         if request.is_empty() {
             self.widget.add_cell(Box::new(AssistantHistoryCell::new(
                 "Usage: /plan <your requirement>".to_string(),
@@ -2266,7 +4352,6 @@ where
         } else {
             prompt_body
         };
-        let user_text = format!("/plan {request}");
         self.begin_plan_workflow(user_text, prompt).await;
     }
 
@@ -2314,6 +4399,7 @@ where
             "read_file".to_string(),
             "list_dir".to_string(),
             "grep_files".to_string(),
+            "search_files".to_string(),
             "request_user_input".to_string(),
             "submit_intent_draft".to_string(),
         ]);
@@ -2343,7 +4429,34 @@ where
                 }
             }
 
-            impl crate::internal::ai::agent::ToolLoopObserver for PlanObserver {
+            impl ToolLoopObserver for PlanObserver {
+                fn on_model_stream_event(&mut self, event: &CompletionStreamEvent) {
+                    match event {
+                        CompletionStreamEvent::TextDelta { delta, .. } if !delta.is_empty() => {
+                            let _ = self.tx.send(AppEvent::AgentEvent {
+                                turn_id: self.turn_id,
+                                event: AgentEvent::ResponseDelta {
+                                    delta: delta.clone(),
+                                },
+                            });
+                        }
+                        CompletionStreamEvent::ToolCallPreview {
+                            call_id,
+                            tool_name,
+                            arguments,
+                            ..
+                        } => {
+                            let _ = self.tx.send(AppEvent::ToolCallPreview {
+                                turn_id: self.turn_id,
+                                call_id: call_id.clone(),
+                                tool_name: tool_name.clone(),
+                                arguments: arguments.clone(),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+
                 fn on_tool_call_begin(
                     &mut self,
                     call_id: &str,
@@ -2369,8 +4482,7 @@ where
                     }
 
                     if tool_name == "submit_intent_draft"
-                        && let Ok(args) =
-                            parse_value_or_json_string::<SubmitIntentDraftArgs>(arguments)
+                        && let Ok(args) = parse_submit_intent_draft_value(arguments)
                     {
                         self.draft = Some(args.draft);
                     }
@@ -2514,11 +4626,7 @@ where
 
             let mut persistence_warning = None;
             let intent_id = if let Some(ref mcp_server) = mcp_server {
-                match crate::internal::ai::intentspec::persistence::persist_intentspec(
-                    &spec, mcp_server,
-                )
-                .await
-                {
+                match persist_intentspec(&spec, mcp_server).await {
                     Ok(intent_id) => Some(intent_id),
                     Err(error) => {
                         persistence_warning =
@@ -2534,67 +4642,23 @@ where
 
             let pretty_json =
                 serde_json::to_string_pretty(&spec).unwrap_or_else(|_| "{}".to_string());
-            let execution_plan = match compile_execution_plan_spec(&spec) {
-                Ok(plan) => plan,
-                Err(e) => {
-                    let _ = tx.send(AppEvent::AgentEvent {
-                        turn_id,
-                        event: AgentEvent::Error {
-                            message: format!("Plan failed: cannot compile execution plan: {e}"),
-                        },
-                    });
-                    return;
-                }
-            };
+            let warnings = persistence_warning.into_iter().collect::<Vec<_>>();
+            let review = build_intentspec_review(&spec, intent_id.as_deref(), &warnings);
 
-            let mut summary = render_summary(&spec, intent_id.as_deref());
-            let mut plan_warning = None;
-            let plan_id = if let (Some(mcp_server), Some(intent_id)) =
-                (mcp_server.as_ref(), intent_id.as_ref())
-            {
-                match persist_execution_plan(&execution_plan, intent_id, mcp_server).await {
-                    Ok(id) => Some(id),
-                    Err(e) => {
-                        plan_warning = Some(format!("failed to persist execution plan: {e}"));
-                        None
-                    }
-                }
-            } else if mcp_server.is_some() {
-                plan_warning = Some(
-                    "intent persistence unavailable; execution plan not persisted.".to_string(),
-                );
-                None
-            } else {
-                plan_warning =
-                    Some("MCP server unavailable; execution plan not persisted.".to_string());
-                None
-            };
-
-            if let Some(ref warn) = persistence_warning {
-                summary.push_str(&format!("\nWarning: {warn}"));
-            }
-            if let Some(ref warn) = plan_warning {
-                summary.push_str(&format!("\nWarning: {warn}"));
-            }
-            summary.push_str("\n\nExecution plan ready. Review the workflow card and choose Execute / Modify / Cancel below.");
-
-            let warnings = [persistence_warning, plan_warning]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>();
-
+            let llm_output = turn
+                .as_ref()
+                .map(|turn| turn.final_text.clone())
+                .filter(|text| !text.trim().is_empty());
             let mut new_history = turn.map(|turn| turn.history).unwrap_or(fallback_history);
-            new_history.push(Message::assistant(summary.clone()));
+            new_history.push(Message::assistant(review.clone()));
 
-            let _ = tx.send(AppEvent::PlanWorkflowComplete {
+            let _ = tx.send(AppEvent::IntentSpecReviewReady {
                 turn_id,
-                text: summary,
+                text: review,
+                llm_output,
                 new_history,
                 intent_id,
-                plan_id,
                 spec_json: pretty_json,
-                spec: Box::new(spec),
-                plan: Box::new(execution_plan),
                 warnings,
             });
         });
@@ -2630,6 +4694,7 @@ where
                             .get(LATEST_EXECUTION_PLAN_ID)
                             .and_then(serde_json::Value::as_str)
                             .map(ToString::to_string),
+                        None,
                     )
                     .await;
                 }
@@ -2671,8 +4736,7 @@ where
             .metadata
             .get(LATEST_INTENTSPEC_JSON)
             .and_then(|v| v.as_str())
-            && let Ok(spec) =
-                serde_json::from_str::<crate::internal::ai::intentspec::IntentSpec>(json_text)
+            && let Ok(spec) = serde_json::from_str::<IntentSpec>(json_text)
         {
             if intentspec_matches_workspace(&spec, &binding.workspace_key, &binding.base_ref) {
                 return LatestIntentSpecLoad::Found(json_text.to_string());
@@ -2726,9 +4790,12 @@ where
     }
 
     fn update_status_after_tool_progress(&mut self) {
-        let next_status = if self.pending_post_plan.is_some() {
+        let next_status = if self.pending_intent_review.is_some() {
+            AgentStatus::AwaitingIntentReviewChoice
+        } else if self.pending_post_plan.is_some() {
             AgentStatus::AwaitingPostPlanChoice
-        } else if self.pending_exec_approval.is_some() {
+        } else if self.pending_phase_confirmation.is_some() || self.pending_exec_approval.is_some()
+        {
             AgentStatus::AwaitingApproval
         } else if self.pending_user_input.is_some() {
             AgentStatus::AwaitingUserInput
@@ -2810,6 +4877,12 @@ where
     }
 
     fn complete_streaming_assistant_cell(&mut self, content: String) {
+        tracing::debug!(
+            target: "libra::internal::tui::app",
+            bytes = content.len(),
+            content = %log_preview_text(&content),
+            "tui assistant message completed"
+        );
         for cell in self.widget.cells.iter_mut().rev() {
             if let Some(assistant_cell) = cell.as_any_mut().downcast_mut::<AssistantHistoryCell>()
                 && assistant_cell.is_streaming
@@ -2824,6 +4897,12 @@ where
     }
 
     fn append_streaming_assistant_delta(&mut self, delta: &str) {
+        tracing::debug!(
+            target: "libra::internal::tui::app",
+            bytes = delta.len(),
+            content = %log_preview_text(delta),
+            "tui assistant delta rendered"
+        );
         for cell in self.widget.cells.iter_mut().rev() {
             if let Some(assistant_cell) = cell.as_any_mut().downcast_mut::<AssistantHistoryCell>()
                 && assistant_cell.is_streaming
@@ -2851,10 +4930,108 @@ where
         self.widget.add_cell(replacement);
     }
 
+    fn tool_call_summary_for_browser(tool_name: &str, arguments: &serde_json::Value) -> String {
+        if tool_name == "shell" {
+            return arguments
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "shell command".to_string());
+        }
+
+        if tool_name == "read_file" {
+            return arguments
+                .get("file_path")
+                .and_then(serde_json::Value::as_str)
+                .map(|path| format!("Read {path}"))
+                .unwrap_or_else(|| "Read file".to_string());
+        }
+
+        if tool_name == "list_dir" {
+            return arguments
+                .get("dir_path")
+                .and_then(serde_json::Value::as_str)
+                .map(|path| format!("List {path}"))
+                .unwrap_or_else(|| "List directory".to_string());
+        }
+
+        if tool_name == "grep_files" || tool_name == "search_files" {
+            let pattern = arguments
+                .get("pattern")
+                .or_else(|| arguments.get("query"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("(pattern)");
+            return format!("Search {pattern}");
+        }
+
+        if tool_name == "apply_patch" {
+            return "Apply patch".to_string();
+        }
+
+        if tool_name == "request_user_input" {
+            return "Ask for user input".to_string();
+        }
+
+        if tool_name == "update_plan" {
+            return "Update plan".to_string();
+        }
+
+        tool_name.replace('_', " ")
+    }
+
+    fn patchset_snapshot_for_browser(
+        call_id: &str,
+        status: &str,
+        result: &Result<ToolOutput, String>,
+    ) -> Option<CodeUiPatchsetSnapshot> {
+        let Ok(output) = result else {
+            return None;
+        };
+        let ToolOutput::Function {
+            metadata: Some(meta),
+            ..
+        } = output
+        else {
+            return None;
+        };
+        let diffs = meta.get("diffs")?.as_array()?;
+        let changes = diffs
+            .iter()
+            .filter_map(|entry| {
+                Some(CodeUiPatchChange {
+                    path: entry.get("path")?.as_str()?.to_string(),
+                    change_type: entry
+                        .get("type")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("update")
+                        .to_string(),
+                    diff: entry
+                        .get("diff")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToString::to_string),
+                })
+            })
+            .collect::<Vec<_>>();
+        if changes.is_empty() {
+            return None;
+        }
+        Some(CodeUiPatchsetSnapshot {
+            id: call_id.to_string(),
+            status: status.to_string(),
+            changes,
+            updated_at: Utc::now(),
+        })
+    }
+
     fn complete_running_tool_cells_with_interrupt(&mut self) {
         for cell in self.widget.cells.iter_mut() {
             if let Some(tool_cell) = cell.as_any_mut().downcast_mut::<ToolCallHistoryCell>() {
                 tool_cell.interrupt_running();
+            }
+            if let Some(plan_cell) = cell.as_any_mut().downcast_mut::<PlanUpdateHistoryCell>()
+                && plan_cell.is_running
+            {
+                plan_cell.complete();
             }
         }
         self.widget.interrupt_task_mux_tool_calls();
@@ -2944,6 +5121,10 @@ fn pending_plan_revision_help_message() -> String {
     "Revise mode is active. Describe changes in plain text, use `/plan modify <changes>` to keep revising, or `/plan cancel` to exit.".to_string()
 }
 
+fn pending_execution_plan_revision_help_message() -> String {
+    "Plan revise mode is active. Describe execution-plan changes in plain text, use `/plan modify <changes>` to keep revising, or `/plan cancel` to exit.".to_string()
+}
+
 fn append_to_last_tool_group_cell(
     cells: &mut Vec<Box<dyn super::history_cell::HistoryCell>>,
     call_id: String,
@@ -2979,9 +5160,196 @@ fn append_to_last_tool_group_cell(
     true
 }
 
-fn format_orchestrator_result(
-    result: &crate::internal::ai::orchestrator::types::OrchestratorResult,
+fn append_to_last_tool_group_preview_cell(
+    cells: &mut Vec<Box<dyn super::history_cell::HistoryCell>>,
+    call_id: String,
+    tool_name: &str,
+    arguments: serde_json::Value,
+) -> bool {
+    let anchor_index = if let Some(streaming_index) = cells.iter().rposition(|cell| {
+        cell.as_any()
+            .downcast_ref::<AssistantHistoryCell>()
+            .is_some_and(|assistant| assistant.is_streaming)
+    }) {
+        streaming_index.checked_sub(1)
+    } else {
+        cells.len().checked_sub(1)
+    };
+
+    let Some(anchor_index) = anchor_index else {
+        return false;
+    };
+
+    let Some(tool_cell) = cells[anchor_index]
+        .as_any_mut()
+        .downcast_mut::<ToolCallHistoryCell>()
+    else {
+        return false;
+    };
+
+    if !tool_cell.can_merge(tool_name) {
+        return false;
+    }
+
+    tool_cell.append_preview_call(call_id, tool_name.to_string(), arguments);
+    true
+}
+
+fn parse_update_plan_arguments(
+    arguments: &serde_json::Value,
+) -> (
+    Option<String>,
+    Vec<crate::internal::ai::tools::context::PlanStep>,
+) {
+    if let Ok(args) = serde_json::from_value::<UpdatePlanArgs>(arguments.clone()) {
+        (args.explanation, args.plan)
+    } else {
+        (None, Vec::new())
+    }
+}
+
+fn mark_visible_tool_call_running(
+    cells: &mut [Box<dyn super::history_cell::HistoryCell>],
+    call_id: &str,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+) -> bool {
+    for cell in cells.iter_mut().rev() {
+        if let Some(plan_cell) = cell.as_any_mut().downcast_mut::<PlanUpdateHistoryCell>()
+            && plan_cell.call_id == call_id
+        {
+            let (explanation, steps) = parse_update_plan_arguments(arguments);
+            plan_cell.update(explanation, steps);
+            plan_cell.is_running = true;
+            return true;
+        }
+
+        if let Some(tool_cell) = cell.as_any_mut().downcast_mut::<ToolCallHistoryCell>()
+            && tool_cell.mark_call_running(call_id, tool_name, arguments)
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn update_visible_tool_call_preview(
+    cells: &mut [Box<dyn super::history_cell::HistoryCell>],
+    call_id: &str,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+) -> bool {
+    for cell in cells.iter_mut().rev() {
+        if let Some(plan_cell) = cell.as_any_mut().downcast_mut::<PlanUpdateHistoryCell>()
+            && plan_cell.call_id == call_id
+        {
+            let (explanation, steps) = parse_update_plan_arguments(arguments);
+            plan_cell.update(explanation, steps);
+            return true;
+        }
+
+        if let Some(tool_cell) = cell.as_any_mut().downcast_mut::<ToolCallHistoryCell>()
+            && tool_cell.contains_call_id(call_id)
+        {
+            tool_cell.append_preview_call(
+                call_id.to_string(),
+                tool_name.to_string(),
+                arguments.clone(),
+            );
+            return true;
+        }
+    }
+
+    false
+}
+
+fn log_preview_text(text: &str) -> String {
+    const MAX_CHARS: usize = 240;
+    summarize_llm_output_for_context(text, MAX_CHARS)
+}
+
+fn summarize_llm_output_for_context(text: &str, max_chars: usize) -> String {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= max_chars {
+        return normalized;
+    }
+
+    let mut out = normalized
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    out.push('…');
+    out
+}
+
+fn format_plan_compiled_stage_note(plan: &ExecutionPlanSpec) -> String {
+    let groups = plan.parallel_groups();
+    let layer_count = groups.len();
+    let lane_count = groups.iter().map(Vec::len).max().unwrap_or(0);
+    format!(
+        "Phase 1 · Plan r{} compiled  \n{} tasks, {} layers, {} max lanes.",
+        plan.revision,
+        plan.tasks.len(),
+        layer_count,
+        lane_count
+    )
+}
+
+fn format_plan_execution_stage_note(revision: u32, task_count: usize) -> String {
+    let task_label = if task_count == 1 { "task" } else { "tasks" };
+    format!(
+        "Phase 2 · Executing Plan r{revision}  \nRunning {task_count} {task_label} through the workflow DAG."
+    )
+}
+
+fn format_system_verification_stage_note(
+    plan: &ExecutionPlanSpec,
+    report: &SystemReport,
 ) -> String {
+    format!(
+        "Phase 3 · Verifying Plan r{}  \nIntegration: {} ({}) · Security: {} ({}) · Release: {} ({}) · Review: {} · Artifacts: {}.",
+        plan.revision,
+        bool_label(report.integration.all_required_passed),
+        gate_report_summary(&report.integration),
+        bool_label(report.security.all_required_passed),
+        gate_report_summary(&report.security),
+        bool_label(report.release.all_required_passed),
+        gate_report_summary(&report.release),
+        bool_label(report.review_passed),
+        bool_label(report.artifacts_complete)
+    )
+}
+
+fn format_replan_stage_note(
+    current_revision: u32,
+    next_revision: u32,
+    reason: &str,
+    diff_summary: &str,
+) -> String {
+    let mut lines = vec![format!(
+        "Replan · Plan r{current_revision} -> r{next_revision}"
+    )];
+    let reason = reason.trim();
+    if !reason.is_empty() {
+        lines.push(format!("Reason: {reason}"));
+    }
+    let diff_summary = diff_summary.trim();
+    if !diff_summary.is_empty() {
+        lines.push(format!("Change: {diff_summary}"));
+    }
+    lines.join("  \n")
+}
+
+fn format_decision_stage_note(plan: &ExecutionPlanSpec, decision: &DecisionOutcome) -> String {
+    format!(
+        "Phase 4 · Decision for Plan r{}: {}",
+        plan.revision,
+        orchestrator_decision_label(decision)
+    )
+}
+
+fn format_orchestrator_result(result: &OrchestratorResult) -> String {
     let mut lines = Vec::new();
     let decision_label = orchestrator_decision_label(&result.decision);
     let groups = result.execution_plan_spec.parallel_groups();
@@ -3091,9 +5459,9 @@ fn format_orchestrator_result(
             .iter()
             .find(|item| item.task_id == task.id());
         let kind = match task.kind {
-            crate::internal::ai::orchestrator::types::TaskKind::Implementation => "I",
-            crate::internal::ai::orchestrator::types::TaskKind::Analysis => "A",
-            crate::internal::ai::orchestrator::types::TaskKind::Gate => "G",
+            TaskKind::Implementation => "I",
+            TaskKind::Analysis => "A",
+            TaskKind::Gate => "G",
         };
         let label = format!("{kind}{:02} {}", idx + 1, task.title());
         let (status, retries, tools, violations, notes) = if let Some(task_result) = task_result {
@@ -3107,9 +5475,7 @@ fn format_orchestrator_result(
                     note.push_str(&format!(" | Issues: {}", review.issues.join("; ")));
                 }
                 note
-            } else if task_result.status
-                == crate::internal::ai::orchestrator::types::TaskNodeStatus::Failed
-            {
+            } else if task_result.status == TaskNodeStatus::Failed {
                 if let Some(reason) = task_result
                     .agent_output
                     .as_deref()
@@ -3211,31 +5577,25 @@ fn format_orchestrator_result(
     lines.join("\n")
 }
 
-fn orchestrator_decision_label(
-    decision: &crate::internal::ai::orchestrator::types::DecisionOutcome,
-) -> &'static str {
+fn orchestrator_decision_label(decision: &DecisionOutcome) -> &'static str {
     match decision {
-        crate::internal::ai::orchestrator::types::DecisionOutcome::Commit => "Commit",
-        crate::internal::ai::orchestrator::types::DecisionOutcome::HumanReviewRequired => {
-            "Human Review Required"
-        }
-        crate::internal::ai::orchestrator::types::DecisionOutcome::Abandon => "Abandon",
+        DecisionOutcome::Commit => "Commit",
+        DecisionOutcome::HumanReviewRequired => "Human Review Required",
+        DecisionOutcome::Abandon => "Abandon",
     }
 }
 
-fn orchestrator_status_label(
-    status: &crate::internal::ai::orchestrator::types::TaskNodeStatus,
-) -> &'static str {
+fn orchestrator_status_label(status: &TaskNodeStatus) -> &'static str {
     match status {
-        crate::internal::ai::orchestrator::types::TaskNodeStatus::Pending => "pending",
-        crate::internal::ai::orchestrator::types::TaskNodeStatus::Running => "running",
-        crate::internal::ai::orchestrator::types::TaskNodeStatus::Completed => "done",
-        crate::internal::ai::orchestrator::types::TaskNodeStatus::Failed => "failed",
-        crate::internal::ai::orchestrator::types::TaskNodeStatus::Skipped => "skipped",
+        TaskNodeStatus::Pending => "pending",
+        TaskNodeStatus::Running => "running",
+        TaskNodeStatus::Completed => "done",
+        TaskNodeStatus::Failed => "failed",
+        TaskNodeStatus::Skipped => "skipped",
     }
 }
 
-fn gate_report_summary(report: &crate::internal::ai::orchestrator::types::GateReport) -> String {
+fn gate_report_summary(report: &GateReport) -> String {
     if report.results.is_empty() {
         return "No checks".to_string();
     }
@@ -3265,15 +5625,41 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        PendingPlanRevisionCommand, append_to_last_tool_group_cell, build_plan_revision_prompt,
+        PendingPlanRevisionCommand, append_to_last_tool_group_cell,
+        append_to_last_tool_group_preview_cell, build_execution_plan_prompt,
+        build_execution_plan_revision_prompt, build_plan_prompt, build_plan_revision_prompt,
+        code_ui_response_from_managed_selection, format_decision_stage_note,
         format_intentspec_target_mismatch, format_orchestrator_result,
-        parse_pending_plan_revision_command, pending_plan_revision_help_message,
-        should_start_mcp_turn_tracking,
+        format_plan_compiled_stage_note, format_plan_execution_stage_note,
+        format_replan_stage_note, format_system_verification_stage_note,
+        intentspec_with_llm_plan_objectives, is_global_quit_command_input,
+        mark_visible_tool_call_running, newest_managed_assistant_text,
+        parse_pending_plan_revision_command, pending_execution_plan_revision_help_message,
+        pending_plan_revision_help_message, should_route_plain_message_to_plan,
     };
     use crate::internal::{
-        ai::orchestrator::types::{
-            DecisionOutcome, ExecutionPlanSpec, GateReport, OrchestratorResult, SystemReport,
-            TaskContract, TaskKind, TaskNodeStatus, TaskResult, TaskSpec,
+        ai::{
+            intentspec::{
+                ResolveContext,
+                draft::{DraftAcceptance, DraftIntent, DraftRisk, IntentDraft},
+                resolve_intentspec,
+                types::{
+                    ChangeType, DecompositionMode, IntentSpec, Objective, ObjectiveKind, RiskLevel,
+                },
+            },
+            orchestrator::types::{
+                DecisionOutcome, ExecutionPlanSpec, GateReport, OrchestratorResult, SystemReport,
+                TaskContract, TaskKind, TaskNodeStatus, TaskResult, TaskSpec,
+            },
+            tools::context::{
+                PlanStep as ToolPlanStep, StepStatus as ToolStepStatus, UpdatePlanArgs,
+            },
+            web::code_ui::{
+                CodeUiApplyToFuture, CodeUiCapabilities, CodeUiInteractionKind,
+                CodeUiInteractionOption, CodeUiInteractionRequest, CodeUiInteractionStatus,
+                CodeUiProviderInfo, CodeUiSessionStatus, CodeUiTranscriptEntry,
+                CodeUiTranscriptEntryKind, initial_snapshot,
+            },
         },
         tui::history_cell::{AssistantHistoryCell, HistoryCell, ToolCallHistoryCell},
     };
@@ -3340,6 +5726,119 @@ mod tests {
         }
     }
 
+    fn minimal_intentspec(objectives: Vec<Objective>) -> IntentSpec {
+        resolve_intentspec(
+            IntentDraft {
+                intent: DraftIntent {
+                    summary: "Implement workflow".to_string(),
+                    problem_statement: "Need a plan workflow".to_string(),
+                    change_type: ChangeType::Feature,
+                    objectives,
+                    in_scope: vec!["src".to_string()],
+                    out_of_scope: vec![],
+                    touch_hints: None,
+                },
+                acceptance: DraftAcceptance {
+                    success_criteria: vec!["workflow is implemented".to_string()],
+                    fast_checks: vec![],
+                    integration_checks: vec![],
+                    security_checks: vec![],
+                    release_checks: vec![],
+                },
+                risk: DraftRisk {
+                    rationale: "test".to_string(),
+                    factors: vec![],
+                    level: Some(RiskLevel::Low),
+                },
+            },
+            RiskLevel::Low,
+            ResolveContext {
+                working_dir: ".".to_string(),
+                base_ref: "HEAD".to_string(),
+                created_by_id: "tester".to_string(),
+            },
+        )
+    }
+
+    fn update_plan_args(steps: &[&str]) -> UpdatePlanArgs {
+        UpdatePlanArgs {
+            explanation: Some("Plan generated from confirmed IntentSpec".to_string()),
+            plan: steps
+                .iter()
+                .map(|step| ToolPlanStep {
+                    step: (*step).to_string(),
+                    status: ToolStepStatus::Pending,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn llm_plan_steps_replace_objectives_for_execution_plan_compile() {
+        let spec = minimal_intentspec(vec![Objective {
+            title: "original broad objective".to_string(),
+            kind: ObjectiveKind::Implementation,
+        }]);
+        let plan = update_plan_args(&["Inspect current flow", "Add LLM plan review"]);
+
+        let planned_spec = intentspec_with_llm_plan_objectives(&spec, &plan).unwrap();
+
+        let titles = planned_spec
+            .intent
+            .objectives
+            .iter()
+            .map(|objective| objective.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(titles, vec!["Inspect current flow", "Add LLM plan review"]);
+        assert!(
+            planned_spec
+                .intent
+                .objectives
+                .iter()
+                .all(|objective| objective.kind == ObjectiveKind::Implementation)
+        );
+        assert_eq!(
+            planned_spec
+                .libra
+                .as_ref()
+                .and_then(|binding| binding.plan_generation.as_ref())
+                .map(|config| &config.decomposition_mode),
+            Some(&DecompositionMode::PerObjective)
+        );
+    }
+
+    #[test]
+    fn execution_plan_prompt_requires_update_plan_after_intentspec_confirmation() {
+        let prompt = build_execution_plan_prompt("{\"kind\":\"IntentSpec\"}");
+
+        assert!(prompt.contains("already confirmed IntentSpec"));
+        assert!(prompt.contains("call update_plan exactly once"));
+        assert!(prompt.contains("Do not call submit_intent_draft"));
+    }
+
+    #[test]
+    fn execution_plan_revision_prompt_includes_existing_plan_and_change_request() {
+        let plan = update_plan_args(&["Inspect current flow"]);
+        let prompt = build_execution_plan_revision_prompt(
+            "{\"kind\":\"IntentSpec\"}",
+            &plan,
+            "split implementation and tests",
+        );
+
+        assert!(prompt.contains("Current execution plan"));
+        assert!(prompt.contains("Inspect current flow"));
+        assert!(prompt.contains("split implementation and tests"));
+        assert!(prompt.contains("call update_plan exactly once"));
+    }
+
+    #[test]
+    fn execution_plan_revision_help_is_plan_specific() {
+        let help = pending_execution_plan_revision_help_message();
+
+        assert!(help.contains("Plan revise mode"));
+        assert!(help.contains("/plan modify <changes>"));
+    }
+
     #[test]
     fn appends_to_last_matching_tool_group_before_streaming_cell() {
         let mut cells: Vec<Box<dyn HistoryCell>> = vec![
@@ -3387,9 +5886,63 @@ mod tests {
     }
 
     #[test]
-    fn managed_claudecode_disables_background_mcp_turn_tracking() {
-        assert!(!should_start_mcp_turn_tracking(true));
-        assert!(should_start_mcp_turn_tracking(false));
+    fn appends_preview_to_last_matching_tool_group_before_streaming_cell() {
+        let mut cells: Vec<Box<dyn HistoryCell>> = vec![
+            Box::new(ToolCallHistoryCell::new_preview(
+                "1".to_string(),
+                "read_file".to_string(),
+                json!({"file_path":"src/main.rs"}),
+            )),
+            Box::new(AssistantHistoryCell::streaming()),
+        ];
+
+        assert!(append_to_last_tool_group_preview_cell(
+            &mut cells,
+            "2".to_string(),
+            "list_dir",
+            json!({"dir_path":"src"}),
+        ));
+
+        let tool_cell = cells[0]
+            .as_any()
+            .downcast_ref::<ToolCallHistoryCell>()
+            .expect("expected grouped tool cell");
+        assert!(tool_cell.contains_call_id("1"));
+        assert!(tool_cell.contains_call_id("2"));
+    }
+
+    #[test]
+    fn marks_preview_tool_call_running_without_duplication() {
+        let mut cells: Vec<Box<dyn HistoryCell>> =
+            vec![Box::new(ToolCallHistoryCell::new_preview(
+                "call_1".to_string(),
+                "read_file".to_string(),
+                json!({"file_path":"src/main.rs"}),
+            ))];
+
+        assert!(
+            cells[0]
+                .as_any()
+                .downcast_ref::<ToolCallHistoryCell>()
+                .expect("expected tool call cell")
+                .contains_call_id("call_1")
+        );
+        assert!(mark_visible_tool_call_running(
+            &mut cells,
+            "call_1",
+            "read_file",
+            &json!({"file_path":"src/main.rs"}),
+        ));
+
+        let rendered = cells[0]
+            .display_lines(100)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Exploring"));
+        assert!(!rendered.contains("Preparing explore"));
     }
 
     #[test]
@@ -3402,6 +5955,29 @@ mod tests {
         assert!(rendered.contains("## Verification"));
         assert!(rendered.contains("| Task | Status | Retries | Tools | Violations | Notes |"));
         assert!(rendered.contains("### Missing Artifacts"));
+    }
+
+    #[test]
+    fn orchestrator_stage_notes_surface_later_phases() {
+        let result = orchestrator_fixture();
+        let plan = &result.execution_plan_spec;
+        let report = &result.system_report;
+
+        let compiled = format_plan_compiled_stage_note(plan);
+        let executing = format_plan_execution_stage_note(plan.revision, plan.tasks.len());
+        let verifying = format_system_verification_stage_note(plan, report);
+        let replanning = format_replan_stage_note(1, 2, "gate failed", "split verification");
+        let decision = format_decision_stage_note(plan, &result.decision);
+
+        assert!(compiled.contains("Phase 1"));
+        assert!(executing.contains("Phase 2"));
+        assert!(executing.contains("Plan r4"));
+        assert!(verifying.contains("Phase 3"));
+        assert!(verifying.contains("Review: Fail"));
+        assert!(replanning.contains("Plan r1 -> r2"));
+        assert!(replanning.contains("split verification"));
+        assert!(decision.contains("Phase 4"));
+        assert!(decision.contains("Abandon"));
     }
 
     #[test]
@@ -3438,6 +6014,35 @@ mod tests {
         assert!(prompt.contains("\"kind\": \"IntentSpec\""));
         assert!(prompt.contains("Requested changes:\nadd an integration gate for cargo test"));
         assert!(prompt.contains("submit_intent_draft exactly once"));
+    }
+
+    #[test]
+    fn plain_developer_messages_are_routed_through_plan_workflow() {
+        assert!(should_route_plain_message_to_plan(
+            "init the project with cargo"
+        ));
+        assert!(should_route_plain_message_to_plan(
+            "  fix the failing Ollama provider path"
+        ));
+        assert!(!should_route_plain_message_to_plan(""));
+        assert!(!should_route_plain_message_to_plan("   "));
+        assert!(!should_route_plain_message_to_plan(
+            "/plan init the project"
+        ));
+        assert!(!should_route_plain_message_to_plan("/verify"));
+
+        let prompt = build_plan_prompt("init the project with cargo");
+        assert!(prompt.contains("request_user_input"));
+        assert!(prompt.contains("submit_intent_draft exactly once"));
+    }
+
+    #[test]
+    fn quit_command_is_global_local_input() {
+        assert!(is_global_quit_command_input("/quit"));
+        assert!(is_global_quit_command_input("  /Quit now"));
+        assert!(!is_global_quit_command_input("/mux quit"));
+        assert!(!is_global_quit_command_input("quit"));
+        assert!(!is_global_quit_command_input("/plan quit"));
     }
 
     #[test]
@@ -3483,6 +6088,198 @@ mod tests {
         assert!(message.contains("current · /tmp/current @ fedcba098765 (main)"));
         assert!(message.contains("stored · /tmp/other @ 1234567890ab (feature/spec)"));
         assert!(message.contains("different workspace or HEAD"));
+    }
+
+    #[test]
+    fn managed_assistant_text_ignores_baseline_transcript_entries() {
+        let now = chrono::Utc::now();
+        let mut snapshot = initial_snapshot(
+            "/tmp/libra",
+            CodeUiProviderInfo {
+                provider: "codex".to_string(),
+                model: Some("gpt-5.4".to_string()),
+                mode: Some("tui".to_string()),
+                managed: true,
+            },
+            CodeUiCapabilities {
+                streaming_text: true,
+                ..CodeUiCapabilities::default()
+            },
+        );
+        snapshot.status = CodeUiSessionStatus::Thinking;
+        snapshot.transcript = vec![
+            CodeUiTranscriptEntry {
+                id: "old-assistant".to_string(),
+                kind: CodeUiTranscriptEntryKind::AssistantMessage,
+                title: Some("Assistant".to_string()),
+                content: Some("old answer".to_string()),
+                status: Some("completed".to_string()),
+                streaming: false,
+                metadata: serde_json::json!({}),
+                created_at: now,
+                updated_at: now,
+            },
+            CodeUiTranscriptEntry {
+                id: "new-assistant".to_string(),
+                kind: CodeUiTranscriptEntryKind::AssistantMessage,
+                title: Some("Assistant".to_string()),
+                content: Some("new answer".to_string()),
+                status: Some("streaming".to_string()),
+                streaming: true,
+                metadata: serde_json::json!({}),
+                created_at: now + chrono::Duration::seconds(1),
+                updated_at: now + chrono::Duration::seconds(1),
+            },
+        ];
+
+        let baseline = std::collections::HashSet::from(["old-assistant".to_string()]);
+
+        assert_eq!(
+            newest_managed_assistant_text(&snapshot, &baseline).as_deref(),
+            Some("new answer")
+        );
+    }
+
+    #[test]
+    fn managed_approval_selection_maps_apply_to_future() {
+        let interaction = CodeUiInteractionRequest {
+            id: "approval-1".to_string(),
+            kind: CodeUiInteractionKind::Approval,
+            title: Some("Approval required".to_string()),
+            description: None,
+            prompt: Some("cargo test".to_string()),
+            options: vec![
+                CodeUiInteractionOption {
+                    id: "approve".to_string(),
+                    label: "Approve".to_string(),
+                    description: None,
+                },
+                CodeUiInteractionOption {
+                    id: "approve_all".to_string(),
+                    label: "Approve All".to_string(),
+                    description: None,
+                },
+                CodeUiInteractionOption {
+                    id: "decline".to_string(),
+                    label: "Decline".to_string(),
+                    description: None,
+                },
+            ],
+            status: CodeUiInteractionStatus::Pending,
+            metadata: serde_json::json!({}),
+            requested_at: chrono::Utc::now(),
+            resolved_at: None,
+        };
+
+        let response = code_ui_response_from_managed_selection(&interaction, 1);
+
+        assert_eq!(response.approved, Some(true));
+        assert_eq!(
+            response.apply_to_future,
+            Some(CodeUiApplyToFuture::AcceptAll)
+        );
+        assert_eq!(response.selected_option.as_deref(), Some("approve_all"));
+    }
+}
+
+fn assistant_entry_ids(snapshot: &CodeUiSessionSnapshot) -> HashSet<String> {
+    snapshot
+        .transcript
+        .iter()
+        .filter(|entry| entry.kind == CodeUiTranscriptEntryKind::AssistantMessage)
+        .map(|entry| entry.id.clone())
+        .collect()
+}
+
+fn newest_managed_assistant_text(
+    snapshot: &CodeUiSessionSnapshot,
+    baseline_assistant_ids: &HashSet<String>,
+) -> Option<String> {
+    snapshot
+        .transcript
+        .iter()
+        .filter(|entry| entry.kind == CodeUiTranscriptEntryKind::AssistantMessage)
+        .filter(|entry| !baseline_assistant_ids.contains(&entry.id))
+        .max_by_key(|entry| (entry.created_at, entry.updated_at))
+        .and_then(|entry| entry.content.clone())
+}
+
+fn managed_snapshot_is_terminal(snapshot: &CodeUiSessionSnapshot) -> bool {
+    let has_pending_interaction = snapshot
+        .interactions
+        .iter()
+        .any(|interaction| interaction.status == CodeUiInteractionStatus::Pending);
+    !has_pending_interaction
+        && matches!(
+            snapshot.status,
+            CodeUiSessionStatus::Idle | CodeUiSessionStatus::Completed | CodeUiSessionStatus::Error
+        )
+}
+
+fn managed_agent_status(status: CodeUiSessionStatus) -> AgentStatus {
+    match status {
+        CodeUiSessionStatus::Thinking => AgentStatus::Thinking,
+        CodeUiSessionStatus::ExecutingTool => AgentStatus::ExecutingTool,
+        CodeUiSessionStatus::AwaitingInteraction => AgentStatus::AwaitingApproval,
+        CodeUiSessionStatus::Idle | CodeUiSessionStatus::Completed | CodeUiSessionStatus::Error => {
+            AgentStatus::Idle
+        }
+    }
+}
+
+fn default_managed_interaction_options() -> Vec<CodeUiInteractionOption> {
+    vec![
+        CodeUiInteractionOption {
+            id: "approve".to_string(),
+            label: "Approve".to_string(),
+            description: Some("Allow this request".to_string()),
+        },
+        CodeUiInteractionOption {
+            id: "decline".to_string(),
+            label: "Decline".to_string(),
+            description: Some("Reject this request".to_string()),
+        },
+    ]
+}
+
+fn code_ui_response_from_managed_selection(
+    interaction: &CodeUiInteractionRequest,
+    selected: usize,
+) -> CodeUiInteractionResponse {
+    let option = interaction.options.get(selected);
+    let selected_option = option.map(|option| option.id.clone());
+    let decision_text = option
+        .map(|option| format!("{} {}", option.id, option.label).to_ascii_lowercase())
+        .unwrap_or_default();
+    let approved = if decision_text.contains("approve")
+        || decision_text.contains("accept")
+        || decision_text.contains("allow")
+    {
+        Some(true)
+    } else if decision_text.contains("decline")
+        || decision_text.contains("deny")
+        || decision_text.contains("reject")
+        || decision_text.contains("no")
+    {
+        Some(false)
+    } else {
+        None
+    };
+    let apply_to_future = if decision_text.contains("all") || decision_text.contains("session") {
+        match approved {
+            Some(true) => Some(CodeUiApplyToFuture::AcceptAll),
+            Some(false) => Some(CodeUiApplyToFuture::DeclineAll),
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    CodeUiInteractionResponse {
+        approved,
+        apply_to_future,
+        selected_option,
+        ..CodeUiInteractionResponse::default()
     }
 }
 
@@ -3581,7 +6378,7 @@ async fn persist_execution_plan(
     let steps = git_plan
         .steps()
         .iter()
-        .map(|step| crate::internal::ai::mcp::resource::PlanStepParams {
+        .map(|step| PlanStepParams {
             description: step.description().to_string(),
             inputs: step.inputs().cloned(),
             checks: step.checks().cloned(),
@@ -3636,6 +6433,110 @@ If required information is missing, call request_user_input again for focused fo
 Do not output a plain-text plan; finalize by submitting the draft tool call.\n\n\
 Current IntentSpec:\n```json\n{spec_json}\n```\n\n\
 Requested changes:\n{request}"
+    )
+}
+
+fn build_execution_plan_prompt(spec_json: &str) -> String {
+    format!(
+        "You are generating an execution plan for an already confirmed IntentSpec.\n\
+Use read-only repository tools if needed, then call update_plan exactly once with the full ordered plan.\n\
+Every plan step must be a concrete execution task the agent can perform. Use status=pending for every step.\n\
+Do not call submit_intent_draft. Do not modify the IntentSpec. Do not execute commands that change files.\n\
+After calling update_plan, stop; the developer must confirm the plan before execution.\n\n\
+Confirmed IntentSpec:\n```json\n{spec_json}\n```"
+    )
+}
+
+fn build_execution_plan_revision_prompt(
+    spec_json: &str,
+    current_plan: &UpdatePlanArgs,
+    request: &str,
+) -> String {
+    let current_plan_json = update_plan_args_json(current_plan);
+    format!(
+        "You are revising an execution plan for an already confirmed IntentSpec.\n\
+Use the current plan as the baseline, apply only the developer's requested changes, then call update_plan exactly once with the complete revised ordered plan.\n\
+Every plan step must be a concrete execution task the agent can perform. Use status=pending for every step.\n\
+Do not call submit_intent_draft. Do not revise the IntentSpec. Do not execute commands that change files.\n\
+After calling update_plan, stop; the developer must confirm the revised plan before execution.\n\n\
+Confirmed IntentSpec:\n```json\n{spec_json}\n```\n\n\
+Current execution plan:\n```json\n{current_plan_json}\n```\n\n\
+Requested plan changes:\n{request}"
+    )
+}
+
+fn update_plan_args_json(args: &UpdatePlanArgs) -> serde_json::Value {
+    serde_json::json!({
+        "explanation": args.explanation.clone(),
+        "plan": args.plan.iter().map(|step| {
+            serde_json::json!({
+                "step": step.step.as_str(),
+                "status": step_status_label(&step.status),
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
+fn step_status_label(status: &StepStatus) -> &'static str {
+    match status {
+        StepStatus::Pending => "pending",
+        StepStatus::InProgress => "in_progress",
+        StepStatus::Completed => "completed",
+    }
+}
+
+fn intentspec_with_llm_plan_objectives(
+    spec: &IntentSpec,
+    llm_plan: &UpdatePlanArgs,
+) -> Result<IntentSpec, String> {
+    let objectives = llm_plan
+        .plan
+        .iter()
+        .filter_map(|step| {
+            let title = step.step.trim();
+            (!title.is_empty()).then(|| Objective {
+                title: title.to_string(),
+                kind: if spec.intent.has_implementation_objectives() {
+                    ObjectiveKind::Implementation
+                } else {
+                    ObjectiveKind::Analysis
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if objectives.is_empty() {
+        return Err("LLM plan did not include any non-empty steps".to_string());
+    }
+
+    let mut planned_spec = spec.clone();
+    planned_spec.intent.objectives = objectives;
+    let mut libra = planned_spec.libra.take().unwrap_or(LibraBinding {
+        object_store: None,
+        context_pipeline: None,
+        plan_generation: None,
+        run_policy: None,
+        actor_mapping: None,
+        decision_policy: None,
+    });
+    let plan_generation = libra
+        .plan_generation
+        .get_or_insert_with(PlanGenerationConfig::default);
+    plan_generation.decomposition_mode = DecompositionMode::PerObjective;
+    plan_generation.conflict_resolution = ConflictResolution::ForceSerial;
+    planned_spec.libra = Some(libra);
+    Ok(planned_spec)
+}
+
+fn should_route_plain_message_to_plan(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    !trimmed.trim().is_empty() && !trimmed.starts_with('/')
+}
+
+fn is_global_quit_command_input(text: &str) -> bool {
+    matches!(
+        super::slash_command::parse_builtin(text),
+        Some((super::slash_command::BuiltinCommand::Quit, _))
     )
 }
 
@@ -3781,7 +6682,7 @@ fn format_binding_branch(branch: Option<&str>) -> String {
 }
 
 fn intentspec_matches_workspace(
-    spec: &crate::internal::ai::intentspec::IntentSpec,
+    spec: &IntentSpec,
     workspace_locator: &str,
     head_sha: &str,
 ) -> bool {
@@ -3825,16 +6726,6 @@ async fn current_head_sha_async(working_dir: std::path::PathBuf) -> String {
     tokio::task::spawn_blocking(move || current_head_sha(&working_dir))
         .await
         .unwrap_or_else(|_| "HEAD".to_string())
-}
-
-fn should_start_mcp_turn_tracking(has_managed_claudecode: bool) -> bool {
-    !has_managed_claudecode
-}
-
-fn reset_managed_claudecode_session(runtime: Option<&mut ClaudecodeTuiRuntime>) {
-    if let Some(runtime) = runtime {
-        runtime.reset_for_new_conversation();
-    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -4092,9 +6983,7 @@ fn task_status_heading(
     }
 }
 
-fn summarize_failed_gate_report(
-    gate_report: Option<&crate::internal::ai::orchestrator::types::GateReport>,
-) -> Option<String> {
+fn summarize_failed_gate_report(gate_report: Option<&GateReport>) -> Option<String> {
     let report = gate_report?;
     let failed_checks: Vec<_> = report
         .results
@@ -4139,14 +7028,14 @@ fn summarize_failed_gate_report(
 async fn fetch_intentspec_from_object_id(
     mcp: &Arc<LibraMcpServer>,
     object_id: &str,
-) -> Option<crate::internal::ai::intentspec::IntentSpec> {
+) -> Option<IntentSpec> {
     let uri = format!("libra://object/{object_id}");
     let resources = mcp.read_resource_impl(&uri).await.ok()?;
     let content = resources.first()?;
     let text = resource_text(content)?;
     let value: serde_json::Value = serde_json::from_str(&text).ok()?;
     let intent_content = extract_content_field(&value)?;
-    serde_json::from_str::<crate::internal::ai::intentspec::IntentSpec>(&intent_content).ok()
+    serde_json::from_str::<IntentSpec>(&intent_content).ok()
 }
 
 fn resource_text(content: &rmcp::model::ResourceContents) -> Option<String> {

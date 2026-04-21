@@ -10,6 +10,8 @@ use crate::{
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
+        pager::LIBRA_TEST_ENV,
+        util::require_repo,
     },
 };
 
@@ -80,7 +82,7 @@ pub async fn execute(args: OpenArgs) {
 /// errors and exiting. Resolves the remote URL and opens it in the default
 /// browser.
 pub async fn execute_safe(args: OpenArgs, output: &OutputConfig) -> CliResult<()> {
-    let in_repo = crate::utils::util::require_repo().is_ok();
+    let in_repo = require_repo().is_ok();
     let resolution = resolve_open_target(args, in_repo)
         .await
         .map_err(open_cli_error)?;
@@ -203,7 +205,7 @@ async fn load_remote_url(remote: &str) -> Result<String, OpenError> {
 }
 
 fn open_browser(url: &str) -> std::io::Result<bool> {
-    if std::env::var_os(crate::utils::pager::LIBRA_TEST_ENV).is_some() {
+    if std::env::var_os(LIBRA_TEST_ENV).is_some() {
         // Keep integration tests side-effect free across all platforms.
         return Ok(false);
     }

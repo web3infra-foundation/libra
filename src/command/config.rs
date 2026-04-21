@@ -12,11 +12,20 @@ use serde::Serialize;
 use tokio::sync::Mutex;
 
 use crate::{
-    internal::config::{ConfigKv, ConfigKvEntry, is_sensitive_key, is_vault_internal_key},
+    internal::{
+        config::{ConfigKv, ConfigKvEntry, is_sensitive_key, is_vault_internal_key},
+        db::{create_database, establish_connection, get_db_conn_instance},
+        vault::{
+            decrypt_token, encrypt_token, generate_pgp_key, generate_ssh_key_pair,
+            lazy_init_vault_for_scope, load_unseal_key_for_scope,
+        },
+    },
     utils::{
-        error::{CliError, CliResult, StableErrorCode},
-        output::OutputConfig,
+        error::{CliError, CliResult, StableErrorCode, emit_warning},
+        output::{OutputConfig, emit_json_data},
+        pager::LIBRA_TEST_ENV,
         text::levenshtein,
+        util::{DATABASE, try_get_storage_path},
     },
 };
 
@@ -79,7 +88,7 @@ impl ConfigScope {
                     }
                     if !config_path.exists() {
                         let config_path_str = config_path.to_string_lossy();
-                        crate::internal::db::create_database(&config_path_str)
+                        create_database(&config_path_str)
                             .await
                             .map_err(|e| format!("Failed to create global config database: {e}"))?;
                     }
@@ -103,18 +112,18 @@ impl ScopedConfig {
     pub async fn get_connection(scope: ConfigScope) -> Result<DatabaseConnection, String> {
         match scope {
             ConfigScope::Local => {
-                let storage = crate::utils::util::try_get_storage_path(None).map_err(|_| {
+                let storage = try_get_storage_path(None).map_err(|_| {
                     "fatal: not a libra repository (or any of the parent directories): .libra"
                         .to_string()
                 })?;
-                let db_path = storage.join(crate::utils::util::DATABASE);
+                let db_path = storage.join(DATABASE);
                 if !db_path.exists() {
                     return Err(format!(
                         "fatal: libra database not found at '{}'",
                         db_path.display()
                     ));
                 }
-                Ok(crate::internal::db::get_db_conn_instance().await.clone())
+                Ok(get_db_conn_instance().await.clone())
             }
             ConfigScope::Global => {
                 Self::get_or_create_cached_connection(&GLOBAL_CONFIG_CONN, scope, "global").await
@@ -141,7 +150,7 @@ impl ScopedConfig {
         }
         scope.ensure_config_exists().await?;
         let config_path_str = config_path.to_string_lossy();
-        let conn = crate::internal::db::establish_connection(&config_path_str)
+        let conn = establish_connection(&config_path_str)
             .await
             .map_err(|e| format!("Failed to connect to {scope_name} config database: {e}"))?;
         *guard = Some((config_path, conn.clone()));
@@ -850,7 +859,7 @@ async fn handle_set(
             // Check if interactive mode is available.
             // Also treat the test harness (`LIBRA_TEST=1`) as non-interactive
             // so that `rpassword::read_password()` never blocks a test run.
-            let in_test = std::env::var_os(crate::utils::pager::LIBRA_TEST_ENV).is_some();
+            let in_test = std::env::var_os(LIBRA_TEST_ENV).is_some();
             if output.is_json() || in_test || !std::io::stdin().is_terminal() {
                 return Err(CliError::from_legacy_string(format!(
                     "error: missing value for protected key '{key}' (non-interactive environment)"
@@ -891,27 +900,23 @@ async fn handle_set(
     // Encrypt the value if needed
     let store_value = if should_encrypt {
         let sn = scope_name(scope);
-        let unseal_key = match crate::internal::vault::load_unseal_key_for_scope(sn).await {
+        let unseal_key = match load_unseal_key_for_scope(sn).await {
             Some(key) => key,
             None => {
                 // Lazy init
-                let key = crate::internal::vault::lazy_init_vault_for_scope(sn)
-                    .await
-                    .map_err(|e| {
-                        CliError::from_legacy_string(format!(
-                            "error: failed to initialize vault for {sn} scope: {e}"
-                        ))
-                    })?;
+                let key = lazy_init_vault_for_scope(sn).await.map_err(|e| {
+                    CliError::from_legacy_string(format!(
+                        "error: failed to initialize vault for {sn} scope: {e}"
+                    ))
+                })?;
                 if !output.quiet && !output.is_json() {
                     println!("Initialized vault for {sn} scope");
                 }
                 key
             }
         };
-        let ciphertext =
-            crate::internal::vault::encrypt_token(&unseal_key, resolved_value.as_bytes()).map_err(
-                |e| CliError::from_legacy_string(format!("error: encryption failed: {e}")),
-            )?;
+        let ciphertext = encrypt_token(&unseal_key, resolved_value.as_bytes())
+            .map_err(|e| CliError::from_legacy_string(format!("error: encryption failed: {e}")))?;
         hex::encode(ciphertext)
     } else {
         resolved_value.clone()
@@ -941,13 +946,12 @@ async fn handle_set(
 /// Decrypt a hex-encoded ciphertext from a config value using the vault unseal key.
 /// The `scope` parameter determines which unseal key to load (local or global).
 async fn decrypt_config_value(hex_value: &str, scope: &str) -> Result<String, String> {
-    let unseal_key = crate::internal::vault::load_unseal_key_for_scope(scope)
+    let unseal_key = load_unseal_key_for_scope(scope)
         .await
         .ok_or_else(|| format!("vault not initialized for {scope} scope — cannot decrypt"))?;
     let ciphertext =
         hex::decode(hex_value).map_err(|e| format!("failed to decode encrypted value: {e}"))?;
-    crate::internal::vault::decrypt_token(&unseal_key, &ciphertext)
-        .map_err(|e| format!("decryption failed: {e}"))
+    decrypt_token(&unseal_key, &ciphertext).map_err(|e| format!("decryption failed: {e}"))
 }
 
 fn config_read_cli_error(message: impl Into<String>) -> CliError {
@@ -1044,7 +1048,7 @@ async fn handle_get(
         }
 
         if output.is_json() {
-            crate::utils::output::emit_json_data(
+            emit_json_data(
                 "config",
                 &serde_json::json!({
                     "action": "get-regexp",
@@ -1083,7 +1087,7 @@ async fn handle_get(
             && let Some(d) = default
         {
             if output.is_json() {
-                crate::utils::output::emit_json_data(
+                emit_json_data(
                     "config",
                     &serde_json::json!({
                         "action": "get-all",
@@ -1107,7 +1111,7 @@ async fn handle_get(
         }
 
         if output.is_json() {
-            crate::utils::output::emit_json_data(
+            emit_json_data(
                 "config",
                 &serde_json::json!({
                     "action": "get-all",
@@ -1199,7 +1203,7 @@ async fn handle_get(
         };
 
         if output.is_json() {
-            crate::utils::output::emit_json_data(
+            emit_json_data(
                 "config",
                 &serde_json::json!({
                     "action": "get",
@@ -1231,7 +1235,7 @@ async fn handle_list(
     if ssh_keys {
         let entries = list_ssh_key_entries(scope).await?;
         if output.is_json() {
-            crate::utils::output::emit_json_data(
+            emit_json_data(
                 "config",
                 &serde_json::json!({
                     "action": "list-ssh-keys",
@@ -1260,7 +1264,7 @@ async fn handle_list(
     if gpg_keys {
         let entries = list_gpg_key_entries(scope).await?;
         if output.is_json() {
-            crate::utils::output::emit_json_data(
+            emit_json_data(
                 "config",
                 &serde_json::json!({
                     "action": "list-gpg-keys",
@@ -1326,7 +1330,7 @@ async fn handle_list(
         }
 
         if output.is_json() {
-            crate::utils::output::emit_json_data(
+            emit_json_data(
                 "config",
                 &serde_json::json!({
                     "action": "list-vault",
@@ -1394,7 +1398,7 @@ async fn handle_list(
         }
 
         if output.is_json() {
-            crate::utils::output::emit_json_data(
+            emit_json_data(
                 "config",
                 &serde_json::json!({
                     "action": "list",
@@ -1445,7 +1449,7 @@ async fn handle_list(
             .collect();
 
         if output.is_json() {
-            crate::utils::output::emit_json_data(
+            emit_json_data(
                 "config",
                 &serde_json::json!({
                     "action": "list",
@@ -1552,7 +1556,7 @@ async fn handle_unset(
     };
 
     if output.is_json() {
-        crate::utils::output::emit_json_data(
+        emit_json_data(
             "config",
             &serde_json::json!({
                 "action": if all { "unset-all" } else { "unset" },
@@ -1583,7 +1587,7 @@ async fn handle_import(scope: ConfigScope, output: &OutputConfig) -> CliResult<(
         .map_err(CliError::from_legacy_string)?;
 
     if output.is_json() {
-        crate::utils::output::emit_json_data(
+        emit_json_data(
             "config",
             &serde_json::json!({
                 "action": "import",
@@ -1606,12 +1610,12 @@ async fn handle_import(scope: ConfigScope, output: &OutputConfig) -> CliResult<(
 async fn handle_path(scope: ConfigScope, output: &OutputConfig) -> CliResult<()> {
     let path = match scope {
         ConfigScope::Local => {
-            let storage = crate::utils::util::try_get_storage_path(None).map_err(|_| {
+            let storage = try_get_storage_path(None).map_err(|_| {
                 CliError::from_legacy_string(
                     "error: not a libra repository (or any parent up to /)\n\nhint: use --global to read/write user-level config without a repository\nhint: use libra init to create a repository here",
                 )
             })?;
-            storage.join(crate::utils::util::DATABASE)
+            storage.join(DATABASE)
         }
         ConfigScope::Global => scope.get_config_path().ok_or_else(|| {
             CliError::from_legacy_string("error: could not determine global config path")
@@ -1621,7 +1625,7 @@ async fn handle_path(scope: ConfigScope, output: &OutputConfig) -> CliResult<()>
     let exists = path.exists();
 
     if output.is_json() {
-        crate::utils::output::emit_json_data(
+        emit_json_data(
             "config",
             &serde_json::json!({
                 "action": "path",
@@ -1665,19 +1669,17 @@ async fn handle_generate_ssh_key(
     }
 
     // Get vault root dir and unseal key
-    let storage = crate::utils::util::try_get_storage_path(None)
+    let storage = try_get_storage_path(None)
         .map_err(|_| CliError::from_legacy_string("error: not a libra repository"))?;
 
-    let unseal_key = match crate::internal::vault::load_unseal_key_for_scope("local").await {
+    let unseal_key = match load_unseal_key_for_scope("local").await {
         Some(key) => key,
         None => {
-            let key = crate::internal::vault::lazy_init_vault_for_scope("local")
-                .await
-                .map_err(|e| {
-                    CliError::from_legacy_string(format!(
-                        "error: failed to initialize vault for local scope: {e}"
-                    ))
-                })?;
+            let key = lazy_init_vault_for_scope("local").await.map_err(|e| {
+                CliError::from_legacy_string(format!(
+                    "error: failed to initialize vault for local scope: {e}"
+                ))
+            })?;
             if !output.quiet {
                 println!("Initialized vault for local scope");
             }
@@ -1694,12 +1696,11 @@ async fn handle_generate_ssh_key(
         .unwrap_or_else(|| "Libra User".to_string());
 
     // Generate key pair via vault (returns both pub and priv)
-    let (public_key, private_key) =
-        crate::internal::vault::generate_ssh_key_pair(&storage, &unseal_key, &user_name)
-            .await
-            .map_err(|e| {
-                CliError::from_legacy_string(format!("error: SSH key generation failed: {e}"))
-            })?;
+    let (public_key, private_key) = generate_ssh_key_pair(&storage, &unseal_key, &user_name)
+        .await
+        .map_err(|e| {
+            CliError::from_legacy_string(format!("error: SSH key generation failed: {e}"))
+        })?;
 
     // Store public key plaintext in config_kv
     let pubkey_key = format!("vault.ssh.{remote}.pubkey");
@@ -1707,17 +1708,13 @@ async fn handle_generate_ssh_key(
 
     // Store private key encrypted in config_kv (vault-backed, no persistent file)
     let privkey_key = format!("vault.ssh.{remote}.privkey");
-    let encrypted_privkey = crate::internal::vault::encrypt_token(
-        &unseal_key,
-        private_key.as_bytes(),
-    )
-    .map_err(|e| {
+    let encrypted_privkey = encrypt_token(&unseal_key, private_key.as_bytes()).map_err(|e| {
         CliError::from_legacy_string(format!("error: failed to encrypt SSH private key: {e}"))
     })?;
     let _ = ConfigKv::set(&privkey_key, &hex::encode(encrypted_privkey), true).await;
 
     if output.is_json() {
-        crate::utils::output::emit_json_data(
+        emit_json_data(
             "config",
             &serde_json::json!({
                 "action": "generate-ssh-key",
@@ -1765,19 +1762,17 @@ async fn handle_generate_gpg_key(
     };
     let is_signing = usage == "signing";
 
-    let storage = crate::utils::util::try_get_storage_path(None)
+    let storage = try_get_storage_path(None)
         .map_err(|_| CliError::from_legacy_string("error: not a libra repository"))?;
 
-    let unseal_key = match crate::internal::vault::load_unseal_key_for_scope("local").await {
+    let unseal_key = match load_unseal_key_for_scope("local").await {
         Some(key) => key,
         None => {
-            let key = crate::internal::vault::lazy_init_vault_for_scope("local")
-                .await
-                .map_err(|e| {
-                    CliError::from_legacy_string(format!(
-                        "error: failed to initialize vault for local scope: {e}"
-                    ))
-                })?;
+            let key = lazy_init_vault_for_scope("local").await.map_err(|e| {
+                CliError::from_legacy_string(format!(
+                    "error: failed to initialize vault for local scope: {e}"
+                ))
+            })?;
             if !output.quiet {
                 println!("Initialized vault for local scope");
             }
@@ -1793,12 +1788,11 @@ async fn handle_generate_gpg_key(
         .map(String::from)
         .unwrap_or_else(|| "user@libra.local".to_string());
 
-    let public_key =
-        crate::internal::vault::generate_pgp_key(&storage, &unseal_key, &user_name, &user_email)
-            .await
-            .map_err(|e| {
-                CliError::from_legacy_string(format!("error: GPG key generation failed: {e}"))
-            })?;
+    let public_key = generate_pgp_key(&storage, &unseal_key, &user_name, &user_email)
+        .await
+        .map_err(|e| {
+            CliError::from_legacy_string(format!("error: GPG key generation failed: {e}"))
+        })?;
 
     // Store pubkey under usage-specific dotted key
     let pubkey_config_key = if is_signing {
@@ -1814,7 +1808,7 @@ async fn handle_generate_gpg_key(
     }
 
     if output.is_json() {
-        crate::utils::output::emit_json_data(
+        emit_json_data(
             "config",
             &serde_json::json!({
                 "action": "generate-gpg-key",
@@ -1966,12 +1960,8 @@ async fn import_git_config(scope: ConfigScope) -> Result<ConfigImportSummary, St
             }
             let should_encrypt = is_sensitive_key(key);
             let store_value = if should_encrypt {
-                if let Some(unseal_key) =
-                    crate::internal::vault::load_unseal_key_for_scope(scope_name(scope)).await
-                {
-                    if let Ok(ct) =
-                        crate::internal::vault::encrypt_token(&unseal_key, value.as_bytes())
-                    {
+                if let Some(unseal_key) = load_unseal_key_for_scope(scope_name(scope)).await {
+                    if let Ok(ct) = encrypt_token(&unseal_key, value.as_bytes()) {
                         hex::encode(ct)
                     } else {
                         value.clone()
@@ -2001,7 +1991,7 @@ async fn import_git_config(scope: ConfigScope) -> Result<ConfigImportSummary, St
     for (key, (value, count)) in &last_value_wins {
         if *count > 1 {
             collapsed_warnings += 1;
-            crate::utils::error::emit_warning(format!(
+            emit_warning(format!(
                 "key '{key}' has {count} values in Git config, only last value kept (not in known multi-value list)"
             ));
         }
@@ -2013,11 +2003,8 @@ async fn import_git_config(scope: ConfigScope) -> Result<ConfigImportSummary, St
         }
         let should_encrypt = is_sensitive_key(key);
         let store_value = if should_encrypt {
-            if let Some(unseal_key) =
-                crate::internal::vault::load_unseal_key_for_scope(scope_name(scope)).await
-            {
-                if let Ok(ct) = crate::internal::vault::encrypt_token(&unseal_key, value.as_bytes())
-                {
+            if let Some(unseal_key) = load_unseal_key_for_scope(scope_name(scope)).await {
+                if let Ok(ct) = encrypt_token(&unseal_key, value.as_bytes()) {
                     hex::encode(ct)
                 } else {
                     value.clone()
@@ -2036,7 +2023,7 @@ async fn import_git_config(scope: ConfigScope) -> Result<ConfigImportSummary, St
     }
 
     if ignored_invalid > 0 {
-        crate::utils::error::emit_warning(format!(
+        emit_warning(format!(
             "ignored {ignored_invalid} unsupported Git config entries"
         ));
     }
@@ -2130,7 +2117,7 @@ fn emit_set_ack(
     output: &OutputConfig,
 ) -> CliResult<()> {
     if output.is_json() {
-        crate::utils::output::emit_json_data(
+        emit_json_data(
             "config",
             &serde_json::json!({
                 "action": action,

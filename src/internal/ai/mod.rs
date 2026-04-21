@@ -23,7 +23,6 @@
 //! ```
 
 pub mod agent;
-pub mod claudecode;
 pub mod client;
 pub mod codex;
 pub mod commands;
@@ -38,10 +37,12 @@ pub mod orchestrator;
 pub mod projection;
 pub mod prompt;
 pub mod providers;
+pub mod runtime;
 pub mod sandbox;
 pub mod session;
 pub mod tools;
 pub mod util;
+pub mod web;
 pub mod workflow_objects;
 pub mod workspace_snapshot;
 

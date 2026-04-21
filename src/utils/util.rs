@@ -21,10 +21,11 @@ use crate::{
     command::load_object,
     internal::{
         branch::{Branch, BranchStoreError},
+        config::ConfigKv,
         head::Head,
         tag,
     },
-    utils::{client_storage::ClientStorage, path, path_ext::PathExt},
+    utils::{client_storage::ClientStorage, error::emit_legacy_stderr, path, path_ext::PathExt},
 };
 
 // SAFETY: The unwrap() and expect() calls in this module are documented with safety
@@ -135,7 +136,7 @@ pub fn require_repo() -> io::Result<()> {
 /// Legacy repository check that still prints for commands not yet migrated.
 pub fn check_repo_exist() -> bool {
     if require_repo().is_err() {
-        crate::utils::error::emit_legacy_stderr(
+        emit_legacy_stderr(
             "fatal: not a libra repository (or any of the parent directories): .libra",
         );
         return false;
@@ -719,8 +720,8 @@ async fn resolve_commit_base_atom_typed(name: &str) -> Result<ObjectHash, Commit
         ObjectType::Commit => Ok(object_id),
         ObjectType::Tag => {
             // Manually dereference tag if search returned a tag object directly
-            let tag_obj: git_internal::internal::object::tag::Tag =
-                crate::command::load_object(&object_id).map_err(|e| {
+            let tag_obj: git_internal::internal::object::tag::Tag = load_object(&object_id)
+                .map_err(|e| {
                     CommitBaseError::classify_storage_failure(format!(
                         "failed to load tag object: {e}"
                     ))
@@ -859,8 +860,6 @@ pub fn check_gitignore(work_dir: &PathBuf, target_file: &PathBuf) -> bool {
 }
 
 use git_internal::internal::object::signature::{Signature, SignatureType};
-
-use crate::internal::config::ConfigKv;
 
 pub async fn create_signatures() -> (Signature, Signature) {
     let user_name = ConfigKv::get("user.name")

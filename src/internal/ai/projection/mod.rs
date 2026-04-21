@@ -8,6 +8,7 @@
 
 pub mod index;
 pub mod rebuild;
+pub mod resolver;
 pub mod scheduler;
 pub mod thread;
 
@@ -16,8 +17,10 @@ pub use index::{
     RunEventIndexRow, RunPatchSetIndexRow, TaskRunIndexRow,
 };
 pub use rebuild::{MaterializedProjection, ProjectionRebuilder};
+pub use resolver::{ProjectionResolver, ThreadBundle};
 pub use scheduler::{
     LiveContextFrameRef, LiveContextPinKind, LiveContextSourceKind, PlanHeadRef, SchedulerState,
+    SchedulerStateCasError, SchedulerStateRepository,
 };
 pub use thread::{
     ThreadId, ThreadIntentLinkReason, ThreadIntentRef, ThreadParticipant, ThreadParticipantRole,

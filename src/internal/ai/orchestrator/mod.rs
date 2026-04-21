@@ -10,7 +10,7 @@ pub mod replan;
 pub mod run_state;
 pub mod types;
 pub mod verifier;
-mod workspace;
+pub(crate) mod workspace;
 
 // SAFETY: The unwrap() and expect() calls in this module are documented with safety
 // justifications where used. Test code uses unwrap for test assertions. Production code
@@ -18,9 +18,13 @@ mod workspace;
 
 use std::sync::Arc;
 
-use types::{OrchestratorConfig, OrchestratorError, OrchestratorResult};
+use types::{
+    OrchestratorConfig, OrchestratorError, OrchestratorResult, PhaseConfirmationDecision,
+    PhaseConfirmationPrompt,
+};
 
 use crate::internal::ai::{
+    agent::ToolLoopConfig,
     completion::{CompletionModel, CompletionUsage, ThrottledCompletionModel},
     intentspec::{repair_intentspec, types::IntentSpec, validate_intentspec},
     tools::registry::ToolRegistry,
@@ -75,6 +79,22 @@ impl types::OrchestratorObserver for FanoutObserver {
         }
     }
 
+    fn on_system_verification(
+        &self,
+        plan: &types::ExecutionPlanSpec,
+        report: &types::SystemReport,
+    ) {
+        for observer in &self.observers {
+            observer.on_system_verification(plan, report);
+        }
+    }
+
+    fn on_decision(&self, plan: &types::ExecutionPlanSpec, decision: &types::DecisionOutcome) {
+        for observer in &self.observers {
+            observer.on_decision(plan, decision);
+        }
+    }
+
     fn on_replan(
         &self,
         current_revision: u32,
@@ -86,6 +106,122 @@ impl types::OrchestratorObserver for FanoutObserver {
             observer.on_replan(current_revision, next_revision, reason, diff_summary);
         }
     }
+}
+
+async fn confirm_phase(
+    confirmer: Option<&dyn types::OrchestratorPhaseConfirmer>,
+    prompt: PhaseConfirmationPrompt,
+) -> Result<(), OrchestratorError> {
+    let Some(confirmer) = confirmer else {
+        return Ok(());
+    };
+
+    let phase_label = prompt.phase.label();
+    match confirmer.confirm(prompt).await {
+        PhaseConfirmationDecision::Continue => Ok(()),
+        PhaseConfirmationDecision::Reject => Err(OrchestratorError::PolicyViolation(format!(
+            "{phase_label} was rejected by the user"
+        ))),
+        PhaseConfirmationDecision::Abort => Err(OrchestratorError::PolicyViolation(format!(
+            "{phase_label} was aborted by the user"
+        ))),
+    }
+}
+
+fn phase3_confirmation_prompt(
+    plan: &types::ExecutionPlanSpec,
+    run_state: &run_state::RunStateSnapshot,
+) -> PhaseConfirmationPrompt {
+    let completed = run_state
+        .task_results
+        .iter()
+        .filter(|result| result.status == types::TaskNodeStatus::Completed)
+        .count();
+    let failed = run_state
+        .task_results
+        .iter()
+        .filter(|result| result.status == types::TaskNodeStatus::Failed)
+        .count();
+    let details = plan
+        .tasks
+        .iter()
+        .map(|task| {
+            let status = run_state.status_for(task.id());
+            format!(
+                "{:02} {:?} · {:?} · {}",
+                task_position(plan, task.id()),
+                task.kind,
+                status,
+                task.title()
+            )
+        })
+        .collect::<Vec<_>>();
+
+    PhaseConfirmationPrompt {
+        phase: types::OrchestratorPhase::SystemVerification,
+        title: "Confirm Phase 3".to_string(),
+        summary: format!(
+            "Plan r{} execution finished: {completed}/{} completed, {failed} failed. Continue to system validation and audit?",
+            plan.revision,
+            plan.tasks.len()
+        ),
+        details,
+    }
+}
+
+fn phase4_confirmation_prompt(
+    plan: &types::ExecutionPlanSpec,
+    report: &types::SystemReport,
+) -> PhaseConfirmationPrompt {
+    let mut details = vec![
+        format!(
+            "integration: {} ({})",
+            report.integration.all_required_passed,
+            report.integration.results.len()
+        ),
+        format!(
+            "security: {} ({})",
+            report.security.all_required_passed,
+            report.security.results.len()
+        ),
+        format!(
+            "release: {} ({})",
+            report.release.all_required_passed,
+            report.release.results.len()
+        ),
+        format!("review passed: {}", report.review_passed),
+        format!("artifacts complete: {}", report.artifacts_complete),
+    ];
+    details.extend(
+        report
+            .review_findings
+            .iter()
+            .map(|finding| format!("review finding: {finding}")),
+    );
+    details.extend(
+        report
+            .missing_artifacts
+            .iter()
+            .map(|artifact| format!("missing artifact: {artifact}")),
+    );
+
+    PhaseConfirmationPrompt {
+        phase: types::OrchestratorPhase::Decision,
+        title: "Confirm Phase 4".to_string(),
+        summary: format!(
+            "Plan r{} validation overall_passed={}. Continue to final decision?",
+            plan.revision, report.overall_passed
+        ),
+        details,
+    }
+}
+
+fn task_position(plan: &types::ExecutionPlanSpec, task_id: uuid::Uuid) -> usize {
+    plan.tasks
+        .iter()
+        .position(|task| task.id() == task_id)
+        .map(|index| index + 1)
+        .unwrap_or_default()
 }
 
 impl<M: CompletionModel + 'static> Orchestrator<M> {
@@ -118,7 +254,7 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
             }
         }
 
-        let tool_loop_config = crate::internal::ai::agent::ToolLoopConfig {
+        let tool_loop_config = ToolLoopConfig {
             preamble: self.config.coder_preamble.clone(),
             ..Default::default()
         };
@@ -156,7 +292,15 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
         };
         let (execution_plan_spec, run_state, system_report, decision) = loop {
             // Phase 1: Compile execution plan
-            let mut plan_spec = planner::compile_execution_plan_spec(&spec)?;
+            let mut plan_spec = if replan_count == 0 {
+                self.config
+                    .initial_plan
+                    .clone()
+                    .map(Ok)
+                    .unwrap_or_else(|| planner::compile_execution_plan_spec(&spec))?
+            } else {
+                planner::compile_execution_plan_spec(&spec)?
+            };
             plan_spec.revision = replan_count + 1;
             plan_spec.parent_revision = (replan_count > 0).then_some(replan_count);
             plan_spec.replan_reason = spec
@@ -196,7 +340,15 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
             .await?;
 
             // Phase 3: System verification
+            confirm_phase(
+                self.config.phase_confirmer.as_deref(),
+                phase3_confirmation_prompt(&plan_spec, &run_state),
+            )
+            .await?;
             let system_report = verifier::build_system_report(&spec, &plan_spec, &run_state);
+            if let Some(observer) = &observer {
+                observer.on_system_verification(&plan_spec, &system_report);
+            }
 
             if replan_count < max_replans
                 && let Some(directive) =
@@ -217,12 +369,20 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
             }
 
             // Phase 4: Decision
+            confirm_phase(
+                self.config.phase_confirmer.as_deref(),
+                phase4_confirmation_prompt(&plan_spec, &system_report),
+            )
+            .await?;
             let decision = decider::make_decision(
                 &run_state,
                 &system_report,
                 &spec.risk.level,
                 spec.risk.human_in_loop.required,
             );
+            if let Some(observer) = &observer {
+                observer.on_decision(&plan_spec, &decision);
+            }
             plan_revision_specs.push(plan_spec.clone());
             break (plan_spec, run_state, system_report, decision);
         };
@@ -268,6 +428,7 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
 mod tests {
     use std::{
         collections::BTreeMap,
+        path::Path,
         sync::{Arc, Mutex},
     };
 
@@ -275,9 +436,10 @@ mod tests {
     use crate::internal::ai::{
         completion::{
             CompletionError, CompletionRequest, CompletionResponse,
-            message::{AssistantContent, Text},
+            message::{AssistantContent, Function, Message, Text, ToolCall, UserContent},
         },
         intentspec::types::*,
+        tools::handlers::ApplyPatchHandler,
     };
 
     #[derive(Clone)]
@@ -285,6 +447,21 @@ mod tests {
 
     struct RecordingObserver {
         events: Arc<Mutex<Vec<String>>>,
+    }
+
+    struct RecordingPhaseConfirmer {
+        phases: Arc<Mutex<Vec<u8>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl types::OrchestratorPhaseConfirmer for RecordingPhaseConfirmer {
+        async fn confirm(
+            &self,
+            prompt: types::PhaseConfirmationPrompt,
+        ) -> types::PhaseConfirmationDecision {
+            self.phases.lock().unwrap().push(prompt.phase.number());
+            types::PhaseConfirmationDecision::Continue
+        }
     }
 
     impl types::OrchestratorObserver for RecordingObserver {
@@ -314,27 +491,117 @@ mod tests {
                 .unwrap()
                 .push(format!("graph:{completed}/{total}"));
         }
+
+        fn on_system_verification(
+            &self,
+            plan: &types::ExecutionPlanSpec,
+            report: &types::SystemReport,
+        ) {
+            self.events.lock().unwrap().push(format!(
+                "verify:{}:{}",
+                plan.revision, report.overall_passed
+            ));
+        }
+
+        fn on_decision(&self, plan: &types::ExecutionPlanSpec, decision: &types::DecisionOutcome) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("decision:{}:{decision:?}", plan.revision));
+        }
     }
 
     impl CompletionModel for MockOrchestratorModel {
         type Response = ();
 
-        #[allow(clippy::manual_async_fn)]
-        fn completion(
+        async fn completion(
             &self,
-            _request: CompletionRequest,
-        ) -> impl std::future::Future<
-            Output = Result<CompletionResponse<Self::Response>, CompletionError>,
-        > + Send {
-            async {
-                Ok(CompletionResponse {
-                    content: vec![AssistantContent::Text(Text {
-                        text: "task complete".into(),
-                    })],
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+            let prompt = latest_user_text(&request);
+            if !has_tool_result(&request) && prompt.contains("apply_patch") {
+                return Ok(CompletionResponse {
+                    content: vec![AssistantContent::ToolCall(add_file_patch_call(
+                        &prompt,
+                        "orchestrator",
+                    ))],
                     raw_response: (),
-                })
+                });
             }
+
+            Ok(CompletionResponse {
+                content: vec![AssistantContent::Text(Text {
+                    text: "task complete".into(),
+                })],
+                raw_response: (),
+            })
         }
+    }
+
+    fn has_tool_result(request: &CompletionRequest) -> bool {
+        request.chat_history.iter().any(|message| match message {
+            Message::User { content } => content
+                .iter()
+                .any(|item| matches!(item, UserContent::ToolResult(_))),
+            _ => false,
+        })
+    }
+
+    fn latest_user_text(request: &CompletionRequest) -> String {
+        request
+            .chat_history
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                Message::User { content } => content.iter().find_map(|item| match item {
+                    UserContent::Text(text) => Some(text.text.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    fn add_file_patch_call(prompt: &str, prefix: &str) -> ToolCall {
+        let slug = prompt
+            .split("## Task\n")
+            .nth(1)
+            .and_then(|tail| tail.lines().next())
+            .map(slugify_task_title)
+            .filter(|slug| !slug.is_empty())
+            .unwrap_or_else(|| "task".to_string());
+        let path = format!("src/{prefix}_{slug}.txt");
+        let patch = format!("*** Begin Patch\n*** Add File: {path}\n+done\n*** End Patch");
+        ToolCall {
+            id: format!("call_{prefix}_{slug}"),
+            name: "apply_patch".to_string(),
+            function: Function {
+                name: "apply_patch".to_string(),
+                arguments: serde_json::json!({ "input": patch }),
+            },
+        }
+    }
+
+    fn slugify_task_title(title: &str) -> String {
+        title
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() {
+                    ch.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>()
+            .trim_matches('_')
+            .to_string()
+    }
+
+    fn test_registry(working_dir: &Path) -> Arc<ToolRegistry> {
+        std::fs::create_dir_all(working_dir.join("src")).unwrap();
+        let mut registry = ToolRegistry::with_working_dir(working_dir.to_path_buf());
+        registry.register("apply_patch", Arc::new(ApplyPatchHandler));
+        Arc::new(registry)
     }
 
     fn test_spec() -> IntentSpec {
@@ -484,17 +751,19 @@ mod tests {
     async fn test_orchestrator_full_pipeline() {
         let dir = tempfile::tempdir().unwrap();
         let model = MockOrchestratorModel;
-        let registry = Arc::new(ToolRegistry::new());
+        let registry = test_registry(dir.path());
         let config = OrchestratorConfig {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
             persisted_intent_id: None,
             persisted_plan_id: None,
+            initial_plan: None,
             dagrs_resume_checkpoint_id: None,
             coder_preamble: None,
             reviewer_preamble: None,
             mcp_server: None,
             observer: None,
+            phase_confirmer: None,
         };
         let orchestrator = Orchestrator::new(model, registry, config);
         let spec = test_spec();
@@ -506,10 +775,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_orchestrator_uses_approved_initial_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = MockOrchestratorModel;
+        let registry = test_registry(dir.path());
+        let spec = test_spec();
+        let mut planned_spec = spec.clone();
+        planned_spec.intent.objectives = vec![
+            Objective {
+                title: "LLM step one".into(),
+                kind: ObjectiveKind::Implementation,
+            },
+            Objective {
+                title: "LLM step two".into(),
+                kind: ObjectiveKind::Implementation,
+            },
+        ];
+        let initial_plan = planner::compile_execution_plan_spec(&planned_spec).unwrap();
+        let config = OrchestratorConfig {
+            working_dir: dir.path().to_path_buf(),
+            base_commit: None,
+            persisted_intent_id: None,
+            persisted_plan_id: None,
+            initial_plan: Some(initial_plan),
+            dagrs_resume_checkpoint_id: None,
+            coder_preamble: None,
+            reviewer_preamble: None,
+            mcp_server: None,
+            observer: None,
+            phase_confirmer: None,
+        };
+
+        let orchestrator = Orchestrator::new(model, registry, config);
+        let result = orchestrator.run(spec).await.unwrap();
+        let task_titles = result
+            .execution_plan_spec
+            .tasks
+            .iter()
+            .map(|task| task.title().to_string())
+            .collect::<Vec<_>>();
+
+        assert!(task_titles.contains(&"LLM step one".to_string()));
+        assert!(task_titles.contains(&"LLM step two".to_string()));
+    }
+
+    #[tokio::test]
     async fn test_orchestrator_emits_progress_events() {
         let dir = tempfile::tempdir().unwrap();
         let model = MockOrchestratorModel;
-        let registry = Arc::new(ToolRegistry::new());
+        let registry = test_registry(dir.path());
         let events = Arc::new(Mutex::new(Vec::new()));
         let observer: Arc<dyn types::OrchestratorObserver> = Arc::new(RecordingObserver {
             events: Arc::clone(&events),
@@ -519,38 +833,92 @@ mod tests {
             base_commit: None,
             persisted_intent_id: None,
             persisted_plan_id: None,
+            initial_plan: None,
             dagrs_resume_checkpoint_id: None,
             coder_preamble: None,
             reviewer_preamble: None,
             mcp_server: None,
             observer: Some(observer),
+            phase_confirmer: None,
         };
         let orchestrator = Orchestrator::new(model, registry, config);
         let result = orchestrator.run(test_spec()).await.unwrap();
         let events = events.lock().unwrap().clone();
         assert!(!events.is_empty());
-        assert!(events.iter().any(|event| event.starts_with("plan:")));
-        assert!(events.iter().any(|event| event.starts_with("start:")));
-        assert!(events.iter().any(|event| event.starts_with("done:")));
-        assert!(events.iter().any(|event| event.starts_with("graph:")));
+        assert!(
+            events.iter().any(|event| event.starts_with("plan:")),
+            "{events:?}"
+        );
+        assert!(
+            events.iter().any(|event| event.starts_with("start:")),
+            "{events:?}"
+        );
+        assert!(
+            events.iter().any(|event| event.starts_with("graph:")),
+            "{events:?}"
+        );
+        assert!(
+            events.iter().any(|event| event.starts_with("verify:")),
+            "{events:?}"
+        );
+        assert!(
+            events.iter().any(|event| event.starts_with("decision:")),
+            "{events:?}"
+        );
+        let expected_decision = format!(
+            "decision:{}:{:?}",
+            result.execution_plan_spec.revision, result.decision
+        );
+        assert!(events.contains(&expected_decision), "{events:?}");
+    }
+
+    #[tokio::test]
+    async fn test_orchestrator_confirms_phase_three_and_four() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = MockOrchestratorModel;
+        let registry = test_registry(dir.path());
+        let phases = Arc::new(Mutex::new(Vec::new()));
+        let confirmer: Arc<dyn types::OrchestratorPhaseConfirmer> =
+            Arc::new(RecordingPhaseConfirmer {
+                phases: Arc::clone(&phases),
+            });
+        let config = OrchestratorConfig {
+            working_dir: dir.path().to_path_buf(),
+            base_commit: None,
+            persisted_intent_id: None,
+            persisted_plan_id: None,
+            initial_plan: None,
+            dagrs_resume_checkpoint_id: None,
+            coder_preamble: None,
+            reviewer_preamble: None,
+            mcp_server: None,
+            observer: None,
+            phase_confirmer: Some(confirmer),
+        };
+        let orchestrator = Orchestrator::new(model, registry, config);
+        let result = orchestrator.run(test_spec()).await.unwrap();
+
         assert_eq!(result.decision, types::DecisionOutcome::Commit);
+        assert_eq!(*phases.lock().unwrap(), vec![3, 4]);
     }
 
     #[tokio::test]
     async fn test_orchestrator_high_risk_human_review() {
         let dir = tempfile::tempdir().unwrap();
         let model = MockOrchestratorModel;
-        let registry = Arc::new(ToolRegistry::new());
+        let registry = test_registry(dir.path());
         let config = OrchestratorConfig {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
             persisted_intent_id: None,
             persisted_plan_id: None,
+            initial_plan: None,
             dagrs_resume_checkpoint_id: None,
             coder_preamble: None,
             reviewer_preamble: None,
             mcp_server: None,
             observer: None,
+            phase_confirmer: None,
         };
         let orchestrator = Orchestrator::new(model, registry, config);
         let mut spec = test_spec();
@@ -565,17 +933,19 @@ mod tests {
     async fn test_orchestrator_analysis_only_pipeline_commits_without_patchset_or_gates() {
         let dir = tempfile::tempdir().unwrap();
         let model = MockOrchestratorModel;
-        let registry = Arc::new(ToolRegistry::new());
+        let registry = test_registry(dir.path());
         let config = OrchestratorConfig {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
             persisted_intent_id: None,
             persisted_plan_id: None,
+            initial_plan: None,
             dagrs_resume_checkpoint_id: None,
             coder_preamble: None,
             reviewer_preamble: None,
             mcp_server: None,
             observer: None,
+            phase_confirmer: None,
         };
         let orchestrator = Orchestrator::new(model, registry, config);
         let mut spec = test_spec();
@@ -618,17 +988,19 @@ mod tests {
     async fn test_orchestrator_validation_failure() {
         let dir = tempfile::tempdir().unwrap();
         let model = MockOrchestratorModel;
-        let registry = Arc::new(ToolRegistry::new());
+        let registry = test_registry(dir.path());
         let config = OrchestratorConfig {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
             persisted_intent_id: None,
             persisted_plan_id: None,
+            initial_plan: None,
             dagrs_resume_checkpoint_id: None,
             coder_preamble: None,
             reviewer_preamble: None,
             mcp_server: None,
             observer: None,
+            phase_confirmer: None,
         };
         let orchestrator = Orchestrator::new(model, registry, config);
         let mut spec = test_spec();
@@ -643,17 +1015,19 @@ mod tests {
     async fn test_orchestrator_replans_after_security_gate_failure() {
         let dir = tempfile::tempdir().unwrap();
         let model = MockOrchestratorModel;
-        let registry = Arc::new(ToolRegistry::new());
+        let registry = test_registry(dir.path());
         let config = OrchestratorConfig {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
             persisted_intent_id: None,
             persisted_plan_id: None,
+            initial_plan: None,
             dagrs_resume_checkpoint_id: None,
             coder_preamble: None,
             reviewer_preamble: None,
             mcp_server: None,
             observer: None,
+            phase_confirmer: None,
         };
         let orchestrator = Orchestrator::new(model, registry, config);
         let mut spec = test_spec();

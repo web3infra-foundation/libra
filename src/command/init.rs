@@ -14,12 +14,12 @@ use serde::Serialize;
 use crate::{
     internal::{
         config::{ConfigKv, LocalIdentityTarget, resolve_user_identity_sources},
-        db,
+        db::{self, get_db_conn_instance_for_path},
         model::{config, reference},
     },
     utils::{
         convert,
-        error::{CliError, CliResult},
+        error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, ProgressMode, emit_json_data},
         util::{DATABASE, ROOT_DIR, cur_dir},
     },
@@ -109,7 +109,7 @@ impl From<InitError> for CliError {
         match error {
             InitError::InvalidArgument { message, hint } => {
                 let mut cli = CliError::command_usage(message)
-                    .with_stable_code(crate::utils::error::StableErrorCode::CliInvalidArguments);
+                    .with_stable_code(StableErrorCode::CliInvalidArguments);
                 if let Some(hint) = hint {
                     cli = cli.with_hint(hint);
                 }
@@ -125,28 +125,28 @@ impl From<InitError> for CliError {
                     "repository already initialized at '{}'",
                     path.display()
                 ))
-                .with_stable_code(crate::utils::error::StableErrorCode::RepoStateInvalid)
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
                 .with_hint(format!("remove {remove_target} to reinitialize."))
             }
             InitError::SourcePathNotFound { path } => CliError::fatal(format!(
                 "source git repository '{}' does not exist",
                 path.display()
             ))
-            .with_stable_code(crate::utils::error::StableErrorCode::IoReadFailed),
+            .with_stable_code(StableErrorCode::IoReadFailed),
             InitError::InvalidGitRepository { path } => CliError::command_usage(format!(
                 "'{}' is not a valid Git repository",
                 path.display()
             ))
-            .with_stable_code(crate::utils::error::StableErrorCode::CliInvalidTarget)
+            .with_stable_code(StableErrorCode::CliInvalidTarget)
             .with_hint("a valid Git repository must contain HEAD, config, and objects."),
             InitError::TemplateNotFound { path } => CliError::fatal(format!(
                 "template directory '{}' does not exist",
                 path.display()
             ))
-            .with_stable_code(crate::utils::error::StableErrorCode::IoReadFailed),
+            .with_stable_code(StableErrorCode::IoReadFailed),
             InitError::InvalidUtf8Path { path } => {
                 CliError::fatal(format!("path '{}' is not valid UTF-8", path.display()))
-                    .with_stable_code(crate::utils::error::StableErrorCode::IoReadFailed)
+                    .with_stable_code(StableErrorCode::IoReadFailed)
             }
             InitError::ConversionFailed {
                 repo,
@@ -156,21 +156,21 @@ impl From<InitError> for CliError {
                 "conversion from git repository '{}' failed during {stage}: {message}",
                 repo.display()
             ))
-            .with_stable_code(crate::utils::error::StableErrorCode::RepoStateInvalid),
+            .with_stable_code(StableErrorCode::RepoStateInvalid),
             InitError::VaultInitializationFailed { message } => {
                 CliError::fatal(format!("vault initialization failed: {message}"))
-                    .with_stable_code(crate::utils::error::StableErrorCode::InternalInvariant)
+                    .with_stable_code(StableErrorCode::InternalInvariant)
                     .with_hint(format!("please report this issue at: {ISSUE_URL}"))
             }
             InitError::Io(error) => match error.kind() {
                 io::ErrorKind::InvalidInput => CliError::command_usage(error.to_string())
-                    .with_stable_code(crate::utils::error::StableErrorCode::CliInvalidArguments),
+                    .with_stable_code(StableErrorCode::CliInvalidArguments),
                 _ => CliError::fatal(error.to_string())
-                    .with_stable_code(crate::utils::error::StableErrorCode::IoReadFailed),
+                    .with_stable_code(StableErrorCode::IoReadFailed),
             },
             InitError::Database(error) => {
                 CliError::fatal(format!("database initialization failed: {error}"))
-                    .with_stable_code(crate::utils::error::StableErrorCode::InternalInvariant)
+                    .with_stable_code(StableErrorCode::InternalInvariant)
                     .with_hint(format!("please report this issue at: {ISSUE_URL}"))
             }
         }
@@ -930,7 +930,7 @@ async fn init_vault_for_repo(root_dir: &Path, database_path: &Path) -> Result<()
 }
 
 async fn set_vault_signing_value(database_path: &Path, enabled: bool) -> Result<(), InitError> {
-    let conn = crate::internal::db::get_db_conn_instance_for_path(database_path)
+    let conn = get_db_conn_instance_for_path(database_path)
         .await
         .map_err(InitError::Io)?;
     ConfigKv::set_with_conn(

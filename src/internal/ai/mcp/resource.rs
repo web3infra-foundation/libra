@@ -24,7 +24,7 @@
 //! `task`, `task_event`, `run`, `run_event`, `snapshot`, `plan`, `patchset`, `evidence`,
 //! `invocation`, `provenance`, `decision`, `intent`, `intent_event`, `context_frame`,
 //! `plan_step_event`, `run_usage`.
-use std::collections::HashMap;
+use std::{collections::HashMap, path::PathBuf, process::Stdio};
 
 use git_internal::internal::object::{
     context::{ContextItem, ContextItemKind, ContextSnapshot, SelectionStrategy},
@@ -54,17 +54,42 @@ use rmcp::{
     tool, tool_router,
 };
 use serde::{Serialize, de::DeserializeOwned};
+use tokio::{
+    process::Command,
+    time::{Duration, timeout},
+};
 use uuid::Uuid;
 
 use crate::{
-    internal::ai::mcp::server::LibraMcpServer,
+    internal::{
+        ai::{mcp::server::LibraMcpServer, util::normalize_commit_anchor},
+        head::Head,
+    },
     utils::storage_ext::{Identifiable, StorageExt},
 };
+
+const ZERO_COMMIT_SHA: &str = "0000000000000000000000000000000000000000";
+const ALLOWED_LIBRA_VCS_COMMANDS: &[&str] = &[
+    "status", "diff", "branch", "log", "show", "show-ref", "add", "commit", "switch",
+];
+const LIBRA_VCS_TIMEOUT_SECONDS: u64 = 120;
 
 impl LibraMcpServer {
     /// Default actor for MCP tool calls. Extracted for testability.
     pub fn default_actor(&self) -> Result<ActorRef, ErrorData> {
         ActorRef::mcp_client("mcp-user").map_err(|e| ErrorData::internal_error(e.to_string(), None))
+    }
+
+    fn libra_vcs_working_dir(&self) -> Result<PathBuf, ErrorData> {
+        if let Some(working_dir) = &self.working_dir {
+            return Ok(working_dir.clone());
+        }
+        std::env::current_dir().map_err(|e| {
+            ErrorData::internal_error(
+                format!("failed to resolve Libra VCS working directory: {e}"),
+                None,
+            )
+        })
     }
 
     /// Resolve actor identity from explicit tool parameters only, without requiring
@@ -200,6 +225,42 @@ impl LibraMcpServer {
         Ok(Some(object))
     }
 
+    async fn resolve_base_commit_anchor(&self, base_commit_sha: &str) -> Result<String, ErrorData> {
+        let input = base_commit_sha.trim();
+        if input.eq_ignore_ascii_case("HEAD") {
+            return self.resolve_head_commit_anchor().await;
+        }
+
+        normalize_commit_anchor(input).map_err(|e| ErrorData::invalid_params(e, None))
+    }
+
+    async fn resolve_head_commit_anchor(&self) -> Result<String, ErrorData> {
+        let history = self.intent_history_manager.as_ref().ok_or_else(|| {
+            ErrorData::invalid_params(
+                "base_commit_sha=HEAD requires repository history to be available",
+                None,
+            )
+        })?;
+        let db = history.database_connection();
+        let commit = Head::current_commit_result_with_conn(&db)
+            .await
+            .map_err(|e| {
+                ErrorData::invalid_params(
+                    format!("failed to resolve base_commit_sha=HEAD: {e}"),
+                    None,
+                )
+            })?;
+        let commit_sha = commit
+            .map(|commit| commit.to_string())
+            .unwrap_or_else(|| ZERO_COMMIT_SHA.to_string());
+        normalize_commit_anchor(&commit_sha).map_err(|e| {
+            ErrorData::internal_error(
+                format!("resolved HEAD produced an invalid commit hash: {e}"),
+                None,
+            )
+        })
+    }
+
     pub(super) async fn latest_task_events(
         &self,
     ) -> Result<HashMap<Uuid, TaskEventKind>, ErrorData> {
@@ -301,6 +362,104 @@ fn parse_intent_spec(spec: String) -> IntentSpec {
     match serde_json::from_str::<serde_json::Value>(&spec) {
         Ok(value) => IntentSpec(value),
         Err(_) => IntentSpec::from(spec),
+    }
+}
+
+fn normalize_libra_vcs_command(command: &str) -> Result<&'static str, ErrorData> {
+    let command = command.trim();
+    if command.is_empty() {
+        return Err(ErrorData::invalid_params(
+            "run_libra_vcs requires a Libra command",
+            None,
+        ));
+    }
+    if command.chars().any(char::is_whitespace) {
+        return Err(ErrorData::invalid_params(
+            "run_libra_vcs command must be a single allowlisted Libra command; pass flags and paths in args",
+            None,
+        ));
+    }
+
+    ALLOWED_LIBRA_VCS_COMMANDS
+        .iter()
+        .copied()
+        .find(|allowed| *allowed == command)
+        .ok_or_else(|| {
+            ErrorData::invalid_params(
+                format!(
+                    "unsupported Libra VCS command '{command}'; allowed commands: {}",
+                    ALLOWED_LIBRA_VCS_COMMANDS.join(", ")
+                ),
+                None,
+            )
+        })
+}
+
+fn validate_libra_vcs_args(args: &[String]) -> Result<(), ErrorData> {
+    for arg in args {
+        if arg.contains('\0') {
+            return Err(ErrorData::invalid_params(
+                "run_libra_vcs args must not contain NUL bytes",
+                None,
+            ));
+        }
+
+        let normalized = arg.trim();
+        if normalized == "git"
+            || normalized.ends_with("/git")
+            || normalized.ends_with("\\git")
+            || normalized.eq_ignore_ascii_case("git.exe")
+        {
+            return Err(ErrorData::invalid_params(
+                "git is not allowed for Libra-managed agent execution; use Libra VCS commands only",
+                None,
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn format_libra_vcs_invocation(command: &str, args: &[String]) -> String {
+    let mut parts = vec!["libra".to_string(), command.to_string()];
+    parts.extend(args.iter().cloned());
+    parts.join(" ")
+}
+
+fn format_libra_vcs_output(
+    command: &str,
+    args: &[String],
+    output: std::process::Output,
+) -> CallToolResult {
+    let status = output
+        .status
+        .code()
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "terminated by signal".to_string());
+    let stdout = String::from_utf8_lossy(&output.stdout)
+        .trim_end()
+        .to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr)
+        .trim_end()
+        .to_string();
+    let mut body = format!(
+        "command: {}\nexit_code: {}",
+        format_libra_vcs_invocation(command, args),
+        status
+    );
+    if !stdout.is_empty() {
+        body.push_str("\n\nstdout:\n");
+        body.push_str(&stdout);
+    }
+    if !stderr.is_empty() {
+        body.push_str("\n\nstderr:\n");
+        body.push_str(&stderr);
+    }
+
+    if output.status.success() {
+        CallToolResult::success(vec![Content::text(body)])
+    } else {
+        CallToolResult::error(vec![Content::text(body)])
     }
 }
 
@@ -819,8 +978,57 @@ pub struct ListRunUsagesParams {
     pub limit: Option<usize>,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RunLibraVcsParams {
+    /// Allowlisted Libra version-control command.
+    pub command: String,
+    /// Command arguments as argv entries. Shell syntax is not evaluated.
+    pub args: Option<Vec<String>>,
+}
+
 #[tool_router]
 impl LibraMcpServer {
+    #[tool(description = "Run an allowlisted Libra version-control command without invoking git")]
+    pub async fn run_libra_vcs(
+        &self,
+        Parameters(params): Parameters<RunLibraVcsParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.run_libra_vcs_impl(params).await
+    }
+
+    pub async fn run_libra_vcs_impl(
+        &self,
+        params: RunLibraVcsParams,
+    ) -> Result<CallToolResult, ErrorData> {
+        let command = normalize_libra_vcs_command(&params.command)?;
+        let args = params.args.unwrap_or_default();
+        validate_libra_vcs_args(&args)?;
+        let working_dir = self.libra_vcs_working_dir()?;
+        let executable = std::env::current_exe().map_err(|e| {
+            ErrorData::internal_error(format!("failed to locate Libra executable: {e}"), None)
+        })?;
+
+        let child = Command::new(executable)
+            .arg(command)
+            .args(&args)
+            .current_dir(&working_dir)
+            .stdin(Stdio::null())
+            .output();
+
+        match timeout(Duration::from_secs(LIBRA_VCS_TIMEOUT_SECONDS), child).await {
+            Ok(Ok(output)) => Ok(format_libra_vcs_output(command, &args, output)),
+            Ok(Err(err)) => Err(ErrorData::internal_error(
+                format!("failed to run Libra VCS command '{command}': {err}"),
+                None,
+            )),
+            Err(_) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Libra VCS command timed out after {}s: {}",
+                LIBRA_VCS_TIMEOUT_SECONDS,
+                format_libra_vcs_invocation(command, &args)
+            ))])),
+        }
+    }
+
     #[tool(description = "Create a new Intent (Prompt/Goal)")]
     pub async fn create_intent(
         &self,
@@ -886,7 +1094,7 @@ impl LibraMcpServer {
             let mut event = IntentEvent::new(actor, intent.header().object_id(), kind)
                 .map_err(|e| ErrorData::internal_error(e, None))?;
             if let Some(sha) = params.commit_sha {
-                let normalized = crate::internal::ai::util::normalize_commit_anchor(&sha)
+                let normalized = normalize_commit_anchor(&sha)
                     .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
                 let ih = normalized
                     .parse()
@@ -1041,7 +1249,7 @@ impl LibraMcpServer {
             .map_err(|e| ErrorData::internal_error(e, None))?;
 
         if let Some(sha) = params.commit_sha {
-            let normalized = crate::internal::ai::util::normalize_commit_anchor(&sha)
+            let normalized = normalize_commit_anchor(&sha)
                 .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
             let ih = normalized
                 .parse()
@@ -1259,9 +1467,9 @@ impl LibraMcpServer {
             .load_tracked_object::<Task>("task", task_id, "task_id")
             .await?;
 
-        let base_commit_sha =
-            crate::internal::ai::util::normalize_commit_anchor(&params.base_commit_sha)
-                .map_err(|e| ErrorData::invalid_params(e, None))?;
+        let base_commit_sha = self
+            .resolve_base_commit_anchor(&params.base_commit_sha)
+            .await?;
 
         let mut run = Run::new(actor.clone(), task_id, &base_commit_sha)
             .map_err(|e| ErrorData::invalid_params(e, None))?;
@@ -1641,9 +1849,9 @@ impl LibraMcpServer {
         let run_id = parse_uuid(&params.run_id, "run_id")?;
         self.ensure_object_exists("run", run_id, "run_id").await?;
 
-        let base_commit_sha =
-            crate::internal::ai::util::normalize_commit_anchor(&params.base_commit_sha)
-                .map_err(|e| ErrorData::invalid_params(e, None))?;
+        let base_commit_sha = self
+            .resolve_base_commit_anchor(&params.base_commit_sha)
+            .await?;
 
         let mut patchset = PatchSet::new(actor, run_id, &base_commit_sha)
             .map_err(|e| ErrorData::invalid_params(e, None))?;
@@ -2139,8 +2347,8 @@ impl LibraMcpServer {
 
         // Set result commit SHA if provided
         if let Some(sha) = params.result_commit_sha {
-            let normalized = crate::internal::ai::util::normalize_commit_anchor(&sha)
-                .map_err(|e| ErrorData::invalid_params(e, None))?;
+            let normalized =
+                normalize_commit_anchor(&sha).map_err(|e| ErrorData::invalid_params(e, None))?;
             let hash_val = normalized
                 .parse()
                 .map_err(|e: String| ErrorData::invalid_params(e, None))?;
@@ -2556,5 +2764,33 @@ impl LibraMcpServer {
     /// re-exports it so `server.rs` (`new()`) can call it.
     pub(crate) fn build_tool_router() -> ToolRouter<Self> {
         Self::tool_router()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_libra_vcs_command_allows_status() {
+        assert_eq!(normalize_libra_vcs_command("status").unwrap(), "status");
+    }
+
+    #[test]
+    fn normalize_libra_vcs_command_rejects_git() {
+        let err = normalize_libra_vcs_command("git").unwrap_err();
+        assert!(err.message.contains("unsupported Libra VCS command"));
+    }
+
+    #[test]
+    fn normalize_libra_vcs_command_rejects_shell_like_input() {
+        let err = normalize_libra_vcs_command("status --short").unwrap_err();
+        assert!(err.message.contains("single allowlisted Libra command"));
+    }
+
+    #[test]
+    fn validate_libra_vcs_args_rejects_git_binary() {
+        let err = validate_libra_vcs_args(&["/usr/bin/git".to_string()]).unwrap_err();
+        assert!(err.message.contains("git is not allowed"));
     }
 }

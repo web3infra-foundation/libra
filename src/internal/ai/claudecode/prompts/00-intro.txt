@@ -1,1 +1,0 @@
-Extend the default Claude Code system prompt with these Libra adapter rules:

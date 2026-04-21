@@ -16,6 +16,7 @@ use super::{
     restore::{self, RestoreArgs},
 };
 use crate::{
+    info_println,
     internal::{
         branch::{Branch, BranchStoreError},
         db::get_db_conn_instance,
@@ -23,7 +24,7 @@ use crate::{
         reflog::{ReflogAction, ReflogContext, with_reflog},
     },
     utils::{
-        error::{CliError, CliResult},
+        error::{CliError, CliResult, StableErrorCode},
         object_ext::TreeExt,
         output::OutputConfig,
         util,
@@ -74,21 +75,22 @@ impl From<PullMergeError> for CliError {
     fn from(error: PullMergeError) -> Self {
         match &error {
             PullMergeError::InvalidTarget(..) => CliError::command_usage(error.to_string())
-                .with_stable_code(crate::utils::error::StableErrorCode::CliInvalidTarget),
+                .with_stable_code(StableErrorCode::CliInvalidTarget),
             PullMergeError::TargetLoad { .. }
             | PullMergeError::CurrentLoad { .. }
             | PullMergeError::History(..)
-            | PullMergeError::TreeLoad { .. } => CliError::fatal(error.to_string())
-                .with_stable_code(crate::utils::error::StableErrorCode::RepoCorrupt),
+            | PullMergeError::TreeLoad { .. } => {
+                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::RepoCorrupt)
+            }
             PullMergeError::UnrelatedHistories => CliError::failure(error.to_string())
-                .with_stable_code(crate::utils::error::StableErrorCode::RepoStateInvalid),
+                .with_stable_code(StableErrorCode::RepoStateInvalid),
             PullMergeError::ManualMergeRequired { .. } => CliError::failure(error.to_string())
-                .with_stable_code(crate::utils::error::StableErrorCode::ConflictOperationBlocked),
-            PullMergeError::HeadResolve(..) => CliError::fatal(error.to_string())
-                .with_stable_code(crate::utils::error::StableErrorCode::IoReadFailed),
+                .with_stable_code(StableErrorCode::ConflictOperationBlocked),
+            PullMergeError::HeadResolve(..) => {
+                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
+            }
             PullMergeError::HeadUpdate(..) | PullMergeError::Restore(..) => {
-                CliError::fatal(error.to_string())
-                    .with_stable_code(crate::utils::error::StableErrorCode::IoWriteFailed)
+                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
             }
         }
     }
@@ -104,21 +106,20 @@ pub async fn execute(args: MergeArgs) {
 /// errors and exiting. Resolves the merge target, performs fast-forward or
 /// recursive merge, stages results, and updates refs.
 pub async fn execute_safe(args: MergeArgs, output: &OutputConfig) -> CliResult<()> {
-    let result =
-        match run_merge_for_pull(&args.branch, &args.branch, output).await {
-            Ok(result) => result,
-            Err(PullMergeError::ManualMergeRequired { .. }) => {
-                return Err(CliError::fatal(
-                    "Not possible to fast-forward merge, try merge manually",
-                )
-                .with_stable_code(crate::utils::error::StableErrorCode::ConflictOperationBlocked));
-            }
-            Err(error) => return Err(CliError::from(error)),
-        };
+    let result = match run_merge_for_pull(&args.branch, &args.branch, output).await {
+        Ok(result) => result,
+        Err(PullMergeError::ManualMergeRequired { .. }) => {
+            return Err(
+                CliError::fatal("Not possible to fast-forward merge, try merge manually")
+                    .with_stable_code(StableErrorCode::ConflictOperationBlocked),
+            );
+        }
+        Err(error) => return Err(CliError::from(error)),
+    };
     if result.up_to_date {
-        crate::info_println!(output, "Already up to date.");
+        info_println!(output, "Already up to date.");
     } else {
-        crate::info_println!(output, "Fast-forward");
+        info_println!(output, "Fast-forward");
     }
     Ok(())
 }

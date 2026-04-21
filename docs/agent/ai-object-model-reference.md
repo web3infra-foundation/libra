@@ -34,7 +34,7 @@ snapshot objects.
 |                                                                                      |
 |  current_intent_id                                                                   |
 |  latest_intent_id                                                                    |
-|  selected_plan_id                                                                    |
+|  selected_plan_ids[]                                                                 |
 |  current_plan_heads[]                                                                |
 |  active_task_id / active_run_id                                                      |
 |  live_context_window                                                                 |
@@ -144,7 +144,7 @@ Thread[L] --------latest_intent_id--------> Intent[S]
 Thread[L] --------intents[].intent_id-----> Intent[S]
 Thread[L] --------intents[].is_head-------> marks current branch heads
 
-Scheduler[L] -----selected_plan_id--------> Plan[S]
+Scheduler[L] -----selected_plan_ids[]-----> Plan[S]
 Scheduler[L] -----current_plan_heads------> Plan[S]
 Scheduler[L] -----active_task_id----------> Task[S]
 Scheduler[L] -----active_run_id-----------> Run[S]
@@ -188,22 +188,33 @@ Notes:
 
 `Scheduler` is the runtime scheduling projection.
 
-It answers: what should run now, what is active, and which plan branch
-is currently selected.
+It answers: what should run now, what is active, and which execution /
+test plan pair is currently selected.
 
 Current design fields:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `selected_plan_id` | `Option<Uuid>` | Current canonical plan head in UI / runtime |
+| `selected_plan_ids` | `Vec<Uuid>` | Current canonical plan heads in stable order: `[execution_plan_id, test_plan_id]` |
 | `current_plan_heads` | `Vec<Uuid>` | Active plan leaves |
 | `active_task_id` | `Option<Uuid>` | Task currently emphasized by Scheduler / UI |
 | `active_run_id` | `Option<Uuid>` | Live run attempt |
 | `live_context_window` | `Vec<Uuid>` | Current visible `ContextFrame` ids |
 
+Notes:
+
+- `selected_plan_ids` is a logical fixed pair, not an open-ended list.
+  Scheduler must maintain exactly one `execution` plan id and one `test`
+  plan id in that order.
+- Phase 2 uses a conservative stage barrier: run `execution_dag` first,
+  then switch the active stage to `test` only after execution work is
+  complete.
+
 Scheduler may also derive or cache:
 
 - ready queue
+- `active_dag_stage` (`execution` or `test`)
+- current stage DAG progress
 - parallel groups
 - checkpoints
 - retry routing
@@ -295,17 +306,30 @@ Immutable incremental context fact.
 - replaces the old mutable `ContextPipeline` runtime concept
 - may be attached to intent analysis, planning, execution, or step-level
   context
+- readonly provider analysis in Phase 0 / Phase 1 should also emit
+  `ContextFrame`
 - Libra keeps only the current `live_context_window`
 
 ## Workflow Mapping
 
 | Phase | Libra runtime / projection | Snapshot writes (`git-internal`) | Event writes (`git-internal`) |
 |---|---|---|---|
-| Phase 0 | Thread bootstrap, Scheduler bootstrap, live context bootstrap | `Intent`, optional `ContextSnapshot` | none |
-| Phase 1 | selected plan head, ready queue, checkpoints | `Plan`, `Task` | none |
+| Phase 0 | Thread bootstrap, current intent revision, IntentSpec review, live context bootstrap | `Intent`, optional `ContextSnapshot` | `ToolInvocation`, `ContextFrame`, optional terminal `Decision` / `IntentEvent` |
+| Phase 1 | selected plan head, current plan heads, plan review, ready queue preview | `Plan`, `Task` | `ToolInvocation`, `ContextFrame`, optional terminal `Decision` / `IntentEvent` |
 | Phase 2 | live context window, retry / replan loop, staging area | `Run`, `PatchSet`, `Provenance` | `TaskEvent`, `RunEvent`, `PlanStepEvent`, `ToolInvocation`, `Evidence`, `ContextFrame`, `RunUsage` |
 | Phase 3 | audit indexing, release candidate view | optional final `ContextSnapshot` | `Evidence`, `Decision`, terminal `TaskEvent` / `RunEvent` / `IntentEvent` |
 | Phase 4 | review UI, current thread pointers | none | `Decision`, optional terminal `IntentEvent` |
+
+Phase 0 `IntentSpec` review exposes only three formal actions:
+`Confirm`, `Modify`, and `Cancel`.
+
+There is no separate `Regenerate` workflow state in the object model.
+If a UI offers a "try again" / regenerate affordance, Libra should model
+it as `Modify` and reuse the same revision path instead of introducing a
+distinct `Snapshot` / `Event` / `Projection` transition.
+
+Phase 3 is a fixed validator pipeline over the release candidate. It
+does not materialize or execute a planner-defined DAG.
 
 ## Rebuild and Read Contract
 

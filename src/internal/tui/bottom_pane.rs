@@ -18,7 +18,7 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{app_event::AgentStatus, theme};
-use crate::internal::ai::sandbox::ExecApprovalRequest;
+use crate::internal::ai::{sandbox::ExecApprovalRequest, tools::context::UserInputQuestion};
 
 /// Snapshot of user-input question data for rendering (avoids borrowing the request).
 #[derive(Clone, Debug)]
@@ -36,6 +36,7 @@ struct UserInputQuestionSnapshot {
 
 #[derive(Clone, Debug)]
 struct ExecApprovalSnapshot {
+    title: String,
     command: String,
     cwd: String,
     reason: Option<String>,
@@ -43,6 +44,7 @@ struct ExecApprovalSnapshot {
     sandbox_label: String,
     network_access: bool,
     writable_roots: Vec<String>,
+    options: Vec<(String, String)>,
 }
 
 /// State for the slash-command autocomplete popup.
@@ -132,10 +134,7 @@ impl BottomPane {
     }
 
     /// Store (or clear) the user-input questions to render.
-    pub fn set_user_input_questions(
-        &mut self,
-        questions: Option<&[crate::internal::ai::tools::context::UserInputQuestion]>,
-    ) {
+    pub fn set_user_input_questions(&mut self, questions: Option<&[UserInputQuestion]>) {
         self.user_input_questions = questions.map(|qs| {
             qs.iter()
                 .map(|q| UserInputQuestionSnapshot {
@@ -158,18 +157,64 @@ impl BottomPane {
     }
 
     pub fn set_exec_approval(&mut self, request: Option<&ExecApprovalRequest>) {
-        self.exec_approval = request.map(|request| ExecApprovalSnapshot {
-            command: request.command.clone(),
-            cwd: request.cwd.display().to_string(),
-            reason: request.reason.clone(),
-            is_retry: request.is_retry,
-            sandbox_label: request.sandbox_label.clone(),
-            network_access: request.network_access,
-            writable_roots: request
-                .writable_roots
+        if let Some(request) = request {
+            self.set_approval_dialog(
+                "Sandbox approval required".to_string(),
+                request.command.clone(),
+                request.cwd.clone(),
+                request.reason.clone(),
+                request.is_retry,
+                request.sandbox_label.clone(),
+                request.network_access,
+                request.writable_roots.clone(),
+                vec![
+                    (
+                        "Approve".to_string(),
+                        "Allow this execution once".to_string(),
+                    ),
+                    (
+                        "Approve Session".to_string(),
+                        "Allow matching commands for this session".to_string(),
+                    ),
+                    ("Deny".to_string(), "Reject this execution".to_string()),
+                    (
+                        "Abort Turn".to_string(),
+                        "Interrupt the current turn".to_string(),
+                    ),
+                ],
+            );
+        } else {
+            self.exec_approval = None;
+            self.exec_approval_selected = 0;
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_approval_dialog(
+        &mut self,
+        title: String,
+        command: String,
+        cwd: PathBuf,
+        reason: Option<String>,
+        is_retry: bool,
+        sandbox_label: String,
+        network_access: bool,
+        writable_roots: Vec<PathBuf>,
+        options: Vec<(String, String)>,
+    ) {
+        self.exec_approval = Some(ExecApprovalSnapshot {
+            title,
+            command,
+            cwd: cwd.display().to_string(),
+            reason,
+            is_retry,
+            sandbox_label,
+            network_access,
+            writable_roots: writable_roots
                 .iter()
                 .map(|path| path.display().to_string())
                 .collect(),
+            options,
         });
         self.exec_approval_selected = 0;
     }
@@ -397,7 +442,10 @@ impl BottomPane {
             // status(1) + summary(3) + options(4) + help(1) = 9
             return 9;
         }
-        if self.status == AgentStatus::AwaitingPostPlanChoice {
+        if matches!(
+            self.status,
+            AgentStatus::AwaitingPostPlanChoice | AgentStatus::AwaitingIntentReviewChoice
+        ) {
             // status(1) + 3 options + 1 blank + help(1) = 6
             return 6;
         }
@@ -436,6 +484,11 @@ impl BottomPane {
 
     /// Render the bottom pane.
     pub fn render(&self, area: Rect, buf: &mut Buffer) -> Option<Position> {
+        let area = area.intersection(*buf.area());
+        if area.width == 0 || area.height == 0 {
+            return None;
+        }
+
         if self.status == AgentStatus::AwaitingUserInput {
             return self.render_user_input_mode(area, buf);
         }
@@ -444,6 +497,9 @@ impl BottomPane {
         }
         if self.status == AgentStatus::AwaitingPostPlanChoice {
             return self.render_post_plan_dialog(area, buf);
+        }
+        if self.status == AgentStatus::AwaitingIntentReviewChoice {
+            return self.render_intent_review_dialog(area, buf);
         }
 
         // Split area into input area and status bar.
@@ -650,8 +706,38 @@ impl BottomPane {
         }
     }
 
-    /// Render the post-plan dialog (Execute / Modify / Cancel).
+    /// Render the post-plan dialog (Execute Plan / Modify Plan / Cancel).
     fn render_post_plan_dialog(&self, area: Rect, buf: &mut Buffer) -> Option<Position> {
+        self.render_choice_dialog(
+            area,
+            buf,
+            [
+                ("Execute Plan", "Run the Scheduler"),
+                ("Modify Plan", "Edit the plan"),
+                ("Cancel", "Return to chat"),
+            ],
+        )
+    }
+
+    /// Render the IntentSpec dialog (Confirm / Modify / Cancel).
+    fn render_intent_review_dialog(&self, area: Rect, buf: &mut Buffer) -> Option<Position> {
+        self.render_choice_dialog(
+            area,
+            buf,
+            [
+                ("Confirm Intent", "Generate plan"),
+                ("Modify Intent", "Revise spec"),
+                ("Cancel", "Return to chat"),
+            ],
+        )
+    }
+
+    fn render_choice_dialog(
+        &self,
+        area: Rect,
+        buf: &mut Buffer,
+        options: [(&str, &str); 3],
+    ) -> Option<Position> {
         let chunks = Layout::vertical([
             Constraint::Length(1), // Status bar
             Constraint::Length(4), // 3 options + 1 blank line
@@ -661,13 +747,6 @@ impl BottomPane {
 
         // Status bar
         self.render_status_bar(chunks[0], buf);
-
-        // Options
-        let options = [
-            ("Execute Spec", "Run the Scheduler"),
-            ("Modify Spec", "Edit the plan"),
-            ("Cancel", "Return to chat"),
-        ];
 
         let mut lines: Vec<Line<'static>> = Vec::new();
         for (i, (label, desc)) in options.iter().enumerate() {
@@ -713,6 +792,7 @@ impl BottomPane {
 
         let retry_prefix = if approval.is_retry { "Retry: " } else { "" };
         let mut summary_lines = vec![
+            Line::styled(format!("  {}", approval.title), theme::interactive::title()),
             Line::styled(
                 format!("  {}{}", retry_prefix, approval.command),
                 theme::text::primary(),
@@ -769,17 +849,8 @@ impl BottomPane {
         }
         Paragraph::new(Text::from(summary_lines)).render(chunks[1], buf);
 
-        let options = [
-            ("Approve", "Allow this execution once"),
-            (
-                "Approve Session",
-                "Allow matching commands for this session",
-            ),
-            ("Deny", "Reject this execution"),
-            ("Abort Turn", "Interrupt the current turn"),
-        ];
         let mut option_lines: Vec<Line<'static>> = Vec::new();
-        for (i, (label, desc)) in options.iter().enumerate() {
+        for (i, (label, desc)) in approval.options.iter().enumerate() {
             let marker = if i == self.exec_approval_selected {
                 "▸"
             } else {
@@ -829,7 +900,10 @@ impl BottomPane {
         Paragraph::new(display).block(block).render(area, buf);
 
         if self.user_input_notes_focused && inner.width > 0 && inner.height > 0 {
-            let cursor_x = self.user_input_notes_text.width().min(inner.width as usize) as u16;
+            let cursor_x = self
+                .user_input_notes_text
+                .width()
+                .min(inner.width.saturating_sub(1) as usize) as u16;
             Some(Position {
                 x: inner.x.saturating_add(cursor_x),
                 y: inner.y,
@@ -938,6 +1012,10 @@ impl BottomPane {
                 "● Plan complete — choose next step",
                 theme::status::pending_choice(),
             ),
+            AgentStatus::AwaitingIntentReviewChoice => Line::styled(
+                "● IntentSpec ready — confirm before planning",
+                theme::status::pending_choice(),
+            ),
         };
         Paragraph::new(status_line).render(area, buf);
     }
@@ -1022,12 +1100,15 @@ impl BottomPane {
         let x = area
             .x
             .saturating_add(area.width.saturating_sub(badge_width + 3));
+        let Some(max_width) = writable_line_width(buf, x, y, area) else {
+            return;
+        };
 
         let spans = vec![
             Span::styled("┤", border_style),
             Span::styled(badge, theme::badge::workspace()),
         ];
-        buf.set_line(x, y, &Line::from(spans), area.width.saturating_sub(x));
+        buf.set_line(x, y, &Line::from(spans), max_width);
     }
 
     fn render_help_text(&self, area: Rect, buf: &mut Buffer) {
@@ -1050,7 +1131,7 @@ impl BottomPane {
                 "[Up/Down: Select] [1-9: Quick select] [Enter: Submit] [Esc: Cancel]"
             }
             AgentStatus::AwaitingApproval => "[Up/Down: Select] [Enter: Confirm] [Esc: Deny]",
-            AgentStatus::AwaitingPostPlanChoice => {
+            AgentStatus::AwaitingPostPlanChoice | AgentStatus::AwaitingIntentReviewChoice => {
                 "[Up/Down: Select] [Enter: Confirm] [Esc: Cancel]"
             }
         };
@@ -1199,6 +1280,17 @@ fn format_workspace_badge(path: &Path, git_branch: Option<&str>, max_width: usiz
     )
 }
 
+fn writable_line_width(buf: &Buffer, x: u16, y: u16, area: Rect) -> Option<u16> {
+    let buf_area = *buf.area();
+    if !buf_area.contains(Position { x, y }) {
+        return None;
+    }
+
+    let area_right = area.right().min(buf_area.right());
+    let max_width = area_right.saturating_sub(x);
+    (max_width > 0).then_some(max_width)
+}
+
 fn truncate_from_left(text: &str, max_width: usize) -> String {
     if max_width == 0 {
         return String::new();
@@ -1267,6 +1359,37 @@ mod tests {
     }
 
     #[test]
+    fn plan_and_intent_review_dialogs_use_phase_specific_labels() {
+        let area = Rect::new(0, 0, 80, 6);
+
+        let mut plan_pane = BottomPane::new();
+        plan_pane.status = AgentStatus::AwaitingPostPlanChoice;
+        let mut plan_buf = Buffer::empty(area);
+        let _ = plan_pane.render(area, &mut plan_buf);
+        let plan_text = (0..area.height)
+            .map(|y| row_text(&plan_buf, y, area.width))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(plan_text.contains("Execute Plan"));
+        assert!(plan_text.contains("Modify Plan"));
+        assert!(!plan_text.contains("Execute Spec"));
+        assert!(!plan_text.contains("Modify Spec"));
+
+        let mut intent_pane = BottomPane::new();
+        intent_pane.status = AgentStatus::AwaitingIntentReviewChoice;
+        let mut intent_buf = Buffer::empty(area);
+        let _ = intent_pane.render(area, &mut intent_buf);
+        let intent_text = (0..area.height)
+            .map(|y| row_text(&intent_buf, y, area.width))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(intent_text.contains("Confirm Intent"));
+        assert!(intent_text.contains("Modify Intent"));
+        assert!(!intent_text.contains("Execute Plan"));
+        assert!(!intent_text.contains("Modify Plan"));
+    }
+
+    #[test]
     fn statusline_renders_below_rounded_input_box() {
         let mut pane = BottomPane::new();
         pane.status = AgentStatus::Idle;
@@ -1300,6 +1423,18 @@ mod tests {
         assert!(bottom_of_box.contains("(main)"));
         assert!(bottom_of_box.contains("┤"));
         assert!(bottom_of_box.ends_with("─╯"));
+    }
+
+    #[test]
+    fn render_clamps_workspace_badge_to_buffer_area() {
+        let mut pane = BottomPane::new();
+        pane.set_cwd(PathBuf::from("/Volumes/Data/linked"));
+
+        let buffer_area = Rect::new(0, 0, 122, 35);
+        let oversized_bottom_area = Rect::new(0, 31, 122, 6);
+        let mut buf = Buffer::empty(buffer_area);
+
+        let _ = pane.render(oversized_bottom_area, &mut buf);
     }
 
     #[test]

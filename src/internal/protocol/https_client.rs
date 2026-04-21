@@ -13,7 +13,7 @@ use super::{
     DiscoveryResult, FetchStream, ProtocolClient, generate_upload_pack_content,
     parse_discovered_references,
 };
-use crate::{command::ask_basic_auth, git_protocol::ServiceType};
+use crate::{command::ask_basic_auth, git_protocol::ServiceType, utils::error::emit_warning};
 
 /// A Git protocol client that communicates with a Git server over HTTPS.
 /// Only support `SmartProtocol` now, see [http-protocol](https://www.git-scm.com/docs/http-protocol) for protocol details.
@@ -90,7 +90,7 @@ impl BasicAuth {
                 eprintln!("fatal: failed to authenticate after {MAX_TRY} attempts");
                 break;
             }
-            crate::utils::error::emit_warning("authentication required, retrying...");
+            emit_warning("authentication required, retrying...");
             AUTH.lock().unwrap().replace(ask_basic_auth());
             try_cnt += 1;
         }

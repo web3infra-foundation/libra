@@ -17,6 +17,7 @@ pub(crate) struct WelcomeView<'a> {
 }
 
 pub(crate) fn render(area: Rect, buf: &mut Buffer, view: WelcomeView<'_>) {
+    let area = area.intersection(*buf.area());
     if area.width < 20 || area.height < 8 {
         return;
     }
@@ -65,8 +66,12 @@ fn render_info_panel(area: Rect, buf: &mut Buffer, view: &WelcomeView<'_>) {
             theme::text::muted(),
         ),
         Line::raw(""),
-        Line::styled(view.welcome_message, theme::text::muted()),
     ]);
+    lines.extend(
+        view.welcome_message
+            .lines()
+            .map(|line| Line::styled(line.to_string(), theme::text::muted())),
+    );
 
     if lines.len() > area.height as usize {
         lines.truncate(area.height as usize);

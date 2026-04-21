@@ -4,10 +4,11 @@ use serde_json::Value;
 
 use crate::internal::ai::{
     completion::{
-        AssistantContent, CompletionError, CompletionModel, CompletionRequest, CompletionUsage,
-        CompletionUsageSummary, Message, OneOrMany, ToolResult, UserContent,
+        AssistantContent, CompletionError, CompletionModel, CompletionRequest,
+        CompletionStreamEvent, CompletionThinking, CompletionUsage, CompletionUsageSummary,
+        Message, OneOrMany, ToolResult, UserContent,
     },
-    hooks::HookRunner,
+    hooks::{HookAction, HookRunner},
     tools::{
         FunctionParameters, ToolDefinition, ToolInvocation, ToolOutput, ToolPayload, ToolRegistry,
         ToolRuntimeContext,
@@ -28,6 +29,8 @@ pub trait ToolLoopObserver: Send {
     fn on_model_turn_start(&mut self, _turn: usize) {}
 
     fn on_model_usage(&mut self, _usage: &CompletionUsageSummary) {}
+
+    fn on_model_stream_event(&mut self, _event: &CompletionStreamEvent) {}
 
     fn on_assistant_step_text(&mut self, _text: &str) {}
 
@@ -60,6 +63,7 @@ impl ToolLoopObserver for NoopObserver {}
 pub struct ToolLoopConfig {
     pub preamble: Option<String>,
     pub temperature: Option<f64>,
+    pub thinking: Option<CompletionThinking>,
     /// Optional hook runner for pre/post tool-use hooks.
     pub hook_runner: Option<Arc<HookRunner>>,
     /// If set, only expose these tools to the model (agent tool restriction).
@@ -75,6 +79,7 @@ impl Default for ToolLoopConfig {
         Self {
             preamble: None,
             temperature: Some(0.0),
+            thinking: None,
             hook_runner: None,
             allowed_tools: None,
             runtime_context: None,
@@ -148,16 +153,36 @@ where
         }
         turn_count += 1;
 
+        let (stream_tx, mut stream_rx) = tokio::sync::mpsc::unbounded_channel();
         let request = CompletionRequest {
             preamble: config.preamble.clone(),
             chat_history: history.clone(),
             temperature: config.temperature,
+            thinking: config.thinking,
             tools: tools.clone(),
+            stream_events: Some(stream_tx),
             ..Default::default()
         };
 
         observer.on_model_turn_start(turn_count);
-        let response = model.completion(request).await?;
+        let response = {
+            let completion = model.completion(request);
+            tokio::pin!(completion);
+
+            loop {
+                tokio::select! {
+                    result = &mut completion => {
+                        while let Ok(event) = stream_rx.try_recv() {
+                            observer.on_model_stream_event(&event);
+                        }
+                        break result?;
+                    }
+                    Some(event) = stream_rx.recv() => {
+                        observer.on_model_stream_event(&event);
+                    }
+                }
+            }
+        };
         if let Some(usage) = response.raw_response.usage_summary() {
             observer.on_model_usage(&usage);
         }
@@ -231,7 +256,7 @@ where
                     let action = hook_runner
                         .run_pre_tool_use(&call.function.name, call.function.arguments.clone())
                         .await;
-                    if let crate::internal::ai::hooks::HookAction::Block(reason) = action {
+                    if let HookAction::Block(reason) = action {
                         let blocked_result: Result<ToolOutput, String> =
                             Err(format!("Blocked by hook: {reason}"));
                         observer.on_tool_call_end(&call.id, &call.function.name, &blocked_result);
@@ -505,9 +530,14 @@ mod tests {
     struct RecordingObserver {
         begins: Vec<(String, String)>,
         ends: Vec<(String, String, bool)>,
+        stream_events: Vec<CompletionStreamEvent>,
     }
 
     impl ToolLoopObserver for RecordingObserver {
+        fn on_model_stream_event(&mut self, event: &CompletionStreamEvent) {
+            self.stream_events.push(event.clone());
+        }
+
         fn on_tool_call_begin(&mut self, call_id: &str, tool_name: &str, _arguments: &Value) {
             self.begins
                 .push((call_id.to_string(), tool_name.to_string()));
@@ -528,6 +558,135 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tool_loop_forwards_completion_stream_events() {
+        #[derive(Clone)]
+        struct StreamingModel;
+
+        impl CompletionModel for StreamingModel {
+            type Response = ();
+
+            async fn completion(
+                &self,
+                request: CompletionRequest,
+            ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+                if let Some(stream_events) = request.stream_events {
+                    stream_events
+                        .send(CompletionStreamEvent::TextDelta {
+                            request_id: Some("req_1".to_string()),
+                            delta: "hel".to_string(),
+                        })
+                        .expect("stream receiver should be open");
+                    stream_events
+                        .send(CompletionStreamEvent::TextDelta {
+                            request_id: Some("req_1".to_string()),
+                            delta: "lo".to_string(),
+                        })
+                        .expect("stream receiver should be open");
+                }
+
+                Ok(CompletionResponse {
+                    content: vec![AssistantContent::Text(Text {
+                        text: "hello".to_string(),
+                    })],
+                    raw_response: (),
+                })
+            }
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let registry = ToolRegistry::with_working_dir(temp_dir.path().to_path_buf());
+        let mut observer = RecordingObserver::default();
+
+        let turn = run_tool_loop_with_history_and_observer(
+            &StreamingModel,
+            Vec::new(),
+            "hello",
+            &registry,
+            ToolLoopConfig::default(),
+            &mut observer,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(turn.final_text, "hello");
+        assert_eq!(observer.stream_events.len(), 2);
+        let streamed = observer
+            .stream_events
+            .iter()
+            .filter_map(|event| match event {
+                CompletionStreamEvent::TextDelta { delta, .. } => Some(delta.as_str()),
+                CompletionStreamEvent::ToolCallPreview { .. } => None,
+            })
+            .collect::<String>();
+        assert_eq!(streamed, "hello");
+    }
+
+    #[tokio::test]
+    async fn tool_loop_forwards_tool_call_preview_without_execution() {
+        #[derive(Clone)]
+        struct ToolPreviewModel;
+
+        impl CompletionModel for ToolPreviewModel {
+            type Response = ();
+
+            async fn completion(
+                &self,
+                request: CompletionRequest,
+            ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+                if let Some(stream_events) = request.stream_events {
+                    stream_events
+                        .send(CompletionStreamEvent::ToolCallPreview {
+                            request_id: Some("req_1".to_string()),
+                            call_id: "call_preview".to_string(),
+                            tool_name: "mock_tool".to_string(),
+                            arguments: json!({"value": 1}),
+                        })
+                        .expect("stream receiver should be open");
+                }
+
+                Ok(CompletionResponse {
+                    content: vec![AssistantContent::Text(Text {
+                        text: "done".to_string(),
+                    })],
+                    raw_response: (),
+                })
+            }
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let registry = ToolRegistry::with_working_dir(temp_dir.path().to_path_buf());
+        let mut observer = RecordingObserver::default();
+
+        let turn = run_tool_loop_with_history_and_observer(
+            &ToolPreviewModel,
+            Vec::new(),
+            "hello",
+            &registry,
+            ToolLoopConfig::default(),
+            &mut observer,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(turn.final_text, "done");
+        assert!(observer.begins.is_empty());
+        assert_eq!(observer.stream_events.len(), 1);
+        match &observer.stream_events[0] {
+            CompletionStreamEvent::ToolCallPreview {
+                call_id,
+                tool_name,
+                arguments,
+                ..
+            } => {
+                assert_eq!(call_id, "call_preview");
+                assert_eq!(tool_name, "mock_tool");
+                assert_eq!(arguments, &json!({"value": 1}));
+            }
+            other => panic!("expected tool preview event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn tool_loop_emits_tool_events_and_updates_history() {
         let temp_dir = TempDir::new().unwrap();
         let mut registry = ToolRegistry::with_working_dir(temp_dir.path().to_path_buf());
@@ -542,6 +701,7 @@ mod tests {
             ToolLoopConfig {
                 preamble: None,
                 temperature: Some(0.0),
+                thinking: None,
                 hook_runner: None,
                 allowed_tools: None,
                 runtime_context: None,
@@ -710,6 +870,7 @@ mod tests {
             ToolLoopConfig {
                 preamble: None,
                 temperature: Some(0.0),
+                thinking: None,
                 hook_runner: None,
                 allowed_tools: None,
                 runtime_context: None,
@@ -779,6 +940,7 @@ mod tests {
             ToolLoopConfig {
                 preamble: None,
                 temperature: Some(0.0),
+                thinking: None,
                 hook_runner: None,
                 allowed_tools: Some(vec!["other_tool".to_string()]),
                 runtime_context: None,

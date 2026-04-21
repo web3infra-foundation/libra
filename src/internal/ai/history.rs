@@ -91,6 +91,10 @@ impl HistoryManager {
         }
     }
 
+    pub fn database_connection(&self) -> DatabaseConnection {
+        self.db_conn.as_ref().clone()
+    }
+
     /// Initialise the AI orphan branch with an empty tree commit.
     ///
     /// This should be called once during `libra init` so that the AI ref

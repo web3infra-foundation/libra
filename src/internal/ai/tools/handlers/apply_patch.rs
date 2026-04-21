@@ -4,13 +4,18 @@ use std::collections::BTreeSet;
 
 use async_trait::async_trait;
 
-use crate::internal::ai::tools::{
-    apply_patch::{self, ApplyPatchArgs},
-    context::{ToolInvocation, ToolKind, ToolOutput, ToolPayload},
-    error::ToolError,
-    registry::ToolHandler,
-    spec::ToolSpec,
-    utils::{is_within_working_dir, validate_path},
+use crate::internal::ai::{
+    sandbox::{
+        AskForApproval, ExecApprovalRequest, ReviewDecision, request_cached_approval_with_keys,
+    },
+    tools::{
+        apply_patch::{self, ApplyPatchArgs},
+        context::{ToolInvocation, ToolKind, ToolOutput, ToolPayload},
+        error::ToolError,
+        registry::ToolHandler,
+        spec::ToolSpec,
+        utils::{is_within_working_dir, validate_path},
+    },
 };
 
 /// Handler for applying patches to files.
@@ -71,10 +76,8 @@ impl ToolHandler for ApplyPatchHandler {
                 .iter()
                 .map(|path| patch_approval_key(path, &working_dir))
                 .collect::<Vec<_>>();
-            let decision = crate::internal::ai::sandbox::request_cached_approval_with_keys(
-                approval_ctx,
-                &keys,
-                |response_tx| crate::internal::ai::sandbox::ExecApprovalRequest {
+            let decision = request_cached_approval_with_keys(approval_ctx, &keys, |response_tx| {
+                ExecApprovalRequest {
                     call_id: call_id.clone(),
                     command: format!("apply_patch ({} path(s))", touched_paths.len()),
                     cwd: working_dir.clone(),
@@ -88,17 +91,16 @@ impl ToolHandler for ApplyPatchHandler {
                     network_access: false,
                     writable_roots: touched_paths.iter().cloned().collect(),
                     response_tx,
-                },
-            )
+                }
+            })
             .await;
 
             match decision {
-                crate::internal::ai::sandbox::ReviewDecision::Approved
-                | crate::internal::ai::sandbox::ReviewDecision::ApprovedForSession => {}
-                crate::internal::ai::sandbox::ReviewDecision::Denied => {
+                ReviewDecision::Approved | ReviewDecision::ApprovedForSession => {}
+                ReviewDecision::Denied => {
                     return Err(ToolError::ExecutionFailed("rejected by user".to_string()));
                 }
-                crate::internal::ai::sandbox::ReviewDecision::Abort => {
+                ReviewDecision::Abort => {
                     return Err(ToolError::ExecutionFailed("aborted by user".to_string()));
                 }
             }
@@ -160,12 +162,12 @@ fn parse_patch_text_from_arguments(arguments: &str) -> Result<String, ToolError>
 }
 
 fn patch_needs_approval(
-    policy: crate::internal::ai::sandbox::AskForApproval,
+    policy: AskForApproval,
     constrained_to_workspace: bool,
 ) -> Result<bool, ToolError> {
     match policy {
-        crate::internal::ai::sandbox::AskForApproval::UnlessTrusted => Ok(true),
-        crate::internal::ai::sandbox::AskForApproval::Never => {
+        AskForApproval::UnlessTrusted => Ok(true),
+        AskForApproval::Never => {
             if constrained_to_workspace {
                 Ok(false)
             } else {
@@ -174,8 +176,7 @@ fn patch_needs_approval(
                 ))
             }
         }
-        crate::internal::ai::sandbox::AskForApproval::OnFailure
-        | crate::internal::ai::sandbox::AskForApproval::OnRequest => Ok(!constrained_to_workspace),
+        AskForApproval::OnFailure | AskForApproval::OnRequest => Ok(!constrained_to_workspace),
     }
 }
 

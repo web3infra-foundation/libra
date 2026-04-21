@@ -9,6 +9,7 @@ use crate::{
         restore::{self, RestoreArgs},
         switch,
     },
+    info_println,
     internal::{
         branch::{Branch, BranchStoreError, INTENT_BRANCH},
         head::Head,
@@ -71,7 +72,7 @@ pub async fn execute_safe(args: CheckoutArgs, output: &OutputConfig) -> CliResul
     if let Some(ref target_branch) = args.branch
         && get_current_branch().await == Some(target_branch.clone())
     {
-        crate::info_println!(output, "Already on {target_branch}");
+        info_println!(output, "Already on {target_branch}");
         return Ok(());
     }
 
@@ -132,10 +133,10 @@ pub async fn get_current_branch() -> Option<String> {
 async fn show_current_branch(output: &OutputConfig) {
     match Head::current().await {
         Head::Detached(commit_hash) => {
-            crate::info_println!(output, "HEAD detached at {}", &commit_hash.to_string()[..8]);
+            info_println!(output, "HEAD detached at {}", &commit_hash.to_string()[..8]);
         }
         Head::Branch(current_branch) => {
-            crate::info_println!(output, "Current branch is {current_branch}.");
+            info_println!(output, "Current branch is {current_branch}.");
         }
     }
 }
@@ -164,7 +165,7 @@ async fn switch_branch_with_output(branch_name: &str, output: &OutputConfig) -> 
 async fn create_and_switch_new_branch(new_branch: &str, output: &OutputConfig) -> CliResult<()> {
     branch::create_branch_safe(new_branch.to_string(), get_current_branch().await).await?;
     switch_branch_with_output(new_branch, output).await?;
-    crate::info_println!(output, "Switched to a new branch '{new_branch}'");
+    info_println!(output, "Switched to a new branch '{new_branch}'");
     Ok(())
 }
 
@@ -191,7 +192,7 @@ async fn check_branch_with_output(
     output: &OutputConfig,
 ) -> CliResult<Option<bool>> {
     if get_current_branch().await == Some(branch_name.to_string()) {
-        crate::info_println!(output, "Already on {branch_name}");
+        info_println!(output, "Already on {branch_name}");
         return Ok(None);
     }
 
@@ -205,7 +206,7 @@ async fn check_branch_with_output(
             .map_err(|error| checkout_branch_store_error("search remote tracking branches", error))?
             .is_empty()
         {
-            crate::info_println!(
+            info_println!(
                 output,
                 "branch '{branch_name}' set up to track '{remote_branch_name}'."
             );
@@ -217,7 +218,7 @@ async fn check_branch_with_output(
             )))
         }
     } else {
-        crate::info_println!(output, "Switched to branch '{branch_name}'");
+        info_println!(output, "Switched to branch '{branch_name}'");
         Ok(Some(false))
     }
 }

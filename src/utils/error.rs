@@ -14,6 +14,8 @@ use std::{
 use serde::{Serialize, Serializer};
 use serde_json::Value;
 
+use crate::utils::output::{JsonFormat, OutputConfig, record_warning};
+
 /// Shared CLI result type.
 pub type CliResult<T = ()> = Result<T, CliError>;
 
@@ -546,11 +548,10 @@ impl CliError {
     ///
     /// When JSON output is active, the error is rendered as a JSON envelope to
     /// **stderr** so stdout remains reserved for successful command data.
-    pub fn print_for_output(&self, config: &crate::utils::output::OutputConfig) {
+    pub fn print_for_output(&self, config: &OutputConfig) {
         if self.silent {
             return;
         }
-        use crate::utils::output::JsonFormat;
 
         if let Some(fmt) = config.json_format {
             let json = self.render_json();
@@ -721,7 +722,7 @@ impl std::error::Error for CliError {}
 pub fn emit_legacy_stderr(message: impl Into<String>) {
     let message = message.into();
     if let Some(text) = message.trim().strip_prefix("warning: ") {
-        crate::utils::output::record_warning();
+        record_warning();
         eprintln!("warning: {}", text);
         return;
     }
@@ -758,7 +759,7 @@ macro_rules! cli_error {
 /// global warning tracker is updated and the `--exit-code-on-warning` flag
 /// works correctly.
 pub fn emit_warning(message: impl std::fmt::Display) {
-    crate::utils::output::record_warning();
+    record_warning();
     eprintln!("warning: {message}");
 }
 

@@ -54,7 +54,31 @@ pub fn resolve_path(path: &Path, working_dir: &Path) -> ToolResult<PathBuf> {
     Ok(resolved)
 }
 
-fn is_reserved_metadata_path(path: &Path, working_dir: &Path) -> bool {
+/// Returns true when a shell command appears to invoke Git as a version-control
+/// executable. This is deliberately conservative: Libra-managed agents must use
+/// Libra VCS tools instead of shelling out to `git`.
+pub fn command_invokes_git_version_control(command: &str) -> bool {
+    command
+        .split(|ch: char| {
+            !(ch.is_ascii_alphanumeric()
+                || ch == '_'
+                || ch == '-'
+                || ch == '.'
+                || ch == '/'
+                || ch == '\\')
+        })
+        .filter(|token| !token.is_empty())
+        .any(|token| {
+            let normalized = token
+                .trim_matches('"')
+                .trim_matches('\'')
+                .trim_end_matches(".exe")
+                .to_ascii_lowercase();
+            normalized == "git" || normalized.ends_with("/git") || normalized.ends_with("\\git")
+        })
+}
+
+pub(crate) fn is_reserved_metadata_path(path: &Path, working_dir: &Path) -> bool {
     let normalized_working_dir = normalize_lexical_absolute(working_dir);
     let normalized_path = normalize_lexical_absolute(path);
     let relative = match normalized_path.strip_prefix(&normalized_working_dir) {
@@ -172,5 +196,19 @@ mod tests {
         let result = validate_path(&reserved_path, &working_dir);
 
         assert!(matches!(result, Err(ToolError::PathReserved(path)) if path == reserved_path));
+    }
+
+    #[test]
+    fn detects_git_version_control_shell_invocations() {
+        assert!(command_invokes_git_version_control("git status"));
+        assert!(command_invokes_git_version_control("/usr/bin/git status"));
+        assert!(command_invokes_git_version_control(
+            "GIT_DIR=.git command git commit -m test"
+        ));
+        assert!(command_invokes_git_version_control("git.exe status"));
+        assert!(!command_invokes_git_version_control("libra status"));
+        assert!(!command_invokes_git_version_control(
+            "grep gitignore README.md"
+        ));
     }
 }

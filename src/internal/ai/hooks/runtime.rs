@@ -19,11 +19,12 @@ use crate::{
     internal::{
         ai::{
             history::{AI_REF, HistoryManager},
-            session::SessionState,
+            session::{SessionState, SessionStore},
         },
+        config::ConfigKv,
         db,
     },
-    utils::{object::write_git_object, storage::local::LocalStorage, util},
+    utils::{error::emit_warning, object::write_git_object, storage::local::LocalStorage, util},
 };
 
 const PROCESSED_EVENT_KEYS: &str = "processed_event_keys";
@@ -111,8 +112,7 @@ pub async fn process_hook_event_from_stdin(
         .context("failed to configure hash kind from repo config")?;
 
     let process_cwd_str = process_cwd.to_string_lossy().to_string();
-    let session_store =
-        crate::internal::ai::session::SessionStore::from_storage_path(&storage_path);
+    let session_store = SessionStore::from_storage_path(&storage_path);
 
     let ai_session_id = build_ai_session_id(provider.provider_name(), &envelope.session_id);
     let recovered_from_out_of_order = event.kind != LifecycleEventKind::SessionStart;
@@ -266,9 +266,7 @@ pub async fn process_hook_event_from_stdin(
                 session
                     .metadata
                     .insert("persisted".to_string(), json!(false));
-                crate::utils::error::emit_warning(format!(
-                    "failed to persist session history: {err}"
-                ));
+                emit_warning(format!("failed to persist session history: {err}"));
                 session_store.save(&session).map_err(|save_err| {
                     anyhow!("failed to save session after persistence failure: {save_err}")
                 })?;
@@ -284,7 +282,7 @@ pub async fn process_hook_event_from_stdin(
 }
 
 async fn set_hash_kind_from_repo() -> Result<()> {
-    let object_format = crate::internal::config::ConfigKv::get("core.objectformat")
+    let object_format = ConfigKv::get("core.objectformat")
         .await
         .ok()
         .flatten()

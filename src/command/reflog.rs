@@ -14,10 +14,11 @@ use sea_orm::{
 };
 
 use crate::{
-    command::load_object,
+    command::{load_object, log::format_stat_output},
     internal::{
         config,
         db::get_db_conn_instance,
+        log::date_parser::parse_date,
         model::reflog::Model,
         reflog::{HEAD, Reflog, ReflogError},
     },
@@ -139,14 +140,14 @@ async fn handle_show(
     let since_ts = options
         .since
         .as_deref()
-        .map(crate::internal::log::date_parser::parse_date)
+        .map(parse_date)
         .transpose()
         .map_err(|e| CliError::fatal(format!("invalid --since date: {e}")))?;
 
     let until_ts = options
         .until
         .as_deref()
-        .map(crate::internal::log::date_parser::parse_date)
+        .map(parse_date)
         .transpose()
         .map_err(|e| CliError::fatal(format!("invalid --until date: {e}")))?;
 
@@ -591,7 +592,7 @@ fn generate_stat_sync(commit: &Commit) -> Result<String, Box<dyn std::error::Err
     }
 
     // Use log module's formatting function for consistent output
-    Ok(crate::command::log::format_stat_output(&stats))
+    Ok(format_stat_output(&stats))
 }
 
 #[cfg(test)]

@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::{
-    command::{clone, fetch},
+    command::{clone, fetch, init::InitError},
     internal::{branch::Branch, config::RemoteConfig},
     utils::output::{OutputConfig, ProgressMode},
 };
@@ -25,14 +25,12 @@ pub struct ConversionReport {
 pub async fn convert_from_git_repository(
     git_repo: &Path,
     is_bare: bool,
-) -> Result<ConversionReport, crate::command::init::InitError> {
+) -> Result<ConversionReport, InitError> {
     let git_dir = resolve_git_source_dir(git_repo)?;
 
-    let url = git_dir
-        .to_str()
-        .ok_or_else(|| crate::command::init::InitError::InvalidUtf8Path {
-            path: git_dir.clone(),
-        })?;
+    let url = git_dir.to_str().ok_or_else(|| InitError::InvalidUtf8Path {
+        path: git_dir.clone(),
+    })?;
 
     let remote = RemoteConfig {
         name: "origin".to_string(),
@@ -49,7 +47,7 @@ pub async fn convert_from_git_repository(
 
     fetch::fetch_repository_safe(remote.clone(), None, false, None, &child_output)
         .await
-        .map_err(|error| crate::command::init::InitError::ConversionFailed {
+        .map_err(|error| InitError::ConversionFailed {
             repo: git_dir.clone(),
             stage: "fetch",
             message: error.to_string(),
@@ -57,13 +55,13 @@ pub async fn convert_from_git_repository(
 
     let remote_branches = Branch::list_branches_result(Some(&remote.name))
         .await
-        .map_err(|error| crate::command::init::InitError::ConversionFailed {
+        .map_err(|error| InitError::ConversionFailed {
             repo: git_dir.clone(),
             stage: "setup",
             message: format!("failed to inspect fetched branches: {error}"),
         })?;
     if remote_branches.is_empty() {
-        return Err(crate::command::init::InitError::ConversionFailed {
+        return Err(InitError::ConversionFailed {
             repo: git_dir.clone(),
             stage: "setup",
             message: "no refs fetched from source git repository".to_string(),
@@ -73,7 +71,7 @@ pub async fn convert_from_git_repository(
     clone::setup_repository(remote, None, !is_bare)
         .await
         .map(|_| ()) // discard SetupResult; convert only needs success/failure
-        .map_err(|error| crate::command::init::InitError::ConversionFailed {
+        .map_err(|error| InitError::ConversionFailed {
             repo: git_dir.clone(),
             stage: "setup",
             message: error.to_string(),
@@ -85,9 +83,7 @@ pub async fn convert_from_git_repository(
     })
 }
 
-pub(crate) fn resolve_git_source_dir(
-    git_repo: &Path,
-) -> Result<PathBuf, crate::command::init::InitError> {
+pub(crate) fn resolve_git_source_dir(git_repo: &Path) -> Result<PathBuf, InitError> {
     let git_dir = if git_repo.join(".git").exists() {
         git_repo.join(".git")
     } else {
@@ -98,12 +94,10 @@ pub(crate) fn resolve_git_source_dir(
         && git_dir.join("config").exists()
         && git_dir.join("objects").exists();
     if !valid {
-        return Err(crate::command::init::InitError::InvalidGitRepository {
+        return Err(InitError::InvalidGitRepository {
             path: git_repo.to_path_buf(),
         });
     }
 
-    git_dir
-        .canonicalize()
-        .map_err(crate::command::init::InitError::Io)
+    git_dir.canonicalize().map_err(InitError::Io)
 }

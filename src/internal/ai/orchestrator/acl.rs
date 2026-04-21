@@ -1,6 +1,8 @@
 use serde_json::Value;
 use wax::Glob;
 
+use crate::internal::ai::intentspec::types::ToolAcl;
+
 /// Verdict for a tool ACL check.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AclVerdict {
@@ -12,17 +14,13 @@ pub enum AclVerdict {
 ///
 /// Deny rules are checked first (deny takes priority). Then allow rules
 /// are checked. If no allow rule matches, the tool is denied.
-pub fn check_tool_acl(
-    acl: &crate::internal::ai::intentspec::types::ToolAcl,
-    tool_name: &str,
-    action: &str,
-) -> AclVerdict {
+pub fn check_tool_acl(acl: &ToolAcl, tool_name: &str, action: &str) -> AclVerdict {
     check_tool_acl_with_context(acl, tool_name, action, None, &[])
 }
 
 /// Check tool access against the ACL rules with optional invocation arguments.
 pub fn check_tool_acl_with_args(
-    acl: &crate::internal::ai::intentspec::types::ToolAcl,
+    acl: &ToolAcl,
     tool_name: &str,
     action: &str,
     arguments: Option<&Value>,
@@ -32,7 +30,7 @@ pub fn check_tool_acl_with_args(
 
 /// Check tool access against ACL rules with invocation arguments and resolved write paths.
 pub fn check_tool_acl_with_context(
-    acl: &crate::internal::ai::intentspec::types::ToolAcl,
+    acl: &ToolAcl,
     tool_name: &str,
     action: &str,
     arguments: Option<&Value>,

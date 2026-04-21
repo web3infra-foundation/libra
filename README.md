@@ -19,6 +19,7 @@ Commands:
   init         Initialize a new repository
   clone        Clone a repository into a new directory
   code         Start Libra Code interactive TUI (with background web server)
+  graph        Inspect an AI thread version graph in a TUI
   add          Add file contents to the index
   rm           Remove files from the working tree and from the index
   restore      Restore working tree files
@@ -152,70 +153,19 @@ Update your `claude_desktop_config.json` as follows:
 > **Note**: The `cwd` (current working directory) must be set to the root of a valid Libra repository.
 > If `libra code` is launched outside of a repository, it will exit with an error.
 
-#### Managed Claude Runtime
+#### Managed Runtime Migration
 
-`libra code --provider claudecode` uses Libra's managed Claude runtime path.
-This is separate from the direct `anthropic` provider, which still uses the
-regular Anthropic chat-completions client. The managed `claudecode` runtime
-still uses the official Python Claude Agent SDK helper under the hood, so the
-active `python3` in your shell should already have `claude-agent-sdk`
-installed.
-
-Recommended setup with `uv`:
-
-```bash
-uv venv .venv --python 3.11
-uv pip install --python .venv/bin/python -U claude-agent-sdk
-source .venv/bin/activate
-```
-
-If you prefer not to activate the virtualenv, pass the helper interpreter
-explicitly when launching Claude managed sessions:
-
-```bash
-libra code --provider claudecode \
-  --model claude-sonnet-4-6 \
-  --python-binary .venv/bin/python
-```
-
-Authentication comes from environment variables:
-
-- Official Anthropic path: `ANTHROPIC_API_KEY`
-- Custom gateway path: `ANTHROPIC_BASE_URL`
-- For gateways that expect bearer auth for Claude Code / Python SDK traffic,
-  use `ANTHROPIC_AUTH_TOKEN`
-
-Example:
-
-```bash
-export ANTHROPIC_BASE_URL=https://your-gateway.example.com/anthropic
-export ANTHROPIC_AUTH_TOKEN=<token>
-unset ANTHROPIC_API_KEY
-```
-
-Start an interactive managed Claude session:
-
-```bash
-libra code --provider claudecode \
-  --model claude-sonnet-4-6
-```
-
-Resume Claude provider sessions explicitly:
-
-```bash
-libra code --provider claudecode --resume
-libra code --provider claudecode --resume-session <provider-session-uuid>
-libra code --provider claudecode --resume-session <provider-session-uuid> --fork-session
-libra code --provider claudecode --resume-session <provider-session-uuid> --resume-at <assistant-message-uuid>
-```
-
-The `--cwd` flag controls which project directory Claude reads and writes, but
-all managed artifacts and AI history are persisted into the current Libra
-repository.
+The legacy `claudecode` provider was removed. Use `libra code --provider codex`
+for Libra's managed agent runtime, or `libra code --provider anthropic` for
+direct Anthropic chat completions. Claude provider-session flags such as
+`--resume-session`, `--fork-session`, `--session-id`, and `--resume-at` are no
+longer accepted; use Libra's canonical `--resume <thread_id>` flow for persisted
+sessions.
 
 Useful inspection commands:
 
 ```bash
+libra graph <thread_id> [--repo /path/to/repo]
 libra cat-file --ai-list ai_session
 libra cat-file --ai-list run
 libra cat-file --ai-list task
@@ -239,9 +189,6 @@ libra code --provider openai --model gpt-4o
 # Anthropic (direct chat completions)
 libra code --provider anthropic --model claude-sonnet-4-6
 
-# Claude Code managed runtime
-libra code --provider claudecode --model claude-sonnet-4-6
-
 # DeepSeek
 libra code --provider deepseek
 
@@ -254,19 +201,23 @@ libra code --provider ollama --model codellama
 
 # Ollama with a remote instance
 libra code --provider ollama --model llama3.2 --api-base http://remote-host:11434/v1
+libra code --provider ollama --model minimax-m2.7:cloud --api-base http://remote-host:11434/v1 --ollama-compact-tools
+
+# Ollama thinking control for reasoning models
+OLLAMA_THINK=false libra code --provider ollama --model qwen3.6
+libra code --provider ollama --model qwen3.6 --ollama-thinking high
 ```
 
-> **Note**: The `--api-base` CLI flag is only honored for the `ollama` provider. Other providers accept custom base URLs through their respective environment variables (e.g. `OPENAI_BASE_URL`).
+> **Note**: The `--api-base` CLI flag is only honored for the `ollama` provider. Other providers accept custom base URLs through their respective environment variables (e.g. `OPENAI_BASE_URL`). Ollama requests stream `/api/chat` responses by default, include a per-request `request_id` in debug logs, and default to `think:false` to keep tool calls responsive; use `--ollama-thinking auto|off|on|low|medium|high` for one run, or set `OLLAMA_THINK=true`, `low`, `medium`, `high`, or `auto` as the environment default. `auto` omits the `think` field and lets Ollama decide. Use `--ollama-compact-tools` or `OLLAMA_COMPACT_TOOLS=true` for remote/cloud Ollama endpoints that return 503s when receiving Libra's full tool schemas.
 
 | Provider | Default Model | Auth Env Variable | Base URL Override |
 |----------|--------------|-------------------|-------------------|
 | `gemini` | `gemini-2.5-flash` | `GEMINI_API_KEY` | — |
 | `openai` | `gpt-4o-mini` | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
 | `anthropic` | `claude-sonnet-4-6` | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
-| `claudecode` | `claude-sonnet-4-6` | `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
 | `deepseek` | `deepseek-chat` | `DEEPSEEK_API_KEY` | *(programmatic only)* |
 | `zhipu` | `glm-5` | `ZHIPU_API_KEY` | `ZHIPU_BASE_URL` |
-| `ollama` | *(requires `--model`)* | — | `OLLAMA_BASE_URL` or `--api-base` |
+| `ollama` | *(requires `--model`)* | `OLLAMA_API_KEY` for direct Cloud API | `OLLAMA_BASE_URL`, `OLLAMA_THINK`, `OLLAMA_COMPACT_TOOLS`, `--api-base`, `--ollama-thinking`, or `--ollama-compact-tools` |
 
 ---
 

@@ -7,6 +7,8 @@
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 
+use crate::internal::config::resolve_env;
+
 /// D1 API response wrapper
 #[derive(Debug, Deserialize)]
 pub struct D1Response<T> {
@@ -92,7 +94,7 @@ impl D1Client {
         missing_code: i32,
         resolution_error_code: i32,
     ) -> Result<String, D1Error> {
-        match crate::internal::config::resolve_env(name).await {
+        match resolve_env(name).await {
             Ok(Some(value)) if !value.is_empty() => Ok(value),
             Ok(Some(_)) | Ok(None) => Err(D1Error {
                 code: missing_code,

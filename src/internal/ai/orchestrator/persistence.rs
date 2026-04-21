@@ -29,9 +29,9 @@ use super::{
     checkpoint_policy::{checkpoint_before_replan, checkpoint_on_replan},
     run_state::RunStateSnapshot,
     types::{
-        DecisionOutcome, ExecutionPlanSpec, GateStage, OrchestratorError, PersistedCheckpoint,
-        PersistedExecution, PersistedTaskArtifacts, SystemReport, TaskKind, TaskResult,
-        ToolCallRecord,
+        DecisionOutcome, ExecutionPlanSpec, GateReport, GateStage, OrchestratorError,
+        PersistedCheckpoint, PersistedDerivedRecords, PersistedExecution, PersistedTaskArtifacts,
+        SystemReport, TaskKind, TaskResult, ToolCallRecord,
     },
 };
 use crate::{
@@ -43,18 +43,25 @@ use crate::{
             },
             types::{FileChange, PatchStatus},
         },
+        completion::CompletionUsageSummary,
         intentspec::{persistence::persist_intentspec, types::IntentSpec},
         mcp::{
             resource::{
-                AgentInstanceParams, ContextItemParams, CreateContextSnapshotParams,
-                CreateDecisionParams, CreateEvidenceParams, CreatePatchSetParams, CreatePlanParams,
-                CreatePlanStepEventParams, CreateProvenanceParams, CreateRunParams,
-                CreateRunUsageParams, CreateTaskParams, CreateToolInvocationParams,
-                IoFootprintParams, PlanStepParams, TouchedFileParams,
+                AgentInstanceParams, ArtifactParams, ContextItemParams,
+                CreateContextSnapshotParams, CreateDecisionParams, CreateEvidenceParams,
+                CreatePatchSetParams, CreatePlanParams, CreatePlanStepEventParams,
+                CreateProvenanceParams, CreateRunParams, CreateRunUsageParams, CreateTaskParams,
+                CreateToolInvocationParams, IoFootprintParams, PlanStepParams, TouchedFileParams,
             },
             server::LibraMcpServer,
         },
-        workflow_objects::{build_git_plan, parse_object_id},
+        runtime::{
+            DecisionPolicy, DecisionProposalStore, ValidationOutcome, ValidationReportStore,
+            ValidationStage, ValidationStageResult, ValidatorEngine, aggregate_risk_score,
+            build_decision_proposal, contracts::EvidenceKind,
+        },
+        tools::ToolOutput,
+        workflow_objects::{build_git_intent, build_git_plan, parse_object_id},
     },
     utils::storage_ext::StorageExt,
 };
@@ -323,7 +330,23 @@ impl ExecutionAuditSession {
                 .flatten()
         };
         let persisted_plan = if let Some(plan_id) = preview_plan_id {
-            bind_existing_plan_revision(&self.mcp_server, &plan_id, plan).await?
+            match bind_existing_plan_revision(&self.mcp_server, &plan_id, plan).await {
+                Ok(persisted_plan) => persisted_plan,
+                Err(error) if is_missing_persisted_plan_error(&error) => {
+                    tracing::warn!(
+                        plan_id = %plan_id,
+                        "preview plan was not found during execution; creating a new plan revision"
+                    );
+                    create_plan_revision(
+                        &self.mcp_server,
+                        &intent_id,
+                        parent_plan_id.as_deref(),
+                        plan,
+                    )
+                    .await?
+                }
+                Err(error) => return Err(error),
+            }
         } else {
             create_plan_revision(
                 &self.mcp_server,
@@ -606,6 +629,18 @@ impl ExecutionAuditSession {
             })
             .await?,
         );
+        let derived_records = Some(
+            persist_validation_decision_derivatives(
+                &self.mcp_server,
+                &{
+                    let state = self.state.lock().await;
+                    state.thread_id.clone()
+                },
+                &run_id,
+                request.system_report,
+            )
+            .await?,
+        );
         if let Some(snapshot_id) = final_checkpoint_id {
             checkpoints.push(PersistedCheckpoint {
                 revision: request.execution_plan_spec.revision,
@@ -666,6 +701,7 @@ impl ExecutionAuditSession {
             plan_ids,
             checkpoints,
             tasks: persisted_tasks,
+            derived_records,
         })
     }
 
@@ -858,7 +894,7 @@ async fn persist_intent_snapshot(
     spec: &IntentSpec,
     intent_id: &str,
 ) -> Result<(), OrchestratorError> {
-    let intent = crate::internal::ai::workflow_objects::build_git_intent(spec)
+    let intent = build_git_intent(spec)
         .map_err(|e| OrchestratorError::ConfigError(format!("failed to build git intent: {e}")))?;
     let snapshot = IntentSnapshot {
         id: intent_id.to_string(),
@@ -1304,6 +1340,8 @@ async fn persist_runtime_event(
             .await?;
         }
         super::types::TaskRuntimeEvent::AssistantMessage(text) => {
+            let summary = summarize_runtime_text(&text, 240);
+            let content_chars = text.chars().count();
             persist_context_frame(
                 mcp_server,
                 actor,
@@ -1312,7 +1350,9 @@ async fn persist_runtime_event(
                 summarize_runtime_text(&text, 96),
                 json!({
                     "event": "assistant_message",
-                    "text": text,
+                    "summary": summary,
+                    "contentChars": content_chars,
+                    "fullTextStored": false,
                     "taskId": task.id().to_string(),
                     "taskTitle": task.title(),
                 }),
@@ -1603,7 +1643,7 @@ async fn create_run_usage_from_task_results(
     run_id: &str,
     task_results: &[TaskResult],
 ) -> Result<Option<String>, OrchestratorError> {
-    let mut usage = crate::internal::ai::completion::CompletionUsageSummary::default();
+    let mut usage = CompletionUsageSummary::default();
     for result in task_results {
         if let Some(task_usage) = result.model_usage.as_ref() {
             usage.merge(task_usage);
@@ -1664,9 +1704,9 @@ fn build_patchset_snapshot_changes(tool_calls: &[ToolCallRecord]) -> Vec<FileCha
     changes
 }
 
-fn tool_output_to_json(output: &crate::internal::ai::tools::ToolOutput) -> serde_json::Value {
+fn tool_output_to_json(output: &ToolOutput) -> serde_json::Value {
     match output {
-        crate::internal::ai::tools::ToolOutput::Function {
+        ToolOutput::Function {
             content,
             success,
             metadata,
@@ -1676,7 +1716,7 @@ fn tool_output_to_json(output: &crate::internal::ai::tools::ToolOutput) -> serde
             "success": success,
             "metadata": metadata,
         }),
-        crate::internal::ai::tools::ToolOutput::Mcp { result } => json!({
+        ToolOutput::Mcp { result } => json!({
             "kind": "mcp",
             "result": result,
         }),
@@ -2067,6 +2107,15 @@ pub async fn persist_execution(
         })
         .await?,
     );
+    let derived_records = Some(
+        persist_validation_decision_derivatives(
+            request.mcp_server,
+            &intent_id,
+            &run_id,
+            request.system_report,
+        )
+        .await?,
+    );
     if let Some(snapshot_id) = final_checkpoint_id {
         checkpoints.push(PersistedCheckpoint {
             revision: request.execution_plan_spec.revision,
@@ -2109,6 +2158,7 @@ pub async fn persist_execution(
         plan_ids,
         checkpoints,
         tasks: persisted_tasks,
+        derived_records,
     })
 }
 
@@ -2403,6 +2453,14 @@ async fn create_plan_revision(
     })
 }
 
+fn is_missing_persisted_plan_error(error: &OrchestratorError) -> bool {
+    matches!(
+        error,
+        OrchestratorError::ConfigError(message)
+            if message.starts_with("persisted plan not found:")
+    )
+}
+
 async fn load_persisted_plan(
     mcp_server: &Arc<LibraMcpServer>,
     plan_id: &str,
@@ -2637,14 +2695,12 @@ async fn create_patchset(
             request.task_title, request.task_objective
         )),
         diff_format: diff_text.as_ref().map(|_| "unified_diff".to_string()),
-        diff_artifact: diff_artifact.map(|artifact| {
-            crate::internal::ai::mcp::resource::ArtifactParams {
-                store: artifact.store().to_string(),
-                key: artifact.key().to_string(),
-                content_type: Some("text/x-diff".to_string()),
-                size_bytes: None,
-                hash: Some(artifact.key().to_string()),
-            }
+        diff_artifact: diff_artifact.map(|artifact| ArtifactParams {
+            store: artifact.store().to_string(),
+            key: artifact.key().to_string(),
+            content_type: Some("text/x-diff".to_string()),
+            size_bytes: None,
+            hash: Some(artifact.key().to_string()),
         }),
         tags: None,
         external_ids: None,
@@ -2751,6 +2807,180 @@ async fn create_decision(request: FinalDecisionRequest<'_>) -> Result<String, Or
             OrchestratorError::ConfigError(format!("MCP create_decision failed: {e:?}"))
         })?;
     parse_created_id("decision", &result)
+}
+
+async fn persist_validation_decision_derivatives(
+    mcp_server: &Arc<LibraMcpServer>,
+    thread_id: &str,
+    run_id: &str,
+    system_report: &SystemReport,
+) -> Result<PersistedDerivedRecords, OrchestratorError> {
+    let history = mcp_server.intent_history_manager.as_ref().ok_or_else(|| {
+        OrchestratorError::ConfigError(
+            "cannot persist validation decision records without AI history manager".to_string(),
+        )
+    })?;
+    let thread_id = Uuid::parse_str(thread_id).map_err(|error| {
+        OrchestratorError::ConfigError(format!(
+            "cannot persist validation decision records because thread id '{thread_id}' is not a UUID: {error}"
+        ))
+    })?;
+    let run_id = Uuid::parse_str(run_id).map_err(|error| {
+        OrchestratorError::ConfigError(format!(
+            "cannot persist validation decision records because run id '{run_id}' is not a UUID: {error}"
+        ))
+    })?;
+
+    let validator = ValidatorEngine::default_policy();
+    let report = validator.build_report(
+        thread_id,
+        Some(run_id),
+        validation_stages_from_system_report(system_report),
+    );
+    let policy = DecisionPolicy::default();
+    let risk = aggregate_risk_score(&report, &policy);
+    let proposal = build_decision_proposal(&report, &risk, &policy);
+
+    let db = history.database_connection();
+    ValidationReportStore::new(db.clone())
+        .write_latest(&report)
+        .await
+        .map_err(|error| {
+            OrchestratorError::ConfigError(format!(
+                "failed to persist validation report {} for thread {}: {error}",
+                report.report_id, report.thread_id
+            ))
+        })?;
+    DecisionProposalStore::new(db)
+        .write_latest(&risk, &proposal)
+        .await
+        .map_err(|error| {
+            OrchestratorError::ConfigError(format!(
+                "failed to persist decision proposal {} for thread {}: {error}",
+                proposal.proposal_id, proposal.thread_id
+            ))
+        })?;
+
+    Ok(PersistedDerivedRecords {
+        validation_report_id: report.report_id,
+        risk_score_breakdown_id: risk.breakdown_id,
+        decision_proposal_id: proposal.proposal_id,
+    })
+}
+
+fn validation_stages_from_system_report(
+    system_report: &SystemReport,
+) -> Vec<ValidationStageResult> {
+    vec![
+        validation_stage_from_gate_report(
+            ValidationStage::Integration,
+            &system_report.integration,
+            system_report.integration.all_required_passed,
+            Vec::new(),
+        ),
+        validation_stage_from_gate_report(
+            ValidationStage::Security,
+            &system_report.security,
+            system_report.security.all_required_passed,
+            Vec::new(),
+        ),
+        validation_stage_from_gate_report(
+            ValidationStage::Release,
+            &system_report.release,
+            system_report.release.all_required_passed
+                && system_report.review_passed
+                && system_report.artifacts_complete,
+            release_stage_blockers(system_report),
+        ),
+    ]
+}
+
+fn validation_stage_from_gate_report(
+    stage: ValidationStage,
+    report: &GateReport,
+    passed: bool,
+    extra_blockers: Vec<String>,
+) -> ValidationStageResult {
+    let evidence = validation_stage_evidence(report, &extra_blockers);
+    let outcome = if report.results.iter().any(|result| result.timed_out) {
+        ValidationOutcome::InfrastructureFailed
+    } else if passed {
+        ValidationOutcome::Passed
+    } else {
+        ValidationOutcome::BlockingFailed
+    };
+    let summary = Some(validation_stage_summary(report, &extra_blockers));
+
+    ValidationStageResult {
+        stage,
+        outcome,
+        evidence,
+        summary,
+    }
+}
+
+fn validation_stage_evidence(report: &GateReport, extra_blockers: &[String]) -> Vec<EvidenceKind> {
+    let mut evidence = report
+        .results
+        .iter()
+        .map(|result| evidence_kind_from_gate_result(&result.kind, result.timed_out))
+        .collect::<Vec<_>>();
+    evidence.extend(
+        extra_blockers
+            .iter()
+            .map(|_| EvidenceKind::ValidationBlockingFailed),
+    );
+    evidence
+}
+
+fn evidence_kind_from_gate_result(kind: &str, timed_out: bool) -> EvidenceKind {
+    if timed_out {
+        return EvidenceKind::Timeout;
+    }
+
+    match kind {
+        "test" => EvidenceKind::Test,
+        "lint" => EvidenceKind::Lint,
+        "build" => EvidenceKind::Build,
+        "security" => EvidenceKind::Security,
+        "performance" => EvidenceKind::Performance,
+        other => EvidenceKind::Other(other.to_string()),
+    }
+}
+
+fn release_stage_blockers(system_report: &SystemReport) -> Vec<String> {
+    let mut blockers = Vec::new();
+    if !system_report.review_passed {
+        if system_report.review_findings.is_empty() {
+            blockers.push("review did not pass".to_string());
+        } else {
+            blockers.extend(system_report.review_findings.iter().cloned());
+        }
+    }
+    if !system_report.artifacts_complete {
+        if system_report.missing_artifacts.is_empty() {
+            blockers.push("required artifacts are incomplete".to_string());
+        } else {
+            blockers.push(format!(
+                "missing artifacts: {}",
+                system_report.missing_artifacts.join(", ")
+            ));
+        }
+    }
+    blockers
+}
+
+fn validation_stage_summary(report: &GateReport, extra_blockers: &[String]) -> String {
+    let passed = report.results.iter().filter(|result| result.passed).count();
+    let failed = report.results.len().saturating_sub(passed);
+    let mut parts = vec![format!(
+        "{passed}/{} gate checks passed; {failed} failed",
+        report.results.len()
+    )];
+    if !extra_blockers.is_empty() {
+        parts.push(extra_blockers.join("; "));
+    }
+    parts.join("; ")
 }
 
 fn build_patchset_payload(
@@ -3135,7 +3365,7 @@ mod tests {
     use git_internal::internal::object::{
         plan::Plan as GitPlan, task::Task as GitTask, types::ActorRef,
     };
-    use sea_orm::{ConnectionTrait, Database, Schema};
+    use sea_orm::{ConnectionTrait, Database, EntityTrait, Schema};
     use tempfile::tempdir;
 
     use super::*;
@@ -3153,7 +3383,10 @@ mod tests {
                     },
                 },
             },
-            model::reference,
+            model::{
+                ai_decision_proposal, ai_risk_score_breakdown, ai_thread, ai_validation_report,
+                reference,
+            },
         },
         utils::{storage::local::LocalStorage, storage_ext::StorageExt},
     };
@@ -3163,6 +3396,14 @@ mod tests {
         let builder = db.get_database_backend();
         let schema = Schema::new(builder);
         let stmt = schema.create_table_from_entity(reference::Entity);
+        db.execute(builder.build(&stmt)).await.unwrap();
+        let stmt = schema.create_table_from_entity(ai_thread::Entity);
+        db.execute(builder.build(&stmt)).await.unwrap();
+        let stmt = schema.create_table_from_entity(ai_validation_report::Entity);
+        db.execute(builder.build(&stmt)).await.unwrap();
+        let stmt = schema.create_table_from_entity(ai_risk_score_breakdown::Entity);
+        db.execute(builder.build(&stmt)).await.unwrap();
+        let stmt = schema.create_table_from_entity(ai_decision_proposal::Entity);
         db.execute(builder.build(&stmt)).await.unwrap();
 
         let temp_dir = tempdir().unwrap();
@@ -3490,8 +3731,36 @@ mod tests {
         assert_eq!(persisted.tasks[0].tool_invocation_ids.len(), 1);
         assert!(persisted.tasks[0].patchset_id.is_some());
         assert_eq!(persisted.tasks[1].evidence_ids.len(), 1);
+        let derived = persisted
+            .derived_records
+            .as_ref()
+            .expect("validation decision derived records");
 
         let history = server.intent_history_manager.as_ref().unwrap();
+        let db = history.database_connection();
+        assert!(
+            ai_validation_report::Entity::find_by_id(derived.validation_report_id.to_string())
+                .one(&db)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            ai_risk_score_breakdown::Entity::find_by_id(
+                derived.risk_score_breakdown_id.to_string()
+            )
+            .one(&db)
+            .await
+            .unwrap()
+            .is_some()
+        );
+        assert!(
+            ai_decision_proposal::Entity::find_by_id(derived.decision_proposal_id.to_string())
+                .one(&db)
+                .await
+                .unwrap()
+                .is_some()
+        );
         assert_eq!(history.list_objects("task").await.unwrap().len(), 3);
         assert_eq!(history.list_objects("run").await.unwrap().len(), 1);
         assert_eq!(history.list_objects("patchset").await.unwrap().len(), 1);
@@ -3575,9 +3844,14 @@ mod tests {
             &plan_spec.tasks[0],
             TaskRuntimeEvent::Phase(TaskRuntimePhase::Starting),
         );
+        let raw_tail = "UNSTORED_RAW_ASSISTANT_TAIL";
+        let long_assistant_message = format!(
+            "Editing src/lib.rs to fix the issue. {} {raw_tail}",
+            "x".repeat(320)
+        );
         observer.on_task_runtime_event(
             &plan_spec.tasks[0],
-            TaskRuntimeEvent::AssistantMessage("Editing src/lib.rs to fix the issue".to_string()),
+            TaskRuntimeEvent::AssistantMessage(long_assistant_message),
         );
         observer.on_task_runtime_event(
             &plan_spec.tasks[0],
@@ -3658,6 +3932,7 @@ mod tests {
             .unwrap();
         assert!(!persisted.run_id.is_empty());
         assert!(persisted.run_usage_id.is_some());
+        assert!(persisted.derived_records.is_some());
 
         let history = server.intent_history_manager.as_ref().unwrap();
         assert_eq!(
@@ -3693,6 +3968,22 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        let context_frames = history.list_objects("context_frame").await.unwrap();
+        let storage = server.storage.as_ref().unwrap();
+        let mut assistant_context_frame = None;
+        for (_, hash) in context_frames {
+            let value = storage.get_json::<serde_json::Value>(&hash).await.unwrap();
+            let serialized = serde_json::to_string(&value).unwrap();
+            if serialized.contains("\"assistant_message\"") {
+                assistant_context_frame = Some(serialized);
+                break;
+            }
+        }
+        let assistant_context_frame =
+            assistant_context_frame.expect("expected assistant message context frame");
+        assert!(assistant_context_frame.contains("\"fullTextStored\":false"));
+        assert!(assistant_context_frame.contains("\"contentChars\""));
+        assert!(!assistant_context_frame.contains(raw_tail));
         assert!(
             history
                 .list_objects("tool_invocation_event")
@@ -3800,5 +4091,58 @@ mod tests {
         let history = server.intent_history_manager.as_ref().unwrap();
         assert_eq!(history.list_objects("intent").await.unwrap().len(), 1);
         assert_eq!(history.list_objects("plan").await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn execution_audit_session_creates_new_plan_when_preview_plan_is_missing() {
+        let server = setup_server().await;
+        let spec = test_spec(vec![]);
+        let analysis_task = {
+            let actor = ActorRef::agent("test-missing-preview").unwrap();
+            GitTask::new(actor, "Analyze repository", None).unwrap()
+        };
+        let plan_spec = ExecutionPlanSpec {
+            intent_spec_id: "intent-preview".to_string(),
+            revision: 1,
+            parent_revision: None,
+            replan_reason: None,
+            tasks: vec![TaskSpec {
+                step: git_internal::internal::object::plan::PlanStep::new("Analyze repository"),
+                task: analysis_task,
+                objective: "Summarize repository state".to_string(),
+                kind: TaskKind::Analysis,
+                gate_stage: None,
+                owner_role: Some("analyst".to_string()),
+                scope_in: vec!["src/".to_string()],
+                scope_out: vec![],
+                checks: vec![],
+                contract: TaskContract::default(),
+            }],
+            max_parallel: 1,
+            checkpoints: vec![],
+        };
+        let intent_id = persist_intentspec(&spec, &server).await.unwrap();
+        let missing_plan_id = Uuid::new_v4().to_string();
+        let session = ExecutionAuditSession::start(
+            server.clone(),
+            &spec,
+            Path::new("."),
+            Some(&intent_id),
+            Some(&missing_plan_id),
+        )
+        .await
+        .unwrap();
+
+        session.record_plan_compiled(&plan_spec).await.unwrap();
+
+        let history = server.intent_history_manager.as_ref().unwrap();
+        assert_eq!(history.list_objects("plan").await.unwrap().len(), 1);
+        assert!(
+            history
+                .get_object_hash("plan", &missing_plan_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

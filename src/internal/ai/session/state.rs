@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::internal::ai::completion::Message;
+
 /// Unique session identifier.
 pub type SessionId = String;
 
@@ -89,7 +91,7 @@ impl SessionState {
     ///
     /// Only "user" and "assistant" messages produce entries; other roles are
     /// skipped because the model API doesn't accept them inline.
-    pub fn to_history(&self) -> Vec<crate::internal::ai::completion::Message> {
+    pub fn to_history(&self) -> Vec<Message> {
         use crate::internal::ai::completion::Message;
 
         self.messages

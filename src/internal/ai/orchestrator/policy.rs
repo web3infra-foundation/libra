@@ -11,6 +11,7 @@ use crate::internal::ai::{
     tools::{
         ToolOutput,
         apply_patch::{ApplyPatchArgs, parse_patch},
+        utils::command_invokes_git_version_control,
     },
 };
 
@@ -61,6 +62,15 @@ pub fn evaluate_tool_call(
     }
 
     if tool_name == "shell" {
+        if shell_invokes_git_version_control(arguments) {
+            return Err(PolicyViolation {
+                code: "git-version-control-deny".into(),
+                message: "git is not allowed for Libra-managed agent execution; use run_libra_vcs or Libra version-control commands instead".into(),
+                tool_name: Some(tool_name.to_string()),
+                path: None,
+            });
+        }
+
         if shell_requests_escalation(arguments) {
             return Err(PolicyViolation {
                 code: "sandbox-escalation-deny".into(),
@@ -83,19 +93,7 @@ pub fn evaluate_tool_call(
         }
     }
 
-    for path in &writes {
-        match check_scope(&task.scope_in, &task.scope_out, path) {
-            ScopeVerdict::InScope => {}
-            ScopeVerdict::OutOfScope(reason) => {
-                return Err(PolicyViolation {
-                    code: "scope-creep".into(),
-                    message: reason,
-                    tool_name: Some(tool_name.to_string()),
-                    path: Some(path.clone()),
-                });
-            }
-        }
-    }
+    validate_task_write_contract(task, tool_name, &writes)?;
 
     Ok(ToolPreflight {
         record: ToolCallRecord {
@@ -181,7 +179,7 @@ pub fn evaluate_tool_result(
 
 fn acl_tool_alias(tool_name: &str) -> &str {
     match tool_name {
-        "read_file" | "list_dir" | "grep_files" | "apply_patch" => "workspace.fs",
+        "read_file" | "list_dir" | "grep_files" | "search_files" | "apply_patch" => "workspace.fs",
         "request_user_input" => "interaction",
         "submit_intent_draft" => "planning",
         _ => tool_name,
@@ -267,21 +265,45 @@ fn validate_recorded_writes(
         }
     }
 
-    for path in &record.paths_written {
-        match check_scope(&task.scope_in, &task.scope_out, path) {
-            ScopeVerdict::InScope => {}
-            ScopeVerdict::OutOfScope(reason) => {
-                return Err(PolicyViolation {
-                    code: "scope-creep".into(),
-                    message: reason,
-                    tool_name: Some(record.tool_name.clone()),
-                    path: Some(path.clone()),
-                });
-            }
+    validate_task_write_contract(task, &record.tool_name, &record.paths_written)?;
+
+    Ok(())
+}
+
+fn validate_task_write_contract(
+    task: &TaskSpec,
+    tool_name: &str,
+    paths_written: &[String],
+) -> Result<(), PolicyViolation> {
+    for path in paths_written {
+        if let Some(reason) = task_write_contract_violation(task, path) {
+            return Err(PolicyViolation {
+                code: "scope-creep".into(),
+                message: reason,
+                tool_name: Some(tool_name.to_string()),
+                path: Some(path.clone()),
+            });
         }
     }
 
     Ok(())
+}
+
+fn task_write_contract_violation(task: &TaskSpec, path: &str) -> Option<String> {
+    if !task.contract.touch_files.is_empty() {
+        if let ScopeVerdict::OutOfScope(reason) = check_scope(&[], &task.scope_out, path) {
+            return Some(reason);
+        }
+        return match check_scope(&task.contract.touch_files, &[], path) {
+            ScopeVerdict::InScope => None,
+            ScopeVerdict::OutOfScope(reason) => Some(format!("not in touchFiles: {reason}")),
+        };
+    }
+
+    match check_scope(&task.scope_in, &task.scope_out, path) {
+        ScopeVerdict::InScope => None,
+        ScopeVerdict::OutOfScope(reason) => Some(reason),
+    }
 }
 
 fn derive_tool_footprint(
@@ -308,7 +330,7 @@ fn derive_tool_footprint(
                 Vec::new(),
             ))
         }
-        "grep_files" => {
+        "grep_files" | "search_files" => {
             let path = arguments
                 .get("path")
                 .and_then(Value::as_str)
@@ -333,6 +355,15 @@ fn derive_tool_footprint(
             Ok(("workspace.fs".into(), "write".into(), Vec::new(), writes))
         }
         "shell" => Ok(("shell".into(), "execute".into(), Vec::new(), Vec::new())),
+        "run_libra_vcs" => {
+            let command = required_string(arguments, "command")?;
+            Ok((
+                "libra.vcs".into(),
+                libra_vcs_action(command)?.into(),
+                Vec::new(),
+                Vec::new(),
+            ))
+        }
         "request_user_input" => Ok((
             "interaction".into(),
             "prompt".into(),
@@ -399,6 +430,24 @@ fn shell_looks_networked(arguments: &Value) -> bool {
         "git fetch",
     ];
     needles.iter().any(|needle| command.contains(needle))
+}
+
+fn shell_invokes_git_version_control(arguments: &Value) -> bool {
+    arguments
+        .get("command")
+        .and_then(Value::as_str)
+        .is_some_and(command_invokes_git_version_control)
+}
+
+fn libra_vcs_action(command: &str) -> Result<&'static str, String> {
+    match command.trim() {
+        "status" | "diff" | "branch" | "log" | "show" | "show-ref" => Ok("read"),
+        "add" | "commit" | "switch" => Ok("write"),
+        "" => Err("missing run_libra_vcs command".to_string()),
+        other => Err(format!(
+            "unsupported run_libra_vcs command '{other}'; use an allowlisted Libra VCS command"
+        )),
+    }
 }
 
 fn shell_requests_escalation(arguments: &Value) -> bool {
@@ -691,6 +740,27 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_patch_preflight_rejects_writes_outside_touch_files() {
+        let mut task = task();
+        task.contract.touch_files = vec!["src/lib.rs".into()];
+
+        let violation = evaluate_tool_call(
+            &spec(),
+            &task,
+            "apply_patch",
+            &serde_json::json!({
+                "input": "*** Begin Patch\n*** Add File: src/main.rs\n+fn main() {}\n*** End Patch"
+            }),
+            Path::new("/tmp/work"),
+        )
+        .expect_err("writes outside touchFiles must be rejected before execution");
+
+        assert_eq!(violation.code, "scope-creep");
+        assert_eq!(violation.path.as_deref(), Some("src/main.rs"));
+        assert!(violation.message.contains("not in touchFiles"));
+    }
+
+    #[test]
     fn test_network_policy_rejected() {
         let res = evaluate_tool_call(
             &spec(),
@@ -700,6 +770,45 @@ mod tests {
             Path::new("/tmp/work"),
         );
         assert!(matches!(res, Err(PolicyViolation { code, .. }) if code == "network-policy-deny"));
+    }
+
+    #[test]
+    fn test_shell_git_version_control_is_rejected() {
+        let mut intent = spec();
+        intent.constraints.security.network_policy = NetworkPolicy::Allow;
+        let res = evaluate_tool_call(
+            &intent,
+            &task(),
+            "shell",
+            &serde_json::json!({ "command": "git status" }),
+            Path::new("/tmp/work"),
+        );
+
+        assert!(
+            matches!(res, Err(PolicyViolation { code, .. }) if code == "git-version-control-deny")
+        );
+    }
+
+    #[test]
+    fn test_run_libra_vcs_uses_libra_vcs_acl() {
+        let mut intent = spec();
+        intent.security.tool_acl.allow.push(ToolRule {
+            tool: "libra.vcs".into(),
+            actions: vec!["read".into(), "write".into()],
+            constraints: BTreeMap::new(),
+        });
+
+        let preflight = evaluate_tool_call(
+            &intent,
+            &task(),
+            "run_libra_vcs",
+            &serde_json::json!({ "command": "status" }),
+            Path::new("/tmp/work"),
+        )
+        .expect("libra status should be allowed by libra.vcs ACL");
+
+        assert_eq!(preflight.record.tool_name, "run_libra_vcs");
+        assert_eq!(preflight.record.action, "read");
     }
 
     #[test]
@@ -840,5 +949,29 @@ mod tests {
 
         assert_eq!(violation.code, "scope-creep");
         assert_eq!(violation.path.as_deref(), Some("vendor/generated.rs"));
+    }
+
+    #[test]
+    fn test_shell_result_rejects_writes_outside_touch_files() {
+        let mut task = task();
+        task.contract.touch_files = vec!["src/lib.rs".into()];
+        let output = ToolOutput::success("Exit code: 0").with_metadata(serde_json::json!({
+            "paths_written": ["src/main.rs"]
+        }));
+        let mut record = ToolCallRecord {
+            tool_name: "shell".into(),
+            action: "execute".into(),
+            arguments_json: Some(
+                serde_json::json!({ "command": "printf 'fn main() {}' > src/main.rs" }),
+            ),
+            ..ToolCallRecord::default()
+        };
+
+        let violation = evaluate_tool_result(&spec(), &task, "shell", &output, &mut record)
+            .expect_err("shell writes outside touchFiles must be rejected");
+
+        assert_eq!(violation.code, "scope-creep");
+        assert_eq!(violation.path.as_deref(), Some("src/main.rs"));
+        assert!(violation.message.contains("not in touchFiles"));
     }
 }

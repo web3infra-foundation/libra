@@ -95,6 +95,7 @@ Every Libra command accepts the following global flags:
 | Command | Alias | Description | Doc |
 |---------|-------|-------------|-----|
 | `libra code` | | Interactive TUI with AI agent, web server, and MCP integration | [code.md](code.md) |
+| `libra graph` | | Inspect a Libra Code thread version graph in a dedicated TUI | [graph.md](graph.md) |
 
 ### Low-Level & Inspection
 

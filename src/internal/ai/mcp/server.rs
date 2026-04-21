@@ -13,7 +13,7 @@
 //! - `libra://context/active`: returns the latest active Run/Task/ContextSnapshot as JSON.
 //!
 //! If `HistoryManager` or `Storage` is missing, related calls return `ErrorData`.
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use rmcp::{
     RoleServer, ServerHandler, handler::server::router::tool::ToolRouter, model::*,
@@ -29,6 +29,7 @@ use crate::{
 pub struct LibraMcpServer {
     pub intent_history_manager: Option<Arc<HistoryManager>>,
     pub storage: Option<Arc<dyn Storage + Send + Sync>>,
+    pub working_dir: Option<PathBuf>,
     // pub repo_id: Uuid,
     tool_router: ToolRouter<LibraMcpServer>,
 }
@@ -41,6 +42,20 @@ impl LibraMcpServer {
         Self {
             intent_history_manager,
             storage,
+            working_dir: None,
+            tool_router: Self::build_tool_router(),
+        }
+    }
+
+    pub fn new_with_working_dir(
+        intent_history_manager: Option<Arc<HistoryManager>>,
+        storage: Option<Arc<dyn Storage + Send + Sync>>,
+        working_dir: PathBuf,
+    ) -> Self {
+        Self {
+            intent_history_manager,
+            storage,
+            working_dir: Some(working_dir),
             tool_router: Self::build_tool_router(),
         }
     }

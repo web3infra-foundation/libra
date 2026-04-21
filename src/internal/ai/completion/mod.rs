@@ -9,7 +9,9 @@ pub use message::{
     AssistantContent, Function, Message, MessageError, OneOrMany, Text, ToolCall, ToolResult,
     UserContent,
 };
-pub use request::{CompletionRequest, CompletionResponse};
+pub use request::{
+    CompletionRequest, CompletionResponse, CompletionStreamEvent, CompletionThinking,
+};
 pub use retry::{
     CompletionRetryEvent, CompletionRetryObserver, CompletionRetryPolicy, RetryingCompletionModel,
 };

@@ -28,6 +28,8 @@ use crate::internal::ai::orchestrator::types::{
 struct DagPanelNode {
     task_id: Uuid,
     kind: TaskKind,
+    title: String,
+    dependency_count: usize,
     depth: usize,
     ordinal: usize,
     status: TaskNodeStatus,
@@ -71,6 +73,8 @@ impl DagPanelState {
             .map(|(idx, task)| DagPanelNode {
                 task_id: task.id(),
                 kind: task.kind.clone(),
+                title: task.title().to_string(),
+                dependency_count: task.dependencies().len(),
                 depth: id_to_depth.get(&task.id()).copied().unwrap_or_default(),
                 ordinal: idx + 1,
                 status: TaskNodeStatus::Pending,
@@ -542,6 +546,7 @@ impl ChatWidget {
     pub fn show_dag_panel(&mut self, plan: ExecutionPlanSpec) {
         self.task_mux = TaskMuxState::new(&plan);
         self.dag_panel = Some(DagPanelState::new(plan));
+        self.clear_stale_task_mux();
     }
 
     pub fn show_dag_preview(&mut self, plan: ExecutionPlanSpec) {
@@ -550,6 +555,7 @@ impl ChatWidget {
     }
 
     pub fn update_dag_task_status(&mut self, task_id: Uuid, status: TaskNodeStatus) {
+        self.clear_stale_task_mux();
         if let Some(panel) = self.dag_panel.as_mut() {
             panel.update_task_status(task_id, status.clone());
         }
@@ -569,7 +575,12 @@ impl ChatWidget {
         self.task_mux = None;
     }
 
+    pub fn clear_task_mux(&mut self) {
+        self.task_mux = None;
+    }
+
     pub fn apply_task_runtime_event(&mut self, task_id: Uuid, event: TaskRuntimeEvent) {
+        self.clear_stale_task_mux();
         if let Some(task_mux) = self.task_mux.as_mut() {
             task_mux.apply_runtime_event(task_id, event);
         }
@@ -583,6 +594,17 @@ impl ChatWidget {
 
     pub fn has_task_mux(&self) -> bool {
         self.task_mux.is_some()
+    }
+
+    fn clear_stale_task_mux(&mut self) {
+        let stale = match (&self.task_mux, &self.dag_panel) {
+            (Some(task_mux), Some(dag_panel)) => task_mux.revision != dag_panel.revision,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        if stale {
+            self.task_mux = None;
+        }
     }
 
     pub fn task_mux_next(&mut self) -> bool {
@@ -705,6 +727,12 @@ impl ChatWidget {
 
     /// Render the chat widget.
     pub fn render(&mut self, area: Rect, buf: &mut Buffer) -> Option<Position> {
+        let area = area.intersection(*buf.area());
+        if area.width == 0 || area.height == 0 {
+            self.last_input_area = None;
+            return None;
+        }
+
         let (chat_area, bottom_area) = self.split_areas(area);
 
         // Render chat area
@@ -721,12 +749,19 @@ impl ChatWidget {
     }
 
     pub fn render_bottom_pane_only(&mut self, area: Rect, buf: &mut Buffer) -> Option<Position> {
+        let area = area.intersection(*buf.area());
+        if area.width == 0 || area.height == 0 {
+            self.last_input_area = None;
+            return None;
+        }
+
         let (_, bottom_area) = self.split_areas(area);
         self.last_input_area = self.bottom_pane.input_hitbox(bottom_area);
         self.bottom_pane.render(bottom_area, buf)
     }
 
     fn render_chat_area(&mut self, area: Rect, buf: &mut Buffer) {
+        self.clear_stale_task_mux();
         if let Some(task_mux) = self.task_mux.as_mut() {
             task_mux.finish_transition_if_ready();
         }
@@ -1142,9 +1177,12 @@ impl ChatWidget {
             .style(style)
             .render(inner, buf);
 
-        if render_state.selected && task_mux.mode == TaskMuxMode::Overview && inner.width > 2 {
-            buf[(inner.x, inner.y)]
-                .set_symbol("›")
+        if render_state.selected
+            && task_mux.mode == TaskMuxMode::Overview
+            && inner.width > 2
+            && let Some(cell) = buf.cell_mut((inner.x, inner.y))
+        {
+            cell.set_symbol("›")
                 .set_style(theme::interactive::selected_option());
         }
     }
@@ -1271,8 +1309,11 @@ impl ChatWidget {
             } else {
                 theme::text::subtle().fg.unwrap_or(Color::Reset)
             };
-            if x <= u16::MAX as usize && y <= u16::MAX as usize {
-                buf[(x as u16, y as u16)]
+            if x <= u16::MAX as usize
+                && y <= u16::MAX as usize
+                && let Some(cell_ref) = buf.cell_mut((x as u16, y as u16))
+            {
+                cell_ref
                     .set_symbol(panel_edge_glyph(cell.mask).encode_utf8(&mut [0; 4]))
                     .set_style(Style::default().fg(color));
             }
@@ -1289,11 +1330,13 @@ impl ChatWidget {
             let glyph = panel_node_glyph(node);
             let x = x as u16;
             let y = y as u16;
-            buf[(x, y)]
-                .set_symbol(glyph.encode_utf8(&mut [0; 4]))
-                .set_style(node_style.add_modifier(Modifier::BOLD));
+            if let Some(cell_ref) = buf.cell_mut((x, y)) {
+                cell_ref
+                    .set_symbol(glyph.encode_utf8(&mut [0; 4]))
+                    .set_style(node_style.add_modifier(Modifier::BOLD));
+            }
 
-            let label = format!("{:02}", node.ordinal);
+            let label = format!("{}{:02}", task_kind_prefix(&node.kind), node.ordinal);
             let label_x = x.saturating_add(2);
             if label_x < inner.right() {
                 for (offset, ch) in label.chars().enumerate() {
@@ -1301,9 +1344,11 @@ impl ChatWidget {
                     if cell_x >= inner.right() {
                         break;
                     }
-                    buf[(cell_x, y)]
-                        .set_symbol(ch.encode_utf8(&mut [0; 4]))
-                        .set_style(theme::text::muted());
+                    if let Some(cell_ref) = buf.cell_mut((cell_x, y)) {
+                        cell_ref
+                            .set_symbol(ch.encode_utf8(&mut [0; 4]))
+                            .set_style(theme::text::muted());
+                    }
                 }
             }
         }
@@ -1327,9 +1372,47 @@ impl ChatWidget {
                 '●' | '■' => theme::text::primary().add_modifier(Modifier::BOLD),
                 _ => theme::text::muted(),
             };
-            buf[(x, layout.summary_y)]
-                .set_symbol(ch.encode_utf8(&mut [0; 4]))
-                .set_style(style);
+            if let Some(cell_ref) = buf.cell_mut((x, layout.summary_y)) {
+                cell_ref
+                    .set_symbol(ch.encode_utf8(&mut [0; 4]))
+                    .set_style(style);
+            }
+        }
+
+        let mut detail_y = layout.summary_y.saturating_add(1);
+        let detail_bottom = inner.bottom().saturating_sub(1);
+        for node in &panel.nodes {
+            if detail_y >= detail_bottom {
+                break;
+            }
+            let dep_suffix = if node.dependency_count == 0 {
+                String::new()
+            } else {
+                format!(" dep:{}", node.dependency_count)
+            };
+            let line = format!(
+                "{}{:02} {:<7} {}{}",
+                task_kind_prefix(&node.kind),
+                node.ordinal,
+                task_status_label(&node.status),
+                node.title,
+                dep_suffix
+            );
+            for (offset, ch) in truncate_label(&line, inner.width.saturating_sub(2) as usize)
+                .chars()
+                .enumerate()
+            {
+                let x = inner.x.saturating_add(1 + offset as u16);
+                if x >= inner.right() {
+                    break;
+                }
+                if let Some(cell_ref) = buf.cell_mut((x, detail_y)) {
+                    cell_ref
+                        .set_symbol(ch.encode_utf8(&mut [0; 4]))
+                        .set_style(panel_node_style(&node.status));
+                }
+            }
+            detail_y = detail_y.saturating_add(1);
         }
     }
 }
@@ -1538,6 +1621,14 @@ fn task_kind_label(kind: &TaskKind) -> &'static str {
     }
 }
 
+fn task_kind_prefix(kind: &TaskKind) -> &'static str {
+    match kind {
+        TaskKind::Implementation => "I",
+        TaskKind::Analysis => "A",
+        TaskKind::Gate => "G",
+    }
+}
+
 fn task_kind_style(kind: &TaskKind) -> Style {
     match kind {
         TaskKind::Implementation => theme::interactive::accent(),
@@ -1709,7 +1800,7 @@ mod tests {
         ai::orchestrator::types::{
             ExecutionPlanSpec, TaskContract, TaskKind, TaskNodeStatus, TaskRuntimeEvent, TaskSpec,
         },
-        tui::history_cell::AssistantHistoryCell,
+        tui::{history_cell::AssistantHistoryCell, welcome_shader},
     };
 
     fn row_text(buf: &Buffer, y: u16, width: u16) -> String {
@@ -1718,6 +1809,29 @@ mod tests {
             out.push_str(buf[(x, y)].symbol());
         }
         out
+    }
+
+    #[test]
+    fn initial_welcome_render_clamps_to_reported_release_buffer_size() {
+        let buffer_area = Rect::new(0, 0, 122, 35);
+        let oversized_frame_area = Rect::new(0, 0, 122, 37);
+        let mut buf = Buffer::empty(buffer_area);
+        let mut widget = ChatWidget::new();
+        widget
+            .bottom_pane
+            .set_cwd(std::path::PathBuf::from("/Volumes/Data/linked"));
+        widget.bottom_pane.set_git_branch(Some("main".to_string()));
+
+        let chat_area = widget.chat_area_rect(oversized_frame_area);
+        let welcome = welcome_shader::WelcomeView {
+            welcome_message: "Welcome to Libra Code!\nWeb: http://127.0.0.1:3000\nMCP: http://127.0.0.1:6789",
+            model_name: "glm-5.1:cloud",
+            provider_name: "ollama",
+            cwd: std::path::Path::new("/Volumes/Data/linked"),
+        };
+
+        welcome_shader::render(chat_area, &mut buf, welcome);
+        let _ = widget.render_bottom_pane_only(oversized_frame_area, &mut buf);
     }
 
     fn make_task(title: &str, kind: TaskKind, dependencies: Vec<uuid::Uuid>) -> TaskSpec {
@@ -1769,6 +1883,20 @@ mod tests {
             replan_reason: None,
             tasks: vec![first, second, gate],
             max_parallel: 2,
+            checkpoints: vec![],
+        }
+    }
+
+    fn sample_serial_replan(revision: u32) -> ExecutionPlanSpec {
+        let first = make_task("Inspect replan", TaskKind::Implementation, vec![]);
+        let second = make_task("Verify replan", TaskKind::Gate, vec![first.id()]);
+        ExecutionPlanSpec {
+            intent_spec_id: "intent-replan".into(),
+            revision,
+            parent_revision: Some(revision.saturating_sub(1)),
+            replan_reason: Some("parallel task failed".into()),
+            tasks: vec![first, second],
+            max_parallel: 1,
             checkpoints: vec![],
         }
     }
@@ -1887,7 +2015,59 @@ mod tests {
     }
 
     #[test]
-    fn dag_panel_renders_graph_without_task_titles() {
+    fn serial_replan_clears_previous_parallel_task_mux() {
+        let mut widget = ChatWidget::new();
+        widget.add_cell(Box::new(AssistantHistoryCell::new(
+            "new revision transcript".to_string(),
+        )));
+        widget.show_dag_panel(sample_parallel_plan());
+        assert!(widget.has_task_mux());
+
+        widget.show_dag_panel(sample_serial_replan(3));
+
+        let area = Rect::new(0, 0, 140, 32);
+        let mut buf = Buffer::empty(area);
+        widget.render_chat_area(area, &mut buf);
+
+        let rendered = (0..area.height)
+            .map(|y| row_text(&buf, y, area.width))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(!widget.has_task_mux());
+        assert!(rendered.contains("Workflow r3"));
+        assert!(rendered.contains("new revision transcript"));
+        assert!(!rendered.contains("Mux r2"));
+        assert!(!rendered.contains("Implement A"));
+    }
+
+    #[test]
+    fn clearing_task_mux_keeps_workflow_dag_visible() {
+        let mut widget = ChatWidget::new();
+        widget.add_cell(Box::new(AssistantHistoryCell::new(
+            "verification stage".to_string(),
+        )));
+        widget.show_dag_panel(sample_parallel_plan());
+
+        widget.clear_task_mux();
+
+        let area = Rect::new(0, 0, 140, 32);
+        let mut buf = Buffer::empty(area);
+        widget.render_chat_area(area, &mut buf);
+
+        let rendered = (0..area.height)
+            .map(|y| row_text(&buf, y, area.width))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(!widget.has_task_mux());
+        assert!(rendered.contains("Workflow r2"));
+        assert!(rendered.contains("verification stage"));
+        assert!(!rendered.contains("Mux r2"));
+    }
+
+    #[test]
+    fn dag_panel_renders_graph_with_task_details() {
         let plan = sample_plan();
         let first_task_id = plan.tasks[0].id();
 
@@ -1910,8 +2090,10 @@ mod tests {
         assert!(rendered.contains('●'));
         assert!(rendered.contains('□'));
         assert!(rendered.contains('│') || rendered.contains('─'));
-        assert!(!rendered.contains("Analyze repository structure"));
-        assert!(!rendered.contains("Fast gate"));
+        assert!(rendered.contains("I01 done"));
+        assert!(rendered.contains("G02 pending"));
+        assert!(rendered.contains("Analyze repository"));
+        assert!(rendered.contains("Fast gate"));
     }
 
     #[test]

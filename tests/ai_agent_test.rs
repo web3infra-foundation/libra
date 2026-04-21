@@ -47,8 +47,8 @@ impl Action for InputGenerator {
 /// export GEMINI_API_KEY="your_key_here"
 /// cargo test --test ai_agent_test test_gemini_agent_execution
 /// ```
-#[test]
-fn test_gemini_agent_execution() {
+#[tokio::test]
+async fn test_gemini_agent_execution() {
     if std::env::var("GEMINI_API_KEY").map_or(true, |v| v.is_empty()) {
         eprintln!("skipped (GEMINI_API_KEY not set)");
         return;
@@ -82,14 +82,14 @@ fn test_gemini_agent_execution() {
     let b_id = b.id();
 
     let mut graph = Graph::new();
-    graph.add_node(a);
-    graph.add_node(b);
+    graph.add_node(a).expect("add input node");
+    graph.add_node(b).expect("add translator node");
 
     // Edge: A -> B
-    graph.add_edge(a_id, vec![b_id]);
+    graph.add_edge(a_id, vec![b_id]).expect("add edge");
 
     // 3. Run
-    let result = graph.start();
+    let result = graph.async_start().await;
     assert!(result.is_ok(), "Graph execution failed: {:?}", result.err());
 
     // 4. Check Output
@@ -148,8 +148,8 @@ impl Tool for WeatherTool {
 /// export GEMINI_API_KEY="your_key_here"
 /// cargo test --test ai_agent_test test_gemini_agent_with_tools
 /// ```
-#[test]
-fn test_gemini_agent_with_tools() {
+#[tokio::test]
+async fn test_gemini_agent_with_tools() {
     if std::env::var("GEMINI_API_KEY").map_or(true, |v| v.is_empty()) {
         eprintln!("skipped (GEMINI_API_KEY not set)");
         return;
@@ -191,14 +191,14 @@ fn test_gemini_agent_with_tools() {
     let b_id = b.id();
 
     let mut graph = Graph::new();
-    graph.add_node(a);
-    graph.add_node(b);
+    graph.add_node(a).expect("add input node");
+    graph.add_node(b).expect("add weather node");
 
     // Edge: A -> B
-    graph.add_edge(a_id, vec![b_id]);
+    graph.add_edge(a_id, vec![b_id]).expect("add edge");
 
     // 3. Run
-    let result = graph.start();
+    let result = graph.async_start().await;
     assert!(result.is_ok(), "Graph execution failed: {:?}", result.err());
 
     // 4. Check Output

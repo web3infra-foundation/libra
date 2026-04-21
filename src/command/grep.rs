@@ -20,7 +20,7 @@ use crate::{
     internal::{db, model::object_index},
     utils::{
         error::{CliError, CliResult, StableErrorCode},
-        output::{OutputConfig, emit_json_data},
+        output::{OutputConfig, emit_json_data, record_warning},
         pager::Pager,
         path, util,
     },
@@ -730,7 +730,7 @@ fn render_grep_output(
     output: &OutputConfig,
 ) -> CliResult<()> {
     for _warning in &result.warnings {
-        crate::utils::output::record_warning();
+        record_warning();
     }
 
     if output.is_json() {

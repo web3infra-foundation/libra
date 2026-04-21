@@ -21,6 +21,7 @@ use crate::{
         load_object, restore,
         status::{changes_to_be_committed_safe, changes_to_be_staged_with_policy},
     },
+    info_println,
     internal::{branch::Branch, config::ConfigKv, db::get_db_conn_instance, head::Head},
     utils::{
         error::{CliError, CliResult},
@@ -439,17 +440,17 @@ async fn handle_start(
 
     state.save().await.map_err(CliError::fatal)?;
 
-    crate::info_println!(output, "Bisect session started");
+    info_println!(output, "Bisect session started");
 
     // If bad is provided but no good, wait for good
     if bad_hash.is_some() && good_hash.is_none() {
-        crate::info_println!(output, "Status: waiting for good commit(s)");
+        info_println!(output, "Status: waiting for good commit(s)");
         return Ok(());
     }
 
     // If good is provided but no bad, wait for bad
     if good_hash.is_some() && bad_hash.is_none() {
-        crate::info_println!(output, "Status: waiting for bad commit");
+        info_println!(output, "Status: waiting for bad commit");
         return Ok(());
     }
 
@@ -468,7 +469,7 @@ async fn handle_start(
                 let commit = load_object::<Commit>(&bad_commit)
                     .map_err(|e| CliError::fatal(format!("Failed to load commit: {e}")))?;
                 let subject = commit.message.lines().next().unwrap_or("");
-                crate::info_println!(
+                info_println!(
                     output,
                     "{} is the first bad commit\n{}",
                     &bad_commit.to_string()[..7],
@@ -483,7 +484,7 @@ async fn handle_start(
             BisectNext::AllSkipped => {
                 // This shouldn't happen on start since we haven't skipped anything yet
                 // But handle gracefully just in case
-                crate::info_println!(
+                info_println!(
                     output,
                     "Cannot narrow down further - all commits have been skipped"
                 );
@@ -521,8 +522,8 @@ async fn handle_bad(rev: Option<String>, output: &OutputConfig) -> CliResult<()>
     if state.good.is_empty() {
         // No good commits yet - just save and wait for good
         state.save().await.map_err(CliError::fatal)?;
-        crate::info_println!(output, "Marked {} as bad", &bad_hash.to_string()[..7]);
-        crate::info_println!(output, "Status: waiting for good commit(s)");
+        info_println!(output, "Marked {} as bad", &bad_hash.to_string()[..7]);
+        info_println!(output, "Status: waiting for good commit(s)");
         return Ok(());
     }
 
@@ -533,19 +534,19 @@ async fn handle_bad(rev: Option<String>, output: &OutputConfig) -> CliResult<()>
     {
         BisectNext::Next(next) => {
             // Mark is valid - print confirmation and continue
-            crate::info_println!(output, "Marked {} as bad", &bad_hash.to_string()[..7]);
+            info_println!(output, "Marked {} as bad", &bad_hash.to_string()[..7]);
             checkout_to_bisect_point(next, &mut state, output).await?;
         }
         BisectNext::Converged => {
             // We found the culprit!
-            crate::info_println!(output, "Marked {} as bad", &bad_hash.to_string()[..7]);
+            info_println!(output, "Marked {} as bad", &bad_hash.to_string()[..7]);
             let bad = state
                 .bad
                 .ok_or_else(|| CliError::fatal("No bad commit set"))?;
             let commit = load_object::<Commit>(&bad)
                 .map_err(|e| CliError::fatal(format!("Failed to load commit: {e}")))?;
             let subject = commit.message.lines().next().unwrap_or("");
-            crate::info_println!(
+            info_println!(
                 output,
                 "{} is the first bad commit\n{}",
                 &bad.to_string()[..7],
@@ -559,8 +560,8 @@ async fn handle_bad(rev: Option<String>, output: &OutputConfig) -> CliResult<()>
         }
         BisectNext::AllSkipped => {
             // Bounds valid but all candidates skipped - mark is saved
-            crate::info_println!(output, "Marked {} as bad", &bad_hash.to_string()[..7]);
-            crate::info_println!(
+            info_println!(output, "Marked {} as bad", &bad_hash.to_string()[..7]);
+            info_println!(
                 output,
                 "Cannot narrow down further - all commits have been skipped"
             );
@@ -597,8 +598,8 @@ async fn handle_good(rev: Option<String>, output: &OutputConfig) -> CliResult<()
     if state.bad.is_none() {
         // No bad commit yet - just save and wait for bad
         state.save().await.map_err(CliError::fatal)?;
-        crate::info_println!(output, "Marked {} as good", &good_hash.to_string()[..7]);
-        crate::info_println!(output, "Status: waiting for bad commit");
+        info_println!(output, "Marked {} as good", &good_hash.to_string()[..7]);
+        info_println!(output, "Status: waiting for bad commit");
         return Ok(());
     }
 
@@ -609,19 +610,19 @@ async fn handle_good(rev: Option<String>, output: &OutputConfig) -> CliResult<()
     {
         BisectNext::Next(next) => {
             // Mark is valid - print confirmation and continue
-            crate::info_println!(output, "Marked {} as good", &good_hash.to_string()[..7]);
+            info_println!(output, "Marked {} as good", &good_hash.to_string()[..7]);
             checkout_to_bisect_point(next, &mut state, output).await?;
         }
         BisectNext::Converged => {
             // We found the culprit!
-            crate::info_println!(output, "Marked {} as good", &good_hash.to_string()[..7]);
+            info_println!(output, "Marked {} as good", &good_hash.to_string()[..7]);
             let bad = state
                 .bad
                 .ok_or_else(|| CliError::fatal("No bad commit set"))?;
             let commit = load_object::<Commit>(&bad)
                 .map_err(|e| CliError::fatal(format!("Failed to load commit: {e}")))?;
             let subject = commit.message.lines().next().unwrap_or("");
-            crate::info_println!(
+            info_println!(
                 output,
                 "{} is the first bad commit\n{}",
                 &bad.to_string()[..7],
@@ -635,8 +636,8 @@ async fn handle_good(rev: Option<String>, output: &OutputConfig) -> CliResult<()
         }
         BisectNext::AllSkipped => {
             // Bounds valid but all candidates skipped - mark is saved
-            crate::info_println!(output, "Marked {} as good", &good_hash.to_string()[..7]);
-            crate::info_println!(
+            info_println!(output, "Marked {} as good", &good_hash.to_string()[..7]);
+            info_println!(
                 output,
                 "Cannot narrow down further - all commits have been skipped"
             );
@@ -653,7 +654,7 @@ async fn handle_reset(rev: Option<String>, output: &OutputConfig) -> CliResult<(
     let has_state = BisectState::has_state().await.map_err(CliError::fatal)?;
 
     if !has_state {
-        crate::info_println!(output, "No bisect in progress");
+        info_println!(output, "No bisect in progress");
         return Ok(());
     }
 
@@ -685,7 +686,7 @@ async fn handle_reset(rev: Option<String>, output: &OutputConfig) -> CliResult<(
     // Clean up bisect state
     BisectState::cleanup().await.map_err(CliError::fatal)?;
 
-    crate::info_println!(
+    info_println!(
         output,
         "Bisect session ended, HEAD restored to {}",
         &target_hash.to_string()[..7]
@@ -727,7 +728,7 @@ async fn restore_to_branch(
     // Restore working directory to the commit's tree
     restore_to_commit(commit_hash, output).await?;
 
-    crate::info_println!(
+    info_println!(
         output,
         "HEAD is now at {} (on branch {})",
         &commit_hash.to_string()[..7],
@@ -758,7 +759,7 @@ async fn handle_skip(rev: Option<String>, output: &OutputConfig) -> CliResult<()
 
     state.skipped.push(skip_hash);
 
-    crate::info_println!(output, "Skipped {}", &skip_hash.to_string()[..7]);
+    info_println!(output, "Skipped {}", &skip_hash.to_string()[..7]);
 
     // Find next bisect point
     match find_next_bisect_point(&state)
@@ -771,14 +772,14 @@ async fn handle_skip(rev: Option<String>, output: &OutputConfig) -> CliResult<()
         BisectNext::Converged => {
             // Should not happen in skip - no single culprit when skipping
             // But handle gracefully if all but one were skipped
-            crate::info_println!(
+            info_println!(
                 output,
                 "Cannot narrow down further after skip - only one candidate remains"
             );
             state.save().await.map_err(CliError::fatal)?;
         }
         BisectNext::AllSkipped => {
-            crate::info_println!(
+            info_println!(
                 output,
                 "Cannot narrow down further - all commits have been skipped"
             );
@@ -810,12 +811,12 @@ async fn handle_log(output: &OutputConfig) -> CliResult<()> {
         .map(|h| h.to_string()[..7].to_string())
         .unwrap_or_else(|| "not set".to_string());
 
-    crate::info_println!(output, "Bisect log:");
-    crate::info_println!(output, "  Bad: {}", bad_str);
-    crate::info_println!(output, "  Good: {}", good_strs);
-    crate::info_println!(output, "  Current: {}", current_str);
-    crate::info_println!(output, "  Skipped: {} commits", state.skipped.len());
-    crate::info_println!(output, "  Steps remaining: {:?}", state.steps);
+    info_println!(output, "Bisect log:");
+    info_println!(output, "  Bad: {}", bad_str);
+    info_println!(output, "  Good: {}", good_strs);
+    info_println!(output, "  Current: {}", current_str);
+    info_println!(output, "  Skipped: {} commits", state.skipped.len());
+    info_println!(output, "  Steps remaining: {:?}", state.steps);
 
     Ok(())
 }
@@ -846,7 +847,7 @@ async fn checkout_to_commit(commit_hash: ObjectHash, output: &OutputConfig) -> C
     // Restore working directory
     restore_to_commit(commit_hash, output).await?;
 
-    crate::info_println!(output, "HEAD is now at {}", &commit_hash.to_string()[..7]);
+    info_println!(output, "HEAD is now at {}", &commit_hash.to_string()[..7]);
     Ok(())
 }
 
@@ -871,7 +872,7 @@ async fn checkout_to_bisect_point(
     state.save().await.map_err(CliError::fatal)?;
 
     if let Some(steps) = state.steps {
-        crate::info_println!(
+        info_println!(
             output,
             "Bisecting: {} revisions left to test after this",
             steps

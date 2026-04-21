@@ -27,7 +27,7 @@ use crate::{
     git_protocol::ServiceType::{self, UploadPack},
     internal::{
         branch::Branch,
-        config::{ConfigKv, RemoteConfig},
+        config::{ConfigKv, ConfigKvEntry, RemoteConfig},
         db::get_db_conn_instance,
         head::Head,
         protocol::{
@@ -39,11 +39,13 @@ use crate::{
             ssh_client::{SshClient, is_ssh_spec},
         },
         reflog::{HEAD, Reflog, ReflogAction, ReflogContext},
+        vault::{decrypt_token, load_unseal_key},
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, ProgressMode, ProgressReporter, emit_json_data},
         path, util,
+        util::try_get_storage_path,
     },
 };
 
@@ -177,7 +179,7 @@ fn try_load_vault_ssh_key_for_remote(
     };
 
     // Only try vault key lookup inside a Libra repository.
-    if crate::utils::util::try_get_storage_path(None).is_err() {
+    if try_get_storage_path(None).is_err() {
         return Ok(None);
     }
 
@@ -197,7 +199,7 @@ fn try_load_vault_ssh_key_for_remote(
         .ok_or_else(|| format!("failed to load vault unseal key for remote '{remote}'"))?;
     let ciphertext = hex::decode(&entry.value)
         .map_err(|e| format!("failed to decode vault SSH private key '{privkey_key}': {e}"))?;
-    let private_key = crate::internal::vault::decrypt_token(&unseal_key, &ciphertext)
+    let private_key = decrypt_token(&unseal_key, &ciphertext)
         .map_err(|e| format!("failed to decrypt vault SSH private key '{privkey_key}': {e}"))?;
 
     // Write to a secure temporary file in ~/.libra/tmp/
@@ -235,14 +237,10 @@ fn try_load_vault_ssh_key_for_remote(
 }
 
 /// Load a full config entry (including the `encrypted` flag) synchronously.
-fn load_config_entry_sync(
-    dotted_key: &str,
-) -> Result<Option<crate::internal::config::ConfigKvEntry>, String> {
+fn load_config_entry_sync(dotted_key: &str) -> Result<Option<ConfigKvEntry>, String> {
     use crate::internal::config::ConfigKv;
 
-    fn read_entry_sync(
-        dotted_key: &str,
-    ) -> Result<Option<crate::internal::config::ConfigKvEntry>, String> {
+    fn read_entry_sync(dotted_key: &str) -> Result<Option<ConfigKvEntry>, String> {
         let rt = tokio::runtime::Runtime::new()
             .map_err(|e| format!("failed to create tokio runtime for config read: {e}"))?;
         rt.block_on(ConfigKv::get(dotted_key))
@@ -265,7 +263,7 @@ fn load_vault_unseal_key_sync() -> Result<Option<Vec<u8>>, String> {
     fn read_unseal_key_sync() -> Result<Option<Vec<u8>>, String> {
         let rt = tokio::runtime::Runtime::new()
             .map_err(|e| format!("failed to create tokio runtime for vault read: {e}"))?;
-        Ok(rt.block_on(crate::internal::vault::load_unseal_key()))
+        Ok(rt.block_on(load_unseal_key()))
     }
 
     match tokio::runtime::Handle::try_current() {
@@ -394,7 +392,7 @@ fn cleanup_expired_vault_ssh_temp_files_in(
 /// `~/.libra/ssh-keys/<repo-id>/id_ed25519`.
 fn try_load_legacy_ssh_key_path() -> Option<String> {
     // Only try vault key lookup inside a Libra repository.
-    if crate::utils::util::try_get_storage_path(None).is_err() {
+    if try_get_storage_path(None).is_err() {
         return None;
     }
 

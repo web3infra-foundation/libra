@@ -1,6 +1,6 @@
 [package]
 name = "libra"
-version = "0.1.14"
+version = "0.1.15"
 edition = "2024"
 
 [features]
@@ -12,7 +12,7 @@ test-live-cloud = []  # L3: tests hitting real D1/R2 endpoints
 
 [dependencies]
 uuid = { version = "1.22.0", features = ["v4", "v7"] }
-git-internal = "0.7.3"
+git-internal = "0.7.4"
 anyhow = "1.0.102"
 byte-unit = "5.2.0"
 byteorder = "1.5.0"
@@ -71,7 +71,7 @@ infer = "0.19.0"
 pathdiff = "0.2.3"
 crc32fast = "1.5.0"
 dirs = "6.0.0"
-dagrs = "0.6.0"
+dagrs = "0.8.1"
 rig-core = { version = "0.32.0", default-features = false, features = ["rmcp", "reqwest-rustls"] }
 rmcp = { version = "1.2.0", features = [
     "macros",

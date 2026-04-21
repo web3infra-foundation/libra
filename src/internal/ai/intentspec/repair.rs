@@ -2,7 +2,8 @@ use std::collections::HashSet;
 
 use super::{
     types::{
-        ArtifactName, ArtifactReq, ArtifactStage, ChangeType, LifecycleStatus, RiskLevel, ToolRule,
+        ArtifactName, ArtifactReq, ArtifactStage, ChangeType, LifecycleStatus, QualityGates,
+        RiskLevel, ToolRule,
     },
     validator::ValidationIssue,
 };
@@ -17,12 +18,10 @@ pub fn repair_intentspec(spec: &mut IntentSpec, _issues: &[ValidationIssue]) {
     }
 
     if spec.intent.change_type == ChangeType::Bugfix {
-        let quality = spec.acceptance.quality_gates.get_or_insert(
-            crate::internal::ai::intentspec::types::QualityGates {
-                require_new_tests_when_bugfix: None,
-                max_allowed_regression: None,
-            },
-        );
+        let quality = spec.acceptance.quality_gates.get_or_insert(QualityGates {
+            require_new_tests_when_bugfix: None,
+            max_allowed_regression: None,
+        });
         quality.require_new_tests_when_bugfix = Some(true);
     }
 
@@ -33,6 +32,11 @@ pub fn repair_intentspec(spec: &mut IntentSpec, _issues: &[ValidationIssue]) {
             constraints: Default::default(),
         });
     }
+    ensure_tool_rule(
+        &mut spec.security.tool_acl.allow,
+        "libra.vcs",
+        &["read", "write"],
+    );
 
     if spec.intent.in_scope.is_empty() {
         if let Some(touch_hints) = spec.intent.touch_hints.as_ref()
@@ -55,6 +59,23 @@ pub fn repair_intentspec(spec: &mut IntentSpec, _issues: &[ValidationIssue]) {
     spec.artifacts.retention.days = effective;
 
     ensure_artifacts_from_checks(spec);
+}
+
+fn ensure_tool_rule(allow: &mut Vec<ToolRule>, tool: &str, actions: &[&str]) {
+    if let Some(rule) = allow.iter_mut().find(|rule| rule.tool == tool) {
+        for action in actions {
+            if !rule.actions.iter().any(|existing| existing == action) {
+                rule.actions.push((*action).to_string());
+            }
+        }
+        return;
+    }
+
+    allow.push(ToolRule {
+        tool: tool.to_string(),
+        actions: actions.iter().map(|action| (*action).to_string()).collect(),
+        constraints: Default::default(),
+    });
 }
 
 fn ensure_artifacts_from_checks(spec: &mut IntentSpec) {
@@ -220,10 +241,23 @@ mod tests {
             "{issues:?}"
         );
 
+        spec.security
+            .tool_acl
+            .allow
+            .retain(|rule| rule.tool == "workspace.fs");
         repair_intentspec(&mut spec, &issues);
 
         let issues = validate_intentspec(&spec);
         assert!(issues.is_empty(), "{issues:?}");
+        let libra_vcs_rule = spec
+            .security
+            .tool_acl
+            .allow
+            .iter()
+            .find(|rule| rule.tool == "libra.vcs")
+            .expect("repair should add libra.vcs ACL");
+        assert!(libra_vcs_rule.actions.contains(&"read".to_string()));
+        assert!(libra_vcs_rule.actions.contains(&"write".to_string()));
         assert_eq!(
             spec.acceptance.verification_plan.fast_checks[0].artifacts_produced,
             vec!["build-log".to_string()]

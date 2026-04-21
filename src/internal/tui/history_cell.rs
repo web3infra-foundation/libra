@@ -254,7 +254,7 @@ enum ToolCallGroup {
 impl ToolCallGroup {
     fn for_tool(tool_name: &str) -> Self {
         match tool_name {
-            "read_file" | "list_dir" | "grep_files" => Self::Explore,
+            "read_file" | "list_dir" | "grep_files" | "search_files" => Self::Explore,
             "apply_patch" => Self::Edit,
             "shell" => Self::Shell,
             "request_user_input" => Self::Input,
@@ -263,14 +263,29 @@ impl ToolCallGroup {
         }
     }
 
-    fn labels(&self) -> (&'static str, &'static str, &'static str) {
+    fn labels(&self) -> (&'static str, &'static str, &'static str, &'static str) {
         match self {
-            Self::Explore => ("Exploring", "Explored", "Explore failed"),
-            Self::Edit => ("Editing", "Edited", "Edit failed"),
-            Self::Shell => ("Running command", "Ran command", "Command failed"),
-            Self::Input => ("Waiting for input", "Input received", "Input cancelled"),
-            Self::Draft => ("Drafting", "Drafted", "Draft failed"),
-            Self::Other(_) => ("Working", "Completed", "Failed"),
+            Self::Explore => (
+                "Preparing explore",
+                "Exploring",
+                "Explored",
+                "Explore failed",
+            ),
+            Self::Edit => ("Preparing edit", "Editing", "Edited", "Edit failed"),
+            Self::Shell => (
+                "Preparing command",
+                "Running command",
+                "Ran command",
+                "Command failed",
+            ),
+            Self::Input => (
+                "Preparing input",
+                "Waiting for input",
+                "Input received",
+                "Input cancelled",
+            ),
+            Self::Draft => ("Preparing draft", "Drafting", "Drafted", "Draft failed"),
+            Self::Other(_) => ("Preparing", "Working", "Completed", "Failed"),
         }
     }
 
@@ -288,14 +303,16 @@ impl ToolCallGroup {
 
 #[derive(Debug, Clone)]
 enum ToolCallEntryStatus {
+    Preview,
     Running,
-    Success,
+    Success(Option<String>),
     Failed(String),
 }
 
 #[derive(Debug, Clone)]
 struct ToolCallEntry {
     call_id: String,
+    tool_name: String,
     summary: String,
     status: ToolCallEntryStatus,
 }
@@ -305,6 +322,7 @@ struct ToolEntryRun<'a> {
     action: &'a str,
     details: Vec<&'a str>,
     failures: Vec<&'a str>,
+    outputs: Vec<&'a str>,
 }
 
 #[derive(Debug, Clone)]
@@ -320,8 +338,22 @@ impl ToolCallHistoryCell {
             group: ToolCallGroup::for_tool(&tool_name),
             entries: vec![ToolCallEntry {
                 call_id,
+                tool_name: tool_name.clone(),
                 summary: summarize_tool_call(&tool_name, &arguments),
                 status: ToolCallEntryStatus::Running,
+            }],
+        }
+    }
+
+    /// Create a new preview-only tool call cell.
+    pub fn new_preview(call_id: String, tool_name: String, arguments: Value) -> Self {
+        Self {
+            group: ToolCallGroup::for_tool(&tool_name),
+            entries: vec![ToolCallEntry {
+                call_id,
+                tool_name: tool_name.clone(),
+                summary: summarize_tool_call(&tool_name, &arguments),
+                status: ToolCallEntryStatus::Preview,
             }],
         }
     }
@@ -331,15 +363,65 @@ impl ToolCallHistoryCell {
     }
 
     pub fn append_call(&mut self, call_id: String, tool_name: String, arguments: Value) {
+        let summary = summarize_tool_call(&tool_name, &arguments);
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.call_id == call_id)
+        {
+            entry.summary = summary;
+            entry.tool_name = tool_name;
+            entry.status = ToolCallEntryStatus::Running;
+            return;
+        }
+
         self.entries.push(ToolCallEntry {
             call_id,
-            summary: summarize_tool_call(&tool_name, &arguments),
+            tool_name,
+            summary,
             status: ToolCallEntryStatus::Running,
+        });
+    }
+
+    pub fn append_preview_call(&mut self, call_id: String, tool_name: String, arguments: Value) {
+        let summary = summarize_tool_call(&tool_name, &arguments);
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.call_id == call_id)
+        {
+            if matches!(entry.status, ToolCallEntryStatus::Preview) {
+                entry.summary = summary;
+                entry.tool_name = tool_name;
+            }
+            return;
+        }
+
+        self.entries.push(ToolCallEntry {
+            call_id,
+            tool_name,
+            summary,
+            status: ToolCallEntryStatus::Preview,
         });
     }
 
     pub fn contains_call_id(&self, call_id: &str) -> bool {
         self.entries.iter().any(|entry| entry.call_id == call_id)
+    }
+
+    pub fn mark_call_running(&mut self, call_id: &str, tool_name: &str, arguments: &Value) -> bool {
+        let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.call_id == call_id)
+        else {
+            return false;
+        };
+
+        entry.summary = summarize_tool_call(tool_name, arguments);
+        entry.tool_name = tool_name.to_string();
+        entry.status = ToolCallEntryStatus::Running;
+        true
     }
 
     /// Complete a single tool call inside the group.
@@ -350,7 +432,9 @@ impl ToolCallHistoryCell {
             .find(|entry| entry.call_id == call_id)
         {
             entry.status = match result {
-                Ok(output) if output.is_success() => ToolCallEntryStatus::Success,
+                Ok(output) if output.is_success() => ToolCallEntryStatus::Success(
+                    summarize_tool_output_success(&entry.tool_name, &output),
+                ),
                 Ok(output) => ToolCallEntryStatus::Failed(summarize_tool_output_failure(&output)),
                 Err(err) => ToolCallEntryStatus::Failed(err),
             };
@@ -359,7 +443,10 @@ impl ToolCallHistoryCell {
 
     pub fn interrupt_running(&mut self) {
         for entry in &mut self.entries {
-            if matches!(entry.status, ToolCallEntryStatus::Running) {
+            if matches!(
+                entry.status,
+                ToolCallEntryStatus::Preview | ToolCallEntryStatus::Running
+            ) {
                 entry.status = ToolCallEntryStatus::Failed("Interrupted".to_string());
             }
         }
@@ -371,12 +458,19 @@ impl ToolCallHistoryCell {
             .any(|entry| matches!(entry.status, ToolCallEntryStatus::Running))
     }
 
+    pub fn has_preview(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| matches!(entry.status, ToolCallEntryStatus::Preview))
+    }
+
     pub fn is_success(&self) -> bool {
         !self.has_running()
+            && !self.has_preview()
             && self
                 .entries
                 .iter()
-                .all(|entry| matches!(entry.status, ToolCallEntryStatus::Success))
+                .all(|entry| matches!(entry.status, ToolCallEntryStatus::Success(_)))
     }
 
     fn has_failure(&self) -> bool {
@@ -390,17 +484,19 @@ impl HistoryCell for ToolCallHistoryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines: Vec<Line<'static>> = Vec::new();
         let phase = animation_phase(120);
-        let (running_label, done_label, failed_label) = self.group.labels();
+        let (preview_label, running_label, done_label, failed_label) = self.group.labels();
 
         // Tool state summary line
         let summary = if self.has_running() {
             running_label
+        } else if self.has_preview() {
+            preview_label
         } else if self.has_failure() {
             failed_label
         } else {
             done_label
         };
-        if self.has_running() {
+        if self.has_running() || self.has_preview() {
             lines.push(gradient_line(
                 &format!("● {summary}"),
                 &theme::animation::active_gradient(),
@@ -446,6 +542,14 @@ impl HistoryCell for ToolCallHistoryCell {
                     theme::status::danger().add_modifier(Modifier::DIM),
                 ));
             }
+            for output in &entry.outputs {
+                lines.extend(wrap_text(
+                    &truncate_utf8(output.trim(), 240),
+                    "    ",
+                    width,
+                    theme::text::muted().add_modifier(Modifier::DIM),
+                ));
+            }
         }
 
         lines.push(Line::raw("")); // Empty line for spacing
@@ -471,8 +575,10 @@ fn summarize_tool_call(tool_name: &str, arguments: &Value) -> String {
             "List {}",
             argument_string(arguments, "dir_path").unwrap_or(".")
         ),
-        "grep_files" => {
-            let pattern = argument_string(arguments, "pattern").unwrap_or("(pattern)");
+        "grep_files" | "search_files" => {
+            let pattern = argument_string(arguments, "pattern")
+                .or_else(|| argument_string(arguments, "query"))
+                .unwrap_or("(pattern)");
             let path = argument_string(arguments, "path").unwrap_or(".");
             format!(
                 "Search {} in {}",
@@ -533,6 +639,31 @@ fn summarize_tool_output_failure(output: &ToolOutput) -> String {
     }
 }
 
+fn summarize_tool_output_success(tool_name: &str, output: &ToolOutput) -> Option<String> {
+    if tool_name != "shell" {
+        return None;
+    }
+
+    let text = output.as_text()?.trim();
+    if text.is_empty() {
+        return None;
+    }
+
+    let lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| !line.starts_with("Exit code: 0"))
+        .take(3)
+        .collect::<Vec<_>>();
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join(" | "))
+    }
+}
+
 fn first_non_empty_line(text: &str) -> Option<&str> {
     text.lines().map(str::trim).find(|line| !line.is_empty())
 }
@@ -548,7 +679,11 @@ fn group_tool_entries(entries: &[ToolCallEntry]) -> Vec<ToolEntryRun<'_>> {
         let (action, detail) = split_tool_summary(&entry.summary);
         let failure = match &entry.status {
             ToolCallEntryStatus::Failed(error) => Some(error.as_str()),
-            ToolCallEntryStatus::Running | ToolCallEntryStatus::Success => None,
+            _ => None,
+        };
+        let output = match &entry.status {
+            ToolCallEntryStatus::Success(Some(output)) => Some(output.as_str()),
+            _ => None,
         };
 
         if let Some(last) = grouped.last_mut()
@@ -559,6 +694,9 @@ fn group_tool_entries(entries: &[ToolCallEntry]) -> Vec<ToolEntryRun<'_>> {
             }
             if let Some(error) = failure {
                 last.failures.push(error);
+            }
+            if let Some(output) = output {
+                last.outputs.push(output);
             }
             continue;
         }
@@ -571,6 +709,7 @@ fn group_tool_entries(entries: &[ToolCallEntry]) -> Vec<ToolEntryRun<'_>> {
                 vec![detail]
             },
             failures: failure.into_iter().collect(),
+            outputs: output.into_iter().collect(),
         });
     }
 
@@ -721,6 +860,12 @@ impl PlanUpdateHistoryCell {
     /// Mark the tool call as complete.
     pub fn complete(&mut self) {
         self.is_running = false;
+    }
+
+    /// Refresh previewed plan arguments when the real tool call starts.
+    pub fn update(&mut self, explanation: Option<String>, steps: Vec<PlanStep>) {
+        self.explanation = explanation;
+        self.steps = steps;
     }
 }
 
@@ -1959,6 +2104,29 @@ mod tests {
         assert!(!joined.contains("Args:"));
         assert!(!joined.contains("Result:"));
         assert!(!joined.contains("L1: fn main() {}"));
+    }
+
+    #[test]
+    fn shell_tool_cell_renders_successful_command_output() {
+        let mut cell = ToolCallHistoryCell::new(
+            "1".to_string(),
+            "shell".to_string(),
+            json!({"command":"cargo test"}),
+        );
+        cell.complete_call(
+            "1",
+            Ok(ToolOutput::success(
+                "Exit code: 0\n\nrunning 3 tests\ntest result: ok",
+            )),
+        );
+
+        let rendered = to_strings(cell.display_lines(100));
+        let joined = rendered.join("\n");
+
+        assert!(joined.contains("Ran command"));
+        assert!(joined.contains("Run cargo test"));
+        assert!(joined.contains("running 3 tests"));
+        assert!(joined.contains("test result: ok"));
     }
 
     #[test]

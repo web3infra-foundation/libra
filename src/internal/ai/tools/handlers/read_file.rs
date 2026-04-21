@@ -10,7 +10,7 @@ use tokio::{
 
 use super::parse_arguments;
 use crate::internal::ai::tools::{
-    context::{ReadFileArgs, ToolInvocation, ToolKind, ToolOutput},
+    context::{ReadFileArgs, ToolInvocation, ToolKind, ToolOutput, ToolPayload},
     error::ToolError,
     registry::ToolHandler,
     spec::{FunctionParameters, ToolSpec},
@@ -36,7 +36,7 @@ impl ToolHandler for ReadFileHandler {
         } = invocation;
 
         let arguments = match payload {
-            crate::internal::ai::tools::context::ToolPayload::Function { arguments } => arguments,
+            ToolPayload::Function { arguments } => arguments,
             _ => {
                 return Err(ToolError::IncompatiblePayload(
                     "read_file handler only accepts Function payloads".to_string(),

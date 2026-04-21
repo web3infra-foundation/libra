@@ -38,7 +38,8 @@ use crate::{
         db::get_db_conn_instance,
         head::Head,
         protocol::{
-            ProtocolClient, get_wire_hash_kind, set_wire_hash_kind, ssh_client::is_ssh_spec,
+            ProtocolClient, get_wire_hash_kind, lfs_client::LFSClient, set_wire_hash_kind,
+            ssh_client::is_ssh_spec,
         },
         reflog::{Reflog, ReflogAction, ReflogContext},
     },
@@ -597,7 +598,7 @@ pub async fn run_push(args: PushArgs, output: &OutputConfig) -> Result<PushOutpu
             url: repo_url.clone(),
             detail: e.to_string(),
         })?;
-        let lfs_client = crate::internal::protocol::lfs_client::LFSClient::from_url(&url);
+        let lfs_client = LFSClient::from_url(&url);
         lfs_files_uploaded =
             lfs_client
                 .push_objects(&objs)

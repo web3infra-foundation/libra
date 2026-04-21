@@ -29,6 +29,7 @@ use crate::{
             date_parser::parse_date,
             formatter::{CommitFormatter, FormatContext, FormatType},
         },
+        tag::{self, TagObject},
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
@@ -1189,14 +1190,14 @@ async fn create_reference_commit_map() -> HashMap<ObjectHash, Vec<Reference>> {
             });
     }
 
-    let all_tags = crate::internal::tag::list().await.unwrap_or_else(|e| {
+    let all_tags = tag::list().await.unwrap_or_else(|e| {
         tracing::warn!("failed to list tags for log decoration: {e}");
         Vec::new()
     });
     for tag in all_tags {
         let commit_id = match tag.object {
-            crate::internal::tag::TagObject::Commit(c) => c.id,
-            crate::internal::tag::TagObject::Tag(t) => t.object_hash,
+            TagObject::Commit(c) => c.id,
+            TagObject::Tag(t) => t.object_hash,
             _ => continue,
         };
         commit_to_refs
