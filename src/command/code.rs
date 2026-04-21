@@ -516,18 +516,7 @@ async fn execute_web_only(args: &CodeArgs) -> CliResult<()> {
 ///
 /// This function handles provider-specific client creation (API key validation,
 /// model selection) and delegates the actual TUI lifecycle to [`run_tui_with_model`].
-async fn execute_tui(mut args: CodeArgs) -> CliResult<()> {
-    // When --provider=codex and --cwd points to a file (not a directory),
-    // treat it as the codex binary path instead of the working directory.
-    if args.provider == CodeProvider::Codex
-        && let Some(ref cwd_path) = args.cwd
-        && cwd_path.exists()
-        && cwd_path.is_file()
-    {
-        args.codex_bin = cwd_path.to_string_lossy().to_string();
-        args.cwd = None;
-    }
-
+async fn execute_tui(args: CodeArgs) -> CliResult<()> {
     let working_dir = resolve_code_working_dir(&args)?;
 
     // Validate --api-base: only honored for Ollama via CLI flag. Other providers
@@ -1033,23 +1022,6 @@ async fn wait_for_codex_ready(ws_url: &str) -> CliResult<()> {
 /// Validates that the resolved path exists and is a directory.
 /// `--cwd` and `--repo` are mutually exclusive.
 pub(crate) fn resolve_code_preflight_working_dir(args: &CodeArgs) -> CliResult<PathBuf> {
-    if args.provider == CodeProvider::Codex
-        && let Some(cwd_path) = args.cwd.as_ref()
-        && cwd_path.exists()
-        && cwd_path.is_file()
-    {
-        let working_dir = args
-            .repo
-            .clone()
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        let flag = if args.repo.is_some() {
-            "--repo"
-        } else {
-            "--cwd"
-        };
-        return validate_code_working_dir(working_dir, flag);
-    }
-
     resolve_code_working_dir(args)
 }
 
@@ -1931,6 +1903,27 @@ mod tests {
         args.provider = CodeProvider::Ollama;
         args.ollama_compact_tools = true;
         assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn codex_preflight_rejects_file_cwd() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cwd_file = temp_dir.path().join("README.md");
+        std::fs::write(&cwd_file, "not a directory").unwrap();
+
+        let mut args = base_args();
+        args.provider = CodeProvider::Codex;
+        args.cwd = Some(cwd_file.clone());
+
+        let err = resolve_code_preflight_working_dir(&args).unwrap_err();
+        assert!(
+            err.to_string().contains("--cwd must point to a directory"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.to_string().contains(&cwd_file.display().to_string()),
+            "error should identify the invalid --cwd path: {err}"
+        );
     }
 
     #[test]
