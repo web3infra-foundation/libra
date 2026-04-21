@@ -9,7 +9,7 @@ use std::{convert::Infallible, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{ConnectInfo, Path, State},
     http::{HeaderMap, StatusCode, header},
     response::{
         IntoResponse, Response,
@@ -71,12 +71,15 @@ pub async fn start(
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
     let join = tokio::spawn(async move {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async move {
-                let _ = shutdown_rx.await;
-            })
-            .await
-            .map_err(|e| anyhow::anyhow!(e))
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
     });
 
     Ok(WebServerHandle {
@@ -114,6 +117,9 @@ async fn static_handler(uri: axum::http::Uri) -> impl IntoResponse {
     use crate::command::web_assets::WebAssets;
 
     let path = uri.path().trim_start_matches('/');
+    if path.contains("..") {
+        return (StatusCode::NOT_FOUND, "404 Not Found").into_response();
+    }
 
     let resolved = if WebAssets::get(path).is_some() {
         Some(path.to_string())
@@ -149,10 +155,15 @@ async fn static_handler(uri: axum::http::Uri) -> impl IntoResponse {
     }
 }
 
-async fn repo_info_handler(State(state): State<WebAppState>) -> impl IntoResponse {
+async fn repo_info_handler(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    State(state): State<WebAppState>,
+) -> Result<Json<serde_json::Value>, WebApiError> {
     use serde_json::json;
 
     use crate::internal::config::ConfigKv;
+
+    ensure_loopback_api_request(remote_addr)?;
 
     let id = ConfigKv::get("libra.repoid")
         .await
@@ -176,23 +187,27 @@ async fn repo_info_handler(State(state): State<WebAppState>) -> impl IntoRespons
     let desc_path = storage_root.join("description");
     let description = std::fs::read_to_string(&desc_path).unwrap_or_default();
 
-    Json(json!({
+    Ok(Json(json!({
         "id": id,
         "name": name,
         "description": description.trim(),
-    }))
+    })))
 }
 
 async fn code_session_handler(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
     State(state): State<WebAppState>,
 ) -> Result<Json<serde_json::Value>, WebApiError> {
+    ensure_loopback_api_request(remote_addr)?;
     let runtime = code_ui_runtime(&state)?;
     Ok(Json(serde_json::to_value(runtime.snapshot().await)?))
 }
 
 async fn code_events_handler(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
     State(state): State<WebAppState>,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, WebApiError> {
+    ensure_loopback_api_request(remote_addr)?;
     let runtime = code_ui_runtime(&state)?;
     let current_snapshot = runtime.snapshot().await;
     let initial_event = ensure_session_updated_event(&current_snapshot)?;
@@ -210,19 +225,23 @@ async fn code_events_handler(
 }
 
 async fn code_controller_attach_handler(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
     State(state): State<WebAppState>,
     Json(body): Json<code_ui::CodeUiControllerAttachRequest>,
 ) -> Result<Json<serde_json::Value>, WebApiError> {
+    ensure_loopback_api_request(remote_addr)?;
     let runtime = code_ui_runtime(&state)?;
     let response = runtime.attach_browser_controller(&body.client_id).await?;
     Ok(Json(serde_json::to_value(response)?))
 }
 
 async fn code_controller_detach_handler(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
     State(state): State<WebAppState>,
     headers: HeaderMap,
     Json(body): Json<CodeUiControllerDetachRequest>,
 ) -> Result<Json<serde_json::Value>, WebApiError> {
+    ensure_loopback_api_request(remote_addr)?;
     let runtime = code_ui_runtime(&state)?;
     let token = browser_controller_token_from_headers(&headers).ok_or_else(|| {
         WebApiError::from(CodeUiApiError::forbidden(
@@ -237,10 +256,12 @@ async fn code_controller_detach_handler(
 }
 
 async fn code_message_handler(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
     State(state): State<WebAppState>,
     headers: HeaderMap,
     Json(body): Json<CodeUiMessageRequest>,
 ) -> Result<Json<serde_json::Value>, WebApiError> {
+    ensure_loopback_api_request(remote_addr)?;
     let runtime = code_ui_runtime(&state)?;
     let token = browser_controller_token_from_headers(&headers);
     runtime.submit_message(token.as_deref(), body.text).await?;
@@ -250,11 +271,13 @@ async fn code_message_handler(
 }
 
 async fn code_interaction_handler(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
     State(state): State<WebAppState>,
     Path(interaction_id): Path<String>,
     headers: HeaderMap,
     Json(body): Json<CodeUiInteractionResponse>,
 ) -> Result<Json<serde_json::Value>, WebApiError> {
+    ensure_loopback_api_request(remote_addr)?;
     let runtime = code_ui_runtime(&state)?;
     let token = browser_controller_token_from_headers(&headers);
     runtime
@@ -279,10 +302,31 @@ fn code_ui_event_to_sse(event: code_ui::CodeUiEventEnvelope) -> Event {
         .unwrap_or_else(|_| Event::default().event("session_updated"))
 }
 
+fn ensure_loopback_api_request(remote_addr: SocketAddr) -> Result<(), WebApiError> {
+    if remote_addr.ip().is_loopback() {
+        return Ok(());
+    }
+
+    Err(WebApiError::forbidden(
+        "LOOPBACK_REQUIRED",
+        "Libra Code API requests must come from a loopback client",
+    ))
+}
+
 struct WebApiError {
     status: StatusCode,
     code: String,
     message: String,
+}
+
+impl WebApiError {
+    fn forbidden(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            code: code.into(),
+            message: message.into(),
+        }
+    }
 }
 
 impl From<CodeUiApiError> for WebApiError {
@@ -323,5 +367,42 @@ impl IntoResponse for WebApiError {
             })),
         )
             .into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    use axum::http::Uri;
+
+    use super::*;
+
+    #[test]
+    fn loopback_api_request_allows_loopback_clients() {
+        let ipv4 = SocketAddr::from((Ipv4Addr::LOCALHOST, 34567));
+        let ipv6 = SocketAddr::from((Ipv6Addr::LOCALHOST, 34567));
+
+        assert!(ensure_loopback_api_request(ipv4).is_ok());
+        assert!(ensure_loopback_api_request(ipv6).is_ok());
+    }
+
+    #[test]
+    fn loopback_api_request_rejects_remote_clients() {
+        let remote = SocketAddr::from((Ipv4Addr::new(192, 0, 2, 10), 34567));
+        let error =
+            ensure_loopback_api_request(remote).expect_err("remote client must be rejected");
+
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+        assert_eq!(error.code, "LOOPBACK_REQUIRED");
+    }
+
+    #[tokio::test]
+    async fn static_handler_rejects_parent_directory_segments() {
+        let response = static_handler(Uri::from_static("/../index.html"))
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

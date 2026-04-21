@@ -1,12 +1,14 @@
 "use client";
 
 import {
-  type FormEvent,
   type ComponentType,
+  type FormEvent,
   type ReactNode,
   startTransition,
+  useCallback,
   useEffect,
-  useEffectEvent,
+  useMemo,
+  useRef,
   useState,
 } from "react";
 import {
@@ -152,6 +154,8 @@ type ControllerAttachResponse = {
 
 const CLIENT_ID_KEY = "libra.code-ui.client-id";
 const CONTROLLER_TOKEN_KEY = "libra.code-ui.controller-token";
+const SSE_RECONNECT_BASE_DELAY_MS = 500;
+const SSE_RECONNECT_MAX_DELAY_MS = 15_000;
 
 const sessionStatusLabel: Record<SessionStatus, string> = {
   idle: "Idle",
@@ -202,13 +206,56 @@ function createClientId() {
 }
 
 function getOrCreateClientId() {
-  const existing = window.localStorage.getItem(CLIENT_ID_KEY);
+  const existing = window.sessionStorage.getItem(CLIENT_ID_KEY);
   if (existing) {
     return existing;
   }
+
+  const legacyClientId = window.localStorage.getItem(CLIENT_ID_KEY);
+  if (legacyClientId) {
+    window.localStorage.removeItem(CLIENT_ID_KEY);
+    window.sessionStorage.setItem(CLIENT_ID_KEY, legacyClientId);
+    return legacyClientId;
+  }
+
   const next = createClientId();
-  window.localStorage.setItem(CLIENT_ID_KEY, next);
+  window.sessionStorage.setItem(CLIENT_ID_KEY, next);
   return next;
+}
+
+function storeControllerToken(controllerToken: string) {
+  window.localStorage.removeItem(CONTROLLER_TOKEN_KEY);
+  window.sessionStorage.setItem(CONTROLLER_TOKEN_KEY, controllerToken);
+}
+
+function getStoredControllerToken() {
+  const sessionToken = window.sessionStorage.getItem(CONTROLLER_TOKEN_KEY);
+  if (sessionToken) {
+    window.localStorage.removeItem(CONTROLLER_TOKEN_KEY);
+    return sessionToken;
+  }
+
+  const legacyToken = window.localStorage.getItem(CONTROLLER_TOKEN_KEY);
+  if (!legacyToken) {
+    return null;
+  }
+  window.localStorage.removeItem(CONTROLLER_TOKEN_KEY);
+  window.sessionStorage.setItem(CONTROLLER_TOKEN_KEY, legacyToken);
+  return legacyToken;
+}
+
+function clearStoredControllerToken() {
+  window.localStorage.removeItem(CONTROLLER_TOKEN_KEY);
+  window.sessionStorage.removeItem(CONTROLLER_TOKEN_KEY);
+}
+
+function eventSourceReconnectDelay(attempt: number) {
+  const cappedAttempt = Math.min(attempt, 6);
+  const exponentialDelay = Math.min(
+    SSE_RECONNECT_MAX_DELAY_MS,
+    SSE_RECONNECT_BASE_DELAY_MS * 2 ** cappedAttempt,
+  );
+  return exponentialDelay / 2 + Math.random() * (exponentialDelay / 2);
 }
 
 async function apiFetch<T>(
@@ -339,21 +386,22 @@ export function CodeSessionPage() {
   const [streamState, setStreamState] = useState<"connecting" | "live" | "reconnecting">(
     "connecting",
   );
+  const sendingRef = useRef(false);
 
-  const applySnapshot = useEffectEvent((nextSession: CodeUiSessionSnapshot) => {
+  const applySnapshot = useCallback((nextSession: CodeUiSessionSnapshot) => {
     startTransition(() => {
       setSession(nextSession);
       setLoading(false);
       setPageError(null);
     });
-  });
+  }, []);
 
-  const loadSession = useEffectEvent(async () => {
+  const loadSession = useCallback(async () => {
     const snapshot = await apiFetch<CodeUiSessionSnapshot>("/api/code/session");
     applySnapshot(snapshot);
-  });
+  }, [applySnapshot]);
 
-  const attachBrowserController = useEffectEvent(async () => {
+  const attachBrowserController = useCallback(async () => {
     if (!clientId) {
       return;
     }
@@ -365,16 +413,16 @@ export function CodeSessionPage() {
           body: JSON.stringify({ clientId }),
         },
       );
-      window.localStorage.setItem(CONTROLLER_TOKEN_KEY, response.controllerToken);
+      storeControllerToken(response.controllerToken);
       setControllerToken(response.controllerToken);
       await loadSession();
       setActionError(null);
     } catch (error) {
       setActionError(error instanceof Error ? error.message : "Failed to attach controller");
     }
-  });
+  }, [clientId, loadSession]);
 
-  const detachBrowserController = useEffectEvent(async () => {
+  const detachBrowserController = useCallback(async () => {
     if (!clientId || !controllerToken) {
       return;
     }
@@ -391,15 +439,15 @@ export function CodeSessionPage() {
     } catch {
       // Best effort cleanup.
     } finally {
-      window.localStorage.removeItem(CONTROLLER_TOKEN_KEY);
+      clearStoredControllerToken();
       setControllerToken(null);
     }
-  });
+  }, [clientId, controllerToken]);
 
   useEffect(() => {
     const nextClientId = getOrCreateClientId();
     setClientId(nextClientId);
-    setControllerToken(window.localStorage.getItem(CONTROLLER_TOKEN_KEY));
+    setControllerToken(getStoredControllerToken());
   }, []);
 
   useEffect(() => {
@@ -410,46 +458,143 @@ export function CodeSessionPage() {
       setPageError(error instanceof Error ? error.message : "Failed to load session");
       setLoading(false);
     });
-  }, [clientId]);
+  }, [clientId, loadSession]);
 
   useEffect(() => {
     if (!clientId) {
       return;
     }
 
-    const eventSource = new EventSource("/api/code/events");
-    const handleEvent = (event: Event) => {
-      const payload = JSON.parse((event as MessageEvent<string>).data) as CodeUiEventEnvelope;
-      applySnapshot(payload.data);
-      setStreamState("live");
+    let eventSource: EventSource | null = null;
+    let reconnectTimer: number | null = null;
+    let reconnectAttempt = 0;
+    let closed = false;
+
+    const clearReconnectTimer = () => {
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
     };
 
-    setStreamState("connecting");
-    eventSource.addEventListener("session_updated", handleEvent);
-    eventSource.addEventListener("controller_changed", handleEvent);
-    eventSource.addEventListener("status_changed", handleEvent);
-    eventSource.onerror = () => {
-      setStreamState("reconnecting");
+    const connect = () => {
+      if (closed) {
+        return;
+      }
+
+      clearReconnectTimer();
+      eventSource?.close();
+      setStreamState(reconnectAttempt === 0 ? "connecting" : "reconnecting");
+
+      const nextEventSource = new EventSource("/api/code/events");
+      eventSource = nextEventSource;
+
+      const handleEvent = (event: Event) => {
+        const rawData = (event as MessageEvent<string>).data;
+        let payload: Partial<CodeUiEventEnvelope>;
+        try {
+          payload = JSON.parse(rawData) as Partial<CodeUiEventEnvelope>;
+        } catch (error) {
+          console.warn("Dropping malformed Code UI event payload", {
+            error,
+            payload: rawData,
+          });
+          return;
+        }
+
+        if (!payload.data) {
+          console.warn("Dropping Code UI event without snapshot data", {
+            payload: rawData,
+          });
+          return;
+        }
+
+        reconnectAttempt = 0;
+        applySnapshot(payload.data);
+        setStreamState("live");
+      };
+
+      nextEventSource.addEventListener("session_updated", handleEvent);
+      nextEventSource.addEventListener("controller_changed", handleEvent);
+      nextEventSource.addEventListener("status_changed", handleEvent);
+      nextEventSource.onerror = () => {
+        if (closed || eventSource !== nextEventSource) {
+          return;
+        }
+
+        nextEventSource.close();
+        setStreamState("reconnecting");
+        const delay = eventSourceReconnectDelay(reconnectAttempt);
+        reconnectAttempt += 1;
+        reconnectTimer = window.setTimeout(connect, delay);
+      };
     };
+
+    connect();
 
     return () => {
-      eventSource.removeEventListener("session_updated", handleEvent);
-      eventSource.removeEventListener("controller_changed", handleEvent);
-      eventSource.removeEventListener("status_changed", handleEvent);
-      eventSource.close();
+      closed = true;
+      clearReconnectTimer();
+      eventSource?.close();
     };
-  }, [clientId]);
+  }, [applySnapshot, clientId]);
+
+  const capabilityMessageInput = session?.capabilities.messageInput ?? false;
+  const capabilityStreamingText = session?.capabilities.streamingText ?? false;
+  const capabilityPlanUpdates = session?.capabilities.planUpdates ?? false;
+  const capabilityToolCalls = session?.capabilities.toolCalls ?? false;
+  const capabilityPatchsets = session?.capabilities.patchsets ?? false;
+  const capabilityInteractiveApprovals = session?.capabilities.interactiveApprovals ?? false;
+  const capabilityStructuredQuestions = session?.capabilities.structuredQuestions ?? false;
+  const capabilityProviderSessionResume = session?.capabilities.providerSessionResume ?? false;
+  const hasSession = session !== null;
+  const controllerKind = session?.controller.kind;
+  const controllerOwnerLabel = session?.controller.ownerLabel;
+  const hasNoController = controllerKind === "none";
+  const ownsBrowserController =
+    controllerKind === "browser" && controllerOwnerLabel === clientId;
+  const capabilityBadges = useMemo<Array<[keyof CodeUiSessionSnapshot["capabilities"], boolean]>>(
+    () => {
+      if (!hasSession) {
+        return [];
+      }
+
+      return [
+        ["messageInput", capabilityMessageInput],
+        ["streamingText", capabilityStreamingText],
+        ["planUpdates", capabilityPlanUpdates],
+        ["toolCalls", capabilityToolCalls],
+        ["patchsets", capabilityPatchsets],
+        ["interactiveApprovals", capabilityInteractiveApprovals],
+        ["structuredQuestions", capabilityStructuredQuestions],
+        ["providerSessionResume", capabilityProviderSessionResume],
+      ];
+    },
+    [
+      capabilityInteractiveApprovals,
+      capabilityMessageInput,
+      capabilityPatchsets,
+      capabilityPlanUpdates,
+      capabilityProviderSessionResume,
+      capabilityStreamingText,
+      capabilityStructuredQuestions,
+      capabilityToolCalls,
+      hasSession,
+    ],
+  );
 
   useEffect(() => {
     if (!clientId) {
       return;
     }
 
-    if (session?.controller.kind === "none" && session.capabilities.messageInput) {
+    if (hasNoController && capabilityMessageInput) {
       void attachBrowserController();
     }
+  }, [attachBrowserController, capabilityMessageInput, clientId, hasNoController]);
 
-    if (session?.controller.kind !== "browser" || session.controller.ownerLabel !== clientId) {
+  useEffect(() => {
+    if (!clientId || !ownsBrowserController) {
       return;
     }
 
@@ -460,7 +605,7 @@ export function CodeSessionPage() {
     }, 30_000);
 
     return () => window.clearInterval(timer);
-  }, [clientId, session]);
+  }, [attachBrowserController, clientId, ownsBrowserController]);
 
   useEffect(() => {
     if (!clientId || !controllerToken) {
@@ -474,13 +619,15 @@ export function CodeSessionPage() {
     return () => {
       window.removeEventListener("beforeunload", onUnload);
     };
-  }, [clientId, controllerToken]);
+  }, [clientId, controllerToken, detachBrowserController]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!draft.trim() || !controllerToken) {
+    const message = draft.trim();
+    if (!message || !controllerToken || sendingRef.current) {
       return;
     }
+    sendingRef.current = true;
     setSending(true);
     setActionError(null);
     try {
@@ -488,7 +635,7 @@ export function CodeSessionPage() {
         "/api/code/messages",
         {
           method: "POST",
-          body: JSON.stringify({ text: draft.trim() }),
+          body: JSON.stringify({ text: message }),
         },
         controllerToken,
       );
@@ -496,6 +643,7 @@ export function CodeSessionPage() {
     } catch (error) {
       setActionError(error instanceof Error ? error.message : "Failed to send message");
     } finally {
+      sendingRef.current = false;
       setSending(false);
     }
   }
@@ -522,8 +670,7 @@ export function CodeSessionPage() {
     }
   }
 
-  const isBrowserController =
-    session?.controller.kind === "browser" && session.controller.ownerLabel === clientId;
+  const isBrowserController = ownsBrowserController;
   const canWrite = Boolean(session?.controller.canWrite && isBrowserController && controllerToken);
   const pendingInteractions =
     session?.interactions.filter((interaction) => interaction.status === "pending") ?? [];
@@ -713,7 +860,7 @@ export function CodeSessionPage() {
                     value={session.provider.mode ?? "unknown"}
                   />
                   <div className="flex flex-wrap gap-2">
-                    {Object.entries(session.capabilities).map(([key, enabled]) => (
+                    {capabilityBadges.map(([key, enabled]) => (
                       <Badge
                         key={key}
                         variant={enabled ? "default" : "outline"}

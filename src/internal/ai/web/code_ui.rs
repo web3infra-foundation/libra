@@ -1060,6 +1060,56 @@ mod tests {
         ))
     }
 
+    #[derive(Clone)]
+    struct RecordingCodeUiAdapter {
+        session: Arc<CodeUiSession>,
+        submitted_messages: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl RecordingCodeUiAdapter {
+        fn new(session: Arc<CodeUiSession>) -> Arc<Self> {
+            Arc::new(Self {
+                session,
+                submitted_messages: Arc::new(Mutex::new(Vec::new())),
+            })
+        }
+
+        async fn submitted_messages(&self) -> Vec<String> {
+            self.submitted_messages.lock().await.clone()
+        }
+    }
+
+    #[async_trait]
+    impl CodeUiReadModel for RecordingCodeUiAdapter {
+        fn session(&self) -> Arc<CodeUiSession> {
+            self.session.clone()
+        }
+    }
+
+    #[async_trait]
+    impl CodeUiCommandAdapter for RecordingCodeUiAdapter {
+        fn capabilities(&self) -> CodeUiCapabilities {
+            CodeUiCapabilities {
+                message_input: true,
+                interactive_approvals: true,
+                ..CodeUiCapabilities::default()
+            }
+        }
+
+        async fn submit_message(&self, text: String) -> anyhow::Result<()> {
+            self.submitted_messages.lock().await.push(text);
+            Ok(())
+        }
+
+        async fn respond_interaction(
+            &self,
+            _interaction_id: &str,
+            _response: CodeUiInteractionResponse,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
     #[tokio::test]
     async fn browser_controller_attach_and_detach_updates_snapshot() {
         let session = test_session();
@@ -1095,6 +1145,156 @@ mod tests {
             CodeUiControllerKind::None
         );
         assert!(!detached_snapshot.controller.can_write);
+    }
+
+    #[tokio::test]
+    async fn expired_browser_controller_lease_is_cleaned_before_attach() {
+        let session = test_session();
+        let runtime = CodeUiRuntimeHandle::build(
+            ReadOnlyCodeUiAdapter::new(session.clone(), CodeUiCapabilities::default()),
+            true,
+            CodeUiInitialController::Unclaimed,
+        )
+        .await;
+
+        let expired_attach = runtime
+            .attach_browser_controller("browser-a")
+            .await
+            .expect("browser controller should attach");
+        {
+            let mut state = runtime.controller_state.lock().await;
+            let lease = state
+                .browser_lease
+                .as_mut()
+                .expect("browser lease should be active");
+            lease.expires_at = Utc::now() - Duration::seconds(1);
+        }
+
+        let replacement_attach = runtime
+            .attach_browser_controller("browser-b")
+            .await
+            .expect("expired lease should not block a new browser");
+
+        assert_ne!(
+            expired_attach.controller_token,
+            replacement_attach.controller_token
+        );
+        let snapshot = runtime.snapshot().await;
+        assert_eq!(snapshot.controller.kind, CodeUiControllerKind::Browser);
+        assert_eq!(
+            snapshot.controller.owner_label.as_deref(),
+            Some("browser-b")
+        );
+
+        let stale_error = runtime
+            .ensure_browser_write_access(Some(&expired_attach.controller_token))
+            .await
+            .expect_err("stale token must not keep write access");
+        assert_eq!(stale_error.status, 403);
+        assert_eq!(stale_error.code, "INVALID_CONTROLLER_TOKEN");
+    }
+
+    #[tokio::test]
+    async fn concurrent_browser_attach_allows_only_one_owner() {
+        let runtime = CodeUiRuntimeHandle::build(
+            ReadOnlyCodeUiAdapter::new(test_session(), CodeUiCapabilities::default()),
+            true,
+            CodeUiInitialController::Unclaimed,
+        )
+        .await;
+
+        let runtime_a = runtime.clone();
+        let runtime_b = runtime.clone();
+        let (first, second) = tokio::join!(
+            async move { runtime_a.attach_browser_controller("browser-a").await },
+            async move { runtime_b.attach_browser_controller("browser-b").await },
+        );
+
+        let successes = [first.as_ref().ok(), second.as_ref().ok()]
+            .into_iter()
+            .flatten()
+            .count();
+        let conflicts = [first.as_ref().err(), second.as_ref().err()]
+            .into_iter()
+            .flatten()
+            .filter(|error| error.status == 409 && error.code == "CONTROLLER_CONFLICT")
+            .count();
+
+        assert_eq!(successes, 1);
+        assert_eq!(conflicts, 1);
+    }
+
+    #[tokio::test]
+    async fn invalid_detach_does_not_clear_browser_controller() {
+        let runtime = CodeUiRuntimeHandle::build(
+            ReadOnlyCodeUiAdapter::new(test_session(), CodeUiCapabilities::default()),
+            true,
+            CodeUiInitialController::Unclaimed,
+        )
+        .await;
+        let attach = runtime
+            .attach_browser_controller("browser-a")
+            .await
+            .expect("browser controller should attach");
+
+        let error = runtime
+            .detach_browser_controller("browser-b", &attach.controller_token)
+            .await
+            .expect_err("wrong client id must not detach");
+        assert_eq!(error.status, 403);
+        assert_eq!(error.code, "INVALID_CONTROLLER_TOKEN");
+
+        let snapshot = runtime.snapshot().await;
+        assert_eq!(snapshot.controller.kind, CodeUiControllerKind::Browser);
+        assert_eq!(
+            snapshot.controller.owner_label.as_deref(),
+            Some("browser-a")
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_detach_and_submit_message_leaves_stale_token_rejected() {
+        let adapter = RecordingCodeUiAdapter::new(test_session());
+        let runtime =
+            CodeUiRuntimeHandle::build(adapter.clone(), true, CodeUiInitialController::Unclaimed)
+                .await;
+        let attach = runtime
+            .attach_browser_controller("browser-a")
+            .await
+            .expect("browser controller should attach");
+
+        let detach_token = attach.controller_token.clone();
+        let submit_token = attach.controller_token.clone();
+        let runtime_for_detach = runtime.clone();
+        let runtime_for_submit = runtime.clone();
+        let (detach_result, submit_result) = tokio::join!(
+            async move {
+                runtime_for_detach
+                    .detach_browser_controller("browser-a", &detach_token)
+                    .await
+            },
+            async move {
+                runtime_for_submit
+                    .submit_message(Some(&submit_token), "hello".to_string())
+                    .await
+            },
+        );
+
+        detach_result.expect("detach should succeed");
+        if let Err(error) = submit_result {
+            assert!(
+                error.status == 403 || error.status == 409,
+                "submit should either win the race or fail authorization, got {error:?}"
+            );
+        }
+
+        let stale_error = runtime
+            .submit_message(Some(&attach.controller_token), "after detach".to_string())
+            .await
+            .expect_err("detached token must not submit again");
+        assert_eq!(stale_error.status, 409);
+        assert_eq!(stale_error.code, "CONTROLLER_CONFLICT");
+        assert!(adapter.submitted_messages().await.len() <= 1);
     }
 
     #[tokio::test]
