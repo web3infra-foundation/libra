@@ -1092,7 +1092,7 @@ async fn read_fetch_stream(
                             progress.tick(pack_data.len() as u64);
                         }
                     }
-                    2 => print_remote_progress(payload, render_progress),
+                    2 => print_remote_progress(payload, render_progress, bar.as_ref()),
                     3 => {
                         if let Some(bar) = &bar {
                             bar.finish_and_clear();
@@ -1110,7 +1110,7 @@ async fn read_fetch_stream(
             && let Some((&code, payload)) = data.split_first()
         {
             match code {
-                2 => print_remote_progress(payload, render_progress),
+                2 => print_remote_progress(payload, render_progress, bar.as_ref()),
                 3 => {
                     if let Some(bar) = &bar {
                         bar.finish_and_clear();
@@ -1120,11 +1120,7 @@ async fn read_fetch_stream(
                     });
                 }
                 _ => {
-                    if render_progress {
-                        let text = String::from_utf8_lossy(&data);
-                        eprint!("{text}");
-                        let _ = io::stderr().flush();
-                    }
+                    print_remote_progress(&data, render_progress, bar.as_ref());
                 }
             }
         }
@@ -1139,11 +1135,21 @@ async fn read_fetch_stream(
     Ok(pack_data)
 }
 
-fn print_remote_progress(payload: &[u8], render_progress: bool) {
+fn print_remote_progress(payload: &[u8], render_progress: bool, bar: Option<&ProgressBar>) {
     if render_progress {
         let text = String::from_utf8_lossy(payload);
-        eprint!("{text}");
-        let _ = io::stderr().flush();
+        let write_progress = || {
+            eprint!("{text}");
+            let _ = io::stderr().flush();
+        };
+        // Remote side-band progress writes raw terminal control characters.
+        // Hide the local receiving spinner while printing it so the two
+        // streams do not leave stale or shifted lines in an interactive TTY.
+        if let Some(bar) = bar {
+            bar.suspend(write_progress);
+        } else {
+            write_progress();
+        }
     }
 }
 

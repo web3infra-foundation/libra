@@ -309,7 +309,7 @@ impl LibraMcpServer {
     }
 }
 
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for LibraMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(
