@@ -310,6 +310,10 @@ pub struct CodeArgs {
     #[arg(long = "ollama-thinking", alias = "thinking", value_enum)]
     pub ollama_thinking: Option<OllamaThinkingArg>,
 
+    /// Send compact Ollama tool schemas for providers that reject complex JSON schemas.
+    #[arg(long = "ollama-compact-tools")]
+    pub ollama_compact_tools: bool,
+
     /// Operating context mode (dev, review, research)
     #[arg(long, value_enum)]
     pub context: Option<CodeContext>,
@@ -663,11 +667,14 @@ async fn execute_tui(mut args: CodeArgs) -> CliResult<()> {
             run_tui_with_model(model, launch_config, model_name, provider_name).await?;
         }
         CodeProvider::Ollama => {
-            let client = if let Some(base_url) = &args.api_base {
+            let mut client = if let Some(base_url) = &args.api_base {
                 OllamaClient::with_base_url(base_url)
             } else {
                 OllamaClient::from_env()
             };
+            if args.ollama_compact_tools {
+                client = client.with_compact_tool_schema(true);
+            }
             if client.missing_required_cloud_api_key() {
                 return Err(CliError::auth(
                     "OLLAMA_API_KEY is required when using Ollama Cloud directly (set --api-base https://ollama.com or OLLAMA_BASE_URL=https://ollama.com)",
@@ -1789,6 +1796,10 @@ fn validate_mode_args(args: &CodeArgs, _output: &OutputConfig) -> Result<(), Str
         );
     }
 
+    if args.provider != CodeProvider::Ollama && args.ollama_compact_tools {
+        return Err("--ollama-compact-tools is only supported with --provider=ollama".to_string());
+    }
+
     Ok(())
 }
 
@@ -1808,6 +1819,7 @@ fn reject_non_tui_flags(args: &CodeArgs, mode: &str) -> Result<(), String> {
     reject_mode_flag(args.model.is_some(), "--model", mode)?;
     reject_mode_flag(args.temperature.is_some(), "--temperature", mode)?;
     reject_mode_flag(args.ollama_thinking.is_some(), "--ollama-thinking", mode)?;
+    reject_mode_flag(args.ollama_compact_tools, "--ollama-compact-tools", mode)?;
     reject_mode_flag(args.context.is_some(), "--context", mode)?;
     reject_mode_flag(args.resume.is_some(), "--resume", mode)?;
     reject_mode_flag(
@@ -1842,6 +1854,7 @@ mod tests {
             model: None,
             temperature: None,
             ollama_thinking: None,
+            ollama_compact_tools: false,
             context: None,
             resume: None,
             approval_policy: CodeApprovalPolicy::OnRequest,
@@ -1902,6 +1915,21 @@ mod tests {
         let mut args = base_args();
         args.provider = CodeProvider::Ollama;
         args.ollama_thinking = Some(OllamaThinkingArg::High);
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn rejects_ollama_compact_tools_for_non_ollama_provider() {
+        let mut args = base_args();
+        args.ollama_compact_tools = true;
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_err());
+    }
+
+    #[test]
+    fn accepts_ollama_compact_tools_for_ollama_provider() {
+        let mut args = base_args();
+        args.provider = CodeProvider::Ollama;
+        args.ollama_compact_tools = true;
         assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
     }
 

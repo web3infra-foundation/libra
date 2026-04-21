@@ -4,6 +4,7 @@ use std::{
     sync::Arc,
 };
 
+use async_trait::async_trait;
 use git_internal::internal::object::{plan::PlanStep, task::Task as GitTask};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -413,6 +414,50 @@ pub struct OrchestratorResult {
     pub persistence: Option<PersistedExecution>,
 }
 
+/// Runtime phase gates that require explicit user confirmation before continuing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OrchestratorPhase {
+    SystemVerification,
+    Decision,
+}
+
+impl OrchestratorPhase {
+    pub fn number(&self) -> u8 {
+        match self {
+            Self::SystemVerification => 3,
+            Self::Decision => 4,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::SystemVerification => "Phase 3 system validation",
+            Self::Decision => "Phase 4 decision",
+        }
+    }
+}
+
+/// A human-readable confirmation request emitted before entering a gated phase.
+#[derive(Clone, Debug)]
+pub struct PhaseConfirmationPrompt {
+    pub phase: OrchestratorPhase,
+    pub title: String,
+    pub summary: String,
+    pub details: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PhaseConfirmationDecision {
+    Continue,
+    Reject,
+    Abort,
+}
+
+#[async_trait]
+pub trait OrchestratorPhaseConfirmer: Send + Sync {
+    async fn confirm(&self, prompt: PhaseConfirmationPrompt) -> PhaseConfirmationDecision;
+}
+
 /// MCP object IDs emitted during orchestrator persistence.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PersistedTaskArtifacts {
@@ -566,6 +611,8 @@ pub struct OrchestratorConfig {
     pub mcp_server: Option<Arc<LibraMcpServer>>,
     /// Optional observer used to surface runtime progress.
     pub observer: Option<Arc<dyn OrchestratorObserver>>,
+    /// Optional user confirmation gate before Phase 3 and Phase 4.
+    pub phase_confirmer: Option<Arc<dyn OrchestratorPhaseConfirmer>>,
 }
 
 #[cfg(test)]

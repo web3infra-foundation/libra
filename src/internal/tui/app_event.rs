@@ -4,6 +4,7 @@
 //! Widgets emit events to request actions that must be handled at the app layer.
 
 use serde_json::Value;
+use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use super::history_cell::HistoryCell;
@@ -11,7 +12,8 @@ use crate::internal::ai::{
     completion::Message,
     intentspec::types::IntentSpec,
     orchestrator::types::{
-        ExecutionPlanSpec, OrchestratorResult, TaskNodeStatus, TaskRuntimeEvent,
+        ExecutionPlanSpec, OrchestratorResult, PhaseConfirmationDecision, PhaseConfirmationPrompt,
+        TaskNodeStatus, TaskRuntimeEvent,
     },
     tools::{ToolOutput, context::UpdatePlanArgs},
 };
@@ -84,6 +86,7 @@ pub enum AppEvent {
     PlanWorkflowComplete {
         turn_id: TurnId,
         text: String,
+        llm_output: Option<String>,
         new_history: Vec<Message>,
         intent_id: Option<String>,
         plan_id: Option<String>,
@@ -97,6 +100,7 @@ pub enum AppEvent {
     IntentSpecReviewReady {
         turn_id: TurnId,
         text: String,
+        llm_output: Option<String>,
         new_history: Vec<Message>,
         intent_id: Option<String>,
         spec_json: String,
@@ -140,6 +144,12 @@ pub enum AppEvent {
     AgentStatusUpdate {
         turn_id: TurnId,
         status: AgentStatus,
+    },
+    /// Orchestrator is waiting for user confirmation before entering a gated phase.
+    PhaseConfirmationRequired {
+        turn_id: TurnId,
+        prompt: PhaseConfirmationPrompt,
+        response_tx: oneshot::Sender<PhaseConfirmationDecision>,
     },
     /// MCP turn-tracking IDs became available for this turn.
     McpTurnTrackingReady {
@@ -188,6 +198,7 @@ impl AppEvent {
             | AppEvent::ToolCallEnd { turn_id, .. }
             | AppEvent::TaskRuntimeEvent { turn_id, .. }
             | AppEvent::AgentStatusUpdate { turn_id, .. }
+            | AppEvent::PhaseConfirmationRequired { turn_id, .. }
             | AppEvent::McpTurnTrackingReady { turn_id, .. }
             | AppEvent::DagGraphBegin { turn_id, .. }
             | AppEvent::DagTaskStatus { turn_id, .. }

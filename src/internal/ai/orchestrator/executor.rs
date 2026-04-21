@@ -286,6 +286,14 @@ where
 
         let retryable_failure = match agent_result {
             Ok(turn) if policy_violations.is_empty() => {
+                if let Some(observer) = &config.observer
+                    && !turn.final_text.trim().is_empty()
+                {
+                    observer.on_task_runtime_event(
+                        task,
+                        TaskRuntimeEvent::AssistantMessage(turn.final_text.clone()),
+                    );
+                }
                 if let Some(reason) =
                     implementation_missing_write_output(task, &accumulated_tool_calls)
                 {

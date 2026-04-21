@@ -9,7 +9,7 @@ use chrono::DateTime;
 use futures_util::StreamExt;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value, json};
 use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 
@@ -27,6 +27,7 @@ use crate::internal::ai::{
             ChatToolCall, ChatToolDefinition, ChatUsage, parse_tools,
         },
     },
+    tools::ToolDefinition,
 };
 
 /// Ollama completion model.
@@ -218,6 +219,89 @@ fn native_chat_endpoint(base_url: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');
     let root = trimmed.strip_suffix("/v1").unwrap_or(trimmed);
     format!("{root}/api/chat")
+}
+
+fn ollama_tools_from_definitions(
+    tools: &[ToolDefinition],
+    compact_tool_schema: bool,
+) -> Vec<ChatToolDefinition> {
+    if !compact_tool_schema {
+        return parse_tools(tools);
+    }
+
+    tools
+        .iter()
+        .map(|tool| ChatToolDefinition {
+            r#type: "function".to_string(),
+            function: crate::internal::ai::providers::openai_compat::ChatFunctionDefinition {
+                name: tool.name.clone(),
+                description: tool.description.clone(),
+                parameters: compact_tool_parameters(&tool.parameters),
+            },
+        })
+        .collect()
+}
+
+fn compact_tool_parameters(parameters: &Value) -> Value {
+    compact_schema_value(parameters, 3)
+}
+
+fn compact_schema_value(schema: &Value, depth: usize) -> Value {
+    let Some(object) = schema.as_object() else {
+        return json!({ "type": "object" });
+    };
+
+    if object.contains_key("$ref") {
+        return json!({ "type": "object" });
+    }
+
+    match object.get("type").and_then(Value::as_str) {
+        Some("object") => {
+            let mut compact = Map::new();
+            compact.insert("type".to_string(), json!("object"));
+
+            if depth > 0 {
+                if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+                    let mut compact_properties = Map::new();
+                    for (name, property_schema) in properties {
+                        compact_properties.insert(
+                            name.clone(),
+                            compact_schema_value(property_schema, depth.saturating_sub(1)),
+                        );
+                    }
+                    if !compact_properties.is_empty() {
+                        compact.insert("properties".to_string(), Value::Object(compact_properties));
+                    }
+                }
+
+                if let Some(required) = object.get("required").and_then(Value::as_array) {
+                    let required = required
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(|item| json!(item))
+                        .collect::<Vec<_>>();
+                    if !required.is_empty() {
+                        compact.insert("required".to_string(), Value::Array(required));
+                    }
+                }
+            }
+
+            Value::Object(compact)
+        }
+        Some("array") => {
+            let mut compact = Map::new();
+            compact.insert("type".to_string(), json!("array"));
+            if let Some(items) = object.get("items") {
+                compact.insert(
+                    "items".to_string(),
+                    compact_schema_value(items, depth.saturating_sub(1)),
+                );
+            }
+            Value::Object(compact)
+        }
+        Some(schema_type) => json!({ "type": schema_type }),
+        None => json!({ "type": "object" }),
+    }
 }
 
 fn format_ollama_provider_error(
@@ -725,7 +809,8 @@ impl CompletionModelTrait for Model {
     ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
         let request_id = Uuid::now_v7().to_string();
         let response_id = format!("ollama-{request_id}");
-        let tools = parse_tools(&request.tools);
+        let compact_tool_schema = self.client.compact_tool_schema();
+        let tools = ollama_tools_from_definitions(&request.tools, compact_tool_schema);
         let messages = build_ollama_messages(&request)?;
         let stream_events = request.stream_events.as_ref();
 
@@ -754,6 +839,7 @@ impl CompletionModelTrait for Model {
             message_count = ollama_request.messages.len(),
             tool_count = ollama_request.tools.len(),
             think = ?ollama_request.think,
+            compact_tool_schema,
             stream = ollama_request.stream,
             "sending Ollama streaming chat completion request"
         );
@@ -1029,6 +1115,77 @@ mod tests {
         assert!(json.contains("\"stream\":true"));
         assert!(json.contains("\"think\":false"));
         assert!(json.contains("\"options\":{\"temperature\":0.7}"));
+    }
+
+    #[test]
+    fn test_compact_tool_schema_removes_deep_definitions() {
+        let tools = vec![ToolDefinition {
+            name: "submit_intent_draft".to_string(),
+            description: "Submit a structured IntentDraft".to_string(),
+            parameters: json!({
+                "type": "object",
+                "required": ["draft"],
+                "properties": {
+                    "draft": {
+                        "type": "object",
+                        "required": ["intent", "acceptance", "risk"],
+                        "properties": {
+                            "intent": {
+                                "type": "object",
+                                "required": ["summary", "changeType"],
+                                "properties": {
+                                    "summary": {"type": "string", "description": "Summary"},
+                                    "changeType": {
+                                        "type": "string",
+                                        "enum": ["bugfix", "feature", "refactor"]
+                                    }
+                                }
+                            },
+                            "acceptance": {
+                                "type": "object",
+                                "properties": {
+                                    "fastChecks": {
+                                        "type": "array",
+                                        "items": {"$ref": "#/$defs/check"}
+                                    }
+                                }
+                            },
+                            "risk": {"type": "object"}
+                        }
+                    }
+                },
+                "$defs": {
+                    "check": {
+                        "type": "object",
+                        "properties": {
+                            "kind": {
+                                "type": "string",
+                                "enum": ["command", "testSuite", "policy"]
+                            }
+                        }
+                    }
+                }
+            }),
+        }];
+
+        let compact = ollama_tools_from_definitions(&tools, true);
+        let parameters = &compact[0].function.parameters;
+
+        assert_eq!(parameters["type"], "object");
+        assert_eq!(parameters["required"], json!(["draft"]));
+        assert!(parameters.get("$defs").is_none());
+        assert!(parameters.get("definitions").is_none());
+        assert!(
+            parameters
+                .pointer("/properties/draft/properties/intent/properties/changeType/enum")
+                .is_none()
+        );
+        assert_eq!(
+            parameters
+                .pointer("/properties/draft/properties/acceptance/properties/fastChecks/items")
+                .unwrap(),
+            &json!({"type": "object"})
+        );
     }
 
     #[test]

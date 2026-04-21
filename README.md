@@ -201,13 +201,14 @@ libra code --provider ollama --model codellama
 
 # Ollama with a remote instance
 libra code --provider ollama --model llama3.2 --api-base http://remote-host:11434/v1
+libra code --provider ollama --model minimax-m2.7:cloud --api-base http://remote-host:11434/v1 --ollama-compact-tools
 
 # Ollama thinking control for reasoning models
 OLLAMA_THINK=false libra code --provider ollama --model qwen3.6
 libra code --provider ollama --model qwen3.6 --ollama-thinking high
 ```
 
-> **Note**: The `--api-base` CLI flag is only honored for the `ollama` provider. Other providers accept custom base URLs through their respective environment variables (e.g. `OPENAI_BASE_URL`). Ollama requests stream `/api/chat` responses by default, include a per-request `request_id` in debug logs, and default to `think:false` to keep tool calls responsive; use `--ollama-thinking auto|off|on|low|medium|high` for one run, or set `OLLAMA_THINK=true`, `low`, `medium`, `high`, or `auto` as the environment default. `auto` omits the `think` field and lets Ollama decide.
+> **Note**: The `--api-base` CLI flag is only honored for the `ollama` provider. Other providers accept custom base URLs through their respective environment variables (e.g. `OPENAI_BASE_URL`). Ollama requests stream `/api/chat` responses by default, include a per-request `request_id` in debug logs, and default to `think:false` to keep tool calls responsive; use `--ollama-thinking auto|off|on|low|medium|high` for one run, or set `OLLAMA_THINK=true`, `low`, `medium`, `high`, or `auto` as the environment default. `auto` omits the `think` field and lets Ollama decide. Use `--ollama-compact-tools` or `OLLAMA_COMPACT_TOOLS=true` for remote/cloud Ollama endpoints that return 503s when receiving Libra's full tool schemas.
 
 | Provider | Default Model | Auth Env Variable | Base URL Override |
 |----------|--------------|-------------------|-------------------|
@@ -216,7 +217,7 @@ libra code --provider ollama --model qwen3.6 --ollama-thinking high
 | `anthropic` | `claude-sonnet-4-6` | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
 | `deepseek` | `deepseek-chat` | `DEEPSEEK_API_KEY` | *(programmatic only)* |
 | `zhipu` | `glm-5` | `ZHIPU_API_KEY` | `ZHIPU_BASE_URL` |
-| `ollama` | *(requires `--model`)* | `OLLAMA_API_KEY` for direct Cloud API | `OLLAMA_BASE_URL`, `OLLAMA_THINK`, `--api-base`, or `--ollama-thinking` |
+| `ollama` | *(requires `--model`)* | `OLLAMA_API_KEY` for direct Cloud API | `OLLAMA_BASE_URL`, `OLLAMA_THINK`, `OLLAMA_COMPACT_TOOLS`, `--api-base`, `--ollama-thinking`, or `--ollama-compact-tools` |
 
 ---
 

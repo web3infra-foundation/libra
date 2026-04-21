@@ -18,7 +18,10 @@ pub(crate) mod workspace;
 
 use std::sync::Arc;
 
-use types::{OrchestratorConfig, OrchestratorError, OrchestratorResult};
+use types::{
+    OrchestratorConfig, OrchestratorError, OrchestratorResult, PhaseConfirmationDecision,
+    PhaseConfirmationPrompt,
+};
 
 use crate::internal::ai::{
     agent::ToolLoopConfig,
@@ -103,6 +106,122 @@ impl types::OrchestratorObserver for FanoutObserver {
             observer.on_replan(current_revision, next_revision, reason, diff_summary);
         }
     }
+}
+
+async fn confirm_phase(
+    confirmer: Option<&dyn types::OrchestratorPhaseConfirmer>,
+    prompt: PhaseConfirmationPrompt,
+) -> Result<(), OrchestratorError> {
+    let Some(confirmer) = confirmer else {
+        return Ok(());
+    };
+
+    let phase_label = prompt.phase.label();
+    match confirmer.confirm(prompt).await {
+        PhaseConfirmationDecision::Continue => Ok(()),
+        PhaseConfirmationDecision::Reject => Err(OrchestratorError::PolicyViolation(format!(
+            "{phase_label} was rejected by the user"
+        ))),
+        PhaseConfirmationDecision::Abort => Err(OrchestratorError::PolicyViolation(format!(
+            "{phase_label} was aborted by the user"
+        ))),
+    }
+}
+
+fn phase3_confirmation_prompt(
+    plan: &types::ExecutionPlanSpec,
+    run_state: &run_state::RunStateSnapshot,
+) -> PhaseConfirmationPrompt {
+    let completed = run_state
+        .task_results
+        .iter()
+        .filter(|result| result.status == types::TaskNodeStatus::Completed)
+        .count();
+    let failed = run_state
+        .task_results
+        .iter()
+        .filter(|result| result.status == types::TaskNodeStatus::Failed)
+        .count();
+    let details = plan
+        .tasks
+        .iter()
+        .map(|task| {
+            let status = run_state.status_for(task.id());
+            format!(
+                "{:02} {:?} · {:?} · {}",
+                task_position(plan, task.id()),
+                task.kind,
+                status,
+                task.title()
+            )
+        })
+        .collect::<Vec<_>>();
+
+    PhaseConfirmationPrompt {
+        phase: types::OrchestratorPhase::SystemVerification,
+        title: "Confirm Phase 3".to_string(),
+        summary: format!(
+            "Plan r{} execution finished: {completed}/{} completed, {failed} failed. Continue to system validation and audit?",
+            plan.revision,
+            plan.tasks.len()
+        ),
+        details,
+    }
+}
+
+fn phase4_confirmation_prompt(
+    plan: &types::ExecutionPlanSpec,
+    report: &types::SystemReport,
+) -> PhaseConfirmationPrompt {
+    let mut details = vec![
+        format!(
+            "integration: {} ({})",
+            report.integration.all_required_passed,
+            report.integration.results.len()
+        ),
+        format!(
+            "security: {} ({})",
+            report.security.all_required_passed,
+            report.security.results.len()
+        ),
+        format!(
+            "release: {} ({})",
+            report.release.all_required_passed,
+            report.release.results.len()
+        ),
+        format!("review passed: {}", report.review_passed),
+        format!("artifacts complete: {}", report.artifacts_complete),
+    ];
+    details.extend(
+        report
+            .review_findings
+            .iter()
+            .map(|finding| format!("review finding: {finding}")),
+    );
+    details.extend(
+        report
+            .missing_artifacts
+            .iter()
+            .map(|artifact| format!("missing artifact: {artifact}")),
+    );
+
+    PhaseConfirmationPrompt {
+        phase: types::OrchestratorPhase::Decision,
+        title: "Confirm Phase 4".to_string(),
+        summary: format!(
+            "Plan r{} validation overall_passed={}. Continue to final decision?",
+            plan.revision, report.overall_passed
+        ),
+        details,
+    }
+}
+
+fn task_position(plan: &types::ExecutionPlanSpec, task_id: uuid::Uuid) -> usize {
+    plan.tasks
+        .iter()
+        .position(|task| task.id() == task_id)
+        .map(|index| index + 1)
+        .unwrap_or_default()
 }
 
 impl<M: CompletionModel + 'static> Orchestrator<M> {
@@ -221,6 +340,11 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
             .await?;
 
             // Phase 3: System verification
+            confirm_phase(
+                self.config.phase_confirmer.as_deref(),
+                phase3_confirmation_prompt(&plan_spec, &run_state),
+            )
+            .await?;
             let system_report = verifier::build_system_report(&spec, &plan_spec, &run_state);
             if let Some(observer) = &observer {
                 observer.on_system_verification(&plan_spec, &system_report);
@@ -245,6 +369,11 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
             }
 
             // Phase 4: Decision
+            confirm_phase(
+                self.config.phase_confirmer.as_deref(),
+                phase4_confirmation_prompt(&plan_spec, &system_report),
+            )
+            .await?;
             let decision = decider::make_decision(
                 &run_state,
                 &system_report,
@@ -318,6 +447,21 @@ mod tests {
 
     struct RecordingObserver {
         events: Arc<Mutex<Vec<String>>>,
+    }
+
+    struct RecordingPhaseConfirmer {
+        phases: Arc<Mutex<Vec<u8>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl types::OrchestratorPhaseConfirmer for RecordingPhaseConfirmer {
+        async fn confirm(
+            &self,
+            prompt: types::PhaseConfirmationPrompt,
+        ) -> types::PhaseConfirmationDecision {
+            self.phases.lock().unwrap().push(prompt.phase.number());
+            types::PhaseConfirmationDecision::Continue
+        }
     }
 
     impl types::OrchestratorObserver for RecordingObserver {
@@ -619,6 +763,7 @@ mod tests {
             reviewer_preamble: None,
             mcp_server: None,
             observer: None,
+            phase_confirmer: None,
         };
         let orchestrator = Orchestrator::new(model, registry, config);
         let spec = test_spec();
@@ -658,6 +803,7 @@ mod tests {
             reviewer_preamble: None,
             mcp_server: None,
             observer: None,
+            phase_confirmer: None,
         };
 
         let orchestrator = Orchestrator::new(model, registry, config);
@@ -693,6 +839,7 @@ mod tests {
             reviewer_preamble: None,
             mcp_server: None,
             observer: Some(observer),
+            phase_confirmer: None,
         };
         let orchestrator = Orchestrator::new(model, registry, config);
         let result = orchestrator.run(test_spec()).await.unwrap();
@@ -726,6 +873,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_orchestrator_confirms_phase_three_and_four() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = MockOrchestratorModel;
+        let registry = test_registry(dir.path());
+        let phases = Arc::new(Mutex::new(Vec::new()));
+        let confirmer: Arc<dyn types::OrchestratorPhaseConfirmer> =
+            Arc::new(RecordingPhaseConfirmer {
+                phases: Arc::clone(&phases),
+            });
+        let config = OrchestratorConfig {
+            working_dir: dir.path().to_path_buf(),
+            base_commit: None,
+            persisted_intent_id: None,
+            persisted_plan_id: None,
+            initial_plan: None,
+            dagrs_resume_checkpoint_id: None,
+            coder_preamble: None,
+            reviewer_preamble: None,
+            mcp_server: None,
+            observer: None,
+            phase_confirmer: Some(confirmer),
+        };
+        let orchestrator = Orchestrator::new(model, registry, config);
+        let result = orchestrator.run(test_spec()).await.unwrap();
+
+        assert_eq!(result.decision, types::DecisionOutcome::Commit);
+        assert_eq!(*phases.lock().unwrap(), vec![3, 4]);
+    }
+
+    #[tokio::test]
     async fn test_orchestrator_high_risk_human_review() {
         let dir = tempfile::tempdir().unwrap();
         let model = MockOrchestratorModel;
@@ -741,6 +918,7 @@ mod tests {
             reviewer_preamble: None,
             mcp_server: None,
             observer: None,
+            phase_confirmer: None,
         };
         let orchestrator = Orchestrator::new(model, registry, config);
         let mut spec = test_spec();
@@ -767,6 +945,7 @@ mod tests {
             reviewer_preamble: None,
             mcp_server: None,
             observer: None,
+            phase_confirmer: None,
         };
         let orchestrator = Orchestrator::new(model, registry, config);
         let mut spec = test_spec();
@@ -821,6 +1000,7 @@ mod tests {
             reviewer_preamble: None,
             mcp_server: None,
             observer: None,
+            phase_confirmer: None,
         };
         let orchestrator = Orchestrator::new(model, registry, config);
         let mut spec = test_spec();
@@ -847,6 +1027,7 @@ mod tests {
             reviewer_preamble: None,
             mcp_server: None,
             observer: None,
+            phase_confirmer: None,
         };
         let orchestrator = Orchestrator::new(model, registry, config);
         let mut spec = test_spec();

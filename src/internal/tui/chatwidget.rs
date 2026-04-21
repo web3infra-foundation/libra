@@ -28,6 +28,8 @@ use crate::internal::ai::orchestrator::types::{
 struct DagPanelNode {
     task_id: Uuid,
     kind: TaskKind,
+    title: String,
+    dependency_count: usize,
     depth: usize,
     ordinal: usize,
     status: TaskNodeStatus,
@@ -71,6 +73,8 @@ impl DagPanelState {
             .map(|(idx, task)| DagPanelNode {
                 task_id: task.id(),
                 kind: task.kind.clone(),
+                title: task.title().to_string(),
+                dependency_count: task.dependencies().len(),
                 depth: id_to_depth.get(&task.id()).copied().unwrap_or_default(),
                 ordinal: idx + 1,
                 status: TaskNodeStatus::Pending,
@@ -1332,7 +1336,7 @@ impl ChatWidget {
                     .set_style(node_style.add_modifier(Modifier::BOLD));
             }
 
-            let label = format!("{:02}", node.ordinal);
+            let label = format!("{}{:02}", task_kind_prefix(&node.kind), node.ordinal);
             let label_x = x.saturating_add(2);
             if label_x < inner.right() {
                 for (offset, ch) in label.chars().enumerate() {
@@ -1373,6 +1377,42 @@ impl ChatWidget {
                     .set_symbol(ch.encode_utf8(&mut [0; 4]))
                     .set_style(style);
             }
+        }
+
+        let mut detail_y = layout.summary_y.saturating_add(1);
+        let detail_bottom = inner.bottom().saturating_sub(1);
+        for node in &panel.nodes {
+            if detail_y >= detail_bottom {
+                break;
+            }
+            let dep_suffix = if node.dependency_count == 0 {
+                String::new()
+            } else {
+                format!(" dep:{}", node.dependency_count)
+            };
+            let line = format!(
+                "{}{:02} {:<7} {}{}",
+                task_kind_prefix(&node.kind),
+                node.ordinal,
+                task_status_label(&node.status),
+                node.title,
+                dep_suffix
+            );
+            for (offset, ch) in truncate_label(&line, inner.width.saturating_sub(2) as usize)
+                .chars()
+                .enumerate()
+            {
+                let x = inner.x.saturating_add(1 + offset as u16);
+                if x >= inner.right() {
+                    break;
+                }
+                if let Some(cell_ref) = buf.cell_mut((x, detail_y)) {
+                    cell_ref
+                        .set_symbol(ch.encode_utf8(&mut [0; 4]))
+                        .set_style(panel_node_style(&node.status));
+                }
+            }
+            detail_y = detail_y.saturating_add(1);
         }
     }
 }
@@ -1578,6 +1618,14 @@ fn task_kind_label(kind: &TaskKind) -> &'static str {
         TaskKind::Implementation => "impl",
         TaskKind::Analysis => "analysis",
         TaskKind::Gate => "gate",
+    }
+}
+
+fn task_kind_prefix(kind: &TaskKind) -> &'static str {
+    match kind {
+        TaskKind::Implementation => "I",
+        TaskKind::Analysis => "A",
+        TaskKind::Gate => "G",
     }
 }
 
@@ -2019,7 +2067,7 @@ mod tests {
     }
 
     #[test]
-    fn dag_panel_renders_graph_without_task_titles() {
+    fn dag_panel_renders_graph_with_task_details() {
         let plan = sample_plan();
         let first_task_id = plan.tasks[0].id();
 
@@ -2042,8 +2090,10 @@ mod tests {
         assert!(rendered.contains('●'));
         assert!(rendered.contains('□'));
         assert!(rendered.contains('│') || rendered.contains('─'));
-        assert!(!rendered.contains("Analyze repository structure"));
-        assert!(!rendered.contains("Fast gate"));
+        assert!(rendered.contains("I01 done"));
+        assert!(rendered.contains("G02 pending"));
+        assert!(rendered.contains("Analyze repository"));
+        assert!(rendered.contains("Fast gate"));
     }
 
     #[test]

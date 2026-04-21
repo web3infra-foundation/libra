@@ -1340,6 +1340,8 @@ async fn persist_runtime_event(
             .await?;
         }
         super::types::TaskRuntimeEvent::AssistantMessage(text) => {
+            let summary = summarize_runtime_text(&text, 240);
+            let content_chars = text.chars().count();
             persist_context_frame(
                 mcp_server,
                 actor,
@@ -1348,7 +1350,9 @@ async fn persist_runtime_event(
                 summarize_runtime_text(&text, 96),
                 json!({
                     "event": "assistant_message",
-                    "text": text,
+                    "summary": summary,
+                    "contentChars": content_chars,
+                    "fullTextStored": false,
                     "taskId": task.id().to_string(),
                     "taskTitle": task.title(),
                 }),
@@ -3840,9 +3844,14 @@ mod tests {
             &plan_spec.tasks[0],
             TaskRuntimeEvent::Phase(TaskRuntimePhase::Starting),
         );
+        let raw_tail = "UNSTORED_RAW_ASSISTANT_TAIL";
+        let long_assistant_message = format!(
+            "Editing src/lib.rs to fix the issue. {} {raw_tail}",
+            "x".repeat(320)
+        );
         observer.on_task_runtime_event(
             &plan_spec.tasks[0],
-            TaskRuntimeEvent::AssistantMessage("Editing src/lib.rs to fix the issue".to_string()),
+            TaskRuntimeEvent::AssistantMessage(long_assistant_message),
         );
         observer.on_task_runtime_event(
             &plan_spec.tasks[0],
@@ -3959,6 +3968,22 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        let context_frames = history.list_objects("context_frame").await.unwrap();
+        let storage = server.storage.as_ref().unwrap();
+        let mut assistant_context_frame = None;
+        for (_, hash) in context_frames {
+            let value = storage.get_json::<serde_json::Value>(&hash).await.unwrap();
+            let serialized = serde_json::to_string(&value).unwrap();
+            if serialized.contains("\"assistant_message\"") {
+                assistant_context_frame = Some(serialized);
+                break;
+            }
+        }
+        let assistant_context_frame =
+            assistant_context_frame.expect("expected assistant message context frame");
+        assert!(assistant_context_frame.contains("\"fullTextStored\":false"));
+        assert!(assistant_context_frame.contains("\"contentChars\""));
+        assert!(!assistant_context_frame.contains(raw_tail));
         assert!(
             history
                 .list_objects("tool_invocation_event")

@@ -14,6 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use async_trait::async_trait;
 use chrono::Utc;
 use crossterm::event::{KeyCode, KeyModifiers};
 use tokio::{
@@ -58,16 +59,19 @@ use crate::{
         },
         mcp::{
             resource::{
-                CreateContextSnapshotParams, CreateDecisionParams, CreatePlanParams,
-                CreateRunParams, CreateTaskParams, CreateToolInvocationParams, PlanStepParams,
+                CreateContextFrameParams, CreateContextSnapshotParams, CreateDecisionParams,
+                CreatePlanParams, CreateRunParams, CreateTaskParams, CreateToolInvocationParams,
+                PlanStepParams,
             },
             server::LibraMcpServer,
         },
         orchestrator::{
             planner::compile_execution_plan_spec,
             types::{
-                DecisionOutcome, ExecutionPlanSpec, GateReport, OrchestratorResult, SystemReport,
-                TaskKind, TaskNodeStatus, TaskRuntimeEvent, TaskRuntimeNoteLevel, TaskRuntimePhase,
+                DecisionOutcome, ExecutionPlanSpec, GateReport, OrchestratorPhaseConfirmer,
+                OrchestratorResult, PhaseConfirmationDecision, PhaseConfirmationPrompt,
+                SystemReport, TaskKind, TaskNodeStatus, TaskRuntimeEvent, TaskRuntimeNoteLevel,
+                TaskRuntimePhase,
             },
         },
         projection::ProjectionRebuilder,
@@ -268,6 +272,14 @@ struct PendingManagedInteraction {
     selected: usize,
 }
 
+/// Pending orchestrator Phase 3 / Phase 4 confirmation.
+struct PendingPhaseConfirmation {
+    prompt: PhaseConfirmationPrompt,
+    response_tx: tokio::sync::oneshot::Sender<PhaseConfirmationDecision>,
+    interaction_id: String,
+    selected: usize,
+}
+
 /// Configuration for creating an App.
 pub struct AppConfig {
     pub welcome_message: String,
@@ -339,6 +351,8 @@ pub struct App<M: CompletionModel> {
     pending_exec_approval: Option<PendingExecApproval>,
     /// Currently pending managed-provider approval interaction, if any.
     pending_managed_interaction: Option<PendingManagedInteraction>,
+    /// Currently pending Phase 3 / Phase 4 confirmation, if any.
+    pending_phase_confirmation: Option<PendingPhaseConfirmation>,
     /// Post-plan dialog state (present when user is choosing Execute/Modify/Cancel).
     pending_post_plan: Option<PendingPostPlan>,
     /// IntentSpec dialog state (present when user is choosing Confirm/Modify/Cancel).
@@ -463,6 +477,7 @@ where
             pending_user_input: None,
             pending_exec_approval: None,
             pending_managed_interaction: None,
+            pending_phase_confirmation: None,
             pending_post_plan: None,
             pending_intent_review: None,
             pending_plan_revision: None,
@@ -795,7 +810,10 @@ where
             }
             AgentStatus::AwaitingApproval => match key.code {
                 KeyCode::Up => {
-                    if let Some(ref mut pending) = self.pending_managed_interaction {
+                    if let Some(ref mut pending) = self.pending_phase_confirmation {
+                        pending.selected = pending.selected.saturating_sub(1);
+                        self.widget.bottom_pane.exec_approval_selected = pending.selected;
+                    } else if let Some(ref mut pending) = self.pending_managed_interaction {
                         pending.selected = pending.selected.saturating_sub(1);
                         self.widget.bottom_pane.exec_approval_selected = pending.selected;
                     } else if let Some(ref mut pending) = self.pending_exec_approval {
@@ -805,7 +823,10 @@ where
                     self.schedule_draw();
                 }
                 KeyCode::Down => {
-                    if let Some(ref mut pending) = self.pending_managed_interaction {
+                    if let Some(ref mut pending) = self.pending_phase_confirmation {
+                        pending.selected = (pending.selected + 1).min(2);
+                        self.widget.bottom_pane.exec_approval_selected = pending.selected;
+                    } else if let Some(ref mut pending) = self.pending_managed_interaction {
                         let max = pending.interaction.options.len().saturating_sub(1);
                         pending.selected = (pending.selected + 1).min(max);
                         self.widget.bottom_pane.exec_approval_selected = pending.selected;
@@ -816,10 +837,18 @@ where
                     self.schedule_draw();
                 }
                 KeyCode::Enter => {
-                    self.submit_exec_approval_decision();
+                    if self.pending_phase_confirmation.is_some() {
+                        self.submit_phase_confirmation_decision();
+                    } else {
+                        self.submit_exec_approval_decision();
+                    }
                 }
                 KeyCode::Esc => {
-                    self.reject_pending_exec_approval();
+                    if self.pending_phase_confirmation.is_some() {
+                        self.reject_pending_phase_confirmation();
+                    } else {
+                        self.reject_pending_exec_approval();
+                    }
                 }
                 _ => {}
             },
@@ -1302,6 +1331,159 @@ where
                     .await;
             });
         }
+    }
+
+    fn handle_phase_confirmation_request(
+        &mut self,
+        prompt: PhaseConfirmationPrompt,
+        response_tx: tokio::sync::oneshot::Sender<PhaseConfirmationDecision>,
+    ) {
+        let interaction_id = format!(
+            "phase-{}-confirmation-{}",
+            prompt.phase.number(),
+            self.next_code_ui_item_id
+        );
+        self.next_code_ui_item_id = self.next_code_ui_item_id.saturating_add(1);
+        let details = (!prompt.details.is_empty()).then(|| prompt.details.join(" | "));
+
+        self.widget.bottom_pane.set_approval_dialog(
+            prompt.title.clone(),
+            prompt.summary.clone(),
+            self.registry.working_dir().to_path_buf(),
+            details.clone(),
+            false,
+            "orchestrator phase gate".to_string(),
+            false,
+            Vec::new(),
+            vec![
+                (
+                    "Continue".to_string(),
+                    format!("Enter {}", prompt.phase.label()),
+                ),
+                (
+                    "Reject".to_string(),
+                    "Stop this phase and report rejection".to_string(),
+                ),
+                ("Abort".to_string(), "Stop the workflow".to_string()),
+            ],
+        );
+        self.pending_phase_confirmation = Some(PendingPhaseConfirmation {
+            prompt: prompt.clone(),
+            response_tx,
+            interaction_id: interaction_id.clone(),
+            selected: 0,
+        });
+        self.widget.bottom_pane.exec_approval_selected = 0;
+        self.widget
+            .bottom_pane
+            .set_status(AgentStatus::AwaitingApproval);
+        self.sync_mux_input_context();
+        self.schedule_draw();
+
+        if let Some(code_ui_session) = self.code_ui_session.clone() {
+            let interaction = CodeUiInteractionRequest {
+                id: interaction_id,
+                kind: CodeUiInteractionKind::Approval,
+                title: Some(prompt.title),
+                description: details,
+                prompt: Some(prompt.summary),
+                options: vec![
+                    CodeUiInteractionOption {
+                        id: "continue".to_string(),
+                        label: "Continue".to_string(),
+                        description: Some("Continue to the next phase".to_string()),
+                    },
+                    CodeUiInteractionOption {
+                        id: "reject".to_string(),
+                        label: "Reject".to_string(),
+                        description: Some("Reject this phase".to_string()),
+                    },
+                    CodeUiInteractionOption {
+                        id: "abort".to_string(),
+                        label: "Abort".to_string(),
+                        description: Some("Stop the workflow".to_string()),
+                    },
+                ],
+                status: CodeUiInteractionStatus::Pending,
+                metadata: serde_json::json!({
+                    "phase": prompt.phase.number(),
+                    "phaseLabel": prompt.phase.label(),
+                    "details": prompt.details,
+                }),
+                requested_at: Utc::now(),
+                resolved_at: None,
+            };
+            tokio::spawn(async move {
+                code_ui_session.upsert_interaction(interaction).await;
+                code_ui_session
+                    .set_status(CodeUiSessionStatus::AwaitingInteraction)
+                    .await;
+            });
+        }
+    }
+
+    fn submit_phase_confirmation_decision(&mut self) {
+        let Some(pending) = self.pending_phase_confirmation.take() else {
+            return;
+        };
+        let decision = match pending.selected {
+            0 => PhaseConfirmationDecision::Continue,
+            1 => PhaseConfirmationDecision::Reject,
+            _ => PhaseConfirmationDecision::Abort,
+        };
+        tracing::debug!(
+            target: "libra::internal::tui::app",
+            phase = pending.prompt.phase.number(),
+            decision = ?decision,
+            "tui phase confirmation resolved"
+        );
+        let interaction_id = pending.interaction_id;
+        let _ = pending.response_tx.send(decision);
+        self.widget.bottom_pane.set_exec_approval(None);
+        self.widget.bottom_pane.set_status(AgentStatus::Thinking);
+        self.sync_mux_input_context();
+        self.schedule_draw();
+        if let Some(code_ui_session) = self.code_ui_session.clone() {
+            tokio::spawn(async move {
+                code_ui_session.resolve_interaction(&interaction_id).await;
+                code_ui_session
+                    .set_status(CodeUiSessionStatus::Thinking)
+                    .await;
+            });
+        }
+    }
+
+    fn reject_pending_phase_confirmation(&mut self) {
+        let Some(pending) = self.pending_phase_confirmation.take() else {
+            return;
+        };
+        let interaction_id = pending.interaction_id;
+        let _ = pending.response_tx.send(PhaseConfirmationDecision::Abort);
+        self.widget.bottom_pane.set_exec_approval(None);
+        self.widget.bottom_pane.set_status(AgentStatus::Thinking);
+        self.sync_mux_input_context();
+        self.schedule_draw();
+        if let Some(code_ui_session) = self.code_ui_session.clone() {
+            tokio::spawn(async move {
+                code_ui_session.resolve_interaction(&interaction_id).await;
+                code_ui_session
+                    .set_status(CodeUiSessionStatus::Thinking)
+                    .await;
+            });
+        }
+    }
+
+    fn cancel_pending_phase_confirmation(&mut self) {
+        if let Some(pending) = self.pending_phase_confirmation.take() {
+            let interaction_id = pending.interaction_id;
+            let _ = pending.response_tx.send(PhaseConfirmationDecision::Abort);
+            if let Some(code_ui_session) = self.code_ui_session.clone() {
+                tokio::spawn(async move {
+                    code_ui_session.clear_interaction(&interaction_id).await;
+                });
+            }
+        }
+        self.widget.bottom_pane.set_exec_approval(None);
     }
 
     fn submit_exec_approval_decision(&mut self) {
@@ -1920,6 +2102,7 @@ where
             AppEvent::PlanWorkflowComplete {
                 turn_id: _turn_id,
                 text,
+                llm_output,
                 new_history,
                 intent_id,
                 plan_id,
@@ -1932,6 +2115,13 @@ where
                 self.finish_turn_state();
                 self.history = new_history;
                 self.session.add_assistant_message(&text);
+                self.enqueue_llm_context_frame(
+                    "step_summary",
+                    "Phase 1 plan",
+                    intent_id.clone(),
+                    plan_id.clone(),
+                    llm_output.clone().unwrap_or_else(|| text.clone()),
+                );
                 let browser_plan_steps = plan
                     .tasks
                     .iter()
@@ -1982,13 +2172,19 @@ where
 
                 let execution_plan = (*plan).clone();
                 self.widget.show_dag_preview(execution_plan.clone());
-                self.replace_streaming_assistant_cell(Box::new(PlanSummaryHistoryCell::new(
+                let plan_summary_cell = Box::new(PlanSummaryHistoryCell::new(
                     *spec,
                     execution_plan.clone(),
                     intent_id.clone(),
                     plan_id.clone(),
                     warnings.clone(),
-                )));
+                ));
+                if let Some(raw) = llm_output.filter(|text| !text.trim().is_empty()) {
+                    self.complete_streaming_assistant_cell(raw);
+                    self.widget.add_cell(plan_summary_cell);
+                } else {
+                    self.replace_streaming_assistant_cell(plan_summary_cell);
+                }
                 if let Some(code_ui_session) = self.code_ui_session.clone() {
                     let plan_snapshot = CodeUiPlanSnapshot {
                         id: plan_id
@@ -2077,6 +2273,7 @@ where
             AppEvent::IntentSpecReviewReady {
                 turn_id: _turn_id,
                 text,
+                llm_output,
                 new_history,
                 intent_id,
                 spec_json,
@@ -2087,6 +2284,13 @@ where
                 self.sync_mux_input_context();
                 self.history = new_history;
                 self.session.add_assistant_message(&text);
+                self.enqueue_llm_context_frame(
+                    "intent_analysis",
+                    "Phase 0 IntentSpec",
+                    intent_id.clone(),
+                    None,
+                    llm_output.clone().unwrap_or_else(|| text.clone()),
+                );
                 self.session.metadata.insert(
                     LATEST_INTENTSPEC_JSON.to_string(),
                     serde_json::Value::String(spec_json.clone()),
@@ -2120,9 +2324,15 @@ where
                 self.mcp_plan_id = None;
 
                 self.widget.clear_dag_panel();
-                self.replace_streaming_assistant_cell(Box::new(AssistantHistoryCell::new(
-                    text.clone(),
-                )));
+                if let Some(raw) = llm_output.filter(|text| !text.trim().is_empty()) {
+                    self.complete_streaming_assistant_cell(raw);
+                    self.widget
+                        .add_cell(Box::new(AssistantHistoryCell::new(text.clone())));
+                } else {
+                    self.replace_streaming_assistant_cell(Box::new(AssistantHistoryCell::new(
+                        text.clone(),
+                    )));
+                }
                 let interaction_id = intent_id
                     .clone()
                     .unwrap_or_else(|| format!("intent-review-{_turn_id}"));
@@ -2310,6 +2520,14 @@ where
                 tool_name,
                 arguments,
             } => {
+                tracing::debug!(
+                    target: "libra::internal::tui::app",
+                    turn_id = _turn_id,
+                    call_id = %call_id,
+                    tool = %tool_name,
+                    arguments = %log_preview_text(&arguments.to_string()),
+                    "tui tool call displayed"
+                );
                 let tool_summary = Self::tool_call_summary_for_browser(&tool_name, &arguments);
                 let already_visible = mark_visible_tool_call_running(
                     &mut self.widget.cells,
@@ -2445,6 +2663,18 @@ where
                 tool_name,
                 result,
             } => {
+                let result_preview = match &result {
+                    Ok(output) => output.log_preview(),
+                    Err(error) => error.clone(),
+                };
+                tracing::debug!(
+                    target: "libra::internal::tui::app",
+                    turn_id = _turn_id,
+                    call_id = %call_id,
+                    tool = %tool_name,
+                    result = %log_preview_text(&result_preview),
+                    "tui tool call result displayed"
+                );
                 // For successful apply_patch, insert a visual diff cell.
                 if tool_name == "apply_patch"
                     && let Ok(ref output) = result
@@ -2560,6 +2790,20 @@ where
                         .await;
                 }
                 self.schedule_draw();
+            }
+            AppEvent::PhaseConfirmationRequired {
+                turn_id: _turn_id,
+                prompt,
+                response_tx,
+            } => {
+                tracing::debug!(
+                    target: "libra::internal::tui::app",
+                    phase = prompt.phase.number(),
+                    title = %prompt.title,
+                    summary = %log_preview_text(&prompt.summary),
+                    "tui phase confirmation displayed"
+                );
+                self.handle_phase_confirmation_request(prompt, response_tx);
             }
             AppEvent::TaskRuntimeEvent {
                 turn_id,
@@ -3060,6 +3304,7 @@ where
 
     fn request_user_exit(&mut self) {
         self.cancel_pending_user_input();
+        self.cancel_pending_phase_confirmation();
         self.cancel_pending_exec_approval();
         if self.pending_post_plan.is_some() {
             self.dismiss_post_plan_dialog();
@@ -3194,6 +3439,60 @@ where
         });
     }
 
+    fn enqueue_llm_context_frame(
+        &self,
+        kind: &'static str,
+        phase: &'static str,
+        intent_id: Option<String>,
+        plan_id: Option<String>,
+        text: String,
+    ) {
+        let Some(mcp_server) = self.mcp_server.clone() else {
+            return;
+        };
+        let summary = format!(
+            "{phase} LLM output: {}",
+            summarize_llm_output_for_context(&text, 96)
+        );
+        let output_summary = summarize_llm_output_for_context(&text, 240);
+        let content_chars = text.chars().count();
+        self.mcp_write_tracker.spawn(async move {
+            let params = CreateContextFrameParams {
+                kind: kind.to_string(),
+                summary,
+                intent_id,
+                run_id: None,
+                plan_id,
+                step_id: None,
+                data: Some(serde_json::json!({
+                    "event": "agent_message",
+                    "phase": phase,
+                    "summary": output_summary,
+                    "contentChars": content_chars,
+                    "fullTextStored": false,
+                })),
+                token_estimate: Some(((content_chars.max(1) as u64) / 4).max(1)),
+                actor_kind: Some("agent".to_string()),
+                actor_id: Some("libra-planner".to_string()),
+            };
+            let actor = match mcp_server
+                .resolve_actor_from_params(params.actor_kind.as_deref(), params.actor_id.as_deref())
+            {
+                Ok(actor) => actor,
+                Err(error) => {
+                    cli_error!(
+                        error,
+                        "error: failed to resolve actor for LLM context frame"
+                    );
+                    return;
+                }
+            };
+            if let Err(error) = mcp_server.create_context_frame_impl(params, actor).await {
+                cli_error!(error, "error: failed to record LLM context frame");
+            }
+        });
+    }
+
     fn clear_mcp_run_id(&mut self) {
         self.mcp_run_id = None;
     }
@@ -3206,6 +3505,7 @@ where
     }
 
     fn finish_turn_state(&mut self) {
+        self.cancel_pending_phase_confirmation();
         self.cancel_pending_exec_approval();
         self.agent_task = None;
         self.running_tool_calls = 0;
@@ -3600,12 +3900,17 @@ where
                 warnings.push(warning);
             }
 
+            let llm_output = turn
+                .as_ref()
+                .map(|turn| turn.final_text.clone())
+                .filter(|text| !text.trim().is_empty());
             let mut new_history = turn.map(|turn| turn.history).unwrap_or(fallback_history);
             new_history.push(Message::assistant(summary.clone()));
 
             let _ = tx.send(AppEvent::PlanWorkflowComplete {
                 turn_id,
                 text: summary,
+                llm_output,
                 new_history,
                 intent_id,
                 plan_id,
@@ -3951,6 +4256,35 @@ where
                 plan_task_counts: Arc::new(Mutex::new(HashMap::new())),
                 execution_notes_sent: Arc::new(Mutex::new(HashSet::new())),
             });
+            struct TuiPhaseConfirmer {
+                tx: UnboundedSender<AppEvent>,
+                turn_id: TurnId,
+            }
+
+            #[async_trait]
+            impl OrchestratorPhaseConfirmer for TuiPhaseConfirmer {
+                async fn confirm(
+                    &self,
+                    prompt: PhaseConfirmationPrompt,
+                ) -> PhaseConfirmationDecision {
+                    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+                    if self
+                        .tx
+                        .send(AppEvent::PhaseConfirmationRequired {
+                            turn_id: self.turn_id,
+                            prompt,
+                            response_tx,
+                        })
+                        .is_err()
+                    {
+                        return PhaseConfirmationDecision::Abort;
+                    }
+                    response_rx
+                        .await
+                        .unwrap_or(PhaseConfirmationDecision::Abort)
+                }
+            }
+
             let config = OrchestratorConfig {
                 working_dir,
                 base_commit: None,
@@ -3962,6 +4296,10 @@ where
                 reviewer_preamble,
                 mcp_server,
                 observer: Some(observer),
+                phase_confirmer: Some(Arc::new(TuiPhaseConfirmer {
+                    tx: tx.clone(),
+                    turn_id,
+                })),
             };
             let orchestrator = Orchestrator::new(model, registry, config);
 
@@ -4307,12 +4645,17 @@ where
             let warnings = persistence_warning.into_iter().collect::<Vec<_>>();
             let review = build_intentspec_review(&spec, intent_id.as_deref(), &warnings);
 
+            let llm_output = turn
+                .as_ref()
+                .map(|turn| turn.final_text.clone())
+                .filter(|text| !text.trim().is_empty());
             let mut new_history = turn.map(|turn| turn.history).unwrap_or(fallback_history);
             new_history.push(Message::assistant(review.clone()));
 
             let _ = tx.send(AppEvent::IntentSpecReviewReady {
                 turn_id,
                 text: review,
+                llm_output,
                 new_history,
                 intent_id,
                 spec_json: pretty_json,
@@ -4451,7 +4794,8 @@ where
             AgentStatus::AwaitingIntentReviewChoice
         } else if self.pending_post_plan.is_some() {
             AgentStatus::AwaitingPostPlanChoice
-        } else if self.pending_exec_approval.is_some() {
+        } else if self.pending_phase_confirmation.is_some() || self.pending_exec_approval.is_some()
+        {
             AgentStatus::AwaitingApproval
         } else if self.pending_user_input.is_some() {
             AgentStatus::AwaitingUserInput
@@ -4533,6 +4877,12 @@ where
     }
 
     fn complete_streaming_assistant_cell(&mut self, content: String) {
+        tracing::debug!(
+            target: "libra::internal::tui::app",
+            bytes = content.len(),
+            content = %log_preview_text(&content),
+            "tui assistant message completed"
+        );
         for cell in self.widget.cells.iter_mut().rev() {
             if let Some(assistant_cell) = cell.as_any_mut().downcast_mut::<AssistantHistoryCell>()
                 && assistant_cell.is_streaming
@@ -4547,6 +4897,12 @@ where
     }
 
     fn append_streaming_assistant_delta(&mut self, delta: &str) {
+        tracing::debug!(
+            target: "libra::internal::tui::app",
+            bytes = delta.len(),
+            content = %log_preview_text(delta),
+            "tui assistant delta rendered"
+        );
         for cell in self.widget.cells.iter_mut().rev() {
             if let Some(assistant_cell) = cell.as_any_mut().downcast_mut::<AssistantHistoryCell>()
                 && assistant_cell.is_streaming
@@ -4906,6 +5262,25 @@ fn update_visible_tool_call_preview(
     }
 
     false
+}
+
+fn log_preview_text(text: &str) -> String {
+    const MAX_CHARS: usize = 240;
+    summarize_llm_output_for_context(text, MAX_CHARS)
+}
+
+fn summarize_llm_output_for_context(text: &str, max_chars: usize) -> String {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= max_chars {
+        return normalized;
+    }
+
+    let mut out = normalized
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    out.push('…');
+    out
 }
 
 fn format_plan_compiled_stage_note(plan: &ExecutionPlanSpec) -> String {

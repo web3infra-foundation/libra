@@ -41,22 +41,14 @@ fn main() {
 
 fn init_tracing() {
     let log_file = std::env::var_os("LIBRA_LOG_FILE");
-    if std::env::var_os("LIBRA_LOG").is_none()
-        && std::env::var_os("RUST_LOG").is_none()
-        && log_file.is_none()
-    {
+    let log_filter = std::env::var_os("LIBRA_LOG")
+        .or_else(|| std::env::var_os("RUST_LOG"))
+        .or_else(|| log_file.as_ref().map(|_| "libra=debug".into()));
+    let Some(log_filter) = log_filter else {
         return;
-    }
+    };
 
-    if std::env::var_os("RUST_LOG").is_none() {
-        let value = std::env::var_os("LIBRA_LOG").unwrap_or_else(|| "libra=debug".into());
-        // SAFETY: CLI startup happens before any threads are spawned.
-        unsafe {
-            std::env::set_var("RUST_LOG", value);
-        }
-    }
-
-    let env_filter = EnvFilter::from_default_env();
+    let env_filter = EnvFilter::new(log_filter.to_string_lossy());
     let Some(path) = log_file else {
         let _ = tracing_subscriber::fmt()
             .with_env_filter(env_filter)

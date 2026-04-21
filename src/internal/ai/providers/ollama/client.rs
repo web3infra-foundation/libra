@@ -31,6 +31,7 @@ const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 10;
 pub struct OllamaProvider {
     cloud_api: bool,
     api_key: Option<String>,
+    compact_tool_schema: bool,
 }
 
 impl fmt::Debug for OllamaProvider {
@@ -38,6 +39,7 @@ impl fmt::Debug for OllamaProvider {
         f.debug_struct("OllamaProvider")
             .field("cloud_api", &self.cloud_api)
             .field("api_key", &self.api_key.as_ref().map(|_| "***"))
+            .field("compact_tool_schema", &self.compact_tool_schema)
             .finish()
     }
 }
@@ -83,6 +85,7 @@ fn build_ollama_client(base_url: &str, api_key: Option<String>) -> Client {
         provider: OllamaProvider {
             cloud_api: is_ollama_cloud_base_url(base_url),
             api_key,
+            compact_tool_schema: compact_tool_schema_from_env(),
         },
     }
 }
@@ -100,6 +103,18 @@ fn is_ollama_cloud_base_url(base_url: &str) -> bool {
     };
 
     matches!(url.host_str(), Some("ollama.com" | "www.ollama.com"))
+}
+
+fn compact_tool_schema_from_env() -> bool {
+    std::env::var("OLLAMA_COMPACT_TOOLS")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 impl Client {
@@ -129,6 +144,17 @@ impl Client {
         build_ollama_client(base_url, api_key)
     }
 
+    /// Enables or disables compact tool schemas for Ollama requests.
+    pub fn with_compact_tool_schema(mut self, compact: bool) -> Self {
+        self.provider.compact_tool_schema = compact;
+        self
+    }
+
+    /// Returns true when tool schemas should be compacted before sending.
+    pub fn compact_tool_schema(&self) -> bool {
+        self.provider.compact_tool_schema
+    }
+
     /// Returns true when the client points directly at Ollama Cloud.
     pub fn is_cloud_api(&self) -> bool {
         self.provider.cloud_api
@@ -149,10 +175,12 @@ mod tests {
         let provider = OllamaProvider {
             cloud_api: true,
             api_key: Some("secret-key".to_string()),
+            compact_tool_schema: true,
         };
         let debug_str = format!("{:?}", provider);
         assert!(debug_str.contains("OllamaProvider"));
         assert!(debug_str.contains("***"));
+        assert!(debug_str.contains("compact_tool_schema"));
         assert!(!debug_str.contains("secret-key"));
     }
 
@@ -168,6 +196,13 @@ mod tests {
         let client = Client::with_base_url("http://remote:11434/v1");
         assert_eq!(client.base_url, "http://remote:11434/v1");
         assert!(!client.is_cloud_api());
+    }
+
+    #[test]
+    fn test_client_compact_tool_schema_override() {
+        let client = Client::new_local().with_compact_tool_schema(true);
+
+        assert!(client.compact_tool_schema());
     }
 
     #[test]

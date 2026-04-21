@@ -35,6 +35,7 @@ When the TUI exits and Libra can derive the canonical thread ID, `libra code` pr
 | Model | | `--model` | provider default | Provider-specific model ID. |
 | Temperature | | `--temperature` | provider default | Sampling temperature for generation. |
 | Ollama thinking | | `--ollama-thinking` / `--thinking` | `OLLAMA_THINK`, then `off` | Ollama thinking mode: `auto`, `off`, `on`, `low`, `medium`, or `high`. |
+| Ollama compact tools | | `--ollama-compact-tools` | `OLLAMA_COMPACT_TOOLS`, then off | Sends compact tool schemas for remote/cloud Ollama endpoints that reject complex JSON schemas. |
 | Context | | `--context` | none | Operating context: `dev` (alias `development`), `review` (alias `code-review`), `research` (alias `explore`). |
 | Resume | | `--resume <THREAD_ID>` | none | Resume a canonical Libra thread by thread ID. |
 | Approval policy | | `--approval-policy` | `on-request` | Tool approval policy (see Approval Policies below). |
@@ -54,10 +55,10 @@ When the TUI exits and Libra can derive the canonical thread ID, `libra code` pr
 | `anthropic` | Anthropic (default: claude-3.5-sonnet) | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
 | `deepseek` | DeepSeek | `DEEPSEEK_API_KEY` | -- |
 | `zhipu` | Zhipu GLM (default: glm-5) | `ZHIPU_API_KEY` | `ZHIPU_BASE_URL` |
-| `ollama` | Ollama (local models and direct Cloud API) | `OLLAMA_API_KEY` for direct Cloud API | `OLLAMA_BASE_URL`, `OLLAMA_THINK`, `--api-base`, or `--ollama-thinking` |
+| `ollama` | Ollama (local models and direct Cloud API) | `OLLAMA_API_KEY` for direct Cloud API | `OLLAMA_BASE_URL`, `OLLAMA_THINK`, `OLLAMA_COMPACT_TOOLS`, `--api-base`, `--ollama-thinking`, or `--ollama-compact-tools` |
 | `codex` | Codex app-server | -- | `--codex-bin` / `--codex-port` |
 
-Ollama requests stream `/api/chat` responses by default and add a per-request `request_id` to debug logs. They also default to `think:false` so reasoning-capable local models do not spend several minutes generating hidden reasoning before tool calls. Use `--ollama-thinking high` for a single run, or set `OLLAMA_THINK=true`, `low`, `medium`, `high`, or `auto` as the environment default. `auto` omits the `think` field and lets Ollama decide.
+Ollama requests stream `/api/chat` responses by default and add a per-request `request_id` to debug logs. They also default to `think:false` so reasoning-capable local models do not spend several minutes generating hidden reasoning before tool calls. Use `--ollama-thinking high` for a single run, or set `OLLAMA_THINK=true`, `low`, `medium`, `high`, or `auto` as the environment default. `auto` omits the `think` field and lets Ollama decide. Use `--ollama-compact-tools` or `OLLAMA_COMPACT_TOOLS=true` when a remote/cloud Ollama endpoint accepts simple tools but returns 503 for Libra's full tool schema payload.
 
 ### Approval Policies
 
@@ -94,6 +95,9 @@ libra code --stdio
 # Use a local Ollama model; plain requests generate a reviewable plan first
 libra code --provider ollama --model llama3 --api-base http://127.0.0.1:11434/v1
 
+# Use compact tool schemas for a remote/cloud Ollama endpoint
+libra code --provider ollama --model minimax-m2.7:cloud --api-base http://192.168.0.5:11434/v1 --ollama-compact-tools
+
 # Enable high thinking for one Ollama run
 libra code --provider ollama --model qwen3.6 --ollama-thinking high
 
@@ -124,7 +128,7 @@ Output is delivered through the TUI, web interface, or MCP protocol depending on
 
 ## Diagnostics
 
-`libra code` supports tracing through `RUST_LOG` or `LIBRA_LOG`. For TUI sessions, prefer `LIBRA_LOG_FILE=<path>` so diagnostics are written to a plain log file instead of the alternate-screen terminal. When `LIBRA_LOG_FILE` is set without an explicit log filter, Libra defaults to `libra=debug`.
+`libra code` supports tracing through `RUST_LOG` or `LIBRA_LOG`; when both are set, `LIBRA_LOG` takes precedence. For TUI sessions, prefer `LIBRA_LOG_FILE=<path>` so diagnostics are written to a plain log file instead of the alternate-screen terminal. When `LIBRA_LOG_FILE` is set without an explicit log filter, Libra defaults to `libra=debug`.
 
 For Ollama provider failures, useful diagnostics are:
 

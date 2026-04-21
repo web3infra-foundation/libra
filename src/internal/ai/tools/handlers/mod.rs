@@ -54,15 +54,36 @@ pub(crate) fn unwrap_json_string_value(mut value: Value) -> ToolResult<Value> {
             return Ok(value);
         }
 
-        value = serde_json::from_str(trimmed).map_err(|e| {
-            ToolError::ParseError(format!(
-                "Failed to parse JSON encoded in string arguments: {}",
-                e
-            ))
-        })?;
+        value = parse_json_string_container(trimmed)?;
     }
 
     Ok(value)
+}
+
+fn parse_json_string_container(trimmed: &str) -> ToolResult<Value> {
+    match serde_json::from_str(trimmed) {
+        Ok(value) => Ok(value),
+        Err(err) => parse_json_string_container_prefix(trimmed).map_err(|_| {
+            ToolError::ParseError(format!(
+                "Failed to parse JSON encoded in string arguments: {}",
+                err
+            ))
+        }),
+    }
+}
+
+fn parse_json_string_container_prefix(trimmed: &str) -> serde_json::Result<Value> {
+    let mut stream = serde_json::Deserializer::from_str(trimmed).into_iter::<Value>();
+    let value = match stream.next() {
+        Some(result) => result?,
+        None => serde_json::from_str(trimmed)?,
+    };
+    let trailing = trimmed[stream.byte_offset()..].trim();
+    if trailing.chars().all(|ch| matches!(ch, '}' | ']')) {
+        Ok(value)
+    } else {
+        serde_json::from_str(trimmed)
+    }
 }
 
 fn looks_like_json_container(value: &str) -> bool {
@@ -107,5 +128,23 @@ mod tests {
         let args: Args = parse_arguments(&twice).unwrap();
 
         assert_eq!(args.dir_path, ".");
+    }
+
+    #[test]
+    fn parse_arguments_accepts_json_string_encoded_object_with_extra_closing_brace() {
+        let encoded = serde_json::to_string(r#"{"dir_path":"."}}"#).unwrap();
+
+        let args: Args = parse_arguments(&encoded).unwrap();
+
+        assert_eq!(args.dir_path, ".");
+    }
+
+    #[test]
+    fn parse_arguments_rejects_json_string_encoded_object_with_trailing_text() {
+        let encoded = serde_json::to_string(r#"{"dir_path":"."} trailing"#).unwrap();
+
+        let result: ToolResult<Args> = parse_arguments(&encoded);
+
+        assert!(result.is_err());
     }
 }
