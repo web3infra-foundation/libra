@@ -67,12 +67,9 @@ fn init_tracing() {
         }
         Err(err) => {
             eprintln!(
-                "warning: failed to open LIBRA_LOG_FILE {}: {err}",
+                "warning: failed to open LIBRA_LOG_FILE {}; tracing disabled: {err}",
                 path.display()
             );
-            let _ = tracing_subscriber::fmt()
-                .with_env_filter(env_filter)
-                .try_init();
         }
     }
 }

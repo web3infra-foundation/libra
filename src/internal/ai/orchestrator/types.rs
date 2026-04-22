@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::PathBuf,
     sync::Arc,
 };
@@ -589,12 +589,23 @@ fn default_execution_revision() -> u32 {
     1
 }
 
+/// Formal Plan/Task snapshots created during Phase 1 review and reused during execution.
+#[derive(Clone, Debug, Default)]
+pub struct PersistedPlanReviewBundle {
+    pub plan_id: String,
+    pub step_ids: HashMap<Uuid, Uuid>,
+    pub task_ids: HashMap<Uuid, String>,
+}
+
 /// Configuration for the orchestrator.
 #[derive(Clone)]
 pub struct OrchestratorConfig {
     pub working_dir: PathBuf,
     pub base_commit: Option<String>,
     pub persisted_intent_id: Option<String>,
+    /// Preferred formal review bundle containing the user-approved Plan and Task snapshots.
+    pub persisted_plan_bundle: Option<PersistedPlanReviewBundle>,
+    /// Compatibility path for older review flows that only persisted a Plan snapshot.
     pub persisted_plan_id: Option<String>,
     /// Optional user-approved plan to execute instead of compiling the first plan locally.
     pub initial_plan: Option<ExecutionPlanSpec>,

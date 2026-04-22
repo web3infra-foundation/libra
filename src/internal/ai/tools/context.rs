@@ -358,6 +358,25 @@ pub struct UpdatePlanArgs {
     pub plan: Vec<PlanStep>,
 }
 
+// ── submit_plan_draft types ───────────────────────────────────────────
+
+/// One provider-proposed step title for an execution plan draft.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PlanDraftStep {
+    /// Human-readable draft step title.
+    pub title: String,
+}
+
+/// Arguments for the `submit_plan_draft` tool.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SubmitPlanDraftArgs {
+    /// Optional explanation for the proposed draft.
+    #[serde(default)]
+    pub explanation: Option<String>,
+    /// Ordered provider-proposed draft steps. Runtime status is intentionally absent.
+    pub steps: Vec<PlanDraftStep>,
+}
+
 // ── submit_intent_draft types ─────────────────────────────────────────
 
 /// Arguments for the `submit_intent_draft` tool.

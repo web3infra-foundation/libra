@@ -15,11 +15,11 @@ libra graph <THREAD_ID> [--repo <PATH>]
 
 ## Description
 
-`libra code` starts an interactive coding session that pairs a human developer with an AI agent. The default mode launches a terminal UI (TUI) built on ratatui/crossterm with a background web server. Plain developer requests in the generic provider TUI are routed through the built-in planning workflow first: Libra generates a reviewable IntentSpec and execution plan, then waits for Execute Plan / Modify Plan / Cancel before running mutating tools. Two alternative modes are available: `--web-only` runs the web server without the TUI (useful for browser access or remote hosting), and `--stdio` runs an MCP server over standard input/output for integration with AI clients like Claude Desktop.
+`libra code` starts an interactive coding session that pairs a human developer with an AI agent. The default mode launches a terminal UI (TUI) built on ratatui/crossterm with a background web server. Plain developer requests in the generic provider TUI are routed through the built-in planning workflow first: Libra generates a reviewable IntentSpec and execution plan, then waits for Execute Plan / Network / Modify Plan / Cancel before running mutating tools. Two alternative modes are available: `--web-only` runs the web server without the TUI (useful for browser access or remote hosting), and `--stdio` runs an MCP server over standard input/output for integration with AI clients like Claude Desktop.
 
 The command supports seven AI provider backends (Gemini, OpenAI, Anthropic, DeepSeek, Zhipu, Ollama, Codex) and three operating contexts (dev, review, research) that tune the agent's behavior for different workflows. Sessions can be persisted and resumed with Libra's canonical `--resume <thread_id>` flow.
 
-A sandboxed tool-execution layer enforces approval policies that control when the agent can run shell commands, apply patches, or perform other potentially destructive operations.
+A sandboxed tool-execution layer enforces approval policies that control when the agent can run shell commands, apply patches, or perform other potentially destructive operations. TUI dev sessions default to workspace-write execution with network access denied. After the execution plan is ready, the Plan review dialog includes a `Network: Deny` / `Network: Allow` toggle; the selected value becomes the execution `IntentSpec` network policy for shell and gate tasks. Review and research contexts remain read-only and do not grant network access.
 
 When the TUI exits and Libra can derive the canonical thread ID, `libra code` prints a follow-up `libra graph <thread_id>` command so the thread's Intent/Plan/Task/Run/PatchSet version graph can be inspected in a separate TUI. Use `libra graph <thread_id> --repo <path>` when inspecting a repository other than the current directory.
 
@@ -39,6 +39,7 @@ When the TUI exits and Libra can derive the canonical thread ID, `libra code` pr
 | Context | | `--context` | none | Operating context: `dev` (alias `development`), `review` (alias `code-review`), `research` (alias `explore`). |
 | Resume | | `--resume <THREAD_ID>` | none | Resume a canonical Libra thread by thread ID. |
 | Approval policy | | `--approval-policy` | `on-request` | Tool approval policy (see Approval Policies below). |
+| Network access | | `--network-access <allow\|deny>` | `deny` | Default TUI network policy for shell and gate execution; can still be toggled at Plan review. |
 | MCP port | | `--mcp-port` | `6789` | MCP server listen port. |
 | Stdio | | `--stdio` / `--mcp-stdio` | off | Run MCP over stdio. Conflicts with `--web-only`. |
 | API base | | `--api-base` | provider default | Provider API base URL override. |

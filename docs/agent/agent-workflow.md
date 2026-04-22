@@ -234,6 +234,13 @@ The Scheduler translates the confirmed `Intent` revision into reviewed
 plan and task definitions, while Libra derives the mutable planning
 view.
 
+Implementation note: the current generic TUI path is a transitional
+single execution-plan path while the full execution/test dual-plan
+Scheduler cutover is in progress. Even in that path, provider output is
+only a draft; Libra persists a formal `Plan(role=execution)` and matching
+`Task` snapshots, and every `Task.origin_step_id` must point to the
+persisted `Plan.steps[*].step_id`.
+
 1. **Plan Construction**:
    - Read the confirmed `Intent` snapshot and relevant context material.
    - Call the provider to generate a plan candidate; provider may call

@@ -2959,6 +2959,18 @@ Codex TUI 运行时在 `run_tui_turn_with_revision()` 中调用 `runtime_handle.
 2. `IntentSpec` review 和 `Plan` review 必须拆成两个独立 gate，不能继续沿用单轮 `plan-first` 近似实现。
 3. Phase 0 / Phase 1 的 readonly tool analysis 都必须进入 formal `ToolInvocation` / `ContextFrame`，不能只存在于 Codex transcript。
 
+### Current Generic TUI Phase 1 Transitional Path
+
+通用 completion provider 的 TUI 路径当前先进入 Phase 0 `IntentSpec` review，再进入 Phase 1 planning review；但 Phase 1 仍是 single execution-plan transitional path，尚未完成 execution/test dual-plan Scheduler cutover。
+
+该过渡路径的对象边界如下：
+
+1. provider 只能通过 `submit_plan_draft` 返回 planning draft；draft 只包含 `explanation` 和有序 `steps[].title`，不包含 runtime status。
+2. Libra 本地 planner 把 draft 规范化为正式 `Plan(role=execution)` 和对应 `Task` snapshots；`PlanStep` 仍是 `Plan` 内部步骤，不是独立 snapshot。
+3. 每个 `Task.origin_step_id` 必须指向已持久化 `Plan.steps[*].step_id`。
+4. Phase 1 review UI 只展示正式编译后的 execution plan / task 表；provider draft 不再作为 `update_plan` checkbox transcript 展示。
+5. `update_plan` 保留为普通多步任务进度工具，不再承担 Phase 1 provider planning draft 的语义。
+
 ---
 
 ## Appendix B: ContextFrame And Provider Mapping

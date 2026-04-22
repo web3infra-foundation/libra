@@ -175,6 +175,53 @@ impl ToolSpec {
         }
     }
 
+    /// Create a ToolSpec for submit_plan_draft.
+    pub fn submit_plan_draft() -> Self {
+        Self {
+            spec_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: "submit_plan_draft".to_string(),
+                description: "Submit an ordered provider draft for Phase 1 execution planning. \
+                    Use this only to propose plan step titles before the local planner compiles formal tasks."
+                    .to_string(),
+                parameters: FunctionParameters::Object {
+                    param_type: "object".to_string(),
+                    properties: {
+                        let mut props = Map::new();
+                        props.insert(
+                            "explanation".to_string(),
+                            json!({
+                                "type": "string",
+                                "description": "Optional rationale for the proposed draft"
+                            }),
+                        );
+                        props.insert(
+                            "steps".to_string(),
+                            json!({
+                                "type": "array",
+                                "minItems": 1,
+                                "description": "Ordered draft step titles. Do not include runtime status.",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "title": {
+                                            "type": "string",
+                                            "description": "Human-readable draft step title"
+                                        }
+                                    },
+                                    "required": ["title"]
+                                }
+                            }),
+                        );
+                        props
+                    },
+                    required: vec!["steps".to_string()],
+                    definitions: None,
+                },
+            },
+        }
+    }
+
     /// Create a ToolSpec for submit_intent_draft.
     pub fn submit_intent_draft() -> Self {
         Self {

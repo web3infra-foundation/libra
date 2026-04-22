@@ -258,7 +258,7 @@ impl ToolCallGroup {
             "apply_patch" => Self::Edit,
             "shell" => Self::Shell,
             "request_user_input" => Self::Input,
-            "submit_intent_draft" => Self::Draft,
+            "submit_intent_draft" | "submit_plan_draft" => Self::Draft,
             _ => Self::Other(tool_name.to_string()),
         }
     }
@@ -596,6 +596,7 @@ fn summarize_tool_call(tool_name: &str, arguments: &Value) -> String {
         "apply_patch" => summarize_apply_patch(arguments),
         "request_user_input" => "Ask for input".to_string(),
         "submit_intent_draft" => "Submit intent draft".to_string(),
+        "submit_plan_draft" => "Submit plan draft".to_string(),
         _ => format!("Run {}", tool_name.replace('_', " ")),
     }
 }
@@ -1029,7 +1030,7 @@ impl PlanSummaryHistoryCell {
                 ),
             ]),
             Line::styled(
-                "  Workflow graph is shown in the side panel.",
+                "  Workflow graph is shown on the right.",
                 theme::text::muted().add_modifier(Modifier::DIM),
             ),
         ]
@@ -1381,7 +1382,7 @@ impl OrchestratorResultHistoryCell {
             ),
         ]));
         lines.push(Line::styled(
-            "  DAG execution flow is shown in the card above.",
+            "  Execution flow is shown on the right.",
             theme::text::muted().add_modifier(Modifier::DIM),
         ));
         lines
@@ -1961,7 +1962,7 @@ mod tests {
                             kind: ObjectiveKind::Analysis,
                         },
                         Objective {
-                            title: "show dag in side panel".to_string(),
+                            title: "show workflow on right".to_string(),
                             kind: ObjectiveKind::Analysis,
                         },
                     ],
@@ -2027,6 +2028,7 @@ mod tests {
         assert!(joined.contains("[max 2]"));
         assert!(joined.contains("[lanes 2]"));
         assert!(joined.contains("[layers 2]"));
+        assert!(!joined.contains("Plan:"));
         assert!(!joined.contains("files:"));
         assert!(!joined.contains("depends on:"));
     }

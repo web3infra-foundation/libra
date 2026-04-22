@@ -199,7 +199,7 @@ impl ToolLoopObserver for TaskExecutionObserver {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct ReviewerDecision {
     approved: bool,
     summary: String,
@@ -1399,7 +1399,7 @@ fn build_task_prompt(task: &TaskSpec, working_dir: &Path, allowed_tools: &[Strin
         "## Path Rules\nUse repository-relative paths for read_file, list_dir, and grep_files. The runtime will resolve them from the working directory. Never invent or use paths outside the current workspace.".to_string(),
     );
     parts.push(
-        "## Version Control\nDo not use git for status, diff, add, commit, branch, log, show, or switch operations. Use Libra version-control only; when the run_libra_vcs tool is available, call it for those operations."
+        "## Version Control\nDo not use git for status, diff, add, commit, branch, log, show, or switch operations. Use Libra version-control only; when the run_libra_vcs tool is available, call it for those operations. run_libra_vcs is not a shell and must not be used for cargo, fmt, clippy, test, build, or arbitrary command execution; deterministic verification commands are owned by gate tasks."
             .to_string(),
     );
 
@@ -1597,14 +1597,66 @@ fn parse_reviewer_decision(raw: &str) -> Result<ReviewerDecision, String> {
         return Ok(parsed);
     }
 
-    let start = raw
-        .find('{')
-        .ok_or_else(|| "reviewer response missing JSON object".to_string())?;
-    let end = raw
-        .rfind('}')
-        .ok_or_else(|| "reviewer response missing JSON terminator".to_string())?;
-    serde_json::from_str::<ReviewerDecision>(&raw[start..=end])
-        .map_err(|err| format!("invalid reviewer JSON: {err}"))
+    let mut last_error = None;
+    for candidate in fenced_json_blocks(raw).chain(json_object_candidates(raw)) {
+        match parse_reviewer_decision_prefix(candidate) {
+            Ok(parsed) => return Ok(parsed),
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    match last_error {
+        Some(error) => Err(format!("invalid reviewer JSON: {error}")),
+        None => Err("reviewer response missing JSON object".to_string()),
+    }
+}
+
+fn fenced_json_blocks(raw: &str) -> impl Iterator<Item = &str> {
+    struct Blocks<'a> {
+        raw: &'a str,
+        offset: usize,
+    }
+
+    impl<'a> Iterator for Blocks<'a> {
+        type Item = &'a str;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            while let Some(relative_start) = self.raw[self.offset..].find("```") {
+                let fence_start = self.offset + relative_start;
+                let header_start = fence_start + 3;
+                let Some(relative_header_end) = self.raw[header_start..].find('\n') else {
+                    self.offset = header_start;
+                    continue;
+                };
+                let header_end = header_start + relative_header_end;
+                let header = self.raw[header_start..header_end].trim();
+                let body_start = header_end + 1;
+                let Some(relative_end) = self.raw[body_start..].find("```") else {
+                    self.offset = body_start;
+                    continue;
+                };
+                let body_end = body_start + relative_end;
+                self.offset = body_end + 3;
+                if header.is_empty() || header.eq_ignore_ascii_case("json") {
+                    return Some(self.raw[body_start..body_end].trim());
+                }
+            }
+            None
+        }
+    }
+
+    Blocks { raw, offset: 0 }
+}
+
+fn json_object_candidates(raw: &str) -> impl Iterator<Item = &str> {
+    raw.char_indices()
+        .filter(|(_, ch)| *ch == '{')
+        .map(|(index, _)| &raw[index..])
+}
+
+fn parse_reviewer_decision_prefix(raw: &str) -> Result<ReviewerDecision, serde_json::Error> {
+    let mut deserializer = serde_json::Deserializer::from_str(raw.trim_start());
+    ReviewerDecision::deserialize(&mut deserializer)
 }
 
 fn runtime_context_for_task(
@@ -2810,9 +2862,48 @@ mod tests {
         assert!(prompt.contains("## Version Control"));
         assert!(prompt.contains("Do not use git"));
         assert!(prompt.contains("run_libra_vcs"));
+        assert!(prompt.contains("must not be used for cargo"));
+        assert!(prompt.contains("verification commands are owned by gate tasks"));
         assert!(prompt.contains("## Completion Requirement"));
         assert!(prompt.contains("Before reporting completion"));
         assert!(prompt.contains("src/main.rs"));
+    }
+
+    #[test]
+    fn parses_reviewer_json_from_fenced_block_after_markdown_notes() {
+        let raw = "\
+Review notes:
+- Do not parse this pseudo object: {approved: true}
+
+```json
+{\"approved\":true,\"summary\":\"clap dependency added\",\"issues\":[]}
+```
+
+Done.";
+
+        let decision = parse_reviewer_decision(raw).unwrap();
+
+        assert!(decision.approved);
+        assert_eq!(decision.summary, "clap dependency added");
+        assert!(decision.issues.is_empty());
+    }
+
+    #[test]
+    fn parses_reviewer_json_embedded_in_plain_text() {
+        let raw = "The change is acceptable. {\"approved\":false,\"summary\":\"needs test\",\"issues\":[\"missing CLI test\"]}";
+
+        let decision = parse_reviewer_decision(raw).unwrap();
+
+        assert!(!decision.approved);
+        assert_eq!(decision.summary, "needs test");
+        assert_eq!(decision.issues, vec!["missing CLI test"]);
+    }
+
+    #[test]
+    fn rejects_reviewer_text_without_json_object() {
+        let error = parse_reviewer_decision("approved: true").unwrap_err();
+
+        assert!(error.contains("missing JSON object"));
     }
 
     #[test]

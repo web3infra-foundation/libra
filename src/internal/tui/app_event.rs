@@ -12,10 +12,10 @@ use crate::internal::ai::{
     completion::Message,
     intentspec::types::IntentSpec,
     orchestrator::types::{
-        ExecutionPlanSpec, OrchestratorResult, PhaseConfirmationDecision, PhaseConfirmationPrompt,
-        TaskNodeStatus, TaskRuntimeEvent,
+        ExecutionPlanSpec, OrchestratorResult, PersistedPlanReviewBundle,
+        PhaseConfirmationDecision, PhaseConfirmationPrompt, TaskNodeStatus, TaskRuntimeEvent,
     },
-    tools::{ToolOutput, context::UpdatePlanArgs},
+    tools::ToolOutput,
 };
 
 /// Logical turn identifier for isolating async event streams.
@@ -69,6 +69,19 @@ pub enum AgentStatus {
     AwaitingIntentReviewChoice,
 }
 
+/// Provider-submitted Phase 1 planning draft captured from `submit_plan_draft`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderPlanDraft {
+    pub explanation: Option<String>,
+    pub steps: Vec<ProviderPlanDraftStep>,
+}
+
+/// One ordered provider draft step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderPlanDraftStep {
+    pub title: String,
+}
+
 /// Application-level events.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
@@ -90,10 +103,11 @@ pub enum AppEvent {
         new_history: Vec<Message>,
         intent_id: Option<String>,
         plan_id: Option<String>,
+        persisted_plan_bundle: Option<PersistedPlanReviewBundle>,
         spec_json: String,
         spec: Box<IntentSpec>,
         plan: Box<ExecutionPlanSpec>,
-        llm_plan: UpdatePlanArgs,
+        plan_draft: ProviderPlanDraft,
         warnings: Vec<String>,
     },
     /// Complete result for the Phase 0 IntentSpec review gate.
@@ -181,6 +195,11 @@ pub enum AppEvent {
         text: String,
         new_history: Vec<Message>,
         result: Option<Box<OrchestratorResult>>,
+        spec_json: String,
+        intent_id: Option<String>,
+        plan_draft: ProviderPlanDraft,
+        warnings: Vec<String>,
+        network_access: bool,
     },
 }
 

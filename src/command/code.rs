@@ -115,7 +115,7 @@ use crate::{
                 handlers::{
                     ApplyPatchHandler, GrepFilesHandler, ListDirHandler, McpBridgeHandler,
                     PlanHandler, ReadFileHandler, RequestUserInputHandler, SearchFilesHandler,
-                    ShellHandler, SubmitIntentDraftHandler,
+                    ShellHandler, SubmitIntentDraftHandler, SubmitPlanDraftHandler,
                 },
             },
             web::{
@@ -247,6 +247,21 @@ pub enum CodeApprovalPolicy {
     Untrusted,
 }
 
+/// Developer-selected network access policy for TUI execution.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum CodeNetworkAccess {
+    /// Allow shell and gate tasks to use network access.
+    Allow,
+    /// Deny network access for shell and gate tasks.
+    Deny,
+}
+
+impl CodeNetworkAccess {
+    fn is_allowed(self) -> bool {
+        matches!(self, Self::Allow)
+    }
+}
+
 /// Maps the user-facing [`CodeApprovalPolicy`] to the internal [`AskForApproval`]
 /// enum used by the sandbox/approval subsystem.
 impl From<CodeApprovalPolicy> for AskForApproval {
@@ -329,6 +344,10 @@ pub struct CodeArgs {
     /// - `untrusted`: prompt for non-trusted operations, auto-allow known-safe reads
     #[arg(long, value_enum, default_value_t = CodeApprovalPolicy::OnRequest)]
     pub approval_policy: CodeApprovalPolicy,
+
+    /// Network access policy for TUI shell and gate execution.
+    #[arg(long, value_enum, default_value_t = CodeNetworkAccess::Deny)]
+    pub network_access: CodeNetworkAccess,
 
     /// Port to listen on (MCP server)
     #[arg(long, default_value_t = DEFAULT_MCP_PORT)]
@@ -579,6 +598,7 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
         .register("shell", Arc::new(ShellHandler))
         .register("update_plan", Arc::new(PlanHandler))
         .register("submit_intent_draft", Arc::new(SubmitIntentDraftHandler))
+        .register("submit_plan_draft", Arc::new(SubmitPlanDraftHandler))
         .register(
             "request_user_input",
             Arc::new(RequestUserInputHandler::new(user_input_tx.clone())),
@@ -602,6 +622,7 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
         context: args.context,
         resume_thread_id,
         approval_policy: args.approval_policy.into(),
+        network_access: args.network_access.is_allowed(),
         user_input_rx,
         exec_approval_rx,
         exec_approval_tx,
@@ -1081,6 +1102,7 @@ struct TuiLaunchConfig {
     context: Option<CodeContext>,
     resume_thread_id: Option<String>,
     approval_policy: AskForApproval,
+    network_access: bool,
     user_input_rx: tokio::sync::mpsc::UnboundedReceiver<UserInputRequest>,
     exec_approval_rx: tokio::sync::mpsc::UnboundedReceiver<ExecApprovalRequest>,
     exec_approval_tx: tokio::sync::mpsc::UnboundedSender<ExecApprovalRequest>,
@@ -1294,6 +1316,7 @@ where
             registry.working_dir(),
             params.context,
             params.approval_policy,
+            params.network_access,
             params.exec_approval_tx.clone(),
         )),
         max_turns: None,
@@ -1432,6 +1455,7 @@ where
             mcp_server: Some(params.mcp_server),
             code_ui_session: Some(code_ui_session),
             managed_code_ui_runtime,
+            default_network_access: params.network_access,
         },
     );
 
@@ -1562,7 +1586,8 @@ fn system_preamble(working_dir: &std::path::Path, context: Option<CodeContext>) 
 /// the sandbox policy based on the operating context:
 ///
 /// - **Dev mode (or no context)**: Workspace-write sandbox allowing modifications
-///   within the working directory; network access is denied.
+///   within the working directory; network access follows the developer's
+///   selected policy.
 /// - **Review / Research mode**: Read-only sandbox; no writes or network access.
 ///
 /// The approval policy and its communication channel are also wired in here.
@@ -1570,13 +1595,14 @@ fn default_tui_runtime_context(
     working_dir: &std::path::Path,
     context: Option<CodeContext>,
     approval_policy: AskForApproval,
+    network_access: bool,
     exec_approval_tx: tokio::sync::mpsc::UnboundedSender<ExecApprovalRequest>,
 ) -> ToolRuntimeContext {
     let policy = match context {
         Some(CodeContext::Review | CodeContext::Research) => SandboxPolicy::ReadOnly,
         Some(CodeContext::Dev) | None => SandboxPolicy::WorkspaceWrite {
             writable_roots: vec![working_dir.to_path_buf()],
-            network_access: false,
+            network_access,
             exclude_tmpdir_env_var: false,
             exclude_slash_tmp: false,
         },
@@ -1799,6 +1825,11 @@ fn reject_non_tui_flags(args: &CodeArgs, mode: &str) -> Result<(), String> {
         "--approval-policy",
         mode,
     )?;
+    reject_mode_flag(
+        args.network_access != CodeNetworkAccess::Deny,
+        "--network-access",
+        mode,
+    )?;
     reject_mode_flag(args.api_base.is_some(), "--api-base", mode)?;
     Ok(())
 }
@@ -1830,6 +1861,7 @@ mod tests {
             context: None,
             resume: None,
             approval_policy: CodeApprovalPolicy::OnRequest,
+            network_access: CodeNetworkAccess::Deny,
             mcp_port: DEFAULT_MCP_PORT,
             stdio: false,
             api_base: None,
@@ -1866,6 +1898,31 @@ mod tests {
     fn accepts_default_tui_mode() {
         let args = base_args();
         assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn accepts_network_access_cli_arg_in_tui_mode() {
+        let args = CodeArgs::try_parse_from(["libra", "--network-access", "allow"]).unwrap();
+
+        assert_eq!(args.network_access, CodeNetworkAccess::Allow);
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn rejects_network_access_cli_arg_with_invalid_value() {
+        let result = CodeArgs::try_parse_from(["libra", "--network-access", "sometimes"]);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_network_access_flag_in_web_mode() {
+        let mut args = base_args();
+        args.web_only = true;
+        args.network_access = CodeNetworkAccess::Allow;
+
+        let err = validate_mode_args(&args, &OutputConfig::default()).unwrap_err();
+        assert!(err.contains("--network-access"));
     }
 
     #[test]
@@ -2002,6 +2059,7 @@ mod tests {
             Path::new("/tmp/workspace"),
             Some(CodeContext::Dev),
             AskForApproval::OnRequest,
+            false,
             tx,
         );
 
@@ -2017,6 +2075,28 @@ mod tests {
     }
 
     #[test]
+    fn default_tui_runtime_context_allows_network_when_requested_in_dev_mode() {
+        let (tx, _rx) = unbounded_channel();
+        let runtime = default_tui_runtime_context(
+            Path::new("/tmp/workspace"),
+            Some(CodeContext::Dev),
+            AskForApproval::OnRequest,
+            true,
+            tx,
+        );
+
+        let sandbox = runtime.sandbox.expect("sandbox context should be present");
+        assert!(matches!(
+            sandbox.policy,
+            SandboxPolicy::WorkspaceWrite {
+                writable_roots,
+                network_access,
+                ..
+            } if writable_roots == vec![PathBuf::from("/tmp/workspace")] && network_access
+        ));
+    }
+
+    #[test]
     fn default_tui_runtime_context_is_read_only_for_review_and_research() {
         for context in [CodeContext::Review, CodeContext::Research] {
             let (tx, _rx) = unbounded_channel();
@@ -2024,6 +2104,7 @@ mod tests {
                 Path::new("/tmp/workspace"),
                 Some(context),
                 AskForApproval::OnRequest,
+                true,
                 tx,
             );
 

@@ -181,7 +181,7 @@ fn acl_tool_alias(tool_name: &str) -> &str {
     match tool_name {
         "read_file" | "list_dir" | "grep_files" | "search_files" | "apply_patch" => "workspace.fs",
         "request_user_input" => "interaction",
-        "submit_intent_draft" => "planning",
+        "submit_intent_draft" | "submit_plan_draft" => "planning",
         _ => tool_name,
     }
 }
@@ -370,7 +370,9 @@ fn derive_tool_footprint(
             Vec::new(),
             Vec::new(),
         )),
-        "submit_intent_draft" => Ok(("planning".into(), "submit".into(), Vec::new(), Vec::new())),
+        "submit_intent_draft" | "submit_plan_draft" => {
+            Ok(("planning".into(), "submit".into(), Vec::new(), Vec::new()))
+        }
         other => Ok((other.to_string(), "execute".into(), Vec::new(), Vec::new())),
     }
 }

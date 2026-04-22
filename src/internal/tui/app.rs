@@ -25,7 +25,9 @@ use tokio::{
 use tokio_stream::StreamExt;
 
 use super::{
-    app_event::{AgentEvent, AgentStatus, AppEvent, TurnId},
+    app_event::{
+        AgentEvent, AgentStatus, AppEvent, ProviderPlanDraft, ProviderPlanDraftStep, TurnId,
+    },
     chatwidget::ChatWidget,
     diff::FileChange,
     history_cell::{
@@ -52,16 +54,15 @@ use crate::{
             persistence::persist_intentspec,
             render_summary, repair_intentspec, resolve_intentspec,
             types::{
-                ConflictResolution, DecompositionMode, LibraBinding, Objective, ObjectiveKind,
-                PlanGenerationConfig,
+                ConflictResolution, DecompositionMode, LibraBinding, NetworkPolicy, Objective,
+                ObjectiveKind, PlanGenerationConfig,
             },
             validate_intentspec,
         },
         mcp::{
             resource::{
                 CreateContextFrameParams, CreateContextSnapshotParams, CreateDecisionParams,
-                CreatePlanParams, CreateRunParams, CreateTaskParams, CreateToolInvocationParams,
-                PlanStepParams,
+                CreateRunParams, CreateTaskParams, CreateToolInvocationParams,
             },
             server::LibraMcpServer,
         },
@@ -69,9 +70,9 @@ use crate::{
             planner::compile_execution_plan_spec,
             types::{
                 DecisionOutcome, ExecutionPlanSpec, GateReport, OrchestratorPhaseConfirmer,
-                OrchestratorResult, PhaseConfirmationDecision, PhaseConfirmationPrompt,
-                SystemReport, TaskKind, TaskNodeStatus, TaskRuntimeEvent, TaskRuntimeNoteLevel,
-                TaskRuntimePhase,
+                OrchestratorResult, PersistedPlanReviewBundle, PhaseConfirmationDecision,
+                PhaseConfirmationPrompt, SystemReport, TaskKind, TaskNodeStatus, TaskRuntimeEvent,
+                TaskRuntimeNoteLevel, TaskRuntimePhase,
             },
         },
         projection::ProjectionRebuilder,
@@ -80,7 +81,7 @@ use crate::{
         tools::{
             ToolOutput, ToolRegistry,
             context::{
-                RequestUserInputArgs, StepStatus, UpdatePlanArgs, UserInputAnswer,
+                RequestUserInputArgs, SubmitPlanDraftArgs, UpdatePlanArgs, UserInputAnswer,
                 UserInputRequest, UserInputResponse,
             },
             handlers::submit_intent_draft::parse_submit_intent_draft_value,
@@ -93,7 +94,6 @@ use crate::{
             CodeUiSessionStatus, CodeUiToolCallSnapshot, CodeUiTranscriptEntry,
             CodeUiTranscriptEntryKind, snapshot_from_event,
         },
-        workflow_objects::{build_git_plan, parse_object_id},
     },
 };
 
@@ -237,18 +237,31 @@ struct PendingPostPlan {
     spec_json: String,
     intent_id: Option<String>,
     plan_id: Option<String>,
+    persisted_plan_bundle: Option<PersistedPlanReviewBundle>,
     plan: ExecutionPlanSpec,
-    llm_plan: UpdatePlanArgs,
+    plan_draft: ProviderPlanDraft,
     warnings: Vec<String>,
-    selected: usize, // 0=Execute, 1=Modify, 2=Cancel
+    network_access: bool,
+    selected: usize, // 0=Execute, 1=Network toggle, 2=Modify, 3=Cancel
 }
 
 /// Execution-plan revision state after the user chooses Modify on the plan review.
 struct PendingExecutionPlanRevision {
     spec_json: String,
     intent_id: Option<String>,
-    current_plan: UpdatePlanArgs,
+    current_plan: ProviderPlanDraft,
     warnings: Vec<String>,
+}
+
+struct ExecuteWorkflowRequest {
+    spec_json: String,
+    persisted_intent_id: Option<String>,
+    persisted_plan_id: Option<String>,
+    persisted_plan_bundle: Option<PersistedPlanReviewBundle>,
+    approved_plan: Option<ExecutionPlanSpec>,
+    approved_plan_draft: Option<ProviderPlanDraft>,
+    plan_warnings: Vec<String>,
+    network_access_override: Option<bool>,
 }
 
 /// IntentSpec review dialog state: stores the spec and user selection.
@@ -299,6 +312,8 @@ pub struct AppConfig {
     pub code_ui_session: Option<Arc<CodeUiSession>>,
     /// Optional managed provider runtime controlled through the same TUI.
     pub managed_code_ui_runtime: Option<Arc<CodeUiRuntimeHandle>>,
+    /// Default network access policy selected at TUI launch.
+    pub default_network_access: bool,
 }
 
 /// The main application struct.
@@ -387,6 +402,8 @@ pub struct App<M: CompletionModel> {
     code_ui_session: Option<Arc<CodeUiSession>>,
     /// Managed provider runtime for providers that own their own tool loop.
     managed_code_ui_runtime: Option<Arc<CodeUiRuntimeHandle>>,
+    /// Default network access policy selected at TUI launch.
+    default_network_access: bool,
     /// Monotonic id source for browser transcript artifacts.
     next_code_ui_item_id: u64,
 }
@@ -432,7 +449,7 @@ where
             .tool_specs()
             .into_iter()
             .map(|s| s.function.name)
-            .filter(|name| name != "submit_intent_draft")
+            .filter(|name| is_default_chat_tool(name))
             .collect();
         let mut widget = ChatWidget::new();
         widget
@@ -495,6 +512,7 @@ where
             active_turn_run_id: None,
             code_ui_session: app_config.code_ui_session,
             managed_code_ui_runtime: app_config.managed_code_ui_runtime,
+            default_network_access: app_config.default_network_access,
             next_code_ui_item_id: 1,
         }
     }
@@ -669,11 +687,7 @@ where
                 }
             }
             TuiEvent::Paste(text) => {
-                for c in text.chars() {
-                    self.widget.bottom_pane.insert_char(c);
-                }
-                self.widget.bottom_pane.sync_command_popup();
-                self.schedule_draw();
+                self.handle_paste_text(&text);
             }
             TuiEvent::Mouse(mouse) => {
                 self.handle_mouse_event(mouse);
@@ -689,6 +703,49 @@ where
             }
         }
         Ok(())
+    }
+
+    fn handle_paste_text(&mut self, text: &str) {
+        let text = normalize_terminal_paste_text(text);
+        if text.is_empty() {
+            return;
+        }
+
+        match self.widget.bottom_pane.status {
+            AgentStatus::Idle => {
+                self.widget.bottom_pane.insert_text(&text);
+                self.widget.bottom_pane.sync_command_popup();
+            }
+            AgentStatus::AwaitingUserInput => {
+                let is_freeform = self.pending_user_input.as_ref().is_some_and(|pending| {
+                    let question = &pending.request.questions[pending.current_question];
+                    question.options.as_ref().is_none_or(Vec::is_empty)
+                });
+                let notes_focused = self
+                    .pending_user_input
+                    .as_ref()
+                    .is_some_and(|pending| pending.notes_focused);
+
+                if notes_focused {
+                    if let Some(pending) = self.pending_user_input.as_mut() {
+                        pending.notes_text.push_str(&text);
+                    }
+                    self.sync_user_input_to_pane();
+                } else if is_freeform {
+                    self.widget.bottom_pane.insert_text(&text);
+                } else {
+                    return;
+                }
+            }
+            AgentStatus::Thinking | AgentStatus::Retrying | AgentStatus::ExecutingTool
+                if self.widget.has_task_mux() =>
+            {
+                self.widget.bottom_pane.insert_text(&text);
+            }
+            _ => return,
+        }
+
+        self.schedule_draw();
     }
 
     /// Handle a key press event.
@@ -862,7 +919,7 @@ where
                 }
                 KeyCode::Down => {
                     if let Some(ref mut p) = self.pending_post_plan {
-                        p.selected = (p.selected + 1).min(2);
+                        p.selected = (p.selected + 1).min(3);
                         self.widget.bottom_pane.post_plan_selected = p.selected;
                     }
                     self.schedule_draw();
@@ -2106,10 +2163,11 @@ where
                 new_history,
                 intent_id,
                 plan_id,
+                persisted_plan_bundle,
                 spec_json,
                 spec,
                 plan,
-                llm_plan,
+                plan_draft,
                 warnings,
             } => {
                 self.finish_turn_state();
@@ -2120,7 +2178,7 @@ where
                     "Phase 1 plan",
                     intent_id.clone(),
                     plan_id.clone(),
-                    llm_output.clone().unwrap_or_else(|| text.clone()),
+                    text.clone(),
                 );
                 let browser_plan_steps = plan
                     .tasks
@@ -2172,6 +2230,10 @@ where
 
                 let execution_plan = (*plan).clone();
                 self.widget.show_dag_preview(execution_plan.clone());
+                let network_access = matches!(
+                    spec.constraints.security.network_policy,
+                    NetworkPolicy::Allow
+                );
                 let plan_summary_cell = Box::new(PlanSummaryHistoryCell::new(
                     *spec,
                     execution_plan.clone(),
@@ -2179,12 +2241,8 @@ where
                     plan_id.clone(),
                     warnings.clone(),
                 ));
-                if let Some(raw) = llm_output.filter(|text| !text.trim().is_empty()) {
-                    self.complete_streaming_assistant_cell(raw);
-                    self.widget.add_cell(plan_summary_cell);
-                } else {
-                    self.replace_streaming_assistant_cell(plan_summary_cell);
-                }
+                let _ = llm_output;
+                self.replace_streaming_assistant_cell(plan_summary_cell);
                 if let Some(code_ui_session) = self.code_ui_session.clone() {
                     let plan_snapshot = CodeUiPlanSnapshot {
                         id: plan_id
@@ -2225,6 +2283,18 @@ where
                                 description: Some("Run the approved plan now".to_string()),
                             },
                             CodeUiInteractionOption {
+                                id: "toggle-network".to_string(),
+                                label: if network_access {
+                                    "Network: Allow".to_string()
+                                } else {
+                                    "Network: Deny".to_string()
+                                },
+                                description: Some(
+                                    "Toggle network access for execution gates and shell tools"
+                                        .to_string(),
+                                ),
+                            },
+                            CodeUiInteractionOption {
                                 id: "modify".to_string(),
                                 label: "Modify Plan".to_string(),
                                 description: Some("Revise the execution plan".to_string()),
@@ -2239,6 +2309,7 @@ where
                         metadata: serde_json::json!({
                             "intentId": transcript_entry.metadata["intentId"].clone(),
                             "planId": transcript_entry.metadata["planId"].clone(),
+                            "networkAccess": network_access,
                         }),
                         requested_at: Utc::now(),
                         resolved_at: None,
@@ -2258,12 +2329,17 @@ where
                     spec_json,
                     intent_id,
                     plan_id,
+                    persisted_plan_bundle,
                     plan: execution_plan,
-                    llm_plan,
+                    plan_draft,
                     warnings,
+                    network_access,
                     selected: 0,
                 });
                 self.widget.bottom_pane.reset_post_plan_selection();
+                self.widget
+                    .bottom_pane
+                    .set_post_plan_network_access(network_access);
                 self.widget
                     .bottom_pane
                     .set_status(AgentStatus::AwaitingPostPlanChoice);
@@ -2860,12 +2936,27 @@ where
                 text,
                 new_history,
                 result,
+                spec_json,
+                intent_id,
+                plan_draft,
+                warnings,
+                network_access: _network_access,
             } => {
                 self.finish_turn_state();
                 self.widget.clear_task_mux();
                 self.sync_mux_input_context();
                 self.history = new_history;
                 self.session.add_assistant_message(&text);
+                let repair_required = execution_requires_plan_repair(result.as_deref());
+                let mut repair_plan = result
+                    .as_deref()
+                    .map(|result| provider_plan_draft_from_plan(&result.execution_plan_spec))
+                    .unwrap_or_else(|| plan_draft.clone());
+                if repair_plan.steps.is_empty() {
+                    repair_plan = plan_draft;
+                }
+                let repair_message =
+                    repair_required.then(|| execution_failure_revision_message(result.as_deref()));
                 if let Some(result) = result {
                     self.replace_streaming_assistant_cell(Box::new(
                         OrchestratorResultHistoryCell::new(*result),
@@ -2894,6 +2985,22 @@ where
                         })
                         .await;
                     code_ui_session.set_status(CodeUiSessionStatus::Idle).await;
+                }
+                if let Some(message) = repair_message {
+                    self.pending_execution_plan_revision = Some(PendingExecutionPlanRevision {
+                        spec_json,
+                        intent_id,
+                        current_plan: repair_plan,
+                        warnings,
+                    });
+                    self.widget
+                        .add_cell(Box::new(AssistantHistoryCell::new(message.clone())));
+                    self.history.push(Message::assistant(message.clone()));
+                    self.session.add_assistant_message(&message);
+                    self.widget.bottom_pane.set_status(AgentStatus::Idle);
+                    self.sync_mux_input_context();
+                    self.schedule_draw();
+                    return Ok(());
                 }
                 self.set_idle_and_draw();
             }
@@ -3709,7 +3816,7 @@ where
             "list_dir".to_string(),
             "grep_files".to_string(),
             "search_files".to_string(),
-            "update_plan".to_string(),
+            "submit_plan_draft".to_string(),
         ]);
         let tx = self.app_event_tx.clone();
         let mcp_server = self.mcp_server.clone();
@@ -3719,13 +3826,15 @@ where
             struct ExecutionPlanObserver {
                 tx: UnboundedSender<AppEvent>,
                 turn_id: TurnId,
-                plan: Option<UpdatePlanArgs>,
+                plan_draft: Option<ProviderPlanDraft>,
             }
 
             impl ToolLoopObserver for ExecutionPlanObserver {
                 fn on_model_stream_event(&mut self, event: &CompletionStreamEvent) {
                     match event {
-                        CompletionStreamEvent::TextDelta { delta, .. } if !delta.is_empty() => {
+                        CompletionStreamEvent::TextDelta { delta, .. }
+                            if should_forward_phase1_model_text_delta(delta) =>
+                        {
                             let _ = self.tx.send(AppEvent::AgentEvent {
                                 turn_id: self.turn_id,
                                 event: AgentEvent::ResponseDelta {
@@ -3739,6 +3848,9 @@ where
                             arguments,
                             ..
                         } => {
+                            if is_phase1_plan_draft_tool(tool_name) {
+                                return;
+                            }
                             let _ = self.tx.send(AppEvent::ToolCallPreview {
                                 turn_id: self.turn_id,
                                 call_id: call_id.clone(),
@@ -3756,19 +3868,22 @@ where
                     tool_name: &str,
                     arguments: &serde_json::Value,
                 ) {
+                    if is_phase1_plan_draft_tool(tool_name) {
+                        if let Ok(args) =
+                            serde_json::from_value::<SubmitPlanDraftArgs>(arguments.clone())
+                            && let Ok(plan_draft) = provider_plan_draft_from_args(args)
+                        {
+                            self.plan_draft = Some(plan_draft);
+                        }
+                        return;
+                    }
+
                     let _ = self.tx.send(AppEvent::ToolCallBegin {
                         turn_id: self.turn_id,
                         call_id: call_id.to_string(),
                         tool_name: tool_name.to_string(),
                         arguments: arguments.clone(),
                     });
-
-                    if tool_name == "update_plan"
-                        && let Ok(args) =
-                            serde_json::from_value::<UpdatePlanArgs>(arguments.clone())
-                    {
-                        self.plan = Some(args);
-                    }
                 }
 
                 fn on_tool_call_end(
@@ -3777,6 +3892,9 @@ where
                     tool_name: &str,
                     result: &Result<ToolOutput, String>,
                 ) {
+                    if is_phase1_plan_draft_tool(tool_name) {
+                        return;
+                    }
                     let _ = self.tx.send(AppEvent::ToolCallEnd {
                         turn_id: self.turn_id,
                         call_id: call_id.to_string(),
@@ -3789,7 +3907,7 @@ where
             let mut observer = ExecutionPlanObserver {
                 tx: tx.clone(),
                 turn_id,
-                plan: None,
+                plan_draft: None,
             };
             let run_result = run_tool_loop_with_history_and_observer(
                 &model,
@@ -3801,9 +3919,9 @@ where
             )
             .await;
 
-            let turn = match run_result {
+            let _turn = match run_result {
                 Ok(turn) => Some(turn),
-                Err(e) if observer.plan.is_some() => {
+                Err(e) if observer.plan_draft.is_some() => {
                     let _ = tx.send(AppEvent::InsertHistoryCell {
                         turn_id,
                         cell: Box::new(AssistantHistoryCell::new(format!(
@@ -3824,20 +3942,20 @@ where
                 }
             };
 
-            let llm_plan = match observer.plan.take() {
-                Some(plan) => plan,
+            let plan_draft = match observer.plan_draft.take() {
+                Some(plan_draft) => plan_draft,
                 None => {
                     let _ = tx.send(AppEvent::AgentEvent {
                         turn_id,
                         event: AgentEvent::Error {
-                            message: "Plan failed: LLM did not call update_plan.".to_string(),
+                            message: "Plan failed: LLM did not call submit_plan_draft.".to_string(),
                         },
                     });
                     return;
                 }
             };
 
-            let spec_for_plan = match intentspec_with_llm_plan_objectives(&spec, &llm_plan) {
+            let spec_for_plan = match intentspec_with_plan_draft_objectives(&spec, &plan_draft) {
                 Ok(spec) => spec,
                 Err(error) => {
                     let _ = tx.send(AppEvent::AgentEvent {
@@ -3864,19 +3982,27 @@ where
             };
 
             let mut summary = render_summary(&spec_for_plan, intent_id.as_deref());
-            if let Some(explanation) = llm_plan.explanation.as_deref()
+            if let Some(explanation) = plan_draft.explanation.as_deref()
                 && !explanation.trim().is_empty()
             {
                 summary.push_str(&format!("\nPlan rationale: {}", explanation.trim()));
             }
             let mut plan_warning = None;
-            let plan_id = if let (Some(mcp_server), Some(intent_id)) =
+            let persisted_plan_bundle = if let (Some(mcp_server), Some(intent_id)) =
                 (mcp_server.as_ref(), intent_id.as_ref())
             {
-                match persist_execution_plan(&execution_plan, intent_id, mcp_server).await {
-                    Ok(id) => Some(id),
+                match crate::internal::ai::orchestrator::persistence::persist_plan_review_bundle(
+                    mcp_server,
+                    intent_id,
+                    &execution_plan,
+                )
+                .await
+                {
+                    Ok(bundle) => Some(bundle),
                     Err(e) => {
-                        plan_warning = Some(format!("failed to persist execution plan: {e}"));
+                        plan_warning = Some(format!(
+                            "failed to persist execution plan review bundle: {e}"
+                        ));
                         None
                     }
                 }
@@ -3890,21 +4016,21 @@ where
                     Some("MCP server unavailable; execution plan not persisted.".to_string());
                 None
             };
+            let plan_id = persisted_plan_bundle
+                .as_ref()
+                .map(|bundle| bundle.plan_id.clone());
 
             if let Some(ref warn) = plan_warning {
                 summary.push_str(&format!("\nWarning: {warn}"));
             }
-            summary.push_str("\n\nExecution plan ready. Review the workflow card and choose Execute Plan / Modify Plan / Cancel below.");
+            summary.push_str("\n\nExecution plan ready. Review the right-side workflow graph and choose Execute Plan / Modify Plan / Cancel below.");
 
             if let Some(warning) = plan_warning {
                 warnings.push(warning);
             }
 
-            let llm_output = turn
-                .as_ref()
-                .map(|turn| turn.final_text.clone())
-                .filter(|text| !text.trim().is_empty());
-            let mut new_history = turn.map(|turn| turn.history).unwrap_or(fallback_history);
+            let llm_output = None;
+            let mut new_history = fallback_history;
             new_history.push(Message::assistant(summary.clone()));
 
             let _ = tx.send(AppEvent::PlanWorkflowComplete {
@@ -3914,10 +4040,11 @@ where
                 new_history,
                 intent_id,
                 plan_id,
+                persisted_plan_bundle,
                 spec_json,
                 spec: Box::new(spec_for_plan),
                 plan: Box::new(execution_plan),
-                llm_plan,
+                plan_draft,
                 warnings,
             });
         });
@@ -3928,6 +4055,17 @@ where
     // ── Post-plan dialog ────────────────────────────────────────────
 
     async fn handle_post_plan_choice(&mut self) {
+        if let Some(pending) = self.pending_post_plan.as_mut()
+            && pending.selected == 1
+        {
+            pending.network_access = !pending.network_access;
+            self.widget
+                .bottom_pane
+                .set_post_plan_network_access(pending.network_access);
+            self.schedule_draw();
+            return;
+        }
+
         let pending = match self.pending_post_plan.take() {
             Some(p) => p,
             None => return,
@@ -3940,20 +4078,24 @@ where
 
         match selected {
             0 => {
-                self.start_execute_workflow(
-                    &pending.spec_json,
-                    pending.intent_id.clone(),
-                    pending.plan_id.clone(),
-                    Some(pending.plan.clone()),
-                )
+                self.start_execute_workflow(ExecuteWorkflowRequest {
+                    spec_json: pending.spec_json,
+                    persisted_intent_id: pending.intent_id.clone(),
+                    persisted_plan_id: pending.plan_id.clone(),
+                    persisted_plan_bundle: pending.persisted_plan_bundle.clone(),
+                    approved_plan: Some(pending.plan.clone()),
+                    approved_plan_draft: Some(pending.plan_draft.clone()),
+                    plan_warnings: pending.warnings.clone(),
+                    network_access_override: Some(pending.network_access),
+                })
                 .await;
             }
             _ => {
-                if pending.selected == 1 {
+                if pending.selected == 2 {
                     self.pending_execution_plan_revision = Some(PendingExecutionPlanRevision {
                         spec_json: pending.spec_json,
                         intent_id: pending.intent_id.clone(),
-                        current_plan: pending.llm_plan,
+                        current_plan: pending.plan_draft,
                         warnings: pending.warnings,
                     });
                     let msg = format!(
@@ -3998,13 +4140,7 @@ where
         self.set_idle_and_draw();
     }
 
-    async fn start_execute_workflow(
-        &mut self,
-        spec_json: &str,
-        persisted_intent_id: Option<String>,
-        persisted_plan_id: Option<String>,
-        approved_plan: Option<ExecutionPlanSpec>,
-    ) {
+    async fn start_execute_workflow(&mut self, request: ExecuteWorkflowRequest) {
         use crate::internal::ai::{
             intentspec::types::IntentSpec,
             orchestrator::{
@@ -4013,7 +4149,18 @@ where
             },
         };
 
-        let spec: IntentSpec = match serde_json::from_str(spec_json) {
+        let ExecuteWorkflowRequest {
+            spec_json,
+            persisted_intent_id,
+            persisted_plan_id,
+            persisted_plan_bundle,
+            approved_plan,
+            approved_plan_draft,
+            plan_warnings,
+            network_access_override,
+        } = request;
+
+        let mut spec: IntentSpec = match serde_json::from_str(&spec_json) {
             Ok(s) => s,
             Err(e) => {
                 self.widget
@@ -4024,6 +4171,9 @@ where
                 return;
             }
         };
+        if let Some(network_access) = network_access_override {
+            apply_developer_network_access(&mut spec, network_access);
+        }
 
         self.widget.clear_dag_panel();
         self.widget
@@ -4048,6 +4198,16 @@ where
         let mcp_server = self.mcp_server.clone();
         let tx = self.app_event_tx.clone();
         let history = self.history.clone();
+        let execution_spec_json =
+            serde_json::to_string_pretty(&spec).unwrap_or_else(|_| spec_json.clone());
+        let execution_intent_id = persisted_intent_id.clone();
+        let execution_plan_draft = approved_plan_draft
+            .or_else(|| approved_plan.as_ref().map(provider_plan_draft_from_plan))
+            .unwrap_or_else(|| provider_plan_draft_from_spec(&spec));
+        let execution_network_access = matches!(
+            spec.constraints.security.network_policy,
+            NetworkPolicy::Allow
+        );
 
         let handle = tokio::spawn(async move {
             struct UiOrchestratorObserver {
@@ -4289,6 +4449,7 @@ where
                 working_dir,
                 base_commit: None,
                 persisted_intent_id,
+                persisted_plan_bundle,
                 persisted_plan_id,
                 initial_plan: approved_plan,
                 dagrs_resume_checkpoint_id: None,
@@ -4318,6 +4479,11 @@ where
                 text: summary,
                 new_history,
                 result: ui_result,
+                spec_json: execution_spec_json,
+                intent_id: execution_intent_id,
+                plan_draft: execution_plan_draft,
+                warnings: plan_warnings,
+                network_access: execution_network_access,
             });
         });
 
@@ -4407,6 +4573,7 @@ where
         let tx = self.app_event_tx.clone();
         let mcp_server = self.mcp_server.clone();
         let working_dir = self.registry.working_dir().to_path_buf();
+        let default_network_access = self.default_network_access;
 
         let handle = tokio::spawn(async move {
             struct PlanObserver {
@@ -4432,7 +4599,9 @@ where
             impl ToolLoopObserver for PlanObserver {
                 fn on_model_stream_event(&mut self, event: &CompletionStreamEvent) {
                     match event {
-                        CompletionStreamEvent::TextDelta { delta, .. } if !delta.is_empty() => {
+                        CompletionStreamEvent::TextDelta { delta, .. }
+                            if should_forward_phase0_model_text_delta(delta) =>
+                        {
                             let _ = self.tx.send(AppEvent::AgentEvent {
                                 turn_id: self.turn_id,
                                 event: AgentEvent::ResponseDelta {
@@ -4596,6 +4765,7 @@ where
                     created_by_id: "tui-user".to_string(),
                 },
             );
+            apply_developer_network_access(&mut spec, default_network_access);
 
             let mut issues = validate_intentspec(&spec);
             for _ in 0..MAX_INTENTSPEC_REPAIR_ATTEMPTS {
@@ -4682,20 +4852,26 @@ where
             }
             "execute" => match self.load_latest_intentspec_json().await {
                 LatestIntentSpecLoad::Found(spec_json) => {
-                    self.start_execute_workflow(
-                        &spec_json,
-                        self.session
+                    self.start_execute_workflow(ExecuteWorkflowRequest {
+                        spec_json,
+                        persisted_intent_id: self
+                            .session
                             .metadata
                             .get(LATEST_INTENTSPEC_INTENT_ID)
                             .and_then(serde_json::Value::as_str)
                             .map(ToString::to_string),
-                        self.session
+                        persisted_plan_id: self
+                            .session
                             .metadata
                             .get(LATEST_EXECUTION_PLAN_ID)
                             .and_then(serde_json::Value::as_str)
                             .map(ToString::to_string),
-                        None,
-                    )
+                        persisted_plan_bundle: None,
+                        approved_plan: None,
+                        approved_plan_draft: None,
+                        plan_warnings: Vec::new(),
+                        network_access_override: Some(self.default_network_access),
+                    })
                     .await;
                 }
                 LatestIntentSpecLoad::Missing => {
@@ -5625,17 +5801,22 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        PendingPlanRevisionCommand, append_to_last_tool_group_cell,
-        append_to_last_tool_group_preview_cell, build_execution_plan_prompt,
+        PendingPlanRevisionCommand, ProviderPlanDraft, ProviderPlanDraftStep,
+        append_to_last_tool_group_cell, append_to_last_tool_group_preview_cell,
+        apply_developer_network_access, build_execution_plan_prompt,
         build_execution_plan_revision_prompt, build_plan_prompt, build_plan_revision_prompt,
-        code_ui_response_from_managed_selection, format_decision_stage_note,
+        code_ui_response_from_managed_selection, execution_failure_revision_message,
+        execution_requires_plan_repair, format_decision_stage_note,
         format_intentspec_target_mismatch, format_orchestrator_result,
         format_plan_compiled_stage_note, format_plan_execution_stage_note,
         format_replan_stage_note, format_system_verification_stage_note,
-        intentspec_with_llm_plan_objectives, is_global_quit_command_input,
-        mark_visible_tool_call_running, newest_managed_assistant_text,
-        parse_pending_plan_revision_command, pending_execution_plan_revision_help_message,
-        pending_plan_revision_help_message, should_route_plain_message_to_plan,
+        intentspec_with_plan_draft_objectives, is_default_chat_tool, is_global_quit_command_input,
+        is_phase1_plan_draft_tool, mark_visible_tool_call_running, newest_managed_assistant_text,
+        normalize_terminal_paste_text, parse_pending_plan_revision_command,
+        pending_execution_plan_revision_help_message, pending_plan_revision_help_message,
+        provider_plan_draft_from_args, provider_plan_draft_from_plan,
+        should_forward_phase0_model_text_delta, should_forward_phase1_model_text_delta,
+        should_route_plain_message_to_plan,
     };
     use crate::internal::{
         ai::{
@@ -5644,16 +5825,16 @@ mod tests {
                 draft::{DraftAcceptance, DraftIntent, DraftRisk, IntentDraft},
                 resolve_intentspec,
                 types::{
-                    ChangeType, DecompositionMode, IntentSpec, Objective, ObjectiveKind, RiskLevel,
+                    ChangeType, DecompositionMode, IntentSpec, NetworkPolicy, Objective,
+                    ObjectiveKind, RiskLevel,
                 },
             },
             orchestrator::types::{
-                DecisionOutcome, ExecutionPlanSpec, GateReport, OrchestratorResult, SystemReport,
-                TaskContract, TaskKind, TaskNodeStatus, TaskResult, TaskSpec,
+                DecisionOutcome, ExecutionPlanSpec, GateReport, GateResult, OrchestratorResult,
+                PolicyViolation, SystemReport, TaskContract, TaskKind, TaskNodeStatus, TaskResult,
+                TaskSpec, ToolCallRecord,
             },
-            tools::context::{
-                PlanStep as ToolPlanStep, StepStatus as ToolStepStatus, UpdatePlanArgs,
-            },
+            tools::context::{PlanDraftStep, SubmitPlanDraftArgs},
             web::code_ui::{
                 CodeUiApplyToFuture, CodeUiCapabilities, CodeUiInteractionKind,
                 CodeUiInteractionOption, CodeUiInteractionRequest, CodeUiInteractionStatus,
@@ -5760,28 +5941,27 @@ mod tests {
         )
     }
 
-    fn update_plan_args(steps: &[&str]) -> UpdatePlanArgs {
-        UpdatePlanArgs {
+    fn provider_plan_draft(steps: &[&str]) -> ProviderPlanDraft {
+        ProviderPlanDraft {
             explanation: Some("Plan generated from confirmed IntentSpec".to_string()),
-            plan: steps
+            steps: steps
                 .iter()
-                .map(|step| ToolPlanStep {
-                    step: (*step).to_string(),
-                    status: ToolStepStatus::Pending,
+                .map(|step| ProviderPlanDraftStep {
+                    title: (*step).to_string(),
                 })
                 .collect(),
         }
     }
 
     #[test]
-    fn llm_plan_steps_replace_objectives_for_execution_plan_compile() {
+    fn provider_plan_draft_steps_replace_objectives_for_execution_plan_compile() {
         let spec = minimal_intentspec(vec![Objective {
             title: "original broad objective".to_string(),
             kind: ObjectiveKind::Implementation,
         }]);
-        let plan = update_plan_args(&["Inspect current flow", "Add LLM plan review"]);
+        let plan = provider_plan_draft(&["Inspect current flow", "Add LLM plan review"]);
 
-        let planned_spec = intentspec_with_llm_plan_objectives(&spec, &plan).unwrap();
+        let planned_spec = intentspec_with_plan_draft_objectives(&spec, &plan).unwrap();
 
         let titles = planned_spec
             .intent
@@ -5808,17 +5988,42 @@ mod tests {
     }
 
     #[test]
-    fn execution_plan_prompt_requires_update_plan_after_intentspec_confirmation() {
+    fn developer_network_choice_updates_intentspec_network_policy() {
+        let mut spec = minimal_intentspec(vec![Objective {
+            title: "download dependency metadata".to_string(),
+            kind: ObjectiveKind::Implementation,
+        }]);
+        assert_eq!(
+            spec.constraints.security.network_policy,
+            NetworkPolicy::Deny
+        );
+
+        apply_developer_network_access(&mut spec, true);
+        assert_eq!(
+            spec.constraints.security.network_policy,
+            NetworkPolicy::Allow
+        );
+
+        apply_developer_network_access(&mut spec, false);
+        assert_eq!(
+            spec.constraints.security.network_policy,
+            NetworkPolicy::Deny
+        );
+    }
+
+    #[test]
+    fn execution_plan_prompt_requires_submit_plan_draft_after_intentspec_confirmation() {
         let prompt = build_execution_plan_prompt("{\"kind\":\"IntentSpec\"}");
 
         assert!(prompt.contains("already confirmed IntentSpec"));
-        assert!(prompt.contains("call update_plan exactly once"));
+        assert!(prompt.contains("call submit_plan_draft exactly once"));
+        assert!(!prompt.contains("call update_plan exactly once"));
         assert!(prompt.contains("Do not call submit_intent_draft"));
     }
 
     #[test]
     fn execution_plan_revision_prompt_includes_existing_plan_and_change_request() {
-        let plan = update_plan_args(&["Inspect current flow"]);
+        let plan = provider_plan_draft(&["Inspect current flow"]);
         let prompt = build_execution_plan_revision_prompt(
             "{\"kind\":\"IntentSpec\"}",
             &plan,
@@ -5828,7 +6033,47 @@ mod tests {
         assert!(prompt.contains("Current execution plan"));
         assert!(prompt.contains("Inspect current flow"));
         assert!(prompt.contains("split implementation and tests"));
-        assert!(prompt.contains("call update_plan exactly once"));
+        assert!(prompt.contains("call submit_plan_draft exactly once"));
+        assert!(!prompt.contains("call update_plan exactly once"));
+    }
+
+    #[test]
+    fn phase1_plan_draft_tool_is_suppressed_from_generic_transcript() {
+        assert!(is_phase1_plan_draft_tool("submit_plan_draft"));
+        assert!(!is_phase1_plan_draft_tool("update_plan"));
+    }
+
+    #[test]
+    fn phase1_plan_generation_does_not_forward_provider_text() {
+        assert!(!should_forward_phase1_model_text_delta(
+            "provider draft markdown that should stay internal"
+        ));
+    }
+
+    #[test]
+    fn phase0_intentspec_generation_does_not_forward_provider_text() {
+        assert!(!should_forward_phase0_model_text_delta(
+            "provider draft markdown that should stay internal"
+        ));
+    }
+
+    #[test]
+    fn default_chat_tools_exclude_phase_review_submission_tools() {
+        assert!(!is_default_chat_tool("submit_intent_draft"));
+        assert!(!is_default_chat_tool("submit_plan_draft"));
+        assert!(is_default_chat_tool("update_plan"));
+    }
+
+    #[test]
+    fn provider_plan_draft_from_args_rejects_empty_titles() {
+        let result = provider_plan_draft_from_args(SubmitPlanDraftArgs {
+            explanation: None,
+            steps: vec![PlanDraftStep {
+                title: "  ".to_string(),
+            }],
+        });
+
+        assert!(result.is_err());
     }
 
     #[test]
@@ -5837,6 +6082,108 @@ mod tests {
 
         assert!(help.contains("Plan revise mode"));
         assert!(help.contains("/plan modify <changes>"));
+    }
+
+    #[test]
+    fn abandoned_execution_requires_plan_repair_loop() {
+        let result = orchestrator_fixture();
+
+        assert!(execution_requires_plan_repair(Some(&result)));
+        let message = execution_failure_revision_message(Some(&result));
+
+        assert!(message.contains("Plan execution failed"));
+        assert!(message.contains("Decision: Abandon"));
+        assert!(message.contains("Inspect sources"));
+        assert!(message.contains("/plan cancel"));
+    }
+
+    #[test]
+    fn failed_execution_revision_message_includes_gate_error_evidence() {
+        let mut result = orchestrator_fixture();
+        let task_result = result
+            .task_results
+            .first_mut()
+            .expect("fixture should include a failed task result");
+        task_result.gate_report = Some(GateReport {
+            results: vec![GateResult {
+                check_id: "cargo-check".to_string(),
+                kind: "command".to_string(),
+                passed: false,
+                exit_code: 101,
+                stdout: String::new(),
+                stderr: "error[E0432]: unresolved import `clap`".to_string(),
+                duration_ms: 42,
+                timed_out: false,
+            }],
+            all_required_passed: false,
+        });
+
+        let message = execution_failure_revision_message(Some(&result));
+
+        assert!(message.contains("Failure details:"));
+        assert!(message.contains("cargo-check"));
+        assert!(message.contains("unresolved import"));
+        assert!(message.contains("Plan change hints:"));
+        assert!(message.contains("compile error first"));
+    }
+
+    #[test]
+    fn failed_execution_revision_message_includes_tool_and_policy_evidence() {
+        let mut result = orchestrator_fixture();
+        let task_result = result
+            .task_results
+            .first_mut()
+            .expect("fixture should include a failed task result");
+        task_result.tool_calls = vec![ToolCallRecord {
+            tool_name: "run_libra_vcs".to_string(),
+            action: "cargo run -- code".to_string(),
+            arguments_json: None,
+            paths_read: vec![],
+            paths_written: vec![],
+            success: false,
+            summary: Some("command failed\nerror[E0599]: no variant named Code".to_string()),
+            diffs: vec![],
+        }];
+        task_result.policy_violations = vec![PolicyViolation {
+            code: "forbidden_command".to_string(),
+            message: "run_libra_vcs may not execute cargo".to_string(),
+            tool_name: Some("run_libra_vcs".to_string()),
+            path: None,
+        }];
+
+        let message = execution_failure_revision_message(Some(&result));
+
+        assert!(message.contains("tool failed: run_libra_vcs cargo run -- code"));
+        assert!(message.contains("error[E0599]"));
+        assert!(message.contains("policy violation: forbidden_command"));
+        assert!(message.contains("compile error first"));
+    }
+
+    #[test]
+    fn successful_or_reviewable_execution_does_not_force_plan_repair_loop() {
+        let mut result = orchestrator_fixture();
+
+        result.decision = DecisionOutcome::Commit;
+        assert!(!execution_requires_plan_repair(Some(&result)));
+
+        result.decision = DecisionOutcome::HumanReviewRequired;
+        assert!(!execution_requires_plan_repair(Some(&result)));
+
+        assert!(execution_requires_plan_repair(None));
+    }
+
+    #[test]
+    fn failed_execution_revision_uses_latest_plan_tasks_as_draft() {
+        let result = orchestrator_fixture();
+        let draft = provider_plan_draft_from_plan(&result.execution_plan_spec);
+
+        let titles = draft
+            .steps
+            .iter()
+            .map(|step| step.title.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(titles, vec!["Inspect sources", "Run checks"]);
     }
 
     #[test]
@@ -6043,6 +6390,14 @@ mod tests {
         assert!(!is_global_quit_command_input("/mux quit"));
         assert!(!is_global_quit_command_input("quit"));
         assert!(!is_global_quit_command_input("/plan quit"));
+    }
+
+    #[test]
+    fn terminal_paste_normalizes_crlf() {
+        assert_eq!(
+            normalize_terminal_paste_text("first\r\nsecond\rthird"),
+            "first\nsecond\nthird"
+        );
     }
 
     #[test]
@@ -6365,54 +6720,6 @@ fn summarize_tool_output(output: &ToolOutput) -> String {
     }
 }
 
-async fn persist_execution_plan(
-    plan: &ExecutionPlanSpec,
-    intent_id: &str,
-    mcp_server: &Arc<LibraMcpServer>,
-) -> Result<String, String> {
-    let git_plan = build_git_plan(
-        parse_object_id(intent_id).map_err(|e| format!("invalid intent id: {e}"))?,
-        plan,
-    )
-    .map_err(|e| format!("failed to build git plan: {e}"))?;
-    let steps = git_plan
-        .steps()
-        .iter()
-        .map(|step| PlanStepParams {
-            description: step.description().to_string(),
-            inputs: step.inputs().cloned(),
-            checks: step.checks().cloned(),
-        })
-        .collect::<Vec<_>>();
-
-    let params = CreatePlanParams {
-        intent_id: intent_id.to_string(),
-        parent_plan_ids: None,
-        context_frame_ids: None,
-        steps: Some(steps),
-        tags: None,
-        external_ids: None,
-        actor_kind: Some("system".to_string()),
-        actor_id: Some("libra-plan".to_string()),
-    };
-
-    let actor = mcp_server
-        .resolve_actor_from_params(params.actor_kind.as_deref(), params.actor_id.as_deref())
-        .map_err(|e| format!("failed to resolve plan actor: {e:?}"))?;
-    let result = mcp_server
-        .create_plan_impl(params, actor)
-        .await
-        .map_err(|e| format!("MCP create_plan failed: {e:?}"))?;
-
-    if result.is_error.unwrap_or(false) {
-        return Err(
-            summarize_mcp_content(&result.content).unwrap_or_else(|| "unknown MCP error".into())
-        );
-    }
-
-    parse_created_id(&result).ok_or_else(|| "failed to parse plan id from MCP result".to_string())
-}
-
 fn build_plan_prompt(request: &str) -> String {
     format!(
         "You are running /plan mode.\n\
@@ -6439,61 +6746,428 @@ Requested changes:\n{request}"
 fn build_execution_plan_prompt(spec_json: &str) -> String {
     format!(
         "You are generating an execution plan for an already confirmed IntentSpec.\n\
-Use read-only repository tools if needed, then call update_plan exactly once with the full ordered plan.\n\
-Every plan step must be a concrete execution task the agent can perform. Use status=pending for every step.\n\
+Use read-only repository tools if needed, then call submit_plan_draft exactly once with the full ordered draft.\n\
+Every draft step must be a concrete execution task the agent can perform. Provide ordered steps with title only; do not include runtime status.\n\
 Do not call submit_intent_draft. Do not modify the IntentSpec. Do not execute commands that change files.\n\
-After calling update_plan, stop; the developer must confirm the plan before execution.\n\n\
+After calling submit_plan_draft, stop; the developer must confirm the compiled plan before execution.\n\n\
 Confirmed IntentSpec:\n```json\n{spec_json}\n```"
     )
 }
 
 fn build_execution_plan_revision_prompt(
     spec_json: &str,
-    current_plan: &UpdatePlanArgs,
+    current_plan: &ProviderPlanDraft,
     request: &str,
 ) -> String {
-    let current_plan_json = update_plan_args_json(current_plan);
+    let current_plan_json = provider_plan_draft_json(current_plan);
     format!(
         "You are revising an execution plan for an already confirmed IntentSpec.\n\
-Use the current plan as the baseline, apply only the developer's requested changes, then call update_plan exactly once with the complete revised ordered plan.\n\
-Every plan step must be a concrete execution task the agent can perform. Use status=pending for every step.\n\
+Use the current draft as the baseline, apply only the developer's requested changes, then call submit_plan_draft exactly once with the complete revised ordered draft.\n\
+Every draft step must be a concrete execution task the agent can perform. Provide ordered steps with title only; do not include runtime status.\n\
 Do not call submit_intent_draft. Do not revise the IntentSpec. Do not execute commands that change files.\n\
-After calling update_plan, stop; the developer must confirm the revised plan before execution.\n\n\
+After calling submit_plan_draft, stop; the developer must confirm the compiled plan before execution.\n\n\
 Confirmed IntentSpec:\n```json\n{spec_json}\n```\n\n\
 Current execution plan:\n```json\n{current_plan_json}\n```\n\n\
 Requested plan changes:\n{request}"
     )
 }
 
-fn update_plan_args_json(args: &UpdatePlanArgs) -> serde_json::Value {
+fn provider_plan_draft_from_plan(plan: &ExecutionPlanSpec) -> ProviderPlanDraft {
+    ProviderPlanDraft {
+        explanation: plan
+            .replan_reason
+            .as_ref()
+            .map(|reason| reason.trim().to_string())
+            .filter(|reason| !reason.is_empty()),
+        steps: plan
+            .tasks
+            .iter()
+            .map(|task| ProviderPlanDraftStep {
+                title: task.title().trim().to_string(),
+            })
+            .filter(|step| !step.title.is_empty())
+            .collect(),
+    }
+}
+
+fn provider_plan_draft_from_spec(spec: &IntentSpec) -> ProviderPlanDraft {
+    let mut steps = spec
+        .intent
+        .objectives
+        .iter()
+        .map(|objective| ProviderPlanDraftStep {
+            title: objective.title.trim().to_string(),
+        })
+        .filter(|step| !step.title.is_empty())
+        .collect::<Vec<_>>();
+
+    if steps.is_empty() {
+        let fallback_title = spec.intent.summary.trim();
+        steps.push(ProviderPlanDraftStep {
+            title: if fallback_title.is_empty() {
+                "Revise execution plan".to_string()
+            } else {
+                fallback_title.to_string()
+            },
+        });
+    }
+
+    ProviderPlanDraft {
+        explanation: Some("Recovered from the current IntentSpec.".to_string()),
+        steps,
+    }
+}
+
+fn provider_plan_draft_json(args: &ProviderPlanDraft) -> serde_json::Value {
     serde_json::json!({
         "explanation": args.explanation.clone(),
-        "plan": args.plan.iter().map(|step| {
+        "steps": args.steps.iter().map(|step| {
             serde_json::json!({
-                "step": step.step.as_str(),
-                "status": step_status_label(&step.status),
+                "title": step.title.as_str(),
             })
         }).collect::<Vec<_>>(),
     })
 }
 
-fn step_status_label(status: &StepStatus) -> &'static str {
-    match status {
-        StepStatus::Pending => "pending",
-        StepStatus::InProgress => "in_progress",
-        StepStatus::Completed => "completed",
-    }
+fn execution_requires_plan_repair(result: Option<&OrchestratorResult>) -> bool {
+    result.is_none_or(|result| result.decision == DecisionOutcome::Abandon)
 }
 
-fn intentspec_with_llm_plan_objectives(
+fn execution_failure_revision_message(result: Option<&OrchestratorResult>) -> String {
+    let mut lines = vec![
+        "Plan execution failed. Revise the execution plan before running it again.".to_string(),
+    ];
+
+    if let Some(result) = result {
+        lines.push(format!(
+            "Decision: {}.",
+            orchestrator_decision_label(&result.decision)
+        ));
+        let failed_tasks = result
+            .task_results
+            .iter()
+            .filter(|task_result| task_result.status == TaskNodeStatus::Failed)
+            .filter_map(|task_result| {
+                result
+                    .execution_plan_spec
+                    .tasks
+                    .iter()
+                    .find(|task| task.id() == task_result.task_id)
+                    .map(|task| task.title().trim().to_string())
+            })
+            .filter(|title| !title.is_empty())
+            .take(3)
+            .collect::<Vec<_>>();
+        if !failed_tasks.is_empty() {
+            lines.push(format!("Failed tasks: {}.", failed_tasks.join(", ")));
+        }
+        let diagnostics = execution_failure_diagnostics(result, 3);
+        if !diagnostics.is_empty() {
+            lines.push("Failure details:".to_string());
+            lines.extend(
+                diagnostics
+                    .into_iter()
+                    .map(|diagnostic| format!("- {diagnostic}")),
+            );
+        }
+        let repair_hints = execution_failure_repair_hints(result, 3);
+        if !repair_hints.is_empty() {
+            lines.push("Plan change hints:".to_string());
+            lines.extend(repair_hints.into_iter().map(|hint| format!("- {hint}")));
+        }
+    } else {
+        lines.push("The orchestrator failed before producing a final decision.".to_string());
+    }
+
+    lines.push(
+        "Send plan changes as plain text or use `/plan modify <changes>`. Use `/plan cancel` to stop this repair loop."
+            .to_string(),
+    );
+    lines.join("\n")
+}
+
+fn execution_failure_diagnostics(result: &OrchestratorResult, limit: usize) -> Vec<String> {
+    result
+        .task_results
+        .iter()
+        .filter(|task_result| task_result.status == TaskNodeStatus::Failed)
+        .filter_map(|task_result| {
+            let (task_index, title) = execution_task_label(result, task_result.task_id)?;
+            let details = task_failure_details(task_result);
+            if details.is_empty() {
+                return Some(format!(
+                    "{task_index} {title}: no structured failure evidence was captured."
+                ));
+            }
+            Some(format!("{task_index} {title}: {}", details.join("; ")))
+        })
+        .take(limit)
+        .collect()
+}
+
+fn execution_failure_repair_hints(result: &OrchestratorResult, limit: usize) -> Vec<String> {
+    let mut hints = Vec::new();
+    for task_result in result
+        .task_results
+        .iter()
+        .filter(|task_result| task_result.status == TaskNodeStatus::Failed)
+    {
+        let Some((task_index, title)) = execution_task_label(result, task_result.task_id) else {
+            continue;
+        };
+        let details = task_failure_details(task_result);
+        let failure_text = format!("{} {}", title, details.join(" "));
+        let Some(hint) = plan_repair_hint_for_failure(&failure_text) else {
+            continue;
+        };
+        let formatted = format!("{task_index}: {hint}");
+        if !hints.contains(&formatted) {
+            hints.push(formatted);
+        }
+        if hints.len() >= limit {
+            break;
+        }
+    }
+
+    if hints.is_empty()
+        && result
+            .task_results
+            .iter()
+            .any(|task_result| task_result.status == TaskNodeStatus::Failed)
+    {
+        hints.push(
+            "Add an explicit required check that captures the failing command output before validation, then split the implementation work so that check can pass."
+                .to_string(),
+        );
+    }
+
+    hints
+}
+
+fn execution_task_label(
+    result: &OrchestratorResult,
+    task_id: uuid::Uuid,
+) -> Option<(String, String)> {
+    result
+        .execution_plan_spec
+        .tasks
+        .iter()
+        .enumerate()
+        .find(|(_, task)| task.id() == task_id)
+        .map(|(idx, task)| {
+            let kind = match task.kind {
+                TaskKind::Implementation => "I",
+                TaskKind::Analysis => "A",
+                TaskKind::Gate => "G",
+            };
+            (
+                format!("{kind}{:02}", idx + 1),
+                task.title().trim().to_string(),
+            )
+        })
+}
+
+fn task_failure_details(
+    task_result: &crate::internal::ai::orchestrator::types::TaskResult,
+) -> Vec<String> {
+    let mut details = Vec::new();
+    if let Some(reason) = summarize_failed_gate_report(task_result.gate_report.as_ref()) {
+        details.push(format!("gate failed: {reason}"));
+    }
+    if let Some(reason) = summarize_failed_tool_calls(task_result) {
+        details.push(format!("tool failed: {reason}"));
+    }
+    if let Some(reason) = summarize_policy_violations(task_result) {
+        details.push(format!("policy violation: {reason}"));
+    }
+    if let Some(review) = task_result.review.as_ref()
+        && (!review.approved || !review.issues.is_empty())
+    {
+        let issue = review
+            .issues
+            .iter()
+            .find_map(|issue| concise_failure_line(issue))
+            .or_else(|| concise_failure_line(&review.summary));
+        if let Some(issue) = issue {
+            details.push(format!("review: {issue}"));
+        }
+    }
+    if let Some(reason) = task_result
+        .agent_output
+        .as_deref()
+        .and_then(concise_failure_line)
+    {
+        details.push(format!("agent output: {reason}"));
+    }
+
+    dedupe_preserving_order(details)
+}
+
+fn summarize_failed_tool_calls(
+    task_result: &crate::internal::ai::orchestrator::types::TaskResult,
+) -> Option<String> {
+    let summaries = task_result
+        .tool_calls
+        .iter()
+        .filter(|tool_call| !tool_call.success)
+        .filter_map(|tool_call| {
+            let action = tool_call.action.trim();
+            let label = if action.is_empty() {
+                tool_call.tool_name.trim().to_string()
+            } else {
+                format!("{} {}", tool_call.tool_name.trim(), action)
+            };
+            tool_call
+                .summary
+                .as_deref()
+                .and_then(concise_failure_line)
+                .map(|summary| format!("{label}: {summary}"))
+                .or_else(|| (!label.trim().is_empty()).then_some(label))
+        })
+        .take(2)
+        .collect::<Vec<_>>();
+
+    (!summaries.is_empty()).then(|| summaries.join("; "))
+}
+
+fn summarize_policy_violations(
+    task_result: &crate::internal::ai::orchestrator::types::TaskResult,
+) -> Option<String> {
+    let summaries = task_result
+        .policy_violations
+        .iter()
+        .filter_map(|violation| {
+            let message = concise_failure_line(&violation.message)?;
+            let mut parts = vec![violation.code.trim().to_string(), message];
+            if let Some(tool_name) = violation
+                .tool_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|tool_name| !tool_name.is_empty())
+            {
+                parts.push(format!("tool {tool_name}"));
+            }
+            if let Some(path) = violation
+                .path
+                .as_deref()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+            {
+                parts.push(format!("path {path}"));
+            }
+            Some(parts.join(" · "))
+        })
+        .take(2)
+        .collect::<Vec<_>>();
+
+    (!summaries.is_empty()).then(|| summaries.join("; "))
+}
+
+fn plan_repair_hint_for_failure(failure_text: &str) -> Option<String> {
+    let lower = failure_text.to_lowercase();
+    if contains_any(
+        &lower,
+        &[
+            "cargo",
+            "rustc",
+            "compile",
+            "compiles",
+            "compiler",
+            "clippy",
+            "error:",
+            "error[",
+            "cannot find",
+            "unresolved",
+            "mismatched",
+        ],
+    ) {
+        return Some(
+            "make the next plan fix the compile error first, then run the cargo/check gate again before any functional echo checks."
+                .to_string(),
+        );
+    }
+    if contains_any(&lower, &["echo", "subcommand", "command output", "stdout"]) {
+        return Some(
+            "split subcommand implementation from output verification, and make each expected command/output pair explicit."
+                .to_string(),
+        );
+    }
+    if contains_any(
+        &lower,
+        &["policy", "violation", "forbidden", "denied", "network"],
+    ) {
+        return Some(
+            "remove the forbidden tool/path/network access from the plan, or choose an allowed access policy before rerunning."
+                .to_string(),
+        );
+    }
+    None
+}
+
+fn contains_any(text: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| text.contains(needle))
+}
+
+fn concise_failure_line(text: &str) -> Option<String> {
+    let lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    let selected = [
+        &[
+            "error:",
+            "error[",
+            "cannot find",
+            "unresolved",
+            "mismatched",
+        ][..],
+        &["expected", "not found", "denied", "violation"][..],
+        &["failed"][..],
+    ]
+    .iter()
+    .find_map(|markers| {
+        lines.iter().copied().find(|line| {
+            let lower = line.to_lowercase();
+            contains_any(&lower, markers)
+        })
+    })
+    .or_else(|| lines.first().copied())?;
+    Some(truncate_chars(selected, 180))
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    let mut output = String::new();
+    for (idx, ch) in text.chars().enumerate() {
+        if idx >= max_chars {
+            output.push_str("...");
+            return output;
+        }
+        output.push(ch);
+    }
+    output
+}
+
+fn dedupe_preserving_order(items: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut deduped = Vec::new();
+    for item in items {
+        if seen.insert(item.clone()) {
+            deduped.push(item);
+        }
+    }
+    deduped
+}
+
+fn intentspec_with_plan_draft_objectives(
     spec: &IntentSpec,
-    llm_plan: &UpdatePlanArgs,
+    plan_draft: &ProviderPlanDraft,
 ) -> Result<IntentSpec, String> {
-    let objectives = llm_plan
-        .plan
+    let objectives = plan_draft
+        .steps
         .iter()
         .filter_map(|step| {
-            let title = step.step.trim();
+            let title = step.title.trim();
             (!title.is_empty()).then(|| Objective {
                 title: title.to_string(),
                 kind: if spec.intent.has_implementation_objectives() {
@@ -6528,6 +7202,50 @@ fn intentspec_with_llm_plan_objectives(
     Ok(planned_spec)
 }
 
+fn provider_plan_draft_from_args(args: SubmitPlanDraftArgs) -> Result<ProviderPlanDraft, String> {
+    let steps = args
+        .steps
+        .into_iter()
+        .map(|step| ProviderPlanDraftStep {
+            title: step.title.trim().to_string(),
+        })
+        .collect::<Vec<_>>();
+    if steps.is_empty() || steps.iter().any(|step| step.title.is_empty()) {
+        return Err("plan draft must include at least one non-empty step title".to_string());
+    }
+    Ok(ProviderPlanDraft {
+        explanation: args.explanation.and_then(|explanation| {
+            let trimmed = explanation.trim().to_string();
+            (!trimmed.is_empty()).then_some(trimmed)
+        }),
+        steps,
+    })
+}
+
+fn apply_developer_network_access(spec: &mut IntentSpec, network_access: bool) {
+    spec.constraints.security.network_policy = if network_access {
+        NetworkPolicy::Allow
+    } else {
+        NetworkPolicy::Deny
+    };
+}
+
+fn is_phase1_plan_draft_tool(tool_name: &str) -> bool {
+    tool_name == "submit_plan_draft"
+}
+
+fn should_forward_phase1_model_text_delta(_delta: &str) -> bool {
+    false
+}
+
+fn is_default_chat_tool(tool_name: &str) -> bool {
+    !matches!(tool_name, "submit_intent_draft" | "submit_plan_draft")
+}
+
+fn should_forward_phase0_model_text_delta(_delta: &str) -> bool {
+    false
+}
+
 fn should_route_plain_message_to_plan(text: &str) -> bool {
     let trimmed = text.trim_start();
     !trimmed.trim().is_empty() && !trimmed.starts_with('/')
@@ -6538,6 +7256,10 @@ fn is_global_quit_command_input(text: &str) -> bool {
         super::slash_command::parse_builtin(text),
         Some((super::slash_command::BuiltinCommand::Quit, _))
     )
+}
+
+fn normalize_terminal_paste_text(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 fn parse_value_or_json_string<T: serde::de::DeserializeOwned>(
