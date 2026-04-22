@@ -94,6 +94,24 @@ async fn test_mcp_integration_server_info() {
 }
 
 #[tokio::test]
+async fn test_mcp_integration_tool_router_exposes_generated_tools() {
+    let (server, _storage, _history_manager, _temp_dir) = setup_server().await;
+
+    let create_task = ServerHandler::get_tool(&server, "create_task")
+        .expect("create_task should be exposed through the MCP tool router");
+    assert_eq!(create_task.name, "create_task");
+
+    let list_tasks = ServerHandler::get_tool(&server, "list_tasks")
+        .expect("list_tasks should be exposed through the MCP tool router");
+    assert_eq!(list_tasks.name, "list_tasks");
+
+    assert!(
+        ServerHandler::get_tool(&server, "__missing_tool__").is_none(),
+        "unknown tools should not resolve through the MCP tool router"
+    );
+}
+
+#[tokio::test]
 async fn test_mcp_integration_list_resources() {
     let temp_dir = tempdir().unwrap();
     let storage = Arc::new(LocalStorage::new(temp_dir.path().join("objects")));
