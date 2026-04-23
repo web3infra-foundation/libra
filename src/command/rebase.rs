@@ -474,9 +474,10 @@ pub async fn execute(args: RebaseArgs) {
     match RebaseState::is_in_progress().await {
         Ok(true) => {
             eprintln!("fatal: rebase already in progress");
-            eprintln!("hint: use 'libra rebase --continue' to continue rebasing");
-            eprintln!("hint: use 'libra rebase --abort' to abort and restore the original branch");
-            eprintln!("hint: use 'libra rebase --skip' to skip this commit");
+            eprintln!();
+            eprintln!("Hint: use 'libra rebase --continue' to continue rebasing");
+            eprintln!("Hint: use 'libra rebase --abort' to abort and restore the original branch");
+            eprintln!("Hint: use 'libra rebase --skip' to skip this commit");
             return;
         }
         Ok(false) => {}
@@ -1013,7 +1014,8 @@ async fn rebase_continue() {
     // Check for unmerged entries (stage != 0)
     if has_unmerged_entries(&index) {
         eprintln!("error: you must resolve all conflicts before continuing");
-        eprintln!("hint: use 'libra add <file>' to mark conflicts as resolved");
+        eprintln!();
+        eprintln!("Hint: use 'libra add <file>' to mark conflicts as resolved");
         return;
     }
 
@@ -1579,7 +1581,8 @@ async fn rebase_worktree_guard(
             "fatal: untracked working tree file would be overwritten by rebase: {}",
             conflict.display()
         );
-        eprintln!("hint: move or remove it before you rebase.");
+        eprintln!();
+        eprintln!("Hint: move or remove it before you rebase.");
         return false;
     }
 

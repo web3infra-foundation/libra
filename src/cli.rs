@@ -529,8 +529,34 @@ fn parse_error_components(err: &clap::Error) -> (String, Option<String>, Vec<Str
     )
 }
 
-fn repo_not_found_error() -> CliError {
-    CliError::repo_not_found()
+fn shell_quote_path(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    format!("'{}'", raw.replace('\'', "'\"'\"'"))
+}
+
+fn git_conversion_hint(location: &utils::util::GitRepositoryLocation) -> String {
+    let command = if location.is_bare {
+        "libra init --bare --from-git-repository ."
+    } else {
+        "libra init --from-git-repository ."
+    };
+    let current = utils::util::cur_dir()
+        .canonicalize()
+        .unwrap_or_else(|_| utils::util::cur_dir());
+
+    if current == location.root {
+        format!("run '{command}' to convert this Git repository to Libra.")
+    } else {
+        format!("run: cd {} && {command}", shell_quote_path(&location.root))
+    }
+}
+
+fn repo_not_found_error(path: Option<&Path>) -> CliError {
+    let mut error = CliError::repo_not_found();
+    if let Some(location) = utils::util::find_git_repository(path) {
+        error = error.with_priority_hint(git_conversion_hint(&location));
+    }
+    error
 }
 
 fn command_preflight_storage(command: &Commands) -> CliResult<Option<std::path::PathBuf>> {
@@ -540,18 +566,18 @@ fn command_preflight_storage(command: &Commands) -> CliResult<Option<std::path::
         Commands::Config(cfg) if cfg.global || cfg.system => Ok(None),
         Commands::Code(code_args) => {
             let working_dir = command::code::resolve_code_preflight_working_dir(code_args)?;
-            let storage = utils::util::try_get_storage_path(Some(working_dir))
-                .map_err(|_| repo_not_found_error())?;
+            let storage = utils::util::try_get_storage_path(Some(working_dir.clone()))
+                .map_err(|_| repo_not_found_error(Some(&working_dir)))?;
             Ok(Some(storage))
         }
         Commands::Graph(graph_args) => {
             let storage = utils::util::try_get_storage_path(graph_args.repo.clone())
-                .map_err(|_| repo_not_found_error())?;
+                .map_err(|_| repo_not_found_error(graph_args.repo.as_deref()))?;
             Ok(Some(storage))
         }
         _ => {
             let storage =
-                utils::util::try_get_storage_path(None).map_err(|_| repo_not_found_error())?;
+                utils::util::try_get_storage_path(None).map_err(|_| repo_not_found_error(None))?;
             Ok(Some(storage))
         }
     }

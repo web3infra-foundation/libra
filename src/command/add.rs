@@ -556,8 +556,9 @@ fn render_warnings_stderr(result: &AddOutput) {
         for path in &result.ignored {
             eprintln!("{path}");
         }
-        eprintln!("hint: use -f if you really want to add them.");
-        eprintln!("hint: use 'libra restore --staged <file>' to unstage if needed");
+        eprintln!();
+        eprintln!("Hint: use -f if you really want to add them.");
+        eprintln!("Hint: use 'libra restore --staged <file>' to unstage if needed");
     }
     if !result.failed.is_empty() {
         eprintln!(

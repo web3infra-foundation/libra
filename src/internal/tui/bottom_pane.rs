@@ -587,10 +587,7 @@ impl BottomPane {
 
     /// Render the bottom pane in user-input mode (questions + options).
     fn render_user_input_mode(&self, area: Rect, buf: &mut Buffer) -> Option<Position> {
-        let questions = match &self.user_input_questions {
-            Some(q) => q,
-            None => return None,
-        };
+        let questions = self.user_input_questions.as_ref()?;
 
         let q_idx = self.user_input_current_question;
         let question = questions.get(q_idx)?;
