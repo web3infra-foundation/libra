@@ -8,11 +8,12 @@
 //! - Index file integrity
 //! - Cross-reference validation (trees reference valid blobs/trees)
 //!
-//! ## Exit codes
-//! - 0: All objects verified successfully
-//! - 1: Corrupted objects found
-//! - 2: Missing refs or broken references
-//! - 3: Index corruption detected
+//! ## Exit codes (bitmask)
+//! - 0: All checks passed
+//! - 1 (bit 0): Object corruption
+//! - 2 (bit 1): Broken refs
+//! - 4 (bit 2): Index corruption
+//! Bits are OR'd when multiple categories fail (e.g. 5 = objects + index)
 
 use std::{fs, io};
 
@@ -34,11 +35,19 @@ use crate::{
     internal::{db, head::Head, model::reference},
     utils::{
         client_storage::ClientStorage,
-        error::{CliError, CliResult},
+        error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
         path, util,
     },
 };
+
+/// Bitmask flags for fsck exit codes. Multiple failure categories are OR'd together.
+mod exit_code {
+    pub const OK: i32 = 0;
+    pub const OBJECT_CORRUPT: i32 = 1;   // bit 0
+    pub const REF_BROKEN: i32 = 2;       // bit 1
+    pub const INDEX_CORRUPT: i32 = 4;    // bit 2
+}
 
 const FSCK_LONG_ABOUT: &str =
     "Verify the integrity of objects, refs, and index in a Libra repository.
@@ -50,11 +59,11 @@ This command checks:
   - Index integrity: the staging index is valid and consistent
   - Cross-reference validation: trees reference valid child objects
 
-Exit codes:
+Exit codes (bitmask, OR'd when multiple fail):
   0 - All checks passed
-  1 - Corrupted objects found
-  2 - Missing refs or broken references
-  3 - Index corruption detected";
+  1 (bit 0) - Object corruption
+  2 (bit 1) - Broken refs
+  4 (bit 2) - Index corruption";
 
 const FSCK_AFTER_HELP: &str = "Examples:
   libra fsck
@@ -129,6 +138,16 @@ pub struct FsckResult {
     pub cross_ref_issues: usize,
     pub overall_status: CheckStatus,
     pub issues: Vec<IssueReport>,
+    /// Bitmask of failure categories (see `exit_code` module).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub failure_mask: i32,
+    /// Human-readable names for the set bits in `failure_mask`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failure_categories: Vec<String>,
+}
+
+fn is_zero(v: &i32) -> bool {
+    *v == 0
 }
 
 /// Detailed issue report
@@ -164,7 +183,7 @@ pub async fn execute(args: FsckArgs) {
 
     match result {
         Ok(fsck_result) => {
-            if fsck_result.overall_status == CheckStatus::Ok {
+            if fsck_result.failure_mask == exit_code::OK {
                 if !args.verbose {
                     println!(
                         "Integrity check passed: {} objects verified",
@@ -175,15 +194,7 @@ pub async fn execute(args: FsckArgs) {
                 }
             } else {
                 print_issues(&fsck_result);
-                // Exit code 2 for broken refs, 3 for index corruption, 1 for object corruption
-                let exit_code = if fsck_result.refs_broken > 0 {
-                    2
-                } else if !fsck_result.index_valid {
-                    3
-                } else {
-                    1
-                };
-                std::process::exit(exit_code);
+                std::process::exit(fsck_result.failure_mask);
             }
         }
         Err(e) => {
@@ -215,15 +226,10 @@ pub async fn execute_safe(args: FsckArgs, output: &OutputConfig) -> CliResult<()
         output,
     )?;
 
-    if result.overall_status != CheckStatus::Ok {
-        let exit_code = if result.refs_broken > 0 {
-            2
-        } else if !result.index_valid {
-            3
-        } else {
-            1
-        };
-        std::process::exit(exit_code);
+    if result.failure_mask != exit_code::OK {
+        return Err(CliError::failure("repository integrity check failed")
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+            .with_exit_code(result.failure_mask));
     }
 
     Ok(())
@@ -333,6 +339,12 @@ async fn check_single_object(object_id: &str, storage: &ClientStorage) -> CliRes
         }
     };
 
+    let (failure_mask, failure_categories) = match overall_status {
+        CheckStatus::Ok => (exit_code::OK, vec![]),
+        CheckStatus::Missing => (exit_code::OBJECT_CORRUPT, vec!["objects".to_string()]),
+        _ => (exit_code::OBJECT_CORRUPT, vec!["objects".to_string()]),
+    };
+
     Ok(FsckResult {
         objects_checked: 1,
         objects_ok: if overall_status == CheckStatus::Ok {
@@ -352,6 +364,8 @@ async fn check_single_object(object_id: &str, storage: &ClientStorage) -> CliRes
         cross_ref_issues: 0,
         overall_status,
         issues,
+        failure_mask,
+        failure_categories,
     })
 }
 
@@ -367,6 +381,8 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
         cross_ref_issues: 0,
         overall_status: CheckStatus::Ok,
         issues: Vec::new(),
+        failure_mask: exit_code::OK,
+        failure_categories: Vec::new(),
     };
 
     // Get all object hashes
@@ -480,6 +496,24 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
             result.overall_status = CheckStatus::Corrupted;
         }
     }
+
+    // Compute failure bitmask from the actual state after all checks and fixes.
+    let mut mask = exit_code::OK;
+    let mut categories = Vec::new();
+    if result.objects_corrupted > 0 || result.cross_ref_issues > 0 {
+        mask |= exit_code::OBJECT_CORRUPT;
+        categories.push("objects".to_string());
+    }
+    if result.refs_broken > 0 {
+        mask |= exit_code::REF_BROKEN;
+        categories.push("refs".to_string());
+    }
+    if !result.index_valid {
+        mask |= exit_code::INDEX_CORRUPT;
+        categories.push("index".to_string());
+    }
+    result.failure_mask = mask;
+    result.failure_categories = categories;
 
     Ok(result)
 }
@@ -1447,6 +1481,8 @@ mod tests {
             cross_ref_issues: 0,
             overall_status: CheckStatus::Ok,
             issues: vec![],
+            failure_mask: exit_code::OK,
+            failure_categories: vec![],
         };
 
         assert_eq!(result.objects_checked, 10);
@@ -1498,6 +1534,8 @@ mod tests {
             cross_ref_issues: 0,
             overall_status: CheckStatus::Ok,
             issues: vec![],
+            failure_mask: exit_code::OK,
+            failure_categories: vec![],
         };
 
         let json = serde_json::to_string_pretty(&result).unwrap();
@@ -1630,6 +1668,8 @@ mod tests {
             cross_ref_issues: 0,
             overall_status: CheckStatus::Ok,
             issues: vec![],
+            failure_mask: exit_code::OK,
+            failure_categories: vec![],
         };
 
         assert_eq!(result.objects_checked, 0);
@@ -1761,6 +1801,8 @@ mod tests {
             cross_ref_issues: 0,
             overall_status: CheckStatus::Ok,
             issues: vec![],
+            failure_mask: exit_code::OK,
+            failure_categories: vec![],
         };
 
         print_verbose_result(&result);
