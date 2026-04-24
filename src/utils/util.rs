@@ -670,22 +670,42 @@ async fn resolve_commit_base_atom_typed(name: &str) -> Result<ObjectHash, Commit
         return Ok(commit);
     }
 
-    // Support both short remote branches (`main` with `remote = origin`) and
-    // fetched remote-tracking refs (`refs/remotes/origin/main`) for inputs such
-    // as `origin/main` and multi-segment remotes like `upstream/origin/main`.
-    for (remote, branch_name) in remote_tracking_candidates(name) {
-        if let Some(commit) = resolve_branch_commit_typed(
-            &format!("refs/remotes/{remote}/{branch_name}"),
-            Some(remote),
-            name,
-        )
-        .await?
-        {
+    // Support both short remote branches (`origin/main`) and fetched
+    // remote-tracking refs (`refs/remotes/origin/main`), including multi-segment
+    // remotes like `upstream/origin/main`.
+    if let Some(short_name) = name.strip_prefix("refs/remotes/") {
+        if let Some(commit) = resolve_branch_commit_typed(name, None, name).await? {
             return Ok(commit);
         }
 
-        if let Some(commit) = resolve_branch_commit_typed(branch_name, Some(remote), name).await? {
-            return Ok(commit);
+        for (remote, branch_name) in remote_tracking_candidates(short_name) {
+            if let Some(commit) = resolve_branch_commit_typed(name, Some(remote), name).await? {
+                return Ok(commit);
+            }
+
+            if let Some(commit) =
+                resolve_branch_commit_typed(branch_name, Some(remote), name).await?
+            {
+                return Ok(commit);
+            }
+        }
+    } else {
+        for (remote, branch_name) in remote_tracking_candidates(name) {
+            if let Some(commit) = resolve_branch_commit_typed(
+                &format!("refs/remotes/{remote}/{branch_name}"),
+                Some(remote),
+                name,
+            )
+            .await?
+            {
+                return Ok(commit);
+            }
+
+            if let Some(commit) =
+                resolve_branch_commit_typed(branch_name, Some(remote), name).await?
+            {
+                return Ok(commit);
+            }
         }
     }
 
