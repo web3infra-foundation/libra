@@ -51,6 +51,8 @@ Every Libra command accepts the following global flags:
 | `libra describe` | `desc` | Find the nearest reachable tag and format as `tag-N-g<abbrev>` | [describe.md](describe.md) |
 | `libra grep` | | Search for patterns in tracked files with regex, revision, and index support | [grep.md](grep.md) |
 | `libra reflog` | | View, delete, or check existence of reference change logs | [reflog.md](reflog.md) |
+| `libra rev-list` | | List commit objects reachable from a revision | [rev-list.md](rev-list.md) |
+| `libra rev-parse` | | Parse revision names, abbreviate refs, and print repository paths | [rev-parse.md](rev-parse.md) |
 
 ### Branching & Navigation
 

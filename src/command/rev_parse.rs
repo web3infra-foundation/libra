@@ -158,14 +158,6 @@ async fn resolve_remote_tracking_ref(spec: &str, short_name: &str) -> CliResult<
             return Ok(true);
         }
 
-        if Branch::find_branch_result(&full_ref, None)
-            .await
-            .map_err(|error| map_symbolic_ref_resolution_error(spec, error))?
-            .is_some()
-        {
-            return Ok(true);
-        }
-
         if Branch::find_branch_result(branch_name, Some(remote))
             .await
             .map_err(|error| map_symbolic_ref_resolution_error(spec, error))?
