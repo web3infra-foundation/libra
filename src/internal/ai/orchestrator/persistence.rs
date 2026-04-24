@@ -183,6 +183,9 @@ struct RuntimeAuditState {
     plan_ids: Vec<String>,
     latest_plan_id: Option<String>,
     latest_plan_revision: Option<u32>,
+    // Both maps are derived from the same persisted plan revision:
+    // step_id -> persisted_step_id for runtime event lookup by task.step_id(),
+    // task_id -> persisted_step_id for final result lookup by task result id.
     persisted_step_ids: HashMap<Uuid, Uuid>,
     persisted_step_ids_by_task_id: HashMap<Uuid, Uuid>,
     persisted_task_ids: HashMap<Uuid, String>,
@@ -1093,7 +1096,7 @@ fn persisted_task_ids_for_plan(
                 .cloned()
                 .map(|persisted_id| (task.id(), persisted_id))
                 .ok_or_else(|| {
-                    OrchestratorError::ConfigError(format!(
+                    OrchestratorError::PersistenceError(format!(
                         "persisted review bundle is missing task snapshot for compiled task {}",
                         task.id()
                     ))
@@ -1114,7 +1117,7 @@ fn persisted_step_ids_by_task_for_plan(
                 .copied()
                 .map(|persisted_step_id| (task.id(), persisted_step_id))
                 .ok_or_else(|| {
-                    OrchestratorError::ConfigError(format!(
+                    OrchestratorError::PersistenceError(format!(
                         "persisted plan is missing step snapshot for compiled task {}",
                         task.id()
                     ))
@@ -1130,7 +1133,7 @@ async fn bind_existing_plan_revision(
 ) -> Result<PersistedPlanRevision, OrchestratorError> {
     let persisted_plan = load_persisted_plan(mcp_server, plan_id).await?;
     if persisted_plan.steps().len() != plan.tasks.len() {
-        return Err(OrchestratorError::ConfigError(format!(
+        return Err(OrchestratorError::PersistenceError(format!(
             "persisted preview plan step count mismatch: expected {}, got {}",
             plan.tasks.len(),
             persisted_plan.steps().len()
@@ -1138,7 +1141,7 @@ async fn bind_existing_plan_revision(
     }
     for (task, step) in plan.tasks.iter().zip(persisted_plan.steps().iter()) {
         if step.description() != task.title() {
-            return Err(OrchestratorError::ConfigError(format!(
+            return Err(OrchestratorError::PersistenceError(format!(
                 "persisted preview plan does not match compiled execution plan at step '{}'",
                 task.title()
             )));
@@ -2561,7 +2564,7 @@ async fn create_plan_revision(
     let plan_id = parse_created_id("plan", &result)?;
     let persisted_plan = load_persisted_plan(mcp_server, &plan_id).await?;
     if persisted_plan.steps().len() != plan.tasks.len() {
-        return Err(OrchestratorError::ConfigError(format!(
+        return Err(OrchestratorError::PersistenceError(format!(
             "persisted plan step count mismatch: expected {}, got {}",
             plan.tasks.len(),
             persisted_plan.steps().len()
@@ -2584,7 +2587,7 @@ async fn create_plan_revision(
 fn is_missing_persisted_plan_error(error: &OrchestratorError) -> bool {
     matches!(
         error,
-        OrchestratorError::ConfigError(message)
+        OrchestratorError::PersistenceError(message)
             if message.starts_with("persisted plan not found:")
     )
 }
@@ -2606,15 +2609,16 @@ async fn load_persisted_plan(
     let hash = history
         .get_object_hash("plan", &plan_uuid.to_string())
         .await
-        .map_err(|e| OrchestratorError::ConfigError(format!("failed to resolve plan hash: {e}")))?
+        .map_err(|e| {
+            OrchestratorError::PersistenceError(format!("failed to resolve plan hash: {e}"))
+        })?
         .ok_or_else(|| {
-            OrchestratorError::ConfigError(format!("persisted plan not found: {plan_id}"))
+            OrchestratorError::PersistenceError(format!("persisted plan not found: {plan_id}"))
         })?;
 
-    storage
-        .get_json::<GitPlan>(&hash)
-        .await
-        .map_err(|e| OrchestratorError::ConfigError(format!("failed to load persisted plan: {e}")))
+    storage.get_json::<GitPlan>(&hash).await.map_err(|e| {
+        OrchestratorError::PersistenceError(format!("failed to load persisted plan: {e}"))
+    })
 }
 
 async fn create_provenance(
@@ -3036,17 +3040,17 @@ async fn rebuild_thread_projection(
     thread_id: &str,
 ) -> Result<(), OrchestratorError> {
     let history = mcp_server.intent_history_manager.as_ref().ok_or_else(|| {
-        OrchestratorError::ConfigError(
+        OrchestratorError::ProjectionError(
             "cannot rebuild workflow projection without AI history manager".to_string(),
         )
     })?;
     let storage = mcp_server.storage.as_ref().ok_or_else(|| {
-        OrchestratorError::ConfigError(
+        OrchestratorError::ProjectionError(
             "cannot rebuild workflow projection without MCP storage".to_string(),
         )
     })?;
     let thread_id = Uuid::parse_str(thread_id).map_err(|error| {
-        OrchestratorError::ConfigError(format!(
+        OrchestratorError::ProjectionError(format!(
             "cannot rebuild workflow projection because thread id '{thread_id}' is not a UUID: {error}"
         ))
     })?;
@@ -3056,12 +3060,12 @@ async fn rebuild_thread_projection(
         .materialize_thread(&db, thread_id)
         .await
         .map_err(|error| {
-            OrchestratorError::ConfigError(format!(
+            OrchestratorError::ProjectionError(format!(
                 "failed to rebuild workflow projection for thread {thread_id}: {error:#}"
             ))
         })?;
     if rebuild.is_none() {
-        return Err(OrchestratorError::ConfigError(format!(
+        return Err(OrchestratorError::ProjectionError(format!(
             "failed to rebuild workflow projection for thread {thread_id}: no projection was produced"
         )));
     }

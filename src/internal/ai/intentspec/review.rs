@@ -46,6 +46,11 @@ pub fn build_intentspec_review(
             .map(|item| format!("{} ({:?})", item.title, item.kind)),
     );
     push_list(&mut out, "In Scope", spec.intent.in_scope.iter().cloned());
+    if scope_grants_repository_root(&spec.intent.in_scope) {
+        out.push_str(
+            "**Scope Notice:** In Scope grants repository-wide write scope (`.`). Confirm this is intentional before executing.\n\n",
+        );
+    }
     push_list(
         &mut out,
         "Out Of Scope",
@@ -143,6 +148,13 @@ pub fn build_intentspec_review(
         "\nConfirm this IntentSpec to generate an execution plan, modify it to revise scope, or cancel.\n",
     );
     out
+}
+
+fn scope_grants_repository_root(in_scope: &[String]) -> bool {
+    in_scope
+        .iter()
+        .map(|scope| scope.trim())
+        .any(|scope| matches!(scope, "." | "./"))
 }
 
 fn push_table_row(out: &mut String, key: &str, value: &str) {
@@ -260,5 +272,47 @@ mod tests {
         assert!(review.contains("Fix the Ollama planner flow"));
         assert!(review.contains("Confirm this IntentSpec to generate an execution plan"));
         assert!(!review.contains("Execution plan ready"));
+    }
+
+    #[test]
+    fn review_warns_when_scope_grants_repository_root() {
+        let spec = resolve_intentspec(
+            IntentDraft {
+                intent: DraftIntent {
+                    summary: "Apply broad cleanup".to_string(),
+                    problem_statement: "Planner omitted a narrow scope".to_string(),
+                    change_type: ChangeType::Bugfix,
+                    objectives: vec![Objective {
+                        title: "Cleanup".to_string(),
+                        kind: ObjectiveKind::Implementation,
+                    }],
+                    in_scope: vec![".".to_string()],
+                    out_of_scope: vec![],
+                    touch_hints: None,
+                },
+                acceptance: DraftAcceptance {
+                    success_criteria: vec!["Cleanup is complete".to_string()],
+                    fast_checks: vec![],
+                    integration_checks: vec![],
+                    security_checks: vec![],
+                    release_checks: vec![],
+                },
+                risk: DraftRisk {
+                    rationale: "repository-wide scope requires review".to_string(),
+                    factors: vec![],
+                    level: Some(RiskLevel::Medium),
+                },
+            },
+            RiskLevel::Medium,
+            ResolveContext {
+                working_dir: "/tmp/repo".to_string(),
+                base_ref: "HEAD".to_string(),
+                created_by_id: "tester".to_string(),
+            },
+        );
+
+        let review = build_intentspec_review(&spec, Some("intent-123"), &[]);
+
+        assert!(review.contains("repository-wide write scope"));
     }
 }

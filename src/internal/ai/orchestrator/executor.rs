@@ -1655,9 +1655,12 @@ fn fenced_json_blocks(raw: &str) -> impl Iterator<Item = &str> {
 }
 
 fn json_object_candidates(raw: &str) -> impl Iterator<Item = &str> {
+    const MAX_JSON_OBJECT_CANDIDATES: usize = 16;
+
     raw.char_indices()
         .filter(|(_, ch)| *ch == '{')
         .map(|(index, _)| &raw[index..])
+        .take(MAX_JSON_OBJECT_CANDIDATES)
 }
 
 fn parse_reviewer_decision_prefix(raw: &str) -> Result<ReviewerDecision, serde_json::Error> {

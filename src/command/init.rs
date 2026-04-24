@@ -175,7 +175,7 @@ impl From<InitError> for CliError {
                 };
                 CliError::fatal(error.to_string())
                     .with_stable_code(stable_code)
-                    .with_hint("check .gitignore/.libraignore permissions and retry.")
+                    .with_hint(error.recovery_hint())
             }
             InitError::Io(error) => match error.kind() {
                 io::ErrorKind::InvalidInput => CliError::command_usage(error.to_string())

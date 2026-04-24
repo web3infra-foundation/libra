@@ -35,6 +35,10 @@ pub enum OrchestratorError {
     PolicyViolation(String),
     #[error("config error: {0}")]
     ConfigError(String),
+    #[error("persistence error: {0}")]
+    PersistenceError(String),
+    #[error("projection error: {0}")]
+    ProjectionError(String),
 }
 
 /// Status of a single task node in the DAG.

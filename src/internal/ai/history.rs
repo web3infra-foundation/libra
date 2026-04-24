@@ -12,7 +12,7 @@ use git_internal::{
 };
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DatabaseTransaction, DbErr, EntityTrait,
-    QueryFilter, Set, TransactionTrait, sea_query::Expr,
+    QueryFilter, Set, SqlErr, TransactionTrait, sea_query::Expr,
 };
 use tokio::time::sleep;
 
@@ -51,7 +51,7 @@ fn is_sqlite_busy(err: &DbErr) -> bool {
 }
 
 fn is_sqlite_unique_violation(err: &DbErr) -> bool {
-    err.to_string().contains("UNIQUE constraint failed")
+    matches!(err.sql_err(), Some(SqlErr::UniqueConstraintViolation(_)))
 }
 
 /// Manages object history using an orphan branch and Git Tree structure.

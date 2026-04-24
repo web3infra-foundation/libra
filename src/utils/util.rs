@@ -2,7 +2,9 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    env, fs, io,
+    env,
+    ffi::OsStr,
+    fs, io,
     io::Write,
     path::{Path, PathBuf},
     sync::Mutex,
@@ -150,6 +152,27 @@ fn is_valid_git_storage_dir(git_dir: &Path) -> bool {
         && git_dir_marker_exists(git_dir, common_dir.as_deref(), "objects")
 }
 
+fn git_config_declares_bare(git_dir: &Path) -> bool {
+    fs::read_to_string(git_dir.join("config")).is_ok_and(|config| {
+        config.lines().any(|line| {
+            line.trim().split_once('=').is_some_and(|(key, value)| {
+                key.trim() == "bare" && value.trim().eq_ignore_ascii_case("true")
+            })
+        })
+    })
+}
+
+fn worktree_root_for_dot_git_storage(candidate: &Path) -> Option<PathBuf> {
+    if candidate.file_name() != Some(OsStr::new(".git"))
+        || !is_valid_git_storage_dir(candidate)
+        || git_config_declares_bare(candidate)
+    {
+        return None;
+    }
+    let parent = candidate.parent()?;
+    Some(fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf()))
+}
+
 pub fn find_git_repository(path: Option<&Path>) -> Option<GitRepositoryLocation> {
     let mut candidate = path.map(Path::to_path_buf).unwrap_or_else(cur_dir);
     if candidate.is_file() {
@@ -162,6 +185,13 @@ pub fn find_git_repository(path: Option<&Path>) -> Option<GitRepositoryLocation>
         {
             return Some(GitRepositoryLocation {
                 root: fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone()),
+                is_bare: false,
+            });
+        }
+
+        if let Some(root) = worktree_root_for_dot_git_storage(&candidate) {
+            return Some(GitRepositoryLocation {
+                root,
                 is_bare: false,
             });
         }
@@ -1448,5 +1478,44 @@ mod test {
 
         assert_eq!(location.root, repo.canonicalize().unwrap());
         assert!(!location.is_bare);
+    }
+
+    #[test]
+    fn test_find_git_repository_treats_dot_git_directory_as_worktree() {
+        let temp = tempdir().unwrap();
+        let repo = temp.path().join("project");
+        let git = repo.join(".git");
+        fs::create_dir_all(git.join("objects").join("aa")).unwrap();
+        fs::write(git.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+        fs::write(
+            git.join("config"),
+            b"[core]\n\trepositoryformatversion = 0\n\tbare = false\n",
+        )
+        .unwrap();
+
+        let location = find_git_repository(Some(&git.join("objects")))
+            .expect("should detect parent Git worktree from inside .git");
+
+        assert_eq!(location.root, repo.canonicalize().unwrap());
+        assert!(!location.is_bare);
+    }
+
+    #[test]
+    fn test_find_git_repository_keeps_bare_dot_git_directory_bare() {
+        let temp = tempdir().unwrap();
+        let bare = temp.path().join(".git");
+        fs::create_dir_all(bare.join("objects")).unwrap();
+        fs::write(bare.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+        fs::write(
+            bare.join("config"),
+            b"[core]\n\trepositoryformatversion = 0\n\tbare = true\n",
+        )
+        .unwrap();
+
+        let location = find_git_repository(Some(&bare))
+            .expect("should detect a bare repository named .git as bare");
+
+        assert_eq!(location.root, bare.canonicalize().unwrap());
+        assert!(location.is_bare);
     }
 }

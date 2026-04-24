@@ -24,6 +24,13 @@ pub enum IgnoreFileError {
     #[error("failed to read ignore file '{path}': {source}")]
     Read { path: PathBuf, source: io::Error },
 
+    #[error("failed to create parent directory '{path}' for ignore file '{target}': {source}")]
+    CreateDirectory {
+        path: PathBuf,
+        target: PathBuf,
+        source: io::Error,
+    },
+
     #[error("failed to write ignore file '{path}': {source}")]
     Write { path: PathBuf, source: io::Error },
 
@@ -40,7 +47,22 @@ pub enum IgnoreFileError {
 
 impl IgnoreFileError {
     pub fn is_write(&self) -> bool {
-        matches!(self, Self::Write { .. })
+        matches!(self, Self::CreateDirectory { .. } | Self::Write { .. })
+    }
+
+    pub fn recovery_hint(&self) -> &'static str {
+        match self {
+            Self::Read { .. } | Self::Write { .. } => {
+                "check .gitignore/.libraignore permissions and retry."
+            }
+            Self::CreateDirectory { .. } => {
+                "check parent directory permissions for .libraignore and retry."
+            }
+            Self::Walk { .. } => "check source repository permissions and retry.",
+            Self::RelativePath { .. } => {
+                "ensure the source ignore file is inside the repository being converted."
+            }
+        }
     }
 }
 
@@ -135,8 +157,9 @@ fn copy_gitignore_to_libraignore(
 
 fn write_libraignore(target: &Path, content: &[u8]) -> Result<(), IgnoreFileError> {
     if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent).map_err(|source| IgnoreFileError::Write {
+        fs::create_dir_all(parent).map_err(|source| IgnoreFileError::CreateDirectory {
             path: parent.to_path_buf(),
+            target: target.to_path_buf(),
             source,
         })?;
     }
@@ -194,9 +217,7 @@ fn should_ignore_with_workdir(
     index: &Index,
     workdir: &PathBuf,
 ) -> bool {
-    let is_tracked = path
-        .to_str()
-        .is_some_and(|path_str| index.tracked(path_str, 0));
+    let is_tracked = path_is_tracked_or_unknown_encoding(path, index);
 
     match policy {
         IgnorePolicy::Respect => {
@@ -212,6 +233,15 @@ fn should_ignore_with_workdir(
             }
             !is_path_ignored(path, workdir)
         }
+    }
+}
+
+fn path_is_tracked_or_unknown_encoding(path: &Path, index: &Index) -> bool {
+    match path.to_str() {
+        Some(path_str) => index.tracked(path_str, 0),
+        // The current index API is UTF-8 keyed. Preserve visibility for paths we cannot
+        // look up instead of silently treating a possibly tracked path as untracked.
+        None => true,
     }
 }
 
@@ -243,6 +273,49 @@ mod tests {
 
     fn build_index() -> Index {
         Index::load(crate::utils::path::index()).unwrap()
+    }
+
+    #[test]
+    fn write_libraignore_reports_parent_directory_creation_errors() {
+        let repo = tempdir().unwrap();
+        let parent = repo.path().join("not-a-directory");
+        fs::write(&parent, "file").unwrap();
+        let target = parent.join(".libraignore");
+
+        let error = write_libraignore(&target, b"ignored\n").unwrap_err();
+
+        match error {
+            IgnoreFileError::CreateDirectory {
+                path,
+                target: error_target,
+                ..
+            } => {
+                assert_eq!(path, parent);
+                assert_eq!(error_target, target);
+            }
+            other => panic!("expected CreateDirectory error, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_paths_use_conservative_tracked_fallback() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+        let repo = tempdir().unwrap();
+        let workdir = repo.path().to_path_buf();
+        fs::write(workdir.join(".libraignore"), "*\n").unwrap();
+        let non_utf8_path = PathBuf::from(OsString::from_vec(vec![b'i', 0xff, b'n']));
+        let index = Index::new();
+
+        assert!(
+            !should_ignore_with_workdir(&non_utf8_path, IgnorePolicy::Respect, &index, &workdir),
+            "unknown-encoding paths should stay visible under Respect"
+        );
+        assert!(
+            should_ignore_with_workdir(&non_utf8_path, IgnorePolicy::OnlyIgnored, &index, &workdir),
+            "unknown-encoding paths should be excluded from OnlyIgnored like tracked entries"
+        );
     }
 
     #[tokio::test]

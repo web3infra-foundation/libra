@@ -215,7 +215,7 @@ impl From<CloneError> for CliError {
                 };
                 CliError::fatal(source.to_string())
                     .with_stable_code(stable_code)
-                    .with_hint("check .gitignore/.libraignore permissions and retry.")
+                    .with_hint(source.recovery_hint())
             }
             CloneError::SetupFailed { .. } => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::InternalInvariant)

@@ -531,6 +531,16 @@ fn parse_error_components(err: &clap::Error) -> (String, Option<String>, Vec<Str
 
 fn shell_quote_path(path: &Path) -> String {
     let raw = path.to_string_lossy();
+    shell_quote_text(&raw)
+}
+
+#[cfg(windows)]
+fn shell_quote_text(raw: &str) -> String {
+    format!("\"{}\"", raw)
+}
+
+#[cfg(not(windows))]
+fn shell_quote_text(raw: &str) -> String {
     format!("'{}'", raw.replace('\'', "'\"'\"'"))
 }
 
@@ -913,5 +923,23 @@ mod tests {
             "libra".to_string(),
             "--help".to_string(),
         ]));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn shell_quote_path_uses_posix_single_quote_escaping() {
+        assert_eq!(
+            shell_quote_path(Path::new("repo's path")),
+            "'repo'\"'\"'s path'"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn shell_quote_path_uses_windows_double_quotes() {
+        assert_eq!(
+            shell_quote_path(Path::new(r"C:\Program Files\repo")),
+            r#""C:\Program Files\repo""#
+        );
     }
 }
