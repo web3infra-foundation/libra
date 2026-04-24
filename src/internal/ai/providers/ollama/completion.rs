@@ -557,6 +557,15 @@ fn process_ollama_stream_line(
         }
     }
 
+    if !thinking.is_empty()
+        && let Some(stream_events) = ctx.stream_events
+    {
+        let _ = stream_events.send(CompletionStreamEvent::ThinkingDelta {
+            request_id: Some(ctx.request_id.to_string()),
+            delta: thinking.to_string(),
+        });
+    }
+
     for (tool_index, tool_call) in chunk.message.tool_calls.iter().enumerate() {
         let tool_call_id = tool_call
             .id
@@ -1294,6 +1303,37 @@ mod tests {
                 assert_eq!(arguments, serde_json::json!({"text": "hi"}));
             }
             other => panic!("expected tool preview event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_streamed_thinking_emits_delta_event() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = OllamaStreamReadContext {
+            request_id: "req_thinking",
+            model: "glm-5.1",
+            endpoint: "http://127.0.0.1:11434/api/chat",
+            attempt: 1,
+            total_attempts: 1,
+            attempt_started: Instant::now(),
+            stream_events: Some(&tx),
+        };
+        let mut accumulator = OllamaStreamAccumulator::default();
+
+        process_ollama_stream_line(
+            br#"{"model":"glm-5.1","created_at":"2026-04-17T13:04:30Z","message":{"role":"assistant","thinking":"checking repository state","content":""},"done":false}"#,
+            &mut accumulator,
+            &ctx,
+        )
+        .unwrap();
+
+        let event = rx.try_recv().unwrap();
+        match event {
+            CompletionStreamEvent::ThinkingDelta { request_id, delta } => {
+                assert_eq!(request_id.as_deref(), Some("req_thinking"));
+                assert_eq!(delta, "checking repository state");
+            }
+            other => panic!("expected thinking delta event, got {other:?}"),
         }
     }
 

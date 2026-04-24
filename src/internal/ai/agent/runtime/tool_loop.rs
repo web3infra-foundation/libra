@@ -577,6 +577,12 @@ mod tests {
                         })
                         .expect("stream receiver should be open");
                     stream_events
+                        .send(CompletionStreamEvent::ThinkingDelta {
+                            request_id: Some("req_1".to_string()),
+                            delta: "checking".to_string(),
+                        })
+                        .expect("stream receiver should be open");
+                    stream_events
                         .send(CompletionStreamEvent::TextDelta {
                             request_id: Some("req_1".to_string()),
                             delta: "lo".to_string(),
@@ -609,12 +615,17 @@ mod tests {
         .unwrap();
 
         assert_eq!(turn.final_text, "hello");
-        assert_eq!(observer.stream_events.len(), 2);
+        assert_eq!(observer.stream_events.len(), 3);
+        assert!(observer.stream_events.iter().any(|event| matches!(
+            event,
+            CompletionStreamEvent::ThinkingDelta { delta, .. } if delta == "checking"
+        )));
         let streamed = observer
             .stream_events
             .iter()
             .filter_map(|event| match event {
                 CompletionStreamEvent::TextDelta { delta, .. } => Some(delta.as_str()),
+                CompletionStreamEvent::ThinkingDelta { .. } => None,
                 CompletionStreamEvent::ToolCallPreview { .. } => None,
             })
             .collect::<String>();

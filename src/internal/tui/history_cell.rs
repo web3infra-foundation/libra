@@ -240,6 +240,65 @@ impl HistoryCell for AssistantHistoryCell {
     }
 }
 
+/// Provider thinking/reasoning output shown to the developer while a turn streams.
+#[derive(Debug, Clone)]
+pub struct ThinkingHistoryCell {
+    /// Incremental thinking content emitted by the provider.
+    pub content: String,
+    /// Whether the provider is still streaming this thinking block.
+    pub is_streaming: bool,
+}
+
+impl ThinkingHistoryCell {
+    /// Create a streaming thinking cell.
+    pub fn streaming() -> Self {
+        Self {
+            content: String::new(),
+            is_streaming: true,
+        }
+    }
+
+    /// Append streamed thinking text.
+    pub fn append(&mut self, delta: &str) {
+        self.content.push_str(delta);
+    }
+
+    /// Mark the thinking block as complete.
+    pub fn complete(&mut self) {
+        self.is_streaming = false;
+    }
+}
+
+impl HistoryCell for ThinkingHistoryCell {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let content = self.content.trim();
+        if content.is_empty() {
+            return Vec::new();
+        }
+
+        let mut lines = Vec::new();
+        let style = theme::text::subtle();
+        lines.push(Line::styled("● Think", style.add_modifier(Modifier::BOLD)));
+        for line in content.lines() {
+            lines.extend(wrap_text(line, "  ", width, style));
+        }
+        if self.is_streaming {
+            lines.push(Line::styled("  ▌", theme::status::ready()));
+        } else {
+            lines.push(Line::raw(""));
+        }
+        lines
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
 /// A tool call in the chat history.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ToolCallGroup {
@@ -1843,7 +1902,7 @@ mod tests {
 
     use super::{
         AssistantHistoryCell, HistoryCell, OrchestratorResultHistoryCell, PlanSummaryHistoryCell,
-        PlanUpdateHistoryCell, ToolCallHistoryCell, UserHistoryCell,
+        PlanUpdateHistoryCell, ThinkingHistoryCell, ToolCallHistoryCell, UserHistoryCell,
     };
     use crate::internal::ai::{
         intentspec::{
@@ -2006,6 +2065,18 @@ mod tests {
         let rendered = to_strings(cell.display_lines(80));
         assert!(rendered.iter().any(|line| line.starts_with("● ")));
         assert!(!rendered.iter().any(|line| line.contains("Assistant:")));
+    }
+
+    #[test]
+    fn thinking_cell_renders_provider_thoughts_for_developers() {
+        let mut cell = ThinkingHistoryCell::streaming();
+        cell.append("Inspecting failure evidence");
+        let rendered = to_strings(cell.display_lines(80));
+        let joined = rendered.join("\n");
+
+        assert!(joined.contains("Think"));
+        assert!(joined.contains("Inspecting failure evidence"));
+        assert!(rendered.iter().any(|line| line.trim() == "▌"));
     }
 
     #[test]

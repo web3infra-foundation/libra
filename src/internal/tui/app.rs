@@ -32,7 +32,8 @@ use super::{
     diff::FileChange,
     history_cell::{
         AssistantHistoryCell, DiffHistoryCell, HistoryCell, OrchestratorResultHistoryCell,
-        PlanSummaryHistoryCell, PlanUpdateHistoryCell, ToolCallHistoryCell, UserHistoryCell,
+        PlanSummaryHistoryCell, PlanUpdateHistoryCell, ThinkingHistoryCell, ToolCallHistoryCell,
+        UserHistoryCell,
     },
     terminal::{TARGET_FRAME_INTERVAL, Tui, TuiEvent},
     welcome_shader::{self, WelcomeView},
@@ -243,6 +244,8 @@ struct PendingPostPlan {
     plan_draft: ProviderPlanDraft,
     warnings: Vec<String>,
     network_access: bool,
+    automatic_repair_attempts: u8,
+    automatic_repair_max_attempts: u8,
     selected: usize, // 0=Execute, 1=Network toggle, 2=Modify, 3=Cancel
 }
 
@@ -253,6 +256,7 @@ struct PendingExecutionPlanRevision {
     current_plan: ProviderPlanDraft,
     warnings: Vec<String>,
     automatic_repair_attempts: u8,
+    automatic_repair_max_attempts: u8,
     network_access: bool,
     failure_report: Option<String>,
 }
@@ -260,6 +264,7 @@ struct PendingExecutionPlanRevision {
 #[derive(Clone, Debug)]
 struct PendingAutoPlanRepairExecution {
     attempt: u8,
+    max_attempts: u8,
     network_access: bool,
 }
 
@@ -273,6 +278,7 @@ struct ExecuteWorkflowRequest {
     plan_warnings: Vec<String>,
     network_access_override: Option<bool>,
     automatic_repair_attempts: u8,
+    automatic_repair_max_attempts: u8,
 }
 
 /// IntentSpec review dialog state: stores the spec and user selection.
@@ -1880,6 +1886,16 @@ where
                                         },
                                     });
                                 }
+                                CompletionStreamEvent::ThinkingDelta { delta, .. }
+                                    if !delta.is_empty() =>
+                                {
+                                    let _ = self.tx.send(AppEvent::AgentEvent {
+                                        turn_id: self.turn_id,
+                                        event: AgentEvent::ThinkingDelta {
+                                            delta: delta.clone(),
+                                        },
+                                    });
+                                }
                                 CompletionStreamEvent::ToolCallPreview {
                                     call_id,
                                     tool_name,
@@ -2121,6 +2137,10 @@ where
                         }
                         self.schedule_draw();
                     }
+                    AgentEvent::ThinkingDelta { delta } => {
+                        self.append_streaming_thinking_delta(&delta);
+                        self.schedule_draw();
+                    }
                     AgentEvent::ManagedResponseComplete {
                         text,
                         provider_session_id: _provider_session_id,
@@ -2184,6 +2204,8 @@ where
                 plan,
                 plan_draft,
                 warnings,
+                automatic_repair_attempts,
+                automatic_repair_max_attempts,
             } => {
                 self.finish_turn_state();
                 self.history = new_history;
@@ -2263,7 +2285,7 @@ where
                         "Automatic plan repair attempt {} produced a revised plan. Executing it now.",
                         automatic_plan_repair_attempt_label(
                             auto_repair.attempt,
-                            MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS
+                            auto_repair.max_attempts
                         )
                     );
                     self.widget
@@ -2314,6 +2336,7 @@ where
                         plan_warnings: warnings,
                         network_access_override: Some(auto_repair.network_access),
                         automatic_repair_attempts: auto_repair.attempt,
+                        automatic_repair_max_attempts: auto_repair.max_attempts,
                     })
                     .await;
                     return Ok(());
@@ -2409,6 +2432,8 @@ where
                     plan_draft,
                     warnings,
                     network_access,
+                    automatic_repair_attempts,
+                    automatic_repair_max_attempts,
                     selected: 0,
                 });
                 self.widget.bottom_pane.reset_post_plan_selection();
@@ -3017,6 +3042,7 @@ where
                 warnings,
                 network_access,
                 automatic_repair_attempts,
+                automatic_repair_max_attempts,
             } => {
                 self.finish_turn_state();
                 self.widget.clear_task_mux();
@@ -3037,18 +3063,19 @@ where
                     result.as_deref(),
                     Some(text.as_str()),
                     automatic_repair_attempts,
+                    automatic_repair_max_attempts,
                 );
                 let repair_message = if repair_required {
                     Some(if can_auto_repair {
                         automatic_plan_repair_started_message(
                             automatic_repair_attempts.saturating_add(1),
-                            MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS,
+                            automatic_repair_max_attempts,
                         )
-                    } else if automatic_repair_attempts >= MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS {
+                    } else if automatic_repair_attempts >= automatic_repair_max_attempts {
                         automatic_plan_repair_threshold_message(
                             failure_report.as_deref().unwrap_or_default(),
                             automatic_repair_attempts,
-                            MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS,
+                            automatic_repair_max_attempts,
                         )
                     } else {
                         execution_failure_revision_message_from_report(
@@ -3094,6 +3121,7 @@ where
                         current_plan: repair_plan,
                         warnings,
                         automatic_repair_attempts,
+                        automatic_repair_max_attempts,
                         network_access,
                         failure_report: failure_report.clone(),
                     };
@@ -3106,10 +3134,15 @@ where
                         let request = automatic_plan_repair_request_from_report(
                             failure_report.as_deref().unwrap_or_default(),
                             next_attempt,
-                            MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS,
+                            automatic_repair_max_attempts,
                         );
-                        self.begin_automatic_execution_plan_repair(pending, request, next_attempt)
-                            .await;
+                        self.begin_automatic_execution_plan_repair(
+                            pending,
+                            request,
+                            next_attempt,
+                            automatic_repair_max_attempts,
+                        )
+                        .await;
                         return Ok(());
                     }
                     self.pending_execution_plan_revision = Some(pending);
@@ -3341,11 +3374,11 @@ where
                 self.schedule_draw();
                 return;
             }
-            if matches!(
-                parse_pending_plan_revision_command(&text),
-                PendingPlanRevisionCommand::ContinueAutoRepair
-            ) {
-                self.continue_automatic_execution_plan_repair(pending).await;
+            if let PendingPlanRevisionCommand::ContinueAutoRepair { max_attempts } =
+                parse_pending_plan_revision_command(&text)
+            {
+                self.continue_automatic_execution_plan_repair(pending, max_attempts)
+                    .await;
                 return;
             }
             self.begin_execution_plan_revision_flow(pending, &text)
@@ -3458,8 +3491,9 @@ where
             BuiltinCommand::Plan => {
                 if let Some(pending) = self.pending_execution_plan_revision.take() {
                     match parse_pending_plan_revision_command(args) {
-                        PendingPlanRevisionCommand::ContinueAutoRepair => {
-                            self.continue_automatic_execution_plan_repair(pending).await;
+                        PendingPlanRevisionCommand::ContinueAutoRepair { max_attempts } => {
+                            self.continue_automatic_execution_plan_repair(pending, max_attempts)
+                                .await;
                         }
                         PendingPlanRevisionCommand::Modify(request) => {
                             self.begin_execution_plan_revision_flow(pending, request)
@@ -3484,7 +3518,7 @@ where
                     }
                 } else if let Some(spec_json) = self.pending_plan_revision.take() {
                     match parse_pending_plan_revision_command(args) {
-                        PendingPlanRevisionCommand::ContinueAutoRepair => {
+                        PendingPlanRevisionCommand::ContinueAutoRepair { .. } => {
                             self.pending_plan_revision = Some(spec_json);
                             self.widget.add_cell(Box::new(AssistantHistoryCell::new(
                                 pending_plan_revision_help_message(),
@@ -3749,6 +3783,7 @@ where
     fn finish_turn_state(&mut self) {
         self.cancel_pending_phase_confirmation();
         self.cancel_pending_exec_approval();
+        self.complete_streaming_thinking_cells();
         self.agent_task = None;
         self.running_tool_calls = 0;
         self.clear_turn_tracking();
@@ -3880,18 +3915,29 @@ where
         warnings: Vec<String>,
     ) {
         let prompt = build_execution_plan_prompt(&spec_json);
-        self.begin_llm_execution_plan_workflow(spec_json, intent_id, warnings, prompt)
-            .await;
+        self.begin_llm_execution_plan_workflow(
+            spec_json,
+            intent_id,
+            warnings,
+            prompt,
+            0,
+            MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS,
+        )
+        .await;
     }
 
     async fn begin_automatic_execution_plan_repair(
         &mut self,
-        pending: PendingExecutionPlanRevision,
+        mut pending: PendingExecutionPlanRevision,
         request: String,
         attempt: u8,
+        max_attempts: u8,
     ) {
+        pending.automatic_repair_attempts = attempt;
+        pending.automatic_repair_max_attempts = max_attempts;
         self.pending_auto_plan_repair_execution = Some(PendingAutoPlanRepairExecution {
             attempt,
+            max_attempts,
             network_access: pending.network_access,
         });
         self.begin_execution_plan_revision_flow(pending, &request)
@@ -3901,6 +3947,7 @@ where
     async fn continue_automatic_execution_plan_repair(
         &mut self,
         pending: PendingExecutionPlanRevision,
+        requested_max_attempts: Option<u8>,
     ) {
         let Some(failure_report) = pending.failure_report.clone() else {
             self.pending_execution_plan_revision = Some(pending);
@@ -3913,18 +3960,27 @@ where
         };
 
         let next_attempt = pending.automatic_repair_attempts.saturating_add(1);
-        let request = automatic_plan_repair_request_from_report(
-            &failure_report,
+        let max_attempts = requested_max_attempts
+            .unwrap_or(pending.automatic_repair_max_attempts)
+            .max(next_attempt);
+        let request =
+            automatic_plan_repair_request_from_report(&failure_report, next_attempt, max_attempts);
+        let mut note = String::new();
+        if requested_max_attempts.is_some() && max_attempts != pending.automatic_repair_max_attempts
+        {
+            note.push_str(&format!(
+                "Plan automatic repair retry limit set to {max_attempts}.\n"
+            ));
+        }
+        note.push_str(&automatic_plan_repair_started_message(
             next_attempt,
-            MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS,
-        );
-        let note =
-            automatic_plan_repair_started_message(next_attempt, MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS);
+            max_attempts,
+        ));
         self.widget
             .add_cell(Box::new(AssistantHistoryCell::new(note.clone())));
         self.history.push(Message::assistant(note.clone()));
         self.session.add_assistant_message(&note);
-        self.begin_automatic_execution_plan_repair(pending, request, next_attempt)
+        self.begin_automatic_execution_plan_repair(pending, request, next_attempt, max_attempts)
             .await;
     }
 
@@ -3948,12 +4004,15 @@ where
             &pending.spec_json,
             &pending.current_plan,
             request,
+            pending.failure_report.as_deref(),
         );
         self.begin_llm_execution_plan_workflow(
             pending.spec_json,
             pending.intent_id,
             pending.warnings,
             prompt,
+            pending.automatic_repair_attempts,
+            pending.automatic_repair_max_attempts,
         )
         .await;
     }
@@ -3964,6 +4023,8 @@ where
         intent_id: Option<String>,
         mut warnings: Vec<String>,
         prompt: String,
+        automatic_repair_attempts: u8,
+        automatic_repair_max_attempts: u8,
     ) {
         let spec = match serde_json::from_str::<IntentSpec>(&spec_json) {
             Ok(spec) => spec,
@@ -4019,6 +4080,14 @@ where
                             let _ = self.tx.send(AppEvent::AgentEvent {
                                 turn_id: self.turn_id,
                                 event: AgentEvent::ResponseDelta {
+                                    delta: delta.clone(),
+                                },
+                            });
+                        }
+                        CompletionStreamEvent::ThinkingDelta { delta, .. } if !delta.is_empty() => {
+                            let _ = self.tx.send(AppEvent::AgentEvent {
+                                turn_id: self.turn_id,
+                                event: AgentEvent::ThinkingDelta {
                                     delta: delta.clone(),
                                 },
                             });
@@ -4233,6 +4302,8 @@ where
                 plan: Box::new(execution_plan),
                 plan_draft,
                 warnings,
+                automatic_repair_attempts,
+                automatic_repair_max_attempts,
             });
         });
 
@@ -4274,7 +4345,8 @@ where
                     approved_plan_draft: Some(pending.plan_draft.clone()),
                     plan_warnings: pending.warnings.clone(),
                     network_access_override: Some(pending.network_access),
-                    automatic_repair_attempts: 0,
+                    automatic_repair_attempts: pending.automatic_repair_attempts,
+                    automatic_repair_max_attempts: pending.automatic_repair_max_attempts,
                 })
                 .await;
             }
@@ -4285,7 +4357,8 @@ where
                         intent_id: pending.intent_id.clone(),
                         current_plan: pending.plan_draft,
                         warnings: pending.warnings,
-                        automatic_repair_attempts: 0,
+                        automatic_repair_attempts: pending.automatic_repair_attempts,
+                        automatic_repair_max_attempts: pending.automatic_repair_max_attempts,
                         network_access: pending.network_access,
                         failure_report: None,
                     });
@@ -4350,6 +4423,7 @@ where
             plan_warnings,
             network_access_override,
             automatic_repair_attempts,
+            automatic_repair_max_attempts,
         } = request;
 
         let mut spec: IntentSpec = match serde_json::from_str(&spec_json) {
@@ -4677,6 +4751,7 @@ where
                 warnings: plan_warnings,
                 network_access: execution_network_access,
                 automatic_repair_attempts,
+                automatic_repair_max_attempts,
             });
         });
 
@@ -4798,6 +4873,14 @@ where
                             let _ = self.tx.send(AppEvent::AgentEvent {
                                 turn_id: self.turn_id,
                                 event: AgentEvent::ResponseDelta {
+                                    delta: delta.clone(),
+                                },
+                            });
+                        }
+                        CompletionStreamEvent::ThinkingDelta { delta, .. } if !delta.is_empty() => {
+                            let _ = self.tx.send(AppEvent::AgentEvent {
+                                turn_id: self.turn_id,
+                                event: AgentEvent::ThinkingDelta {
                                     delta: delta.clone(),
                                 },
                             });
@@ -5065,6 +5148,7 @@ where
                         plan_warnings: Vec::new(),
                         network_access_override: Some(self.default_network_access),
                         automatic_repair_attempts: 0,
+                        automatic_repair_max_attempts: MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS,
                     })
                     .await;
                 }
@@ -5156,6 +5240,7 @@ where
             handle.abort();
         }
         self.pending_auto_plan_repair_execution = None;
+        self.complete_streaming_thinking_cells();
         self.clear_active_turn();
         self.running_tool_calls = 0;
     }
@@ -5285,6 +5370,33 @@ where
         let mut cell = AssistantHistoryCell::streaming();
         cell.content.push_str(delta);
         self.widget.add_cell(Box::new(cell));
+    }
+
+    fn append_streaming_thinking_delta(&mut self, delta: &str) {
+        tracing::debug!(
+            target: "libra::internal::tui::app",
+            bytes = delta.len(),
+            "tui thinking delta rendered"
+        );
+        for cell in self.widget.cells.iter_mut().rev() {
+            if let Some(thinking_cell) = cell.as_any_mut().downcast_mut::<ThinkingHistoryCell>()
+                && thinking_cell.is_streaming
+            {
+                thinking_cell.append(delta);
+                return;
+            }
+        }
+        let mut cell = ThinkingHistoryCell::streaming();
+        cell.append(delta);
+        self.insert_before_streaming_assistant(Box::new(cell));
+    }
+
+    fn complete_streaming_thinking_cells(&mut self) {
+        for cell in self.widget.cells.iter_mut() {
+            if let Some(thinking_cell) = cell.as_any_mut().downcast_mut::<ThinkingHistoryCell>() {
+                thinking_cell.complete();
+            }
+        }
     }
 
     fn replace_streaming_assistant_cell(&mut self, replacement: Box<dyn HistoryCell>) {
@@ -5467,7 +5579,7 @@ where
 }
 
 enum PendingPlanRevisionCommand<'a> {
-    ContinueAutoRepair,
+    ContinueAutoRepair { max_attempts: Option<u8> },
     Modify(&'a str),
     Cancel,
     Invalid,
@@ -5475,11 +5587,24 @@ enum PendingPlanRevisionCommand<'a> {
 
 fn parse_pending_plan_revision_command(args: &str) -> PendingPlanRevisionCommand<'_> {
     let trimmed = args.trim();
-    if matches!(
-        trimmed.to_ascii_lowercase().as_str(),
-        "continue" | "continue-auto" | "auto" | "auto-repair"
-    ) {
-        return PendingPlanRevisionCommand::ContinueAutoRepair;
+    let mut parts = trimmed.split_whitespace();
+    if let Some(command) = parts.next()
+        && matches!(
+            command.to_ascii_lowercase().as_str(),
+            "continue" | "continue-auto" | "auto" | "auto-repair"
+        )
+    {
+        let max_attempts = match parts.next() {
+            Some(value) => match value.parse::<u8>() {
+                Ok(value) if value > 0 => Some(value),
+                _ => return PendingPlanRevisionCommand::Invalid,
+            },
+            None => None,
+        };
+        if parts.next().is_some() {
+            return PendingPlanRevisionCommand::Invalid;
+        }
+        return PendingPlanRevisionCommand::ContinueAutoRepair { max_attempts };
     }
     if trimmed.eq_ignore_ascii_case("cancel") {
         return PendingPlanRevisionCommand::Cancel;
@@ -5500,7 +5625,7 @@ fn pending_plan_revision_help_message() -> String {
 }
 
 fn pending_execution_plan_revision_help_message() -> String {
-    "Plan revise mode is active. Describe execution-plan changes in plain text, use `continue` or `/plan continue` to allow one more automatic repair attempt, use `/plan modify <changes>` to keep revising, or `/plan cancel` to exit.".to_string()
+    "Plan revise mode is active. Describe execution-plan changes in plain text, use `continue` or `/plan continue <max-attempts>` to allow more automatic repair attempts, use `/plan modify <changes>` to keep revising, or `/plan cancel` to exit.".to_string()
 }
 
 fn append_to_last_tool_group_cell(
@@ -6231,6 +6356,7 @@ mod tests {
             "{\"kind\":\"IntentSpec\"}",
             &plan,
             "split implementation and tests",
+            None,
         );
 
         assert!(prompt.contains("Current execution plan"));
@@ -6238,6 +6364,21 @@ mod tests {
         assert!(prompt.contains("split implementation and tests"));
         assert!(prompt.contains("call submit_plan_draft exactly once"));
         assert!(!prompt.contains("call update_plan exactly once"));
+    }
+
+    #[test]
+    fn execution_plan_revision_prompt_includes_previous_failure_context() {
+        let plan = provider_plan_draft(&["Run failing check"]);
+        let prompt = build_execution_plan_revision_prompt(
+            "{\"kind\":\"IntentSpec\"}",
+            &plan,
+            "repair the plan",
+            Some("Failed tasks: Run failing check.\nFailure details:\n- cargo test failed"),
+        );
+
+        assert!(prompt.contains("Previous execution failure evidence"));
+        assert!(prompt.contains("cargo test failed"));
+        assert!(prompt.contains("addresses the concrete failure"));
     }
 
     #[test]
@@ -6320,12 +6461,29 @@ mod tests {
         let result = orchestrator_fixture();
         let report = execution_failure_report(Some(&result), None);
 
-        assert!(should_auto_repair_execution_failure(Some(&result), None, 0));
-        assert!(should_auto_repair_execution_failure(Some(&result), None, 2));
+        assert!(should_auto_repair_execution_failure(
+            Some(&result),
+            None,
+            0,
+            3
+        ));
+        assert!(should_auto_repair_execution_failure(
+            Some(&result),
+            None,
+            2,
+            3
+        ));
         assert!(!should_auto_repair_execution_failure(
             Some(&result),
             None,
+            3,
             3
+        ));
+        assert!(should_auto_repair_execution_failure(
+            Some(&result),
+            None,
+            3,
+            5
         ));
 
         let message = automatic_plan_repair_threshold_message(&report, 3, 3);
@@ -6341,10 +6499,16 @@ mod tests {
 
         assert!(report.contains("before producing a final decision"));
         assert!(report.contains("persisted plan not found"));
-        assert!(should_auto_repair_execution_failure(None, Some(summary), 0));
+        assert!(should_auto_repair_execution_failure(
+            None,
+            Some(summary),
+            0,
+            3
+        ));
         assert!(!should_auto_repair_execution_failure(
             None,
             Some(summary),
+            3,
             3
         ));
 
@@ -6676,7 +6840,17 @@ mod tests {
         ));
         assert!(matches!(
             parse_pending_plan_revision_command("continue"),
-            PendingPlanRevisionCommand::ContinueAutoRepair
+            PendingPlanRevisionCommand::ContinueAutoRepair { max_attempts: None }
+        ));
+        assert!(matches!(
+            parse_pending_plan_revision_command("continue 5"),
+            PendingPlanRevisionCommand::ContinueAutoRepair {
+                max_attempts: Some(5)
+            }
+        ));
+        assert!(matches!(
+            parse_pending_plan_revision_command("continue 0"),
+            PendingPlanRevisionCommand::Invalid
         ));
         assert!(matches!(
             parse_pending_plan_revision_command("revise add checks"),
@@ -7030,17 +7204,24 @@ fn build_execution_plan_revision_prompt(
     spec_json: &str,
     current_plan: &ProviderPlanDraft,
     request: &str,
+    failure_report: Option<&str>,
 ) -> String {
     let current_plan_json = provider_plan_draft_json(current_plan);
+    let failure_context = failure_report
+        .map(str::trim)
+        .filter(|report| !report.is_empty())
+        .map(|report| format!("\n\nPrevious execution failure evidence:\n```text\n{report}\n```"))
+        .unwrap_or_default();
     format!(
         "You are revising an execution plan for an already confirmed IntentSpec.\n\
 Use the current draft as the baseline, apply only the developer's requested changes, then call submit_plan_draft exactly once with the complete revised ordered draft.\n\
+When previous execution failure evidence is provided, use it as hard context for the revised plan so the next plan addresses the concrete failure instead of repeating the same approach.\n\
 Every draft step must be a concrete execution task the agent can perform. Provide ordered steps with title only; do not include runtime status.\n\
 Do not call submit_intent_draft. Do not revise the IntentSpec. Do not execute commands that change files.\n\
 After calling submit_plan_draft, stop; the developer must confirm the compiled plan before execution.\n\n\
 Confirmed IntentSpec:\n```json\n{spec_json}\n```\n\n\
 Current execution plan:\n```json\n{current_plan_json}\n```\n\n\
-Requested plan changes:\n{request}"
+Requested plan changes:\n{request}{failure_context}"
     )
 }
 
@@ -7187,8 +7368,9 @@ fn should_auto_repair_execution_failure(
     result: Option<&OrchestratorResult>,
     execution_summary: Option<&str>,
     automatic_repair_attempts: u8,
+    automatic_repair_max_attempts: u8,
 ) -> bool {
-    automatic_repair_attempts < MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS
+    automatic_repair_attempts < automatic_repair_max_attempts
         && (result.is_some_and(|result| result.decision == DecisionOutcome::Abandon)
             || orchestrator_failure_detail(execution_summary).is_some())
 }
@@ -7229,7 +7411,7 @@ fn automatic_plan_repair_threshold_message(report: &str, attempts: u8, max_attem
         "Automatic plan repair stopped after {attempts} failed repair attempts (automatic threshold: {max_attempts}).\n\
 Developer confirmation is required before more automatic correction.\n\
 {report}\n\
-Reply `continue` or `/plan continue` to allow one more automatic repair attempt, describe specific Plan repair guidance, or use `/plan cancel` to stop."
+Reply `continue` or `/plan continue <max-attempts>` to allow more automatic repair attempts, describe specific Plan repair guidance, or use `/plan cancel` to stop."
     )
 }
 

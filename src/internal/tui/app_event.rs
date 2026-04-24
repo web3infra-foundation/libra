@@ -31,6 +31,8 @@ pub enum AgentEvent {
     },
     /// Managed provider produced a streamed delta for the current response.
     ResponseDelta { delta: String },
+    /// Provider produced a streamed thinking/reasoning delta for developer visibility.
+    ThinkingDelta { delta: String },
     /// Managed provider completed a turn and returned follow-up session context.
     ManagedResponseComplete {
         text: String,
@@ -109,6 +111,8 @@ pub enum AppEvent {
         plan: Box<ExecutionPlanSpec>,
         plan_draft: ProviderPlanDraft,
         warnings: Vec<String>,
+        automatic_repair_attempts: u8,
+        automatic_repair_max_attempts: u8,
     },
     /// Complete result for the Phase 0 IntentSpec review gate.
     IntentSpecReviewReady {
@@ -201,6 +205,7 @@ pub enum AppEvent {
         warnings: Vec<String>,
         network_access: bool,
         automatic_repair_attempts: u8,
+        automatic_repair_max_attempts: u8,
     },
 }
 

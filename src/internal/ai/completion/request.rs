@@ -11,6 +11,10 @@ pub enum CompletionStreamEvent {
         request_id: Option<String>,
         delta: String,
     },
+    ThinkingDelta {
+        request_id: Option<String>,
+        delta: String,
+    },
     ToolCallPreview {
         request_id: Option<String>,
         call_id: String,
