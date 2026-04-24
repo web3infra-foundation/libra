@@ -84,6 +84,10 @@ async fn init_vault_false_writes_seed_keys_and_human_summary() {
 
     let output = run_libra_command(&["init", "--vault", "false"], &repo);
     assert_cli_success(&output, "init --vault false");
+    assert!(
+        repo.join(".libraignore").exists(),
+        "non-bare init should create a visible root .libraignore"
+    );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -146,6 +150,64 @@ async fn init_vault_false_writes_seed_keys_and_human_summary() {
     assert!(
         legacy_rows.is_empty(),
         "init should not seed the legacy config table"
+    );
+}
+
+#[test]
+fn init_status_shows_root_libraignore_as_untracked() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+
+    let output = run_libra_command(&["init", "--vault", "false"], &repo);
+    assert_cli_success(&output, "init --vault false");
+
+    let status = run_libra_command(&["status", "--short"], &repo);
+    assert_cli_success(&status, "status --short");
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        stdout.contains("?? .libraignore"),
+        "new repository should show .libraignore as an untracked project file, got: {stdout}"
+    );
+}
+
+#[test]
+fn init_preserves_existing_root_libraignore() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    fs::write(repo.join(".libraignore"), "custom-cache/\n").unwrap();
+
+    let output = run_libra_command(&["init", "--vault", "false"], &repo);
+    assert_cli_success(&output, "init --vault false");
+
+    let content = fs::read_to_string(repo.join(".libraignore")).unwrap();
+    assert_eq!(
+        content, "custom-cache/\n",
+        "init must not overwrite a user-provided .libraignore"
+    );
+}
+
+#[test]
+fn init_bare_does_not_create_root_libraignore() {
+    let temp = tempdir().unwrap();
+    let bare_repo = temp.path().join("repo.git");
+
+    let output = run_libra_command(
+        &[
+            "init",
+            "--bare",
+            "--vault",
+            "false",
+            bare_repo.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_cli_success(&output, "bare init");
+
+    assert!(
+        !bare_repo.join(".libraignore").exists(),
+        "bare init should not create a worktree .libraignore"
     );
 }
 

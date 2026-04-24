@@ -17,10 +17,11 @@ transparently reuses `run_init()` for the local metadata setup.
 Cloning fetches all objects and refs from the remote, creates a `.libra` directory with a
 SQLite-backed metadata store, sets up the `origin` remote, and checks out the default branch
 (or the branch specified with `-b`). Vault signing is always bootstrapped during clone,
-matching `libra init` defaults.
+matching `libra init` defaults. For non-bare clones, any checked-out `.gitignore` files are
+copied to matching `.libraignore` files so Libra ignore rules work immediately.
 
 For bare clones, no working tree checkout is performed and the repository directory itself
-becomes the object store.
+becomes the object store. Bare clones do not create `.libraignore`.
 
 ## Options
 
@@ -217,6 +218,12 @@ without additional setup. Git requires users to manually configure GPG/SSH signi
 cloning, which means most cloned repositories produce unsigned commits by default. By
 bootstrapping the vault at clone time, Libra ensures that the security posture of a cloned
 repository matches that of a freshly initialized one.
+
+### Ignore file conversion
+
+Libra uses `.libraignore` for its ignore policy. During non-bare clone, every checked-out
+`.gitignore` is copied to a sibling `.libraignore`. Existing user-owned `.libraignore` files
+are preserved and surfaced as warnings; the original `.gitignore` files remain untouched.
 
 ### `--depth` for shallow clones
 

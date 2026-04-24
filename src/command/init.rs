@@ -54,6 +54,8 @@ fn _touch_conflict_imports() {
     fn _needs_transaction_trait<T: TransactionTrait>() {}
 }
 
+use crate::utils::ignore;
+
 const MAX_BRANCH_NAME_LENGTH: usize = 255;
 const LOCK_SUFFIX: &str = ".lock";
 const HEAD_REF: &str = "HEAD";
@@ -96,6 +98,9 @@ pub enum InitError {
 
     #[error("vault initialization failed: {message}")]
     VaultInitializationFailed { message: String },
+
+    #[error("{0}")]
+    IgnoreFile(#[from] ignore::IgnoreFileError),
 
     #[error("{0}")]
     Io(#[from] io::Error),
@@ -161,6 +166,16 @@ impl From<InitError> for CliError {
                 CliError::fatal(format!("vault initialization failed: {message}"))
                     .with_stable_code(StableErrorCode::InternalInvariant)
                     .with_hint(format!("please report this issue at: {ISSUE_URL}"))
+            }
+            InitError::IgnoreFile(error) => {
+                let stable_code = if error.is_write() {
+                    StableErrorCode::IoWriteFailed
+                } else {
+                    StableErrorCode::IoReadFailed
+                };
+                CliError::fatal(error.to_string())
+                    .with_stable_code(stable_code)
+                    .with_hint("check .gitignore/.libraignore permissions and retry.")
             }
             InitError::Io(error) => match error.kind() {
                 io::ErrorKind::InvalidInput => CliError::command_usage(error.to_string())
@@ -347,6 +362,10 @@ fn render_init_result(result: &InitOutput, output: &OutputConfig) -> CliResult<(
         }
     }
 
+    for warning in &result.warnings {
+        eprintln!("warning: {warning}");
+    }
+
     Ok(())
 }
 
@@ -424,6 +443,11 @@ async fn run_init_internal(
         apply_shared(&root_dir, shared_mode)?;
     }
 
+    let mut warnings = Vec::new();
+    if !args.bare {
+        ignore::ensure_root_libraignore(&target_dir)?;
+    }
+
     let target_guard_path = target_dir
         .canonicalize()
         .unwrap_or_else(|_| target_dir.clone());
@@ -435,11 +459,9 @@ async fn run_init_internal(
             source_git_dir.display()
         ));
         let _guard = CurrentDirGuard::change_to(&target_guard_path)?;
-        Some(
-            convert::convert_from_git_repository(&source_git_dir, args.bare)
-                .await?
-                .source_git_dir,
-        )
+        let report = convert::convert_from_git_repository(&source, args.bare).await?;
+        warnings.extend(report.warnings);
+        Some(report.source_git_dir)
     } else {
         None
     };
@@ -473,7 +495,7 @@ async fn run_init_internal(
         vault_signing: args.vault,
         converted_from,
         ssh_key_detected: detect_system_ssh_key(),
-        warnings: Vec::new(),
+        warnings,
     })
 }
 

@@ -1,10 +1,48 @@
 //! Ignore handling utilities defining policies for .libraignore, index-aware filtering, and helpers to test whether paths are ignored.
 
-use std::path::{Path, PathBuf};
+use std::{
+    ffi::OsStr,
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 use git_internal::internal::index::Index;
+use walkdir::WalkDir;
 
 use super::util;
+
+const LIBRAIGNORE_FILE: &str = ".libraignore";
+const GITIGNORE_FILE: &str = ".gitignore";
+const DEFAULT_LIBRAIGNORE_CONTENT: &[u8] = b"# Libra ignore file
+# Uses gitignore-compatible patterns.
+# Add generated files and local-only paths below.
+";
+
+/// File-system errors raised while creating or converting ignore files.
+#[derive(thiserror::Error, Debug)]
+pub enum IgnoreFileError {
+    #[error("failed to read ignore file '{path}': {source}")]
+    Read { path: PathBuf, source: io::Error },
+
+    #[error("failed to write ignore file '{path}': {source}")]
+    Write { path: PathBuf, source: io::Error },
+
+    #[error("failed to scan ignore files under '{path}': {source}")]
+    Walk { path: PathBuf, source: io::Error },
+
+    #[error("failed to resolve ignore file path '{path}' relative to '{root}': {message}")]
+    RelativePath {
+        root: PathBuf,
+        path: PathBuf,
+        message: String,
+    },
+}
+
+impl IgnoreFileError {
+    pub fn is_write(&self) -> bool {
+        matches!(self, Self::Write { .. })
+    }
+}
 
 /// Describes how commands should treat entries matched by `.libraignore`.
 /// - `Respect`: honor ignore rules for untracked files but always keep tracked ones.
@@ -15,6 +53,118 @@ pub enum IgnorePolicy {
     Respect,
     IncludeIgnored,
     OnlyIgnored,
+}
+
+/// Creates the root `.libraignore` for a non-bare worktree if the user has not already provided one.
+pub fn ensure_root_libraignore(worktree: &Path) -> Result<(), IgnoreFileError> {
+    let target = worktree.join(LIBRAIGNORE_FILE);
+    if target.exists() {
+        return Ok(());
+    }
+    fs::write(&target, DEFAULT_LIBRAIGNORE_CONTENT).map_err(|source| IgnoreFileError::Write {
+        path: target,
+        source,
+    })
+}
+
+/// Copies every `.gitignore` under `source_root` to a sibling `.libraignore` under `target_root`.
+///
+/// Existing generated default `.libraignore` files are replaced; existing user-owned
+/// `.libraignore` files are preserved and reported as non-fatal warnings.
+pub fn convert_gitignore_files_to_libraignore(
+    source_root: &Path,
+    target_root: &Path,
+) -> Result<Vec<String>, IgnoreFileError> {
+    let mut warnings = Vec::new();
+    for entry in WalkDir::new(source_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| should_visit_ignore_entry(entry.path(), source_root))
+    {
+        let entry = entry.map_err(|error| walkdir_error(source_root, error))?;
+        if !entry.file_type().is_file() || entry.file_name() != OsStr::new(GITIGNORE_FILE) {
+            continue;
+        }
+
+        let relative = entry.path().strip_prefix(source_root).map_err(|error| {
+            IgnoreFileError::RelativePath {
+                root: source_root.to_path_buf(),
+                path: entry.path().to_path_buf(),
+                message: error.to_string(),
+            }
+        })?;
+        let target = target_root.join(relative).with_file_name(LIBRAIGNORE_FILE);
+        copy_gitignore_to_libraignore(entry.path(), &target, &mut warnings)?;
+    }
+    Ok(warnings)
+}
+
+fn copy_gitignore_to_libraignore(
+    source: &Path,
+    target: &Path,
+    warnings: &mut Vec<String>,
+) -> Result<(), IgnoreFileError> {
+    let source_content = fs::read(source).map_err(|read_error| IgnoreFileError::Read {
+        path: source.to_path_buf(),
+        source: read_error,
+    })?;
+
+    if !target.exists() {
+        write_libraignore(target, &source_content)?;
+        return Ok(());
+    }
+
+    let existing = fs::read(target).map_err(|read_error| IgnoreFileError::Read {
+        path: target.to_path_buf(),
+        source: read_error,
+    })?;
+    if existing == DEFAULT_LIBRAIGNORE_CONTENT || existing == source_content {
+        if existing != source_content {
+            write_libraignore(target, &source_content)?;
+        }
+        return Ok(());
+    }
+
+    warnings.push(format!(
+        "kept existing .libraignore at '{}'; skipped converting '{}'",
+        target.display(),
+        source.display()
+    ));
+    Ok(())
+}
+
+fn write_libraignore(target: &Path, content: &[u8]) -> Result<(), IgnoreFileError> {
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|source| IgnoreFileError::Write {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    fs::write(target, content).map_err(|source| IgnoreFileError::Write {
+        path: target.to_path_buf(),
+        source,
+    })
+}
+
+fn should_visit_ignore_entry(path: &Path, root: &Path) -> bool {
+    if path == root {
+        return true;
+    }
+    let Some(name) = path.file_name() else {
+        return true;
+    };
+    name != OsStr::new(".git") && name != OsStr::new(util::ROOT_DIR)
+}
+
+fn walkdir_error(root: &Path, error: walkdir::Error) -> IgnoreFileError {
+    let message = error.to_string();
+    let source = error
+        .into_io_error()
+        .unwrap_or_else(|| io::Error::other(message));
+    IgnoreFileError::Walk {
+        path: root.to_path_buf(),
+        source,
+    }
 }
 
 /// Returns `true` if the given workdir-relative `path` should be filtered out under `policy`.
@@ -44,10 +194,9 @@ fn should_ignore_with_workdir(
     index: &Index,
     workdir: &PathBuf,
 ) -> bool {
-    let path_str = path
+    let is_tracked = path
         .to_str()
-        .unwrap_or_else(|| panic!("path {:?} is not valid UTF-8", path));
-    let is_tracked = index.tracked(path_str, 0);
+        .is_some_and(|path_str| index.tracked(path_str, 0));
 
     match policy {
         IgnorePolicy::Respect => {
