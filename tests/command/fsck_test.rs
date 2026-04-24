@@ -619,3 +619,228 @@ fn walk_objects_dir(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     }
     files
 }
+
+// ---------------------------------------------------------------------------
+// SHA-256 object format tests
+// ---------------------------------------------------------------------------
+
+fn init_sha256_repo_via_cli(repo: &Path) {
+    fs::create_dir_all(repo).expect("failed to create repository directory");
+    let output = run_libra_command(&["init", "--object-format", "sha256"], repo);
+    assert_cli_success(&output, "failed to initialize SHA-256 repository");
+}
+
+fn create_sha256_committed_repo_via_cli() -> tempfile::TempDir {
+    let repo = tempdir().expect("failed to create repository root");
+    init_sha256_repo_via_cli(repo.path());
+    configure_identity_via_cli(repo.path());
+
+    fs::write(repo.path().join("tracked.txt"), "sha256 tracked content\n")
+        .expect("failed to create tracked file");
+
+    let output = run_libra_command(&["add", "tracked.txt"], repo.path());
+    assert_cli_success(&output, "failed to add tracked file");
+
+    let output = run_libra_command(&["commit", "-m", "sha256 base", "--no-verify"], repo.path());
+    assert_cli_success(&output, "failed to create initial commit");
+
+    repo
+}
+
+#[test]
+#[serial]
+fn test_fsck_sha256_empty_repo_passes() {
+    let repo = tempdir().unwrap();
+    init_sha256_repo_via_cli(repo.path());
+
+    let output = run_libra_command(&["fsck"], repo.path());
+    assert!(
+        output.status.success(),
+        "fsck on empty SHA-256 repo should pass: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[serial]
+fn test_fsck_sha256_repo_with_commit_passes() {
+    let repo = create_sha256_committed_repo_via_cli();
+
+    let output = run_libra_command(&["fsck"], repo.path());
+    assert!(
+        output.status.success(),
+        "fsck on SHA-256 repo with commit should pass: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Integrity check passed"),
+        "should print pass message: {stdout}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_fsck_sha256_verbose_output() {
+    let repo = create_sha256_committed_repo_via_cli();
+
+    let output = run_libra_command(&["fsck", "--verbose"], repo.path());
+    assert!(
+        output.status.success(),
+        "fsck --verbose on SHA-256 repo should pass: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Fsck Summary"),
+        "verbose output should contain summary: {stdout}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_fsck_sha256_json_output() {
+    let repo = create_sha256_committed_repo_via_cli();
+
+    let output = run_libra_command(&["fsck", "--json"], repo.path());
+    assert!(
+        output.status.success(),
+        "fsck --json on SHA-256 repo should pass: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\"overall_status\": \"ok\""),
+        "JSON should report ok status: {stdout}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_fsck_sha256_corrupted_object_detected() {
+    let repo = create_sha256_committed_repo_via_cli();
+
+    let objects_dir = repo.path().join(".libra").join("objects");
+    if objects_dir.exists() {
+        for entry in walk_objects_dir(&objects_dir) {
+            fs::write(&entry, b"corrupted sha256 data!!!")
+                .expect("failed to corrupt SHA-256 object");
+
+            let output = run_libra_command(&["fsck"], repo.path());
+            assert!(
+                !output.status.success(),
+                "fsck should fail on corrupted SHA-256 object"
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains("corrupt")
+                    || stderr.contains("FAILED")
+                    || stderr.contains("mismatch"),
+                "should report corruption: {stderr}"
+            );
+            return;
+        }
+    }
+    panic!("no SHA-256 objects found to corrupt");
+}
+
+#[test]
+#[serial]
+fn test_fsck_sha256_missing_object_detected() {
+    let repo = create_sha256_committed_repo_via_cli();
+
+    let objects_dir = repo.path().join(".libra").join("objects");
+    if objects_dir.exists() {
+        for entry in walk_objects_dir(&objects_dir) {
+            fs::remove_file(&entry).expect("failed to remove SHA-256 object");
+
+            let output = run_libra_command(&["fsck"], repo.path());
+            assert!(
+                !output.status.success(),
+                "fsck should fail on missing SHA-256 object"
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains("missing") || stderr.contains("FAILED"),
+                "should report missing object: {stderr}"
+            );
+            return;
+        }
+    }
+    panic!("no SHA-256 objects found to remove");
+}
+
+#[test]
+#[serial]
+fn test_fsck_sha256_single_object_valid() {
+    let repo = create_sha256_committed_repo_via_cli();
+
+    let log_output = run_libra_command(&["log", "--oneline"], repo.path());
+    let stdout = String::from_utf8_lossy(&log_output.stdout);
+    let commit_hash = stdout
+        .lines()
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap();
+
+    // SHA-256 hashes are 64 hex chars
+    assert_eq!(
+        commit_hash.len(),
+        64,
+        "SHA-256 commit hash should be 64 hex chars, got {}: {commit_hash}",
+        commit_hash.len()
+    );
+
+    let output = run_libra_command(&["fsck", commit_hash], repo.path());
+    assert!(
+        output.status.success(),
+        "fsck single SHA-256 object should pass: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("is valid"),
+        "should show object is valid: {stdout}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_fsck_sha256_with_indexed_files() {
+    let repo = tempdir().unwrap();
+    init_sha256_repo_via_cli(repo.path());
+    configure_identity_via_cli(repo.path());
+
+    fs::write(repo.path().join("staged.txt"), "sha256 staged content\n")
+        .expect("failed to create staged file");
+    let output = run_libra_command(&["add", "staged.txt"], repo.path());
+    assert_cli_success(&output, "add staged file");
+
+    let output = run_libra_command(&["fsck"], repo.path());
+    assert!(
+        output.status.success(),
+        "fsck with SHA-256 staged files should pass: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[serial]
+fn test_fsck_sha256_invalid_object_id() {
+    let repo = create_sha256_committed_repo_via_cli();
+
+    // Use an invalid hash that is clearly not SHA-256
+    let output = run_libra_command(&["fsck", "not-a-valid-sha256-hash!!"], repo.path());
+    assert!(
+        !output.status.success(),
+        "fsck with invalid SHA-256 object ID should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("invalid") || stderr.contains("fatal"),
+        "should report invalid hash: {stderr}"
+    );
+}
+
