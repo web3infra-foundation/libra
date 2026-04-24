@@ -107,6 +107,10 @@ pub struct ClientStorage {
 }
 
 impl ClientStorage {
+    pub fn base_path(&self) -> &PathBuf {
+        &self.base_path
+    }
+
     pub fn init(base_path: PathBuf) -> ClientStorage {
         let storage = Self::create_storage_backend(base_path.clone());
         ClientStorage { storage, base_path }
