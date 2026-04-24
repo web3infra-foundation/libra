@@ -621,10 +621,6 @@ fn find_overlaps(nodes: &[TaskSpec]) -> Vec<String> {
                 .collect::<BTreeSet<_>>();
 
             if !left_files.is_empty() && !right_files.is_empty() {
-                if left_files == right_files && left_files.len() > 1 {
-                    continue;
-                }
-
                 overlaps.extend(left_files.intersection(&right_files).cloned());
                 continue;
             }
@@ -994,9 +990,8 @@ mod tests {
         let plan = compile_execution_plan_spec(&minimal_spec()).unwrap();
         assert_eq!(plan.tasks.len(), 7);
         let groups = plan.parallel_groups();
-        assert_eq!(groups.len(), 5, "{groups:?}");
-        assert_eq!(groups[0].len(), 2, "{groups:?}");
-        assert_eq!(groups[1].len(), 2, "{groups:?}");
+        assert_eq!(groups.len(), 7, "{groups:?}");
+        assert!(groups.iter().all(|group| group.len() == 1), "{groups:?}");
         assert!(
             plan.tasks
                 .iter()
@@ -1016,9 +1011,8 @@ mod tests {
                 .any(|task| task.gate_stage == Some(GateStage::Fast))
         );
         let groups = plan_spec.parallel_groups();
-        assert_eq!(groups.len(), 5, "{groups:?}");
-        assert_eq!(groups[0].len(), 2, "{groups:?}");
-        assert_eq!(groups[1].len(), 2, "{groups:?}");
+        assert_eq!(groups.len(), 7, "{groups:?}");
+        assert!(groups.iter().all(|group| group.len() == 1), "{groups:?}");
     }
 
     #[test]
@@ -1180,6 +1174,41 @@ mod tests {
             implementation_tasks
                 .iter()
                 .map(|task| (task.title().to_string(), task.dependencies().to_vec()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_compile_execution_plan_serializes_identical_touch_file_sets() {
+        let mut spec = minimal_spec();
+        spec.intent.touch_hints = Some(TouchHints {
+            files: vec!["Cargo.toml".into(), "src/main.rs".into()],
+            symbols: vec![],
+            apis: vec![],
+        });
+
+        let plan = compile_execution_plan_spec(&spec).unwrap();
+        let implementation_tasks = plan
+            .tasks
+            .iter()
+            .filter(|task| task.kind == TaskKind::Implementation)
+            .collect::<Vec<_>>();
+
+        assert_eq!(implementation_tasks.len(), 2);
+        assert!(
+            implementation_tasks[1]
+                .dependencies()
+                .contains(&implementation_tasks[0].id()),
+            "{:?}",
+            implementation_tasks
+                .iter()
+                .map(|task| {
+                    (
+                        task.title().to_string(),
+                        task.contract.touch_files.clone(),
+                        task.dependencies().to_vec(),
+                    )
+                })
                 .collect::<Vec<_>>()
         );
     }

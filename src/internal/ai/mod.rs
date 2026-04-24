@@ -31,6 +31,7 @@ pub mod history;
 pub mod hooks;
 pub mod intent;
 pub mod intentspec;
+pub mod libra_vcs;
 pub mod mcp;
 pub mod node_adapter;
 pub mod orchestrator;

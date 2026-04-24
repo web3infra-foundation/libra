@@ -8,6 +8,7 @@ use super::{
 };
 use crate::internal::ai::{
     intentspec::types::{IntentSpec, NetworkPolicy},
+    libra_vcs::unsupported_command_message,
     tools::{
         ToolOutput,
         apply_patch::{ApplyPatchArgs, parse_patch},
@@ -446,9 +447,7 @@ fn libra_vcs_action(command: &str) -> Result<&'static str, String> {
         "status" | "diff" | "branch" | "log" | "show" | "show-ref" => Ok("read"),
         "add" | "commit" | "switch" => Ok("write"),
         "" => Err("missing run_libra_vcs command".to_string()),
-        other => Err(format!(
-            "unsupported run_libra_vcs command '{other}'; use an allowlisted Libra VCS command"
-        )),
+        other => Err(unsupported_command_message("run_libra_vcs", other)),
     }
 }
 
@@ -811,6 +810,15 @@ mod tests {
 
         assert_eq!(preflight.record.tool_name, "run_libra_vcs");
         assert_eq!(preflight.record.action, "read");
+    }
+
+    #[test]
+    fn test_run_libra_vcs_unknown_command_error_is_actionable() {
+        let error = libra_vcs_action("ls-files").unwrap_err();
+
+        assert!(error.contains("allowed commands"));
+        assert!(error.contains("status --json"));
+        assert!(error.contains("workspace file tools"));
     }
 
     #[test]

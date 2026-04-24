@@ -144,6 +144,7 @@ const LATEST_INTENTSPEC_WORKSPACE_KEY: &str = "latest_intentspec_workspace_key";
 const LATEST_INTENTSPEC_BASE_REF: &str = "latest_intentspec_base_ref";
 const LATEST_INTENTSPEC_BRANCH_LABEL: &str = "latest_intentspec_branch_label";
 const MAX_INTENTSPEC_REPAIR_ATTEMPTS: usize = 2;
+const MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS: u8 = 3;
 const MCP_WRITE_TIMEOUT: Duration = Duration::from_secs(8);
 const MCP_TURN_TRACKING_TIMEOUT: Duration = Duration::from_secs(3);
 const GRAPH_THREAD_ID_METADATA_KEYS: &[&str] = &["thread_id", "threadId", "canonical_thread_id"];
@@ -251,6 +252,15 @@ struct PendingExecutionPlanRevision {
     intent_id: Option<String>,
     current_plan: ProviderPlanDraft,
     warnings: Vec<String>,
+    automatic_repair_attempts: u8,
+    network_access: bool,
+    failure_report: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingAutoPlanRepairExecution {
+    attempt: u8,
+    network_access: bool,
 }
 
 struct ExecuteWorkflowRequest {
@@ -262,6 +272,7 @@ struct ExecuteWorkflowRequest {
     approved_plan_draft: Option<ProviderPlanDraft>,
     plan_warnings: Vec<String>,
     network_access_override: Option<bool>,
+    automatic_repair_attempts: u8,
 }
 
 /// IntentSpec review dialog state: stores the spec and user selection.
@@ -376,6 +387,8 @@ pub struct App<M: CompletionModel> {
     pending_plan_revision: Option<String>,
     /// Base execution plan for the next plan-revision request, if the user chose Modify Plan.
     pending_execution_plan_revision: Option<PendingExecutionPlanRevision>,
+    /// Auto-execute the next generated plan as an execution-failure repair attempt.
+    pending_auto_plan_repair_execution: Option<PendingAutoPlanRepairExecution>,
     /// Display name of the active model.
     model_name: String,
     /// Provider identifier.
@@ -499,6 +512,7 @@ where
             pending_intent_review: None,
             pending_plan_revision: None,
             pending_execution_plan_revision: None,
+            pending_auto_plan_repair_execution: None,
             model_name: app_config.model_name,
             provider_name: app_config.provider_name,
             mcp_server: app_config.mcp_server,
@@ -2066,6 +2080,7 @@ where
                         self.set_idle_and_draw();
                     }
                     AgentEvent::Error { message } => {
+                        self.pending_auto_plan_repair_execution = None;
                         self.enqueue_mcp_turn_decision(
                             "abandon",
                             format!("Turn failed: {message}"),
@@ -2243,6 +2258,66 @@ where
                 ));
                 let _ = llm_output;
                 self.replace_streaming_assistant_cell(plan_summary_cell);
+                if let Some(auto_repair) = self.pending_auto_plan_repair_execution.take() {
+                    let note = format!(
+                        "Automatic plan repair attempt {} produced a revised plan. Executing it now.",
+                        automatic_plan_repair_attempt_label(
+                            auto_repair.attempt,
+                            MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS
+                        )
+                    );
+                    self.widget
+                        .add_cell(Box::new(AssistantHistoryCell::new(note.clone())));
+                    self.history.push(Message::assistant(note.clone()));
+                    self.session.add_assistant_message(&note);
+                    if let Some(code_ui_session) = self.code_ui_session.clone() {
+                        let plan_snapshot = CodeUiPlanSnapshot {
+                            id: plan_id
+                                .clone()
+                                .unwrap_or_else(|| format!("plan-{_turn_id}")),
+                            title: Some("Execution Plan".to_string()),
+                            summary: Some(text.clone()),
+                            status: "executing".to_string(),
+                            steps: browser_plan_steps,
+                            updated_at: Utc::now(),
+                        };
+                        let transcript_entry = CodeUiTranscriptEntry {
+                            id: Self::code_ui_assistant_entry_id(_turn_id),
+                            kind: CodeUiTranscriptEntryKind::PlanSummary,
+                            title: Some("Plan Ready".to_string()),
+                            content: Some(text.clone()),
+                            status: Some("completed".to_string()),
+                            streaming: false,
+                            metadata: serde_json::json!({
+                                "intentId": intent_id.clone(),
+                                "planId": plan_id.clone(),
+                                "automaticRepairAttempt": auto_repair.attempt,
+                            }),
+                            created_at: Utc::now(),
+                            updated_at: Utc::now(),
+                        };
+                        code_ui_session.upsert_plan(plan_snapshot).await;
+                        code_ui_session
+                            .upsert_transcript_entry(transcript_entry)
+                            .await;
+                        code_ui_session
+                            .set_status(CodeUiSessionStatus::Thinking)
+                            .await;
+                    }
+                    self.start_execute_workflow(ExecuteWorkflowRequest {
+                        spec_json,
+                        persisted_intent_id: intent_id.clone(),
+                        persisted_plan_id: plan_id.clone(),
+                        persisted_plan_bundle,
+                        approved_plan: Some(execution_plan),
+                        approved_plan_draft: Some(plan_draft),
+                        plan_warnings: warnings,
+                        network_access_override: Some(auto_repair.network_access),
+                        automatic_repair_attempts: auto_repair.attempt,
+                    })
+                    .await;
+                    return Ok(());
+                }
                 if let Some(code_ui_session) = self.code_ui_session.clone() {
                     let plan_snapshot = CodeUiPlanSnapshot {
                         id: plan_id
@@ -2940,7 +3015,8 @@ where
                 intent_id,
                 plan_draft,
                 warnings,
-                network_access: _network_access,
+                network_access,
+                automatic_repair_attempts,
             } => {
                 self.finish_turn_state();
                 self.widget.clear_task_mux();
@@ -2955,8 +3031,33 @@ where
                 if repair_plan.steps.is_empty() {
                     repair_plan = plan_draft;
                 }
-                let repair_message =
-                    repair_required.then(|| execution_failure_revision_message(result.as_deref()));
+                let failure_report = repair_required
+                    .then(|| execution_failure_report(result.as_deref(), Some(text.as_str())));
+                let can_auto_repair = should_auto_repair_execution_failure(
+                    result.as_deref(),
+                    Some(text.as_str()),
+                    automatic_repair_attempts,
+                );
+                let repair_message = if repair_required {
+                    Some(if can_auto_repair {
+                        automatic_plan_repair_started_message(
+                            automatic_repair_attempts.saturating_add(1),
+                            MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS,
+                        )
+                    } else if automatic_repair_attempts >= MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS {
+                        automatic_plan_repair_threshold_message(
+                            failure_report.as_deref().unwrap_or_default(),
+                            automatic_repair_attempts,
+                            MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS,
+                        )
+                    } else {
+                        execution_failure_revision_message_from_report(
+                            failure_report.as_deref().unwrap_or_default(),
+                        )
+                    })
+                } else {
+                    None
+                };
                 if let Some(result) = result {
                     self.replace_streaming_assistant_cell(Box::new(
                         OrchestratorResultHistoryCell::new(*result),
@@ -2987,16 +3088,31 @@ where
                     code_ui_session.set_status(CodeUiSessionStatus::Idle).await;
                 }
                 if let Some(message) = repair_message {
-                    self.pending_execution_plan_revision = Some(PendingExecutionPlanRevision {
+                    let pending = PendingExecutionPlanRevision {
                         spec_json,
                         intent_id,
                         current_plan: repair_plan,
                         warnings,
-                    });
+                        automatic_repair_attempts,
+                        network_access,
+                        failure_report: failure_report.clone(),
+                    };
                     self.widget
                         .add_cell(Box::new(AssistantHistoryCell::new(message.clone())));
                     self.history.push(Message::assistant(message.clone()));
                     self.session.add_assistant_message(&message);
+                    if can_auto_repair {
+                        let next_attempt = automatic_repair_attempts.saturating_add(1);
+                        let request = automatic_plan_repair_request_from_report(
+                            failure_report.as_deref().unwrap_or_default(),
+                            next_attempt,
+                            MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS,
+                        );
+                        self.begin_automatic_execution_plan_repair(pending, request, next_attempt)
+                            .await;
+                        return Ok(());
+                    }
+                    self.pending_execution_plan_revision = Some(pending);
                     self.widget.bottom_pane.set_status(AgentStatus::Idle);
                     self.sync_mux_input_context();
                     self.schedule_draw();
@@ -3225,6 +3341,13 @@ where
                 self.schedule_draw();
                 return;
             }
+            if matches!(
+                parse_pending_plan_revision_command(&text),
+                PendingPlanRevisionCommand::ContinueAutoRepair
+            ) {
+                self.continue_automatic_execution_plan_repair(pending).await;
+                return;
+            }
             self.begin_execution_plan_revision_flow(pending, &text)
                 .await;
             return;
@@ -3311,6 +3434,7 @@ where
                 self.mcp_run_id = None;
                 self.pending_plan_revision = None;
                 self.pending_execution_plan_revision = None;
+                self.pending_auto_plan_repair_execution = None;
                 self.sync_mux_input_context();
             }
             BuiltinCommand::Model => {
@@ -3334,6 +3458,9 @@ where
             BuiltinCommand::Plan => {
                 if let Some(pending) = self.pending_execution_plan_revision.take() {
                     match parse_pending_plan_revision_command(args) {
+                        PendingPlanRevisionCommand::ContinueAutoRepair => {
+                            self.continue_automatic_execution_plan_repair(pending).await;
+                        }
                         PendingPlanRevisionCommand::Modify(request) => {
                             self.begin_execution_plan_revision_flow(pending, request)
                                 .await;
@@ -3357,6 +3484,14 @@ where
                     }
                 } else if let Some(spec_json) = self.pending_plan_revision.take() {
                     match parse_pending_plan_revision_command(args) {
+                        PendingPlanRevisionCommand::ContinueAutoRepair => {
+                            self.pending_plan_revision = Some(spec_json);
+                            self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                                pending_plan_revision_help_message(),
+                            )));
+                            self.sync_mux_input_context();
+                            self.schedule_draw();
+                        }
                         PendingPlanRevisionCommand::Modify(request) => {
                             self.begin_plan_revision_flow(spec_json, request).await;
                         }
@@ -3749,6 +3884,50 @@ where
             .await;
     }
 
+    async fn begin_automatic_execution_plan_repair(
+        &mut self,
+        pending: PendingExecutionPlanRevision,
+        request: String,
+        attempt: u8,
+    ) {
+        self.pending_auto_plan_repair_execution = Some(PendingAutoPlanRepairExecution {
+            attempt,
+            network_access: pending.network_access,
+        });
+        self.begin_execution_plan_revision_flow(pending, &request)
+            .await;
+    }
+
+    async fn continue_automatic_execution_plan_repair(
+        &mut self,
+        pending: PendingExecutionPlanRevision,
+    ) {
+        let Some(failure_report) = pending.failure_report.clone() else {
+            self.pending_execution_plan_revision = Some(pending);
+            self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                pending_execution_plan_revision_help_message(),
+            )));
+            self.sync_mux_input_context();
+            self.schedule_draw();
+            return;
+        };
+
+        let next_attempt = pending.automatic_repair_attempts.saturating_add(1);
+        let request = automatic_plan_repair_request_from_report(
+            &failure_report,
+            next_attempt,
+            MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS,
+        );
+        let note =
+            automatic_plan_repair_started_message(next_attempt, MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS);
+        self.widget
+            .add_cell(Box::new(AssistantHistoryCell::new(note.clone())));
+        self.history.push(Message::assistant(note.clone()));
+        self.session.add_assistant_message(&note);
+        self.begin_automatic_execution_plan_repair(pending, request, next_attempt)
+            .await;
+    }
+
     async fn begin_execution_plan_revision_flow(
         &mut self,
         pending: PendingExecutionPlanRevision,
@@ -3789,6 +3968,7 @@ where
         let spec = match serde_json::from_str::<IntentSpec>(&spec_json) {
             Ok(spec) => spec,
             Err(error) => {
+                self.pending_auto_plan_repair_execution = None;
                 let msg = format!("Plan failed: stored IntentSpec JSON is invalid: {error}");
                 self.widget
                     .add_cell(Box::new(AssistantHistoryCell::new(msg.clone())));
@@ -3821,6 +4001,7 @@ where
         let tx = self.app_event_tx.clone();
         let mcp_server = self.mcp_server.clone();
         let fallback_history = self.history.clone();
+        let auto_repair_pending = self.pending_auto_plan_repair_execution.is_some();
 
         let handle = tokio::spawn(async move {
             struct ExecutionPlanObserver {
@@ -4023,7 +4204,13 @@ where
             if let Some(ref warn) = plan_warning {
                 summary.push_str(&format!("\nWarning: {warn}"));
             }
-            summary.push_str("\n\nExecution plan ready. Review the right-side workflow graph and choose Execute Plan / Modify Plan / Cancel below.");
+            if auto_repair_pending {
+                summary.push_str(
+                    "\n\nAutomatic repair plan ready. Libra will execute this revised plan now.",
+                );
+            } else {
+                summary.push_str("\n\nExecution plan ready. Review the right-side workflow graph and choose Execute Plan / Modify Plan / Cancel below.");
+            }
 
             if let Some(warning) = plan_warning {
                 warnings.push(warning);
@@ -4087,6 +4274,7 @@ where
                     approved_plan_draft: Some(pending.plan_draft.clone()),
                     plan_warnings: pending.warnings.clone(),
                     network_access_override: Some(pending.network_access),
+                    automatic_repair_attempts: 0,
                 })
                 .await;
             }
@@ -4097,6 +4285,9 @@ where
                         intent_id: pending.intent_id.clone(),
                         current_plan: pending.plan_draft,
                         warnings: pending.warnings,
+                        automatic_repair_attempts: 0,
+                        network_access: pending.network_access,
+                        failure_report: None,
                     });
                     let msg = format!(
                         "{} Your next plain-text message will revise the current execution plan.",
@@ -4158,6 +4349,7 @@ where
             approved_plan_draft,
             plan_warnings,
             network_access_override,
+            automatic_repair_attempts,
         } = request;
 
         let mut spec: IntentSpec = match serde_json::from_str(&spec_json) {
@@ -4484,6 +4676,7 @@ where
                 plan_draft: execution_plan_draft,
                 warnings: plan_warnings,
                 network_access: execution_network_access,
+                automatic_repair_attempts,
             });
         });
 
@@ -4871,6 +5064,7 @@ where
                         approved_plan_draft: None,
                         plan_warnings: Vec::new(),
                         network_access_override: Some(self.default_network_access),
+                        automatic_repair_attempts: 0,
                     })
                     .await;
                 }
@@ -4961,6 +5155,7 @@ where
         if let Some(handle) = self.agent_task.take() {
             handle.abort();
         }
+        self.pending_auto_plan_repair_execution = None;
         self.clear_active_turn();
         self.running_tool_calls = 0;
     }
@@ -5272,6 +5467,7 @@ where
 }
 
 enum PendingPlanRevisionCommand<'a> {
+    ContinueAutoRepair,
     Modify(&'a str),
     Cancel,
     Invalid,
@@ -5279,6 +5475,12 @@ enum PendingPlanRevisionCommand<'a> {
 
 fn parse_pending_plan_revision_command(args: &str) -> PendingPlanRevisionCommand<'_> {
     let trimmed = args.trim();
+    if matches!(
+        trimmed.to_ascii_lowercase().as_str(),
+        "continue" | "continue-auto" | "auto" | "auto-repair"
+    ) {
+        return PendingPlanRevisionCommand::ContinueAutoRepair;
+    }
     if trimmed.eq_ignore_ascii_case("cancel") {
         return PendingPlanRevisionCommand::Cancel;
     }
@@ -5298,7 +5500,7 @@ fn pending_plan_revision_help_message() -> String {
 }
 
 fn pending_execution_plan_revision_help_message() -> String {
-    "Plan revise mode is active. Describe execution-plan changes in plain text, use `/plan modify <changes>` to keep revising, or `/plan cancel` to exit.".to_string()
+    "Plan revise mode is active. Describe execution-plan changes in plain text, use `continue` or `/plan continue` to allow one more automatic repair attempt, use `/plan modify <changes>` to keep revising, or `/plan cancel` to exit.".to_string()
 }
 
 fn append_to_last_tool_group_cell(
@@ -5803,11 +6005,12 @@ mod tests {
     use super::{
         PendingPlanRevisionCommand, ProviderPlanDraft, ProviderPlanDraftStep,
         append_to_last_tool_group_cell, append_to_last_tool_group_preview_cell,
-        apply_developer_network_access, build_execution_plan_prompt,
+        apply_developer_network_access, automatic_plan_repair_request_from_report,
+        automatic_plan_repair_threshold_message, build_execution_plan_prompt,
         build_execution_plan_revision_prompt, build_plan_prompt, build_plan_revision_prompt,
-        code_ui_response_from_managed_selection, execution_failure_revision_message,
-        execution_requires_plan_repair, format_decision_stage_note,
-        format_intentspec_target_mismatch, format_orchestrator_result,
+        code_ui_response_from_managed_selection, execution_failure_report,
+        execution_failure_revision_message, execution_requires_plan_repair,
+        format_decision_stage_note, format_intentspec_target_mismatch, format_orchestrator_result,
         format_plan_compiled_stage_note, format_plan_execution_stage_note,
         format_replan_stage_note, format_system_verification_stage_note,
         intentspec_with_plan_draft_objectives, is_default_chat_tool, is_global_quit_command_input,
@@ -5815,8 +6018,8 @@ mod tests {
         normalize_terminal_paste_text, parse_pending_plan_revision_command,
         pending_execution_plan_revision_help_message, pending_plan_revision_help_message,
         provider_plan_draft_from_args, provider_plan_draft_from_plan,
-        should_forward_phase0_model_text_delta, should_forward_phase1_model_text_delta,
-        should_route_plain_message_to_plan,
+        should_auto_repair_execution_failure, should_forward_phase0_model_text_delta,
+        should_forward_phase1_model_text_delta, should_route_plain_message_to_plan,
     };
     use crate::internal::{
         ai::{
@@ -6081,7 +6284,72 @@ mod tests {
         let help = pending_execution_plan_revision_help_message();
 
         assert!(help.contains("Plan revise mode"));
+        assert!(help.contains("/plan continue"));
         assert!(help.contains("/plan modify <changes>"));
+    }
+
+    #[test]
+    fn automatic_plan_repair_request_includes_failure_report_and_attempt() {
+        let mut result = orchestrator_fixture();
+        let task_result = result
+            .task_results
+            .first_mut()
+            .expect("fixture should include a failed task result");
+        task_result.tool_calls = vec![ToolCallRecord {
+            tool_name: "shell".to_string(),
+            action: "cargo test".to_string(),
+            arguments_json: None,
+            paths_read: vec![],
+            paths_written: vec![],
+            success: false,
+            summary: Some("error[E0425]: cannot find value `x`".to_string()),
+            diffs: vec![],
+        }];
+
+        let report = execution_failure_report(Some(&result), None);
+        let request = automatic_plan_repair_request_from_report(&report, 2, 3);
+
+        assert!(request.contains("Automatic plan repair attempt 2/3"));
+        assert!(request.contains("concrete repair Step"));
+        assert!(request.contains("cargo test"));
+        assert!(request.contains("cannot find value"));
+    }
+
+    #[test]
+    fn automatic_plan_repair_stops_at_threshold_for_developer_confirmation() {
+        let result = orchestrator_fixture();
+        let report = execution_failure_report(Some(&result), None);
+
+        assert!(should_auto_repair_execution_failure(Some(&result), None, 0));
+        assert!(should_auto_repair_execution_failure(Some(&result), None, 2));
+        assert!(!should_auto_repair_execution_failure(
+            Some(&result),
+            None,
+            3
+        ));
+
+        let message = automatic_plan_repair_threshold_message(&report, 3, 3);
+        assert!(message.contains("Developer confirmation"));
+        assert!(message.contains("/plan continue"));
+        assert!(message.contains("Plan repair guidance"));
+    }
+
+    #[test]
+    fn automatic_plan_repair_uses_orchestrator_errors_before_a_final_decision() {
+        let summary = "Orchestrator failed: config error: persisted plan not found: 019dbb06-b68c-72f3-b17a-47c46e7b7328";
+        let report = execution_failure_report(None, Some(summary));
+
+        assert!(report.contains("before producing a final decision"));
+        assert!(report.contains("persisted plan not found"));
+        assert!(should_auto_repair_execution_failure(None, Some(summary), 0));
+        assert!(!should_auto_repair_execution_failure(
+            None,
+            Some(summary),
+            3
+        ));
+
+        let request = automatic_plan_repair_request_from_report(&report, 1, 3);
+        assert!(request.contains("persisted plan not found"));
     }
 
     #[test]
@@ -6405,6 +6673,10 @@ mod tests {
         assert!(matches!(
             parse_pending_plan_revision_command("modify tighten sandbox"),
             PendingPlanRevisionCommand::Modify("tighten sandbox")
+        ));
+        assert!(matches!(
+            parse_pending_plan_revision_command("continue"),
+            PendingPlanRevisionCommand::ContinueAutoRepair
         ));
         assert!(matches!(
             parse_pending_plan_revision_command("revise add checks"),
@@ -6833,11 +7105,33 @@ fn execution_requires_plan_repair(result: Option<&OrchestratorResult>) -> bool {
     result.is_none_or(|result| result.decision == DecisionOutcome::Abandon)
 }
 
+#[cfg(test)]
 fn execution_failure_revision_message(result: Option<&OrchestratorResult>) -> String {
+    execution_failure_revision_message_from_report(&execution_failure_report(result, None))
+}
+
+fn execution_failure_revision_message_from_report(report: &str) -> String {
     let mut lines = vec![
         "Plan execution failed. Revise the execution plan before running it again.".to_string(),
     ];
+    lines.extend(
+        report
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(str::to_string),
+    );
+    lines.push(
+        "Send plan changes as plain text or use `/plan modify <changes>`. Use `/plan cancel` to stop this repair loop."
+            .to_string(),
+    );
+    lines.join("\n")
+}
 
+fn execution_failure_report(
+    result: Option<&OrchestratorResult>,
+    execution_summary: Option<&str>,
+) -> String {
+    let mut lines = Vec::new();
     if let Some(result) = result {
         lines.push(format!(
             "Decision: {}.",
@@ -6877,13 +7171,74 @@ fn execution_failure_revision_message(result: Option<&OrchestratorResult>) -> St
         }
     } else {
         lines.push("The orchestrator failed before producing a final decision.".to_string());
+        if let Some(error) = orchestrator_failure_detail(execution_summary) {
+            lines.push(format!("Orchestrator error: {error}."));
+            lines.push(
+                "Plan change hints:\n- Add or adjust a repair step that restores the missing precondition before retrying the failed execution stage."
+                    .to_string(),
+            );
+        }
     }
 
-    lines.push(
-        "Send plan changes as plain text or use `/plan modify <changes>`. Use `/plan cancel` to stop this repair loop."
-            .to_string(),
-    );
     lines.join("\n")
+}
+
+fn should_auto_repair_execution_failure(
+    result: Option<&OrchestratorResult>,
+    execution_summary: Option<&str>,
+    automatic_repair_attempts: u8,
+) -> bool {
+    automatic_repair_attempts < MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS
+        && (result.is_some_and(|result| result.decision == DecisionOutcome::Abandon)
+            || orchestrator_failure_detail(execution_summary).is_some())
+}
+
+fn orchestrator_failure_detail(execution_summary: Option<&str>) -> Option<String> {
+    execution_summary
+        .map(str::trim)
+        .filter(|summary| !summary.is_empty())
+        .and_then(|summary| summary.strip_prefix("Orchestrator failed:"))
+        .map(str::trim)
+        .filter(|detail| !detail.is_empty())
+        .map(str::to_string)
+}
+
+fn automatic_plan_repair_started_message(attempt: u8, max_attempts: u8) -> String {
+    format!(
+        "Plan execution failed. Automatic plan repair attempt {} is feeding the failure evidence back to the planner.",
+        automatic_plan_repair_attempt_label(attempt, max_attempts)
+    )
+}
+
+fn automatic_plan_repair_request_from_report(
+    report: &str,
+    attempt: u8,
+    max_attempts: u8,
+) -> String {
+    format!(
+        "Automatic plan repair attempt {}.\n\
+The previous plan execution failed. Revise the execution plan by adding or adjusting concrete repair Step(s) before the failing verification.\n\
+Return a complete ordered execution plan draft. Keep successful steps only when they are still needed, and keep verification steps that can judge success automatically.\n\
+Use this failure evidence as the source of truth:\n{report}",
+        automatic_plan_repair_attempt_label(attempt, max_attempts)
+    )
+}
+
+fn automatic_plan_repair_threshold_message(report: &str, attempts: u8, max_attempts: u8) -> String {
+    format!(
+        "Automatic plan repair stopped after {attempts} failed repair attempts (automatic threshold: {max_attempts}).\n\
+Developer confirmation is required before more automatic correction.\n\
+{report}\n\
+Reply `continue` or `/plan continue` to allow one more automatic repair attempt, describe specific Plan repair guidance, or use `/plan cancel` to stop."
+    )
+}
+
+fn automatic_plan_repair_attempt_label(attempt: u8, max_attempts: u8) -> String {
+    if attempt <= max_attempts {
+        format!("{attempt}/{max_attempts}")
+    } else {
+        format!("{attempt} (threshold {max_attempts})")
+    }
 }
 
 fn execution_failure_diagnostics(result: &OrchestratorResult, limit: usize) -> Vec<String> {

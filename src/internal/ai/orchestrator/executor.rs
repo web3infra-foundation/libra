@@ -32,6 +32,7 @@ use crate::internal::ai::{
     completion::{CompletionError, CompletionModel, CompletionUsage, CompletionUsageSummary},
     hooks::HookRunner,
     intentspec::types::{IntentSpec, NetworkPolicy, ToolAcl},
+    libra_vcs::run_libra_vcs_tool_guidance,
     runtime::environment::{ExecutionEnvironmentProvider, SyncBackRequest},
     sandbox::{
         NetworkAccess, SandboxPermissions, SandboxPolicy, ToolRuntimeContext, ToolSandboxContext,
@@ -1398,10 +1399,15 @@ fn build_task_prompt(task: &TaskSpec, working_dir: &Path, allowed_tools: &[Strin
     parts.push(
         "## Path Rules\nUse repository-relative paths for read_file, list_dir, and grep_files. The runtime will resolve them from the working directory. Never invent or use paths outside the current workspace.".to_string(),
     );
-    parts.push(
-        "## Version Control\nDo not use git for status, diff, add, commit, branch, log, show, or switch operations. Use Libra version-control only; when the run_libra_vcs tool is available, call it for those operations. run_libra_vcs is not a shell and must not be used for cargo, fmt, clippy, test, build, or arbitrary command execution; deterministic verification commands are owned by gate tasks."
-            .to_string(),
-    );
+    parts.push(format!(
+        "## Version Control\nDo not use git for status, diff, add, commit, branch, log, \
+             show, or switch operations. Use Libra version-control only; when the \
+             run_libra_vcs tool is available, call it for those operations.\n{}\nrun_libra_vcs \
+             is not a shell and must not be used for cargo, fmt, clippy, test, build, or \
+             arbitrary command execution; deterministic verification commands are owned by \
+             gate tasks.",
+        run_libra_vcs_tool_guidance()
+    ));
 
     if !task.contract.touch_files.is_empty() {
         parts.push(format!(
@@ -2862,6 +2868,10 @@ mod tests {
         assert!(prompt.contains("## Version Control"));
         assert!(prompt.contains("Do not use git"));
         assert!(prompt.contains("run_libra_vcs"));
+        assert!(prompt.contains("Allowed run_libra_vcs commands"));
+        assert!(prompt.contains("status --json"));
+        assert!(prompt.contains("ls-files"));
+        assert!(prompt.contains("status -uall"));
         assert!(prompt.contains("must not be used for cargo"));
         assert!(prompt.contains("verification commands are owned by gate tasks"));
         assert!(prompt.contains("## Completion Requirement"));

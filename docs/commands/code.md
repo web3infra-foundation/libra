@@ -125,7 +125,7 @@ libra code --provider codex --plan-mode
 
 ## Human Output
 
-Output is delivered through the TUI, web interface, or MCP protocol depending on the mode. There is no line-oriented stdout in the default TUI mode. In the generic provider TUI, a normal plain-text request starts the plan workflow automatically; explicit slash commands keep their command-specific behavior. Generic provider planning uses a two-step review: the LLM first drafts an IntentSpec for confirmation, then the confirmed IntentSpec is sent back to the LLM to generate a reviewable execution plan before any execution starts. The web server serves an embedded Next.js application. The stdio mode communicates via JSON-RPC messages following the Model Context Protocol.
+Output is delivered through the TUI, web interface, or MCP protocol depending on the mode. There is no line-oriented stdout in the default TUI mode. In the generic provider TUI, a normal plain-text request starts the plan workflow automatically; explicit slash commands keep their command-specific behavior. Generic provider planning uses a two-step review: the LLM first drafts an IntentSpec for confirmation, then the confirmed IntentSpec is sent back to the LLM to generate a reviewable execution plan before any execution starts. If a confirmed plan executes and fails, or the orchestrator aborts before reaching a final decision, Libra feeds the failure evidence back into the planner, asks it to add or adjust repair steps, and automatically runs the revised plan up to the automatic repair threshold. After the threshold is reached, the TUI waits for the developer to either continue automatic repair with `/plan continue` or provide explicit plan repair guidance. The web server serves an embedded Next.js application. The stdio mode communicates via JSON-RPC messages following the Model Context Protocol.
 
 ## Diagnostics
 
@@ -159,7 +159,7 @@ Different providers excel at different tasks and have different cost/latency pro
 
 ### Why MCP integration?
 
-The Model Context Protocol (MCP) is an open standard for connecting AI clients to tool servers. By supporting `--stdio` mode, Libra can act as a tool server for any MCP-compatible client (e.g., Claude Desktop). Libra exposes an allowlisted `run_libra_vcs` tool for version-control operations such as status, diff, add, commit, branch, log, show, and switch, so external AI agents use Libra directly instead of invoking Git. Libra-managed execution also rejects direct `git` shell commands.
+The Model Context Protocol (MCP) is an open standard for connecting AI clients to tool servers. By supporting `--stdio` mode, Libra can act as a tool server for any MCP-compatible client (e.g., Claude Desktop). Libra exposes an allowlisted `run_libra_vcs` tool for version-control operations such as status, diff, add, commit, branch, log, show, and switch, so external AI agents use Libra directly instead of invoking Git. `run_libra_vcs` only accepts those Libra subcommands; it is not a Git-compatible shell, and agents should use workspace file tools for raw file discovery instead of Git-only commands like `ls-files`. For repository state inspection, prefer `status --json` or `status --porcelain v2 --untracked-files=all`. Libra-managed execution also rejects direct `git` shell commands.
 
 ### Why approval policies?
 

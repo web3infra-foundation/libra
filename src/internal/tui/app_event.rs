@@ -200,6 +200,7 @@ pub enum AppEvent {
         plan_draft: ProviderPlanDraft,
         warnings: Vec<String>,
         network_access: bool,
+        automatic_repair_attempts: u8,
     },
 }
 

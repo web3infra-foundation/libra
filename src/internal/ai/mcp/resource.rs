@@ -62,16 +62,17 @@ use uuid::Uuid;
 
 use crate::{
     internal::{
-        ai::{mcp::server::LibraMcpServer, util::normalize_commit_anchor},
+        ai::{
+            libra_vcs::{ALLOWED_COMMANDS, normalize_tool_args, unsupported_command_message},
+            mcp::server::LibraMcpServer,
+            util::normalize_commit_anchor,
+        },
         head::Head,
     },
     utils::storage_ext::{Identifiable, StorageExt},
 };
 
 const ZERO_COMMIT_SHA: &str = "0000000000000000000000000000000000000000";
-const ALLOWED_LIBRA_VCS_COMMANDS: &[&str] = &[
-    "status", "diff", "branch", "log", "show", "show-ref", "add", "commit", "switch",
-];
 const LIBRA_VCS_TIMEOUT_SECONDS: u64 = 120;
 
 impl LibraMcpServer {
@@ -141,23 +142,63 @@ impl LibraMcpServer {
     where
         T: Serialize + Send + Sync + Identifiable,
     {
-        let storage = self
-            .storage
-            .as_ref()
-            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
+        let object_type = object.object_type();
+        let object_id = object.object_id();
+        let tracked = self.intent_history_manager.is_some();
+        let started_at = std::time::Instant::now();
 
-        if let Some(history) = &self.intent_history_manager {
-            storage
-                .put_tracked(object, history)
-                .await
-                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        tracing::debug!(
+            target: "libra::ai::mcp",
+            object_type = %object_type,
+            object_id = %object_id,
+            tracked,
+            "mcp object write started"
+        );
+
+        let storage = self.storage.as_ref().ok_or_else(|| {
+            tracing::warn!(
+                target: "libra::ai::mcp",
+                object_type = %object_type,
+                object_id = %object_id,
+                tracked,
+                "mcp object write failed: storage not available"
+            );
+            ErrorData::internal_error("Storage not available", None)
+        })?;
+
+        let write_result = if let Some(history) = &self.intent_history_manager {
+            storage.put_tracked(object, history).await
         } else {
-            storage
-                .put_json(object)
-                .await
-                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            storage.put_json(object).await
+        };
+
+        match write_result {
+            Ok(hash) => {
+                tracing::info!(
+                    target: "libra::ai::mcp",
+                    object_type = %object_type,
+                    object_id = %object_id,
+                    object_hash = %hash,
+                    tracked,
+                    elapsed_ms = started_at.elapsed().as_millis(),
+                    "mcp object write succeeded"
+                );
+                Ok(())
+            }
+            Err(error) => {
+                let message = error.to_string();
+                tracing::warn!(
+                    target: "libra::ai::mcp",
+                    object_type = %object_type,
+                    object_id = %object_id,
+                    tracked,
+                    elapsed_ms = started_at.elapsed().as_millis(),
+                    error = %message,
+                    "mcp object write failed"
+                );
+                Err(ErrorData::internal_error(message, None))
+            }
         }
-        Ok(())
     }
 
     /// Validate object references when history is available.
@@ -380,18 +421,12 @@ fn normalize_libra_vcs_command(command: &str) -> Result<&'static str, ErrorData>
         ));
     }
 
-    ALLOWED_LIBRA_VCS_COMMANDS
+    ALLOWED_COMMANDS
         .iter()
         .copied()
         .find(|allowed| *allowed == command)
         .ok_or_else(|| {
-            ErrorData::invalid_params(
-                format!(
-                    "unsupported Libra VCS command '{command}'; allowed commands: {}",
-                    ALLOWED_LIBRA_VCS_COMMANDS.join(", ")
-                ),
-                None,
-            )
+            ErrorData::invalid_params(unsupported_command_message("Libra VCS", command), None)
         })
 }
 
@@ -980,15 +1015,21 @@ pub struct ListRunUsagesParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct RunLibraVcsParams {
-    /// Allowlisted Libra version-control command.
+    /// Allowlisted Libra subcommand: status, diff, branch, log, show, show-ref, add, commit,
+    /// or switch. Pass Git-like flags in args only when they map cleanly to Libra; do not use
+    /// Git-only commands such as ls-files.
     pub command: String,
-    /// Command arguments as argv entries. Shell syntax is not evaluated.
+    /// Command arguments as argv entries. Shell syntax is not evaluated. Prefer
+    /// `status --json` or `status --porcelain v2 --untracked-files=all` for repository state.
+    /// `status -uall` is normalized to `--untracked-files=all` for compatibility.
     pub args: Option<Vec<String>>,
 }
 
 #[tool_router]
 impl LibraMcpServer {
-    #[tool(description = "Run an allowlisted Libra version-control command without invoking git")]
+    #[tool(
+        description = "Run an allowlisted Libra version-control command without invoking git. Allowed commands: status, diff, branch, log, show, show-ref, add, commit, switch. Pass flags in args. Use workspace file tools instead of ls-files."
+    )]
     pub async fn run_libra_vcs(
         &self,
         Parameters(params): Parameters<RunLibraVcsParams>,
@@ -1003,6 +1044,8 @@ impl LibraMcpServer {
         let command = normalize_libra_vcs_command(&params.command)?;
         let args = params.args.unwrap_or_default();
         validate_libra_vcs_args(&args)?;
+        let args = normalize_tool_args(command, &args)
+            .map_err(|message| ErrorData::invalid_params(message, None))?;
         let working_dir = self.libra_vcs_working_dir()?;
         let executable = std::env::current_exe().map_err(|e| {
             ErrorData::internal_error(format!("failed to locate Libra executable: {e}"), None)
@@ -2780,6 +2823,10 @@ mod tests {
     fn normalize_libra_vcs_command_rejects_git() {
         let err = normalize_libra_vcs_command("git").unwrap_err();
         assert!(err.message.contains("unsupported Libra VCS command"));
+        assert!(
+            err.message
+                .contains(crate::internal::ai::libra_vcs::ALLOWED_COMMANDS_DISPLAY)
+        );
     }
 
     #[test]
@@ -2792,5 +2839,19 @@ mod tests {
     fn validate_libra_vcs_args_rejects_git_binary() {
         let err = validate_libra_vcs_args(&["/usr/bin/git".to_string()]).unwrap_err();
         assert!(err.message.contains("git is not allowed"));
+    }
+
+    #[test]
+    fn run_libra_vcs_status_compat_rewrites_git_untracked_shorthand() {
+        let args = normalize_tool_args("status", &["-uall".to_string()]).unwrap();
+
+        assert_eq!(args, vec!["--untracked-files=all"]);
+    }
+
+    #[test]
+    fn run_libra_vcs_status_compat_rejects_status_a_with_hint() {
+        let err = normalize_tool_args("status", &["-a".to_string()]).unwrap_err();
+
+        assert!(err.contains("--untracked-files=all"));
     }
 }

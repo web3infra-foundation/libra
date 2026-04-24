@@ -315,7 +315,7 @@ fn glob_matches(pattern: &str, path: &str) -> bool {
     let pattern = pattern.trim().replace('\\', "/");
     let path = normalize_slash_path(path);
 
-    if pattern == "*" || pattern == "**" {
+    if pattern == "." || pattern == "./" || pattern == "*" || pattern == "**" {
         return true;
     }
 
@@ -556,6 +556,15 @@ mod tests {
     fn test_scope_empty_in_scope_allows_all() {
         let verdict = check_scope(&[], &[], "anything/goes.rs");
         assert_eq!(verdict, ScopeVerdict::InScope);
+    }
+
+    #[test]
+    fn test_scope_dot_allows_repository_root() {
+        let root_file = check_scope(&[".".into()], &[], "Cargo.toml");
+        assert_eq!(root_file, ScopeVerdict::InScope);
+
+        let nested_file = check_scope(&["./".into()], &[], "src/main.rs");
+        assert_eq!(nested_file, ScopeVerdict::InScope);
     }
 
     #[test]

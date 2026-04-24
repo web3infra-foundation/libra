@@ -12,7 +12,7 @@ use git_internal::{
 };
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DatabaseTransaction, DbErr, EntityTrait,
-    QueryFilter, Set, TransactionTrait,
+    QueryFilter, Set, TransactionTrait, sea_query::Expr,
 };
 use tokio::time::sleep;
 
@@ -37,10 +37,21 @@ use crate::{
 pub const AI_REF: &str = "libra/intent";
 const SQLITE_BUSY_MAX_RETRIES: usize = 15;
 const SQLITE_BUSY_RETRY_BASE_MS: u64 = 100;
+const HISTORY_HEAD_CONFLICT_MAX_RETRIES: usize = 32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefUpdateOutcome {
+    Updated,
+    HeadChanged,
+}
 
 fn is_sqlite_busy(err: &DbErr) -> bool {
     let message = err.to_string();
     message.contains("database is locked") || message.contains("database schema is locked")
+}
+
+fn is_sqlite_unique_violation(err: &DbErr) -> bool {
+    err.to_string().contains("UNIQUE constraint failed")
 }
 
 /// Manages object history using an orphan branch and Git Tree structure.
@@ -150,80 +161,30 @@ impl HistoryManager {
         object_id: &str,
         blob_hash: ObjectHash,
     ) -> Result<()> {
-        // 1. Resolve current history head
-        let parent_commit_id = self.resolve_history_head().await?;
+        for attempt in 0..=HISTORY_HEAD_CONFLICT_MAX_RETRIES {
+            let parent_commit_id = self.resolve_history_head().await?;
+            let commit_hash =
+                self.create_append_commit(parent_commit_id, object_type, object_id, blob_hash)?;
 
-        let mut root_items = if let Some(parent_id) = parent_commit_id {
-            self.load_commit_tree(&parent_id)?
-        } else {
-            Vec::new()
-        };
+            match self
+                .update_ref_if_matches(&self.ref_name, parent_commit_id, commit_hash)
+                .await?
+            {
+                RefUpdateOutcome::Updated => return Ok(()),
+                RefUpdateOutcome::HeadChanged if attempt < HISTORY_HEAD_CONFLICT_MAX_RETRIES => {
+                    continue;
+                }
+                RefUpdateOutcome::HeadChanged => {
+                    return Err(anyhow!(
+                        "history head changed repeatedly while appending {}/{}",
+                        object_type,
+                        object_id
+                    ));
+                }
+            }
+        }
 
-        // 2. Update Tree
-        // Structure: <type>/<id> -> blob
-        let type_tree_entry = root_items
-            .iter()
-            .find(|item| item.name == object_type)
-            .cloned();
-
-        let mut type_items = if let Some(entry) = type_tree_entry {
-            self.load_tree(&entry.id)?
-        } else {
-            Vec::new()
-        };
-
-        // Add/Update the object in the sub-tree
-        let new_item = TreeItem::new(TreeItemMode::Blob, blob_hash, object_id.to_string());
-        // Remove existing if any (to support updates)
-        type_items.retain(|item| item.name != object_id);
-        type_items.push(new_item);
-        type_items.sort_by(|a, b| a.name.cmp(&b.name));
-
-        // Write sub-tree
-        let type_tree_hash = self.write_tree(&type_items)?;
-
-        // Update root tree
-        let new_root_item =
-            TreeItem::new(TreeItemMode::Tree, type_tree_hash, object_type.to_string());
-        root_items.retain(|item| item.name != object_type);
-        root_items.push(new_root_item);
-        root_items.sort_by(|a, b| a.name.cmp(&b.name));
-
-        // Write root tree
-        let root_tree_hash = self.write_tree(&root_items)?;
-
-        let author = Signature::new(
-            SignatureType::Author,
-            "Libra".to_string(),
-            "history@libra".to_string(),
-        );
-
-        let signature = Signature::new(
-            SignatureType::Committer,
-            "Libra".to_string(),
-            "history@libra".to_string(),
-        );
-
-        let message = format!("Update {}/{}", object_type, object_id);
-
-        let parents = if let Some(p) = parent_commit_id {
-            vec![p]
-        } else {
-            vec![]
-        };
-
-        let commit = Commit::new(author, signature, root_tree_hash, parents, &message);
-
-        // Serialize and write commit
-        let commit_data = commit
-            .to_data()
-            .context("Failed to serialize AI history commit")?;
-        let commit_hash = write_git_object(&self.repo_path, "commit", &commit_data)?;
-
-        // 4. Update Ref
-        self.update_ref(&self.ref_name, commit_hash).await?;
-
-        Ok(())
+        unreachable!("head conflict retry loop must return on success or terminal error")
     }
 
     /// Retrieve the object hash for a given type and ID from the current history.
@@ -375,6 +336,67 @@ impl HistoryManager {
         Ok(write_git_object(&self.repo_path, "tree", &data)?)
     }
 
+    fn create_append_commit(
+        &self,
+        parent_commit_id: Option<ObjectHash>,
+        object_type: &str,
+        object_id: &str,
+        blob_hash: ObjectHash,
+    ) -> Result<ObjectHash> {
+        let mut root_items = if let Some(parent_id) = parent_commit_id {
+            self.load_commit_tree(&parent_id)?
+        } else {
+            Vec::new()
+        };
+
+        let type_tree_entry = root_items
+            .iter()
+            .find(|item| item.name == object_type)
+            .cloned();
+
+        let mut type_items = if let Some(entry) = type_tree_entry {
+            self.load_tree(&entry.id)?
+        } else {
+            Vec::new()
+        };
+
+        let new_item = TreeItem::new(TreeItemMode::Blob, blob_hash, object_id.to_string());
+        type_items.retain(|item| item.name != object_id);
+        type_items.push(new_item);
+        type_items.sort_by(|a, b| a.name.cmp(&b.name));
+
+        let type_tree_hash = self.write_tree(&type_items)?;
+
+        let new_root_item =
+            TreeItem::new(TreeItemMode::Tree, type_tree_hash, object_type.to_string());
+        root_items.retain(|item| item.name != object_type);
+        root_items.push(new_root_item);
+        root_items.sort_by(|a, b| a.name.cmp(&b.name));
+
+        let root_tree_hash = self.write_tree(&root_items)?;
+
+        let author = Signature::new(
+            SignatureType::Author,
+            "Libra".to_string(),
+            "history@libra".to_string(),
+        );
+
+        let signature = Signature::new(
+            SignatureType::Committer,
+            "Libra".to_string(),
+            "history@libra".to_string(),
+        );
+
+        let message = format!("Update {}/{}", object_type, object_id);
+        let parents = parent_commit_id.into_iter().collect::<Vec<_>>();
+        let commit = Commit::new(author, signature, root_tree_hash, parents, &message);
+        let commit_data = commit
+            .to_data()
+            .context("Failed to serialize AI history commit")?;
+        write_git_object(&self.repo_path, "commit", &commit_data)
+            .context("Failed to write AI history commit")
+    }
+
     async fn update_ref(&self, ref_name: &str, hash: ObjectHash) -> Result<()> {
         for attempt in 0..=SQLITE_BUSY_MAX_RETRIES {
             let txn: DatabaseTransaction = match self.db_conn.begin().await {
@@ -445,6 +467,126 @@ impl HistoryManager {
 
             match txn.commit().await {
                 Ok(()) => return Ok(()),
+                Err(err) if is_sqlite_busy(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
+                    sleep(Duration::from_millis(
+                        SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                    ))
+                    .await;
+                }
+                Err(err) => return Err(err).context("Failed to commit transaction"),
+            }
+        }
+
+        unreachable!("sqlite busy retry loop must return on success or terminal error")
+    }
+
+    async fn update_ref_if_matches(
+        &self,
+        ref_name: &str,
+        expected_head: Option<ObjectHash>,
+        new_hash: ObjectHash,
+    ) -> Result<RefUpdateOutcome> {
+        let expected_commit = expected_head.map(|hash| hash.to_string());
+        let new_commit = new_hash.to_string();
+
+        for attempt in 0..=SQLITE_BUSY_MAX_RETRIES {
+            let txn: DatabaseTransaction = match self.db_conn.begin().await {
+                Ok(txn) => txn,
+                Err(err) if is_sqlite_busy(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
+                    sleep(Duration::from_millis(
+                        SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                    ))
+                    .await;
+                    continue;
+                }
+                Err(err) => return Err(err).context("Failed to begin transaction"),
+            };
+
+            let existing = match reference::Entity::find()
+                .filter(reference::Column::Name.eq(ref_name))
+                .filter(reference::Column::Kind.eq(ConfigKind::Branch))
+                .one(&txn)
+                .await
+            {
+                Ok(existing) => existing,
+                Err(err) if is_sqlite_busy(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
+                    let _ = txn.rollback().await;
+                    sleep(Duration::from_millis(
+                        SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                    ))
+                    .await;
+                    continue;
+                }
+                Err(err) => return Err(err).context("Failed to query reference"),
+            };
+
+            let write_result = match existing {
+                Some(model) if model.commit != expected_commit => {
+                    let _ = txn.rollback().await;
+                    return Ok(RefUpdateOutcome::HeadChanged);
+                }
+                Some(model) => {
+                    let mut update = reference::Entity::update_many()
+                        .filter(reference::Column::Id.eq(model.id))
+                        .filter(reference::Column::Name.eq(ref_name))
+                        .filter(reference::Column::Kind.eq(ConfigKind::Branch));
+                    update = match expected_commit.as_ref() {
+                        Some(commit) => update.filter(reference::Column::Commit.eq(commit.clone())),
+                        None => update.filter(reference::Column::Commit.is_null()),
+                    };
+
+                    update
+                        .col_expr(
+                            reference::Column::Commit,
+                            Expr::value(Some(new_commit.clone())),
+                        )
+                        .exec(&txn)
+                        .await
+                        .map(Some)
+                }
+                None if expected_commit.is_some() => {
+                    let _ = txn.rollback().await;
+                    return Ok(RefUpdateOutcome::HeadChanged);
+                }
+                None => {
+                    let new_ref = reference::ActiveModel {
+                        name: Set(Some(ref_name.to_string())),
+                        kind: Set(ConfigKind::Branch),
+                        commit: Set(Some(new_commit.clone())),
+                        remote: Set(None),
+                        ..Default::default()
+                    };
+                    match new_ref.insert(&txn).await {
+                        Ok(_) => Ok(None),
+                        Err(err) if is_sqlite_unique_violation(&err) => {
+                            let _ = txn.rollback().await;
+                            return Ok(RefUpdateOutcome::HeadChanged);
+                        }
+                        Err(err) => Err(err),
+                    }
+                }
+            };
+
+            let rows_affected = match write_result {
+                Ok(rows_affected) => rows_affected,
+                Err(err) if is_sqlite_busy(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
+                    let _ = txn.rollback().await;
+                    sleep(Duration::from_millis(
+                        SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                    ))
+                    .await;
+                    continue;
+                }
+                Err(err) => return Err(err).context("Failed to compare-and-swap history head"),
+            };
+
+            if rows_affected.is_some_and(|result| result.rows_affected != 1) {
+                let _ = txn.rollback().await;
+                return Ok(RefUpdateOutcome::HeadChanged);
+            }
+
+            match txn.commit().await {
+                Ok(()) => return Ok(RefUpdateOutcome::Updated),
                 Err(err) if is_sqlite_busy(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
                     sleep(Duration::from_millis(
                         SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
@@ -640,5 +782,55 @@ mod tests {
             .expect("history head should be readable after retry")
             .expect("history head should exist");
         assert_eq!(resolved, hash);
+    }
+
+    #[tokio::test]
+    async fn test_update_ref_if_matches_rejects_stale_history_head() {
+        let dir = tempdir().unwrap();
+        let repo_path = dir.path().join(".libra");
+        std::fs::create_dir(&repo_path).unwrap();
+        let objects_dir = repo_path.join("objects");
+
+        let storage = Arc::new(LocalStorage::new(objects_dir));
+        let db_conn = Arc::new(setup_test_db().await);
+        let manager = HistoryManager::new(storage, repo_path, db_conn);
+
+        let task_hash = ObjectHash::from_str("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391").unwrap();
+        let plan_hash = ObjectHash::from_str("f4e6d0434b8b29ae775ad8c2e48c5391e69de29b").unwrap();
+        let frame_hash = ObjectHash::from_str("a4e6d0434b8b29ae775ad8c2e48c5391e69de29b").unwrap();
+
+        manager.append("task", "task-1", task_hash).await.unwrap();
+        let stale_head = manager.resolve_history_head().await.unwrap();
+        let stale_commit = manager
+            .create_append_commit(stale_head, "plan", "plan-1", plan_hash)
+            .expect("stale append commit should be created");
+
+        manager
+            .append("context_frame", "frame-1", frame_hash)
+            .await
+            .unwrap();
+
+        let outcome = manager
+            .update_ref_if_matches(AI_REF, stale_head, stale_commit)
+            .await
+            .expect("stale ref update should not error");
+        assert_eq!(outcome, RefUpdateOutcome::HeadChanged);
+
+        manager.append("plan", "plan-1", plan_hash).await.unwrap();
+
+        assert!(
+            manager
+                .get_object_hash("context_frame", "frame-1")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            manager
+                .get_object_hash("plan", "plan-1")
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 }
