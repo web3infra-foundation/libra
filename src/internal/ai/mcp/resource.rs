@@ -53,7 +53,11 @@ use rmcp::{
     service::RequestContext,
     tool, tool_router,
 };
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{
+    Deserialize, Deserializer, Serialize,
+    de::{DeserializeOwned, Error as _},
+};
+use serde_json::{Map, Value, json};
 use tokio::{
     process::Command,
     time::{Duration, timeout},
@@ -406,6 +410,251 @@ fn parse_intent_spec(spec: String) -> IntentSpec {
     }
 }
 
+fn parse_run_libra_vcs_params_value(value: Value) -> Result<RunLibraVcsParams, String> {
+    match value {
+        Value::Object(mut map) => {
+            let command_value = take_first_value(&mut map, &["command", "cmd", "subcommand"]);
+            let args_value = take_first_value(&mut map, &["args", "argv", "arguments"]);
+
+            let mut command = command_value
+                .as_ref()
+                .and_then(value_as_trimmed_string)
+                .unwrap_or_default();
+            let mut args = match args_value {
+                Some(args_value) => parse_libra_vcs_args_value(args_value)?,
+                None if !map.is_empty() => libra_vcs_arg_map_to_args(map)?,
+                None => Vec::new(),
+            };
+
+            if command.is_empty()
+                && let Some(first) = args.first().cloned()
+            {
+                command = first;
+                args.remove(0);
+            }
+
+            if command.is_empty() {
+                return Err("run_libra_vcs requires a `command` string".to_string());
+            }
+
+            strip_redundant_libra_vcs_prefix(&command, &mut args);
+            Ok(RunLibraVcsParams {
+                command,
+                args: (!args.is_empty()).then_some(args),
+            })
+        }
+        Value::Array(items) => {
+            let mut args = scalar_array_to_strings(items)?;
+            if args.is_empty() {
+                return Err("run_libra_vcs array form requires at least a command".to_string());
+            }
+            let command = args.remove(0);
+            strip_redundant_libra_vcs_prefix(&command, &mut args);
+            Ok(RunLibraVcsParams {
+                command,
+                args: (!args.is_empty()).then_some(args),
+            })
+        }
+        Value::String(command_line) => {
+            let mut args = split_libra_vcs_arg_string(&command_line)?;
+            if args.is_empty() {
+                return Err("run_libra_vcs string form requires a command".to_string());
+            }
+            let command = args.remove(0);
+            strip_redundant_libra_vcs_prefix(&command, &mut args);
+            Ok(RunLibraVcsParams {
+                command,
+                args: (!args.is_empty()).then_some(args),
+            })
+        }
+        other => Err(format!(
+            "run_libra_vcs arguments must be an object, array, or command string, got {}",
+            json_type_name(&other)
+        )),
+    }
+}
+
+fn take_first_value(map: &mut Map<String, Value>, keys: &[&str]) -> Option<Value> {
+    keys.iter().find_map(|key| map.remove(*key))
+}
+
+fn parse_libra_vcs_args_value(value: Value) -> Result<Vec<String>, String> {
+    match value {
+        Value::Null => Ok(Vec::new()),
+        Value::Array(items) => scalar_array_to_strings(items),
+        Value::String(raw) => split_libra_vcs_arg_string(&raw),
+        Value::Object(map) => libra_vcs_arg_map_to_args(map),
+        other => value_as_trimmed_string(&other)
+            .map(|value| vec![value])
+            .ok_or_else(|| {
+                format!(
+                    "run_libra_vcs args must be an array, string, or object, got {}",
+                    json_type_name(&other)
+                )
+            }),
+    }
+}
+
+fn scalar_array_to_strings(items: Vec<Value>) -> Result<Vec<String>, String> {
+    items
+        .iter()
+        .map(|item| {
+            value_as_trimmed_string(item).ok_or_else(|| {
+                format!(
+                    "run_libra_vcs args entries must be strings, numbers, or booleans, got {}",
+                    json_type_name(item)
+                )
+            })
+        })
+        .collect()
+}
+
+fn split_libra_vcs_arg_string(raw: &str) -> Result<Vec<String>, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    if matches!(trimmed.as_bytes().first(), Some(b'[')) {
+        let value = serde_json::from_str::<Value>(trimmed).map_err(|err| {
+            format!("failed to parse run_libra_vcs args JSON array string: {err}")
+        })?;
+        return parse_libra_vcs_args_value(value);
+    }
+
+    shlex::split(trimmed)
+        .ok_or_else(|| "failed to parse run_libra_vcs args string as shell words".to_string())
+}
+
+fn libra_vcs_arg_map_to_args(map: Map<String, Value>) -> Result<Vec<String>, String> {
+    let mut args = Vec::new();
+    for (key, value) in map {
+        let normalized_key = key.trim();
+        if normalized_key.is_empty() || matches!(normalized_key, "command" | "cmd" | "subcommand") {
+            continue;
+        }
+
+        if matches!(normalized_key, "path" | "file") {
+            if let Some(path) = value_as_trimmed_string(&value) {
+                args.push(path);
+            }
+            continue;
+        }
+
+        if matches!(normalized_key, "paths" | "files") {
+            match value {
+                Value::Array(items) => args.extend(scalar_array_to_strings(items)?),
+                other => {
+                    if let Some(path) = value_as_trimmed_string(&other) {
+                        args.push(path);
+                    }
+                }
+            }
+            continue;
+        }
+
+        if is_libra_vcs_positional_arg_key(normalized_key) {
+            match value {
+                Value::Array(items) => args.extend(scalar_array_to_strings(items)?),
+                other => {
+                    if let Some(path) = value_as_trimmed_string(&other) {
+                        args.push(path);
+                    }
+                }
+            }
+            continue;
+        }
+
+        let Some(flag) = libra_vcs_map_flag(normalized_key) else {
+            continue;
+        };
+        match value {
+            Value::Bool(true) => args.push(flag),
+            Value::Bool(false) | Value::Null => {}
+            Value::Array(items) => {
+                for item in scalar_array_to_strings(items)? {
+                    args.push(flag.clone());
+                    args.push(item);
+                }
+            }
+            other => {
+                if let Some(text) = value_as_trimmed_string(&other) {
+                    args.push(flag);
+                    args.push(text);
+                }
+            }
+        }
+    }
+    Ok(args)
+}
+
+fn is_libra_vcs_positional_arg_key(key: &str) -> bool {
+    let normalized = key
+        .trim()
+        .trim_start_matches('-')
+        .chars()
+        .filter(|ch| !matches!(ch, '-' | '_' | ' '))
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    matches!(
+        normalized.as_str(),
+        "pathspec"
+            | "pathspecs"
+            | "positional"
+            | "positionals"
+            | "object"
+            | "objects"
+            | "revision"
+            | "revisions"
+            | "rev"
+            | "revs"
+            | "commit"
+            | "commits"
+            | "branch"
+            | "branches"
+            | "branchname"
+            | "ref"
+            | "refs"
+    )
+}
+
+fn libra_vcs_map_flag(key: &str) -> Option<String> {
+    let normalized = key.trim().trim_start_matches('-').replace('_', "-");
+    let normalized = normalized.trim_matches('-');
+    (!normalized.is_empty()).then(|| format!("--{normalized}"))
+}
+
+fn strip_redundant_libra_vcs_prefix(command: &str, args: &mut Vec<String>) {
+    if args.first().is_some_and(|arg| arg == "libra") {
+        args.remove(0);
+    }
+    if args.first().is_some_and(|arg| arg == command) {
+        args.remove(0);
+    }
+}
+
+fn value_as_trimmed_string(value: &Value) -> Option<String> {
+    let text = match value {
+        Value::String(text) => text.clone(),
+        Value::Number(number) => number.to_string(),
+        Value::Bool(flag) => flag.to_string(),
+        Value::Null | Value::Array(_) | Value::Object(_) => return None,
+    };
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+fn json_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
 fn normalize_libra_vcs_command(command: &str) -> Result<&'static str, ErrorData> {
     let command = command.trim();
     if command.is_empty() {
@@ -461,41 +710,94 @@ fn format_libra_vcs_invocation(command: &str, args: &[String]) -> String {
     parts.join(" ")
 }
 
+fn libra_vcs_process_args(command: &str, args: &[String]) -> Vec<String> {
+    let mut process_args = vec!["--json=compact".to_string(), command.to_string()];
+    process_args.extend(strip_libra_vcs_output_args(args));
+    process_args
+}
+
+fn strip_libra_vcs_output_args(args: &[String]) -> Vec<String> {
+    args.iter()
+        .filter(|arg| {
+            !matches!(arg.as_str(), "--json" | "-J" | "--machine")
+                && !arg.starts_with("--json=")
+                && !arg.starts_with("-J=")
+        })
+        .cloned()
+        .collect()
+}
+
 fn format_libra_vcs_output(
     command: &str,
     args: &[String],
     output: std::process::Output,
 ) -> CallToolResult {
-    let status = output
-        .status
-        .code()
-        .map(|code| code.to_string())
-        .unwrap_or_else(|| "terminated by signal".to_string());
+    let exit_code = output.status.code();
     let stdout = String::from_utf8_lossy(&output.stdout)
         .trim_end()
         .to_string();
     let stderr = String::from_utf8_lossy(&output.stderr)
         .trim_end()
         .to_string();
-    let mut body = format!(
-        "command: {}\nexit_code: {}",
-        format_libra_vcs_invocation(command, args),
-        status
-    );
-    if !stdout.is_empty() {
-        body.push_str("\n\nstdout:\n");
-        body.push_str(&stdout);
-    }
-    if !stderr.is_empty() {
-        body.push_str("\n\nstderr:\n");
-        body.push_str(&stderr);
-    }
+    let argv = {
+        let mut argv = vec!["libra".to_string()];
+        argv.extend(libra_vcs_process_args(command, args));
+        argv
+    };
+    let body = json!({
+        "command": format_libra_vcs_invocation(command, args),
+        "argv": argv,
+        "exit_code": exit_code,
+        "success": output.status.success(),
+        "stdout": stdout,
+        "stderr": stderr,
+        "stdout_json": parse_json_text(&stdout),
+        "stderr_json": parse_json_text(&stderr),
+    });
+    let body = match serde_json::to_string(&body) {
+        Ok(body) => body,
+        Err(err) => format!(
+            "{{\"success\":false,\"command\":\"{}\",\"serialization_error\":\"{}\"}}",
+            escape_json_string(&format_libra_vcs_invocation(command, args)),
+            escape_json_string(&err.to_string())
+        ),
+    };
 
     if output.status.success() {
         CallToolResult::success(vec![Content::text(body)])
     } else {
         CallToolResult::error(vec![Content::text(body)])
     }
+}
+
+fn parse_json_text(text: &str) -> Option<Value> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    serde_json::from_str(trimmed).ok().or_else(|| {
+        trimmed
+            .lines()
+            .rev()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .and_then(|line| serde_json::from_str(line).ok())
+    })
+}
+
+fn escape_json_string(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|ch| match ch {
+            '"' => "\\\"".chars().collect::<Vec<_>>(),
+            '\\' => "\\\\".chars().collect::<Vec<_>>(),
+            '\n' => "\\n".chars().collect::<Vec<_>>(),
+            '\r' => "\\r".chars().collect::<Vec<_>>(),
+            '\t' => "\\t".chars().collect::<Vec<_>>(),
+            other => vec![other],
+        })
+        .collect()
 }
 
 fn parse_intent_event_kind(status: &str) -> Result<Option<IntentEventKind>, ErrorData> {
@@ -1013,7 +1315,7 @@ pub struct ListRunUsagesParams {
     pub limit: Option<usize>,
 }
 
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, schemars::JsonSchema)]
 pub struct RunLibraVcsParams {
     /// Allowlisted Libra subcommand: status, diff, branch, log, show, show-ref, add, commit,
     /// or switch. Pass Git-like flags in args only when they map cleanly to Libra; do not use
@@ -1023,6 +1325,16 @@ pub struct RunLibraVcsParams {
     /// `status --json` or `status --porcelain v2 --untracked-files=all` for repository state.
     /// `status -uall` is normalized to `--untracked-files=all` for compatibility.
     pub args: Option<Vec<String>>,
+}
+
+impl<'de> Deserialize<'de> for RunLibraVcsParams {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        parse_run_libra_vcs_params_value(value).map_err(D::Error::custom)
+    }
 }
 
 #[tool_router]
@@ -1050,10 +1362,10 @@ impl LibraMcpServer {
         let executable = std::env::current_exe().map_err(|e| {
             ErrorData::internal_error(format!("failed to locate Libra executable: {e}"), None)
         })?;
+        let process_args = libra_vcs_process_args(command, &args);
 
         let child = Command::new(executable)
-            .arg(command)
-            .args(&args)
+            .args(&process_args)
             .current_dir(&working_dir)
             .stdin(Stdio::null())
             .output();
@@ -2853,5 +3165,88 @@ mod tests {
         let err = normalize_tool_args("status", &["-a".to_string()]).unwrap_err();
 
         assert!(err.contains("--untracked-files=all"));
+    }
+
+    #[test]
+    fn run_libra_vcs_params_accepts_stringified_args_array() {
+        let params: RunLibraVcsParams = serde_json::from_value(serde_json::json!({
+            "command": "add",
+            "args": "[\"add\", \".\"]"
+        }))
+        .unwrap();
+
+        assert_eq!(params.command, "add");
+        assert_eq!(params.args, Some(vec![".".to_string()]));
+    }
+
+    #[test]
+    fn run_libra_vcs_params_accepts_args_object_flags() {
+        let params: RunLibraVcsParams = serde_json::from_value(serde_json::json!({
+            "command": "status",
+            "args": {"short": true, "ignored": false}
+        }))
+        .unwrap();
+
+        assert_eq!(params.command, "status");
+        assert_eq!(params.args, Some(vec!["--short".to_string()]));
+    }
+
+    #[test]
+    fn run_libra_vcs_params_accepts_dashed_arg_object_flags() {
+        let params: RunLibraVcsParams = serde_json::from_value(serde_json::json!({
+            "command": "status",
+            "args": {"--porcelain": "v2", "--untracked-files": "all"}
+        }))
+        .unwrap();
+
+        assert_eq!(params.command, "status");
+        assert_eq!(
+            params.args,
+            Some(vec![
+                "--porcelain".to_string(),
+                "v2".to_string(),
+                "--untracked-files".to_string(),
+                "all".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn run_libra_vcs_params_treats_pathspec_keys_as_positionals() {
+        let params: RunLibraVcsParams = serde_json::from_value(serde_json::json!({
+            "command": "add",
+            "args": {"pathspecs": ["."]}
+        }))
+        .unwrap();
+
+        assert_eq!(params.command, "add");
+        assert_eq!(params.args, Some(vec![".".to_string()]));
+    }
+
+    #[test]
+    fn run_libra_vcs_params_accepts_top_level_flag_fields() {
+        let params: RunLibraVcsParams = serde_json::from_value(serde_json::json!({
+            "command": "status",
+            "short": true
+        }))
+        .unwrap();
+
+        assert_eq!(params.command, "status");
+        assert_eq!(params.args, Some(vec!["--short".to_string()]));
+    }
+
+    #[test]
+    fn run_libra_vcs_process_args_default_to_json() {
+        let args = libra_vcs_process_args("status", &["--porcelain".to_string(), "v2".to_string()]);
+
+        assert_eq!(
+            args,
+            vec![
+                "--json=compact".to_string(),
+                "status".to_string(),
+                "--porcelain".to_string(),
+                "v2".to_string()
+            ]
+        );
     }
 }

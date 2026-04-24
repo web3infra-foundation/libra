@@ -745,6 +745,42 @@ mod tests {
     }
 
     #[test]
+    fn test_risk_level_is_case_insensitive() {
+        let args = parse_submit_intent_draft_arguments(
+            &serde_json::json!({
+                "draft": {
+                    "intent": {
+                        "summary": "Inspect repository",
+                        "problemStatement": "Need a small read-only diagnosis.",
+                        "changeType": "unknown",
+                        "objectives": [{"title": "inspect", "kind": "analysis"}],
+                        "inScope": ["src"],
+                        "outOfScope": []
+                    },
+                    "acceptance": {
+                        "successCriteria": ["report findings"],
+                        "fastChecks": [],
+                        "integrationChecks": [],
+                        "securityChecks": [],
+                        "releaseChecks": []
+                    },
+                    "risk": {
+                        "rationale": "read-only",
+                        "level": "Low"
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("PascalCase risk level should be accepted");
+
+        assert_eq!(
+            args.draft.risk.level,
+            Some(crate::internal::ai::intentspec::types::RiskLevel::Low)
+        );
+    }
+
+    #[test]
     fn test_json_string_encoded_check_object_is_accepted() {
         let command_check = serde_json::json!({
             "command": "test -f hello.txt",

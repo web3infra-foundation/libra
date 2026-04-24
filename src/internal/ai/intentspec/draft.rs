@@ -88,6 +88,8 @@ impl<'de> Deserialize<'de> for DraftCheck {
             kind: Option<CheckKind>,
             #[serde(default)]
             command: Option<String>,
+            #[serde(default)]
+            description: Option<String>,
             #[serde(rename = "timeoutSeconds", default)]
             timeout_seconds: Option<u64>,
             #[serde(rename = "expectedExitCode", default)]
@@ -99,21 +101,23 @@ impl<'de> Deserialize<'de> for DraftCheck {
         }
 
         let input = DraftCheckInput::deserialize(deserializer)?;
+        let description = normalize_optional_string(input.description);
+        let mut command = normalize_optional_string(input.command);
+        if command.is_none() {
+            command = description
+                .as_deref()
+                .and_then(infer_command_from_check_description);
+        }
+
         let kind = match input.kind {
             Some(kind) => kind,
-            None if input
-                .command
+            None if command
                 .as_deref()
-                .map(str::trim)
                 .is_some_and(|command| !command.is_empty()) =>
             {
                 CheckKind::Command
             }
-            None => {
-                return Err(<D::Error as serde::de::Error>::custom(
-                    "check.kind is required when command is absent",
-                ));
-            }
+            None => CheckKind::Policy,
         };
         let id = input
             .id
@@ -121,18 +125,85 @@ impl<'de> Deserialize<'de> for DraftCheck {
             .map(str::trim)
             .filter(|id| !id.is_empty())
             .map(str::to_string)
-            .unwrap_or_else(|| derive_check_id(&kind, input.command.as_deref()));
+            .unwrap_or_else(|| {
+                derive_check_id(&kind, command.as_deref().or(description.as_deref()))
+            });
 
         Ok(Self {
             id,
             kind,
-            command: input.command,
+            command,
             timeout_seconds: input.timeout_seconds,
             expected_exit_code: input.expected_exit_code,
             required: input.required,
             artifacts_produced: input.artifacts_produced,
         })
     }
+}
+
+fn normalize_optional_string(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn infer_command_from_check_description(description: &str) -> Option<String> {
+    let trimmed = description.trim().trim_end_matches('.');
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(command) = quoted_prefix(trimmed) {
+        return Some(command);
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    let command_prefixes = [
+        "cargo ", "libra ", "git ", "npm ", "pnpm ", "yarn ", "make", "cmake ", "pytest",
+        "python ", "python3 ", "go ", "rustc ",
+    ];
+    if !command_prefixes.iter().any(|prefix| {
+        lower == *prefix
+            || lower
+                .strip_prefix(prefix)
+                .is_some_and(|rest| rest.is_empty() || !rest.starts_with(char::is_whitespace))
+    }) {
+        return None;
+    }
+
+    let command = strip_description_command_suffix(trimmed).trim();
+    (!command.is_empty()).then(|| command.to_string())
+}
+
+fn quoted_prefix(description: &str) -> Option<String> {
+    let mut chars = description.chars();
+    let quote = chars.next()?;
+    if !matches!(quote, '\'' | '"') {
+        return None;
+    }
+
+    let close = description[quote.len_utf8()..].find(quote)?;
+    let command = &description[quote.len_utf8()..quote.len_utf8() + close];
+    let command = command.trim();
+    (!command.is_empty()).then(|| command.to_string())
+}
+
+fn strip_description_command_suffix(description: &str) -> &str {
+    let lower = description.to_ascii_lowercase();
+    [
+        " succeeds",
+        " passes",
+        " should pass",
+        " exits with",
+        " exits ",
+        " returns ",
+        " output contains",
+        " prints ",
+    ]
+    .iter()
+    .filter_map(|marker| lower.find(marker))
+    .min()
+    .map_or(description, |index| &description[..index])
 }
 
 fn derive_check_id(kind: &CheckKind, command: Option<&str>) -> String {
@@ -228,13 +299,50 @@ mod tests {
     }
 
     #[test]
-    fn draft_check_missing_kind_without_command_is_rejected() {
-        let err = serde_json::from_value::<DraftCheck>(serde_json::json!({
+    fn draft_check_missing_kind_without_command_defaults_to_policy() {
+        let check: DraftCheck = serde_json::from_value(serde_json::json!({
+            "description": "No hardcoded secrets in source files",
             "required": true
         }))
-        .expect_err("checks without kind or command are ambiguous");
+        .unwrap();
 
-        assert!(err.to_string().contains("command is absent"));
+        assert_eq!(check.id, "no-hardcoded-secrets-in-source-files");
+        assert_eq!(check.kind, CheckKind::Policy);
+        assert_eq!(check.command, None);
+    }
+
+    #[test]
+    fn draft_check_infers_command_from_description() {
+        let check: DraftCheck = serde_json::from_value(serde_json::json!({
+            "description": "cargo build --manifest-path /home/eli/linked/Cargo.toml succeeds",
+            "required": true
+        }))
+        .unwrap();
+
+        assert_eq!(
+            check.command.as_deref(),
+            Some("cargo build --manifest-path /home/eli/linked/Cargo.toml")
+        );
+        assert_eq!(check.kind, CheckKind::Command);
+    }
+
+    #[test]
+    fn draft_check_accepts_kind_aliases() {
+        let build: DraftCheck = serde_json::from_value(serde_json::json!({
+            "kind": "build",
+            "description": "cargo build succeeds"
+        }))
+        .unwrap();
+        let test: DraftCheck = serde_json::from_value(serde_json::json!({
+            "kind": "test",
+            "description": "cargo test succeeds"
+        }))
+        .unwrap();
+
+        assert_eq!(build.kind, CheckKind::Command);
+        assert_eq!(build.command.as_deref(), Some("cargo build"));
+        assert_eq!(test.kind, CheckKind::TestSuite);
+        assert_eq!(test.command.as_deref(), Some("cargo test"));
     }
 
     #[test]

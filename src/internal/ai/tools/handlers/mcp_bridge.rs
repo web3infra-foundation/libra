@@ -11,6 +11,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use rmcp::model::CallToolResult;
 
+use super::parse_argument_value;
 use crate::internal::ai::{
     mcp::{resource::*, server::LibraMcpServer},
     tools::{
@@ -44,7 +45,8 @@ fn mcp_error_to_tool_error(e: rmcp::model::ErrorData) -> ToolError {
 
 /// Parse JSON arguments string into a typed params struct.
 fn parse_args<T: serde::de::DeserializeOwned>(arguments: &str) -> ToolResult<T> {
-    serde_json::from_str(arguments)
+    let value = parse_argument_value(arguments)?;
+    serde_json::from_value(value)
         .map_err(|e| ToolError::ParseError(format!("Failed to parse MCP tool arguments: {e}")))
 }
 

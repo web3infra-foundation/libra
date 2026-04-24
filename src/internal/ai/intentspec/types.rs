@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::Value;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -205,12 +205,51 @@ pub struct Check {
     pub artifacts_produced: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum CheckKind {
     Command,
     TestSuite,
     Policy,
+}
+
+impl<'de> Deserialize<'de> for CheckKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        let normalized = value
+            .trim()
+            .chars()
+            .filter(|ch| !matches!(ch, '-' | '_' | ' '))
+            .flat_map(char::to_lowercase)
+            .collect::<String>();
+
+        match normalized.as_str() {
+            "command" | "cmd" | "shell" | "run" | "build" | "lint" | "fmt" | "format"
+            | "clippy" => Ok(Self::Command),
+            "testsuite" | "test" | "tests" | "unittest" | "unittests" | "integrationtest"
+            | "integrationtests" => Ok(Self::TestSuite),
+            "policy" | "security" | "manual" | "review" | "release" => Ok(Self::Policy),
+            other => Err(D::Error::unknown_variant(
+                other,
+                &[
+                    "command",
+                    "cmd",
+                    "run",
+                    "build",
+                    "lint",
+                    "testSuite",
+                    "test",
+                    "tests",
+                    "policy",
+                    "security",
+                    "release",
+                ],
+            )),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -326,12 +365,29 @@ pub struct Risk {
     pub human_in_loop: HumanInLoop,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum RiskLevel {
     Low,
     Medium,
     High,
+}
+
+impl<'de> Deserialize<'de> for RiskLevel {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        match value.trim().to_ascii_lowercase().as_str() {
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            _ => Err(D::Error::custom(format!(
+                "unknown risk level `{value}`, expected one of `low`, `medium`, `high`"
+            ))),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
