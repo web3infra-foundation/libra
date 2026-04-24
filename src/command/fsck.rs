@@ -19,12 +19,15 @@ use std::{fs, io, path::PathBuf};
 use clap::Parser;
 use git_internal::{
     hash::ObjectHash,
-    internal::object::{
-        ObjectTrait,
-        blob::Blob,
-        commit::Commit,
-        tree::Tree,
-        types::ObjectType,
+    internal::{
+        index::Index,
+        object::{
+            ObjectTrait,
+            blob::Blob,
+            commit::Commit,
+            tree::Tree,
+            types::ObjectType,
+        },
     },
 };
 use hex;
@@ -144,6 +147,17 @@ pub struct IssueReport {
     pub suggestion: Option<String>,
 }
 
+/// Result of checking the index file
+#[derive(Debug, Clone)]
+pub struct IndexCheckResult {
+    pub valid: bool,
+    pub entries_checked: usize,
+    pub entries_ok: usize,
+    pub entries_corrupted: usize,
+    pub missing_objects: usize,
+    pub issues: Vec<IssueReport>,
+}
+
 pub async fn execute(args: FsckArgs) {
     let storage = ClientStorage::init(path::objects());
 
@@ -163,7 +177,15 @@ pub async fn execute(args: FsckArgs) {
                 }
             } else {
                 print_issues(&fsck_result);
-                std::process::exit(1);
+                // Exit code 2 for broken refs, 3 for index corruption, 1 for object corruption
+                let exit_code = if fsck_result.refs_broken > 0 {
+                    2
+                } else if !fsck_result.index_valid {
+                    3
+                } else {
+                    1
+                };
+                std::process::exit(exit_code);
             }
         }
         Err(e) => {
@@ -193,7 +215,14 @@ pub async fn execute_safe(args: FsckArgs, output: &OutputConfig) -> CliResult<()
     })?, output)?;
 
     if result.overall_status != CheckStatus::Ok {
-        std::process::exit(1);
+        let exit_code = if result.refs_broken > 0 {
+            2
+        } else if !result.index_valid {
+            3
+        } else {
+            1
+        };
+        std::process::exit(exit_code);
     }
 
     Ok(())
@@ -396,19 +425,12 @@ async fn check_all_objects(
 
     // Check index unless --no-index-check or --objects-only
     if !args.no_index_check && !args.objects_only {
-        let index_valid = check_index().await?;
-        result.index_valid = index_valid;
+        let index_result = check_index(storage)?;
+        result.index_valid = index_result.valid;
+        result.issues.extend(index_result.issues);
 
-        if !index_valid {
+        if !index_result.valid {
             result.overall_status = CheckStatus::Corrupted;
-            result.issues.push(IssueReport {
-                issue_type: "index_corruption".to_string(),
-                severity: "error".to_string(),
-                object_id: None,
-                ref_name: None,
-                message: "Index file is corrupted or inconsistent".to_string(),
-                suggestion: Some("Try running 'libra reset' or rebuild the index.".to_string()),
-            });
         }
     }
 
@@ -625,24 +647,164 @@ async fn check_refs(storage: &ClientStorage) -> CliResult<RefCheckResult> {
     Ok(result)
 }
 
-/// Check index file integrity
-async fn check_index() -> CliResult<bool> {
-    // Index validation would require reading the index file structure
-    // For now, we check if the index file exists
-    // A full implementation would parse the index binary format
+/// Check index file integrity.
+///
+/// Loads the binary index file (`.libra/index`), validates its structure,
+/// and cross-references each entry's hash against object storage.
+fn check_index(storage: &ClientStorage) -> CliResult<IndexCheckResult> {
+    let mut result = IndexCheckResult {
+        valid: true,
+        entries_checked: 0,
+        entries_ok: 0,
+        entries_corrupted: 0,
+        missing_objects: 0,
+        issues: Vec::new(),
+    };
 
-    let index_path = util::try_get_storage_path(None)
-        .map(|p| p.join("index"))
-        .unwrap_or_else(|_| PathBuf::from(".libra/index"));
+    let index_path = path::index();
 
     if !index_path.exists() {
-        // No index file is OK (clean state)
-        return Ok(true);
+        // No index file is OK (clean state, nothing staged)
+        return Ok(result);
     }
 
-    // Try to read index metadata if available
-    // This is a simplified check - full implementation would parse the index format
-    Ok(true)
+    // Step 1: Load and parse the index file.
+    // Index::from_file validates the DIRC magic, version, entry count,
+    // and the SHA1/SHA256 trailer checksum.
+    let index = match Index::load(&index_path) {
+        Ok(idx) => idx,
+        Err(e) => {
+            result.valid = false;
+            result.issues.push(IssueReport {
+                issue_type: "index_parse_error".to_string(),
+                severity: "error".to_string(),
+                object_id: None,
+                ref_name: None,
+                message: format!("Failed to parse index file: {}", e),
+                suggestion: Some("The index file is corrupted. Try removing .libra/index and running 'libra add' to rebuild.".to_string()),
+            });
+            return Ok(result);
+        }
+    };
+
+    // Step 2: Validate each index entry.
+    let entries = index.tracked_entries(0);
+
+    for entry in entries {
+        result.entries_checked += 1;
+
+        // Validate entry mode (must be a valid git file mode)
+        if !is_valid_index_mode(entry.mode) {
+            result.entries_corrupted += 1;
+            result.valid = false;
+            result.issues.push(IssueReport {
+                issue_type: "invalid_index_mode".to_string(),
+                severity: "error".to_string(),
+                object_id: None,
+                ref_name: Some(entry.name.clone()),
+                message: format!(
+                    "Index entry '{}' has invalid mode 0o{:o}",
+                    entry.name, entry.mode
+                ),
+                suggestion: Some("Remove and re-add this file to fix.".to_string()),
+            });
+            continue;
+        }
+
+        // Validate entry stage (0 = normal, 1-3 = merge conflict)
+        if entry.flags.stage > 3 {
+            result.entries_corrupted += 1;
+            result.valid = false;
+            result.issues.push(IssueReport {
+                issue_type: "invalid_index_stage".to_string(),
+                severity: "error".to_string(),
+                object_id: None,
+                ref_name: Some(entry.name.clone()),
+                message: format!(
+                    "Index entry '{}' has invalid stage {}",
+                    entry.name, entry.flags.stage
+                ),
+                suggestion: Some("This may indicate a corrupted merge state.".to_string()),
+            });
+            continue;
+        }
+
+        // Cross-reference: verify the entry's hash points to an existing blob
+        if !storage.exist(&entry.hash) {
+            result.missing_objects += 1;
+            result.entries_corrupted += 1;
+            result.valid = false;
+            result.issues.push(IssueReport {
+                issue_type: "index_entry_missing_object".to_string(),
+                severity: "error".to_string(),
+                object_id: Some(entry.hash.to_string()),
+                ref_name: Some(entry.name.clone()),
+                message: format!(
+                    "Index entry '{}' references missing object {}",
+                    entry.name, entry.hash
+                ),
+                suggestion: Some("Run 'libra add <file>' to re-stage this file.".to_string()),
+            });
+            continue;
+        }
+
+        // Verify the object is actually a blob
+        if let Ok(obj_type) = storage.get_object_type(&entry.hash)
+            && obj_type != ObjectType::Blob
+        {
+            result.entries_corrupted += 1;
+            result.valid = false;
+            result.issues.push(IssueReport {
+                issue_type: "index_entry_wrong_type".to_string(),
+                severity: "error".to_string(),
+                object_id: Some(entry.hash.to_string()),
+                ref_name: Some(entry.name.clone()),
+                message: format!(
+                    "Index entry '{}' references a {} object instead of a blob",
+                    entry.name, obj_type
+                ),
+                suggestion: Some("Re-stage this file to fix the reference.".to_string()),
+            });
+            continue;
+        }
+
+        result.entries_ok += 1;
+    }
+
+    // Step 3: Check for entries in non-zero stages (merge conflict markers)
+    for stage in [1, 2, 3] {
+        let conflict_entries = index.tracked_entries(stage);
+        if !conflict_entries.is_empty() {
+            for entry in conflict_entries {
+                result.issues.push(IssueReport {
+                    issue_type: "index_conflict_marker".to_string(),
+                    severity: "warning".to_string(),
+                    object_id: Some(entry.hash.to_string()),
+                    ref_name: Some(entry.name.clone()),
+                    message: format!(
+                        "Index entry '{}' is in merge conflict stage {}",
+                        entry.name, stage
+                    ),
+                    suggestion: Some("Resolve the merge conflict and re-add this file.".to_string()),
+                });
+                result.entries_checked += 1;
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+/// Valid git index file modes.
+fn is_valid_index_mode(mode: u32) -> bool {
+    matches!(
+        mode,
+        0o100644 // regular file
+            | 0o100755 // executable
+            | 0o120000 // symlink
+            | 0o160000 // gitlink (submodule)
+            | 0o040000 // directory (tree)
+    )
 }
 
 /// Validate cross-references between objects (trees reference valid blobs/trees)
@@ -674,38 +836,38 @@ async fn validate_cross_references(storage: &ClientStorage) -> CliResult<Vec<Iss
                         }
                     }
                 }
-            } else if obj_type == ObjectType::Commit {
-                if let Ok(commit) = load_object::<Commit>(hash) {
-                    // Check tree reference
-                    if !storage.exist(&commit.tree_id) {
+            } else if obj_type == ObjectType::Commit
+                && let Ok(commit) = load_object::<Commit>(hash)
+            {
+                // Check tree reference
+                if !storage.exist(&commit.tree_id) {
+                    issues.push(IssueReport {
+                        issue_type: "missing_commit_tree".to_string(),
+                        severity: "error".to_string(),
+                        object_id: Some(commit.tree_id.to_string()),
+                        ref_name: None,
+                        message: format!(
+                            "Commit {} references missing tree {}",
+                            hash, commit.tree_id
+                        ),
+                        suggestion: Some("The commit's tree is missing.".to_string()),
+                    });
+                }
+
+                // Check parent references
+                for parent in &commit.parent_commit_ids {
+                    if !storage.exist(parent) {
                         issues.push(IssueReport {
-                            issue_type: "missing_commit_tree".to_string(),
-                            severity: "error".to_string(),
-                            object_id: Some(commit.tree_id.to_string()),
+                            issue_type: "missing_parent_commit".to_string(),
+                            severity: "warning".to_string(),
+                            object_id: Some(parent.to_string()),
                             ref_name: None,
                             message: format!(
-                                "Commit {} references missing tree {}",
-                                hash, commit.tree_id
+                                "Commit {} references missing parent {}",
+                                hash, parent
                             ),
-                            suggestion: Some("The commit's tree is missing.".to_string()),
+                            suggestion: Some("Parent commit is missing - history may be incomplete.".to_string()),
                         });
-                    }
-
-                    // Check parent references
-                    for parent in &commit.parent_commit_ids {
-                        if !storage.exist(parent) {
-                            issues.push(IssueReport {
-                                issue_type: "missing_parent_commit".to_string(),
-                                severity: "warning".to_string(),
-                                object_id: Some(parent.to_string()),
-                                ref_name: None,
-                                message: format!(
-                                    "Commit {} references missing parent {}",
-                                    hash, parent
-                                ),
-                                suggestion: Some("Parent commit is missing - history may be incomplete.".to_string()),
-                            });
-                        }
                     }
                 }
             }
