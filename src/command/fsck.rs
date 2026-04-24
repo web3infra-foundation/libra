@@ -18,14 +18,14 @@ use std::{fs, io};
 
 use clap::Parser;
 use git_internal::{
-    hash::ObjectHash,
+    hash::{HashKind, ObjectHash, get_hash_kind},
     internal::{
         index::Index,
         object::{ObjectTrait, blob::Blob, commit::Commit, tree::Tree, types::ObjectType},
     },
 };
 use hex;
-use ring::digest::{Context, SHA1_FOR_LEGACY_USE_ONLY};
+use ring::digest::{Context, SHA1_FOR_LEGACY_USE_ONLY, SHA256};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde::Serialize;
 
@@ -527,9 +527,13 @@ async fn verify_object(hash: &ObjectHash, storage: &ClientStorage) -> CliResult<
         }
     };
 
-    // Verify hash integrity using ring crate
-    // Git/Libra computes hash as: SHA1(type + ' ' + size + '\0' + content)
-    let mut ctx = Context::new(&SHA1_FOR_LEGACY_USE_ONLY);
+    // Verify hash integrity using ring crate.
+    // Git/Libra computes hash as: SHAx(type + ' ' + size + '\0' + content)
+    // The algorithm is determined by the repo's core.objectformat config.
+    let mut ctx = Context::new(match get_hash_kind() {
+        HashKind::Sha256 => &SHA256,
+        _ => &SHA1_FOR_LEGACY_USE_ONLY,
+    });
 
     // Add header: "<type> <size>\0"
     let header = format!("{} {}\0", obj_type.to_string().to_lowercase(), size);
