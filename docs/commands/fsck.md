@@ -16,7 +16,7 @@ corruption, broken references, or data inconsistencies.
 
 The command performs the following checks:
 
-- **Object hash integrity**: Recomputes the SHA1 hash of each object and verifies it matches the stored hash
+- **Object hash integrity**: Recomputes the SHA1 or SHA256 hash (selected by `core.objectformat` config) of each object and verifies it matches the stored hash
 - **Object format validity**: Ensures each object can be parsed correctly (blob, tree, commit, tag)
 - **Ref consistency**: Verifies all references point to existing, valid objects
 - **Index integrity**: Checks that the staging index file is valid and consistent
@@ -68,11 +68,16 @@ libra fsck --objects-only
 
 ### `--fix`
 
-Automatically fix issues where possible. Currently a placeholder for future implementation.
+Automatically fix issues where possible. Currently supports:
+
+- **Deleting broken refs** that point to nonexistent or invalid objects
+- **Rebuilding a corrupted index** from HEAD's tree (falls back to deletion on unborn branches)
 
 ```bash
 libra fsck --fix
 ```
+
+Fixed issues are deleted from the database and the index is rebuilt from scratch. Issues that cannot be auto-repaired are left unchanged with a suggestion.
 
 ### `[OBJECT]`
 
@@ -197,6 +202,8 @@ Example (with issues):
     "index_valid": true,
     "cross_ref_issues": 1,
     "overall_status": "corrupted",
+    "failure_mask": 1,
+    "failure_categories": ["objects"],
     "issues": [
       {
         "issue_type": "missing_tree_entry",
@@ -214,6 +221,9 @@ Example (with issues):
 ### Schema Notes
 
 - `overall_status` is `"ok"`, `"corrupted"`, `"missing"`, `"invalid_format"`, or `"hash_mismatch"`
+- `failure_mask` is a bitmask of failure categories (see [Exit Code Behavior](#exit-code-behavior)).
+  A value of `0` means no failures; `7` means all three categories (objects, refs, index) have issues.
+- `failure_categories` is an array of human-readable category names corresponding to the set bits in `failure_mask`.
 - `issues` contains detailed problem reports with severity and suggestions
 - `issue_type` values:
   - `hash_mismatch`: Object content doesn't match its hash
@@ -262,7 +272,7 @@ structured output suitable for:
 ## Parameter Comparison: Libra vs Git
 
 | Parameter / Flag | Git | Libra |
-|---|---|---|
+| ---------------- | --- | ----- |
 | Full integrity check | `git fsck` | `libra fsck` |
 | Verbose output | `git fsck --verbose` | `libra fsck --verbose` |
 | Check single object | `git fsck <object>` | `libra fsck <object-id>` |
@@ -273,44 +283,67 @@ structured output suitable for:
 | Skip cross-refs | N/A | `libra fsck --no-cross-ref-check` |
 | Skip index | N/A | `libra fsck --no-index-check` |
 | Objects only | N/A | `libra fsck --objects-only` |
-| Auto-fix | `git fsck --lost-found` | `libra fsck --fix` (placeholder) |
+| Auto-fix | `git fsck --lost-found` | `libra fsck --fix` (delete broken refs, rebuild index) |
 
 ## Exit Code Behavior
 
-| Condition | Exit Code |
-|-----------|-----------|
-| All checks passed | 0 |
-| Corrupted objects found | 1 |
-| Missing refs or broken references | 2 |
-| Index corruption detected | 3 |
+The exit code is a **bitmask** encoding all categories of issues found in a single run.
+Multiple failure types are OR'd together so scripts can decode the full failure set from one value.
 
-Note: When issues are found, the command prints details to `stderr` before exiting with the
-appropriate error code. This behavior is designed for scripting and CI integration.
+| Bit | Flag | Value | Meaning |
+| ---- | ---- | ----- | ------- |
+| 0 | `OBJECT_CORRUPT` | 1 | Object hash mismatch or format invalid |
+| 1 | `REF_BROKEN` | 2 | Ref points to missing or invalid object |
+| 2 | `INDEX_CORRUPT` | 4 | Index file parse error or entry inconsistency |
+
+| Exit Code | Binary | Meaning |
+| --------- | ------ | ------- |
+| 0 | `0b000` | All checks passed |
+| 1 | `0b001` | Object corruption only |
+| 2 | `0b010` | Broken refs only |
+| 3 | `0b011` | Object corruption + broken refs |
+| 4 | `0b100` | Index corruption only |
+| 5 | `0b101` | Object corruption + index corruption |
+| 6 | `0b110` | Broken refs + index corruption |
+| 7 | `0b111` | All three categories have issues |
+
+To decode in shell:
+
+```bash
+exit_code=$?
+if [ $((exit_code & 1)) -ne 0 ]; then echo "objects corrupted"; fi
+if [ $((exit_code & 2)) -ne 0 ]; then echo "refs broken"; fi
+if [ $((exit_code & 4)) -ne 0 ]; then echo "index corrupted"; fi
+```
 
 ## Error Handling
 
-Every error scenario maps to an explicit `StableErrorCode`.
+Every error scenario maps to an explicit `StableErrorCode` and a bitmask exit code (see [Exit Code Behavior](#exit-code-behavior)).
 
-| Scenario | Error Code | Exit | Hint |
-|----------|-----------|------|------|
-| Object not found | `LBR-REPO-001` | 1 | "Object may have been deleted or never created." |
-| Hash mismatch | `LBR-REPO-004` | 1 | "Object data is corrupted. Consider restoring from backup or remote." |
-| Invalid object format | `LBR-REPO-004` | 1 | "Object has invalid format." |
-| Broken ref | `LBR-REF-001` | 2 | "Update or delete this ref." |
-| Missing tree entry | `LBR-REPO-004` | 1 | "The tree references an object that doesn't exist." |
-| Missing commit tree | `LBR-REPO-004` | 1 | "The commit's tree is missing." |
-| Missing parent commit | `LBR-REPO-004` | 1 | "Parent commit is missing - history may be incomplete." |
-| Index corruption | `LBR-REPO-002` | 3 | "Try running 'libra reset' or rebuild the index." |
-| Not a repository | `LBR-REPO-001` | 128 | "Run 'libra init' to create a repository." |
-| Database error | `LBR-DB-001` | 128 | -- |
-| I/O error | `LBR-IO-001` | 128 | -- |
+| Scenario | Stable Error Code | Exit Bitmask | Hint |
+| -------- | ----------------- | ------------ | ---- |
+| Hash mismatch / object corrupted | `LBR-REPO-002` | 1 (bit 0) | "Object data is corrupted. Consider restoring from backup or remote." |
+| Invalid object format | `LBR-REPO-002` | 1 (bit 0) | "Object has invalid format." |
+| Missing tree entry | `LBR-REPO-002` | 1 (bit 0) | "The tree references an object that doesn't exist." |
+| Missing commit tree | `LBR-REPO-002` | 1 (bit 0) | "The commit's tree is missing." |
+| Missing parent commit | `LBR-REPO-002` | 1 (bit 0) | "Parent commit is missing — history may be incomplete." |
+| Broken ref (points to missing object) | `LBR-REPO-002` | 2 (bit 1) | "Update or delete this ref." |
+| Invalid ref hash format | `LBR-REPO-002` | 2 (bit 1) | "Delete this corrupted ref." |
+| Index parse error | `LBR-REPO-002` | 4 (bit 2) | "The index file is corrupted. Try removing `.libra/index` and re-staging." |
+| Index entry missing object | `LBR-REPO-002` | 4 (bit 2) | "Run `libra add <file>` to re-stage this file." |
+| Not a repository | `LBR-REPO-001` | 128 | "Run `libra init` to create a repository." |
+| Invalid object ID argument | `LBR-CLI-002` | 129 | "Provide a valid hex object hash." |
+| Database error | `LBR-INTERNAL-001` | 128 | — |
+| I/O error listing objects | `LBR-IO-001` | 128 | — |
+
+When multiple failure categories are present, their bitmask values are OR'd together (e.g. objects corrupted + index corrupted = exit code `5`).
 
 ## Compatibility Notes
 
 - Git's `git fsck` checks packed objects and `.git/objects/pack/` directories; Libra currently
   supports loose objects only (pack file support is planned for future versions)
-- Git's `--lost-found` option creates refs for dangling objects; Libra's `--fix` is a
-  placeholder for similar future functionality
+- Git's `--lost-found` option creates refs for dangling objects; Libra's `--fix` deletes broken refs
+  and rebuilds a corrupted index from HEAD's tree
 - Git stores both objects and refs on the filesystem; Libra uses SQLite for refs, so
   `fsck` must verify database consistency in addition to filesystem integrity
 - The JSON output format is unique to Libra and has no Git equivalent
