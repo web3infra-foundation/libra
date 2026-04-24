@@ -954,71 +954,114 @@ fn is_valid_index_mode(mode: u32) -> bool {
 }
 
 /// Validate cross-references between objects (trees reference valid blobs/trees)
+///
+/// Checks that:
+/// - Every tree entry's referenced object exists and has the correct type
+/// - Every commit's tree reference exists
+/// - Every commit's parent references exist
 async fn validate_cross_references(storage: &ClientStorage) -> CliResult<Vec<IssueReport>> {
+    use git_internal::internal::object::tree::TreeItemMode;
+
     let mut issues = Vec::new();
 
-    // Get all object hashes
     let all_hashes = list_all_objects_in_storage(storage)
         .map_err(|e| CliError::fatal(format!("failed to list objects: {}", e)))?;
 
     for hash in &all_hashes {
-        if let Ok(obj_type) = storage.get_object_type(hash) {
-            if obj_type == ObjectType::Tree {
-                if let Ok(tree) = load_object::<Tree>(hash) {
-                    // Check each entry in the tree
-                    for item in &tree.tree_items {
-                        if !storage.exist(&item.id) {
-                            issues.push(IssueReport {
-                                issue_type: "missing_tree_entry".to_string(),
-                                severity: "error".to_string(),
-                                object_id: Some(item.id.to_string()),
-                                ref_name: None,
-                                message: format!(
-                                    "Tree {} references missing object {} ({})",
-                                    hash, item.id, item.name
-                                ),
-                                suggestion: Some(
-                                    "The tree references an object that doesn't exist.".to_string(),
-                                ),
-                            });
-                        }
-                    }
-                }
-            } else if obj_type == ObjectType::Commit
-                && let Ok(commit) = load_object::<Commit>(hash)
-            {
-                // Check tree reference
-                if !storage.exist(&commit.tree_id) {
+        let Ok(obj_type) = storage.get_object_type(hash) else {
+            continue;
+        };
+
+        if obj_type == ObjectType::Tree {
+            let Ok(tree) = load_object::<Tree>(hash) else {
+                continue;
+            };
+            for item in &tree.tree_items {
+                if !storage.exist(&item.id) {
                     issues.push(IssueReport {
-                        issue_type: "missing_commit_tree".to_string(),
+                        issue_type: "missing_tree_entry".to_string(),
                         severity: "error".to_string(),
-                        object_id: Some(commit.tree_id.to_string()),
+                        object_id: Some(item.id.to_string()),
                         ref_name: None,
                         message: format!(
-                            "Commit {} references missing tree {}",
-                            hash, commit.tree_id
+                            "Tree {} references missing object {} ({})",
+                            hash, item.id, item.name
                         ),
-                        suggestion: Some("The commit's tree is missing.".to_string()),
+                        suggestion: Some(
+                            "The tree references an object that doesn't exist.".to_string(),
+                        ),
                     });
+                    continue;
                 }
-
-                // Check parent references
-                for parent in &commit.parent_commit_ids {
-                    if !storage.exist(parent) {
+                // Verify the referenced object type matches the declaration
+                if let Ok(actual_type) = storage.get_object_type(&item.id) {
+                    let expected_is_tree = item.mode == TreeItemMode::Tree;
+                    if expected_is_tree && actual_type != ObjectType::Tree {
                         issues.push(IssueReport {
-                            issue_type: "missing_parent_commit".to_string(),
-                            severity: "warning".to_string(),
-                            object_id: Some(parent.to_string()),
+                            issue_type: "tree_entry_type_mismatch".to_string(),
+                            severity: "error".to_string(),
+                            object_id: Some(item.id.to_string()),
                             ref_name: None,
                             message: format!(
-                                "Commit {} references missing parent {}",
-                                hash, parent
+                                "Tree {} declares {} as a subtree but it is a {}",
+                                hash, item.name, actual_type
                             ),
                             suggestion: Some(
-                                "Parent commit is missing - history may be incomplete.".to_string(),
+                                "The tree entry type does not match the actual object type."
+                                    .to_string(),
+                            ),
+                        });
+                    } else if !expected_is_tree && actual_type == ObjectType::Tree {
+                        issues.push(IssueReport {
+                            issue_type: "tree_entry_type_mismatch".to_string(),
+                            severity: "error".to_string(),
+                            object_id: Some(item.id.to_string()),
+                            ref_name: None,
+                            message: format!(
+                                "Tree {} declares {} as a blob but it is a tree",
+                                hash, item.name
+                            ),
+                            suggestion: Some(
+                                "The tree entry type does not match the actual object type."
+                                    .to_string(),
                             ),
                         });
                     }
+                }
+            }
+        } else if obj_type == ObjectType::Commit {
+            let Ok(commit) = load_object::<Commit>(hash) else {
+                continue;
+            };
+            if !storage.exist(&commit.tree_id) {
+                issues.push(IssueReport {
+                    issue_type: "missing_commit_tree".to_string(),
+                    severity: "error".to_string(),
+                    object_id: Some(commit.tree_id.to_string()),
+                    ref_name: None,
+                    message: format!(
+                        "Commit {} references missing tree {}",
+                        hash, commit.tree_id
+                    ),
+                    suggestion: Some("The commit's tree is missing.".to_string()),
+                });
+            }
+
+            for parent in &commit.parent_commit_ids {
+                if !storage.exist(parent) {
+                    issues.push(IssueReport {
+                        issue_type: "missing_parent_commit".to_string(),
+                        severity: "warning".to_string(),
+                        object_id: Some(parent.to_string()),
+                        ref_name: None,
+                        message: format!(
+                            "Commit {} references missing parent {}",
+                            hash, parent
+                        ),
+                        suggestion: Some(
+                            "Parent commit is missing - history may be incomplete.".to_string(),
+                        ),
+                    });
                 }
             }
         }
