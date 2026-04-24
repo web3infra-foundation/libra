@@ -255,6 +255,25 @@ fn test_rev_parse_show_toplevel_from_storage_dir_returns_repo_root() {
 }
 
 #[test]
+fn test_rev_parse_show_toplevel_in_bare_repo_returns_work_tree_error() {
+    let repo = tempdir().expect("failed to create repository root");
+    let bare_repo = repo.path().join("repo.git");
+
+    let init_output = run_libra_command(
+        &["init", "--bare", "repo.git", "--vault", "false"],
+        repo.path(),
+    );
+    assert_cli_success(&init_output, "init bare repo for rev-parse test");
+
+    let output = run_libra_command(&["rev-parse", "--show-toplevel"], &bare_repo);
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert!(stderr.contains("this operation must be run in a work tree"));
+    assert_eq!(report.error_code, "LBR-REP-002");
+}
+
+#[test]
 fn test_rev_parse_show_toplevel_rejects_spec() {
     let repo = tempdir().expect("failed to create repository root");
     init_repo_via_cli(repo.path());

@@ -9,6 +9,7 @@ use serde::Serialize;
 use crate::{
     internal::{
         branch::{Branch, BranchStoreError},
+        config::ConfigKv,
         head::Head,
     },
     utils::{
@@ -71,7 +72,7 @@ pub async fn execute_safe(args: RevParseArgs, output: &OutputConfig) -> CliResul
 
 async fn resolve_rev_parse(args: &RevParseArgs) -> CliResult<RevParseOutput> {
     if args.show_toplevel {
-        let workdir = resolve_show_toplevel_path().map_err(map_repo_path_error)?;
+        let workdir = resolve_show_toplevel_path().await?;
         return Ok(RevParseOutput {
             mode: "show_toplevel",
             input: None,
@@ -115,13 +116,12 @@ async fn resolve_abbrev_ref(spec: &str) -> CliResult<String> {
         };
     }
 
-    if let Some(branch_name) = spec.strip_prefix("refs/heads/") {
-        if let Some(branch) = Branch::find_branch_result(branch_name, None)
+    if let Some(branch_name) = spec.strip_prefix("refs/heads/")
+        && let Some(branch) = Branch::find_branch_result(branch_name, None)
             .await
             .map_err(|error| map_symbolic_ref_resolution_error(spec, error))?
-        {
-            return Ok(branch.name);
-        }
+    {
+        return Ok(branch.name);
     }
 
     if let Some(short_name) = spec.strip_prefix("refs/remotes/")
@@ -199,19 +199,56 @@ async fn resolve_short_commit(commit: &ObjectHash) -> CliResult<String> {
     Ok(full)
 }
 
-fn resolve_show_toplevel_path() -> std::io::Result<PathBuf> {
-    let workdir = util::try_working_dir()?;
-    let storage = util::try_get_storage_path(None)?;
+async fn is_bare_repository() -> CliResult<bool> {
+    fn parse_git_bool(value: &str) -> Option<bool> {
+        match value.trim() {
+            v if v.eq_ignore_ascii_case("true")
+                || v.eq_ignore_ascii_case("yes")
+                || v.eq_ignore_ascii_case("on")
+                || v == "1" =>
+            {
+                Some(true)
+            }
+            v if v.eq_ignore_ascii_case("false")
+                || v.eq_ignore_ascii_case("no")
+                || v.eq_ignore_ascii_case("off")
+                || v == "0" =>
+            {
+                Some(false)
+            }
+            _ => None,
+        }
+    }
+
+    match ConfigKv::get("core.bare").await {
+        Ok(Some(entry)) => parse_git_bool(&entry.value).ok_or_else(|| {
+            CliError::fatal(format!(
+                "Invalid core.bare value: '{}'. Expected true/false/yes/no/on/off/1/0",
+                entry.value
+            ))
+            .with_stable_code(StableErrorCode::RepoCorrupt)
+        }),
+        Ok(None) => Ok(false),
+        Err(error) => Err(
+            CliError::fatal(format!("Failed to read core.bare config: {error}"))
+                .with_stable_code(StableErrorCode::IoReadFailed),
+        ),
+    }
+}
+
+async fn resolve_show_toplevel_path() -> CliResult<PathBuf> {
+    let workdir = util::try_working_dir().map_err(map_repo_path_error)?;
+    let storage = util::try_get_storage_path(None).map_err(map_repo_path_error)?;
     if workdir == storage {
-        return workdir.parent().map(PathBuf::from).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!(
-                    "failed to determine worktree root from '{}'",
-                    workdir.display()
-                ),
-            )
-        });
+        if is_bare_repository().await? {
+            return Err(CliError::fatal("this operation must be run in a work tree")
+                .with_stable_code(StableErrorCode::RepoStateInvalid));
+        }
+
+        return workdir
+            .parent()
+            .map(PathBuf::from)
+            .ok_or_else(CliError::repo_not_found);
     }
     Ok(workdir)
 }
