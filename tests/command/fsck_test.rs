@@ -106,8 +106,7 @@ fn test_fsck_with_multiple_files_and_commits() {
     let repo = create_committed_repo_via_cli();
 
     // Add more files and another commit
-    fs::write(repo.path().join("file2.txt"), "second file\n")
-        .expect("failed to create file2");
+    fs::write(repo.path().join("file2.txt"), "second file\n").expect("failed to create file2");
     let output = run_libra_command(&["add", "file2.txt"], repo.path());
     assert_cli_success(&output, "add file2");
 
@@ -187,15 +186,11 @@ fn test_fsck_with_special_characters_in_filename() {
 fn test_fsck_with_empty_file() {
     let repo = create_committed_repo_via_cli();
 
-    fs::write(repo.path().join("empty.txt"), "")
-        .expect("failed to create empty file");
+    fs::write(repo.path().join("empty.txt"), "").expect("failed to create empty file");
     let output = run_libra_command(&["add", "empty.txt"], repo.path());
     assert_cli_success(&output, "add empty file");
 
-    let output = run_libra_command(
-        &["commit", "-m", "empty file", "--no-verify"],
-        repo.path(),
-    );
+    let output = run_libra_command(&["commit", "-m", "empty file", "--no-verify"], repo.path());
     assert_cli_success(&output, "commit empty file");
 
     let output = run_libra_command(&["fsck"], repo.path());
@@ -213,15 +208,11 @@ fn test_fsck_with_large_file() {
 
     // Create a ~1MB file
     let content = "x".repeat(1_048_576);
-    fs::write(repo.path().join("large.txt"), &content)
-        .expect("failed to create large file");
+    fs::write(repo.path().join("large.txt"), &content).expect("failed to create large file");
     let output = run_libra_command(&["add", "large.txt"], repo.path());
     assert_cli_success(&output, "add large file");
 
-    let output = run_libra_command(
-        &["commit", "-m", "large file", "--no-verify"],
-        repo.path(),
-    );
+    let output = run_libra_command(&["commit", "-m", "large file", "--no-verify"], repo.path());
     assert_cli_success(&output, "commit large file");
 
     let output = run_libra_command(&["fsck"], repo.path());
@@ -260,8 +251,7 @@ fn test_fsck_with_ignored_files() {
 
     fs::write(repo.path().join(".libraignore"), "ignore_me/\n")
         .expect("failed to create ignore file");
-    fs::create_dir_all(repo.path().join("ignore_me"))
-        .expect("failed to create ignored dir");
+    fs::create_dir_all(repo.path().join("ignore_me")).expect("failed to create ignored dir");
     fs::write(repo.path().join("ignore_me/data.txt"), "ignored\n")
         .expect("failed to create ignored file");
 
@@ -298,15 +288,11 @@ fn test_fsck_with_unicode_content() {
     let repo = create_committed_repo_via_cli();
 
     // Emoji and various Unicode
-    fs::write(repo.path().join("emoji.txt"), "🦀🔥✅🎉\n")
-        .expect("failed to create emoji file");
+    fs::write(repo.path().join("emoji.txt"), "🦀🔥✅🎉\n").expect("failed to create emoji file");
     let output = run_libra_command(&["add", "emoji.txt"], repo.path());
     assert_cli_success(&output, "add emoji file");
 
-    let output = run_libra_command(
-        &["commit", "-m", "emoji", "--no-verify"],
-        repo.path(),
-    );
+    let output = run_libra_command(&["commit", "-m", "emoji", "--no-verify"], repo.path());
     assert_cli_success(&output, "commit emoji");
 
     let output = run_libra_command(&["fsck"], repo.path());
@@ -325,7 +311,13 @@ fn test_fsck_single_object_valid() {
     // Get the commit hash from log
     let log_output = run_libra_command(&["log", "--oneline"], repo.path());
     let stdout = String::from_utf8_lossy(&log_output.stdout);
-    let commit_hash = stdout.lines().next().unwrap().split_whitespace().next().unwrap();
+    let commit_hash = stdout
+        .lines()
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap();
 
     let output = run_libra_command(&["fsck", commit_hash], repo.path());
     assert!(
@@ -398,8 +390,7 @@ fn test_fsck_corrupted_object() {
     if objects_dir.exists() {
         // Find and corrupt a loose object
         for entry in walk_objects_dir(&objects_dir) {
-            fs::write(&entry, b"corrupted data!!!")
-                .expect("failed to corrupt object");
+            fs::write(&entry, b"corrupted data!!!").expect("failed to corrupt object");
 
             let output = run_libra_command(&["fsck"], repo.path());
             assert!(
@@ -408,7 +399,9 @@ fn test_fsck_corrupted_object() {
             );
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(
-                stderr.contains("corrupt") || stderr.contains("FAILED") || stderr.contains("mismatch"),
+                stderr.contains("corrupt")
+                    || stderr.contains("FAILED")
+                    || stderr.contains("mismatch"),
                 "should report corruption: {stderr}"
             );
             return;
@@ -496,7 +489,9 @@ fn test_fsck_deleted_objects_dir() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if !output.status.success() {
             assert!(
-                stderr.contains("missing") || stderr.contains("corrupt") || stderr.contains("FAILED"),
+                stderr.contains("missing")
+                    || stderr.contains("corrupt")
+                    || stderr.contains("FAILED"),
                 "should report issues: {stderr}"
             );
         } else {
@@ -516,8 +511,7 @@ fn test_fsck_corrupted_index() {
     // Corrupt the index file
     let index_path = repo.path().join(".libra").join("index");
     if index_path.exists() {
-        fs::write(&index_path, b"not a valid index file!!!")
-            .expect("failed to corrupt index");
+        fs::write(&index_path, b"not a valid index file!!!").expect("failed to corrupt index");
 
         let output = run_libra_command(&["fsck"], repo.path());
         // Should detect the corruption or fail to parse
@@ -542,7 +536,11 @@ fn test_fsck_broken_ref() {
 
     // Create a branch pointing to a nonexistent commit
     let _output = run_libra_command(
-        &["branch", "dead-branch", "0000000000000000000000000000000000000000"],
+        &[
+            "branch",
+            "dead-branch",
+            "0000000000000000000000000000000000000000",
+        ],
         repo.path(),
     );
     // This might fail, which is fine - try fsck regardless
@@ -571,8 +569,7 @@ fn test_fsck_after_force_delete_tracked_file() {
     let repo = create_committed_repo_via_cli();
 
     // Delete the tracked file
-    fs::remove_file(repo.path().join("tracked.txt"))
-        .expect("failed to delete tracked file");
+    fs::remove_file(repo.path().join("tracked.txt")).expect("failed to delete tracked file");
 
     // fsck should still pass (objects are fine, index is stale but not corrupted)
     let output = run_libra_command(&["fsck"], repo.path());
@@ -592,10 +589,7 @@ fn test_fsck_too_short_hash() {
 
     // Use a hash that's too short
     let output = run_libra_command(&["fsck", "abc123"], repo.path());
-    assert!(
-        !output.status.success(),
-        "fsck with short hash should fail"
-    );
+    assert!(!output.status.success(), "fsck with short hash should fail");
 }
 
 #[test]
@@ -604,10 +598,7 @@ fn test_fsck_empty_hash_string() {
     let repo = create_committed_repo_via_cli();
 
     let output = run_libra_command(&["fsck", ""], repo.path());
-    assert!(
-        !output.status.success(),
-        "fsck with empty hash should fail"
-    );
+    assert!(!output.status.success(), "fsck with empty hash should fail");
 }
 
 /// Walk the objects directory and return paths to loose object files.
