@@ -14,20 +14,14 @@
 //! - 2: Missing refs or broken references
 //! - 3: Index corruption detected
 
-use std::{fs, io, path::PathBuf};
+use std::{fs, io};
 
 use clap::Parser;
 use git_internal::{
     hash::ObjectHash,
     internal::{
         index::Index,
-        object::{
-            ObjectTrait,
-            blob::Blob,
-            commit::Commit,
-            tree::Tree,
-            types::ObjectType,
-        },
+        object::{ObjectTrait, blob::Blob, commit::Commit, tree::Tree, types::ObjectType},
     },
 };
 use hex;
@@ -41,12 +35,12 @@ use crate::{
         client_storage::ClientStorage,
         error::{CliError, CliResult},
         output::{OutputConfig, emit_json_data},
-        path,
-        util,
+        path, util,
     },
 };
 
-const FSCK_LONG_ABOUT: &str = "Verify the integrity of objects, refs, and index in a Libra repository.
+const FSCK_LONG_ABOUT: &str =
+    "Verify the integrity of objects, refs, and index in a Libra repository.
 
 This command checks:
   - Object hash integrity: verifies each object's hash matches its content
@@ -171,7 +165,10 @@ pub async fn execute(args: FsckArgs) {
         Ok(fsck_result) => {
             if fsck_result.overall_status == CheckStatus::Ok {
                 if !args.verbose {
-                    println!("Integrity check passed: {} objects verified", fsck_result.objects_checked);
+                    println!(
+                        "Integrity check passed: {} objects verified",
+                        fsck_result.objects_checked
+                    );
                 } else {
                     print_verbose_result(&fsck_result);
                 }
@@ -210,9 +207,12 @@ pub async fn execute_safe(args: FsckArgs, output: &OutputConfig) -> CliResult<()
         check_all_objects(&args, &storage).await
     }?;
 
-    emit_json_data("fsck", &serde_json::to_value(&result).map_err(|e| {
-        CliError::fatal(format!("failed to serialize result: {}", e))
-    })?, output)?;
+    emit_json_data(
+        "fsck",
+        &serde_json::to_value(&result)
+            .map_err(|e| CliError::fatal(format!("failed to serialize result: {}", e)))?,
+        output,
+    )?;
 
     if result.overall_status != CheckStatus::Ok {
         let exit_code = if result.refs_broken > 0 {
@@ -250,7 +250,7 @@ fn list_all_objects_in_storage(storage: &ClientStorage) -> io::Result<Vec<Object
     }
 
     // Iterate through object directories (loose objects)
-    for entry in fs::read_dir(&objects_dir)? {
+    for entry in fs::read_dir(objects_dir)? {
         let entry = entry?;
         let path = entry.path();
         if !path.is_dir() {
@@ -282,10 +282,7 @@ fn list_all_objects_in_storage(storage: &ClientStorage) -> io::Result<Vec<Object
     Ok(hashes)
 }
 
-async fn check_single_object(
-    object_id: &str,
-    storage: &ClientStorage,
-) -> CliResult<FsckResult> {
+async fn check_single_object(object_id: &str, storage: &ClientStorage) -> CliResult<FsckResult> {
     let hash = parse_object_hash(object_id)
         .ok_or_else(|| CliError::command_usage(format!("invalid object ID: {}", object_id)))?;
 
@@ -304,7 +301,10 @@ async fn check_single_object(
                 object_id: Some(object_id.to_string()),
                 ref_name: None,
                 message: check_result.error_message.unwrap_or_default(),
-                suggestion: Some("Object data is corrupted. Consider restoring from backup or remote.".to_string()),
+                suggestion: Some(
+                    "Object data is corrupted. Consider restoring from backup or remote."
+                        .to_string(),
+                ),
             });
             CheckStatus::Corrupted
         }
@@ -334,8 +334,16 @@ async fn check_single_object(
 
     Ok(FsckResult {
         objects_checked: 1,
-        objects_ok: if overall_status == CheckStatus::Ok { 1 } else { 0 },
-        objects_corrupted: if overall_status == CheckStatus::Ok { 0 } else { 1 },
+        objects_ok: if overall_status == CheckStatus::Ok {
+            1
+        } else {
+            0
+        },
+        objects_corrupted: if overall_status == CheckStatus::Ok {
+            0
+        } else {
+            1
+        },
         refs_checked: 0,
         refs_ok: 0,
         refs_broken: 0,
@@ -346,10 +354,7 @@ async fn check_single_object(
     })
 }
 
-async fn check_all_objects(
-    args: &FsckArgs,
-    storage: &ClientStorage,
-) -> CliResult<FsckResult> {
+async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResult<FsckResult> {
     let mut result = FsckResult {
         objects_checked: 0,
         objects_ok: 0,
@@ -395,7 +400,9 @@ async fn check_all_objects(
                 result.overall_status = check_result.status.clone();
                 result.issues.push(IssueReport {
                     issue_type: match check_result.status {
-                        CheckStatus::Corrupted | CheckStatus::HashMismatch => "hash_mismatch".to_string(),
+                        CheckStatus::Corrupted | CheckStatus::HashMismatch => {
+                            "hash_mismatch".to_string()
+                        }
                         CheckStatus::InvalidFormat => "invalid_format".to_string(),
                         CheckStatus::Missing => "missing_object".to_string(),
                         _ => "unknown".to_string(),
@@ -403,7 +410,9 @@ async fn check_all_objects(
                     severity: "error".to_string(),
                     object_id: Some(hash.to_string()),
                     ref_name: None,
-                    message: check_result.error_message.unwrap_or_else(|| "Object verification failed".to_string()),
+                    message: check_result
+                        .error_message
+                        .unwrap_or_else(|| "Object verification failed".to_string()),
                     suggestion: Some("Consider restoring from backup or remote.".to_string()),
                 });
             }
@@ -450,10 +459,7 @@ async fn check_all_objects(
 }
 
 /// Verify a single object's integrity
-async fn verify_object(
-    hash: &ObjectHash,
-    storage: &ClientStorage,
-) -> CliResult<ObjectCheckResult> {
+async fn verify_object(hash: &ObjectHash, storage: &ClientStorage) -> CliResult<ObjectCheckResult> {
     // Check if object exists
     if !storage.exist(hash) {
         return Ok(ObjectCheckResult {
@@ -516,7 +522,8 @@ async fn verify_object(
             status: CheckStatus::HashMismatch,
             error_message: Some(format!(
                 "Hash mismatch: expected {}, computed {}",
-                hash, hex::encode(computed_bytes)
+                hash,
+                hex::encode(computed_bytes)
             )),
             size,
         });
@@ -597,8 +604,11 @@ async fn check_refs(storage: &ClientStorage) -> CliResult<RefCheckResult> {
                                 severity: "error".to_string(),
                                 object_id: Some(hash.to_string()),
                                 ref_name: Some(ref_name.clone()),
-                                message: format!("Ref '{}' points to invalid object: {}",
-                                    ref_name, check.error_message.unwrap_or_default()),
+                                message: format!(
+                                    "Ref '{}' points to invalid object: {}",
+                                    ref_name,
+                                    check.error_message.unwrap_or_default()
+                                ),
                                 suggestion: Some("Update or delete this ref.".to_string()),
                             });
                         }
@@ -623,8 +633,7 @@ async fn check_refs(storage: &ClientStorage) -> CliResult<RefCheckResult> {
                         severity: "error".to_string(),
                         object_id: Some(hash.to_string()),
                         ref_name: Some(ref_name.clone()),
-                        message: format!("Ref '{}' points to missing object {}",
-                            ref_name, hash),
+                        message: format!("Ref '{}' points to missing object {}", ref_name, hash),
                         suggestion: Some("Update or delete this ref.".to_string()),
                     });
                 }
@@ -636,8 +645,10 @@ async fn check_refs(storage: &ClientStorage) -> CliResult<RefCheckResult> {
                     severity: "error".to_string(),
                     object_id: None,
                     ref_name: Some(ref_name.clone()),
-                    message: format!("Ref '{}' has invalid hash format: {}",
-                        ref_name, commit_hash_str),
+                    message: format!(
+                        "Ref '{}' has invalid hash format: {}",
+                        ref_name, commit_hash_str
+                    ),
                     suggestion: Some("Delete this corrupted ref.".to_string()),
                 });
             }
@@ -785,7 +796,9 @@ fn check_index(storage: &ClientStorage) -> CliResult<IndexCheckResult> {
                         "Index entry '{}' is in merge conflict stage {}",
                         entry.name, stage
                     ),
-                    suggestion: Some("Resolve the merge conflict and re-add this file.".to_string()),
+                    suggestion: Some(
+                        "Resolve the merge conflict and re-add this file.".to_string(),
+                    ),
                 });
                 result.entries_checked += 1;
             }
@@ -831,7 +844,9 @@ async fn validate_cross_references(storage: &ClientStorage) -> CliResult<Vec<Iss
                                     "Tree {} references missing object {} ({})",
                                     hash, item.id, item.name
                                 ),
-                                suggestion: Some("The tree references an object that doesn't exist.".to_string()),
+                                suggestion: Some(
+                                    "The tree references an object that doesn't exist.".to_string(),
+                                ),
                             });
                         }
                     }
@@ -866,7 +881,9 @@ async fn validate_cross_references(storage: &ClientStorage) -> CliResult<Vec<Iss
                                 "Commit {} references missing parent {}",
                                 hash, parent
                             ),
-                            suggestion: Some("Parent commit is missing - history may be incomplete.".to_string()),
+                            suggestion: Some(
+                                "Parent commit is missing - history may be incomplete.".to_string(),
+                            ),
                         });
                     }
                 }
@@ -891,7 +908,12 @@ fn print_verbose_result(result: &FsckResult) {
     if !result.issues.is_empty() {
         println!("\n=== Issues Found ===");
         for issue in &result.issues {
-            println!("[{}] {}: {}", issue.severity.to_uppercase(), issue.issue_type, issue.message);
+            println!(
+                "[{}] {}: {}",
+                issue.severity.to_uppercase(),
+                issue.issue_type,
+                issue.message
+            );
             if let Some(ref obj) = issue.object_id {
                 println!("  Object: {}", obj);
             }
@@ -907,10 +929,14 @@ fn print_verbose_result(result: &FsckResult) {
 
 fn print_issues(result: &FsckResult) {
     eprintln!("Integrity check FAILED");
-    eprintln!("Objects: {} checked, {} OK, {} corrupted",
-        result.objects_checked, result.objects_ok, result.objects_corrupted);
-    eprintln!("Refs: {} checked, {} OK, {} broken",
-        result.refs_checked, result.refs_ok, result.refs_broken);
+    eprintln!(
+        "Objects: {} checked, {} OK, {} corrupted",
+        result.objects_checked, result.objects_ok, result.objects_corrupted
+    );
+    eprintln!(
+        "Refs: {} checked, {} OK, {} broken",
+        result.refs_checked, result.refs_ok, result.refs_broken
+    );
 
     if !result.issues.is_empty() {
         eprintln!("\nIssues:");
@@ -922,9 +948,10 @@ fn print_issues(result: &FsckResult) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serial_test::serial;
     use tempfile::tempdir;
+
+    use super::*;
     use crate::utils::test;
 
     #[tokio::test]
@@ -996,15 +1023,12 @@ mod tests {
             mode: git_internal::internal::object::tree::TreeItemMode::Blob,
             name: "test.txt".to_string(),
             id: ObjectHash::new(&[1u8; 20]),
-        }]).unwrap();
+        }])
+        .unwrap();
         crate::command::save_object(&tree, &tree.id).unwrap();
 
         // Create a commit referencing the tree
-        let commit = Commit::from_tree_id(
-            tree.id,
-            vec![],
-            "Test commit",
-        );
+        let commit = Commit::from_tree_id(tree.id, vec![], "Test commit");
         crate::command::save_object(&commit, &commit.id).unwrap();
 
         let result = verify_object(&commit.id, &storage).await.unwrap();
@@ -1030,7 +1054,8 @@ mod tests {
             mode: git_internal::internal::object::tree::TreeItemMode::Blob,
             name: "test.txt".to_string(),
             id: blob.id,
-        }]).unwrap();
+        }])
+        .unwrap();
         crate::command::save_object(&tree, &tree.id).unwrap();
 
         let result = verify_object(&tree.id, &storage).await.unwrap();
@@ -1085,11 +1110,12 @@ mod tests {
 
     #[test]
     fn test_fsck_args_with_object() {
-        let args = FsckArgs::try_parse_from([
-            "fsck",
-            "abc123def456789012345678901234567890abcd",
-        ]).unwrap();
-        assert_eq!(args.object, Some("abc123def456789012345678901234567890abcd".to_string()));
+        let args =
+            FsckArgs::try_parse_from(["fsck", "abc123def456789012345678901234567890abcd"]).unwrap();
+        assert_eq!(
+            args.object,
+            Some("abc123def456789012345678901234567890abcd".to_string())
+        );
     }
 
     #[test]
@@ -1101,7 +1127,8 @@ mod tests {
             "--no-index-check",
             "--objects-only",
             "--fix",
-        ]).unwrap();
+        ])
+        .unwrap();
         assert!(args.verbose);
         assert!(args.no_cross_ref_check);
         assert!(args.no_index_check);
@@ -1120,7 +1147,9 @@ mod tests {
         let blob = Blob::from_content("test");
         crate::command::save_object(&blob, &blob.id).unwrap();
 
-        let result = check_single_object(&blob.id.to_string(), &storage).await.unwrap();
+        let result = check_single_object(&blob.id.to_string(), &storage)
+            .await
+            .unwrap();
 
         assert_eq!(result.objects_checked, 1);
         assert_eq!(result.objects_ok, 1);
@@ -1145,15 +1174,12 @@ mod tests {
             mode: git_internal::internal::object::tree::TreeItemMode::Blob,
             name: "test.txt".to_string(),
             id: blob.id,
-        }]).unwrap();
+        }])
+        .unwrap();
         crate::command::save_object(&tree, &tree.id).unwrap();
 
         // Create a commit referencing the tree
-        let commit = Commit::from_tree_id(
-            tree.id,
-            vec![],
-            "Initial commit",
-        );
+        let commit = Commit::from_tree_id(tree.id, vec![], "Initial commit");
         crate::command::save_object(&commit, &commit.id).unwrap();
 
         let args = FsckArgs {
@@ -1188,14 +1214,15 @@ mod tests {
             mode: git_internal::internal::object::tree::TreeItemMode::Blob,
             name: "missing.txt".to_string(),
             id: fake_blob_id,
-        }]).unwrap();
+        }])
+        .unwrap();
         crate::command::save_object(&tree, &tree.id).unwrap();
 
         let args = FsckArgs {
             verbose: false,
             no_cross_ref_check: false,
             no_index_check: true,
-            objects_only: false,  // Must be false to enable cross-ref validation
+            objects_only: false, // Must be false to enable cross-ref validation
             fix: false,
             object: None,
         };
@@ -1203,7 +1230,12 @@ mod tests {
         let result = check_all_objects(&args, &storage).await.unwrap();
 
         assert!(result.cross_ref_issues > 0);
-        assert!(result.issues.iter().any(|i| i.issue_type == "missing_tree_entry"));
+        assert!(
+            result
+                .issues
+                .iter()
+                .any(|i| i.issue_type == "missing_tree_entry")
+        );
     }
 
     #[tokio::test]
@@ -1224,7 +1256,7 @@ mod tests {
             verbose: false,
             no_cross_ref_check: false,
             no_index_check: true,
-            objects_only: false,  // Must be false to enable cross-ref validation
+            objects_only: false, // Must be false to enable cross-ref validation
             fix: false,
             object: None,
         };
@@ -1232,7 +1264,12 @@ mod tests {
         let result = check_all_objects(&args, &storage).await.unwrap();
 
         assert!(result.cross_ref_issues > 0);
-        assert!(result.issues.iter().any(|i| i.issue_type == "missing_commit_tree"));
+        assert!(
+            result
+                .issues
+                .iter()
+                .any(|i| i.issue_type == "missing_commit_tree")
+        );
     }
 
     #[tokio::test]
@@ -1255,21 +1292,19 @@ mod tests {
             mode: git_internal::internal::object::tree::TreeItemMode::Blob,
             name: ".gitkeep".to_string(),
             id: blob.id,
-        }]).unwrap();
+        }])
+        .unwrap();
         crate::command::save_object(&tree, &tree.id).unwrap();
 
-        let commit = Commit::from_tree_id(
-            tree.id,
-            vec![fake_parent_id],
-            "Commit with missing parent",
-        );
+        let commit =
+            Commit::from_tree_id(tree.id, vec![fake_parent_id], "Commit with missing parent");
         crate::command::save_object(&commit, &commit.id).unwrap();
 
         let args = FsckArgs {
             verbose: false,
             no_cross_ref_check: false,
             no_index_check: true,
-            objects_only: false,  // Must be false to enable cross-ref validation
+            objects_only: false, // Must be false to enable cross-ref validation
             fix: false,
             object: None,
         };
@@ -1277,9 +1312,12 @@ mod tests {
         let result = check_all_objects(&args, &storage).await.unwrap();
 
         assert!(result.cross_ref_issues > 0);
-        assert!(result.issues.iter().any(|i|
-            i.issue_type == "missing_parent_commit" && i.severity == "warning"
-        ));
+        assert!(
+            result
+                .issues
+                .iter()
+                .any(|i| i.issue_type == "missing_parent_commit" && i.severity == "warning")
+        );
     }
 
     #[test]
@@ -1459,12 +1497,24 @@ mod tests {
     #[test]
     fn test_check_status_display() {
         assert_eq!(serde_json::to_string(&CheckStatus::Ok).unwrap(), "\"ok\"");
-        assert_eq!(serde_json::to_string(&CheckStatus::Corrupted).unwrap(), "\"corrupted\"");
-        assert_eq!(serde_json::to_string(&CheckStatus::Missing).unwrap(), "\"missing\"");
+        assert_eq!(
+            serde_json::to_string(&CheckStatus::Corrupted).unwrap(),
+            "\"corrupted\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CheckStatus::Missing).unwrap(),
+            "\"missing\""
+        );
         // Note: serde renames to kebab-case, but InvalidFormat is rendered as "invalidformat"
         // due to how the rename works - this is expected behavior
-        assert_eq!(serde_json::to_string(&CheckStatus::InvalidFormat).unwrap(), "\"invalidformat\"");
-        assert_eq!(serde_json::to_string(&CheckStatus::HashMismatch).unwrap(), "\"hashmismatch\"");
+        assert_eq!(
+            serde_json::to_string(&CheckStatus::InvalidFormat).unwrap(),
+            "\"invalidformat\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CheckStatus::HashMismatch).unwrap(),
+            "\"hashmismatch\""
+        );
     }
 
     #[test]
@@ -1518,7 +1568,8 @@ mod tests {
             mode: git_internal::internal::object::tree::TreeItemMode::Blob,
             name: ".gitkeep".to_string(),
             id: blob.id,
-        }]).unwrap();
+        }])
+        .unwrap();
         crate::command::save_object(&tree, &tree.id).unwrap();
 
         let commit = Commit::from_tree_id(tree.id, vec![], "Root commit");
@@ -1538,7 +1589,9 @@ mod tests {
         let storage = ClientStorage::init(path::objects());
 
         let fake_hash = ObjectHash::new(&[0xee; 20]);
-        let result = check_single_object(&fake_hash.to_string(), &storage).await.unwrap();
+        let result = check_single_object(&fake_hash.to_string(), &storage)
+            .await
+            .unwrap();
 
         assert_eq!(result.objects_checked, 1);
         assert_eq!(result.objects_ok, 0);
@@ -1577,17 +1630,17 @@ mod tests {
             mode: git_internal::internal::object::tree::TreeItemMode::Blob,
             name: "inner.txt".to_string(),
             id: blob.id,
-        }]).unwrap();
+        }])
+        .unwrap();
         crate::command::save_object(&blob, &blob.id).unwrap();
         crate::command::save_object(&subtree, &subtree.id).unwrap();
 
-        let tree = Tree::from_tree_items(vec![
-            git_internal::internal::object::tree::TreeItem {
-                mode: git_internal::internal::object::tree::TreeItemMode::Tree,
-                name: "subdir".to_string(),
-                id: subtree.id,
-            },
-        ]).unwrap();
+        let tree = Tree::from_tree_items(vec![git_internal::internal::object::tree::TreeItem {
+            mode: git_internal::internal::object::tree::TreeItemMode::Tree,
+            name: "subdir".to_string(),
+            id: subtree.id,
+        }])
+        .unwrap();
         crate::command::save_object(&tree, &tree.id).unwrap();
 
         let result = verify_object(&tree.id, &storage).await.unwrap();
