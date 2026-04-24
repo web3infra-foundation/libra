@@ -25,12 +25,13 @@ use git_internal::{
     },
 };
 use hex;
-use sea_orm::EntityTrait;
+use ring::digest::{Context, SHA1_FOR_LEGACY_USE_ONLY};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde::Serialize;
 
 use crate::{
-    command::load_object,
-    internal::{db, model::reference},
+    command::{load_object, reset::rebuild_index_from_tree},
+    internal::{db, head::Head, model::reference},
     utils::{
         client_storage::ClientStorage,
         error::{CliError, CliResult},
@@ -425,10 +426,24 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
         result.refs_checked = ref_result.checked;
         result.refs_ok = ref_result.ok;
         result.refs_broken = ref_result.broken;
-        result.issues.extend(ref_result.issues);
+        result.issues.extend(ref_result.issues.clone());
 
         if ref_result.broken > 0 {
-            result.overall_status = CheckStatus::Missing;
+            if args.fix {
+                let fixed = fix_broken_refs(&ref_result.broken_ref_names).await?;
+                if fixed > 0 {
+                    println!("Fixed: deleted {} broken ref(s)", fixed);
+                    result.refs_broken = 0;
+                    result.issues.retain(|i| {
+                        !ref_result
+                            .broken_ref_names
+                            .iter()
+                            .any(|n| i.ref_name.as_deref() == Some(n))
+                    });
+                }
+            } else {
+                result.overall_status = CheckStatus::Missing;
+            }
         }
     }
 
@@ -439,7 +454,18 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
         result.issues.extend(index_result.issues);
 
         if !index_result.valid {
-            result.overall_status = CheckStatus::Corrupted;
+            if args.fix {
+                let fixed = fix_corrupted_index().await?;
+                if fixed {
+                    println!("Fixed: rebuilt corrupted index");
+                    result.index_valid = true;
+                    result
+                        .issues
+                        .retain(|i| i.severity != "error" || i.issue_type.contains("index"));
+                }
+            } else {
+                result.overall_status = CheckStatus::Corrupted;
+            }
         }
     }
 
@@ -503,7 +529,6 @@ async fn verify_object(hash: &ObjectHash, storage: &ClientStorage) -> CliResult<
 
     // Verify hash integrity using ring crate
     // Git/Libra computes hash as: SHA1(type + ' ' + size + '\0' + content)
-    use ring::digest::{Context, SHA1_FOR_LEGACY_USE_ONLY};
     let mut ctx = Context::new(&SHA1_FOR_LEGACY_USE_ONLY);
 
     // Add header: "<type> <size>\0"
@@ -561,11 +586,13 @@ async fn verify_object(hash: &ObjectHash, storage: &ClientStorage) -> CliResult<
 }
 
 /// Result of checking refs
+#[derive(Clone)]
 struct RefCheckResult {
     checked: usize,
     ok: usize,
     broken: usize,
     issues: Vec<IssueReport>,
+    broken_ref_names: Vec<String>,
 }
 
 /// Check all refs point to valid objects
@@ -575,6 +602,7 @@ async fn check_refs(storage: &ClientStorage) -> CliResult<RefCheckResult> {
         ok: 0,
         broken: 0,
         issues: Vec::new(),
+        broken_ref_names: Vec::new(),
     };
 
     let db_conn = db::get_db_conn_instance().await;
@@ -599,14 +627,14 @@ async fn check_refs(storage: &ClientStorage) -> CliResult<RefCheckResult> {
                         Ok(check) => {
                             result.broken += 1;
                             let ref_name = ref_entry.name.clone().unwrap_or_default();
+                            result.broken_ref_names.push(ref_name.clone());
                             result.issues.push(IssueReport {
                                 issue_type: "invalid_ref_target".to_string(),
                                 severity: "error".to_string(),
                                 object_id: Some(hash.to_string()),
-                                ref_name: Some(ref_name.clone()),
+                                ref_name: Some(ref_name),
                                 message: format!(
-                                    "Ref '{}' points to invalid object: {}",
-                                    ref_name,
+                                    "Ref points to invalid object: {}",
                                     check.error_message.unwrap_or_default()
                                 ),
                                 suggestion: Some("Update or delete this ref.".to_string()),
@@ -615,11 +643,12 @@ async fn check_refs(storage: &ClientStorage) -> CliResult<RefCheckResult> {
                         Err(e) => {
                             result.broken += 1;
                             let ref_name = ref_entry.name.clone().unwrap_or_default();
+                            result.broken_ref_names.push(ref_name);
                             result.issues.push(IssueReport {
                                 issue_type: "ref_check_error".to_string(),
                                 severity: "error".to_string(),
                                 object_id: Some(hash.to_string()),
-                                ref_name: Some(ref_name),
+                                ref_name: None,
                                 message: format!("Failed to verify ref target: {}", e),
                                 suggestion: None,
                             });
@@ -628,18 +657,20 @@ async fn check_refs(storage: &ClientStorage) -> CliResult<RefCheckResult> {
                 } else {
                     result.broken += 1;
                     let ref_name = ref_entry.name.clone().unwrap_or_default();
+                    result.broken_ref_names.push(ref_name.clone());
                     result.issues.push(IssueReport {
                         issue_type: "broken_ref".to_string(),
                         severity: "error".to_string(),
                         object_id: Some(hash.to_string()),
-                        ref_name: Some(ref_name.clone()),
-                        message: format!("Ref '{}' points to missing object {}", ref_name, hash),
+                        ref_name: Some(ref_name),
+                        message: format!("Ref points to missing object {}", hash),
                         suggestion: Some("Update or delete this ref.".to_string()),
                     });
                 }
             } else {
                 result.broken += 1;
                 let ref_name = ref_entry.name.clone().unwrap_or_default();
+                result.broken_ref_names.push(ref_name.clone());
                 result.issues.push(IssueReport {
                     issue_type: "invalid_ref_hash".to_string(),
                     severity: "error".to_string(),
@@ -806,6 +837,70 @@ fn check_index(storage: &ClientStorage) -> CliResult<IndexCheckResult> {
     }
 
     Ok(result)
+}
+
+/// Delete broken refs that point to nonexistent or invalid objects.
+async fn fix_broken_refs(broken_ref_names: &[String]) -> CliResult<usize> {
+    let db_conn = db::get_db_conn_instance().await;
+    let mut fixed = 0;
+
+    for name in broken_ref_names {
+        let deleted = reference::Entity::delete_many()
+            .filter(reference::Column::Name.eq(name))
+            .exec(&db_conn)
+            .await
+            .map_err(|e| CliError::fatal(format!("failed to delete ref '{}': {}", name, e)))?;
+
+        if deleted.rows_affected > 0 {
+            eprintln!("Deleted broken ref '{}'", name);
+            fixed += 1;
+        }
+    }
+
+    Ok(fixed)
+}
+
+/// Rebuild a corrupted index from HEAD's tree.
+///
+/// Deletes the corrupted index file and constructs a new one
+/// by walking the tree that HEAD points to.
+async fn fix_corrupted_index() -> CliResult<bool> {
+    let index_path = path::index();
+
+    // Try to get HEAD commit
+    let head_commit = match Head::current_commit().await {
+        Some(commit) => commit,
+        None => {
+            // No HEAD commit yet (unborn branch) — just delete the corrupted index
+            if index_path.exists() {
+                fs::remove_file(&index_path).map_err(|e| {
+                    CliError::fatal(format!("failed to remove corrupted index: {}", e))
+                })?;
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+    };
+
+    // Load the commit's tree
+    let commit: Commit = load_object(&head_commit).map_err(|e| {
+        CliError::fatal(format!("failed to load HEAD commit {}: {}", head_commit, e))
+    })?;
+
+    let tree: Tree = load_object(&commit.tree_id)
+        .map_err(|e| CliError::fatal(format!("failed to load tree {}: {}", commit.tree_id, e)))?;
+
+    // Build a new index from the tree
+    let mut new_index = Index::new();
+    rebuild_index_from_tree(&tree, &mut new_index, "")
+        .map_err(|e| CliError::fatal(format!("failed to rebuild index: {}", e)))?;
+
+    // Save the new index
+    new_index
+        .save(&index_path)
+        .map_err(|e| CliError::fatal(format!("failed to save rebuilt index: {}", e)))?;
+
+    Ok(true)
 }
 
 /// Valid git index file modes.
@@ -1362,6 +1457,7 @@ mod tests {
             ok: 2,
             broken: 1,
             issues: vec![],
+            broken_ref_names: vec![],
         };
 
         assert_eq!(result.checked, 3);
@@ -1544,6 +1640,7 @@ mod tests {
             ok: 0,
             broken: 0,
             issues: vec![],
+            broken_ref_names: vec![],
         };
 
         assert_eq!(result.checked, 0);
