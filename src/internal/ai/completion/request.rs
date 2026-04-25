@@ -34,6 +34,15 @@ pub enum CompletionThinking {
     High,
 }
 
+/// Provider-neutral reasoning effort for models that expose a separate depth knob.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionReasoningEffort {
+    Low,
+    Medium,
+    High,
+    Max,
+}
+
 /// Represents a request for AI completion, including chat history and optional parameters.
 #[derive(Debug, Clone, Default)]
 pub struct CompletionRequest {
@@ -46,6 +55,10 @@ pub struct CompletionRequest {
     pub documents: Vec<Value>, // Placeholder for Document
     /// Optional thinking/reasoning mode for providers that support it.
     pub thinking: Option<CompletionThinking>,
+    /// Optional reasoning effort for providers that expose a separate effort field.
+    pub reasoning_effort: Option<CompletionReasoningEffort>,
+    /// Optional provider request streaming flag.
+    pub stream: Option<bool>,
     /// Optional sink for providers that can stream partial response events.
     pub stream_events: Option<UnboundedSender<CompletionStreamEvent>>,
 }
@@ -54,7 +67,10 @@ pub struct CompletionRequest {
 #[derive(Debug)]
 pub struct CompletionResponse<T> {
     pub content: Vec<AssistantContent>, // The content of the response (text, tool calls, etc.)
-    pub raw_response: T,                // Raw response from the AI service
+    /// Provider-specific reasoning text that must be preserved while continuing
+    /// the same assistant tool-call turn.
+    pub reasoning_content: Option<String>,
+    pub raw_response: T, // Raw response from the AI service
 }
 
 impl CompletionRequest {

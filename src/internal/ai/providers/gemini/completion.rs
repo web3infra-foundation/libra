@@ -209,6 +209,7 @@ impl CompletionModelTrait for CompletionModel {
 
         Ok(CompletionResponse {
             content,
+            reasoning_content: None,
             raw_response: api_resp,
         })
     }

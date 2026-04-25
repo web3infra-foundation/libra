@@ -29,7 +29,10 @@ use super::{
 };
 use crate::internal::ai::{
     agent::{ToolLoopConfig, ToolLoopObserver, run_tool_loop_with_history_and_observer},
-    completion::{CompletionError, CompletionModel, CompletionUsage, CompletionUsageSummary},
+    completion::{
+        CompletionError, CompletionModel, CompletionStreamEvent, CompletionUsage,
+        CompletionUsageSummary,
+    },
     hooks::HookRunner,
     intentspec::types::{IntentSpec, NetworkPolicy, ToolAcl},
     libra_vcs::run_libra_vcs_tool_guidance,
@@ -116,6 +119,16 @@ impl ToolLoopObserver for TaskExecutionObserver {
 
     fn on_model_usage(&mut self, usage: &CompletionUsageSummary) {
         self.model_usage.merge(usage);
+    }
+
+    fn on_model_stream_event(&mut self, event: &CompletionStreamEvent) {
+        if let CompletionStreamEvent::ThinkingDelta { delta, .. } = event
+            && !delta.is_empty()
+            && let Some(observer) = &self.observer
+        {
+            observer
+                .on_task_runtime_event(&self.task, TaskRuntimeEvent::ThinkingDelta(delta.clone()));
+        }
     }
 
     fn on_tool_call_begin(&mut self, call_id: &str, tool_name: &str, arguments: &Value) {
@@ -1578,11 +1591,18 @@ fn allowed_tools_for_task(spec: &IntentSpec, task: &TaskSpec) -> Vec<String> {
         tools.push("shell".to_string());
     }
 
+    if matches!(task.kind, TaskKind::Implementation | TaskKind::Analysis)
+        && spec.constraints.security.network_policy == NetworkPolicy::Allow
+        && acl_allows(&spec.security.tool_acl, "web.search", "query")
+    {
+        tools.push("web_search".to_string());
+    }
+
     tools
 }
 
 fn allowed_tools_for_reviewer(spec: &IntentSpec) -> Vec<String> {
-    if acl_allows(&spec.security.tool_acl, "workspace.fs", "read") {
+    let mut tools = if acl_allows(&spec.security.tool_acl, "workspace.fs", "read") {
         vec![
             "read_file".to_string(),
             "list_dir".to_string(),
@@ -1591,7 +1611,13 @@ fn allowed_tools_for_reviewer(spec: &IntentSpec) -> Vec<String> {
         ]
     } else {
         Vec::new()
+    };
+    if spec.constraints.security.network_policy == NetworkPolicy::Allow
+        && acl_allows(&spec.security.tool_acl, "web.search", "query")
+    {
+        tools.push("web_search".to_string());
     }
+    tools
 }
 
 fn acl_allows(acl: &ToolAcl, tool: &str, action: &str) -> bool {
@@ -1903,6 +1929,7 @@ mod tests {
             async move {
                 Ok(CompletionResponse {
                     content: vec![AssistantContent::Text(Text { text })],
+                    reasoning_content: None,
                     raw_response: (),
                 })
             }
@@ -1950,6 +1977,7 @@ mod tests {
                         &prompt,
                         "conditional",
                     ))],
+                    reasoning_content: None,
                     raw_response: (),
                 })
             } else {
@@ -1957,6 +1985,7 @@ mod tests {
                     content: vec![AssistantContent::Text(Text {
                         text: "done".into(),
                     })],
+                    reasoning_content: None,
                     raw_response: (),
                 })
             }
@@ -1984,6 +2013,7 @@ mod tests {
                     content: vec![AssistantContent::Text(Text {
                         text: "done".to_string(),
                     })],
+                    reasoning_content: None,
                     raw_response: (),
                 });
             }
@@ -2005,6 +2035,7 @@ mod tests {
                 content: vec![AssistantContent::ToolCall(add_file_patch_call(
                     &prompt, "budget",
                 ))],
+                reasoning_content: None,
                 raw_response: (),
             })
         }
@@ -2069,6 +2100,7 @@ mod tests {
                     content: vec![AssistantContent::Text(Text {
                         text: "done".to_string(),
                     })],
+                    reasoning_content: None,
                     raw_response: (),
                 });
             }
@@ -2107,6 +2139,7 @@ mod tests {
                         arguments: serde_json::json!({ "input": patch }),
                     },
                 })],
+                reasoning_content: None,
                 raw_response: (),
             })
         }
@@ -2133,6 +2166,7 @@ mod tests {
                     content: vec![AssistantContent::Text(Text {
                         text: "done".to_string(),
                     })],
+                    reasoning_content: None,
                     raw_response: (),
                 });
             }
@@ -2148,6 +2182,7 @@ mod tests {
                         }),
                     },
                 })],
+                reasoning_content: None,
                 raw_response: (),
             })
         }
@@ -2174,6 +2209,7 @@ mod tests {
                     content: vec![AssistantContent::Text(Text {
                         text: "done".to_string(),
                     })],
+                    reasoning_content: None,
                     raw_response: (),
                 });
             }
@@ -2203,6 +2239,7 @@ mod tests {
                             }),
                         },
                     })],
+                    reasoning_content: None,
                     raw_response: (),
                 });
             }
@@ -2211,6 +2248,7 @@ mod tests {
                 content: vec![AssistantContent::Text(Text {
                     text: "done without edits".to_string(),
                 })],
+                reasoning_content: None,
                 raw_response: (),
             })
         }
@@ -2249,6 +2287,7 @@ mod tests {
                         }),
                     },
                 })],
+                reasoning_content: None,
                 raw_response: (),
             })
         }
@@ -2943,11 +2982,25 @@ Done.";
         let task = implementation_task();
         let mut spec = (*spec()).clone();
         spec.security = profiles::default_security();
+        spec.constraints.security.network_policy = NetworkPolicy::Deny;
         let tools = allowed_tools_for_task(&spec, &task);
         assert!(tools.contains(&"read_file".to_string()));
         assert!(tools.contains(&"apply_patch".to_string()));
         assert!(tools.contains(&"run_libra_vcs".to_string()));
         assert!(!tools.contains(&"shell".to_string()));
+        assert!(!tools.contains(&"web_search".to_string()));
+    }
+
+    #[test]
+    fn network_allow_exposes_web_search_to_coder() {
+        let task = analysis_task();
+        let mut spec = (*spec()).clone();
+        spec.security = profiles::default_security();
+        spec.constraints.security.network_policy = NetworkPolicy::Allow;
+
+        let tools = allowed_tools_for_task(&spec, &task);
+
+        assert!(tools.contains(&"web_search".to_string()));
     }
 
     #[test]

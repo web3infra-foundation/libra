@@ -313,7 +313,9 @@ enum ToolCallGroup {
 impl ToolCallGroup {
     fn for_tool(tool_name: &str) -> Self {
         match tool_name {
-            "read_file" | "list_dir" | "grep_files" | "search_files" => Self::Explore,
+            "read_file" | "list_dir" | "grep_files" | "search_files" | "web_search" => {
+                Self::Explore
+            }
             "apply_patch" => Self::Edit,
             "shell" => Self::Shell,
             "request_user_input" => Self::Input,
@@ -644,6 +646,10 @@ fn summarize_tool_call(tool_name: &str, arguments: &Value) -> String {
                 truncate_utf8(pattern, 80),
                 truncate_utf8(path, 80)
             )
+        }
+        "web_search" => {
+            let query = argument_string(arguments, "query").unwrap_or("(query)");
+            format!("Search web for {}", truncate_utf8(query, 80))
         }
         "shell" => format!(
             "Run {}",

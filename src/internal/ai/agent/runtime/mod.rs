@@ -114,6 +114,7 @@ impl<M: CompletionModel> Agent<M> {
 
             chat_history.push(Message::Assistant {
                 id: None,
+                reasoning_content: response.reasoning_content.clone(),
                 content: assistant_content,
             });
 
@@ -219,6 +220,7 @@ mod tests {
                             arguments: json!({"value": 1}),
                         },
                     })],
+                    reasoning_content: None,
                     raw_response: (),
                 });
             }
@@ -227,6 +229,7 @@ mod tests {
                 content: vec![AssistantContent::Text(Text {
                     text: "done".to_string(),
                 })],
+                reasoning_content: None,
                 raw_response: (),
             })
         }

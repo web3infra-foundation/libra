@@ -34,6 +34,8 @@ pub enum ChatMessage {
     /// An assistant response, which may include both text and tool calls.
     Assistant {
         content: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_content: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tool_calls: Vec<ChatToolCall>,
     },
@@ -150,6 +152,24 @@ pub fn parse_tools(tools: &[ToolDefinition]) -> Vec<ChatToolDefinition> {
 /// messages collect text and tool calls into a single message. Image content
 /// returns a [`CompletionError::NotImplemented`] error.
 pub fn build_messages(request: &CompletionRequest) -> Result<Vec<ChatMessage>, CompletionError> {
+    build_messages_internal(request, false)
+}
+
+/// Builds messages while preserving assistant `reasoning_content`.
+///
+/// This is provider-specific for DeepSeek thinking mode. Other OpenAI-compatible
+/// providers should use [`build_messages`] so they do not receive unsupported
+/// message fields.
+pub fn build_messages_with_reasoning_content(
+    request: &CompletionRequest,
+) -> Result<Vec<ChatMessage>, CompletionError> {
+    build_messages_internal(request, true)
+}
+
+fn build_messages_internal(
+    request: &CompletionRequest,
+    include_reasoning_content: bool,
+) -> Result<Vec<ChatMessage>, CompletionError> {
     let mut messages = Vec::new();
 
     if let Some(preamble) = &request.preamble {
@@ -183,7 +203,11 @@ pub fn build_messages(request: &CompletionRequest) -> Result<Vec<ChatMessage>, C
                     }
                 }
             }
-            Message::Assistant { content, .. } => {
+            Message::Assistant {
+                content,
+                reasoning_content,
+                ..
+            } => {
                 let mut text_parts = Vec::new();
                 let mut tool_calls = Vec::new();
 
@@ -215,6 +239,11 @@ pub fn build_messages(request: &CompletionRequest) -> Result<Vec<ChatMessage>, C
 
                 messages.push(ChatMessage::Assistant {
                     content: text,
+                    reasoning_content: if include_reasoning_content {
+                        reasoning_content.clone()
+                    } else {
+                        None
+                    },
                     tool_calls,
                 });
             }
@@ -244,6 +273,7 @@ pub fn parse_choice_content(choice: &ChatChoice) -> Result<Vec<AssistantContent>
     match &choice.message {
         ChatMessage::Assistant {
             content,
+            reasoning_content: _,
             tool_calls,
         } => {
             let mut parts = Vec::new();
@@ -272,6 +302,19 @@ pub fn parse_choice_content(choice: &ChatChoice) -> Result<Vec<AssistantContent>
         _ => Err(CompletionError::ResponseError(
             "Unexpected non-assistant message in response".to_string(),
         )),
+    }
+}
+
+/// Extracts provider-specific reasoning content from an assistant choice.
+pub fn choice_reasoning_content(choice: &ChatChoice) -> Option<String> {
+    match &choice.message {
+        ChatMessage::Assistant {
+            reasoning_content, ..
+        } => reasoning_content
+            .as_ref()
+            .filter(|content| !content.trim().is_empty())
+            .cloned(),
+        _ => None,
     }
 }
 
@@ -328,6 +371,7 @@ impl From<&Message> for ChatMessage {
                     .unwrap_or_default();
                 ChatMessage::Assistant {
                     content: if text.is_empty() { None } else { Some(text) },
+                    reasoning_content: None,
                     tool_calls: Vec::new(),
                 }
             }
@@ -359,6 +403,7 @@ mod tests {
 
         let assistant_msg = Message::Assistant {
             id: None,
+            reasoning_content: None,
             content: crate::internal::ai::completion::message::OneOrMany::one(
                 AssistantContent::Text(Text {
                     text: "Hi there".to_string(),
@@ -377,5 +422,57 @@ mod tests {
         };
         let chat_msg: ChatMessage = (&system_msg).into();
         assert!(matches!(chat_msg, ChatMessage::System { .. }));
+    }
+
+    #[test]
+    fn build_messages_with_reasoning_content_preserves_assistant_reasoning_content() {
+        let request = CompletionRequest {
+            chat_history: vec![Message::Assistant {
+                id: None,
+                reasoning_content: Some("I should call the tool first.".to_string()),
+                content: crate::internal::ai::completion::message::OneOrMany::one(
+                    AssistantContent::ToolCall(ToolCall {
+                        id: "call_1".to_string(),
+                        name: "read_file".to_string(),
+                        function: Function {
+                            name: "read_file".to_string(),
+                            arguments: serde_json::json!({"path": "Cargo.toml"}),
+                        },
+                    }),
+                ),
+            }],
+            ..Default::default()
+        };
+
+        let messages = build_messages_with_reasoning_content(&request).unwrap();
+        let json = serde_json::to_value(&messages).unwrap();
+
+        assert_eq!(
+            json[0]["reasoning_content"],
+            "I should call the tool first."
+        );
+        assert_eq!(json[0]["tool_calls"][0]["id"], "call_1");
+    }
+
+    #[test]
+    fn build_messages_omits_assistant_reasoning_content_by_default() {
+        let request = CompletionRequest {
+            chat_history: vec![Message::Assistant {
+                id: None,
+                reasoning_content: Some("DeepSeek-only reasoning".to_string()),
+                content: crate::internal::ai::completion::message::OneOrMany::one(
+                    AssistantContent::Text(Text {
+                        text: "visible answer".to_string(),
+                    }),
+                ),
+            }],
+            ..Default::default()
+        };
+
+        let messages = build_messages(&request).unwrap();
+        let json = serde_json::to_value(&messages).unwrap();
+
+        assert!(json[0].get("reasoning_content").is_none());
+        assert_eq!(json[0]["content"], "visible answer");
     }
 }

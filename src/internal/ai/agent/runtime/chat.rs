@@ -131,6 +131,7 @@ mod tests {
                 content: vec![AssistantContent::Text(Text {
                     text: response_text,
                 })],
+                reasoning_content: None,
                 raw_response: (),
             })
         }

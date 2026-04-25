@@ -51,6 +51,8 @@
 //! directory, supporting `--resume <thread_id>` to continue a canonical Libra thread.
 
 use std::{
+    collections::BTreeMap,
+    fs,
     net::SocketAddr,
     path::{Path, PathBuf},
     process::Stdio,
@@ -87,8 +89,8 @@ use crate::{
             codex as agent_codex,
             commands::{CommandDispatcher, load_commands},
             completion::{
-                CompletionError, CompletionModel, CompletionRequest, CompletionResponse,
-                CompletionThinking, CompletionUsage,
+                CompletionError, CompletionModel, CompletionReasoningEffort, CompletionRequest,
+                CompletionResponse, CompletionThinking, CompletionUsage,
             },
             history::HistoryManager,
             hooks::HookRunner,
@@ -116,6 +118,7 @@ use crate::{
                     ApplyPatchHandler, GrepFilesHandler, ListDirHandler, McpBridgeHandler,
                     PlanHandler, ReadFileHandler, RequestUserInputHandler, SearchFilesHandler,
                     ShellHandler, SubmitIntentDraftHandler, SubmitPlanDraftHandler,
+                    WebSearchHandler,
                 },
             },
             web::{
@@ -227,6 +230,45 @@ impl From<OllamaThinkingArg> for CompletionThinking {
     }
 }
 
+/// DeepSeek-specific thinking mode.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum DeepSeekThinkingArg {
+    /// Send `thinking: {"type": "enabled"}` to DeepSeek.
+    Enabled,
+    /// Send `thinking: {"type": "disabled"}` to DeepSeek.
+    Disabled,
+}
+
+impl From<DeepSeekThinkingArg> for CompletionThinking {
+    fn from(value: DeepSeekThinkingArg) -> Self {
+        match value {
+            DeepSeekThinkingArg::Enabled => CompletionThinking::Enabled,
+            DeepSeekThinkingArg::Disabled => CompletionThinking::Disabled,
+        }
+    }
+}
+
+/// DeepSeek-specific reasoning effort.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum DeepSeekReasoningEffortArg {
+    Low,
+    Medium,
+    High,
+    #[value(alias = "xhigh")]
+    Max,
+}
+
+impl From<DeepSeekReasoningEffortArg> for CompletionReasoningEffort {
+    fn from(value: DeepSeekReasoningEffortArg) -> Self {
+        match value {
+            DeepSeekReasoningEffortArg::Low => CompletionReasoningEffort::Low,
+            DeepSeekReasoningEffortArg::Medium => CompletionReasoningEffort::Medium,
+            DeepSeekReasoningEffortArg::High => CompletionReasoningEffort::High,
+            DeepSeekReasoningEffortArg::Max => CompletionReasoningEffort::Max,
+        }
+    }
+}
+
 /// User-facing approval policy controlling when tool execution requires
 /// explicit human confirmation in the TUI.
 ///
@@ -307,6 +349,13 @@ pub struct CodeArgs {
     #[arg(long)]
     pub repo: Option<PathBuf>,
 
+    /// Load provider environment variables from a dotenv-style file.
+    ///
+    /// Values in this file take precedence over already exported process
+    /// environment variables for provider bootstrap.
+    #[arg(long = "env-file", value_name = "PATH")]
+    pub env_file: Option<PathBuf>,
+
     /// AI provider backend
     #[arg(long, value_enum, default_value_t = CodeProvider::Gemini)]
     pub provider: CodeProvider,
@@ -328,6 +377,18 @@ pub struct CodeArgs {
     /// Send compact Ollama tool schemas for providers that reject complex JSON schemas.
     #[arg(long = "ollama-compact-tools")]
     pub ollama_compact_tools: bool,
+
+    /// DeepSeek thinking mode: enabled or disabled.
+    #[arg(long = "deepseek-thinking", value_enum)]
+    pub deepseek_thinking: Option<DeepSeekThinkingArg>,
+
+    /// DeepSeek reasoning effort: low, medium, high, or max.
+    #[arg(long = "deepseek-reasoning-effort", value_enum)]
+    pub deepseek_reasoning_effort: Option<DeepSeekReasoningEffortArg>,
+
+    /// DeepSeek stream mode: true or false.
+    #[arg(long = "deepseek-stream", alias = "stream", value_name = "BOOL")]
+    pub deepseek_stream: Option<bool>,
 
     /// Operating context mode (dev, review, research)
     #[arg(long, value_enum)]
@@ -529,6 +590,149 @@ async fn execute_web_only(args: &CodeArgs) -> CliResult<()> {
 // Mode: TUI — full interactive terminal with background servers
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Default)]
+struct CodeEnvFile {
+    values: BTreeMap<String, String>,
+}
+
+impl CodeEnvFile {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.values.get(key).map(String::as_str)
+    }
+}
+
+fn load_code_env_file(path: Option<&Path>) -> CliResult<CodeEnvFile> {
+    let Some(path) = path else {
+        return Ok(CodeEnvFile::default());
+    };
+
+    let contents = fs::read_to_string(path).map_err(|error| {
+        CliError::io(format!(
+            "failed to read --env-file {}: {error}",
+            path.display()
+        ))
+    })?;
+    parse_code_env_file(&contents, path).map_err(CliError::command_usage)
+}
+
+fn parse_code_env_file(contents: &str, path: &Path) -> Result<CodeEnvFile, String> {
+    let mut values = BTreeMap::new();
+    for (index, raw_line) in contents.lines().enumerate() {
+        let line_no = index + 1;
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(format!(
+                "{}:{line_no}: expected KEY=VALUE entry",
+                path.display()
+            ));
+        };
+        let key = key.trim();
+        if !is_valid_env_key(key) {
+            return Err(format!(
+                "{}:{line_no}: invalid environment variable name `{key}`",
+                path.display()
+            ));
+        }
+
+        let value = parse_env_file_value(value).map_err(|message| {
+            format!(
+                "{}:{line_no}: invalid value for `{key}`: {message}",
+                path.display()
+            )
+        })?;
+        values.insert(key.to_string(), value);
+    }
+
+    Ok(CodeEnvFile { values })
+}
+
+fn is_valid_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn parse_env_file_value(raw: &str) -> Result<String, String> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Ok(String::new());
+    }
+
+    let first = value.as_bytes()[0];
+    match first {
+        b'\'' | b'"' => {
+            if value.as_bytes().last() != Some(&first) || value.len() < 2 {
+                return Err("quoted values must end with the matching quote".to_string());
+            }
+            let inner = &value[1..value.len() - 1];
+            if first == b'"' {
+                parse_double_quoted_env_value(inner)
+            } else {
+                Ok(inner.to_string())
+            }
+        }
+        _ => Ok(strip_inline_env_comment(value).trim_end().to_string()),
+    }
+}
+
+fn parse_double_quoted_env_value(value: &str) -> Result<String, String> {
+    let mut parsed = String::new();
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            parsed.push(ch);
+            continue;
+        }
+
+        let Some(escaped) = chars.next() else {
+            return Err("trailing backslash in quoted value".to_string());
+        };
+        match escaped {
+            'n' => parsed.push('\n'),
+            'r' => parsed.push('\r'),
+            't' => parsed.push('\t'),
+            '\\' => parsed.push('\\'),
+            '"' => parsed.push('"'),
+            other => parsed.push(other),
+        }
+    }
+    Ok(parsed)
+}
+
+fn strip_inline_env_comment(value: &str) -> &str {
+    for (index, ch) in value.char_indices() {
+        if ch == '#' && (index == 0 || value[..index].ends_with(char::is_whitespace)) {
+            return &value[..index];
+        }
+    }
+    value
+}
+
+fn provider_env_value(env_file: &CodeEnvFile, key: &str) -> Option<String> {
+    provider_env_value_with_lookup(env_file, key, |key| std::env::var(key).ok())
+}
+
+fn provider_env_value_with_lookup(
+    env_file: &CodeEnvFile,
+    key: &str,
+    lookup: impl FnOnce(&str) -> Option<String>,
+) -> Option<String> {
+    env_file
+        .get(key)
+        .map(str::to_string)
+        .or_else(|| lookup(key))
+}
+
 /// Main TUI execution path: initializes the AI provider, builds the tool
 /// registry, starts background web/MCP servers, and launches the interactive
 /// terminal application.
@@ -537,6 +741,7 @@ async fn execute_web_only(args: &CodeArgs) -> CliResult<()> {
 /// model selection) and delegates the actual TUI lifecycle to [`run_tui_with_model`].
 async fn execute_tui(args: CodeArgs) -> CliResult<()> {
     let working_dir = resolve_code_working_dir(&args)?;
+    let env_file = load_code_env_file(args.env_file.as_deref())?;
 
     // Validate --api-base: only honored for Ollama via CLI flag. Other providers
     // accept custom base URLs through their respective environment variables.
@@ -568,7 +773,9 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
 
     let preamble = system_preamble(&working_dir, args.context);
     let temperature = args.temperature;
-    let thinking = args.ollama_thinking.map(CompletionThinking::from);
+    let thinking = completion_thinking_for_args(&args);
+    let reasoning_effort = completion_reasoning_effort_for_args(&args);
+    let stream = completion_stream_for_args(&args);
     let resume_thread_id = args.resume.clone();
     let host = args.host.clone();
     let trace_id = resume_thread_id
@@ -594,6 +801,7 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
         .register("list_dir", Arc::new(ListDirHandler))
         .register("grep_files", Arc::new(GrepFilesHandler))
         .register("search_files", Arc::new(SearchFilesHandler))
+        .register("web_search", Arc::new(WebSearchHandler))
         .register("apply_patch", Arc::new(ApplyPatchHandler))
         .register("shell", Arc::new(ShellHandler))
         .register("update_plan", Arc::new(PlanHandler))
@@ -619,6 +827,8 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
         preamble,
         temperature,
         thinking,
+        reasoning_effort,
+        stream,
         context: args.context,
         resume_thread_id,
         approval_policy: args.approval_policy.into(),
@@ -659,10 +869,9 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
             run_tui_with_model(model, launch_config, model_name, provider_name).await?;
         }
         CodeProvider::Deepseek => {
-            let client = match DeepSeekClient::from_env() {
-                Ok(client) => client,
-                Err(_) => return Err(CliError::auth("DEEPSEEK_API_KEY is not set")),
-            };
+            let api_key = provider_env_value(&env_file, "DEEPSEEK_API_KEY")
+                .ok_or_else(|| CliError::auth("DEEPSEEK_API_KEY is not set"))?;
+            let client = DeepSeekClient::with_api_key(api_key);
             let model_name = args.model.unwrap_or_else(|| "deepseek-chat".to_string());
             let model = client.completion_model(&model_name);
             run_tui_with_model(model, launch_config, model_name, provider_name).await?;
@@ -738,6 +947,30 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
     }
 
     Ok(())
+}
+
+fn completion_thinking_for_args(args: &CodeArgs) -> Option<CompletionThinking> {
+    match args.provider {
+        CodeProvider::Ollama => args.ollama_thinking.map(CompletionThinking::from),
+        CodeProvider::Deepseek => args.deepseek_thinking.map(CompletionThinking::from),
+        _ => None,
+    }
+}
+
+fn completion_reasoning_effort_for_args(args: &CodeArgs) -> Option<CompletionReasoningEffort> {
+    match args.provider {
+        CodeProvider::Deepseek => args
+            .deepseek_reasoning_effort
+            .map(CompletionReasoningEffort::from),
+        _ => None,
+    }
+}
+
+fn completion_stream_for_args(args: &CodeArgs) -> Option<bool> {
+    match args.provider {
+        CodeProvider::Deepseek => args.deepseek_stream,
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1099,6 +1332,8 @@ struct TuiLaunchConfig {
     preamble: String,
     temperature: Option<f64>,
     thinking: Option<CompletionThinking>,
+    reasoning_effort: Option<CompletionReasoningEffort>,
+    stream: Option<bool>,
     context: Option<CodeContext>,
     resume_thread_id: Option<String>,
     approval_policy: AskForApproval,
@@ -1310,6 +1545,8 @@ where
         preamble: Some(params.preamble),
         temperature: params.temperature,
         thinking: params.thinking,
+        reasoning_effort: params.reasoning_effort,
+        stream: params.stream,
         hook_runner,
         allowed_tools: None,
         runtime_context: Some(default_tui_runtime_context(
@@ -1798,6 +2035,22 @@ fn validate_mode_args(args: &CodeArgs, _output: &OutputConfig) -> Result<(), Str
         return Err("--ollama-compact-tools is only supported with --provider=ollama".to_string());
     }
 
+    if args.provider != CodeProvider::Deepseek && args.deepseek_thinking.is_some() {
+        return Err("--deepseek-thinking is only supported with --provider=deepseek".to_string());
+    }
+
+    if args.provider != CodeProvider::Deepseek && args.deepseek_reasoning_effort.is_some() {
+        return Err(
+            "--deepseek-reasoning-effort is only supported with --provider=deepseek".to_string(),
+        );
+    }
+
+    if args.provider != CodeProvider::Deepseek && args.deepseek_stream.is_some() {
+        return Err(
+            "--deepseek-stream/--stream is only supported with --provider=deepseek".to_string(),
+        );
+    }
+
     Ok(())
 }
 
@@ -1816,8 +2069,20 @@ fn reject_non_tui_flags(args: &CodeArgs, mode: &str) -> Result<(), String> {
     reject_mode_flag(args.provider != CodeProvider::Gemini, "--provider", mode)?;
     reject_mode_flag(args.model.is_some(), "--model", mode)?;
     reject_mode_flag(args.temperature.is_some(), "--temperature", mode)?;
+    reject_mode_flag(args.env_file.is_some(), "--env-file", mode)?;
     reject_mode_flag(args.ollama_thinking.is_some(), "--ollama-thinking", mode)?;
     reject_mode_flag(args.ollama_compact_tools, "--ollama-compact-tools", mode)?;
+    reject_mode_flag(
+        args.deepseek_thinking.is_some(),
+        "--deepseek-thinking",
+        mode,
+    )?;
+    reject_mode_flag(
+        args.deepseek_reasoning_effort.is_some(),
+        "--deepseek-reasoning-effort",
+        mode,
+    )?;
+    reject_mode_flag(args.deepseek_stream.is_some(), "--deepseek-stream", mode)?;
     reject_mode_flag(args.context.is_some(), "--context", mode)?;
     reject_mode_flag(args.resume.is_some(), "--resume", mode)?;
     reject_mode_flag(
@@ -1853,11 +2118,15 @@ mod tests {
             host: DEFAULT_BIND_HOST.to_string(),
             cwd: None,
             repo: None,
+            env_file: None,
             provider: CodeProvider::Gemini,
             model: None,
             temperature: None,
             ollama_thinking: None,
             ollama_compact_tools: false,
+            deepseek_thinking: None,
+            deepseek_reasoning_effort: None,
+            deepseek_stream: None,
             context: None,
             resume: None,
             approval_policy: CodeApprovalPolicy::OnRequest,
@@ -1898,6 +2167,57 @@ mod tests {
     fn accepts_default_tui_mode() {
         let args = base_args();
         assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn accepts_env_file_cli_arg_in_tui_mode() {
+        let args = CodeArgs::try_parse_from(["libra", "--env-file", ".env.test"]).unwrap();
+
+        assert_eq!(args.env_file.as_deref(), Some(Path::new(".env.test")));
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn rejects_env_file_in_web_mode() {
+        let mut args = base_args();
+        args.web_only = true;
+        args.env_file = Some(PathBuf::from(".env.test"));
+
+        let err = validate_mode_args(&args, &OutputConfig::default()).unwrap_err();
+        assert!(err.contains("--env-file"));
+    }
+
+    #[test]
+    fn parses_dotenv_style_env_file() {
+        let env_file = parse_code_env_file(
+            r#"
+            # comments and blank lines are ignored
+            export DEEPSEEK_API_KEY='deepseek-key'
+            OPENAI_BASE_URL="https://example.test/v1"
+            UNQUOTED=value # inline comment
+            "#,
+            Path::new(".env.test"),
+        )
+        .unwrap();
+
+        assert_eq!(env_file.get("DEEPSEEK_API_KEY"), Some("deepseek-key"));
+        assert_eq!(
+            env_file.get("OPENAI_BASE_URL"),
+            Some("https://example.test/v1")
+        );
+        assert_eq!(env_file.get("UNQUOTED"), Some("value"));
+    }
+
+    #[test]
+    fn provider_env_file_value_overrides_process_lookup() {
+        let env_file =
+            parse_code_env_file("DEEPSEEK_API_KEY=file-key", Path::new(".env.test")).unwrap();
+
+        let value = provider_env_value_with_lookup(&env_file, "DEEPSEEK_API_KEY", |_| {
+            Some("old-key".into())
+        });
+
+        assert_eq!(value.as_deref(), Some("file-key"));
     }
 
     #[test]
@@ -1959,6 +2279,88 @@ mod tests {
         let mut args = base_args();
         args.provider = CodeProvider::Ollama;
         args.ollama_compact_tools = true;
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn accepts_deepseek_reasoning_flags_for_deepseek_provider() {
+        let args = CodeArgs::try_parse_from([
+            "libra",
+            "--provider",
+            "deepseek",
+            "--model",
+            "deepseek-v4-pro",
+            "--deepseek-thinking",
+            "enabled",
+            "--deepseek-reasoning-effort",
+            "high",
+            "--deepseek-stream",
+            "true",
+        ])
+        .unwrap();
+
+        assert_eq!(args.provider, CodeProvider::Deepseek);
+        assert_eq!(args.deepseek_thinking, Some(DeepSeekThinkingArg::Enabled));
+        assert_eq!(
+            args.deepseek_reasoning_effort,
+            Some(DeepSeekReasoningEffortArg::High)
+        );
+        assert_eq!(
+            completion_thinking_for_args(&args),
+            Some(CompletionThinking::Enabled)
+        );
+        assert_eq!(
+            completion_reasoning_effort_for_args(&args),
+            Some(CompletionReasoningEffort::High)
+        );
+        assert_eq!(completion_stream_for_args(&args), Some(true));
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn accepts_deepseek_max_reasoning_alias() {
+        let args = CodeArgs::try_parse_from([
+            "libra",
+            "--provider",
+            "deepseek",
+            "--deepseek-reasoning-effort",
+            "xhigh",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            args.deepseek_reasoning_effort,
+            Some(DeepSeekReasoningEffortArg::Max)
+        );
+        assert_eq!(
+            completion_reasoning_effort_for_args(&args),
+            Some(CompletionReasoningEffort::Max)
+        );
+    }
+
+    #[test]
+    fn rejects_deepseek_reasoning_flags_for_non_deepseek_provider() {
+        let mut args = base_args();
+        args.deepseek_thinking = Some(DeepSeekThinkingArg::Enabled);
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_err());
+
+        let mut args = base_args();
+        args.deepseek_reasoning_effort = Some(DeepSeekReasoningEffortArg::High);
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_err());
+
+        let mut args = base_args();
+        args.deepseek_stream = Some(true);
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_err());
+    }
+
+    #[test]
+    fn accepts_deepseek_stream_alias_for_deepseek_provider() {
+        let args =
+            CodeArgs::try_parse_from(["libra", "--provider", "deepseek", "--stream", "false"])
+                .unwrap();
+
+        assert_eq!(args.deepseek_stream, Some(false));
+        assert_eq!(completion_stream_for_args(&args), Some(false));
         assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
     }
 

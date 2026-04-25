@@ -10,7 +10,8 @@ pub use message::{
     UserContent,
 };
 pub use request::{
-    CompletionRequest, CompletionResponse, CompletionStreamEvent, CompletionThinking,
+    CompletionReasoningEffort, CompletionRequest, CompletionResponse, CompletionStreamEvent,
+    CompletionThinking,
 };
 pub use retry::{
     CompletionRetryEvent, CompletionRetryObserver, CompletionRetryPolicy, RetryingCompletionModel,

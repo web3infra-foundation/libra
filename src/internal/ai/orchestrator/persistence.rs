@@ -1474,6 +1474,26 @@ async fn persist_runtime_event(
             )
             .await?;
         }
+        super::types::TaskRuntimeEvent::ThinkingDelta(text) => {
+            let summary = summarize_runtime_text(&text, 240);
+            let content_chars = text.chars().count();
+            persist_context_frame(
+                mcp_server,
+                actor,
+                &context,
+                FrameKind::Other("reasoning".to_string()),
+                summarize_runtime_text(&text, 96),
+                json!({
+                    "event": "thinking_delta",
+                    "summary": summary,
+                    "contentChars": content_chars,
+                    "fullTextStored": false,
+                    "taskId": task.id().to_string(),
+                    "taskTitle": task.title(),
+                }),
+            )
+            .await?;
+        }
         super::types::TaskRuntimeEvent::ToolCallBegin {
             call_id,
             tool_name,

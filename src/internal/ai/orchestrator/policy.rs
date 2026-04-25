@@ -62,6 +62,16 @@ pub fn evaluate_tool_call(
         }
     }
 
+    if tool_name == "web_search" && spec.constraints.security.network_policy == NetworkPolicy::Deny
+    {
+        return Err(PolicyViolation {
+            code: "network-policy-deny".into(),
+            message: "web_search requires network access while networkPolicy=deny".into(),
+            tool_name: Some(tool_name.to_string()),
+            path: None,
+        });
+    }
+
     if tool_name == "shell" {
         if shell_invokes_git_version_control(arguments) {
             return Err(PolicyViolation {
@@ -181,6 +191,7 @@ pub fn evaluate_tool_result(
 fn acl_tool_alias(tool_name: &str) -> &str {
     match tool_name {
         "read_file" | "list_dir" | "grep_files" | "search_files" | "apply_patch" => "workspace.fs",
+        "web_search" => "web.search",
         "request_user_input" => "interaction",
         "submit_intent_draft" | "submit_plan_draft" => "planning",
         _ => tool_name,
@@ -344,6 +355,7 @@ fn derive_tool_footprint(
                 Vec::new(),
             ))
         }
+        "web_search" => Ok(("web.search".into(), "query".into(), Vec::new(), Vec::new())),
         "apply_patch" => {
             let patch_text = parse_patch_text(arguments)?;
             let patch = parse_patch(&patch_text).map_err(|e| e.to_string())?;
@@ -771,6 +783,39 @@ mod tests {
             Path::new("/tmp/work"),
         );
         assert!(matches!(res, Err(PolicyViolation { code, .. }) if code == "network-policy-deny"));
+    }
+
+    #[test]
+    fn test_web_search_honors_network_policy() {
+        let mut intent = spec();
+        intent.security.tool_acl.allow.push(ToolRule {
+            tool: "web.search".into(),
+            actions: vec!["query".into()],
+            constraints: BTreeMap::new(),
+        });
+
+        let denied = evaluate_tool_call(
+            &intent,
+            &task(),
+            "web_search",
+            &serde_json::json!({ "query": "Rust 2024 edition stable" }),
+            Path::new("/tmp/work"),
+        )
+        .expect_err("web_search should be blocked when networkPolicy=deny");
+
+        assert_eq!(denied.code, "network-policy-deny");
+
+        intent.constraints.security.network_policy = NetworkPolicy::Allow;
+        let allowed = evaluate_tool_call(
+            &intent,
+            &task(),
+            "web_search",
+            &serde_json::json!({ "query": "Rust 2024 edition stable" }),
+            Path::new("/tmp/work"),
+        )
+        .expect("web_search should be allowed when ACL and network policy allow it");
+
+        assert_eq!(allowed.record.action, "query");
     }
 
     #[test]

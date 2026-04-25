@@ -176,6 +176,8 @@ impl<M: CompletionModel> ToolLoopAction<M> {
                 preamble,
                 temperature,
                 thinking: None,
+                reasoning_effort: None,
+                stream: None,
                 hook_runner: None,
                 allowed_tools: None,
                 runtime_context: None,

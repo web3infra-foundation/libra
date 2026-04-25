@@ -14,6 +14,8 @@ pub enum Message {
     // The message is from an assistant.
     Assistant {
         id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_content: Option<String>,
         content: OneOrMany<AssistantContent>,
     },
     // Future-proof: Explicit System message support
@@ -186,6 +188,7 @@ impl Message {
     pub fn assistant(text: impl Into<String>) -> Self {
         Message::Assistant {
             id: None,
+            reasoning_content: None,
             content: OneOrMany::One(AssistantContent::Text(Text { text: text.into() })),
         }
     }

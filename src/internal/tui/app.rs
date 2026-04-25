@@ -145,7 +145,7 @@ const LATEST_INTENTSPEC_WORKSPACE_KEY: &str = "latest_intentspec_workspace_key";
 const LATEST_INTENTSPEC_BASE_REF: &str = "latest_intentspec_base_ref";
 const LATEST_INTENTSPEC_BRANCH_LABEL: &str = "latest_intentspec_branch_label";
 const MAX_INTENTSPEC_REPAIR_ATTEMPTS: usize = 2;
-const MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS: u8 = 3;
+const MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS: u8 = 10;
 const MCP_WRITE_TIMEOUT: Duration = Duration::from_secs(8);
 const MCP_TURN_TRACKING_TIMEOUT: Duration = Duration::from_secs(3);
 const GRAPH_THREAD_ID_METADATA_KEYS: &[&str] = &["thread_id", "threadId", "canonical_thread_id"];
@@ -3960,9 +3960,24 @@ where
         };
 
         let next_attempt = pending.automatic_repair_attempts.saturating_add(1);
+        if next_attempt > MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS {
+            self.pending_execution_plan_revision = Some(pending);
+            let message = format!(
+                "Automatic plan repair is capped at {} attempts. Describe specific Plan repair guidance, use `/plan modify <changes>`, or use `/plan cancel` to stop.",
+                MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS
+            );
+            self.widget
+                .add_cell(Box::new(AssistantHistoryCell::new(message.clone())));
+            self.history.push(Message::assistant(message.clone()));
+            self.session.add_assistant_message(&message);
+            self.sync_mux_input_context();
+            self.schedule_draw();
+            return;
+        }
         let max_attempts = requested_max_attempts
             .unwrap_or(pending.automatic_repair_max_attempts)
-            .max(next_attempt);
+            .max(next_attempt)
+            .min(MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS);
         let request =
             automatic_plan_repair_request_from_report(&failure_report, next_attempt, max_attempts);
         let mut note = String::new();
@@ -4057,6 +4072,7 @@ where
             "list_dir".to_string(),
             "grep_files".to_string(),
             "search_files".to_string(),
+            "web_search".to_string(),
             "submit_plan_draft".to_string(),
         ]);
         let tx = self.app_event_tx.clone();
@@ -4452,6 +4468,7 @@ where
 
         let model = self.model.clone();
         let registry = self.registry.clone();
+        let tool_loop_config = self.config.clone();
         let working_dir = self.registry.working_dir().to_path_buf();
         let coder_preamble = self
             .agent_router
@@ -4593,6 +4610,14 @@ where
                             };
                             self.send_note(format!("{title}  \n{text}"));
                         }
+                        TaskRuntimeEvent::ThinkingDelta(delta) if !delta.is_empty() => {
+                            let _ = self.tx.send(AppEvent::AgentEvent {
+                                turn_id: self.turn_id,
+                                event: AgentEvent::ThinkingDelta {
+                                    delta: delta.clone(),
+                                },
+                            });
+                        }
                         _ => {}
                     }
 
@@ -4719,6 +4744,7 @@ where
                 persisted_plan_id,
                 initial_plan: approved_plan,
                 dagrs_resume_checkpoint_id: None,
+                tool_loop_config,
                 coder_preamble,
                 reviewer_preamble,
                 mcp_server,
@@ -4834,6 +4860,7 @@ where
             "list_dir".to_string(),
             "grep_files".to_string(),
             "search_files".to_string(),
+            "web_search".to_string(),
             "request_user_input".to_string(),
             "submit_intent_draft".to_string(),
         ]);
@@ -5596,7 +5623,9 @@ fn parse_pending_plan_revision_command(args: &str) -> PendingPlanRevisionCommand
     {
         let max_attempts = match parts.next() {
             Some(value) => match value.parse::<u8>() {
-                Ok(value) if value > 0 => Some(value),
+                Ok(value) if (1..=MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS).contains(&value) => {
+                    Some(value)
+                }
                 _ => return PendingPlanRevisionCommand::Invalid,
             },
             None => None,
@@ -5625,7 +5654,10 @@ fn pending_plan_revision_help_message() -> String {
 }
 
 fn pending_execution_plan_revision_help_message() -> String {
-    "Plan revise mode is active. Describe execution-plan changes in plain text, use `continue` or `/plan continue <max-attempts>` to allow more automatic repair attempts, use `/plan modify <changes>` to keep revising, or `/plan cancel` to exit.".to_string()
+    format!(
+        "Plan revise mode is active. Describe execution-plan changes in plain text, use `continue` or `/plan continue <max-attempts>` to allow more automatic repair attempts (max {}), use `/plan modify <changes>` to keep revising, or `/plan cancel` to exit.",
+        MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS
+    )
 }
 
 fn append_to_last_tool_group_cell(
@@ -6128,14 +6160,15 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        PendingPlanRevisionCommand, ProviderPlanDraft, ProviderPlanDraftStep,
-        append_to_last_tool_group_cell, append_to_last_tool_group_preview_cell,
-        apply_developer_network_access, automatic_plan_repair_request_from_report,
-        automatic_plan_repair_threshold_message, build_execution_plan_prompt,
-        build_execution_plan_revision_prompt, build_plan_prompt, build_plan_revision_prompt,
-        code_ui_response_from_managed_selection, execution_failure_report,
-        execution_failure_revision_message, execution_requires_plan_repair,
-        format_decision_stage_note, format_intentspec_target_mismatch, format_orchestrator_result,
+        MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS, PendingPlanRevisionCommand, ProviderPlanDraft,
+        ProviderPlanDraftStep, append_to_last_tool_group_cell,
+        append_to_last_tool_group_preview_cell, apply_developer_network_access,
+        automatic_plan_repair_request_from_report, automatic_plan_repair_threshold_message,
+        build_execution_plan_prompt, build_execution_plan_revision_prompt, build_plan_prompt,
+        build_plan_revision_prompt, code_ui_response_from_managed_selection,
+        execution_failure_report, execution_failure_revision_message,
+        execution_requires_plan_repair, format_decision_stage_note,
+        format_intentspec_target_mismatch, format_orchestrator_result,
         format_plan_compiled_stage_note, format_plan_execution_stage_note,
         format_replan_stage_note, format_system_verification_stage_note,
         intentspec_with_plan_draft_objectives, is_default_chat_tool, is_global_quit_command_input,
@@ -6345,6 +6378,8 @@ mod tests {
 
         assert!(prompt.contains("already confirmed IntentSpec"));
         assert!(prompt.contains("call submit_plan_draft exactly once"));
+        assert!(prompt.contains("web_search"));
+        assert!(prompt.contains("Rust edition 2024 is stable"));
         assert!(!prompt.contains("call update_plan exactly once"));
         assert!(prompt.contains("Do not call submit_intent_draft"));
     }
@@ -6378,6 +6413,8 @@ mod tests {
 
         assert!(prompt.contains("Previous execution failure evidence"));
         assert!(prompt.contains("cargo test failed"));
+        assert!(prompt.contains("Do not start over from the IntentSpec"));
+        assert!(prompt.contains("primary goal is to repair that specific failed execution"));
         assert!(prompt.contains("addresses the concrete failure"));
     }
 
@@ -6406,6 +6443,7 @@ mod tests {
         assert!(!is_default_chat_tool("submit_intent_draft"));
         assert!(!is_default_chat_tool("submit_plan_draft"));
         assert!(is_default_chat_tool("update_plan"));
+        assert!(is_default_chat_tool("web_search"));
     }
 
     #[test]
@@ -6448,12 +6486,24 @@ mod tests {
         }];
 
         let report = execution_failure_report(Some(&result), None);
-        let request = automatic_plan_repair_request_from_report(&report, 2, 3);
+        let request = automatic_plan_repair_request_from_report(
+            &report,
+            2,
+            MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS,
+        );
 
-        assert!(request.contains("Automatic plan repair attempt 2/3"));
+        assert!(request.contains("Automatic plan repair attempt 2/10"));
+        assert!(request.contains("repair of that failed execution"));
+        assert!(request.contains("not a fresh plan from the original Intent"));
         assert!(request.contains("concrete repair Step"));
+        assert!(request.contains("preserve successful prior steps only when"));
         assert!(request.contains("cargo test"));
         assert!(request.contains("cannot find value"));
+    }
+
+    #[test]
+    fn automatic_plan_repair_default_threshold_is_ten() {
+        assert_eq!(MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS, 10);
     }
 
     #[test]
@@ -6813,6 +6863,8 @@ mod tests {
         let prompt = build_plan_prompt("init the project with cargo");
         assert!(prompt.contains("request_user_input"));
         assert!(prompt.contains("submit_intent_draft exactly once"));
+        assert!(prompt.contains("web_search"));
+        assert!(prompt.contains("Rust edition 2024 is stable"));
     }
 
     #[test]
@@ -6849,7 +6901,17 @@ mod tests {
             }
         ));
         assert!(matches!(
+            parse_pending_plan_revision_command("continue 10"),
+            PendingPlanRevisionCommand::ContinueAutoRepair {
+                max_attempts: Some(10)
+            }
+        ));
+        assert!(matches!(
             parse_pending_plan_revision_command("continue 0"),
+            PendingPlanRevisionCommand::Invalid
+        ));
+        assert!(matches!(
+            parse_pending_plan_revision_command("continue 11"),
             PendingPlanRevisionCommand::Invalid
         ));
         assert!(matches!(
@@ -7171,6 +7233,7 @@ fn build_plan_prompt(request: &str) -> String {
         "You are running /plan mode.\n\
 First, you MUST call request_user_input with exactly one question id=risk_profile, header=Risk, and options Low/Medium/High.\n\
 After receiving user choice, analyze the repository and then call submit_intent_draft exactly once.\n\
+Use web_search when available before making version-sensitive external claims. Rust edition 2024 is stable in current Rust; do not reject Cargo.toml edition=\"2024\" unless local toolchain evidence proves it unsupported.\n\
 If required information is missing, call request_user_input again for focused follow-up questions.\n\
 Do not output a plain-text plan; finalize by submitting the draft tool call.\n\n\
 User request:\n{request}"
@@ -7182,6 +7245,7 @@ fn build_plan_revision_prompt(spec_json: &str, request: &str) -> String {
         "You are revising an existing IntentSpec.\n\
 First, you MUST call request_user_input with exactly one question id=risk_profile, header=Risk, and options Low/Medium/High.\n\
 Use the current IntentSpec as the baseline, apply only the user's requested changes, and then call submit_intent_draft exactly once.\n\
+Use web_search when available before making version-sensitive external claims. Rust edition 2024 is stable in current Rust; do not reject Cargo.toml edition=\"2024\" unless local toolchain evidence proves it unsupported.\n\
 If required information is missing, call request_user_input again for focused follow-up questions.\n\
 Do not output a plain-text plan; finalize by submitting the draft tool call.\n\n\
 Current IntentSpec:\n```json\n{spec_json}\n```\n\n\
@@ -7193,6 +7257,7 @@ fn build_execution_plan_prompt(spec_json: &str) -> String {
     format!(
         "You are generating an execution plan for an already confirmed IntentSpec.\n\
 Use read-only repository tools if needed, then call submit_plan_draft exactly once with the full ordered draft.\n\
+Use web_search when available before making version-sensitive external claims. Rust edition 2024 is stable in current Rust; do not reject Cargo.toml edition=\"2024\" unless local toolchain evidence proves it unsupported.\n\
 Every draft step must be a concrete execution task the agent can perform. Provide ordered steps with title only; do not include runtime status.\n\
 Do not call submit_intent_draft. Do not modify the IntentSpec. Do not execute commands that change files.\n\
 After calling submit_plan_draft, stop; the developer must confirm the compiled plan before execution.\n\n\
@@ -7214,8 +7279,11 @@ fn build_execution_plan_revision_prompt(
         .unwrap_or_default();
     format!(
         "You are revising an execution plan for an already confirmed IntentSpec.\n\
-Use the current draft as the baseline, apply only the developer's requested changes, then call submit_plan_draft exactly once with the complete revised ordered draft.\n\
-When previous execution failure evidence is provided, use it as hard context for the revised plan so the next plan addresses the concrete failure instead of repeating the same approach.\n\
+Use the current draft as the baseline. Do not start over from the IntentSpec unless the evidence proves the current draft is unusable.\n\
+Apply only the developer's requested changes, then call submit_plan_draft exactly once with the complete revised ordered draft.\n\
+When previous execution failure evidence is provided, use it as hard context for the revised plan: the next plan's primary goal is to repair that specific failed execution; it addresses the concrete failure and then continues toward the original Intent.\n\
+Keep successful prior steps only when they are still prerequisites for fixing the failure; add or reorder concrete repair and verification steps around the failing point instead of repeating the same approach.\n\
+Use web_search when available before making version-sensitive external claims. Rust edition 2024 is stable in current Rust; do not reject Cargo.toml edition=\"2024\" unless local toolchain evidence proves it unsupported.\n\
 Every draft step must be a concrete execution task the agent can perform. Provide ordered steps with title only; do not include runtime status.\n\
 Do not call submit_intent_draft. Do not revise the IntentSpec. Do not execute commands that change files.\n\
 After calling submit_plan_draft, stop; the developer must confirm the compiled plan before execution.\n\n\
@@ -7399,8 +7467,10 @@ fn automatic_plan_repair_request_from_report(
 ) -> String {
     format!(
         "Automatic plan repair attempt {}.\n\
-The previous plan execution failed. Revise the execution plan by adding or adjusting concrete repair Step(s) before the failing verification.\n\
-Return a complete ordered execution plan draft. Keep successful steps only when they are still needed, and keep verification steps that can judge success automatically.\n\
+The previous plan execution failed. The next plan must be a repair of that failed execution, not a fresh plan from the original Intent.\n\
+Revise the execution plan by adding, replacing, or reordering concrete repair Step(s) at the failing point before the failed verification.\n\
+Return a complete ordered execution plan draft, but preserve successful prior steps only when they are still prerequisites for the repair.\n\
+Keep verification steps that can judge success automatically, and add a focused regression check for the observed failure when possible.\n\
 Use this failure evidence as the source of truth:\n{report}",
         automatic_plan_repair_attempt_label(attempt, max_attempts)
     )

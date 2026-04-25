@@ -82,6 +82,21 @@ impl ToolSpec {
         ))
     }
 
+    /// Create a ToolSpec for web_search.
+    pub fn web_search() -> Self {
+        Self::new(
+            "web_search",
+            "Search the public web for current facts and return result titles, URLs, and snippets. Use this before making claims about changing external facts such as language/toolchain support, package versions, APIs, standards, or vendor behavior.",
+        )
+        .with_parameters(FunctionParameters::object(
+            [
+                ("query", "string", "Search query"),
+                ("limit", "integer", "Maximum number of results to return (default: 5, max: 10)"),
+            ],
+            [("query", true)],
+        ))
+    }
+
     /// Create a ToolSpec for shell.
     pub fn shell() -> Self {
         Self::new(

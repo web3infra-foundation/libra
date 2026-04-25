@@ -328,6 +328,21 @@ fn default_grep_limit() -> usize {
     100
 }
 
+/// Arguments for the web_search tool.
+#[derive(Clone, Deserialize, Debug)]
+pub struct WebSearchArgs {
+    /// Search query to send to the web search provider.
+    #[serde(alias = "q")]
+    pub query: String,
+    /// Maximum number of results to return (default: 5, max enforced by handler).
+    #[serde(default = "default_web_search_limit")]
+    pub limit: usize,
+}
+
+fn default_web_search_limit() -> usize {
+    5
+}
+
 // ── update_plan types ──────────────────────────────────────────────────
 
 /// Status of a single plan step.

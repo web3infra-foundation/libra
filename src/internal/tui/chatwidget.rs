@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use super::{
     bottom_pane::BottomPane,
-    history_cell::{AssistantHistoryCell, HistoryCell, ToolCallHistoryCell},
+    history_cell::{AssistantHistoryCell, HistoryCell, ThinkingHistoryCell, ToolCallHistoryCell},
     theme,
 };
 use crate::internal::ai::orchestrator::types::{
@@ -79,11 +79,26 @@ impl DagPanelState {
         if let Some(node) = self.nodes.iter_mut().find(|node| node.task_id == task_id) {
             node.status = status;
         }
+        self.completed = self.terminal_node_count().min(self.total);
     }
 
     fn update_progress(&mut self, completed: usize, total: usize) {
-        self.completed = completed.min(total);
-        self.total = total.max(self.total);
+        self.total = total.max(self.total).max(self.nodes.len());
+        self.completed = completed
+            .min(self.total)
+            .max(self.terminal_node_count().min(self.total));
+    }
+
+    fn terminal_node_count(&self) -> usize {
+        self.nodes
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.status,
+                    TaskNodeStatus::Completed | TaskNodeStatus::Failed | TaskNodeStatus::Skipped
+                )
+            })
+            .count()
     }
 
     fn lane_count(&self) -> usize {
@@ -134,6 +149,7 @@ struct TaskMuxNoteEntry {
 #[derive(Debug, Clone)]
 enum TaskMuxTranscriptEntry {
     Note(TaskMuxNoteEntry),
+    Thinking(ThinkingHistoryCell),
     Assistant(AssistantHistoryCell),
     Tool(ToolCallHistoryCell),
 }
@@ -186,6 +202,7 @@ struct TaskMuxState {
 
 const TASK_MUX_MAX_ENTRIES: usize = 96;
 const TASK_MUX_TRANSITION_DURATION: Duration = Duration::from_millis(220);
+const DAG_PANEL_WIDTH_PERCENT: u16 = 35;
 
 impl TaskMuxState {
     fn current_focus_index(&self) -> usize {
@@ -227,6 +244,7 @@ impl TaskMuxState {
                 task.isolated = isolated;
             }
             TaskRuntimeEvent::Note { level, text } => {
+                complete_streaming_task_thinking(&mut task.transcript);
                 let trimmed = text.trim();
                 if trimmed.is_empty() {
                     return;
@@ -239,7 +257,26 @@ impl TaskMuxState {
                     }),
                 );
             }
+            TaskRuntimeEvent::ThinkingDelta(delta) => {
+                if delta.is_empty() {
+                    return;
+                }
+                if let Some(TaskMuxTranscriptEntry::Thinking(cell)) = task.transcript.last_mut()
+                    && cell.is_streaming
+                {
+                    cell.append(&delta);
+                    return;
+                }
+
+                let mut cell = ThinkingHistoryCell::streaming();
+                cell.append(&delta);
+                push_task_transcript_entry(
+                    &mut task.transcript,
+                    TaskMuxTranscriptEntry::Thinking(cell),
+                );
+            }
             TaskRuntimeEvent::AssistantMessage(text) => {
+                complete_streaming_task_thinking(&mut task.transcript);
                 let trimmed = text.trim();
                 if trimmed.is_empty() {
                     return;
@@ -256,6 +293,7 @@ impl TaskMuxState {
                 tool_name,
                 arguments,
             } => {
+                complete_streaming_task_thinking(&mut task.transcript);
                 if let Some(TaskMuxTranscriptEntry::Tool(cell)) = task.transcript.last_mut()
                     && cell.can_merge(&tool_name)
                 {
@@ -275,6 +313,7 @@ impl TaskMuxState {
                 tool_name: _tool_name,
                 result,
             } => {
+                complete_streaming_task_thinking(&mut task.transcript);
                 let mut pending_result = Some(result);
                 for idx in (0..task.transcript.len()).rev() {
                     let Some(TaskMuxTranscriptEntry::Tool(cell)) = task.transcript.get_mut(idx)
@@ -727,10 +766,9 @@ impl ChatWidget {
 
         if self.task_mux.is_some() {
             if area.width >= 108 {
-                let panel_width = (area.width / 3).clamp(30, 40);
                 let chunks = Layout::horizontal([
-                    Constraint::Min(area.width.saturating_sub(panel_width)),
-                    Constraint::Length(panel_width),
+                    Constraint::Percentage(100 - DAG_PANEL_WIDTH_PERCENT),
+                    Constraint::Percentage(DAG_PANEL_WIDTH_PERCENT),
                 ])
                 .split(area);
                 return (chunks[0], Some(chunks[1]));
@@ -742,10 +780,9 @@ impl ChatWidget {
             return (area, None);
         }
 
-        let panel_width = (area.width / 3).clamp(30, 42);
         let chunks = Layout::horizontal([
-            Constraint::Min(area.width.saturating_sub(panel_width)),
-            Constraint::Length(panel_width),
+            Constraint::Percentage(100 - DAG_PANEL_WIDTH_PERCENT),
+            Constraint::Percentage(DAG_PANEL_WIDTH_PERCENT),
         ])
         .split(area);
         (chunks[0], Some(chunks[1]))
@@ -1138,8 +1175,9 @@ impl ChatWidget {
         };
         let title = Line::from(vec![
             Span::styled("⌁ ", theme::interactive::accent()),
+            Span::styled("Workflow · ", title_style.add_modifier(Modifier::BOLD)),
             Span::styled(
-                format!("Workflow r{}", panel.revision),
+                format!("Plan r{}", panel.revision),
                 title_style.add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -1507,6 +1545,14 @@ fn push_task_transcript_entry(
     transcript.push(entry);
 }
 
+fn complete_streaming_task_thinking(transcript: &mut [TaskMuxTranscriptEntry]) {
+    for entry in transcript.iter_mut() {
+        if let TaskMuxTranscriptEntry::Thinking(cell) = entry {
+            cell.complete();
+        }
+    }
+}
+
 fn render_task_transcript_lines(
     transcript: &[TaskMuxTranscriptEntry],
     width: u16,
@@ -1525,6 +1571,9 @@ fn render_task_transcript_lines(
                     TaskRuntimeNoteLevel::Error => ("! ", theme::status::danger()),
                 };
                 all_lines.extend(wrap_mux_text(&entry.text, prefix, width, style));
+            }
+            TaskMuxTranscriptEntry::Thinking(cell) => {
+                all_lines.extend(cell.display_lines(width));
             }
             TaskMuxTranscriptEntry::Assistant(cell) => {
                 all_lines.extend(cell.display_lines(width));
@@ -1679,12 +1728,15 @@ mod tests {
     use ratatui::{buffer::Buffer, layout::Rect};
     use serde_json::json;
 
-    use super::ChatWidget;
+    use super::{ChatWidget, TaskMuxTranscriptEntry, render_task_transcript_lines};
     use crate::internal::{
         ai::orchestrator::types::{
             ExecutionPlanSpec, TaskContract, TaskKind, TaskNodeStatus, TaskRuntimeEvent, TaskSpec,
         },
-        tui::{history_cell::AssistantHistoryCell, welcome_shader},
+        tui::{
+            history_cell::{AssistantHistoryCell, ThinkingHistoryCell},
+            welcome_shader,
+        },
     };
 
     fn row_text(buf: &Buffer, y: u16, width: u16) -> String {
@@ -1791,9 +1843,23 @@ mod tests {
         widget.show_dag_panel(sample_plan());
 
         let (history, dag) = widget.split_chat_layout(Rect::new(0, 0, 120, 30));
+        let dag = dag.unwrap();
 
-        assert_eq!(history.width + dag.unwrap().width, 120);
+        assert_eq!(history.width + dag.width, 120);
+        assert_eq!(dag.width, 42);
         assert!(history.width < 120);
+    }
+
+    #[test]
+    fn dag_panel_uses_thirty_five_percent_side_column() {
+        let mut widget = ChatWidget::new();
+        widget.show_dag_panel(sample_parallel_plan());
+
+        let (history, dag) = widget.split_chat_layout(Rect::new(0, 0, 140, 32));
+        let dag = dag.unwrap();
+
+        assert_eq!(history.width, 91);
+        assert_eq!(dag.width, 49);
     }
 
     #[test]
@@ -1881,12 +1947,29 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(rendered.contains("Workflow r2"));
+        assert!(rendered.contains("Workflow"));
+        assert!(rendered.contains("Plan r2"));
         assert!(rendered.contains("Thread graph"));
         assert!(rendered.contains("phase 2: start"));
         assert!(rendered.contains("I01 Implement A"));
         assert!(rendered.contains("transcript sentinel"));
         assert!(!rendered.contains("Mux r2"));
+    }
+
+    #[test]
+    fn task_transcript_renders_thinking_deltas() {
+        let mut cell = ThinkingHistoryCell::streaming();
+        cell.append("checking the failed plan step");
+        let transcript = vec![TaskMuxTranscriptEntry::Thinking(cell)];
+
+        let rendered = render_task_transcript_lines(&transcript, 80, 10)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Think"));
+        assert!(rendered.contains("checking the failed plan step"));
     }
 
     #[test]
@@ -1910,7 +1993,7 @@ mod tests {
             .join("\n");
 
         assert!(!widget.has_task_mux());
-        assert!(rendered.contains("Workflow r3"));
+        assert!(rendered.contains("Plan r3"));
         assert!(rendered.contains("new revision transcript"));
         assert!(!rendered.contains("Mux r2"));
         assert!(!rendered.contains("Implement A"));
@@ -1936,7 +2019,7 @@ mod tests {
             .join("\n");
 
         assert!(!widget.has_task_mux());
-        assert!(rendered.contains("Workflow r2"));
+        assert!(rendered.contains("Plan r2"));
         assert!(rendered.contains("verification stage"));
         assert!(!rendered.contains("Mux r2"));
     }
@@ -1960,7 +2043,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(rendered.contains("Workflow r1"));
+        assert!(rendered.contains("Plan r1"));
+        assert!(rendered.contains("1 / 2"));
         assert!(rendered.contains("Thread graph"));
         assert!(rendered.contains("plan: exec + test"));
         assert!(rendered.contains('●'));
@@ -1968,6 +2052,28 @@ mod tests {
         assert!(rendered.contains('│') || rendered.contains('─'));
         assert!(rendered.contains("I01 Analyze repository"));
         assert!(rendered.contains("G02 Fast gate"));
+    }
+
+    #[test]
+    fn dag_panel_title_progress_tracks_terminal_task_statuses() {
+        let plan = sample_plan();
+        let first_task_id = plan.tasks[0].id();
+
+        let mut widget = ChatWidget::new();
+        widget.show_dag_panel(plan);
+        widget.update_dag_task_status(first_task_id, TaskNodeStatus::Completed);
+
+        let area = Rect::new(0, 0, 120, 24);
+        let mut buf = Buffer::empty(area);
+        widget.render_chat_area(area, &mut buf);
+
+        let rendered = (0..area.height)
+            .map(|y| row_text(&buf, y, area.width))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Plan r1"));
+        assert!(rendered.contains("1 / 2"));
     }
 
     #[test]
@@ -1998,6 +2104,7 @@ mod tests {
             .join("\n");
 
         assert!(rendered.contains("Thread graph"));
+        assert!(rendered.contains("Plan r1"));
         assert!(rendered.contains("G03 Gate"));
     }
 }

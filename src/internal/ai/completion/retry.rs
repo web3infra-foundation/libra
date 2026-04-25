@@ -131,6 +131,8 @@ fn is_retryable_provider_message(message: &str) -> bool {
         "timeout",
         "timed out",
         "connection reset",
+        "error decoding response body",
+        "stream ended before a usable response",
     ]
     .iter()
     .any(|needle| msg.contains(needle))
@@ -170,6 +172,7 @@ mod tests {
             }
             Ok(CompletionResponse {
                 content: vec![AssistantContent::Text(Text { text: "ok".into() })],
+                reasoning_content: None,
                 raw_response: (),
             })
         }
@@ -195,5 +198,12 @@ mod tests {
 
         assert_eq!(response.content.len(), 1);
         assert_eq!(model.attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn retries_stream_body_decode_failures() {
+        assert!(is_retryable_provider_message(
+            "DeepSeek stream ended before a usable response: error decoding response body"
+        ));
     }
 }

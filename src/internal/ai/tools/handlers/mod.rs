@@ -10,6 +10,7 @@ pub mod request_user_input;
 pub mod shell;
 pub mod submit_intent_draft;
 pub mod submit_plan_draft;
+pub mod web_search;
 
 pub use apply_patch::ApplyPatchHandler;
 pub use grep_files::{GrepFilesHandler, SearchFilesHandler};
@@ -22,6 +23,7 @@ use serde_json::Value;
 pub use shell::ShellHandler;
 pub use submit_intent_draft::SubmitIntentDraftHandler;
 pub use submit_plan_draft::SubmitPlanDraftHandler;
+pub use web_search::WebSearchHandler;
 
 use crate::internal::ai::tools::{ToolResult, error::ToolError};
 

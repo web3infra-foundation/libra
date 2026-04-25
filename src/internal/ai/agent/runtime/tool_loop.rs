@@ -4,9 +4,9 @@ use serde_json::Value;
 
 use crate::internal::ai::{
     completion::{
-        AssistantContent, CompletionError, CompletionModel, CompletionRequest,
-        CompletionStreamEvent, CompletionThinking, CompletionUsage, CompletionUsageSummary,
-        Message, OneOrMany, ToolResult, UserContent,
+        AssistantContent, CompletionError, CompletionModel, CompletionReasoningEffort,
+        CompletionRequest, CompletionStreamEvent, CompletionThinking, CompletionUsage,
+        CompletionUsageSummary, Message, OneOrMany, ToolResult, UserContent,
     },
     hooks::{HookAction, HookRunner},
     tools::{
@@ -64,6 +64,8 @@ pub struct ToolLoopConfig {
     pub preamble: Option<String>,
     pub temperature: Option<f64>,
     pub thinking: Option<CompletionThinking>,
+    pub reasoning_effort: Option<CompletionReasoningEffort>,
+    pub stream: Option<bool>,
     /// Optional hook runner for pre/post tool-use hooks.
     pub hook_runner: Option<Arc<HookRunner>>,
     /// If set, only expose these tools to the model (agent tool restriction).
@@ -80,6 +82,8 @@ impl Default for ToolLoopConfig {
             preamble: None,
             temperature: Some(0.0),
             thinking: None,
+            reasoning_effort: None,
+            stream: None,
             hook_runner: None,
             allowed_tools: None,
             runtime_context: None,
@@ -159,6 +163,8 @@ where
             chat_history: history.clone(),
             temperature: config.temperature,
             thinking: config.thinking,
+            reasoning_effort: config.reasoning_effort,
+            stream: config.stream,
             tools: tools.clone(),
             stream_events: Some(stream_tx),
             ..Default::default()
@@ -212,6 +218,7 @@ where
             })?;
             history.push(Message::Assistant {
                 id: None,
+                reasoning_content: response.reasoning_content.clone(),
                 content: assistant_content,
             });
 
@@ -380,6 +387,7 @@ where
             })?;
             history.push(Message::Assistant {
                 id: None,
+                reasoning_content: response.reasoning_content.clone(),
                 content: assistant_content,
             });
             return Ok(ToolLoopTurn {
@@ -451,7 +459,7 @@ fn registry_tool_definitions(registry: &ToolRegistry) -> Vec<ToolDefinition> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
     use serde_json::json;
@@ -493,6 +501,7 @@ mod tests {
                             arguments: json!({"value": 1}),
                         },
                     })],
+                    reasoning_content: None,
                     raw_response: (),
                 });
             }
@@ -501,6 +510,7 @@ mod tests {
                 content: vec![AssistantContent::Text(Text {
                     text: "done".to_string(),
                 })],
+                reasoning_content: None,
                 raw_response: (),
             })
         }
@@ -594,6 +604,7 @@ mod tests {
                     content: vec![AssistantContent::Text(Text {
                         text: "hello".to_string(),
                     })],
+                    reasoning_content: None,
                     raw_response: (),
                 })
             }
@@ -659,6 +670,7 @@ mod tests {
                     content: vec![AssistantContent::Text(Text {
                         text: "done".to_string(),
                     })],
+                    reasoning_content: None,
                     raw_response: (),
                 })
             }
@@ -713,6 +725,8 @@ mod tests {
                 preamble: None,
                 temperature: Some(0.0),
                 thinking: None,
+                reasoning_effort: None,
+                stream: None,
                 hook_runner: None,
                 allowed_tools: None,
                 runtime_context: None,
@@ -739,6 +753,100 @@ mod tests {
         assert!(matches!(&turn.history[1], Message::Assistant { .. }));
         assert!(matches!(&turn.history[2], Message::User { .. }));
         assert!(matches!(&turn.history[3], Message::Assistant { .. }));
+    }
+
+    #[tokio::test]
+    async fn tool_loop_preserves_assistant_reasoning_content_for_tool_followup() {
+        #[derive(Clone)]
+        struct ReasoningToolModel {
+            seen_followup_reasoning: Arc<Mutex<Vec<Option<String>>>>,
+        }
+
+        impl CompletionModel for ReasoningToolModel {
+            type Response = ();
+
+            async fn completion(
+                &self,
+                request: CompletionRequest,
+            ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+                let has_tool_result = request.chat_history.iter().any(|msg| match msg {
+                    Message::User { content } => content
+                        .iter()
+                        .any(|item| matches!(item, UserContent::ToolResult(_))),
+                    _ => false,
+                });
+
+                if has_tool_result {
+                    let reasoning = request.chat_history.iter().find_map(|msg| match msg {
+                        Message::Assistant {
+                            reasoning_content, ..
+                        } => reasoning_content.clone(),
+                        _ => None,
+                    });
+                    self.seen_followup_reasoning.lock().unwrap().push(reasoning);
+
+                    return Ok(CompletionResponse {
+                        content: vec![AssistantContent::Text(Text {
+                            text: "done".to_string(),
+                        })],
+                        reasoning_content: Some("final reasoning".to_string()),
+                        raw_response: (),
+                    });
+                }
+
+                Ok(CompletionResponse {
+                    content: vec![AssistantContent::ToolCall(ToolCall {
+                        id: "call_1".to_string(),
+                        name: "mock_tool".to_string(),
+                        function: Function {
+                            name: "mock_tool".to_string(),
+                            arguments: json!({"value": 1}),
+                        },
+                    })],
+                    reasoning_content: Some("need tool result".to_string()),
+                    raw_response: (),
+                })
+            }
+        }
+
+        let seen_followup_reasoning = Arc::new(Mutex::new(Vec::new()));
+        let model = ReasoningToolModel {
+            seen_followup_reasoning: Arc::clone(&seen_followup_reasoning),
+        };
+        let temp_dir = TempDir::new().unwrap();
+        let mut registry = ToolRegistry::with_working_dir(temp_dir.path().to_path_buf());
+        registry.register("mock_tool", Arc::new(MockHandler));
+
+        let turn = run_tool_loop_with_history_and_observer(
+            &model,
+            Vec::new(),
+            "hello",
+            &registry,
+            ToolLoopConfig::default(),
+            &mut RecordingObserver::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(turn.final_text, "done");
+        assert_eq!(
+            seen_followup_reasoning.lock().unwrap().as_slice(),
+            &[Some("need tool result".to_string())]
+        );
+        assert!(matches!(
+            &turn.history[1],
+            Message::Assistant {
+                reasoning_content: Some(reasoning),
+                ..
+            } if reasoning == "need tool result"
+        ));
+        assert!(matches!(
+            &turn.history[3],
+            Message::Assistant {
+                reasoning_content: Some(reasoning),
+                ..
+            } if reasoning == "final reasoning"
+        ));
     }
 
     #[tokio::test]
@@ -855,6 +963,7 @@ mod tests {
                                 arguments: json!({}),
                             },
                         })],
+                        reasoning_content: None,
                         raw_response: (),
                     });
                 }
@@ -863,6 +972,7 @@ mod tests {
                     content: vec![AssistantContent::Text(Text {
                         text: "handled error".to_string(),
                     })],
+                    reasoning_content: None,
                     raw_response: (),
                 })
             }
@@ -882,6 +992,8 @@ mod tests {
                 preamble: None,
                 temperature: Some(0.0),
                 thinking: None,
+                reasoning_effort: None,
+                stream: None,
                 hook_runner: None,
                 allowed_tools: None,
                 runtime_context: None,
@@ -952,6 +1064,8 @@ mod tests {
                 preamble: None,
                 temperature: Some(0.0),
                 thinking: None,
+                reasoning_effort: None,
+                stream: None,
                 hook_runner: None,
                 allowed_tools: Some(vec!["other_tool".to_string()]),
                 runtime_context: None,
@@ -997,6 +1111,7 @@ mod tests {
                             arguments: json!({"value": 1}),
                         },
                     })],
+                    reasoning_content: None,
                     raw_response: (),
                 })
             }
@@ -1046,6 +1161,7 @@ mod tests {
                             arguments: json!({"value": 7}),
                         },
                     })],
+                    reasoning_content: None,
                     raw_response: (),
                 })
             }

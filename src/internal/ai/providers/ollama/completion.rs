@@ -701,6 +701,7 @@ fn ollama_response_to_chat_response(response: OllamaResponse, response_id: Strin
             index: 0,
             message: ChatMessage::Assistant {
                 content,
+                reasoning_content: None,
                 tool_calls,
             },
             finish_reason,
@@ -1004,6 +1005,7 @@ impl CompletionModelTrait for Model {
         if let Some(choice) = ollama_response.choices.first()
             && let ChatMessage::Assistant {
                 content,
+                reasoning_content: _,
                 tool_calls,
             } = &choice.message
         {
@@ -1042,6 +1044,7 @@ impl CompletionModelTrait for Model {
         let content = match &choice.message {
             ChatMessage::Assistant {
                 content,
+                reasoning_content: _,
                 tool_calls,
             } => {
                 let mut parsed = Vec::new();
@@ -1078,6 +1081,7 @@ impl CompletionModelTrait for Model {
 
         Ok(CompletionResponse {
             content,
+            reasoning_content: None,
             raw_response: ollama_response,
         })
     }
@@ -1344,6 +1348,7 @@ mod tests {
                 Message::user("Read Cargo.toml"),
                 Message::Assistant {
                     id: None,
+                    reasoning_content: None,
                     content: OneOrMany::One(AssistantContent::ToolCall(ToolCall {
                         id: "call_1".to_string(),
                         name: "read_file".to_string(),
@@ -1548,6 +1553,7 @@ mod tests {
         let content = match &response.choices[0].message {
             ChatMessage::Assistant {
                 content,
+                reasoning_content: _,
                 tool_calls,
             } => {
                 assert_eq!(content.as_deref(), Some("done"));
@@ -1600,6 +1606,8 @@ mod tests {
             tools: vec![],
             documents: vec![],
             thinking: None,
+            reasoning_effort: None,
+            stream: None,
             stream_events: None,
         };
 
@@ -1664,6 +1672,7 @@ mod tests {
                 Message::user("Read Cargo.toml, then say OK."),
                 Message::Assistant {
                     id: None,
+                    reasoning_content: None,
                     content: OneOrMany::One(AssistantContent::ToolCall(ToolCall {
                         id: "call_1".to_string(),
                         name: "read_file".to_string(),
@@ -1697,6 +1706,8 @@ mod tests {
             }],
             documents: vec![],
             thinking: None,
+            reasoning_effort: None,
+            stream: None,
             stream_events: None,
         };
 

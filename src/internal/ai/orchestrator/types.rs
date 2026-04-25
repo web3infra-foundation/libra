@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use super::run_state::RunStateSnapshot;
 use crate::internal::ai::{
+    agent::ToolLoopConfig,
     completion::CompletionUsageSummary,
     intentspec::types::{ChangeLogEntry, Check},
     mcp::server::LibraMcpServer,
@@ -548,6 +549,7 @@ pub enum TaskRuntimeEvent {
         level: TaskRuntimeNoteLevel,
         text: String,
     },
+    ThinkingDelta(String),
     AssistantMessage(String),
     ToolCallBegin {
         call_id: String,
@@ -618,6 +620,8 @@ pub struct OrchestratorConfig {
     /// Note: This field is currently unused. The checkpoint/resume feature needs to be
     /// redesigned around userspace-fs change tracking. dagrs-native resume remains disabled.
     pub dagrs_resume_checkpoint_id: Option<String>,
+    /// Base tool-loop configuration inherited by task and reviewer execution.
+    pub tool_loop_config: ToolLoopConfig,
     /// System prompt injected into each task's tool loop (e.g. coder agent prompt).
     pub coder_preamble: Option<String>,
     /// Optional system prompt for the reviewer pass.
