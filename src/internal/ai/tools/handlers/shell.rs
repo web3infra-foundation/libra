@@ -97,10 +97,11 @@ impl ToolHandler for ShellHandler {
             ToolError::ExecutionFailed(format!("failed to snapshot workspace: {err}"))
         })?;
 
+        let command_for_error = args.command.clone();
         let output = run_shell_command_with_approval(ShellCommandRequest {
             call_id,
             command: args.command,
-            cwd,
+            cwd: cwd.clone(),
             timeout_ms: args.timeout_ms,
             max_output_bytes,
             sandbox,
@@ -109,7 +110,17 @@ impl ToolHandler for ShellHandler {
             justification: args.justification,
         })
         .await
-        .map_err(ToolError::ExecutionFailed)?;
+        .map_err(|err| {
+            // Surface the command and cwd so the LLM has full context when the
+            // sandbox refuses to execute, rather than just a bare runtime
+            // error string.
+            ToolError::ExecutionFailed(format!(
+                "shell sandbox refused command (cwd={}): {}\ncommand: {}",
+                cwd.display(),
+                err,
+                command_for_error
+            ))
+        })?;
         let final_snapshot = snapshot_workspace(&working_dir).map_err(|err| {
             ToolError::ExecutionFailed(format!(
                 "failed to inspect workspace changes after shell command: {err}"

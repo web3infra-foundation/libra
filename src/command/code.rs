@@ -278,6 +278,14 @@ impl From<DeepSeekReasoningEffortArg> for CompletionReasoningEffort {
 pub enum CodeApprovalPolicy {
     /// Never prompt; dangerous commands are rejected.
     Never,
+    /// Never prompt; allow every command for this interactive session.
+    #[value(
+        alias = "allow-all",
+        alias = "allow_all",
+        alias = "always",
+        alias = "accept"
+    )]
+    AllowAll,
     /// Prompt only when retrying after sandbox denial.
     #[value(alias = "on-failure")]
     OnFailure,
@@ -304,12 +312,19 @@ impl CodeNetworkAccess {
     }
 }
 
+impl CodeApprovalPolicy {
+    fn allows_all_commands(self) -> bool {
+        matches!(self, Self::AllowAll)
+    }
+}
+
 /// Maps the user-facing [`CodeApprovalPolicy`] to the internal [`AskForApproval`]
 /// enum used by the sandbox/approval subsystem.
 impl From<CodeApprovalPolicy> for AskForApproval {
     fn from(value: CodeApprovalPolicy) -> Self {
         match value {
             CodeApprovalPolicy::Never => AskForApproval::Never,
+            CodeApprovalPolicy::AllowAll => AskForApproval::OnRequest,
             CodeApprovalPolicy::OnFailure => AskForApproval::OnFailure,
             CodeApprovalPolicy::OnRequest => AskForApproval::OnRequest,
             CodeApprovalPolicy::Untrusted => AskForApproval::UnlessTrusted,
@@ -400,6 +415,7 @@ pub struct CodeArgs {
 
     /// Tool approval policy:
     /// - `never`: no prompts, dangerous commands are rejected
+    /// - `allow-all`: no prompts, all commands are allowed for this session
     /// - `on-failure`: prompt only for retry outside sandbox after sandbox denial
     /// - `on-request`: run sandboxed by default; prompt for escalation/policy-required cases
     /// - `untrusted`: prompt for non-trusted operations, auto-allow known-safe reads
@@ -834,6 +850,7 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
         context: args.context,
         resume_thread_id,
         approval_policy: args.approval_policy.into(),
+        allow_all_commands: args.approval_policy.allows_all_commands(),
         network_access: args.network_access.is_allowed(),
         user_input_rx,
         exec_approval_rx,
@@ -1125,7 +1142,7 @@ async fn start_codex_code_ui_runtime(
 /// Codex only distinguishes between "accept" (auto-approve) and "ask" (prompt).
 fn approval_policy_to_codex(policy: CodeApprovalPolicy) -> &'static str {
     match policy {
-        CodeApprovalPolicy::Never => "accept",
+        CodeApprovalPolicy::Never | CodeApprovalPolicy::AllowAll => "accept",
         CodeApprovalPolicy::OnFailure
         | CodeApprovalPolicy::OnRequest
         | CodeApprovalPolicy::Untrusted => "ask",
@@ -1344,6 +1361,7 @@ struct TuiLaunchConfig {
     context: Option<CodeContext>,
     resume_thread_id: Option<String>,
     approval_policy: AskForApproval,
+    allow_all_commands: bool,
     network_access: bool,
     user_input_rx: tokio::sync::mpsc::UnboundedReceiver<UserInputRequest>,
     exec_approval_rx: tokio::sync::mpsc::UnboundedReceiver<ExecApprovalRequest>,
@@ -1560,6 +1578,7 @@ where
             registry.working_dir(),
             params.context,
             params.approval_policy,
+            params.allow_all_commands,
             params.network_access,
             params.exec_approval_tx.clone(),
         )),
@@ -1841,6 +1860,7 @@ fn default_tui_runtime_context(
     working_dir: &std::path::Path,
     context: Option<CodeContext>,
     approval_policy: AskForApproval,
+    allow_all_commands: bool,
     network_access: bool,
     exec_approval_tx: tokio::sync::mpsc::UnboundedSender<ExecApprovalRequest>,
 ) -> ToolRuntimeContext {
@@ -1854,6 +1874,11 @@ fn default_tui_runtime_context(
         },
     };
 
+    let mut approval_store = ApprovalStore::default();
+    if allow_all_commands {
+        approval_store.approve_all_commands();
+    }
+
     ToolRuntimeContext {
         sandbox: Some(ToolSandboxContext {
             policy,
@@ -1863,7 +1888,7 @@ fn default_tui_runtime_context(
         approval: Some(ToolApprovalContext {
             policy: approval_policy,
             request_tx: exec_approval_tx,
-            store: Arc::new(tokio::sync::Mutex::new(ApprovalStore::default())),
+            store: Arc::new(tokio::sync::Mutex::new(approval_store)),
         }),
         max_output_bytes: None,
     }
@@ -2238,6 +2263,19 @@ mod tests {
     }
 
     #[test]
+    fn accepts_allow_all_approval_policy_in_tui_mode() {
+        let args = CodeArgs::try_parse_from(["libra", "--approval-policy", "allow-all"]).unwrap();
+
+        assert_eq!(args.approval_policy, CodeApprovalPolicy::AllowAll);
+        assert!(args.approval_policy.allows_all_commands());
+        assert_eq!(
+            AskForApproval::from(args.approval_policy),
+            AskForApproval::OnRequest
+        );
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
     fn rejects_network_access_cli_arg_with_invalid_value() {
         let result = CodeArgs::try_parse_from(["libra", "--network-access", "sometimes"]);
 
@@ -2484,6 +2522,7 @@ mod tests {
             Some(CodeContext::Dev),
             AskForApproval::OnRequest,
             false,
+            false,
             tx,
         );
 
@@ -2505,6 +2544,7 @@ mod tests {
             Path::new("/tmp/workspace"),
             Some(CodeContext::Dev),
             AskForApproval::OnRequest,
+            false,
             true,
             tx,
         );
@@ -2520,6 +2560,24 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn default_tui_runtime_context_can_allow_all_commands() {
+        let (tx, _rx) = unbounded_channel();
+        let runtime = default_tui_runtime_context(
+            Path::new("/tmp/workspace"),
+            Some(CodeContext::Dev),
+            AskForApproval::OnRequest,
+            true,
+            true,
+            tx,
+        );
+
+        let approval = runtime
+            .approval
+            .expect("approval context should be present");
+        assert!(approval.store.lock().await.allow_all_commands());
+    }
+
     #[test]
     fn default_tui_runtime_context_is_read_only_for_review_and_research() {
         for context in [CodeContext::Review, CodeContext::Research] {
@@ -2528,6 +2586,7 @@ mod tests {
                 Path::new("/tmp/workspace"),
                 Some(context),
                 AskForApproval::OnRequest,
+                false,
                 true,
                 tx,
             );

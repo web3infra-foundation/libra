@@ -17,7 +17,7 @@ use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use super::{
-    acl::{AclVerdict, check_tool_acl},
+    acl::{AclVerdict, cargo_lock_companion_allowed, check_tool_acl},
     checkpoint_policy::dagrs_checkpointing_enabled,
     gate, policy,
     run_state::{RunStateSnapshot, RunStateStore},
@@ -26,6 +26,7 @@ use super::{
         TaskKind, TaskNodeStatus, TaskResult, TaskRuntimeEvent, TaskRuntimeNoteLevel,
         TaskRuntimePhase, TaskSpec, ToolCallRecord,
     },
+    workspace::{detect_contract_violations, format_contract_violation_message},
 };
 use crate::internal::ai::{
     agent::{ToolLoopConfig, ToolLoopObserver, run_tool_loop_with_history_and_observer},
@@ -41,6 +42,7 @@ use crate::internal::ai::{
         NetworkAccess, SandboxPermissions, SandboxPolicy, ToolRuntimeContext, ToolSandboxContext,
     },
     tools::{ToolOutput, registry::ToolRegistry},
+    workspace_snapshot::WorkspaceSnapshot,
 };
 
 /// Configuration for task execution.
@@ -54,7 +56,14 @@ pub struct ExecutorConfig {
     pub reviewer_preamble: Option<String>,
     pub dagrs_resume_checkpoint_id: Option<String>,
     pub observer: Option<Arc<dyn OrchestratorObserver>>,
+    /// Pre-execution snapshot of the worktree this task runs in. When present,
+    /// `execute_task` validates the contract immediately after reviewer approval
+    /// so out-of-scope writes surface as retryable feedback to the LLM instead
+    /// of escaping as terminal sync-back failures that force a replan.
+    pub(crate) workspace_baseline: Option<Arc<WorkspaceSnapshot>>,
 }
+
+const NO_CHANGES_NEEDED_TOKEN: &str = "[NO_CHANGES_NEEDED]";
 
 struct TaskExecutionObserver {
     spec: Arc<IntentSpec>,
@@ -274,6 +283,7 @@ where
         let tool_loop_config = ToolLoopConfig {
             allowed_tools: Some(allowed_tools.clone()),
             runtime_context: Some(runtime_context.clone()),
+            max_turns: Some(config.tool_loop_config.max_turns.unwrap_or(24)),
             ..config.tool_loop_config.clone()
         };
         let attempt_prompt = match retry_feedback.as_deref() {
@@ -308,9 +318,11 @@ where
                         TaskRuntimeEvent::AssistantMessage(turn.final_text.clone()),
                     );
                 }
-                if let Some(reason) =
-                    implementation_missing_write_output(task, &accumulated_tool_calls)
-                {
+                if let Some(reason) = implementation_missing_write_output(
+                    task,
+                    &accumulated_tool_calls,
+                    turn.final_text.as_str(),
+                ) {
                     (
                         Some(reason.clone()),
                         tool_calls,
@@ -367,6 +379,19 @@ where
                             policy_violations,
                             format!("review rejected: {}", review.summary),
                             Some(review.clone()),
+                        )
+                    } else if let Some(violation_message) = workspace_contract_failure(task, config)
+                    {
+                        // Surface workspace contract violations (e.g. files
+                        // modified outside the touch_files contract) to the LLM
+                        // so it can correct course on the next attempt rather
+                        // than failing terminally during sync-back.
+                        (
+                            Some(turn.final_text),
+                            tool_calls,
+                            policy_violations,
+                            violation_message,
+                            review,
                         )
                     } else {
                         return TaskResult {
@@ -448,22 +473,68 @@ where
     }
 }
 
+fn workspace_contract_failure(task: &TaskSpec, config: &ExecutorConfig) -> Option<String> {
+    let baseline = config.workspace_baseline.as_ref()?;
+    match detect_contract_violations(
+        &config.working_dir,
+        baseline,
+        &task.contract.touch_files,
+        &task.scope_in,
+        &task.scope_out,
+    ) {
+        Ok(violations) if violations.is_empty() => None,
+        Ok(violations) => {
+            let detail = format_contract_violation_message(&violations);
+            Some(format!(
+                "workspace contract violation detected before sync-back. Revert or move these changes back inside the declared contract before reporting completion.\n{detail}"
+            ))
+        }
+        Err(err) => Some(format!(
+            "failed to inspect workspace before sync-back: {err}. Investigate the workspace state and retry."
+        )),
+    }
+}
+
 fn implementation_missing_write_output(
     task: &TaskSpec,
     tool_calls: &[ToolCallRecord],
+    agent_output: &str,
 ) -> Option<String> {
     if task.kind != TaskKind::Implementation {
         return None;
     }
 
-    let has_successful_write = tool_calls
-        .iter()
-        .any(|call| call.success && (!call.paths_written.is_empty() || !call.diffs.is_empty()));
+    if has_successful_write(tool_calls) {
+        return None;
+    }
 
-    (!has_successful_write).then(|| {
-        "implementation task completed without writing any files; use apply_patch or an allowed shell write to create or modify the expected project files before reporting completion"
-            .to_string()
+    if agent_declared_no_changes_needed(agent_output) && has_noop_evidence(tool_calls) {
+        return None;
+    }
+
+    Some(format!(
+        "implementation task completed without writing any files; use apply_patch or an allowed shell write to create or modify the expected project files before reporting completion. If you verified that no change is needed or the write scope is wrong, explain the evidence and end the final response with {NO_CHANGES_NEEDED_TOKEN}"
+    ))
+}
+
+fn has_successful_write(tool_calls: &[ToolCallRecord]) -> bool {
+    tool_calls
+        .iter()
+        .any(|call| call.success && (!call.paths_written.is_empty() || !call.diffs.is_empty()))
+}
+
+fn has_noop_evidence(tool_calls: &[ToolCallRecord]) -> bool {
+    tool_calls.iter().any(|call| {
+        call.success
+            && call.paths_written.is_empty()
+            && call.diffs.is_empty()
+            && (!call.paths_read.is_empty()
+                || matches!(call.action.as_str(), "read" | "query" | "execute"))
     })
+}
+
+fn agent_declared_no_changes_needed(agent_output: &str) -> bool {
+    agent_output.trim_end().ends_with(NO_CHANGES_NEEDED_TOKEN)
 }
 
 async fn execute_gate_task(
@@ -624,6 +695,7 @@ where
             &config.spec,
             config.tool_loop_config.runtime_context.as_ref(),
         )),
+        max_turns: Some(config.tool_loop_config.max_turns.unwrap_or(8)),
         ..config.tool_loop_config.clone()
     };
 
@@ -737,12 +809,14 @@ where
         Err(err) => return task_workspace_failure(task, err),
     };
     let task_worktree_root = environment.root().to_path_buf();
+    let baseline = environment.baseline_snapshot();
 
     let task_registry = Arc::new(registry.clone_with_working_dir(task_worktree_root.clone()));
     let mut task_config = config.clone();
     task_config.working_dir = task_worktree_root.clone();
     task_config.tool_loop_config =
         clone_tool_loop_config_for_workdir(&config.tool_loop_config, &task_worktree_root);
+    task_config.workspace_baseline = Some(Arc::new(baseline));
     if let Some(observer) = &config.observer {
         observer.on_task_runtime_event(
             task,
@@ -774,10 +848,20 @@ where
         match sync_result {
             Ok(()) => {}
             Err(err) => {
-                result.status = TaskNodeStatus::Failed;
-                result.agent_output = Some(format!(
+                let detail = format!(
                     "task completed in isolated worktree but failed to sync changes back: {err}"
-                ));
+                );
+                if let Some(observer) = &config.observer {
+                    observer.on_task_runtime_event(
+                        task,
+                        TaskRuntimeEvent::Note {
+                            level: TaskRuntimeNoteLevel::Error,
+                            text: detail.clone(),
+                        },
+                    );
+                }
+                result.status = TaskNodeStatus::Failed;
+                result.agent_output = Some(detail);
             }
         }
     }
@@ -1481,10 +1565,9 @@ fn build_task_prompt(task: &TaskSpec, working_dir: &Path, allowed_tools: &[Strin
     }
 
     if task.kind == TaskKind::Implementation {
-        parts.push(
-            "## Completion Requirement\nBefore reporting completion, use apply_patch or an allowed shell command that creates or modifies at least one in-scope project file. If no file change is needed or the write scope is wrong, report the mismatch instead of claiming the task is complete."
-                .to_string(),
-        );
+        parts.push(format!(
+            "## Completion Requirement\nBefore reporting completion, use apply_patch or an allowed shell command that creates or modifies at least one in-scope project file. If no file change is needed or the write scope is wrong, first use read-only tools or verification commands to gather evidence, then explain the evidence and end your final response with {NO_CHANGES_NEEDED_TOKEN}. Do not use {NO_CHANGES_NEEDED_TOKEN} without tool-based evidence."
+        ));
     }
 
     if !task.constraints().is_empty() {
@@ -1496,6 +1579,17 @@ fn build_task_prompt(task: &TaskSpec, working_dir: &Path, allowed_tools: &[Strin
                 .collect::<Vec<_>>()
                 .join("\n")
         ));
+    }
+
+    if task
+        .constraints()
+        .iter()
+        .any(|constraint| constraint == "dependency-policy:no-new")
+    {
+        parts.push(
+            "## Dependency Policy\nDo not add new third-party dependencies or edit dependency manifests to introduce new crates/packages. Prefer the standard library or dependencies already present in the project. If the requested task truly requires a new dependency, report the policy mismatch instead of adding it."
+                .to_string(),
+        );
     }
 
     if task.kind == TaskKind::Analysis {
@@ -1515,12 +1609,23 @@ fn build_reviewer_prompt(
     working_dir: &Path,
     allowed_tools: &[String],
 ) -> String {
-    let touched_files = tool_calls
+    let raw_touched: std::collections::BTreeSet<String> = tool_calls
         .iter()
         .flat_map(|call| call.paths_written.iter().cloned())
-        .collect::<std::collections::BTreeSet<_>>()
+        .collect();
+    // Auto-generated companion files (e.g. Cargo.lock that pairs with an
+    // in-contract Cargo.toml) are accepted by sync-back; surfacing them to the
+    // reviewer caused spurious rejections that triggered endless replans.
+    let companion_scope: Vec<String> = task
+        .contract
+        .touch_files
+        .iter()
+        .chain(task.scope_in.iter())
+        .cloned()
+        .collect();
+    let (touched_files, generated_companions): (Vec<String>, Vec<String>) = raw_touched
         .into_iter()
-        .collect::<Vec<_>>();
+        .partition(|path| !cargo_lock_companion_allowed(&companion_scope, path));
 
     let mut parts = vec![
         format!("## Review Task\n{}", task.title()),
@@ -1538,9 +1643,16 @@ fn build_reviewer_prompt(
         parts.push(format!("## Touched Files\n{}", touched_files.join(", ")));
     }
 
+    if !generated_companions.is_empty() {
+        parts.push(format!(
+            "## Auto-Generated Companions\n{}\nThese were produced as side effects of in-contract files (e.g. Cargo.lock for an in-contract Cargo.toml). The runtime accepts them; do not treat them as contract violations.",
+            generated_companions.join(", ")
+        ));
+    }
+
     if !task.contract.touch_files.is_empty() {
         parts.push(format!(
-            "## Write Contract\nOnly these paths may be modified:\n{}\nReject the candidate if Touched Files contains any path outside this list.",
+            "## Write Contract\nOnly these paths may be modified:\n{}\nReject the candidate only if Touched Files contains a path outside this list. Auto-generated companions listed above do not count as out-of-contract writes.",
             task.contract
                 .touch_files
                 .iter()
@@ -1906,7 +2018,10 @@ mod tests {
             },
             intentspec::{profiles, types::*},
             orchestrator::types::{ExecutionPlanSpec, TaskContract, TaskKind, TaskSpec},
-            tools::{handlers::ApplyPatchHandler, registry::ToolRegistry},
+            tools::{
+                handlers::{ApplyPatchHandler, ShellHandler},
+                registry::ToolRegistry,
+            },
         },
         utils::test,
     };
@@ -2293,6 +2408,50 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct CargoInitShellModel;
+
+    impl CompletionModel for CargoInitShellModel {
+        type Response = ();
+
+        async fn completion(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+            let has_tool_result = request.chat_history.iter().any(|message| match message {
+                Message::User { content } => content
+                    .iter()
+                    .any(|item| matches!(item, UserContent::ToolResult(_))),
+                _ => false,
+            });
+            if has_tool_result {
+                return Ok(CompletionResponse {
+                    content: vec![AssistantContent::Text(Text {
+                        text: "created cargo project".to_string(),
+                    })],
+                    reasoning_content: None,
+                    raw_response: (),
+                });
+            }
+
+            Ok(CompletionResponse {
+                content: vec![AssistantContent::ToolCall(ToolCall {
+                    id: "call_cargo_init".to_string(),
+                    name: "shell".to_string(),
+                    function: Function {
+                        name: "shell".to_string(),
+                        arguments: serde_json::json!({
+                            "command": "cargo init libra --vcs none && cargo build --manifest-path libra/Cargo.toml",
+                            "timeout_ms": 120000
+                        }),
+                    },
+                })],
+                reasoning_content: None,
+                raw_response: (),
+            })
+        }
+    }
+
     struct RecordingObserver {
         events: Arc<Mutex<Vec<String>>>,
     }
@@ -2650,6 +2809,7 @@ mod tests {
             reviewer_preamble: None,
             dagrs_resume_checkpoint_id: None,
             observer: None,
+            workspace_baseline: None,
         };
         let registry = ToolRegistry::new();
         let model = MockModel {
@@ -2683,6 +2843,7 @@ mod tests {
             reviewer_preamble: None,
             dagrs_resume_checkpoint_id: None,
             observer: None,
+            workspace_baseline: None,
         };
         let task = implementation_task();
         let result = execute_task(&task, &SrcMainPatchModel, &registry, &config).await;
@@ -2710,6 +2871,7 @@ mod tests {
             reviewer_preamble: None,
             dagrs_resume_checkpoint_id: None,
             observer: None,
+            workspace_baseline: None,
         };
         let task = implementation_task();
 
@@ -2742,6 +2904,7 @@ mod tests {
             reviewer_preamble: None,
             dagrs_resume_checkpoint_id: None,
             observer: None,
+            workspace_baseline: None,
         };
 
         let result = execute_task(
@@ -2776,6 +2939,7 @@ mod tests {
             reviewer_preamble: None,
             dagrs_resume_checkpoint_id: None,
             observer: None,
+            workspace_baseline: None,
         };
         let plan = plan_for_tasks(vec![implementation_task()], 1);
         let model = MockModel {
@@ -2818,6 +2982,7 @@ mod tests {
             reviewer_preamble: None,
             dagrs_resume_checkpoint_id: None,
             observer: None,
+            workspace_baseline: None,
         };
 
         let plan = plan_for_tasks(
@@ -2850,6 +3015,59 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn execute_dag_syncs_cargo_project_without_treating_lockfile_or_target_as_scope_creep() {
+        let repo = tempfile::tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+
+        let mut registry = ToolRegistry::with_working_dir(repo.path().to_path_buf());
+        registry.register("shell", Arc::new(ShellHandler));
+        let registry = Arc::new(registry);
+
+        let config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig::default(),
+            max_retries: 0,
+            backoff_seconds: 0,
+            working_dir: repo.path().to_path_buf(),
+            spec: spec(),
+            reviewer_preamble: None,
+            dagrs_resume_checkpoint_id: None,
+            observer: None,
+            workspace_baseline: None,
+        };
+
+        let mut task = scoped_implementation_task("Initialize Cargo project", "libra/Cargo.toml");
+        task.task.set_description(Some(
+            "Initialize a Cargo project named libra and verify it builds".into(),
+        ));
+        task.scope_in = vec!["libra/".into()];
+        task.contract.write_scope = vec!["libra/".into()];
+        task.contract.touch_files = vec!["libra/Cargo.toml".into(), "libra/src/main.rs".into()];
+        task.contract.expected_outputs = vec![
+            "libra/Cargo.toml exists".into(),
+            "libra/src/main.rs exists".into(),
+            "cargo build succeeds".into(),
+        ];
+
+        let run_state = execute_dag(
+            &plan_for_tasks(vec![task], 1),
+            &CargoInitShellModel,
+            &registry,
+            &config,
+        )
+        .await
+        .unwrap();
+
+        let result = &run_state.ordered_task_results()[0];
+        assert_eq!(result.status, TaskNodeStatus::Completed);
+        assert!(result.policy_violations.is_empty());
+        assert!(repo.path().join("libra/Cargo.toml").exists());
+        assert!(repo.path().join("libra/src/main.rs").exists());
+        assert!(repo.path().join("libra/Cargo.lock").exists());
+        assert!(!repo.path().join("libra/target/.rustc_info.json").exists());
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn execute_dag_keeps_main_workspace_clean_when_serial_task_fails() {
         let repo = tempfile::tempdir().unwrap();
         test::setup_with_new_libra_in(repo.path()).await;
@@ -2868,6 +3086,7 @@ mod tests {
             reviewer_preamble: None,
             dagrs_resume_checkpoint_id: None,
             observer: None,
+            workspace_baseline: None,
         };
 
         let plan = plan_for_tasks(vec![scoped_implementation_task("Task A", "task_a.txt")], 1);
@@ -2899,8 +3118,10 @@ mod tests {
 
     #[test]
     fn task_prompt_marks_touch_files_as_hard_write_contract() {
+        let mut task = implementation_task();
+        task.task.add_constraint("dependency-policy:no-new");
         let prompt = build_task_prompt(
-            &implementation_task(),
+            &task,
             Path::new("/tmp/workspace"),
             &["read_file".into(), "apply_patch".into()],
         );
@@ -2918,7 +3139,158 @@ mod tests {
         assert!(prompt.contains("verification commands are owned by gate tasks"));
         assert!(prompt.contains("## Completion Requirement"));
         assert!(prompt.contains("Before reporting completion"));
+        assert!(prompt.contains(NO_CHANGES_NEEDED_TOKEN));
+        assert!(prompt.contains("without tool-based evidence"));
+        assert!(prompt.contains("## Dependency Policy"));
+        assert!(prompt.contains("Do not add new third-party dependencies"));
         assert!(prompt.contains("src/main.rs"));
+    }
+
+    #[test]
+    fn implementation_task_allows_no_changes_needed_with_evidence() {
+        let record = ToolCallRecord {
+            tool_name: "read_file".into(),
+            action: "read".into(),
+            paths_read: vec!["src/main.rs".into()],
+            success: true,
+            ..ToolCallRecord::default()
+        };
+
+        assert_eq!(
+            implementation_missing_write_output(
+                &implementation_task(),
+                &[record],
+                &format!("Already correct. {NO_CHANGES_NEEDED_TOKEN}"),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn implementation_task_rejects_no_changes_needed_without_evidence() {
+        let reason = implementation_missing_write_output(
+            &implementation_task(),
+            &[],
+            &format!("Already correct. {NO_CHANGES_NEEDED_TOKEN}"),
+        )
+        .unwrap();
+
+        assert!(reason.contains("without writing any files"));
+        assert!(reason.contains(NO_CHANGES_NEEDED_TOKEN));
+    }
+
+    #[test]
+    fn implementation_task_rejects_no_changes_needed_token_not_at_end() {
+        let record = ToolCallRecord {
+            tool_name: "read_file".into(),
+            action: "read".into(),
+            paths_read: vec!["src/main.rs".into()],
+            success: true,
+            ..ToolCallRecord::default()
+        };
+
+        let reason = implementation_missing_write_output(
+            &implementation_task(),
+            &[record],
+            &format!("{NO_CHANGES_NEEDED_TOKEN} but I kept writing"),
+        )
+        .unwrap();
+
+        assert!(reason.contains("without writing any files"));
+    }
+
+    #[test]
+    fn workspace_contract_failure_detects_writes_outside_touch_files() {
+        use crate::internal::ai::workspace_snapshot::snapshot_workspace;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        let baseline = snapshot_workspace(dir.path()).unwrap();
+        std::fs::write(dir.path().join("untracked.bin"), b"junk").unwrap();
+
+        let mut config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig::default(),
+            max_retries: 0,
+            backoff_seconds: 0,
+            working_dir: dir.path().to_path_buf(),
+            spec: spec(),
+            reviewer_preamble: None,
+            dagrs_resume_checkpoint_id: None,
+            observer: None,
+            workspace_baseline: None,
+        };
+        // Without baseline, the precheck is a no-op.
+        assert!(workspace_contract_failure(&implementation_task(), &config).is_none());
+
+        config.workspace_baseline = Some(Arc::new(baseline));
+        let message =
+            workspace_contract_failure(&implementation_task(), &config).expect("violation");
+        assert!(message.contains("workspace contract violation"));
+        assert!(
+            message.contains("untracked.bin"),
+            "expected violating path in message: {}",
+            message
+        );
+    }
+
+    #[test]
+    fn workspace_contract_failure_accepts_cargo_lock_companion_via_absolute_touch_file() {
+        use crate::internal::ai::workspace_snapshot::snapshot_workspace;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        let baseline = snapshot_workspace(dir.path()).unwrap();
+        std::fs::write(dir.path().join("Cargo.lock"), "# generated\n").unwrap();
+
+        let mut task = implementation_task();
+        task.contract.touch_files = vec![
+            "/some/abs/Cargo.toml".into(),
+            "/some/abs/src/main.rs".into(),
+        ];
+        task.scope_in = vec![];
+
+        let config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig::default(),
+            max_retries: 0,
+            backoff_seconds: 0,
+            working_dir: dir.path().to_path_buf(),
+            spec: spec(),
+            reviewer_preamble: None,
+            dagrs_resume_checkpoint_id: None,
+            observer: None,
+            workspace_baseline: Some(Arc::new(baseline)),
+        };
+
+        assert!(
+            workspace_contract_failure(&task, &config).is_none(),
+            "Cargo.lock companion should be accepted even when touch_files contain absolute Cargo.toml"
+        );
+    }
+
+    #[test]
+    fn reviewer_prompt_filters_cargo_lock_companion_into_auto_generated_section() {
+        let record = ToolCallRecord {
+            paths_written: vec!["src/main.rs".into(), "Cargo.lock".into()],
+            ..ToolCallRecord::default()
+        };
+        let mut task = implementation_task();
+        task.contract.touch_files = vec!["Cargo.toml".into(), "src/main.rs".into()];
+        let prompt = build_reviewer_prompt(
+            &task,
+            "done",
+            &[record],
+            Path::new("/tmp/workspace"),
+            &["apply_patch".to_string()],
+        );
+
+        assert!(prompt.contains("## Touched Files\nsrc/main.rs"));
+        assert!(prompt.contains("## Auto-Generated Companions\nCargo.lock"));
+        assert!(
+            !prompt.contains("## Touched Files\nCargo.lock")
+                && !prompt.contains("Cargo.lock, src/main.rs"),
+            "Cargo.lock should not appear in the Touched Files section"
+        );
     }
 
     #[test]
@@ -2989,6 +3361,23 @@ Done.";
         assert!(tools.contains(&"run_libra_vcs".to_string()));
         assert!(!tools.contains(&"shell".to_string()));
         assert!(!tools.contains(&"web_search".to_string()));
+    }
+
+    #[test]
+    fn shell_acl_exposes_shell_to_coder() {
+        let task = implementation_task();
+        let mut spec = (*spec()).clone();
+        spec.security = profiles::default_security();
+        spec.constraints.security.network_policy = NetworkPolicy::Deny;
+        spec.security.tool_acl.allow.push(ToolRule {
+            tool: "shell".into(),
+            actions: vec!["execute".into()],
+            constraints: BTreeMap::new(),
+        });
+
+        let tools = allowed_tools_for_task(&spec, &task);
+
+        assert!(tools.contains(&"shell".to_string()));
     }
 
     #[test]
@@ -3091,6 +3480,7 @@ Done.";
             observer: Some(Arc::new(RecordingObserver {
                 events: Arc::clone(&events),
             })),
+            workspace_baseline: None,
         };
 
         let a = scoped_implementation_task("A", "src/a.txt");
@@ -3149,6 +3539,7 @@ Done.";
             observer: Some(Arc::new(RecordingObserver {
                 events: Arc::clone(&events),
             })),
+            workspace_baseline: None,
         };
 
         let mut failing = implementation_task();
@@ -3215,6 +3606,7 @@ Done.";
             reviewer_preamble: None,
             dagrs_resume_checkpoint_id: None,
             observer: None,
+            workspace_baseline: None,
         };
 
         let first = implementation_task();
@@ -3288,6 +3680,7 @@ Done.";
             reviewer_preamble: None,
             dagrs_resume_checkpoint_id: Some("todo".into()),
             observer: None,
+            workspace_baseline: None,
         };
         let err = execute_dag(
             &plan,

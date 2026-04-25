@@ -184,6 +184,8 @@ impl<M: CompletionModel> ToolLoopAction<M> {
                 max_turns: None,
                 repeat_detection_window: None,
                 repeat_warning_threshold: None,
+                repeat_abort_threshold: None,
+                terminal_tools: None,
                 preserve_reasoning_content: false,
             },
         }

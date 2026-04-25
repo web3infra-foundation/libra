@@ -179,6 +179,10 @@ impl BottomPane {
                         "Approve Session".to_string(),
                         "Allow matching commands for this session".to_string(),
                     ),
+                    (
+                        "Allow All Commands".to_string(),
+                        "Allow every command for this session".to_string(),
+                    ),
                     ("Deny".to_string(), "Reject this execution".to_string()),
                     (
                         "Abort Turn".to_string(),
@@ -455,8 +459,13 @@ impl BottomPane {
     /// Return the height (in lines) the bottom pane needs for the current state.
     pub fn desired_height(&self) -> u16 {
         if self.status == AgentStatus::AwaitingApproval {
-            // status(1) + summary(3) + options(4) + help(1) = 9
-            return 9;
+            let options = self
+                .exec_approval
+                .as_ref()
+                .map(|approval| approval.options.len() as u16)
+                .unwrap_or(5);
+            // status(1) + summary(7) + options + help(1)
+            return 1 + 7 + options + 1;
         }
         if self.status == AgentStatus::AwaitingPostPlanChoice {
             // status(1) + 4 options + 1 blank + help(1) = 7
@@ -806,10 +815,10 @@ impl BottomPane {
         };
 
         let chunks = Layout::vertical([
-            Constraint::Length(1), // Status bar
-            Constraint::Length(7), // Command summary
-            Constraint::Length(4), // Options
-            Constraint::Length(1), // Help text
+            Constraint::Length(1),                             // Status bar
+            Constraint::Length(7),                             // Command summary
+            Constraint::Length(approval.options.len() as u16), // Options
+            Constraint::Length(1),                             // Help text
         ])
         .split(area);
 
@@ -887,7 +896,7 @@ impl BottomPane {
                 theme::text::primary()
             };
             option_lines.push(Line::styled(
-                format!("  {} {:<16} {}", marker, label, desc),
+                format!("  {} {:<20} {}", marker, label, desc),
                 style,
             ));
         }
@@ -1384,10 +1393,33 @@ mod tests {
     }
 
     #[test]
-    fn approval_mode_height_is_nine_lines() {
+    fn approval_mode_height_tracks_option_count() {
         let mut pane = BottomPane::new();
         pane.status = AgentStatus::AwaitingApproval;
-        assert_eq!(pane.desired_height(), 9);
+        pane.set_approval_dialog(
+            "Sandbox approval required".to_string(),
+            "cargo test".to_string(),
+            PathBuf::from("/tmp"),
+            None,
+            false,
+            "workspace-write".to_string(),
+            false,
+            Vec::new(),
+            vec![
+                ("Approve".to_string(), "Run once".to_string()),
+                (
+                    "Approve Session".to_string(),
+                    "Allow matching commands".to_string(),
+                ),
+                (
+                    "Allow All Commands".to_string(),
+                    "Allow every command".to_string(),
+                ),
+                ("Deny".to_string(), "Reject".to_string()),
+                ("Abort Turn".to_string(), "Interrupt".to_string()),
+            ],
+        );
+        assert_eq!(pane.desired_height(), 14);
     }
 
     #[test]

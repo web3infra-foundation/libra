@@ -96,7 +96,9 @@ impl ToolHandler for ApplyPatchHandler {
             .await;
 
             match decision {
-                ReviewDecision::Approved | ReviewDecision::ApprovedForSession => {}
+                ReviewDecision::Approved
+                | ReviewDecision::ApprovedForSession
+                | ReviewDecision::ApprovedForAllCommands => {}
                 ReviewDecision::Denied => {
                     return Err(ToolError::ExecutionFailed("rejected by user".to_string()));
                 }

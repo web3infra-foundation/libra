@@ -55,6 +55,7 @@ pub enum AskForApproval {
 pub enum ReviewDecision {
     Approved,
     ApprovedForSession,
+    ApprovedForAllCommands,
     #[default]
     Denied,
     Abort,
@@ -63,6 +64,7 @@ pub enum ReviewDecision {
 #[derive(Debug, Default)]
 pub struct ApprovalStore {
     map: HashMap<String, ReviewDecision>,
+    allow_all_commands: bool,
 }
 
 impl ApprovalStore {
@@ -72,6 +74,14 @@ impl ApprovalStore {
 
     pub fn put(&mut self, key: String, value: ReviewDecision) {
         self.map.insert(key, value);
+    }
+
+    pub fn allow_all_commands(&self) -> bool {
+        self.allow_all_commands
+    }
+
+    pub fn approve_all_commands(&mut self) {
+        self.allow_all_commands = true;
     }
 }
 
@@ -83,6 +93,18 @@ pub async fn request_cached_approval_with_keys<F>(
 where
     F: FnOnce(oneshot::Sender<ReviewDecision>) -> ExecApprovalRequest,
 {
+    {
+        let store = ctx.store.lock().await;
+        if store.allow_all_commands() {
+            tracing::debug!(
+                target: "libra::internal::ai::sandbox",
+                key_count = keys.len(),
+                "approval request skipped by allow-all-commands session decision"
+            );
+            return ReviewDecision::ApprovedForAllCommands;
+        }
+    }
+
     let already_approved = if keys.is_empty() {
         false
     } else {
@@ -91,6 +113,11 @@ where
             .all(|key| matches!(store.get(key), Some(ReviewDecision::ApprovedForSession)))
     };
     if already_approved {
+        tracing::debug!(
+            target: "libra::internal::ai::sandbox",
+            key_count = keys.len(),
+            "approval request skipped by matching session approval"
+        );
         return ReviewDecision::ApprovedForSession;
     }
 
@@ -101,11 +128,23 @@ where
     }
 
     let decision = response_rx.await.unwrap_or_default();
-    if matches!(decision, ReviewDecision::ApprovedForSession) && !keys.is_empty() {
+    if matches!(decision, ReviewDecision::ApprovedForAllCommands) {
+        let mut store = ctx.store.lock().await;
+        store.approve_all_commands();
+        tracing::debug!(
+            target: "libra::internal::ai::sandbox",
+            "approval decision cached as allow-all-commands for this session"
+        );
+    } else if matches!(decision, ReviewDecision::ApprovedForSession) && !keys.is_empty() {
         let mut store = ctx.store.lock().await;
         for key in keys {
             store.put(key.clone(), ReviewDecision::ApprovedForSession);
         }
+        tracing::debug!(
+            target: "libra::internal::ai::sandbox",
+            key_count = keys.len(),
+            "approval decision cached for matching commands"
+        );
     }
     decision
 }
@@ -273,7 +312,9 @@ pub async fn run_shell_command_with_approval(
                 .await;
 
                 match decision {
-                    ReviewDecision::Approved | ReviewDecision::ApprovedForSession => {
+                    ReviewDecision::Approved
+                    | ReviewDecision::ApprovedForSession
+                    | ReviewDecision::ApprovedForAllCommands => {
                         already_approved = true;
                     }
                     ReviewDecision::Denied => return Err("rejected by user".to_string()),
@@ -335,7 +376,9 @@ pub async fn run_shell_command_with_approval(
         .await;
 
         match decision {
-            ReviewDecision::Approved | ReviewDecision::ApprovedForSession => {}
+            ReviewDecision::Approved
+            | ReviewDecision::ApprovedForSession
+            | ReviewDecision::ApprovedForAllCommands => {}
             ReviewDecision::Denied => return Err("rejected by user".to_string()),
             ReviewDecision::Abort => return Err("aborted by user".to_string()),
         }
@@ -911,5 +954,65 @@ mod tests {
         let guard = store.lock().await;
         assert_eq!(guard.get("a"), Some(ReviewDecision::ApprovedForSession));
         assert_eq!(guard.get("b"), Some(ReviewDecision::ApprovedForSession));
+    }
+
+    #[tokio::test]
+    async fn approved_for_all_commands_decision_skips_later_prompts() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let store = Arc::new(tokio::sync::Mutex::new(ApprovalStore::default()));
+        let ctx = ToolApprovalContext {
+            policy: AskForApproval::OnRequest,
+            request_tx: tx,
+            store: Arc::clone(&store),
+        };
+
+        let responder = tokio::spawn(async move {
+            let request = rx.recv().await.expect("approval request expected");
+            let _ = request
+                .response_tx
+                .send(ReviewDecision::ApprovedForAllCommands);
+            assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+            rx
+        });
+
+        let first_keys = vec!["first".to_string()];
+        let first_decision = request_cached_approval_with_keys(&ctx, &first_keys, |response_tx| {
+            ExecApprovalRequest {
+                call_id: "call-allow-all".to_string(),
+                command: "cargo test".to_string(),
+                cwd: PathBuf::from("/tmp"),
+                reason: None,
+                is_retry: false,
+                sandbox_label: "workspace-write".to_string(),
+                network_access: false,
+                writable_roots: vec![PathBuf::from("/tmp")],
+                response_tx,
+            }
+        })
+        .await;
+
+        assert_eq!(first_decision, ReviewDecision::ApprovedForAllCommands);
+        assert!(store.lock().await.allow_all_commands());
+        let mut rx = responder.await.expect("responder task failed");
+
+        let second_keys = vec!["different-command".to_string()];
+        let second_decision =
+            request_cached_approval_with_keys(&ctx, &second_keys, |response_tx| {
+                ExecApprovalRequest {
+                    call_id: "call-skipped".to_string(),
+                    command: "git status".to_string(),
+                    cwd: PathBuf::from("/tmp/other"),
+                    reason: None,
+                    is_retry: false,
+                    sandbox_label: "workspace-write".to_string(),
+                    network_access: false,
+                    writable_roots: vec![PathBuf::from("/tmp/other")],
+                    response_tx,
+                }
+            })
+            .await;
+
+        assert_eq!(second_decision, ReviewDecision::ApprovedForAllCommands);
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
     }
 }

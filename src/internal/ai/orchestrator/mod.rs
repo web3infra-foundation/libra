@@ -334,6 +334,7 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
                 reviewer_preamble: self.config.reviewer_preamble.clone(),
                 dagrs_resume_checkpoint_id: self.config.dagrs_resume_checkpoint_id.clone(),
                 observer: observer.clone(),
+                workspace_baseline: None,
             };
 
             let provider_parallel_limit =

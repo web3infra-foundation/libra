@@ -50,20 +50,29 @@ fn init_tracing() {
 
     let env_filter = EnvFilter::new(log_filter.to_string_lossy());
     let Some(path) = log_file else {
-        let _ = tracing_subscriber::fmt()
+        if let Err(err) = tracing_subscriber::fmt()
             .with_env_filter(env_filter)
-            .try_init();
+            .try_init()
+        {
+            eprintln!("warning: failed to initialize tracing subscriber: {err}");
+        }
         return;
     };
 
     let path = PathBuf::from(path);
     match OpenOptions::new().create(true).append(true).open(&path) {
         Ok(file) => {
-            let _ = tracing_subscriber::fmt()
+            if let Err(err) = tracing_subscriber::fmt()
                 .with_env_filter(env_filter)
                 .with_ansi(false)
                 .with_writer(Mutex::new(file))
-                .try_init();
+                .try_init()
+            {
+                eprintln!(
+                    "warning: failed to initialize tracing subscriber for LIBRA_LOG_FILE {}: {err}",
+                    path.display()
+                );
+            }
         }
         Err(err) => {
             eprintln!(

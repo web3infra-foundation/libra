@@ -7,8 +7,11 @@ use std::{
 
 use uuid::Uuid;
 
-use crate::internal::ai::orchestrator::workspace::{
-    TaskWorktree, cleanup_task_worktree, prepare_task_worktree, sync_task_worktree_back,
+use crate::internal::ai::{
+    orchestrator::workspace::{
+        TaskWorktree, cleanup_task_worktree, prepare_task_worktree, sync_task_worktree_back,
+    },
+    workspace_snapshot::WorkspaceSnapshot,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -21,6 +24,10 @@ pub struct TaskExecutionEnvironment {
 impl TaskExecutionEnvironment {
     pub fn root(&self) -> &Path {
         &self.worktree.root
+    }
+
+    pub(crate) fn baseline_snapshot(&self) -> WorkspaceSnapshot {
+        self.worktree.baseline.clone()
     }
 }
 

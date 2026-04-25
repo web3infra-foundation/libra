@@ -301,7 +301,7 @@ struct PendingIntentReview {
 /// Pending sandbox approval state.
 struct PendingExecApproval {
     request: ExecApprovalRequest,
-    selected: usize, // 0=Approve, 1=Approve Session, 2=Deny, 3=Abort
+    selected: usize, // 0=Approve, 1=Approve Session, 2=Approve All Commands, 3=Deny, 4=Abort
 }
 
 /// Pending managed-provider interaction mirrored into the approval dialog.
@@ -916,7 +916,7 @@ where
                         pending.selected = (pending.selected + 1).min(max);
                         self.widget.bottom_pane.exec_approval_selected = pending.selected;
                     } else if let Some(ref mut pending) = self.pending_exec_approval {
-                        pending.selected = (pending.selected + 1).min(3);
+                        pending.selected = (pending.selected + 1).min(4);
                         self.widget.bottom_pane.exec_approval_selected = pending.selected;
                     }
                     self.schedule_draw();
@@ -1203,20 +1203,38 @@ where
             return;
         };
 
-        let done = if let Some(pending) = self.pending_user_input.as_mut() {
-            let question_id = pending.request.questions[pending.current_question]
-                .id
-                .clone();
-            pending.answers.insert(question_id, answer);
-            pending.current_question += 1;
-            pending.selected_option = 0;
-            pending.notes_focused = false;
-            pending.notes_text.clear();
-            self.widget.bottom_pane.clear();
-            pending.current_question >= pending.request.questions.len()
-        } else {
-            return;
-        };
+        let (done, question_number, question_count, answer_count) =
+            if let Some(pending) = self.pending_user_input.as_mut() {
+                let question_id = pending.request.questions[pending.current_question]
+                    .id
+                    .clone();
+                let question_number = pending.current_question + 1;
+                let question_count = pending.request.questions.len();
+                let answer_count = answer.answers.len();
+                pending.answers.insert(question_id, answer);
+                pending.current_question += 1;
+                pending.selected_option = 0;
+                pending.notes_focused = false;
+                pending.notes_text.clear();
+                self.widget.bottom_pane.clear();
+                (
+                    pending.current_question >= pending.request.questions.len(),
+                    question_number,
+                    question_count,
+                    answer_count,
+                )
+            } else {
+                return;
+            };
+
+        tracing::debug!(
+            target: "libra::internal::tui::interaction",
+            question_number,
+            question_count,
+            answer_count,
+            completed = done,
+            "tui user-input answer submitted"
+        );
 
         if done {
             // Send the response back to the handler.
@@ -1251,6 +1269,13 @@ where
     fn cancel_pending_user_input(&mut self) {
         if let Some(pending) = self.pending_user_input.take() {
             let interaction_id = pending.request.call_id.clone();
+            tracing::debug!(
+                target: "libra::internal::tui::interaction",
+                call_id = %interaction_id,
+                answered_questions = pending.answers.len(),
+                total_questions = pending.request.questions.len(),
+                "tui user-input request cancelled"
+            );
             // Dropping response_tx signals cancellation to the handler.
             drop(pending.request.response_tx);
             self.widget.bottom_pane.set_user_input_questions(None);
@@ -1274,6 +1299,19 @@ where
 
     /// Handle a user-input request from the tool handler.
     fn handle_user_input_request(&mut self, request: UserInputRequest) {
+        let first_question = request.questions.first();
+        tracing::debug!(
+            target: "libra::internal::tui::interaction",
+            call_id = %request.call_id,
+            question_count = request.questions.len(),
+            first_question_id = first_question.map(|question| question.id.as_str()).unwrap_or(""),
+            first_question_options = first_question
+                .and_then(|question| question.options.as_ref())
+                .map(Vec::len)
+                .unwrap_or_default(),
+            "tui user-input request received"
+        );
+
         let interaction = CodeUiInteractionRequest {
             id: request.call_id.clone(),
             kind: CodeUiInteractionKind::RequestUserInput,
@@ -1353,9 +1391,28 @@ where
 
     fn handle_exec_approval_request(&mut self, request: ExecApprovalRequest) {
         if self.active_turn_id.is_none() {
+            tracing::debug!(
+                target: "libra::internal::tui::interaction",
+                call_id = %request.call_id,
+                command = %log_preview_text(&request.command),
+                "tui sandbox approval denied because there is no active turn"
+            );
             let _ = request.response_tx.send(ReviewDecision::Denied);
             return;
         }
+
+        tracing::debug!(
+            target: "libra::internal::tui::interaction",
+            call_id = %request.call_id,
+            command = %log_preview_text(&request.command),
+            cwd = %request.cwd.display(),
+            sandbox = %request.sandbox_label,
+            network_access = request.network_access,
+            writable_roots = request.writable_roots.len(),
+            is_retry = request.is_retry,
+            has_reason = request.reason.as_ref().is_some_and(|reason| !reason.trim().is_empty()),
+            "tui sandbox approval requested"
+        );
 
         let interaction = CodeUiInteractionRequest {
             id: request.call_id.clone(),
@@ -1373,6 +1430,11 @@ where
                     id: "approve_session".to_string(),
                     label: "Approve Session".to_string(),
                     description: Some("Approve matching commands for this session".to_string()),
+                },
+                CodeUiInteractionOption {
+                    id: "allow_all_commands".to_string(),
+                    label: "Allow All Commands".to_string(),
+                    description: Some("Allow every command for this session".to_string()),
                 },
                 CodeUiInteractionOption {
                     id: "deny".to_string(),
@@ -1581,13 +1643,16 @@ where
             return;
         };
 
-        let decision = match pending.selected {
-            0 => ReviewDecision::Approved,
-            1 => ReviewDecision::ApprovedForSession,
-            2 => ReviewDecision::Denied,
-            _ => ReviewDecision::Abort,
-        };
+        let decision = exec_approval_decision_from_selection(pending.selected);
         let interaction_id = pending.request.call_id.clone();
+        tracing::debug!(
+            target: "libra::internal::tui::interaction",
+            call_id = %interaction_id,
+            decision = ?decision,
+            selected = pending.selected,
+            command = %log_preview_text(&pending.request.command),
+            "tui sandbox approval resolved"
+        );
         let _ = pending.request.response_tx.send(decision);
 
         self.widget.bottom_pane.set_exec_approval(None);
@@ -1635,6 +1700,12 @@ where
 
         if let Some(pending) = self.pending_exec_approval.take() {
             let interaction_id = pending.request.call_id.clone();
+            tracing::debug!(
+                target: "libra::internal::tui::interaction",
+                call_id = %interaction_id,
+                command = %log_preview_text(&pending.request.command),
+                "tui sandbox approval rejected"
+            );
             let _ = pending.request.response_tx.send(ReviewDecision::Denied);
             if let Some(code_ui_session) = self.code_ui_session.clone() {
                 tokio::spawn(async move {
@@ -1661,6 +1732,12 @@ where
 
         if let Some(pending) = self.pending_exec_approval.take() {
             let interaction_id = pending.request.call_id.clone();
+            tracing::debug!(
+                target: "libra::internal::tui::interaction",
+                call_id = %interaction_id,
+                command = %log_preview_text(&pending.request.command),
+                "tui sandbox approval cancelled"
+            );
             let _ = pending.request.response_tx.send(ReviewDecision::Denied);
             if let Some(code_ui_session) = self.code_ui_session.clone() {
                 tokio::spawn(async move {
@@ -3439,10 +3516,14 @@ where
 
         self.widget.clear_dag_panel();
         self.sync_mux_input_context();
+        self.submit_direct_agent_message(final_text, allowed_tools);
+    }
+
+    fn submit_direct_agent_message(&mut self, text: String, allowed_tools: Option<Vec<String>>) {
         let turn_id = self.begin_turn();
         let _ = self.app_event_tx.send(AppEvent::SubmitUserMessage {
             turn_id,
-            text: final_text,
+            text,
             allowed_tools,
         });
     }
@@ -3478,6 +3559,28 @@ where
                 self.pending_execution_plan_revision = None;
                 self.pending_auto_plan_repair_execution = None;
                 self.sync_mux_input_context();
+            }
+            BuiltinCommand::Chat => {
+                let request = args.trim();
+                if request.is_empty() {
+                    self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                        "Usage: /chat <your question>".to_string(),
+                    )));
+                    self.schedule_draw();
+                    return;
+                }
+                self.widget.clear_dag_panel();
+                self.sync_mux_input_context();
+                self.submit_direct_agent_message(
+                    request.to_string(),
+                    Some(vec![
+                        "read_file".to_string(),
+                        "list_dir".to_string(),
+                        "grep_files".to_string(),
+                        "search_files".to_string(),
+                        "web_search".to_string(),
+                    ]),
+                );
             }
             BuiltinCommand::Model => {
                 let info = format!(
@@ -3844,7 +3947,8 @@ where
                 .bottom_pane
                 .set_input_context_label(Some("Revise IntentSpec".to_string()));
             self.widget.bottom_pane.set_input_hint(Some(
-                "Describe spec changes, or use /plan modify <changes> or /plan cancel".to_string(),
+                "Describe spec changes, or use /intent modify <changes> or /intent cancel"
+                    .to_string(),
             ));
         } else {
             self.widget.bottom_pane.set_input_context_label(None);
@@ -3942,7 +4046,7 @@ where
         attempt: u8,
         max_attempts: u8,
     ) {
-        pending.automatic_repair_attempts = attempt;
+        pending.automatic_repair_attempts = pending.automatic_repair_attempts.max(attempt);
         pending.automatic_repair_max_attempts = max_attempts;
         self.pending_auto_plan_repair_execution = Some(PendingAutoPlanRepairExecution {
             attempt,
@@ -4075,15 +4179,7 @@ where
 
         let model = self.model.clone();
         let registry = self.registry.clone();
-        let mut config = self.config.clone();
-        config.allowed_tools = Some(vec![
-            "read_file".to_string(),
-            "list_dir".to_string(),
-            "grep_files".to_string(),
-            "search_files".to_string(),
-            "web_search".to_string(),
-            "submit_plan_draft".to_string(),
-        ]);
+        let config = phase1_plan_tool_loop_config(self.config.clone());
         let tx = self.app_event_tx.clone();
         let mcp_server = self.mcp_server.clone();
         let fallback_history = self.history.clone();
@@ -4863,16 +4959,7 @@ where
 
         let model = self.model.clone();
         let registry = self.registry.clone();
-        let mut config = self.config.clone();
-        config.allowed_tools = Some(vec![
-            "read_file".to_string(),
-            "list_dir".to_string(),
-            "grep_files".to_string(),
-            "search_files".to_string(),
-            "web_search".to_string(),
-            "request_user_input".to_string(),
-            "submit_intent_draft".to_string(),
-        ]);
+        let config = phase0_plan_tool_loop_config(self.config.clone());
         let history = self.history.clone();
         let tx = self.app_event_tx.clone();
         let mcp_server = self.mcp_server.clone();
@@ -5149,7 +5236,11 @@ where
     }
 
     async fn handle_intent_command(&mut self, args: &str) {
-        match args.trim() {
+        let trimmed = args.trim();
+        let (command, rest) = trimmed
+            .split_once(char::is_whitespace)
+            .unwrap_or((trimmed, ""));
+        match command.to_ascii_lowercase().as_str() {
             "show" => {
                 let rendered = match self.load_latest_intentspec_json().await {
                     LatestIntentSpecLoad::Found(json) => json,
@@ -5200,9 +5291,56 @@ where
                     self.schedule_draw();
                 }
             },
+            "modify" | "revise" => {
+                let request = rest.trim();
+                if request.is_empty() {
+                    self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                        pending_plan_revision_help_message(),
+                    )));
+                    self.sync_mux_input_context();
+                    self.schedule_draw();
+                    return;
+                }
+
+                let spec_json = match self.pending_plan_revision.take() {
+                    Some(spec_json) => spec_json,
+                    None => match self.load_latest_intentspec_json().await {
+                        LatestIntentSpecLoad::Found(json) => json,
+                        LatestIntentSpecLoad::Missing => {
+                            self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                                "No IntentSpec found. Run `/plan <requirement>` first.".to_string(),
+                            )));
+                            self.schedule_draw();
+                            return;
+                        }
+                        LatestIntentSpecLoad::BindingMismatch(message) => {
+                            self.widget
+                                .add_cell(Box::new(AssistantHistoryCell::new(message)));
+                            self.schedule_draw();
+                            return;
+                        }
+                    },
+                };
+
+                self.begin_plan_revision_flow(spec_json, request).await;
+            }
+            "cancel" => {
+                if self.pending_plan_revision.take().is_some() {
+                    self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                        "Spec revision canceled.".to_string(),
+                    )));
+                    self.widget.bottom_pane.set_status(AgentStatus::Idle);
+                    self.sync_mux_input_context();
+                } else {
+                    self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                        "No IntentSpec revision is active.".to_string(),
+                    )));
+                }
+                self.schedule_draw();
+            }
             _ => {
                 self.widget.add_cell(Box::new(AssistantHistoryCell::new(
-                    "Usage: /intent show|execute".to_string(),
+                    "Usage: /intent show|execute|modify <changes>|cancel".to_string(),
                 )));
                 self.schedule_draw();
             }
@@ -5659,7 +5797,7 @@ fn parse_pending_plan_revision_command(args: &str) -> PendingPlanRevisionCommand
 }
 
 fn pending_plan_revision_help_message() -> String {
-    "Revise mode is active. Describe changes in plain text, use `/plan modify <changes>` to keep revising, or `/plan cancel` to exit.".to_string()
+    "IntentSpec revise mode is active. Describe changes in plain text, use `/intent modify <changes>` to keep revising, or `/intent cancel` to exit.".to_string()
 }
 
 fn pending_execution_plan_revision_help_message() -> String {
@@ -5811,6 +5949,16 @@ fn update_visible_tool_call_preview(
 fn log_preview_text(text: &str) -> String {
     const MAX_CHARS: usize = 240;
     summarize_llm_output_for_context(text, MAX_CHARS)
+}
+
+fn exec_approval_decision_from_selection(selected: usize) -> ReviewDecision {
+    match selected {
+        0 => ReviewDecision::Approved,
+        1 => ReviewDecision::ApprovedForSession,
+        2 => ReviewDecision::ApprovedForAllCommands,
+        3 => ReviewDecision::Denied,
+        _ => ReviewDecision::Abort,
+    }
 }
 
 fn summarize_llm_output_for_context(text: &str, max_chars: usize) -> String {
@@ -6176,21 +6324,25 @@ mod tests {
         automatic_plan_repair_request_from_report, automatic_plan_repair_threshold_message,
         build_execution_plan_prompt, build_execution_plan_revision_prompt, build_plan_prompt,
         build_plan_revision_prompt, classify_execution_failure_revision,
-        code_ui_response_from_managed_selection, execution_failure_report,
-        execution_failure_revision_message, execution_requires_plan_repair,
-        format_decision_stage_note, format_intentspec_target_mismatch, format_orchestrator_result,
+        code_ui_response_from_managed_selection, exec_approval_decision_from_selection,
+        execution_failure_report, execution_failure_revision_message,
+        execution_requires_plan_repair, format_decision_stage_note,
+        format_intentspec_target_mismatch, format_orchestrator_result,
         format_plan_compiled_stage_note, format_plan_execution_stage_note,
         format_replan_stage_note, format_system_verification_stage_note,
-        intentspec_with_plan_draft_objectives, is_default_chat_tool, is_global_quit_command_input,
-        is_phase1_plan_draft_tool, mark_visible_tool_call_running, newest_managed_assistant_text,
+        intentspec_failure_revision_message_from_report, intentspec_with_plan_draft_objectives,
+        is_default_chat_tool, is_global_quit_command_input, is_phase1_plan_draft_tool,
+        mark_visible_tool_call_running, newest_managed_assistant_text,
         normalize_terminal_paste_text, parse_pending_plan_revision_command,
         pending_execution_plan_revision_help_message, pending_plan_revision_help_message,
-        provider_plan_draft_from_args, provider_plan_draft_from_plan,
-        should_auto_repair_execution_failure, should_forward_phase0_model_text_delta,
-        should_forward_phase1_model_text_delta, should_route_plain_message_to_plan,
+        phase0_plan_tool_loop_config, phase1_plan_tool_loop_config, provider_plan_draft_from_args,
+        provider_plan_draft_from_plan, should_auto_repair_execution_failure,
+        should_forward_phase0_model_text_delta, should_forward_phase1_model_text_delta,
+        should_route_plain_message_to_plan,
     };
     use crate::internal::{
         ai::{
+            agent::ToolLoopConfig,
             intentspec::{
                 ResolveContext,
                 draft::{DraftAcceptance, DraftIntent, DraftRisk, IntentDraft},
@@ -6205,6 +6357,7 @@ mod tests {
                 PolicyViolation, SystemReport, TaskContract, TaskKind, TaskNodeStatus, TaskResult,
                 TaskSpec, ToolCallRecord,
             },
+            sandbox::ReviewDecision,
             tools::context::{PlanDraftStep, SubmitPlanDraftArgs},
             web::code_ui::{
                 CodeUiApplyToFuture, CodeUiCapabilities, CodeUiInteractionKind,
@@ -6442,6 +6595,40 @@ mod tests {
     }
 
     #[test]
+    fn phase0_tool_loop_config_stops_after_submit_intent_draft() {
+        let config = phase0_plan_tool_loop_config(ToolLoopConfig::default());
+
+        assert_eq!(config.max_turns, Some(12));
+        assert_eq!(
+            config.terminal_tools.as_ref().unwrap(),
+            &vec!["submit_intent_draft".to_string()]
+        );
+        assert!(
+            config
+                .allowed_tools
+                .as_ref()
+                .is_some_and(|tools| tools.iter().any(|tool| tool == "submit_intent_draft"))
+        );
+    }
+
+    #[test]
+    fn phase1_tool_loop_config_stops_after_submit_plan_draft() {
+        let config = phase1_plan_tool_loop_config(ToolLoopConfig::default());
+
+        assert_eq!(config.max_turns, Some(12));
+        assert_eq!(
+            config.terminal_tools.as_ref().unwrap(),
+            &vec!["submit_plan_draft".to_string()]
+        );
+        assert!(
+            config
+                .allowed_tools
+                .as_ref()
+                .is_some_and(|tools| tools.iter().any(|tool| tool == "submit_plan_draft"))
+        );
+    }
+
+    #[test]
     fn phase0_intentspec_generation_does_not_forward_provider_text() {
         assert!(!should_forward_phase0_model_text_delta(
             "provider draft markdown that should stay internal"
@@ -6623,6 +6810,18 @@ mod tests {
     }
 
     #[test]
+    fn intentspec_revision_message_uses_intent_commands() {
+        let message = intentspec_failure_revision_message_from_report(
+            "Failed tasks: Gate failed.\nFailure details:\n- network policy denied",
+        );
+
+        assert!(message.contains("IntentSpec constraints"));
+        assert!(message.contains("/intent modify <changes>"));
+        assert!(message.contains("/intent cancel"));
+        assert!(!message.contains("/plan modify"));
+    }
+
+    #[test]
     fn abandoned_execution_requires_plan_repair_loop() {
         let result = orchestrator_fixture();
 
@@ -6663,6 +6862,34 @@ mod tests {
         assert!(message.contains("unresolved import"));
         assert!(message.contains("Plan change hints:"));
         assert!(message.contains("compile error first"));
+    }
+
+    #[test]
+    fn failed_execution_revision_message_prioritizes_dependency_network_hint() {
+        let mut result = orchestrator_fixture();
+        let task_result = result
+            .task_results
+            .first_mut()
+            .expect("fixture should include a failed task result");
+        task_result.gate_report = Some(GateReport {
+            results: vec![GateResult {
+                check_id: "build".to_string(),
+                kind: "command".to_string(),
+                passed: false,
+                exit_code: 101,
+                stdout: String::new(),
+                stderr: "    Updating crates.io index".to_string(),
+                duration_ms: 42,
+                timed_out: false,
+            }],
+            all_required_passed: false,
+        });
+
+        let message = execution_failure_revision_message(Some(&result));
+
+        assert!(message.contains("std-only implementation"));
+        assert!(message.contains("dependency-policy:no-new"));
+        assert!(!message.contains("compile error first"));
     }
 
     #[test]
@@ -6899,6 +7126,8 @@ mod tests {
         assert!(prompt.contains("\"kind\": \"IntentSpec\""));
         assert!(prompt.contains("Requested changes:\nadd an integration gate for cargo test"));
         assert!(prompt.contains("submit_intent_draft exactly once"));
+        assert!(prompt.contains("dependency-policy:no-new"));
+        assert!(prompt.contains("prefer std::env"));
     }
 
     #[test]
@@ -6921,6 +7150,8 @@ mod tests {
         assert!(prompt.contains("submit_intent_draft exactly once"));
         assert!(prompt.contains("web_search"));
         assert!(prompt.contains("Rust edition 2024 is stable"));
+        assert!(prompt.contains("dependency-policy:no-new"));
+        assert!(prompt.contains("prefer std::env"));
     }
 
     #[test]
@@ -6987,8 +7218,10 @@ mod tests {
     #[test]
     fn pending_revision_help_mentions_escape_hatch() {
         let help = pending_plan_revision_help_message();
-        assert!(help.contains("/plan modify <changes>"));
-        assert!(help.contains("/plan cancel"));
+        assert!(help.contains("IntentSpec revise mode"));
+        assert!(help.contains("/intent modify <changes>"));
+        assert!(help.contains("/intent cancel"));
+        assert!(!help.contains("/plan modify"));
     }
 
     #[test]
@@ -7098,6 +7331,22 @@ mod tests {
             Some(CodeUiApplyToFuture::AcceptAll)
         );
         assert_eq!(response.selected_option.as_deref(), Some("approve_all"));
+    }
+
+    #[test]
+    fn exec_approval_selection_maps_allow_all_commands() {
+        assert_eq!(
+            exec_approval_decision_from_selection(2),
+            ReviewDecision::ApprovedForAllCommands
+        );
+        assert_eq!(
+            exec_approval_decision_from_selection(3),
+            ReviewDecision::Denied
+        );
+        assert_eq!(
+            exec_approval_decision_from_selection(4),
+            ReviewDecision::Abort
+        );
     }
 }
 
@@ -7290,6 +7539,7 @@ fn build_plan_prompt(request: &str) -> String {
 First, you MUST call request_user_input with exactly one question id=risk_profile, header=Risk, and options Low/Medium/High.\n\
 After receiving user choice, analyze the repository and then call submit_intent_draft exactly once.\n\
 Use web_search when available before making version-sensitive external claims. Rust edition 2024 is stable in current Rust; do not reject Cargo.toml edition=\"2024\" unless local toolchain evidence proves it unsupported.\n\
+Default execution uses dependency-policy:no-new. Do not introduce third-party dependencies unless the user explicitly asks for that package or the repository already declares it; for simple Rust CLI argument handling, prefer std::env over crates such as clap.\n\
 If required information is missing, call request_user_input again for focused follow-up questions.\n\
 Do not output a plain-text plan; finalize by submitting the draft tool call.\n\n\
 User request:\n{request}"
@@ -7302,6 +7552,7 @@ fn build_plan_revision_prompt(spec_json: &str, request: &str) -> String {
 First, you MUST call request_user_input with exactly one question id=risk_profile, header=Risk, and options Low/Medium/High.\n\
 Use the current IntentSpec as the baseline, apply only the user's requested changes, and then call submit_intent_draft exactly once.\n\
 Use web_search when available before making version-sensitive external claims. Rust edition 2024 is stable in current Rust; do not reject Cargo.toml edition=\"2024\" unless local toolchain evidence proves it unsupported.\n\
+Default execution uses dependency-policy:no-new. Do not introduce third-party dependencies unless the user explicitly asks for that package or the repository already declares it; for simple Rust CLI argument handling, prefer std::env over crates such as clap.\n\
 If required information is missing, call request_user_input again for focused follow-up questions.\n\
 Do not output a plain-text plan; finalize by submitting the draft tool call.\n\n\
 Current IntentSpec:\n```json\n{spec_json}\n```\n\n\
@@ -7443,7 +7694,7 @@ fn intentspec_failure_revision_message_from_report(report: &str) -> String {
             .map(str::to_string),
     );
     lines.push(
-        "Revise the IntentSpec scope, network policy, tool ACL, or artifact requirements with plain text or `/plan modify <changes>`. Use `/plan cancel` to stop."
+        "Revise the IntentSpec scope, network policy, tool ACL, or artifact requirements with plain text or `/intent modify <changes>`. Use `/intent cancel` to stop."
             .to_string(),
     );
     lines.join("\n")
@@ -7859,6 +8110,21 @@ fn plan_repair_hint_for_failure(failure_text: &str) -> Option<String> {
     if contains_any(
         &lower,
         &[
+            "updating crates.io index",
+            "download of config.json failed",
+            "failed to get",
+            "crates.io",
+            "dependency-policy:no-new",
+        ],
+    ) {
+        return Some(
+            "remove any unrequested third-party dependency and prefer a std-only implementation under dependency-policy:no-new; only use networked dependency resolution after the developer explicitly allows network/dependency changes."
+                .to_string(),
+        );
+    }
+    if contains_any(
+        &lower,
+        &[
             "cargo",
             "rustc",
             "compile",
@@ -8027,6 +8293,35 @@ fn is_phase1_plan_draft_tool(tool_name: &str) -> bool {
 
 fn should_forward_phase1_model_text_delta(_delta: &str) -> bool {
     false
+}
+
+fn phase0_plan_tool_loop_config(mut config: ToolLoopConfig) -> ToolLoopConfig {
+    config.allowed_tools = Some(vec![
+        "read_file".to_string(),
+        "list_dir".to_string(),
+        "grep_files".to_string(),
+        "search_files".to_string(),
+        "web_search".to_string(),
+        "request_user_input".to_string(),
+        "submit_intent_draft".to_string(),
+    ]);
+    config.terminal_tools = Some(vec!["submit_intent_draft".to_string()]);
+    config.max_turns = Some(12);
+    config
+}
+
+fn phase1_plan_tool_loop_config(mut config: ToolLoopConfig) -> ToolLoopConfig {
+    config.allowed_tools = Some(vec![
+        "read_file".to_string(),
+        "list_dir".to_string(),
+        "grep_files".to_string(),
+        "search_files".to_string(),
+        "web_search".to_string(),
+        "submit_plan_draft".to_string(),
+    ]);
+    config.terminal_tools = Some(vec!["submit_plan_draft".to_string()]);
+    config.max_turns = Some(12);
+    config
 }
 
 fn is_default_chat_tool(tool_name: &str) -> bool {

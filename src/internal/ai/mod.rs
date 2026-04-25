@@ -27,6 +27,7 @@ pub mod client;
 pub mod codex;
 pub mod commands;
 pub mod completion;
+pub(crate) mod generated_artifacts;
 pub mod history;
 pub mod hooks;
 pub mod intent;

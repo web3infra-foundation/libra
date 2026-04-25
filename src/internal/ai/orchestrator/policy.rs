@@ -3,7 +3,10 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use super::{
-    acl::{AclVerdict, ScopeVerdict, check_scope, check_tool_acl_with_context},
+    acl::{
+        AclVerdict, ScopeVerdict, cargo_lock_companion_allowed, check_scope,
+        check_tool_acl_with_context,
+    },
     types::{PolicyViolation, TaskKind, TaskSpec, ToolCallRecord, ToolDiffRecord},
 };
 use crate::internal::ai::{
@@ -306,12 +309,21 @@ fn task_write_contract_violation(task: &TaskSpec, path: &str) -> Option<String> 
         if let ScopeVerdict::OutOfScope(reason) = check_scope(&[], &task.scope_out, path) {
             return Some(reason);
         }
+        if cargo_lock_companion_allowed(&task.contract.touch_files, path) {
+            return None;
+        }
         return match check_scope(&task.contract.touch_files, &[], path) {
             ScopeVerdict::InScope => None,
             ScopeVerdict::OutOfScope(reason) => Some(format!("not in touchFiles: {reason}")),
         };
     }
 
+    if let ScopeVerdict::OutOfScope(reason) = check_scope(&[], &task.scope_out, path) {
+        return Some(reason);
+    }
+    if cargo_lock_companion_allowed(&task.scope_in, path) {
+        return None;
+    }
     match check_scope(&task.scope_in, &task.scope_out, path) {
         ScopeVerdict::InScope => None,
         ScopeVerdict::OutOfScope(reason) => Some(reason),
@@ -1028,5 +1040,24 @@ mod tests {
         assert_eq!(violation.code, "scope-creep");
         assert_eq!(violation.path.as_deref(), Some("src/main.rs"));
         assert!(violation.message.contains("not in touchFiles"));
+    }
+
+    #[test]
+    fn test_shell_result_allows_cargo_lock_companion_for_cargo_toml_touch_file() {
+        let mut task = task();
+        task.contract.touch_files = vec!["libra/Cargo.toml".into(), "libra/src/main.rs".into()];
+        let output = ToolOutput::success("Exit code: 0").with_metadata(serde_json::json!({
+            "paths_written": ["libra/Cargo.lock"]
+        }));
+        let mut record = ToolCallRecord {
+            tool_name: "shell".into(),
+            action: "execute".into(),
+            arguments_json: Some(serde_json::json!({ "command": "cargo build" })),
+            ..ToolCallRecord::default()
+        };
+
+        evaluate_tool_result(&spec(), &task, "shell", &output, &mut record).unwrap();
+
+        assert_eq!(record.paths_written, vec!["libra/Cargo.lock".to_string()]);
     }
 }
