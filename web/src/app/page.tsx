@@ -1,11 +1,11 @@
 import type { Metadata } from "next";
 
-import { CodeSessionPage } from "@/components/code-session/code-session-page";
+import { Workspace } from "@/components/workspace/workspace";
 
 export const metadata: Metadata = {
-  title: "Libra Code",
+  title: "Libra — Agent Workspace",
 };
 
 export default function Home() {
-  return <CodeSessionPage />;
+  return <Workspace />;
 }

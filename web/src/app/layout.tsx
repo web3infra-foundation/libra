@@ -18,10 +18,11 @@ const jetBrainsMono = JetBrains_Mono({
 
 export const metadata: Metadata = {
   title: {
-    default: "Libra",
+    default: "Libra — Agent Workspace",
     template: "%s | Libra",
   },
-  description: "Internal tooling surfaces for monorepo change control.",
+  description:
+    "Libra agent workspace — a five-phase pipeline for AI-driven, intent-anchored code change.",
 };
 
 export default function RootLayout({
@@ -34,7 +35,7 @@ export default function RootLayout({
       lang="en"
       className={cn("font-sans", inter.variable, jetBrainsMono.variable)}
     >
-      <body className="antialiased">{children}</body>
+      <body>{children}</body>
     </html>
   );
 }
