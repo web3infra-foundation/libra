@@ -1,6 +1,6 @@
 //! Implements `rev-parse` to resolve revision names and print basic repository paths.
 
-use std::{io::Write, path::PathBuf};
+use std::{fs, io::Write, path::PathBuf};
 
 use clap::Parser;
 use git_internal::hash::ObjectHash;
@@ -237,7 +237,15 @@ async fn resolve_show_toplevel_path() -> CliResult<PathBuf> {
                 .with_stable_code(StableErrorCode::RepoStateInvalid));
         }
 
-        return workdir
+        let storage = fs::canonicalize(&storage).map_err(|error| {
+            CliError::io(format!(
+                "failed to resolve repository storage path '{}': {error}",
+                storage.display()
+            ))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+        })?;
+
+        return storage
             .parent()
             .map(PathBuf::from)
             .ok_or_else(CliError::repo_not_found);

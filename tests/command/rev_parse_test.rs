@@ -289,6 +289,30 @@ fn test_rev_parse_show_toplevel_from_storage_dir_returns_repo_root() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn test_rev_parse_show_toplevel_from_symlinked_storage_dir_returns_repo_root() {
+    use std::os::unix::fs::symlink;
+
+    let temp_root = tempdir().expect("failed to create temp root");
+    let repo = temp_root.path().join("repo");
+    init_repo_via_cli(&repo);
+
+    let storage = repo.join(libra::utils::util::ROOT_DIR);
+    let storage_link = temp_root.path().join("storage-link");
+    symlink(&storage, &storage_link).expect("failed to create storage symlink");
+
+    let output = run_libra_command(&["rev-parse", "--show-toplevel"], &storage_link);
+    assert_cli_success(&output, "rev-parse --show-toplevel from symlinked .libra");
+
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        repo.canonicalize()
+            .expect("failed to canonicalize repo path")
+            .to_string_lossy()
+    );
+}
+
 #[test]
 fn test_rev_parse_show_toplevel_in_bare_repo_returns_work_tree_error() {
     let repo = tempdir().expect("failed to create repository root");
