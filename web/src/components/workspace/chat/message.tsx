@@ -71,8 +71,8 @@ function AssistantMessage({ message }: Props) {
   return (
     <div className="mb-[26px] max-w-[720px]">
       <div className="mb-2 flex items-center gap-1.5 text-ink-2">
-        <div className="grid h-[18px] w-[18px] place-items-center rounded-sm bg-ink text-paper">
-          <BrandMark size={11} />
+        <div className="grid h-[18px] w-[18px] place-items-center">
+          <BrandMark size={18} />
         </div>
         <span className="mono text-[10.5px] font-medium">libra</span>
         <span className="text-[10.5px] text-ink-3">·</span>

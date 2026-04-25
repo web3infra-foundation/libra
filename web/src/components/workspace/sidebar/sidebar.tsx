@@ -56,8 +56,8 @@ export function Sidebar({ width }: Props) {
       style={{ width }}
     >
       <div className="flex items-center gap-2.5 px-1 pb-3.5 pt-0.5">
-        <div className="grid h-7 w-7 place-items-center rounded-md bg-ink text-paper">
-          <BrandMark size={18} />
+        <div className="grid h-7 w-7 place-items-center">
+          <BrandMark size={26} />
         </div>
         <div>
           <div className="font-semibold tracking-tight">Libra</div>
