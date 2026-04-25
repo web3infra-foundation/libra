@@ -128,6 +128,7 @@ impl ToolHandler for ShellHandler {
             &output.stdout,
             &output.stderr,
             output.timed_out,
+            max_output_bytes,
         );
         let rendered = if output.exit_code == 0 {
             ToolOutput::success(formatted)
@@ -144,7 +145,13 @@ impl ToolHandler for ShellHandler {
 
 // ── Output formatting ─────────────────────────────────────────────────────────
 
-fn format_output(exit_code: i32, stdout: &str, stderr: &str, timed_out: bool) -> String {
+fn format_output(
+    exit_code: i32,
+    stdout: &str,
+    stderr: &str,
+    timed_out: bool,
+    max_output_bytes: usize,
+) -> String {
     let mut parts: Vec<String> = Vec::new();
 
     if timed_out {
@@ -155,10 +162,20 @@ fn format_output(exit_code: i32, stdout: &str, stderr: &str, timed_out: bool) ->
     if !stdout.is_empty() {
         parts.push(String::new()); // blank separator line
         parts.push(stdout.to_string());
+        if stdout.contains("[stdout truncated]") {
+            parts.push(format!(
+                "[truncated: stdout exceeded {max_output_bytes} bytes]"
+            ));
+        }
     }
     if !stderr.is_empty() {
         parts.push("[stderr]".to_string());
         parts.push(stderr.to_string());
+        if stderr.contains("[stderr truncated]") {
+            parts.push(format!(
+                "[truncated: stderr exceeded {max_output_bytes} bytes]"
+            ));
+        }
     }
 
     parts.join("\n")
@@ -558,7 +575,7 @@ mod tests {
 
     #[test]
     fn test_format_output_success_stdout_only() {
-        let text = format_output(0, "hello world\n", "", false);
+        let text = format_output(0, "hello world\n", "", false, DEFAULT_MAX_OUTPUT_BYTES);
         assert!(text.contains("Exit code: 0"));
         assert!(text.contains("hello world"));
         assert!(!text.contains("[stderr]"));
@@ -567,7 +584,7 @@ mod tests {
 
     #[test]
     fn test_format_output_failure_with_stderr() {
-        let text = format_output(1, "", "error occurred\n", false);
+        let text = format_output(1, "", "error occurred\n", false, DEFAULT_MAX_OUTPUT_BYTES);
         assert!(text.contains("Exit code: 1"));
         assert!(text.contains("[stderr]"));
         assert!(text.contains("error occurred"));
@@ -575,16 +592,36 @@ mod tests {
 
     #[test]
     fn test_format_output_timed_out() {
-        let text = format_output(TIMEOUT_EXIT_CODE, "", "", true);
+        let text = format_output(TIMEOUT_EXIT_CODE, "", "", true, DEFAULT_MAX_OUTPUT_BYTES);
         assert!(text.contains("[Command timed out]"));
         assert!(text.contains(&format!("Exit code: {TIMEOUT_EXIT_CODE}")));
     }
 
     #[test]
     fn test_format_output_both_streams() {
-        let text = format_output(0, "stdout content\n", "stderr content\n", false);
+        let text = format_output(
+            0,
+            "stdout content\n",
+            "stderr content\n",
+            false,
+            DEFAULT_MAX_OUTPUT_BYTES,
+        );
         assert!(text.contains("stdout content"));
         assert!(text.contains("[stderr]"));
         assert!(text.contains("stderr content"));
+    }
+
+    #[test]
+    fn test_format_output_adds_explicit_truncation_markers() {
+        let text = format_output(
+            0,
+            "partial stdout\n[stdout truncated]",
+            "partial stderr\n[stderr truncated]",
+            false,
+            123,
+        );
+
+        assert!(text.contains("[truncated: stdout exceeded 123 bytes]"));
+        assert!(text.contains("[truncated: stderr exceeded 123 bytes]"));
     }
 }

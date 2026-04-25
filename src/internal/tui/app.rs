@@ -72,8 +72,8 @@ use crate::{
             types::{
                 DecisionOutcome, ExecutionPlanSpec, GateReport, OrchestratorPhaseConfirmer,
                 OrchestratorResult, PersistedPlanReviewBundle, PhaseConfirmationDecision,
-                PhaseConfirmationPrompt, SystemReport, TaskKind, TaskNodeStatus, TaskRuntimeEvent,
-                TaskRuntimeNoteLevel, TaskRuntimePhase,
+                PhaseConfirmationPrompt, PolicyViolation, SystemReport, TaskKind, TaskNodeStatus,
+                TaskRuntimeEvent, TaskRuntimeNoteLevel, TaskRuntimePhase,
             },
         },
         projection::ProjectionRebuilder,
@@ -146,6 +146,7 @@ const LATEST_INTENTSPEC_BASE_REF: &str = "latest_intentspec_base_ref";
 const LATEST_INTENTSPEC_BRANCH_LABEL: &str = "latest_intentspec_branch_label";
 const MAX_INTENTSPEC_REPAIR_ATTEMPTS: usize = 2;
 const MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS: u8 = 10;
+const DEFAULT_AUTOMATIC_PLAN_REPAIR_ATTEMPTS: u8 = 0;
 const MCP_WRITE_TIMEOUT: Duration = Duration::from_secs(8);
 const MCP_TURN_TRACKING_TIMEOUT: Duration = Duration::from_secs(3);
 const GRAPH_THREAD_ID_METADATA_KEYS: &[&str] = &["thread_id", "threadId", "canonical_thread_id"];
@@ -259,6 +260,13 @@ struct PendingExecutionPlanRevision {
     automatic_repair_max_attempts: u8,
     network_access: bool,
     failure_report: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExecutionFailureRevision {
+    PlanRevision,
+    IntentSpecRevision,
+    ManualAction,
 }
 
 #[derive(Clone, Debug)]
@@ -3059,32 +3067,25 @@ where
                 }
                 let failure_report = repair_required
                     .then(|| execution_failure_report(result.as_deref(), Some(text.as_str())));
-                let can_auto_repair = should_auto_repair_execution_failure(
-                    result.as_deref(),
-                    Some(text.as_str()),
-                    automatic_repair_attempts,
-                    automatic_repair_max_attempts,
-                );
-                let repair_message = if repair_required {
-                    Some(if can_auto_repair {
-                        automatic_plan_repair_started_message(
-                            automatic_repair_attempts.saturating_add(1),
-                            automatic_repair_max_attempts,
-                        )
-                    } else if automatic_repair_attempts >= automatic_repair_max_attempts {
-                        automatic_plan_repair_threshold_message(
-                            failure_report.as_deref().unwrap_or_default(),
-                            automatic_repair_attempts,
-                            automatic_repair_max_attempts,
-                        )
-                    } else {
-                        execution_failure_revision_message_from_report(
-                            failure_report.as_deref().unwrap_or_default(),
-                        )
-                    })
-                } else {
-                    None
-                };
+                let repair_route = repair_required.then(|| {
+                    classify_execution_failure_revision(result.as_deref(), Some(text.as_str()))
+                });
+                let can_auto_repair = repair_route.is_some_and(|route| {
+                    should_auto_repair_execution_failure(
+                        route,
+                        automatic_repair_attempts,
+                        automatic_repair_max_attempts,
+                    )
+                });
+                let repair_message = repair_route.map(|route| {
+                    repair_message_for_execution_failure(
+                        route,
+                        failure_report.as_deref().unwrap_or_default(),
+                        can_auto_repair,
+                        automatic_repair_attempts,
+                        automatic_repair_max_attempts,
+                    )
+                });
                 if let Some(result) = result {
                     self.replace_streaming_assistant_cell(Box::new(
                         OrchestratorResultHistoryCell::new(*result),
@@ -3115,37 +3116,45 @@ where
                     code_ui_session.set_status(CodeUiSessionStatus::Idle).await;
                 }
                 if let Some(message) = repair_message {
-                    let pending = PendingExecutionPlanRevision {
-                        spec_json,
-                        intent_id,
-                        current_plan: repair_plan,
-                        warnings,
-                        automatic_repair_attempts,
-                        automatic_repair_max_attempts,
-                        network_access,
-                        failure_report: failure_report.clone(),
-                    };
                     self.widget
                         .add_cell(Box::new(AssistantHistoryCell::new(message.clone())));
                     self.history.push(Message::assistant(message.clone()));
                     self.session.add_assistant_message(&message);
-                    if can_auto_repair {
-                        let next_attempt = automatic_repair_attempts.saturating_add(1);
-                        let request = automatic_plan_repair_request_from_report(
-                            failure_report.as_deref().unwrap_or_default(),
-                            next_attempt,
-                            automatic_repair_max_attempts,
-                        );
-                        self.begin_automatic_execution_plan_repair(
-                            pending,
-                            request,
-                            next_attempt,
-                            automatic_repair_max_attempts,
-                        )
-                        .await;
-                        return Ok(());
+                    match repair_route {
+                        Some(ExecutionFailureRevision::PlanRevision) => {
+                            let pending = PendingExecutionPlanRevision {
+                                spec_json,
+                                intent_id,
+                                current_plan: repair_plan,
+                                warnings,
+                                automatic_repair_attempts,
+                                automatic_repair_max_attempts,
+                                network_access,
+                                failure_report: failure_report.clone(),
+                            };
+                            if can_auto_repair {
+                                let next_attempt = automatic_repair_attempts.saturating_add(1);
+                                let request = automatic_plan_repair_request_from_report(
+                                    failure_report.as_deref().unwrap_or_default(),
+                                    next_attempt,
+                                    automatic_repair_max_attempts,
+                                );
+                                self.begin_automatic_execution_plan_repair(
+                                    pending,
+                                    request,
+                                    next_attempt,
+                                    automatic_repair_max_attempts,
+                                )
+                                .await;
+                                return Ok(());
+                            }
+                            self.pending_execution_plan_revision = Some(pending);
+                        }
+                        Some(ExecutionFailureRevision::IntentSpecRevision) => {
+                            self.pending_plan_revision = Some(spec_json);
+                        }
+                        Some(ExecutionFailureRevision::ManualAction) | None => {}
                     }
-                    self.pending_execution_plan_revision = Some(pending);
                     self.widget.bottom_pane.set_status(AgentStatus::Idle);
                     self.sync_mux_input_context();
                     self.schedule_draw();
@@ -3921,7 +3930,7 @@ where
             warnings,
             prompt,
             0,
-            MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS,
+            DEFAULT_AUTOMATIC_PLAN_REPAIR_ATTEMPTS,
         )
         .await;
     }
@@ -5175,7 +5184,7 @@ where
                         plan_warnings: Vec::new(),
                         network_access_override: Some(self.default_network_access),
                         automatic_repair_attempts: 0,
-                        automatic_repair_max_attempts: MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS,
+                        automatic_repair_max_attempts: DEFAULT_AUTOMATIC_PLAN_REPAIR_ATTEMPTS,
                     })
                     .await;
                 }
@@ -6160,15 +6169,16 @@ mod tests {
     use serde_json::json;
 
     use super::{
+        DEFAULT_AUTOMATIC_PLAN_REPAIR_ATTEMPTS, ExecutionFailureRevision,
         MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS, PendingPlanRevisionCommand, ProviderPlanDraft,
         ProviderPlanDraftStep, append_to_last_tool_group_cell,
         append_to_last_tool_group_preview_cell, apply_developer_network_access,
         automatic_plan_repair_request_from_report, automatic_plan_repair_threshold_message,
         build_execution_plan_prompt, build_execution_plan_revision_prompt, build_plan_prompt,
-        build_plan_revision_prompt, code_ui_response_from_managed_selection,
-        execution_failure_report, execution_failure_revision_message,
-        execution_requires_plan_repair, format_decision_stage_note,
-        format_intentspec_target_mismatch, format_orchestrator_result,
+        build_plan_revision_prompt, classify_execution_failure_revision,
+        code_ui_response_from_managed_selection, execution_failure_report,
+        execution_failure_revision_message, execution_requires_plan_repair,
+        format_decision_stage_note, format_intentspec_target_mismatch, format_orchestrator_result,
         format_plan_compiled_stage_note, format_plan_execution_stage_note,
         format_replan_stage_note, format_system_verification_stage_note,
         intentspec_with_plan_draft_objectives, is_default_chat_tool, is_global_quit_command_input,
@@ -6504,37 +6514,20 @@ mod tests {
     #[test]
     fn automatic_plan_repair_default_threshold_is_ten() {
         assert_eq!(MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS, 10);
+        assert_eq!(DEFAULT_AUTOMATIC_PLAN_REPAIR_ATTEMPTS, 0);
     }
 
     #[test]
     fn automatic_plan_repair_stops_at_threshold_for_developer_confirmation() {
         let result = orchestrator_fixture();
         let report = execution_failure_report(Some(&result), None);
+        let route = ExecutionFailureRevision::PlanRevision;
 
-        assert!(should_auto_repair_execution_failure(
-            Some(&result),
-            None,
-            0,
-            3
-        ));
-        assert!(should_auto_repair_execution_failure(
-            Some(&result),
-            None,
-            2,
-            3
-        ));
-        assert!(!should_auto_repair_execution_failure(
-            Some(&result),
-            None,
-            3,
-            3
-        ));
-        assert!(should_auto_repair_execution_failure(
-            Some(&result),
-            None,
-            3,
-            5
-        ));
+        assert!(should_auto_repair_execution_failure(route, 0, 3));
+        assert!(should_auto_repair_execution_failure(route, 2, 3));
+        assert!(!should_auto_repair_execution_failure(route, 3, 3));
+        assert!(should_auto_repair_execution_failure(route, 3, 5));
+        assert!(!should_auto_repair_execution_failure(route, 0, 0));
 
         let message = automatic_plan_repair_threshold_message(&report, 3, 3);
         assert!(message.contains("Developer confirmation"));
@@ -6549,21 +6542,84 @@ mod tests {
 
         assert!(report.contains("before producing a final decision"));
         assert!(report.contains("persisted plan not found"));
+        let route = classify_execution_failure_revision(None, Some(summary));
+        assert_eq!(route, ExecutionFailureRevision::ManualAction);
+        assert!(!should_auto_repair_execution_failure(route, 0, 3));
+        assert!(!should_auto_repair_execution_failure(route, 3, 3));
+
+        let request = automatic_plan_repair_request_from_report(&report, 1, 3);
+        assert!(request.contains("persisted plan not found"));
+    }
+
+    #[test]
+    fn automatic_plan_repair_only_runs_for_plan_revision_route() {
         assert!(should_auto_repair_execution_failure(
-            None,
-            Some(summary),
+            ExecutionFailureRevision::PlanRevision,
             0,
             3
         ));
         assert!(!should_auto_repair_execution_failure(
-            None,
-            Some(summary),
-            3,
+            ExecutionFailureRevision::IntentSpecRevision,
+            0,
             3
         ));
+        assert!(!should_auto_repair_execution_failure(
+            ExecutionFailureRevision::ManualAction,
+            0,
+            3
+        ));
+    }
 
-        let request = automatic_plan_repair_request_from_report(&report, 1, 3);
-        assert!(request.contains("persisted plan not found"));
+    #[test]
+    fn execution_failure_classification_routes_plan_repairs_only_for_plan_failures() {
+        let mut result = orchestrator_fixture();
+        result.system_report.missing_artifacts.clear();
+        result.system_report.artifacts_complete = true;
+
+        assert_eq!(
+            classify_execution_failure_revision(Some(&result), None),
+            ExecutionFailureRevision::PlanRevision
+        );
+    }
+
+    #[test]
+    fn execution_failure_classification_routes_artifact_failure_to_intentspec_revision() {
+        let result = orchestrator_fixture();
+
+        assert_eq!(
+            classify_execution_failure_revision(Some(&result), None),
+            ExecutionFailureRevision::IntentSpecRevision
+        );
+    }
+
+    #[test]
+    fn execution_failure_classification_routes_policy_failures_to_intentspec_revision() {
+        for code in [
+            "scope-creep",
+            "network-policy-deny",
+            "tool-acl-deny",
+            "sandbox-escalation-deny",
+        ] {
+            let mut result = orchestrator_fixture();
+            result.system_report.missing_artifacts.clear();
+            result.system_report.artifacts_complete = true;
+            let task_result = result
+                .task_results
+                .first_mut()
+                .expect("fixture should include a failed task result");
+            task_result.policy_violations = vec![PolicyViolation {
+                code: code.to_string(),
+                message: "policy blocked execution".to_string(),
+                tool_name: Some("shell".to_string()),
+                path: None,
+            }];
+
+            assert_eq!(
+                classify_execution_failure_revision(Some(&result), None),
+                ExecutionFailureRevision::IntentSpecRevision,
+                "policy code {code} should revise IntentSpec"
+            );
+        }
     }
 
     #[test]
@@ -7370,10 +7426,79 @@ fn execution_failure_revision_message_from_report(report: &str) -> String {
             .map(str::to_string),
     );
     lines.push(
-        "Send plan changes as plain text or use `/plan modify <changes>`. Use `/plan cancel` to stop this repair loop."
+        "Reply `continue` or `/plan continue <max-attempts>` to allow automatic repair attempts, send plan changes as plain text or `/plan modify <changes>`, or use `/plan cancel` to stop."
             .to_string(),
     );
     lines.join("\n")
+}
+
+fn intentspec_failure_revision_message_from_report(report: &str) -> String {
+    let mut lines = vec![
+        "Plan execution failed because the current IntentSpec constraints or required artifacts need revision before another plan repair can help.".to_string(),
+    ];
+    lines.extend(
+        report
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(str::to_string),
+    );
+    lines.push(
+        "Revise the IntentSpec scope, network policy, tool ACL, or artifact requirements with plain text or `/plan modify <changes>`. Use `/plan cancel` to stop."
+            .to_string(),
+    );
+    lines.join("\n")
+}
+
+fn manual_execution_failure_message_from_report(report: &str) -> String {
+    let mut lines =
+        vec!["Plan execution failed before automatic plan repair can make progress.".to_string()];
+    lines.extend(
+        report
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(str::to_string),
+    );
+    lines.push(
+        "Resolve the configuration, MCP, persistence, or external blocker, then rerun `/intent execute` or revise the plan/spec explicitly."
+            .to_string(),
+    );
+    lines.join("\n")
+}
+
+fn repair_message_for_execution_failure(
+    route: ExecutionFailureRevision,
+    report: &str,
+    can_auto_repair: bool,
+    automatic_repair_attempts: u8,
+    automatic_repair_max_attempts: u8,
+) -> String {
+    match route {
+        ExecutionFailureRevision::PlanRevision if can_auto_repair => {
+            automatic_plan_repair_started_message(
+                automatic_repair_attempts.saturating_add(1),
+                automatic_repair_max_attempts,
+            )
+        }
+        ExecutionFailureRevision::PlanRevision
+            if automatic_repair_attempts >= automatic_repair_max_attempts
+                && automatic_repair_max_attempts > 0 =>
+        {
+            automatic_plan_repair_threshold_message(
+                report,
+                automatic_repair_attempts,
+                automatic_repair_max_attempts,
+            )
+        }
+        ExecutionFailureRevision::PlanRevision => {
+            execution_failure_revision_message_from_report(report)
+        }
+        ExecutionFailureRevision::IntentSpecRevision => {
+            intentspec_failure_revision_message_from_report(report)
+        }
+        ExecutionFailureRevision::ManualAction => {
+            manual_execution_failure_message_from_report(report)
+        }
+    }
 }
 
 fn execution_failure_report(
@@ -7433,14 +7558,73 @@ fn execution_failure_report(
 }
 
 fn should_auto_repair_execution_failure(
-    result: Option<&OrchestratorResult>,
-    execution_summary: Option<&str>,
+    route: ExecutionFailureRevision,
     automatic_repair_attempts: u8,
     automatic_repair_max_attempts: u8,
 ) -> bool {
     automatic_repair_attempts < automatic_repair_max_attempts
-        && (result.is_some_and(|result| result.decision == DecisionOutcome::Abandon)
-            || orchestrator_failure_detail(execution_summary).is_some())
+        && route == ExecutionFailureRevision::PlanRevision
+}
+
+fn classify_execution_failure_revision(
+    result: Option<&OrchestratorResult>,
+    execution_summary: Option<&str>,
+) -> ExecutionFailureRevision {
+    if let Some(result) = result {
+        if execution_failure_requires_intentspec_revision(result) {
+            return ExecutionFailureRevision::IntentSpecRevision;
+        }
+        return if result.decision == DecisionOutcome::Abandon {
+            ExecutionFailureRevision::PlanRevision
+        } else {
+            ExecutionFailureRevision::ManualAction
+        };
+    }
+
+    if let Some(detail) = orchestrator_failure_detail(execution_summary)
+        && orchestrator_failure_requires_manual_action(&detail)
+    {
+        return ExecutionFailureRevision::ManualAction;
+    }
+
+    ExecutionFailureRevision::ManualAction
+}
+
+fn execution_failure_requires_intentspec_revision(result: &OrchestratorResult) -> bool {
+    !result.system_report.missing_artifacts.is_empty()
+        || result.task_results.iter().any(|task_result| {
+            task_result
+                .policy_violations
+                .iter()
+                .any(policy_violation_requires_intentspec_revision)
+        })
+}
+
+fn policy_violation_requires_intentspec_revision(violation: &PolicyViolation) -> bool {
+    matches!(
+        violation.code.as_str(),
+        "scope-creep"
+            | "network-policy-deny"
+            | "tool-acl-deny"
+            | "sandbox-escalation-deny"
+            | "git-version-control-deny"
+    )
+}
+
+fn orchestrator_failure_requires_manual_action(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    [
+        "config error",
+        "configuration",
+        "mcp",
+        "persisted plan",
+        "persistence",
+        "database",
+        "sqlite",
+        "store",
+    ]
+    .iter()
+    .any(|needle| detail.contains(needle))
 }
 
 fn orchestrator_failure_detail(execution_summary: Option<&str>) -> Option<String> {

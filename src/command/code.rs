@@ -1557,6 +1557,7 @@ where
             params.exec_approval_tx.clone(),
         )),
         max_turns: None,
+        ..Default::default()
     };
 
     // Initialize terminal

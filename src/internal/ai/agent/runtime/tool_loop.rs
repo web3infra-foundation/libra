@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+};
 
 use serde_json::Value;
 
@@ -74,6 +77,12 @@ pub struct ToolLoopConfig {
     pub runtime_context: Option<ToolRuntimeContext>,
     /// Hard cap for model turns in one tool loop run.
     pub max_turns: Option<usize>,
+    /// Number of recent executed tool calls used to detect repeated calls.
+    pub repeat_detection_window: Option<usize>,
+    /// Same executed tool-call signature count that triggers a strategy warning.
+    pub repeat_warning_threshold: Option<usize>,
+    /// Whether assistant reasoning content should be retained in model history.
+    pub preserve_reasoning_content: bool,
 }
 
 impl Default for ToolLoopConfig {
@@ -88,11 +97,16 @@ impl Default for ToolLoopConfig {
             allowed_tools: None,
             runtime_context: None,
             max_turns: None,
+            repeat_detection_window: Some(DEFAULT_REPEAT_DETECTION_WINDOW),
+            repeat_warning_threshold: Some(DEFAULT_REPEAT_WARNING_THRESHOLD),
+            preserve_reasoning_content: false,
         }
     }
 }
 
 const DEFAULT_MAX_TOOL_LOOP_TURNS: usize = 64;
+const DEFAULT_REPEAT_DETECTION_WINDOW: usize = 10;
+const DEFAULT_REPEAT_WARNING_THRESHOLD: usize = 3;
 const MAX_IDENTICAL_BLOCKED_TOOL_CALLS: usize = 3;
 
 /// Run a prompt through a completion model, allowing iterative tool calls.
@@ -141,6 +155,14 @@ where
     }
     let mut turn_count = 0usize;
     let mut blocked_signatures: HashMap<String, usize> = HashMap::new();
+    let repeat_detection_window = config
+        .repeat_detection_window
+        .unwrap_or(DEFAULT_REPEAT_DETECTION_WINDOW);
+    let repeat_warning_threshold = config
+        .repeat_warning_threshold
+        .unwrap_or(DEFAULT_REPEAT_WARNING_THRESHOLD);
+    let mut executed_tool_signatures: VecDeque<String> = VecDeque::new();
+    let mut executed_tool_signature_counts: HashMap<String, usize> = HashMap::new();
 
     let mut tools = registry_tool_definitions(registry);
 
@@ -218,7 +240,10 @@ where
             })?;
             history.push(Message::Assistant {
                 id: None,
-                reasoning_content: response.reasoning_content.clone(),
+                reasoning_content: history_reasoning_content(
+                    response.reasoning_content.clone(),
+                    config.preserve_reasoning_content,
+                ),
                 content: assistant_content,
             });
 
@@ -339,12 +364,23 @@ where
                     invocation = invocation.with_runtime_context(runtime_context);
                 }
 
-                let tool_result: Result<ToolOutput, String> =
+                let mut tool_result: Result<ToolOutput, String> =
                     match registry.dispatch(invocation).await {
                         Ok(output) => Ok(output),
                         Err(err) => Err(format!("Tool '{}' failed: {}", call.function.name, err)),
                     };
                 blocked_signatures.clear();
+                let repeat_warning = record_executed_tool_signature(
+                    &mut executed_tool_signatures,
+                    &mut executed_tool_signature_counts,
+                    &call.function.name,
+                    &call.function.arguments,
+                    repeat_detection_window,
+                    repeat_warning_threshold,
+                );
+                if let Some(warning) = repeat_warning {
+                    append_repeat_warning_to_tool_result(&mut tool_result, &warning);
+                }
 
                 observer.on_tool_call_end(&call.id, &call.function.name, &tool_result);
 
@@ -387,7 +423,10 @@ where
             })?;
             history.push(Message::Assistant {
                 id: None,
-                reasoning_content: response.reasoning_content.clone(),
+                reasoning_content: history_reasoning_content(
+                    response.reasoning_content.clone(),
+                    config.preserve_reasoning_content,
+                ),
                 content: assistant_content,
             });
             return Ok(ToolLoopTurn {
@@ -419,7 +458,7 @@ fn tool_arguments_json(arguments: &Value) -> String {
 }
 
 fn blocked_tool_call_signature(tool_name: &str, arguments: &Value) -> String {
-    format!("{tool_name}|{}", arguments)
+    format!("{tool_name}|{}", canonical_json_value(arguments))
 }
 
 fn increment_blocked_count(
@@ -429,6 +468,110 @@ fn increment_blocked_count(
     let count = blocked_signatures.entry(signature.to_string()).or_insert(0);
     *count += 1;
     *count
+}
+
+fn history_reasoning_content(
+    reasoning_content: Option<String>,
+    preserve_reasoning_content: bool,
+) -> Option<String> {
+    if preserve_reasoning_content {
+        reasoning_content
+    } else {
+        None
+    }
+}
+
+fn record_executed_tool_signature(
+    recent_signatures: &mut VecDeque<String>,
+    signature_counts: &mut HashMap<String, usize>,
+    tool_name: &str,
+    arguments: &Value,
+    window: usize,
+    threshold: usize,
+) -> Option<String> {
+    if window == 0 || threshold == 0 {
+        return None;
+    }
+
+    let signature = format!("{tool_name}|{}", canonical_json_value(arguments));
+    recent_signatures.push_back(signature.clone());
+    *signature_counts.entry(signature.clone()).or_insert(0) += 1;
+
+    while recent_signatures.len() > window {
+        if let Some(expired) = recent_signatures.pop_front()
+            && let Some(count) = signature_counts.get_mut(&expired)
+        {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                signature_counts.remove(&expired);
+            }
+        }
+    }
+
+    let count = signature_counts
+        .get(&signature)
+        .copied()
+        .unwrap_or_default();
+    (count >= threshold).then(|| {
+        format!(
+            "[system warning: repeated tool call] You have called `{tool_name}` with the same arguments {count} times in the last {window} executed tool calls. Do not repeat the same call again unless new information changed the target; switch strategy or finish with a final response if the task is complete."
+        )
+    })
+}
+
+fn append_repeat_warning_to_tool_result(result: &mut Result<ToolOutput, String>, warning: &str) {
+    match result {
+        Ok(ToolOutput::Function { content, .. }) => {
+            if !content.is_empty() {
+                content.push_str("\n\n");
+            }
+            content.push_str(warning);
+        }
+        Ok(ToolOutput::Mcp { result }) => {
+            if let Value::Object(object) = result {
+                object.insert(
+                    "repeat_warning".to_string(),
+                    Value::String(warning.to_string()),
+                );
+            }
+        }
+        Err(message) => {
+            if !message.is_empty() {
+                message.push_str("\n\n");
+            }
+            message.push_str(warning);
+        }
+    }
+}
+
+fn canonical_json_value(value: &Value) -> String {
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => value.to_string(),
+        Value::Array(items) => {
+            let inner = items
+                .iter()
+                .map(canonical_json_value)
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("[{inner}]")
+        }
+        Value::Object(object) => {
+            let mut entries = object.iter().collect::<Vec<_>>();
+            entries.sort_by_key(|(key, _)| *key);
+            let inner = entries
+                .into_iter()
+                .map(|(key, value)| {
+                    let key = match serde_json::to_string(key) {
+                        Ok(serialized) => serialized,
+                        Err(_) => "\"<invalid-key>\"".to_string(),
+                    };
+                    format!("{key}:{}", canonical_json_value(value))
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{{{inner}}}")
+        }
+    }
 }
 
 fn registry_tool_definitions(registry: &ToolRegistry) -> Vec<ToolDefinition> {
@@ -731,6 +874,9 @@ mod tests {
                 allowed_tools: None,
                 runtime_context: None,
                 max_turns: None,
+                repeat_detection_window: Some(DEFAULT_REPEAT_DETECTION_WINDOW),
+                repeat_warning_threshold: Some(DEFAULT_REPEAT_WARNING_THRESHOLD),
+                preserve_reasoning_content: false,
             },
             &mut observer,
         )
@@ -756,7 +902,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_loop_preserves_assistant_reasoning_content_for_tool_followup() {
+    async fn tool_loop_clears_assistant_reasoning_content_by_default() {
         #[derive(Clone)]
         struct ReasoningToolModel {
             seen_followup_reasoning: Arc<Mutex<Vec<Option<String>>>>,
@@ -823,6 +969,100 @@ mod tests {
             "hello",
             &registry,
             ToolLoopConfig::default(),
+            &mut RecordingObserver::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(turn.final_text, "done");
+        assert_eq!(seen_followup_reasoning.lock().unwrap().as_slice(), &[None]);
+        assert!(matches!(
+            &turn.history[1],
+            Message::Assistant {
+                reasoning_content: None,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &turn.history[3],
+            Message::Assistant {
+                reasoning_content: None,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn tool_loop_preserves_assistant_reasoning_content_when_configured() {
+        #[derive(Clone)]
+        struct ReasoningToolModel {
+            seen_followup_reasoning: Arc<Mutex<Vec<Option<String>>>>,
+        }
+
+        impl CompletionModel for ReasoningToolModel {
+            type Response = ();
+
+            async fn completion(
+                &self,
+                request: CompletionRequest,
+            ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+                let has_tool_result = request.chat_history.iter().any(|msg| match msg {
+                    Message::User { content } => content
+                        .iter()
+                        .any(|item| matches!(item, UserContent::ToolResult(_))),
+                    _ => false,
+                });
+
+                if has_tool_result {
+                    let reasoning = request.chat_history.iter().find_map(|msg| match msg {
+                        Message::Assistant {
+                            reasoning_content, ..
+                        } => reasoning_content.clone(),
+                        _ => None,
+                    });
+                    self.seen_followup_reasoning.lock().unwrap().push(reasoning);
+
+                    return Ok(CompletionResponse {
+                        content: vec![AssistantContent::Text(Text {
+                            text: "done".to_string(),
+                        })],
+                        reasoning_content: Some("final reasoning".to_string()),
+                        raw_response: (),
+                    });
+                }
+
+                Ok(CompletionResponse {
+                    content: vec![AssistantContent::ToolCall(ToolCall {
+                        id: "call_1".to_string(),
+                        name: "mock_tool".to_string(),
+                        function: Function {
+                            name: "mock_tool".to_string(),
+                            arguments: json!({"value": 1}),
+                        },
+                    })],
+                    reasoning_content: Some("need tool result".to_string()),
+                    raw_response: (),
+                })
+            }
+        }
+
+        let seen_followup_reasoning = Arc::new(Mutex::new(Vec::new()));
+        let model = ReasoningToolModel {
+            seen_followup_reasoning: Arc::clone(&seen_followup_reasoning),
+        };
+        let temp_dir = TempDir::new().unwrap();
+        let mut registry = ToolRegistry::with_working_dir(temp_dir.path().to_path_buf());
+        registry.register("mock_tool", Arc::new(MockHandler));
+
+        let turn = run_tool_loop_with_history_and_observer(
+            &model,
+            Vec::new(),
+            "hello",
+            &registry,
+            ToolLoopConfig {
+                preserve_reasoning_content: true,
+                ..Default::default()
+            },
             &mut RecordingObserver::default(),
         )
         .await
@@ -998,6 +1238,9 @@ mod tests {
                 allowed_tools: None,
                 runtime_context: None,
                 max_turns: None,
+                repeat_detection_window: Some(DEFAULT_REPEAT_DETECTION_WINDOW),
+                repeat_warning_threshold: Some(DEFAULT_REPEAT_WARNING_THRESHOLD),
+                preserve_reasoning_content: false,
             },
             &mut observer,
         )
@@ -1070,6 +1313,9 @@ mod tests {
                 allowed_tools: Some(vec!["other_tool".to_string()]),
                 runtime_context: None,
                 max_turns: None,
+                repeat_detection_window: Some(DEFAULT_REPEAT_DETECTION_WINDOW),
+                repeat_warning_threshold: Some(DEFAULT_REPEAT_WARNING_THRESHOLD),
+                preserve_reasoning_content: false,
             },
             &mut observer,
         )
@@ -1138,6 +1384,93 @@ mod tests {
         assert!(
             matches!(err, CompletionError::ResponseError(msg) if msg.contains("maximum turns"))
         );
+    }
+
+    #[tokio::test]
+    async fn tool_loop_warns_on_repeated_executed_tool_call() {
+        #[derive(Clone)]
+        struct RepeatingToolModel;
+
+        impl CompletionModel for RepeatingToolModel {
+            type Response = ();
+
+            async fn completion(
+                &self,
+                request: CompletionRequest,
+            ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+                let tool_result_count = request
+                    .chat_history
+                    .iter()
+                    .filter_map(|msg| match msg {
+                        Message::User { content } => Some(
+                            content
+                                .iter()
+                                .filter(|item| matches!(item, UserContent::ToolResult(_)))
+                                .count(),
+                        ),
+                        _ => None,
+                    })
+                    .sum::<usize>();
+
+                if tool_result_count >= 3 {
+                    return Ok(CompletionResponse {
+                        content: vec![AssistantContent::Text(Text {
+                            text: "done".to_string(),
+                        })],
+                        reasoning_content: None,
+                        raw_response: (),
+                    });
+                }
+
+                Ok(CompletionResponse {
+                    content: vec![AssistantContent::ToolCall(ToolCall {
+                        id: format!("call_{tool_result_count}"),
+                        name: "mock_tool".to_string(),
+                        function: Function {
+                            name: "mock_tool".to_string(),
+                            arguments: json!({"b": 2, "a": 1}),
+                        },
+                    })],
+                    reasoning_content: None,
+                    raw_response: (),
+                })
+            }
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let mut registry = ToolRegistry::with_working_dir(temp_dir.path().to_path_buf());
+        registry.register("mock_tool", Arc::new(MockHandler));
+
+        let turn = run_tool_loop_with_history_and_observer(
+            &RepeatingToolModel,
+            Vec::new(),
+            "repeat",
+            &registry,
+            ToolLoopConfig::default(),
+            &mut RecordingObserver::default(),
+        )
+        .await
+        .unwrap();
+
+        let tool_result_contents = turn
+            .history
+            .iter()
+            .filter_map(|msg| match msg {
+                Message::User { content } => content.iter().find_map(|item| match item {
+                    UserContent::ToolResult(result) => {
+                        result.result["content"].as_str().map(str::to_string)
+                    }
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(tool_result_contents.len(), 3);
+        assert!(!tool_result_contents[0].contains("repeated tool call"));
+        assert!(!tool_result_contents[1].contains("repeated tool call"));
+        assert!(tool_result_contents[2].contains("repeated tool call"));
+        assert!(tool_result_contents[2].contains("same arguments 3 times"));
     }
 
     #[tokio::test]

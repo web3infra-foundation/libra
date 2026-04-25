@@ -282,10 +282,9 @@ fn decode_numeric_entity(entity: &str) -> Option<String> {
         .or_else(|| entity.strip_prefix("#X"))
     {
         u32::from_str_radix(hex, 16).ok()?
-    } else if let Some(decimal) = entity.strip_prefix('#') {
-        decimal.parse::<u32>().ok()?
     } else {
-        return None;
+        let decimal = entity.strip_prefix('#')?;
+        decimal.parse::<u32>().ok()?
     };
     char::from_u32(value).map(|ch| ch.to_string())
 }

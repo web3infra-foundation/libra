@@ -9,6 +9,12 @@ use thiserror::Error;
 
 use super::parser::{Hunk, ParseError, UpdateFileChunk, parse_patch};
 
+const PATCH_DIAGNOSTIC_CONTEXT_LINES: usize = 2;
+const PATCH_DIAGNOSTIC_MAX_EXPECTED_LINES: usize = 12;
+const PATCH_DIAGNOSTIC_MAX_ACTUAL_LINES: usize = 16;
+const PATCH_DIAGNOSTIC_MAX_DIFF_LINES: usize = 8;
+const PATCH_DIAGNOSTIC_MAX_LINE_CHARS: usize = 180;
+
 #[derive(Debug, Error, PartialEq)]
 pub enum ApplyPatchError {
     #[error(transparent)]
@@ -358,17 +364,214 @@ fn compute_replacements(
             replacements.push((start_idx, pattern.len(), new_slice.to_vec()));
             line_index = start_idx + pattern.len();
         } else {
-            return Err(ApplyPatchError::ComputeReplacements(format!(
-                "Failed to find expected lines in {}:\n{}",
-                path.display(),
-                chunk.old_lines.join("\n"),
-            )));
+            return Err(ApplyPatchError::ComputeReplacements(
+                format_expected_lines_not_found(path, pattern, original_lines, line_index),
+            ));
         }
     }
 
     replacements.sort_by_key(|(idx, _, _)| *idx);
 
     Ok(replacements)
+}
+
+fn format_expected_lines_not_found(
+    path: &Path,
+    expected_lines: &[String],
+    original_lines: &[String],
+    search_start: usize,
+) -> String {
+    let mut lines = vec![format!(
+        "Failed to find expected lines in {}.",
+        path.display()
+    )];
+
+    lines.push("Expected lines:".to_string());
+    if expected_lines.is_empty() {
+        lines.push("(empty expected block)".to_string());
+    } else {
+        lines.extend(
+            expected_lines
+                .iter()
+                .take(PATCH_DIAGNOSTIC_MAX_EXPECTED_LINES)
+                .enumerate()
+                .map(|(idx, line)| {
+                    format!(
+                        "E{}: {}",
+                        idx + 1,
+                        truncate_diagnostic_line(line, PATCH_DIAGNOSTIC_MAX_LINE_CHARS)
+                    )
+                }),
+        );
+        if expected_lines.len() > PATCH_DIAGNOSTIC_MAX_EXPECTED_LINES {
+            lines.push(format!(
+                "... {} more expected lines omitted",
+                expected_lines.len() - PATCH_DIAGNOSTIC_MAX_EXPECTED_LINES
+            ));
+        }
+    }
+
+    let closest = closest_matching_window(expected_lines, original_lines, search_start);
+    if let Some(window_start) = closest {
+        let expected_len = expected_lines.len().max(1);
+        let context_start = window_start.saturating_sub(PATCH_DIAGNOSTIC_CONTEXT_LINES);
+        let context_end = (window_start + expected_len + PATCH_DIAGNOSTIC_CONTEXT_LINES)
+            .min(original_lines.len())
+            .min(context_start + PATCH_DIAGNOSTIC_MAX_ACTUAL_LINES);
+        let read_offset = context_start + 1;
+        let read_limit = context_end.saturating_sub(context_start).max(1);
+
+        lines.push(format!(
+            "Closest content in file around L{}:",
+            window_start + 1
+        ));
+        for (idx, line) in original_lines
+            .iter()
+            .enumerate()
+            .skip(context_start)
+            .take(read_limit)
+        {
+            lines.push(format!(
+                "L{}: {}",
+                idx + 1,
+                truncate_diagnostic_line(line, PATCH_DIAGNOSTIC_MAX_LINE_CHARS)
+            ));
+        }
+
+        let diff_lines = expected_actual_mismatch_summary(
+            expected_lines,
+            original_lines,
+            window_start,
+            PATCH_DIAGNOSTIC_MAX_DIFF_LINES,
+        );
+        if !diff_lines.is_empty() {
+            lines.push("Mismatch summary:".to_string());
+            lines.extend(diff_lines);
+        }
+
+        lines.push(format!(
+            "Suggested next step: call read_file for '{}' with offset {read_offset} and limit {read_limit}, then rebuild the patch from the current file content.",
+            path.display()
+        ));
+    } else {
+        let read_offset = search_start
+            .saturating_add(1)
+            .min(original_lines.len().max(1));
+        lines.push(
+            "Closest content in file: file is empty or no comparable window was found.".to_string(),
+        );
+        lines.push(format!(
+            "Suggested next step: call read_file for '{}' with offset {read_offset} and limit {}, then rebuild the patch from the current file content.",
+            path.display(),
+            PATCH_DIAGNOSTIC_MAX_ACTUAL_LINES
+        ));
+    }
+
+    lines.join("\n")
+}
+
+fn closest_matching_window(
+    expected_lines: &[String],
+    original_lines: &[String],
+    search_start: usize,
+) -> Option<usize> {
+    if expected_lines.is_empty() || original_lines.is_empty() {
+        return None;
+    }
+
+    let window_len = expected_lines.len().min(original_lines.len()).max(1);
+    let last_start = original_lines.len().saturating_sub(window_len);
+    let mut best: Option<(usize, usize)> = None;
+
+    for start in 0..=last_start {
+        let actual = &original_lines[start..start + window_len];
+        let score = matching_window_score(expected_lines, actual, start, search_start);
+        if best.is_none_or(|(_, best_score)| score < best_score) {
+            best = Some((start, score));
+        }
+    }
+
+    best.map(|(start, _)| start)
+}
+
+fn matching_window_score(
+    expected_lines: &[String],
+    actual_lines: &[String],
+    actual_start: usize,
+    search_start: usize,
+) -> usize {
+    let distance_penalty = actual_start.abs_diff(search_start).min(100);
+    let mut score = distance_penalty;
+    let comparable_len = expected_lines.len().max(actual_lines.len());
+
+    for idx in 0..comparable_len {
+        match (expected_lines.get(idx), actual_lines.get(idx)) {
+            (Some(expected), Some(actual)) if expected == actual => {}
+            (Some(expected), Some(actual)) if expected.trim_end() == actual.trim_end() => {
+                score += 1;
+            }
+            (Some(expected), Some(actual)) if expected.trim() == actual.trim() => {
+                score += 2;
+            }
+            (Some(expected), Some(actual)) => {
+                score += 10 + expected.len().abs_diff(actual.len()).min(20);
+            }
+            _ => {
+                score += 30;
+            }
+        }
+    }
+
+    score
+}
+
+fn expected_actual_mismatch_summary(
+    expected_lines: &[String],
+    original_lines: &[String],
+    actual_start: usize,
+    limit: usize,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    for (idx, expected) in expected_lines.iter().enumerate() {
+        let Some(actual) = original_lines.get(actual_start + idx) else {
+            lines.push(format!(
+                "+{} expected: {}",
+                idx + 1,
+                truncate_diagnostic_line(expected, PATCH_DIAGNOSTIC_MAX_LINE_CHARS)
+            ));
+            lines.push(format!("+{} actual: <missing line>", idx + 1));
+            break;
+        };
+        if expected != actual {
+            lines.push(format!(
+                "+{} expected: {}",
+                idx + 1,
+                truncate_diagnostic_line(expected, PATCH_DIAGNOSTIC_MAX_LINE_CHARS)
+            ));
+            lines.push(format!(
+                "+{} actual:   {}",
+                idx + 1,
+                truncate_diagnostic_line(actual, PATCH_DIAGNOSTIC_MAX_LINE_CHARS)
+            ));
+        }
+        if lines.len() >= limit.saturating_mul(2) {
+            lines.push("... additional mismatches omitted".to_string());
+            break;
+        }
+    }
+    lines
+}
+
+fn truncate_diagnostic_line(line: &str, max_chars: usize) -> String {
+    let mut truncated = String::new();
+    for (idx, ch) in line.chars().enumerate() {
+        if idx >= max_chars {
+            truncated.push_str("...");
+            return truncated;
+        }
+        truncated.push(ch);
+    }
+    truncated
 }
 
 /// Apply the `(start_index, old_len, new_lines)` replacements to `original_lines`,
@@ -488,6 +691,36 @@ mod tests {
         assert_eq!(result, expected);
         let contents = fs::read_to_string(&path).unwrap();
         assert_eq!(contents, "foo\nbaz\n");
+    }
+
+    #[test]
+    fn test_update_file_hunk_match_failure_includes_diagnostics() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("diagnostic.txt");
+        fs::write(&path, "alpha\nbeta current\ngamma\n").unwrap();
+        let patch = wrap_patch(&format!(
+            r#"*** Update File: {}
+@@
+ alpha
+-beta old
++beta new
+ gamma"#,
+            path.display()
+        ));
+
+        let error = apply_patch(&patch, dir.path()).unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains("Failed to find expected lines"));
+        assert!(message.contains("Expected lines:"));
+        assert!(message.contains("E2: beta old"));
+        assert!(message.contains("Closest content in file around L1:"));
+        assert!(message.contains("L2: beta current"));
+        assert!(message.contains("Mismatch summary:"));
+        assert!(message.contains("+2 expected: beta old"));
+        assert!(message.contains("+2 actual:   beta current"));
+        assert!(message.contains("Suggested next step: call read_file"));
+        assert!(message.contains("offset 1"));
     }
 
     #[test]

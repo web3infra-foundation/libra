@@ -20,6 +20,13 @@ Working directory: {working_dir}
 - Trust internal code and framework guarantees. Only validate at system boundaries.
 - If blocked, consider alternative approaches rather than brute-forcing the same path.
 
+## Completion Protocol
+
+- When the task is complete, stop calling tools and provide a final concise summary.
+- If the same tool with the same arguments fails twice, switch strategy before trying again.
+- Do not repeat verification that already passed unless new changes could invalidate it.
+- If you cannot continue, state the blocker clearly instead of retrying the same path.
+
 ## Working Directory
 
 All file paths are relative to: `{working_dir}`

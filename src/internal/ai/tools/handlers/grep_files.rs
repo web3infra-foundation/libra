@@ -29,6 +29,12 @@ pub struct SearchFilesHandler;
 const MAX_LIMIT: usize = 2000;
 const GREP_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[derive(Debug)]
+struct SearchResults {
+    matches: Vec<String>,
+    truncated: bool,
+}
+
 #[async_trait]
 impl ToolHandler for GrepFilesHandler {
     fn kind(&self) -> ToolKind {
@@ -134,10 +140,16 @@ async fn handle_search_invocation(
 
     let results = run_grep_search(pattern, include.as_deref(), &search_path, limit).await?;
 
-    if results.is_empty() {
+    if results.matches.is_empty() {
         Ok(ToolOutput::success("No matches found.".to_string()))
     } else {
-        Ok(ToolOutput::success(results.join("\n")))
+        let mut output = results.matches.join("\n");
+        if results.truncated {
+            output.push_str(&format!(
+                "\n[truncated: showing {limit} matches; narrow query or increase limit]"
+            ));
+        }
+        Ok(ToolOutput::success(output))
     }
 }
 
@@ -146,7 +158,7 @@ async fn run_grep_search(
     include: Option<&str>,
     search_path: &Path,
     limit: usize,
-) -> Result<Vec<String>, ToolError> {
+) -> Result<SearchResults, ToolError> {
     let re = Regex::new(pattern)
         .map_err(|e| ToolError::InvalidArguments(format!("invalid regex pattern: {e}")))?;
 
@@ -195,7 +207,7 @@ fn grep_files_blocking(
     glob_pattern: Option<&str>,
     search_path: &Path,
     limit: usize,
-) -> Result<Vec<String>, ToolError> {
+) -> Result<SearchResults, ToolError> {
     let mut matched: Vec<(String, SystemTime)> = Vec::new();
 
     for entry in WalkDir::new(search_path).into_iter().filter_map(|e| e.ok()) {
@@ -233,7 +245,10 @@ fn grep_files_blocking(
     // Sort by modification time, most recent first.
     matched.sort_by_key(|entry| std::cmp::Reverse(entry.1));
 
-    Ok(matched.into_iter().map(|(p, _)| p).take(limit).collect())
+    let truncated = matched.len() > limit;
+    let matches = matched.into_iter().map(|(p, _)| p).take(limit).collect();
+
+    Ok(SearchResults { matches, truncated })
 }
 
 #[cfg(test)]
@@ -334,7 +349,12 @@ mod tests {
             .unwrap();
 
         let text = result.as_text().unwrap();
-        assert_eq!(text.lines().count(), 2);
+        let matched_paths = text
+            .lines()
+            .filter(|line| !line.starts_with("[truncated:"))
+            .count();
+        assert_eq!(matched_paths, 2);
+        assert!(text.contains("[truncated: showing 2 matches"));
     }
 
     #[tokio::test]

@@ -127,6 +127,9 @@ async fn read_file_slice(
 
         // Stop if we've reached the limit
         if lines.len() >= limit {
+            lines.push(format!(
+                "[truncated: more lines remain; continue with offset {line_number}]"
+            ));
             break;
         }
 
@@ -375,10 +378,11 @@ mod tests {
         let output = result.unwrap();
         let text = output.as_text().unwrap();
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.len(), 2);
+        assert_eq!(lines.len(), 3);
         assert!(text.contains("L1: line 1"));
         assert!(text.contains("L2: line 2"));
         assert!(!text.contains("L3:"));
+        assert!(text.contains("[truncated: more lines remain; continue with offset 3]"));
     }
 
     #[tokio::test]
