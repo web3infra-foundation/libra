@@ -776,6 +776,7 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
     let thinking = completion_thinking_for_args(&args);
     let reasoning_effort = completion_reasoning_effort_for_args(&args);
     let stream = completion_stream_for_args(&args);
+    let preserve_reasoning_content = preserve_reasoning_content_for_provider(args.provider);
     let resume_thread_id = args.resume.clone();
     let host = args.host.clone();
     let trace_id = resume_thread_id
@@ -829,6 +830,7 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
         thinking,
         reasoning_effort,
         stream,
+        preserve_reasoning_content,
         context: args.context,
         resume_thread_id,
         approval_policy: args.approval_policy.into(),
@@ -971,6 +973,10 @@ fn completion_stream_for_args(args: &CodeArgs) -> Option<bool> {
         CodeProvider::Deepseek => args.deepseek_stream,
         _ => None,
     }
+}
+
+fn preserve_reasoning_content_for_provider(provider: CodeProvider) -> bool {
+    matches!(provider, CodeProvider::Deepseek)
 }
 
 // ---------------------------------------------------------------------------
@@ -1334,6 +1340,7 @@ struct TuiLaunchConfig {
     thinking: Option<CompletionThinking>,
     reasoning_effort: Option<CompletionReasoningEffort>,
     stream: Option<bool>,
+    preserve_reasoning_content: bool,
     context: Option<CodeContext>,
     resume_thread_id: Option<String>,
     approval_policy: AskForApproval,
@@ -1557,6 +1564,7 @@ where
             params.exec_approval_tx.clone(),
         )),
         max_turns: None,
+        preserve_reasoning_content: params.preserve_reasoning_content,
         ..Default::default()
     };
 
@@ -2363,6 +2371,19 @@ mod tests {
         assert_eq!(args.deepseek_stream, Some(false));
         assert_eq!(completion_stream_for_args(&args), Some(false));
         assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn tui_preserves_reasoning_content_for_deepseek_only() {
+        assert!(preserve_reasoning_content_for_provider(
+            CodeProvider::Deepseek
+        ));
+        assert!(!preserve_reasoning_content_for_provider(
+            CodeProvider::Gemini
+        ));
+        assert!(!preserve_reasoning_content_for_provider(
+            CodeProvider::Ollama
+        ));
     }
 
     #[test]

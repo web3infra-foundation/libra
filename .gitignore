@@ -27,6 +27,7 @@ target-codex-review/
 .cursor/
 .agent/
 .agents/
+.air/
 
 # Generated when moving Windows files to WSL
 *:Zone.Identifier
