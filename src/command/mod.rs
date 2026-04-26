@@ -33,6 +33,8 @@ pub mod remote;
 pub mod remove;
 pub mod reset;
 pub mod restore;
+pub mod rev_list;
+pub mod rev_parse;
 pub mod revert;
 pub mod shortlog;
 pub mod show;

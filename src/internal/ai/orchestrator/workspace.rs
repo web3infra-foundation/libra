@@ -643,6 +643,9 @@ mod tests {
     use super::{
         cleanup_task_worktree, clone_or_copy_file, detect_contract_violations,
         materialize_workspace, prepare_task_worktree, sync_task_worktree_back,
+        cleanup_task_worktree, clone_or_copy_file, materialize_workspace,
+        prepare_copy_task_worktree, prepare_task_worktree, prepare_task_worktree_root,
+        sync_task_worktree_back, task_worktree_paths,
     };
     use crate::{
         internal::ai::workspace_snapshot::{WorkspaceEntry, snapshot_workspace},
@@ -931,6 +934,39 @@ mod tests {
         assert!(!task_worktree.root.join("target").exists());
 
         cleanup_task_worktree(task_worktree).unwrap();
+    }
+
+    #[test]
+    fn prepare_copy_task_worktree_includes_untracked_workspace_files() {
+        let temp = tempdir().unwrap();
+        let main = temp.path().join("workspace");
+        std::fs::create_dir_all(main.join("src")).unwrap();
+        std::fs::write(main.join("src/lib.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(main.join("task_a.txt"), "base\n").unwrap();
+        std::fs::write(main.join("task_b.txt"), "base\n").unwrap();
+
+        let baseline = snapshot_workspace(&main).unwrap();
+        let paths = task_worktree_paths(Uuid::new_v4(), "copy-test");
+        prepare_task_worktree_root(&paths.cleanup_root).unwrap();
+
+        let backend = prepare_copy_task_worktree(&main, &paths, &baseline).unwrap();
+
+        assert!(matches!(backend, super::TaskWorktreeBackend::Copy { .. }));
+        assert_eq!(
+            std::fs::read_to_string(paths.workspace_root.join("task_a.txt")).unwrap(),
+            "base\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(paths.workspace_root.join("task_b.txt")).unwrap(),
+            "base\n"
+        );
+
+        cleanup_task_worktree(super::TaskWorktree {
+            root: paths.workspace_root.clone(),
+            baseline,
+            backend,
+        })
+        .unwrap();
     }
 
     #[tokio::test]

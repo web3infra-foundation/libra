@@ -467,7 +467,7 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     let commit_hash = current_head_commit.to_string();
 
     let mut reachable_commits = get_reachable_commits(commit_hash.clone(), None).await?;
-    // default sort with signature time
+    // newest first
     reachable_commits.sort_by_key(|b| std::cmp::Reverse(b.committer.timestamp));
     let default_abbrev = util::get_min_unique_hash_length(&reachable_commits).max(7);
 
@@ -665,7 +665,8 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
     let commit_hash = current_head_commit.to_string();
 
     let mut reachable_commits = get_reachable_commits(commit_hash, None).await?;
-    reachable_commits.sort_by_key(|commit| std::cmp::Reverse(commit.committer.timestamp));
+    // newest first
+    reachable_commits.sort_by_key(|b| std::cmp::Reverse(b.committer.timestamp));
 
     let max_output_number = min(args.number.unwrap_or(usize::MAX), reachable_commits.len());
     let include_total = args.number.is_none();

@@ -2302,13 +2302,19 @@ mod tests {
             &self,
             request: CompletionRequest,
         ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
-            let has_tool_result = request.chat_history.iter().any(|message| match message {
-                Message::User { content } => content
-                    .iter()
-                    .any(|item| matches!(item, UserContent::ToolResult(_))),
-                _ => false,
-            });
-            if has_tool_result {
+            let has_successful_tool_result =
+                request.chat_history.iter().any(|message| match message {
+                    Message::User { content } => content.iter().any(|item| match item {
+                        UserContent::ToolResult(result) => result
+                            .result
+                            .get("success")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false),
+                        _ => false,
+                    }),
+                    _ => false,
+                });
+            if has_successful_tool_result {
                 return Ok(CompletionResponse {
                     content: vec![AssistantContent::Text(Text {
                         text: "done".to_string(),
@@ -2321,17 +2327,25 @@ mod tests {
             let prompt = request
                 .chat_history
                 .iter()
-                .rev()
-                .find_map(|message| match message {
-                    Message::User { content } => content.iter().find_map(|item| match item {
-                        UserContent::Text(text) => Some(text.text.clone()),
-                        _ => None,
-                    }),
+                .filter_map(|message| match message {
+                    Message::User { content } => Some(
+                        content
+                            .iter()
+                            .filter_map(|item| match item {
+                                UserContent::Text(text) => Some(text.text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    ),
                     _ => None,
                 })
-                .unwrap_or_default();
+                .collect::<Vec<_>>()
+                .join("\n");
 
-            let (call_id, patch) = if prompt.contains("## Task\nTask A") {
+            let is_task_a = prompt.contains("task_a.txt") || prompt.contains("## Task\nTask A");
+
+            let (call_id, patch) = if is_task_a {
                 (
                     "call_a",
                     "*** Begin Patch\n*** Update File: task_a.txt\n@@\n-base\n+task-a\n*** End Patch",
