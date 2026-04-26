@@ -2084,4 +2084,169 @@ mod tests {
         let hashes = list_all_objects_in_storage(&storage).unwrap();
         assert!(hashes.is_empty(), "empty objects dir should return no hashes");
     }
+
+    // -----------------------------------------------------------------------
+    // verify_object: corrupted object detection
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    #[serial]
+    async fn test_verify_corrupted_blob_detected() {
+        let temp_path = tempdir().unwrap();
+        test::setup_with_new_libra_in(temp_path.path()).await;
+        let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+        let storage = ClientStorage::init(path::objects());
+        let blob = Blob::from_content("original content");
+        crate::command::save_object(&blob, &blob.id).unwrap();
+
+        // Corrupt the object by overwriting with garbage
+        let objects_dir = path::objects();
+        let hash_str = blob.id.to_string();
+        let object_path = objects_dir.join(&hash_str[..2]).join(&hash_str[2..]);
+        fs::write(&object_path, b"garbage data!!!").unwrap();
+
+        let result = verify_object(&blob.id, &storage).await.unwrap();
+        assert!(
+            result.status == CheckStatus::HashMismatch
+                || result.status == CheckStatus::InvalidFormat
+                || result.status == CheckStatus::Corrupted,
+            "corrupted blob should be detected: {:?}",
+            result.status
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_verify_corrupted_tree_detected() {
+        let temp_path = tempdir().unwrap();
+        test::setup_with_new_libra_in(temp_path.path()).await;
+        let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+        let storage = ClientStorage::init(path::objects());
+
+        let blob = Blob::from_content("file");
+        crate::command::save_object(&blob, &blob.id).unwrap();
+
+        let tree = Tree::from_tree_items(vec![git_internal::internal::object::tree::TreeItem {
+            mode: git_internal::internal::object::tree::TreeItemMode::Blob,
+            name: "file.txt".to_string(),
+            id: blob.id,
+        }])
+        .unwrap();
+        crate::command::save_object(&tree, &tree.id).unwrap();
+
+        // Corrupt the tree object
+        let objects_dir = path::objects();
+        let hash_str = tree.id.to_string();
+        let object_path = objects_dir.join(&hash_str[..2]).join(&hash_str[2..]);
+        fs::write(&object_path, b"corrupted tree!!!").unwrap();
+
+        let result = verify_object(&tree.id, &storage).await.unwrap();
+        assert!(
+            result.status != CheckStatus::Ok,
+            "corrupted tree should be detected: {:?}",
+            result.status
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // validate_cross_references: tree entry type mismatch
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    #[serial]
+    async fn test_cross_ref_detects_tree_entry_type_mismatch() {
+        let temp_path = tempdir().unwrap();
+        test::setup_with_new_libra_in(temp_path.path()).await;
+        let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+        let storage = ClientStorage::init(path::objects());
+
+        // Create a blob
+        let blob = Blob::from_content("content");
+        crate::command::save_object(&blob, &blob.id).unwrap();
+
+        // Create a tree that incorrectly declares the blob as a subtree
+        let tree = Tree::from_tree_items(vec![git_internal::internal::object::tree::TreeItem {
+            mode: git_internal::internal::object::tree::TreeItemMode::Tree, // declares as tree
+            name: "should_be_blob".to_string(),
+            id: blob.id, // but is actually a blob
+        }])
+        .unwrap();
+        crate::command::save_object(&tree, &tree.id).unwrap();
+
+        let args = FsckArgs {
+            verbose: false,
+            no_cross_ref_check: false,
+            no_index_check: true,
+            objects_only: false,
+            fix: false,
+            object: None,
+        };
+
+        let result = check_all_objects(&args, &storage).await.unwrap();
+
+        assert!(result.cross_ref_issues > 0);
+        assert!(
+            result
+                .issues
+                .iter()
+                .any(|i| i.issue_type == "tree_entry_type_mismatch"),
+            "should detect tree entry type mismatch: {:?}",
+            result.issues
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_cross_ref_detects_blob_declared_as_tree_when_actual_is_tree() {
+        let temp_path = tempdir().unwrap();
+        test::setup_with_new_libra_in(temp_path.path()).await;
+        let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+        let storage = ClientStorage::init(path::objects());
+
+        // Create a real subtree
+        let inner_blob = Blob::from_content("inner");
+        crate::command::save_object(&inner_blob, &inner_blob.id).unwrap();
+
+        let subtree = Tree::from_tree_items(vec![git_internal::internal::object::tree::TreeItem {
+            mode: git_internal::internal::object::tree::TreeItemMode::Blob,
+            name: "inner.txt".to_string(),
+            id: inner_blob.id,
+        }])
+        .unwrap();
+        crate::command::save_object(&subtree, &subtree.id).unwrap();
+
+        // Create a parent tree that declares the subtree as a blob
+        let tree = Tree::from_tree_items(vec![git_internal::internal::object::tree::TreeItem {
+            mode: git_internal::internal::object::tree::TreeItemMode::Blob, // declares as blob
+            name: "should_be_tree".to_string(),
+            id: subtree.id, // but is actually a tree
+        }])
+        .unwrap();
+        crate::command::save_object(&tree, &tree.id).unwrap();
+
+        let args = FsckArgs {
+            verbose: false,
+            no_cross_ref_check: false,
+            no_index_check: true,
+            objects_only: false,
+            fix: false,
+            object: None,
+        };
+
+        let result = check_all_objects(&args, &storage).await.unwrap();
+
+        assert!(result.cross_ref_issues > 0);
+        assert!(
+            result
+                .issues
+                .iter()
+                .any(|i| i.issue_type == "tree_entry_type_mismatch"),
+            "should detect blob-declared-as-tree mismatch: {:?}",
+            result.issues
+        );
+    }
 }
