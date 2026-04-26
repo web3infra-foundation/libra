@@ -457,7 +457,9 @@ async fn test_execute_log() {
         .unwrap();
     //the last seven commits
     let max_output_number = min(6, reachable_commits.len());
-    let expected_msgs = vec!["Commit_6", "Commit_3", "Commit_5", "Commit_2", "Commit_4", "Commit_1"];
+    let expected_msgs = [
+        "Commit_6", "Commit_3", "Commit_5", "Commit_2", "Commit_4", "Commit_1",
+    ];
     for (i, commit) in reachable_commits.iter().take(max_output_number).enumerate() {
         let msg = commit.message.trim_start_matches('\n');
         assert_eq!(msg, expected_msgs[i]);
@@ -566,7 +568,7 @@ async fn test_log_oneline() {
         sorted_commits.len(),
     );
 
-    let expected_msgs = vec!["Commit_6", "Commit_3", "Commit_5"];
+    let expected_msgs = ["Commit_6", "Commit_3", "Commit_5"];
     for (i, commit) in sorted_commits.iter().take(max_commits).enumerate() {
         // Test short hash format (should be 7 characters)
         let short_hash = &commit.id.to_string()[..7];
