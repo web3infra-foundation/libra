@@ -89,8 +89,10 @@ pub struct BottomPane {
     pub exec_approval_selected: usize,
     /// Slash-command autocomplete popup state.
     command_popup: CommandPopupState,
-    /// Currently selected option in the post-plan dialog (0=Execute, 1=Modify, 2=Cancel).
+    /// Currently selected option in the post-plan dialog.
     pub post_plan_selected: usize,
+    /// Current network access choice shown in the post-plan dialog.
+    pub post_plan_network_access: bool,
     /// Current working directory shown in the input border.
     cwd: Option<PathBuf>,
     /// Current Git branch or detached HEAD label shown beside the working directory.
@@ -125,6 +127,7 @@ impl BottomPane {
                 scroll_offset: 0,
             },
             post_plan_selected: 0,
+            post_plan_network_access: false,
             cwd: None,
             git_branch: None,
             retry_notice: None,
@@ -176,6 +179,10 @@ impl BottomPane {
                         "Approve Session".to_string(),
                         "Allow matching commands for this session".to_string(),
                     ),
+                    (
+                        "Allow All Commands".to_string(),
+                        "Allow every command for this session".to_string(),
+                    ),
                     ("Deny".to_string(), "Reject this execution".to_string()),
                     (
                         "Abort Turn".to_string(),
@@ -224,10 +231,23 @@ impl BottomPane {
         self.post_plan_selected = 0;
     }
 
+    pub fn set_post_plan_network_access(&mut self, network_access: bool) {
+        self.post_plan_network_access = network_access;
+    }
+
     /// Handle a character input.
     pub fn insert_char(&mut self, c: char) {
         self.input.insert(self.cursor_pos, c);
         self.cursor_pos += c.len_utf8();
+    }
+
+    /// Insert pasted text at the cursor.
+    pub fn insert_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.input.insert_str(self.cursor_pos, text);
+        self.cursor_pos += text.len();
     }
 
     /// Handle backspace.
@@ -439,13 +459,23 @@ impl BottomPane {
     /// Return the height (in lines) the bottom pane needs for the current state.
     pub fn desired_height(&self) -> u16 {
         if self.status == AgentStatus::AwaitingApproval {
-            // status(1) + summary(3) + options(4) + help(1) = 9
-            return 9;
+            let options = self
+                .exec_approval
+                .as_ref()
+                .map(|approval| approval.options.len() as u16)
+                .unwrap_or(5);
+            // status(1) + summary(7) + options + help(1)
+            return 1 + 7 + options + 1;
         }
-        if matches!(
-            self.status,
-            AgentStatus::AwaitingPostPlanChoice | AgentStatus::AwaitingIntentReviewChoice
-        ) {
+        if self.status == AgentStatus::AwaitingPostPlanChoice {
+            // status(1) + 3 options + 1 blank + help(1) = 6
+            return 6;
+        }
+        if self.status == AgentStatus::AwaitingNetworkPolicyChoice {
+            // status(1) + 3 options + 1 blank + help(1) = 6
+            return 6;
+        }
+        if self.status == AgentStatus::AwaitingIntentReviewChoice {
             // status(1) + 3 options + 1 blank + help(1) = 6
             return 6;
         }
@@ -498,6 +528,9 @@ impl BottomPane {
         if self.status == AgentStatus::AwaitingPostPlanChoice {
             return self.render_post_plan_dialog(area, buf);
         }
+        if self.status == AgentStatus::AwaitingNetworkPolicyChoice {
+            return self.render_network_policy_dialog(area, buf);
+        }
         if self.status == AgentStatus::AwaitingIntentReviewChoice {
             return self.render_intent_review_dialog(area, buf);
         }
@@ -528,6 +561,9 @@ impl BottomPane {
             return None;
         }
         if self.status == AgentStatus::AwaitingPostPlanChoice {
+            return None;
+        }
+        if self.status == AgentStatus::AwaitingNetworkPolicyChoice {
             return None;
         }
 
@@ -570,10 +606,7 @@ impl BottomPane {
 
     /// Render the bottom pane in user-input mode (questions + options).
     fn render_user_input_mode(&self, area: Rect, buf: &mut Buffer) -> Option<Position> {
-        let questions = match &self.user_input_questions {
-            Some(q) => q,
-            None => return None,
-        };
+        let questions = self.user_input_questions.as_ref()?;
 
         let q_idx = self.user_input_current_question;
         let question = questions.get(q_idx)?;
@@ -711,10 +744,23 @@ impl BottomPane {
         self.render_choice_dialog(
             area,
             buf,
-            [
+            &[
                 ("Execute Plan", "Run the Scheduler"),
                 ("Modify Plan", "Edit the plan"),
                 ("Cancel", "Return to chat"),
+            ],
+        )
+    }
+
+    /// Render the network policy dialog shown after the developer approves the plan.
+    fn render_network_policy_dialog(&self, area: Rect, buf: &mut Buffer) -> Option<Position> {
+        self.render_choice_dialog(
+            area,
+            buf,
+            &[
+                ("Network: Deny", "Run shell/gates offline"),
+                ("Network: Allow", "Shell/gates may use network"),
+                ("Back", "Return to plan choices"),
             ],
         )
     }
@@ -724,7 +770,7 @@ impl BottomPane {
         self.render_choice_dialog(
             area,
             buf,
-            [
+            &[
                 ("Confirm Intent", "Generate plan"),
                 ("Modify Intent", "Revise spec"),
                 ("Cancel", "Return to chat"),
@@ -736,12 +782,12 @@ impl BottomPane {
         &self,
         area: Rect,
         buf: &mut Buffer,
-        options: [(&str, &str); 3],
+        options: &[(&str, &str)],
     ) -> Option<Position> {
         let chunks = Layout::vertical([
-            Constraint::Length(1), // Status bar
-            Constraint::Length(4), // 3 options + 1 blank line
-            Constraint::Length(1), // Help text
+            Constraint::Length(1),                        // Status bar
+            Constraint::Length(options.len() as u16 + 1), // options + 1 blank line
+            Constraint::Length(1),                        // Help text
         ])
         .split(area);
 
@@ -761,7 +807,7 @@ impl BottomPane {
                 theme::text::primary()
             };
             lines.push(Line::styled(
-                format!("  {} {:<16} {}", marker, label, desc),
+                format!("  {} {:<18} {}", marker, label, desc),
                 style,
             ));
         }
@@ -781,10 +827,10 @@ impl BottomPane {
         };
 
         let chunks = Layout::vertical([
-            Constraint::Length(1), // Status bar
-            Constraint::Length(7), // Command summary
-            Constraint::Length(4), // Options
-            Constraint::Length(1), // Help text
+            Constraint::Length(1),                             // Status bar
+            Constraint::Length(7),                             // Command summary
+            Constraint::Length(approval.options.len() as u16), // Options
+            Constraint::Length(1),                             // Help text
         ])
         .split(area);
 
@@ -862,7 +908,7 @@ impl BottomPane {
                 theme::text::primary()
             };
             option_lines.push(Line::styled(
-                format!("  {} {:<16} {}", marker, label, desc),
+                format!("  {} {:<20} {}", marker, label, desc),
                 style,
             ));
         }
@@ -1012,6 +1058,10 @@ impl BottomPane {
                 "● Plan complete — choose next step",
                 theme::status::pending_choice(),
             ),
+            AgentStatus::AwaitingNetworkPolicyChoice => Line::styled(
+                "● Plan confirmed — choose network policy",
+                theme::status::pending_choice(),
+            ),
             AgentStatus::AwaitingIntentReviewChoice => Line::styled(
                 "● IntentSpec ready — confirm before planning",
                 theme::status::pending_choice(),
@@ -1021,6 +1071,10 @@ impl BottomPane {
     }
 
     fn render_input_area(&self, area: Rect, buf: &mut Buffer) -> Option<Position> {
+        if area.width == 0 || area.height == 0 {
+            return None;
+        }
+
         let border_style = if self.focused {
             theme::border::focused()
         } else {
@@ -1033,7 +1087,7 @@ impl BottomPane {
             .border_style(border_style);
         if let Some(label) = self.input_context_label.as_deref() {
             block = block.title(Line::styled(
-                format!(" {} ", label),
+                format!(" {label} "),
                 theme::interactive::title(),
             ));
         }
@@ -1117,21 +1171,27 @@ impl BottomPane {
                 if self.command_popup.visible {
                     "[Tab: Complete] [Up/Down: Select] [Esc: Dismiss] [Enter: Send]"
                 } else {
-                    "[Enter: Send] [PgUp/PgDn: Scroll] [Shift+Drag: Select] [Ctrl+C: Exit]"
+                    "[Enter: Send] [PgUp/PgDn: Scroll] [Drag: Select] [Ctrl+C: Exit]"
                 }
             }
             AgentStatus::Thinking | AgentStatus::Retrying | AgentStatus::ExecutingTool => {
                 if self.input_hint.is_some() {
                     "[Tab/Shift+Tab: Switch pane] [Ctrl+O: Overview] [Ctrl+F: Focus] [Enter: Run /mux] [Esc: Clear/Interrupt]"
                 } else {
-                    "[Esc: Interrupt] [PgUp/PgDn: Scroll] [Shift+Drag: Select] [Ctrl+C: Exit]"
+                    "[Esc: Interrupt] [PgUp/PgDn: Scroll] [Drag: Select] [Ctrl+C: Exit]"
                 }
             }
             AgentStatus::AwaitingUserInput => {
                 "[Up/Down: Select] [1-9: Quick select] [Enter: Submit] [Esc: Cancel]"
             }
             AgentStatus::AwaitingApproval => "[Up/Down: Select] [Enter: Confirm] [Esc: Deny]",
-            AgentStatus::AwaitingPostPlanChoice | AgentStatus::AwaitingIntentReviewChoice => {
+            AgentStatus::AwaitingPostPlanChoice => {
+                "[Up/Down: Select] [Enter: Confirm] [Esc: Cancel]"
+            }
+            AgentStatus::AwaitingNetworkPolicyChoice => {
+                "[Up/Down: Select] [Enter: Confirm] [Esc: Back]"
+            }
+            AgentStatus::AwaitingIntentReviewChoice => {
                 "[Up/Down: Select] [Enter: Confirm] [Esc: Cancel]"
             }
         };
@@ -1352,29 +1412,70 @@ mod tests {
     }
 
     #[test]
-    fn approval_mode_height_is_nine_lines() {
+    fn approval_mode_height_tracks_option_count() {
         let mut pane = BottomPane::new();
         pane.status = AgentStatus::AwaitingApproval;
-        assert_eq!(pane.desired_height(), 9);
+        pane.set_approval_dialog(
+            "Sandbox approval required".to_string(),
+            "cargo test".to_string(),
+            PathBuf::from("/tmp"),
+            None,
+            false,
+            "workspace-write".to_string(),
+            false,
+            Vec::new(),
+            vec![
+                ("Approve".to_string(), "Run once".to_string()),
+                (
+                    "Approve Session".to_string(),
+                    "Allow matching commands".to_string(),
+                ),
+                (
+                    "Allow All Commands".to_string(),
+                    "Allow every command".to_string(),
+                ),
+                ("Deny".to_string(), "Reject".to_string()),
+                ("Abort Turn".to_string(), "Interrupt".to_string()),
+            ],
+        );
+        assert_eq!(pane.desired_height(), 14);
     }
 
     #[test]
     fn plan_and_intent_review_dialogs_use_phase_specific_labels() {
-        let area = Rect::new(0, 0, 80, 6);
+        let plan_area = Rect::new(0, 0, 80, 6);
 
         let mut plan_pane = BottomPane::new();
         plan_pane.status = AgentStatus::AwaitingPostPlanChoice;
-        let mut plan_buf = Buffer::empty(area);
-        let _ = plan_pane.render(area, &mut plan_buf);
-        let plan_text = (0..area.height)
-            .map(|y| row_text(&plan_buf, y, area.width))
+        let mut plan_buf = Buffer::empty(plan_area);
+        let _ = plan_pane.render(plan_area, &mut plan_buf);
+        let plan_text = (0..plan_area.height)
+            .map(|y| row_text(&plan_buf, y, plan_area.width))
             .collect::<Vec<_>>()
             .join("\n");
         assert!(plan_text.contains("Execute Plan"));
         assert!(plan_text.contains("Modify Plan"));
+        assert!(plan_text.contains("Cancel"));
+        assert!(!plan_text.contains("Network: Deny"));
+        assert!(!plan_text.contains("Network: Allow"));
         assert!(!plan_text.contains("Execute Spec"));
         assert!(!plan_text.contains("Modify Spec"));
 
+        let mut network_pane = BottomPane::new();
+        network_pane.status = AgentStatus::AwaitingNetworkPolicyChoice;
+        let mut network_buf = Buffer::empty(plan_area);
+        let _ = network_pane.render(plan_area, &mut network_buf);
+        let network_text = (0..plan_area.height)
+            .map(|y| row_text(&network_buf, y, plan_area.width))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(network_text.contains("Network: Deny"));
+        assert!(network_text.contains("Network: Allow"));
+        assert!(network_text.contains("Back"));
+        assert!(!network_text.contains("Execute Plan"));
+        assert!(!network_text.contains("Modify Plan"));
+
+        let area = Rect::new(0, 0, 80, 6);
         let mut intent_pane = BottomPane::new();
         intent_pane.status = AgentStatus::AwaitingIntentReviewChoice;
         let mut intent_buf = Buffer::empty(area);
@@ -1390,7 +1491,7 @@ mod tests {
     }
 
     #[test]
-    fn statusline_renders_below_rounded_input_box() {
+    fn statusline_renders_below_input_box() {
         let mut pane = BottomPane::new();
         pane.status = AgentStatus::Idle;
 
@@ -1399,9 +1500,11 @@ mod tests {
         let _ = pane.render(area, &mut buf);
 
         let top = row_text(&buf, 0, area.width);
+        let input = row_text(&buf, 1, area.width);
         let bottom_of_box = row_text(&buf, 4, area.width);
         let status = row_text(&buf, 5, area.width);
 
+        assert!(input.contains("Type your message"));
         assert!(top.contains("╭"));
         assert!(bottom_of_box.contains("╰"));
         assert!(status.contains("Ready"));
@@ -1451,6 +1554,18 @@ mod tests {
 
         let badge_x = row_symbol_x(&buf, 4, area.width, "┤").expect("badge separator missing");
         assert_eq!(theme::border::focused().fg, Some(buf[(badge_x, 4)].fg));
+    }
+
+    #[test]
+    fn pasted_text_inserts_at_cursor() {
+        let mut pane = BottomPane::new();
+        pane.insert_text("hello world");
+        pane.cursor_left();
+        pane.cursor_left();
+        pane.insert_text("\nwide 文本");
+
+        assert_eq!(pane.input, "hello wor\nwide 文本ld");
+        assert_eq!(pane.cursor_pos, "hello wor\nwide 文本".len());
     }
 
     #[test]

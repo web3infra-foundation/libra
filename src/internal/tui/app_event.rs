@@ -12,10 +12,10 @@ use crate::internal::ai::{
     completion::Message,
     intentspec::types::IntentSpec,
     orchestrator::types::{
-        ExecutionPlanSpec, OrchestratorResult, PhaseConfirmationDecision, PhaseConfirmationPrompt,
-        TaskNodeStatus, TaskRuntimeEvent,
+        ExecutionPlanSpec, OrchestratorResult, PersistedPlanReviewBundle,
+        PhaseConfirmationDecision, PhaseConfirmationPrompt, TaskNodeStatus, TaskRuntimeEvent,
     },
-    tools::{ToolOutput, context::UpdatePlanArgs},
+    tools::ToolOutput,
 };
 
 /// Logical turn identifier for isolating async event streams.
@@ -31,6 +31,8 @@ pub enum AgentEvent {
     },
     /// Managed provider produced a streamed delta for the current response.
     ResponseDelta { delta: String },
+    /// Provider produced a streamed thinking/reasoning delta for developer visibility.
+    ThinkingDelta { delta: String },
     /// Managed provider completed a turn and returned follow-up session context.
     ManagedResponseComplete {
         text: String,
@@ -65,8 +67,23 @@ pub enum AgentStatus {
     AwaitingApproval,
     /// Waiting for user to choose post-plan action (Execute Plan / Modify Plan / Cancel).
     AwaitingPostPlanChoice,
+    /// Waiting for user to choose the network policy for an approved plan.
+    AwaitingNetworkPolicyChoice,
     /// Waiting for user to confirm, modify, or cancel a generated IntentSpec.
     AwaitingIntentReviewChoice,
+}
+
+/// Provider-submitted Phase 1 planning draft captured from `submit_plan_draft`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderPlanDraft {
+    pub explanation: Option<String>,
+    pub steps: Vec<ProviderPlanDraftStep>,
+}
+
+/// One ordered provider draft step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderPlanDraftStep {
+    pub title: String,
 }
 
 /// Application-level events.
@@ -90,11 +107,14 @@ pub enum AppEvent {
         new_history: Vec<Message>,
         intent_id: Option<String>,
         plan_id: Option<String>,
+        persisted_plan_bundle: Option<PersistedPlanReviewBundle>,
         spec_json: String,
         spec: Box<IntentSpec>,
         plan: Box<ExecutionPlanSpec>,
-        llm_plan: UpdatePlanArgs,
+        plan_draft: ProviderPlanDraft,
         warnings: Vec<String>,
+        automatic_repair_attempts: u8,
+        automatic_repair_max_attempts: u8,
     },
     /// Complete result for the Phase 0 IntentSpec review gate.
     IntentSpecReviewReady {
@@ -173,6 +193,10 @@ pub enum AppEvent {
         completed: usize,
         total: usize,
     },
+    /// System validation finished and should update the DAG terminal validation row.
+    DagValidationStatus { turn_id: TurnId, passed: bool },
+    /// Final release decision finished and should update the DAG terminal release row.
+    DagReleaseStatus { turn_id: TurnId, passed: bool },
     /// The task mux should leave focus mode while keeping the workflow DAG visible.
     DagTaskMuxClear { turn_id: TurnId },
     /// Orchestrator workflow completed.
@@ -181,6 +205,13 @@ pub enum AppEvent {
         text: String,
         new_history: Vec<Message>,
         result: Option<Box<OrchestratorResult>>,
+        spec_json: String,
+        intent_id: Option<String>,
+        plan_draft: ProviderPlanDraft,
+        warnings: Vec<String>,
+        network_access: bool,
+        automatic_repair_attempts: u8,
+        automatic_repair_max_attempts: u8,
     },
 }
 
@@ -203,6 +234,8 @@ impl AppEvent {
             | AppEvent::DagGraphBegin { turn_id, .. }
             | AppEvent::DagTaskStatus { turn_id, .. }
             | AppEvent::DagGraphProgress { turn_id, .. }
+            | AppEvent::DagValidationStatus { turn_id, .. }
+            | AppEvent::DagReleaseStatus { turn_id, .. }
             | AppEvent::DagTaskMuxClear { turn_id }
             | AppEvent::ExecuteWorkflowComplete { turn_id, .. } => *turn_id,
         }

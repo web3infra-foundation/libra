@@ -14,7 +14,9 @@ use crate::internal::ai::tools::{
     error::ToolError,
     registry::ToolHandler,
     spec::{FunctionParameters, ToolSpec},
-    utils::resolve_path,
+    utils::{
+        generated_build_artifact_hidden_message, is_generated_build_artifact_path, resolve_path,
+    },
 };
 
 /// Handler for reading file contents.
@@ -61,6 +63,11 @@ impl ToolHandler for ReadFileHandler {
 
         // Validate and resolve path
         let path = resolve_path(Path::new(&args.file_path), &working_dir)?;
+        if is_generated_build_artifact_path(&path, &working_dir) {
+            return Err(ToolError::InvalidArguments(
+                generated_build_artifact_hidden_message(&path),
+            ));
+        }
 
         // Read the file
         let lines = read_file_slice(&path, args.offset, args.limit).await?;
@@ -71,7 +78,7 @@ impl ToolHandler for ReadFileHandler {
     fn schema(&self) -> ToolSpec {
         ToolSpec::new(
             "read_file",
-            "Read the contents of a file. Returns the file content with each line prefixed as 'L{n}: content'. Blank lines appear as 'L{n}: ' (nothing after the space). Supports pagination with offset and limit parameters.",
+            "Read the contents of a file. Returns the file content with each line prefixed as 'L{n}: content'. Blank lines appear as 'L{n}: ' (nothing after the space). Supports pagination with offset and limit parameters. Generated build artifacts are rejected.",
         )
         .with_parameters(FunctionParameters::object(
             [
@@ -127,6 +134,9 @@ async fn read_file_slice(
 
         // Stop if we've reached the limit
         if lines.len() >= limit {
+            lines.push(format!(
+                "[truncated: more lines remain; continue with offset {line_number}]"
+            ));
             break;
         }
 
@@ -319,6 +329,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_read_file_rejects_generated_build_outputs() {
+        let temp_dir = TempDir::new().unwrap();
+        let working_dir = temp_dir.path().to_path_buf();
+        let generated_path = working_dir.join("target/debug/.fingerprint/bin-libra.json");
+        tokio::fs::create_dir_all(generated_path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&generated_path, r#"{"target":"libra"}"#)
+            .await
+            .unwrap();
+
+        let handler = ReadFileHandler;
+        let invocation = ToolInvocation::new(
+            "call-1",
+            "read_file",
+            ToolPayload::Function {
+                arguments: serde_json::json!({
+                    "file_path": "target/debug/.fingerprint/bin-libra.json",
+                    "offset": 1,
+                    "limit": 10
+                })
+                .to_string(),
+            },
+            working_dir,
+        );
+
+        let result = handler.handle(invocation).await;
+
+        assert!(matches!(
+            result,
+            Err(ToolError::InvalidArguments(message))
+                if message.contains("generated build output")
+        ));
+    }
+
+    #[tokio::test]
     async fn test_read_file_zero_limit() {
         let temp_dir = TempDir::new().unwrap();
         let working_dir = temp_dir.path().to_path_buf();
@@ -375,10 +421,11 @@ mod tests {
         let output = result.unwrap();
         let text = output.as_text().unwrap();
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.len(), 2);
+        assert_eq!(lines.len(), 3);
         assert!(text.contains("L1: line 1"));
         assert!(text.contains("L2: line 2"));
         assert!(!text.contains("L3:"));
+        assert!(text.contains("[truncated: more lines remain; continue with offset 3]"));
     }
 
     #[tokio::test]

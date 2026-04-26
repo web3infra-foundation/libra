@@ -35,6 +35,7 @@ use crate::{
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
+        ignore as ignore_utils,
         output::{OutputConfig, emit_json_data},
         util,
     },
@@ -150,6 +151,10 @@ pub enum CloneError {
     FetchFailed { source: fetch::FetchError },
     #[error("failed to checkout working tree")]
     CheckoutFailed { source: RestoreError },
+    #[error("failed to convert ignore files")]
+    IgnoreFile {
+        source: ignore_utils::IgnoreFileError,
+    },
     #[error("failed to complete clone setup: {message}")]
     SetupFailed { message: String },
 }
@@ -202,6 +207,16 @@ impl From<CloneError> for CliError {
                 .with_hint("run 'libra status' to verify the local repository state"),
             CloneError::FetchFailed { source } => map_fetch_error(source),
             CloneError::CheckoutFailed { source } => map_checkout_error(source),
+            CloneError::IgnoreFile { source } => {
+                let stable_code = if source.is_write() {
+                    StableErrorCode::IoWriteFailed
+                } else {
+                    StableErrorCode::IoReadFailed
+                };
+                CliError::fatal(source.to_string())
+                    .with_stable_code(stable_code)
+                    .with_hint(source.recovery_hint())
+            }
             CloneError::SetupFailed { .. } => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::InternalInvariant)
                 .with_hint(format!("please report this issue at: {ISSUE_URL}")),
@@ -711,6 +726,14 @@ async fn clone_into_destination(
     let setup_result =
         setup_repository(remote_config.clone(), args.branch.clone(), !args.bare).await?;
 
+    let mut warnings = init_output.warnings.clone();
+    if !args.bare {
+        warnings.extend(
+            ignore_utils::convert_gitignore_files_to_libraignore(local_path, local_path)
+                .map_err(|source| CloneError::IgnoreFile { source })?,
+        );
+    }
+
     // Restore original directory before returning.
     env::set_current_dir(original_dir).map_err(|source| CloneError::RestoreDirectory {
         path: original_dir.to_path_buf(),
@@ -718,7 +741,6 @@ async fn clone_into_destination(
     })?;
 
     // Build CloneOutput.
-    let mut warnings = init_output.warnings.clone();
     if setup_result.branch_name.is_none() {
         warnings.push("You appear to have cloned an empty repository.".to_string());
     }

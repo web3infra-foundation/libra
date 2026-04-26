@@ -477,6 +477,7 @@ mod tests {
                     summary: "looks good".into(),
                     issues: vec![],
                 }),
+                thinking: None,
             },
             TaskResult {
                 task_id: plan.tasks[1].id(),
@@ -500,6 +501,7 @@ mod tests {
                 policy_violations: vec![],
                 model_usage: None,
                 review: None,
+                thinking: None,
             },
         ];
         let run_state = RunStateSnapshot {
@@ -550,6 +552,7 @@ mod tests {
                     summary: "looks good".into(),
                     issues: vec![],
                 }),
+                thinking: None,
             },
             TaskResult {
                 task_id: plan.tasks[1].id(),
@@ -573,6 +576,7 @@ mod tests {
                 policy_violations: vec![],
                 model_usage: None,
                 review: None,
+                thinking: None,
             },
         ];
         let run_state = RunStateSnapshot {
@@ -627,6 +631,7 @@ mod tests {
                 policy_violations: vec![],
                 model_usage: None,
                 review: None,
+                thinking: None,
             }],
             dagrs_runtime: Default::default(),
         };
@@ -685,6 +690,7 @@ mod tests {
                 summary: "looks good".into(),
                 issues: vec![],
             }),
+            thinking: None,
         }];
         let run_state = RunStateSnapshot {
             intent_spec_id: plan.intent_spec_id.clone(),

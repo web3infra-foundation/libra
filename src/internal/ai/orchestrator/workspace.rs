@@ -18,7 +18,10 @@ use tokio::runtime::Handle;
 use tracing::warn;
 use uuid::Uuid;
 
-use super::acl::{ScopeVerdict, check_scope};
+use super::{
+    acl::{ScopeVerdict, cargo_lock_companion_allowed, check_scope},
+    types::TaskWorkspaceBackend,
+};
 use crate::{
     internal::ai::workspace_snapshot::{
         WorkspaceSnapshot, changed_paths_since_baseline, snapshot_workspace,
@@ -31,6 +34,16 @@ pub(crate) struct TaskWorktree {
     pub(crate) root: PathBuf,
     pub(crate) baseline: WorkspaceSnapshot,
     backend: TaskWorktreeBackend,
+}
+
+impl TaskWorktree {
+    pub(crate) fn backend(&self) -> TaskWorkspaceBackend {
+        match &self.backend {
+            TaskWorktreeBackend::Copy { .. } => TaskWorkspaceBackend::Copy,
+            #[cfg(unix)]
+            TaskWorktreeBackend::Fuse(_) => TaskWorkspaceBackend::Fuse,
+        }
+    }
 }
 
 enum TaskWorktreeBackend {
@@ -299,17 +312,12 @@ pub(crate) fn sync_task_worktree_back(
     let task_snapshot = snapshot_workspace(task_worktree_dir)?;
     let changed_paths = changed_paths_since_baseline(baseline, &task_snapshot);
 
-    for rel_path in &changed_paths {
-        let rel_path_str = rel_path.to_string_lossy();
-        if let Some(reason) =
-            sync_contract_violation(touch_files, in_scope, out_of_scope, &rel_path_str)
-        {
-            return Err(io::Error::other(format!(
-                "task worktree modified '{}' outside its declared contract: {}",
-                rel_path.display(),
-                reason
-            )));
-        }
+    let violations =
+        collect_contract_violations(&changed_paths, touch_files, in_scope, out_of_scope);
+    if !violations.is_empty() {
+        return Err(io::Error::other(format_contract_violation_message(
+            &violations,
+        )));
     }
 
     for rel_path in &changed_paths {
@@ -334,6 +342,67 @@ pub(crate) fn sync_task_worktree_back(
     Ok(())
 }
 
+/// Snapshot the worktree at `task_worktree_dir` and report every changed path
+/// that violates the task contract relative to `baseline`.
+///
+/// Why: the executor needs to surface these violations to the LLM *inside* the
+/// retry loop instead of letting them slip through to a terminal sync-back
+/// failure that would force a full replan.
+pub(crate) fn detect_contract_violations(
+    task_worktree_dir: &Path,
+    baseline: &WorkspaceSnapshot,
+    touch_files: &[String],
+    in_scope: &[String],
+    out_of_scope: &[String],
+) -> io::Result<Vec<ContractViolation>> {
+    let task_snapshot = snapshot_workspace(task_worktree_dir)?;
+    let changed_paths = changed_paths_since_baseline(baseline, &task_snapshot);
+    Ok(collect_contract_violations(
+        &changed_paths,
+        touch_files,
+        in_scope,
+        out_of_scope,
+    ))
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ContractViolation {
+    pub(crate) path: PathBuf,
+    pub(crate) reason: String,
+}
+
+pub(crate) fn format_contract_violation_message(violations: &[ContractViolation]) -> String {
+    let mut parts = Vec::with_capacity(violations.len());
+    for violation in violations {
+        parts.push(format!(
+            "task worktree modified '{}' outside its declared contract: {}",
+            violation.path.display(),
+            violation.reason
+        ));
+    }
+    parts.join("\n")
+}
+
+fn collect_contract_violations(
+    changed_paths: &[PathBuf],
+    touch_files: &[String],
+    in_scope: &[String],
+    out_of_scope: &[String],
+) -> Vec<ContractViolation> {
+    changed_paths
+        .iter()
+        .filter_map(|rel_path| {
+            let rel_path_str = rel_path.to_string_lossy();
+            sync_contract_violation(touch_files, in_scope, out_of_scope, &rel_path_str).map(
+                |reason| ContractViolation {
+                    path: rel_path.clone(),
+                    reason,
+                },
+            )
+        })
+        .collect()
+}
+
 fn sync_contract_violation(
     touch_files: &[String],
     in_scope: &[String],
@@ -344,12 +413,21 @@ fn sync_contract_violation(
         if let ScopeVerdict::OutOfScope(reason) = check_scope(&[], out_of_scope, path) {
             return Some(reason);
         }
+        if cargo_lock_companion_allowed(touch_files, path) {
+            return None;
+        }
         return match check_scope(touch_files, &[], path) {
             ScopeVerdict::InScope => None,
             ScopeVerdict::OutOfScope(reason) => Some(format!("not in touchFiles: {reason}")),
         };
     }
 
+    if let ScopeVerdict::OutOfScope(reason) = check_scope(&[], out_of_scope, path) {
+        return Some(reason);
+    }
+    if cargo_lock_companion_allowed(in_scope, path) {
+        return None;
+    }
     match check_scope(in_scope, out_of_scope, path) {
         ScopeVerdict::InScope => None,
         ScopeVerdict::OutOfScope(reason) => Some(reason),
@@ -563,6 +641,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
+        cleanup_task_worktree, clone_or_copy_file, detect_contract_violations,
+        materialize_workspace, prepare_task_worktree, sync_task_worktree_back,
         cleanup_task_worktree, clone_or_copy_file, materialize_workspace,
         prepare_copy_task_worktree, prepare_task_worktree, prepare_task_worktree_root,
         sync_task_worktree_back, task_worktree_paths,
@@ -686,6 +766,109 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(main.join("src/other.rs")).unwrap(),
             "base\n"
+        );
+    }
+
+    #[test]
+    fn sync_allows_cargo_lock_companion_and_ignores_target_outputs() {
+        let temp = tempdir().unwrap();
+        let main = temp.path().join("main");
+        let task = temp.path().join("task");
+        std::fs::create_dir_all(main.join("libra/src")).unwrap();
+        std::fs::write(
+            main.join("libra/Cargo.toml"),
+            "[package]\nname = \"libra\"\n",
+        )
+        .unwrap();
+        std::fs::write(main.join("libra/src/main.rs"), "fn main() {}\n").unwrap();
+
+        let baseline = snapshot_workspace(&main).unwrap();
+        std::fs::create_dir_all(&task).unwrap();
+        materialize_workspace(&main, &task, &baseline).unwrap();
+        std::fs::write(task.join("libra/Cargo.lock"), "# generated lockfile\n").unwrap();
+        std::fs::create_dir_all(task.join("libra/target")).unwrap();
+        std::fs::write(task.join("libra/target/.rustc_info.json"), "{}\n").unwrap();
+
+        sync_task_worktree_back(
+            &main,
+            &task,
+            &baseline,
+            &[
+                "libra/Cargo.toml".to_string(),
+                "libra/src/main.rs".to_string(),
+            ],
+            &["libra/".to_string()],
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(main.join("libra/Cargo.lock")).unwrap(),
+            "# generated lockfile\n"
+        );
+        assert!(!main.join("libra/target/.rustc_info.json").exists());
+    }
+
+    #[test]
+    fn detect_contract_violations_reports_path_outside_touch_files() {
+        let temp = tempdir().unwrap();
+        let main = temp.path().join("main");
+        let task = temp.path().join("task");
+        std::fs::create_dir_all(main.join("src")).unwrap();
+        std::fs::write(main.join("src/allowed.rs"), "base\n").unwrap();
+        std::fs::write(main.join("src/other.rs"), "base\n").unwrap();
+
+        let baseline = snapshot_workspace(&main).unwrap();
+        std::fs::create_dir_all(&task).unwrap();
+        materialize_workspace(&main, &task, &baseline).unwrap();
+        std::fs::write(task.join("src/other.rs"), "changed\n").unwrap();
+
+        let violations = detect_contract_violations(
+            &task,
+            &baseline,
+            &["src/allowed.rs".to_string()],
+            &["src/".to_string()],
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].path, std::path::PathBuf::from("src/other.rs"));
+        assert!(violations[0].reason.contains("not in touchFiles"));
+    }
+
+    #[test]
+    fn detect_contract_violations_accepts_cargo_lock_companion_with_absolute_touch_file() {
+        let temp = tempdir().unwrap();
+        let main = temp.path().join("main");
+        let task = temp.path().join("task");
+        std::fs::create_dir_all(main.join("src")).unwrap();
+        std::fs::write(main.join("Cargo.toml"), "[package]\nname = \"libra\"\n").unwrap();
+        std::fs::write(main.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+        let baseline = snapshot_workspace(&main).unwrap();
+        std::fs::create_dir_all(&task).unwrap();
+        materialize_workspace(&main, &task, &baseline).unwrap();
+        std::fs::write(task.join("Cargo.lock"), "# generated lockfile\n").unwrap();
+
+        // Simulates touch_files coming straight from the LLM with absolute paths;
+        // the cargo-lock companion match should still tolerate it.
+        let violations = detect_contract_violations(
+            &task,
+            &baseline,
+            &[
+                "/some/abs/Cargo.toml".to_string(),
+                "/some/abs/src/main.rs".to_string(),
+            ],
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        assert!(
+            violations.is_empty(),
+            "expected no violations, got {:?}",
+            violations
         );
     }
 

@@ -268,7 +268,7 @@ async fn test_execute_commit() {
 
         let tree_id = commit.tree_id;
         let tree: Tree = load_object(&tree_id).unwrap();
-        assert_eq!(tree.tree_items.len(), 2); // 2 subtree according to the test data
+        assert_eq!(tree.tree_items.len(), 3); // .libraignore, a.txt, and bb/
     }
     //modify new commit
     {
@@ -302,7 +302,7 @@ async fn test_execute_commit() {
 
         let tree_id = commit.tree_id;
         let tree: Tree = load_object(&tree_id).unwrap();
-        assert_eq!(tree.tree_items.len(), 2); // 2 subtree according to the test data
+        assert_eq!(tree.tree_items.len(), 3); // .libraignore, a.txt, and bb/
     }
 }
 

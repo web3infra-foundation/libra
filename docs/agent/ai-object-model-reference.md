@@ -254,6 +254,9 @@ Immutable snapshot of strategy and step structure.
 - `PlanStep.step_id` is the stable logical step identity across plan
   revisions
 - runtime step progress belongs to `PlanStepEvent`
+- provider-facing draft output is not a `Plan`; it is normalized into
+  immutable `Plan.steps` only after the local planner accepts it
+- `PlanStep` stays inside `Plan`; it is not a top-level snapshot object
 
 There is no mutable `ExecutionPlan` object in `git-internal`.
 
@@ -265,6 +268,8 @@ Stable work-unit definition.
   `intent`, `parent`, `origin_step_id`, `dependencies`
 - runtime status, retries, and active run belong to events or Libra
   projection
+- `Task.origin_step_id` points to the persisted `PlanStep.step_id`
+  that produced the work-unit snapshot
 
 ### Run
 

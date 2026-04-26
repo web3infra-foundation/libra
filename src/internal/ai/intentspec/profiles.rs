@@ -107,6 +107,11 @@ pub fn default_security() -> SecurityPolicy {
                     actions: vec!["read".to_string(), "write".to_string()],
                     constraints: BTreeMap::new(),
                 },
+                ToolRule {
+                    tool: "web.search".to_string(),
+                    actions: vec!["query".to_string()],
+                    constraints: BTreeMap::new(),
+                },
             ],
             deny: Vec::new(),
         },

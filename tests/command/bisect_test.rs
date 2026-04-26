@@ -69,8 +69,14 @@ async fn create_linear_commits(count: usize) -> Vec<String> {
 
     for i in 0..count {
         test::ensure_file("file.txt", Some(&format!("content_{i}\n")));
+        let pathspec = if i == 0 {
+            vec![String::from(".libraignore"), String::from("file.txt")]
+        } else {
+            vec![String::from("file.txt")]
+        };
+
         add::execute(AddArgs {
-            pathspec: vec![String::from("file.txt")],
+            pathspec,
             all: false,
             update: false,
             refresh: false,

@@ -24,7 +24,6 @@ use types::{
 };
 
 use crate::internal::ai::{
-    agent::ToolLoopConfig,
     completion::{CompletionModel, CompletionUsage, ThrottledCompletionModel},
     intentspec::{repair_intentspec, types::IntentSpec, validate_intentspec},
     tools::registry::ToolRegistry,
@@ -224,6 +223,15 @@ fn task_position(plan: &types::ExecutionPlanSpec, task_id: uuid::Uuid) -> usize 
         .unwrap_or_default()
 }
 
+fn execution_complete_for_phase3(
+    plan: &types::ExecutionPlanSpec,
+    run_state: &run_state::RunStateSnapshot,
+) -> bool {
+    plan.tasks
+        .iter()
+        .all(|task| run_state.status_for(task.id()) == types::TaskNodeStatus::Completed)
+}
+
 impl<M: CompletionModel + 'static> Orchestrator<M> {
     pub fn new(model: M, registry: Arc<ToolRegistry>, config: OrchestratorConfig) -> Self {
         Self {
@@ -254,10 +262,10 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
             }
         }
 
-        let tool_loop_config = ToolLoopConfig {
-            preamble: self.config.coder_preamble.clone(),
-            ..Default::default()
-        };
+        let mut tool_loop_config = self.config.tool_loop_config.clone();
+        if self.config.coder_preamble.is_some() {
+            tool_loop_config.preamble = self.config.coder_preamble.clone();
+        }
         let max_replans = replan::max_replans(&spec);
         let mut replan_count = 0_u32;
         let mut plan_revision_specs = Vec::new();
@@ -269,6 +277,7 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
                     &spec,
                     &self.config.working_dir,
                     self.config.persisted_intent_id.as_deref(),
+                    self.config.persisted_plan_bundle.clone(),
                     self.config.persisted_plan_id.as_deref(),
                 )
                 .await?,
@@ -325,6 +334,7 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
                 reviewer_preamble: self.config.reviewer_preamble.clone(),
                 dagrs_resume_checkpoint_id: self.config.dagrs_resume_checkpoint_id.clone(),
                 observer: observer.clone(),
+                workspace_baseline: None,
             };
 
             let provider_parallel_limit =
@@ -339,16 +349,7 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
             )
             .await?;
 
-            // Phase 3: System verification
-            confirm_phase(
-                self.config.phase_confirmer.as_deref(),
-                phase3_confirmation_prompt(&plan_spec, &run_state),
-            )
-            .await?;
             let system_report = verifier::build_system_report(&spec, &plan_spec, &run_state);
-            if let Some(observer) = &observer {
-                observer.on_system_verification(&plan_spec, &system_report);
-            }
 
             if replan_count < max_replans
                 && let Some(directive) =
@@ -368,12 +369,37 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
                 continue;
             }
 
-            // Phase 4: Decision
-            confirm_phase(
-                self.config.phase_confirmer.as_deref(),
-                phase4_confirmation_prompt(&plan_spec, &system_report),
-            )
-            .await?;
+            let execution_complete = execution_complete_for_phase3(&plan_spec, &run_state);
+            if execution_complete {
+                // Phase 3: System verification
+                confirm_phase(
+                    self.config.phase_confirmer.as_deref(),
+                    phase3_confirmation_prompt(&plan_spec, &run_state),
+                )
+                .await?;
+                if let Some(observer) = &observer {
+                    observer.on_system_verification(&plan_spec, &system_report);
+                }
+
+                // Phase 4: Decision
+                confirm_phase(
+                    self.config.phase_confirmer.as_deref(),
+                    phase4_confirmation_prompt(&plan_spec, &system_report),
+                )
+                .await?;
+            } else {
+                tracing::warn!(
+                    revision = plan_spec.revision,
+                    completed = run_state
+                        .task_results
+                        .iter()
+                        .filter(|result| result.status == types::TaskNodeStatus::Completed)
+                        .count(),
+                    total = plan_spec.tasks.len(),
+                    "execution did not complete all required tasks; skipping phase 3 and phase 4 confirmations"
+                );
+            }
+
             let decision = decider::make_decision(
                 &run_state,
                 &system_report,
@@ -434,8 +460,9 @@ mod tests {
 
     use super::*;
     use crate::internal::ai::{
+        agent::ToolLoopConfig,
         completion::{
-            CompletionError, CompletionRequest, CompletionResponse,
+            CompletionError, CompletionRequest, CompletionResponse, CompletionThinking,
             message::{AssistantContent, Function, Message, Text, ToolCall, UserContent},
         },
         intentspec::types::*,
@@ -444,6 +471,11 @@ mod tests {
 
     #[derive(Clone)]
     struct MockOrchestratorModel;
+
+    #[derive(Clone)]
+    struct ThinkingRecordingModel {
+        seen: Arc<Mutex<Vec<Option<CompletionThinking>>>>,
+    }
 
     struct RecordingObserver {
         events: Arc<Mutex<Vec<String>>>,
@@ -525,6 +557,7 @@ mod tests {
                         &prompt,
                         "orchestrator",
                     ))],
+                    reasoning_content: None,
                     raw_response: (),
                 });
             }
@@ -533,6 +566,36 @@ mod tests {
                 content: vec![AssistantContent::Text(Text {
                     text: "task complete".into(),
                 })],
+                reasoning_content: None,
+                raw_response: (),
+            })
+        }
+    }
+
+    impl CompletionModel for ThinkingRecordingModel {
+        type Response = ();
+
+        async fn completion(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+            self.seen.lock().unwrap().push(request.thinking);
+            let prompt = latest_user_text(&request);
+            if !has_tool_result(&request) && prompt.contains("apply_patch") {
+                return Ok(CompletionResponse {
+                    content: vec![AssistantContent::ToolCall(add_file_patch_call(
+                        &prompt, "thinking",
+                    ))],
+                    reasoning_content: None,
+                    raw_response: (),
+                });
+            }
+
+            Ok(CompletionResponse {
+                content: vec![AssistantContent::Text(Text {
+                    text: "task complete".into(),
+                })],
+                reasoning_content: None,
                 raw_response: (),
             })
         }
@@ -756,9 +819,11 @@ mod tests {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
             persisted_intent_id: None,
+            persisted_plan_bundle: None,
             persisted_plan_id: None,
             initial_plan: None,
             dagrs_resume_checkpoint_id: None,
+            tool_loop_config: ToolLoopConfig::default(),
             coder_preamble: None,
             reviewer_preamble: None,
             mcp_server: None,
@@ -796,9 +861,11 @@ mod tests {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
             persisted_intent_id: None,
+            persisted_plan_bundle: None,
             persisted_plan_id: None,
             initial_plan: Some(initial_plan),
             dagrs_resume_checkpoint_id: None,
+            tool_loop_config: ToolLoopConfig::default(),
             coder_preamble: None,
             reviewer_preamble: None,
             mcp_server: None,
@@ -820,6 +887,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_orchestrator_preserves_tool_loop_thinking_for_execution() {
+        let dir = tempfile::tempdir().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let model = ThinkingRecordingModel {
+            seen: Arc::clone(&seen),
+        };
+        let registry = test_registry(dir.path());
+        let config = OrchestratorConfig {
+            working_dir: dir.path().to_path_buf(),
+            base_commit: None,
+            persisted_intent_id: None,
+            persisted_plan_bundle: None,
+            persisted_plan_id: None,
+            initial_plan: None,
+            dagrs_resume_checkpoint_id: None,
+            tool_loop_config: ToolLoopConfig {
+                thinking: Some(CompletionThinking::High),
+                ..Default::default()
+            },
+            coder_preamble: None,
+            reviewer_preamble: None,
+            mcp_server: None,
+            observer: None,
+            phase_confirmer: None,
+        };
+        let orchestrator = Orchestrator::new(model, registry, config);
+
+        let result = orchestrator.run(test_spec()).await.unwrap();
+
+        assert_eq!(result.decision, types::DecisionOutcome::Commit);
+        let seen = seen.lock().unwrap().clone();
+        assert!(!seen.is_empty());
+        assert!(
+            seen.iter()
+                .all(|thinking| *thinking == Some(CompletionThinking::High)),
+            "{seen:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_orchestrator_emits_progress_events() {
         let dir = tempfile::tempdir().unwrap();
         let model = MockOrchestratorModel;
@@ -832,9 +939,11 @@ mod tests {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
             persisted_intent_id: None,
+            persisted_plan_bundle: None,
             persisted_plan_id: None,
             initial_plan: None,
             dagrs_resume_checkpoint_id: None,
+            tool_loop_config: ToolLoopConfig::default(),
             coder_preamble: None,
             reviewer_preamble: None,
             mcp_server: None,
@@ -886,9 +995,11 @@ mod tests {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
             persisted_intent_id: None,
+            persisted_plan_bundle: None,
             persisted_plan_id: None,
             initial_plan: None,
             dagrs_resume_checkpoint_id: None,
+            tool_loop_config: ToolLoopConfig::default(),
             coder_preamble: None,
             reviewer_preamble: None,
             mcp_server: None,
@@ -903,6 +1014,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_orchestrator_skips_phase_confirmation_when_required_gate_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = MockOrchestratorModel;
+        let registry = test_registry(dir.path());
+        let phases = Arc::new(Mutex::new(Vec::new()));
+        let confirmer: Arc<dyn types::OrchestratorPhaseConfirmer> =
+            Arc::new(RecordingPhaseConfirmer {
+                phases: Arc::clone(&phases),
+            });
+        let config = OrchestratorConfig {
+            working_dir: dir.path().to_path_buf(),
+            base_commit: None,
+            persisted_intent_id: None,
+            persisted_plan_bundle: None,
+            persisted_plan_id: None,
+            initial_plan: None,
+            dagrs_resume_checkpoint_id: None,
+            tool_loop_config: ToolLoopConfig::default(),
+            coder_preamble: None,
+            reviewer_preamble: None,
+            mcp_server: None,
+            observer: None,
+            phase_confirmer: Some(confirmer),
+        };
+        let orchestrator = Orchestrator::new(model, registry, config);
+        let mut spec = test_spec();
+        spec.acceptance.verification_plan.integration_checks = vec![Check {
+            id: "integration-fail".into(),
+            kind: CheckKind::Command,
+            command: Some("false".into()),
+            timeout_seconds: Some(1),
+            expected_exit_code: None,
+            required: true,
+            artifacts_produced: vec![],
+        }];
+
+        let result = orchestrator.run(spec).await.unwrap();
+
+        assert_eq!(result.decision, types::DecisionOutcome::Abandon);
+        assert!(
+            result
+                .task_results
+                .iter()
+                .any(|result| result.status == types::TaskNodeStatus::Failed)
+        );
+        assert_eq!(*phases.lock().unwrap(), Vec::<u8>::new());
+    }
+
+    #[tokio::test]
     async fn test_orchestrator_high_risk_human_review() {
         let dir = tempfile::tempdir().unwrap();
         let model = MockOrchestratorModel;
@@ -911,9 +1071,11 @@ mod tests {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
             persisted_intent_id: None,
+            persisted_plan_bundle: None,
             persisted_plan_id: None,
             initial_plan: None,
             dagrs_resume_checkpoint_id: None,
+            tool_loop_config: ToolLoopConfig::default(),
             coder_preamble: None,
             reviewer_preamble: None,
             mcp_server: None,
@@ -938,9 +1100,11 @@ mod tests {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
             persisted_intent_id: None,
+            persisted_plan_bundle: None,
             persisted_plan_id: None,
             initial_plan: None,
             dagrs_resume_checkpoint_id: None,
+            tool_loop_config: ToolLoopConfig::default(),
             coder_preamble: None,
             reviewer_preamble: None,
             mcp_server: None,
@@ -993,9 +1157,11 @@ mod tests {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
             persisted_intent_id: None,
+            persisted_plan_bundle: None,
             persisted_plan_id: None,
             initial_plan: None,
             dagrs_resume_checkpoint_id: None,
+            tool_loop_config: ToolLoopConfig::default(),
             coder_preamble: None,
             reviewer_preamble: None,
             mcp_server: None,
@@ -1020,9 +1186,11 @@ mod tests {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
             persisted_intent_id: None,
+            persisted_plan_bundle: None,
             persisted_plan_id: None,
             initial_plan: None,
             dagrs_resume_checkpoint_id: None,
+            tool_loop_config: ToolLoopConfig::default(),
             coder_preamble: None,
             reviewer_preamble: None,
             mcp_server: None,

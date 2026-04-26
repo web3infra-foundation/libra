@@ -97,6 +97,7 @@ mod tests {
                 content: vec![AssistantContent::Text(Text {
                     text: "mock response".to_string(),
                 })],
+                reasoning_content: None,
                 raw_response: (),
             })
         }

@@ -624,8 +624,11 @@ impl CliError {
             lines.push(usage.trim_end().to_string());
         }
 
-        for hint in &self.hints {
-            lines.extend(render_hint(hint.as_str()));
+        if !self.hints.is_empty() {
+            lines.push(String::new());
+            for hint in &self.hints {
+                lines.extend(render_hint(hint.as_str()));
+            }
         }
 
         lines.join("\n")
@@ -1136,7 +1139,7 @@ mod tests {
         let rendered = CliError::repo_not_found().render();
         assert_eq!(
             rendered,
-            "fatal: not a libra repository (or any of the parent directories): .libra\nHint: run 'libra init' to create a repository in the current directory."
+            "fatal: not a libra repository (or any of the parent directories): .libra\n\nHint: run 'libra init' to create a repository in the current directory."
         );
     }
 
@@ -1148,7 +1151,7 @@ mod tests {
             .render();
         assert_eq!(
             rendered,
-            "error: unexpected argument '--bad'\nUsage: libra add [OPTIONS] [PATHSPEC]...\nHint: use '--help' to see available options."
+            "error: unexpected argument '--bad'\nUsage: libra add [OPTIONS] [PATHSPEC]...\n\nHint: use '--help' to see available options."
         );
     }
 
@@ -1161,7 +1164,7 @@ mod tests {
             .render();
         assert_eq!(
             rendered,
-            "error: name and email are not configured\nHint: to configure, run:\nHint:   libra config --global user.name \"Some One\"\nHint:   libra config --global user.email \"someone@example.com\""
+            "error: name and email are not configured\n\nHint: to configure, run:\nHint:   libra config --global user.name \"Some One\"\nHint:   libra config --global user.email \"someone@example.com\""
         );
     }
 
@@ -1184,7 +1187,7 @@ mod tests {
             .with_hint("Hint: second")
             .with_hint("third")
             .render();
-        assert_eq!(rendered, "error: bad\nHint: first\nHint: second");
+        assert_eq!(rendered, "error: bad\n\nHint: first\nHint: second");
     }
 
     #[test]

@@ -15,11 +15,14 @@ libra init [OPTIONS] [DIRECTORY]
 
 Running `libra init` in an existing directory creates a `.libra` subdirectory with the
 object store, SQLite database, default configuration, HEAD pointing to the initial branch,
-and (by default) a vault-backed PGP signing key. If `DIRECTORY` is given and does not exist,
-it is created first.
+and (by default) a vault-backed PGP signing key. Non-bare repositories also get a visible
+root `.libraignore` file for ignore rules. If `DIRECTORY` is given and does not exist, it is
+created first.
 
 When `--from-git-repository` is supplied, objects and refs are imported from the source Git
-repository and `origin` is configured to point at the source branch layout.
+repository and `origin` is configured to point at the source branch layout. Any `.gitignore`
+files found in the source worktree or checked-out import are copied to matching
+`.libraignore` files.
 
 ## Options
 
@@ -66,6 +69,10 @@ libra init --object-format sha256
 Import objects and refs from an existing local Git repository. The source must contain
 valid `HEAD`, `config`, and `objects` structures. An `origin` remote is configured pointing
 to the imported branch layout. Empty Git repositories (no refs) produce an error.
+
+For non-bare imports, Libra converts every `.gitignore` it can see into a sibling
+`.libraignore`. Existing user-owned `.libraignore` files are preserved and reported as
+warnings in structured output.
 
 ```bash
 libra init --from-git-repository ../old-project

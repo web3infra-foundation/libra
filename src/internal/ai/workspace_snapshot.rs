@@ -7,7 +7,7 @@ use std::{
 use git_internal::{hash::ObjectHash, internal::object::blob::Blob};
 use ignore::WalkBuilder;
 
-use crate::utils::object_ext::BlobExt;
+use crate::{internal::ai::generated_artifacts, utils::object_ext::BlobExt};
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct WorkspaceSnapshot {
@@ -32,7 +32,12 @@ pub(crate) fn snapshot_workspace(root: &Path) -> io::Result<WorkspaceSnapshot> {
         .require_git(false)
         .follow_links(false)
         .sort_by_file_path(|left, right| left.cmp(right))
-        .filter_entry(|entry| entry.depth() == 0 || !protected_workspace_entry(entry.path()));
+        .filter_entry(|entry| {
+            let is_dir = entry
+                .file_type()
+                .is_some_and(|file_type| file_type.is_dir());
+            entry.depth() == 0 || !ignored_workspace_entry(entry.path(), is_dir)
+        });
 
     let mut entries = BTreeMap::new();
     for entry in builder.build() {
@@ -84,6 +89,11 @@ pub(crate) fn workspace_entry_if_exists(path: &Path) -> io::Result<Option<Worksp
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(err),
     }
+}
+
+fn ignored_workspace_entry(path: &Path, is_dir: bool) -> bool {
+    protected_workspace_entry(path)
+        || (is_dir && generated_artifacts::is_generated_build_dir_path(path))
 }
 
 fn protected_workspace_entry(path: &Path) -> bool {
@@ -161,6 +171,87 @@ mod tests {
                 .entries
                 .contains_key(Path::new("web/node_modules/pkg/index.js"))
         );
+    }
+
+    #[test]
+    fn snapshot_skips_default_build_outputs_without_gitignore() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir_all(root.join("target/debug")).unwrap();
+        fs::write(root.join("Cargo.lock"), "# lock\n").unwrap();
+        fs::write(root.join("target/.rustc_info.json"), "{}\n").unwrap();
+        fs::write(root.join("target/debug/app"), "compiled\n").unwrap();
+
+        let snapshot = snapshot_workspace(&root).unwrap();
+
+        assert!(snapshot.entries.contains_key(Path::new("Cargo.lock")));
+        assert!(
+            !snapshot
+                .entries
+                .contains_key(Path::new("target/.rustc_info.json"))
+        );
+        assert!(!snapshot.entries.contains_key(Path::new("target/debug/app")));
+    }
+
+    #[test]
+    fn snapshot_skips_common_compiled_language_build_outputs_without_gitignore() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir_all(root.join("rust/target/debug")).unwrap();
+        fs::create_dir_all(root.join("java/build/classes")).unwrap();
+        fs::create_dir_all(root.join("java/target/classes")).unwrap();
+        fs::create_dir_all(root.join("dotnet/bin/Debug")).unwrap();
+        fs::create_dir_all(root.join("dotnet/obj")).unwrap();
+        fs::create_dir_all(root.join("swift/.build/debug")).unwrap();
+        fs::create_dir_all(root.join("zig/.zig-cache")).unwrap();
+        fs::create_dir_all(root.join("zig/zig-out/bin")).unwrap();
+        fs::create_dir_all(root.join("cpp/cmake-build-debug")).unwrap();
+        fs::create_dir_all(root.join("cpp/CMakeFiles/app.dir")).unwrap();
+        fs::create_dir_all(root.join("bazel-bin")).unwrap();
+        fs::create_dir_all(root.join("bazel-out")).unwrap();
+        fs::create_dir_all(root.join("bazel-testlogs")).unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("src/bin")).unwrap();
+        fs::write(root.join("src/lib.rs"), "pub fn ok() {}\n").unwrap();
+        fs::write(root.join("src/bin/tool.rs"), "fn main() {}\n").unwrap();
+        fs::write(root.join("rust/target/debug/app"), "compiled\n").unwrap();
+        fs::write(root.join("java/build/classes/App.class"), "compiled\n").unwrap();
+        fs::write(root.join("java/target/classes/App.class"), "compiled\n").unwrap();
+        fs::write(root.join("dotnet/bin/Debug/app.dll"), "compiled\n").unwrap();
+        fs::write(root.join("dotnet/obj/project.assets.json"), "{}\n").unwrap();
+        fs::write(root.join("swift/.build/debug/app"), "compiled\n").unwrap();
+        fs::write(root.join("zig/.zig-cache/state"), "cache\n").unwrap();
+        fs::write(root.join("zig/zig-out/bin/app"), "compiled\n").unwrap();
+        fs::write(root.join("cpp/cmake-build-debug/app"), "compiled\n").unwrap();
+        fs::write(root.join("cpp/CMakeFiles/app.dir/main.o"), "compiled\n").unwrap();
+        fs::write(root.join("bazel-bin/app"), "compiled\n").unwrap();
+        fs::write(root.join("bazel-out/state"), "cache\n").unwrap();
+        fs::write(root.join("bazel-testlogs/test.log"), "log\n").unwrap();
+
+        let snapshot = snapshot_workspace(&root).unwrap();
+
+        assert!(snapshot.entries.contains_key(Path::new("src/lib.rs")));
+        assert!(snapshot.entries.contains_key(Path::new("src/bin/tool.rs")));
+        for generated in [
+            "rust/target/debug/app",
+            "java/build/classes/App.class",
+            "java/target/classes/App.class",
+            "dotnet/bin/Debug/app.dll",
+            "dotnet/obj/project.assets.json",
+            "swift/.build/debug/app",
+            "zig/.zig-cache/state",
+            "zig/zig-out/bin/app",
+            "cpp/cmake-build-debug/app",
+            "cpp/CMakeFiles/app.dir/main.o",
+            "bazel-bin/app",
+            "bazel-out/state",
+            "bazel-testlogs/test.log",
+        ] {
+            assert!(
+                !snapshot.entries.contains_key(Path::new(generated)),
+                "{generated} should be ignored"
+            );
+        }
     }
 
     #[test]

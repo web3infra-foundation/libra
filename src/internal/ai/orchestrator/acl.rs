@@ -310,12 +310,38 @@ pub fn check_scope(in_scope: &[String], out_of_scope: &[String], path: &str) -> 
     ScopeVerdict::OutOfScope(format!("path '{}' not in any in-scope pattern", path))
 }
 
+pub(crate) fn cargo_lock_companion_allowed(scope: &[String], path: &str) -> bool {
+    let path = normalize_slash_path(path);
+    let Some(prefix) = path.strip_suffix("Cargo.lock") else {
+        return false;
+    };
+    let cargo_toml = format!("{prefix}Cargo.toml");
+    let cargo_toml_basename = "Cargo.toml";
+    scope.iter().any(|pattern| {
+        let normalized_pattern = normalize_slash_path(pattern);
+        if glob_matches(&normalized_pattern, &cargo_toml) {
+            return true;
+        }
+        // Defense-in-depth: tolerate absolute-path scope entries that point at
+        // an in-scope Cargo.toml (e.g. `/Volumes/Data/linked/Cargo.toml`) so the
+        // companion Cargo.lock is still accepted even if path normalisation
+        // upstream has been bypassed.
+        if normalized_pattern == cargo_toml_basename {
+            return true;
+        }
+        normalized_pattern == cargo_toml
+            || normalized_pattern
+                .strip_suffix(cargo_toml.as_str())
+                .is_some_and(|prefix| prefix.is_empty() || prefix.ends_with('/'))
+    })
+}
+
 /// Match repository-relative paths against scope patterns.
 fn glob_matches(pattern: &str, path: &str) -> bool {
     let pattern = pattern.trim().replace('\\', "/");
     let path = normalize_slash_path(path);
 
-    if pattern == "*" || pattern == "**" {
+    if pattern == "." || pattern == "./" || pattern == "*" || pattern == "**" {
         return true;
     }
 
@@ -368,6 +394,38 @@ mod tests {
             check_tool_acl(&acl, "workspace.fs", "read"),
             AclVerdict::Allow
         );
+    }
+
+    #[test]
+    fn cargo_lock_companion_matches_scoped_cargo_toml() {
+        assert!(cargo_lock_companion_allowed(
+            &["libra/Cargo.toml".to_string()],
+            "libra/Cargo.lock"
+        ));
+        assert!(cargo_lock_companion_allowed(
+            &["crates/app/**".to_string()],
+            "crates/app/Cargo.lock"
+        ));
+        assert!(!cargo_lock_companion_allowed(
+            &["src/main.rs".to_string()],
+            "Cargo.lock"
+        ));
+    }
+
+    #[test]
+    fn cargo_lock_companion_tolerates_absolute_cargo_toml_pattern() {
+        assert!(cargo_lock_companion_allowed(
+            &["/Volumes/Data/linked/Cargo.toml".to_string()],
+            "Cargo.lock"
+        ));
+        assert!(cargo_lock_companion_allowed(
+            &["/repo/libra/Cargo.toml".to_string()],
+            "libra/Cargo.lock"
+        ));
+        assert!(!cargo_lock_companion_allowed(
+            &["/repo/src/main.rs".to_string()],
+            "Cargo.lock"
+        ));
     }
 
     #[test]
@@ -556,6 +614,15 @@ mod tests {
     fn test_scope_empty_in_scope_allows_all() {
         let verdict = check_scope(&[], &[], "anything/goes.rs");
         assert_eq!(verdict, ScopeVerdict::InScope);
+    }
+
+    #[test]
+    fn test_scope_dot_allows_repository_root() {
+        let root_file = check_scope(&[".".into()], &[], "Cargo.toml");
+        assert_eq!(root_file, ScopeVerdict::InScope);
+
+        let nested_file = check_scope(&["./".into()], &[], "src/main.rs");
+        assert_eq!(nested_file, ScopeVerdict::InScope);
     }
 
     #[test]

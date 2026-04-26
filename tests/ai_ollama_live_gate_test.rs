@@ -12,7 +12,7 @@ use libra::internal::ai::{
         handlers::{
             ApplyPatchHandler, GrepFilesHandler, ListDirHandler, McpBridgeHandler, PlanHandler,
             ReadFileHandler, RequestUserInputHandler, SearchFilesHandler, ShellHandler,
-            SubmitIntentDraftHandler,
+            SubmitIntentDraftHandler, SubmitPlanDraftHandler,
         },
     },
 };
@@ -177,6 +177,7 @@ async fn local_ollama_accepts_libra_tool_schemas() {
                         | "search_files"
                         | "request_user_input"
                         | "submit_intent_draft"
+                        | "submit_plan_draft"
                 )
             )
         })
@@ -198,6 +199,7 @@ fn libra_code_tool_schemas() -> Vec<Value> {
         .register("shell", Arc::new(ShellHandler))
         .register("update_plan", Arc::new(PlanHandler))
         .register("submit_intent_draft", Arc::new(SubmitIntentDraftHandler))
+        .register("submit_plan_draft", Arc::new(SubmitPlanDraftHandler))
         .register(
             "request_user_input",
             Arc::new(RequestUserInputHandler::new(user_input_tx)),

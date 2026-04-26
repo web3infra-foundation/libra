@@ -227,6 +227,7 @@ mod tests {
                 policy_violations: vec![],
                 model_usage: None,
                 review: None,
+                thinking: None,
             })
             .await;
 
@@ -256,6 +257,7 @@ mod tests {
                 policy_violations: vec![],
                 model_usage: None,
                 review: None,
+                thinking: None,
             })
             .await;
         store
@@ -269,6 +271,7 @@ mod tests {
                 policy_violations: vec![],
                 model_usage: None,
                 review: None,
+                thinking: None,
             })
             .await;
         store
@@ -282,6 +285,7 @@ mod tests {
                 policy_violations: vec![],
                 model_usage: None,
                 review: None,
+                thinking: None,
             })
             .await;
 

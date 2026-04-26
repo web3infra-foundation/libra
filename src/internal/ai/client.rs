@@ -2,6 +2,10 @@ use reqwest::Client as HttpClient;
 
 use crate::internal::ai::completion::CompletionModel;
 
+pub(crate) const AI_HTTP_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+pub(crate) const AI_HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+pub(crate) const AI_HTTP_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// A generic client for AI providers.
 ///
 /// It holds the shared HTTP client, base URL, and provider-specific extension.
@@ -24,12 +28,16 @@ impl<P> Client<P> {
     /// * `provider` - The provider-specific implementation.
     ///
     /// This constructor automatically configures the HTTP client with:
-    /// - 30 seconds timeout
+    /// - 10 minute request timeout for long reasoning/tool-planning turns
+    /// - 30 second connection timeout
+    /// - 120 second per-read timeout while streaming response bodies
     /// - System proxy support (from environment variables)
     pub fn new(base_url: &str, provider: P) -> Self {
         // Build client with timeout and system proxy support
         let http_client = HttpClient::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(AI_HTTP_REQUEST_TIMEOUT)
+            .connect_timeout(AI_HTTP_CONNECT_TIMEOUT)
+            .read_timeout(AI_HTTP_READ_TIMEOUT)
             .build()
             .unwrap_or_else(|e| {
                 tracing::warn!(
@@ -68,4 +76,16 @@ pub trait CompletionClient {
 
     /// Creates a completion model instance for the given model name.
     fn completion_model(&self, model: impl Into<String>) -> Self::Model;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ai_http_timeouts_allow_long_reasoning_requests() {
+        assert!(AI_HTTP_REQUEST_TIMEOUT >= std::time::Duration::from_secs(300));
+        assert_eq!(AI_HTTP_CONNECT_TIMEOUT, std::time::Duration::from_secs(30));
+        assert!(AI_HTTP_READ_TIMEOUT >= std::time::Duration::from_secs(60));
+    }
 }

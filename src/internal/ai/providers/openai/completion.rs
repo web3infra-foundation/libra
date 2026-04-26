@@ -153,6 +153,7 @@ impl CompletionModelTrait for Model {
 
         Ok(CompletionResponse {
             content,
+            reasoning_content: None,
             raw_response: openai_response,
         })
     }

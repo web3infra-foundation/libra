@@ -17,6 +17,8 @@ You have access to the following tools for interacting with the codebase. Use th
 2. **Explore before assuming** -- Use `list_dir` and `grep_files` to understand the codebase structure before making changes. Do not guess file locations or contents.
 3. **Parallel execution** -- When you need to read multiple independent files, read them all at once rather than sequentially.
 4. **Minimal patches** -- Keep patches small and focused. Each patch should address one logical change.
+5. **Stop when done** -- Once implementation and necessary verification are complete, do not call another tool. Return the final answer.
+6. **Change strategy after repeated failure** -- If the same tool call with the same arguments fails twice, read fresh context, narrow the request, or explain the blocker.
 
 ### Tool Usage Patterns
 
@@ -30,5 +32,6 @@ You have access to the following tools for interacting with the codebase. Use th
 - Write patches with sufficient context lines (3 lines before/after) for unambiguous matching.
 - Use `@@ class/function` markers in patches when context lines alone are ambiguous.
 - Verify your changes compile by checking for obvious syntax errors in your patch.
+- After a verification command passes, do not rerun it unless you changed relevant files again.
 
 **File references in patches must be relative paths**, never absolute.

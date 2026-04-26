@@ -78,6 +78,20 @@ fn libra_command(cwd: &Path) -> Command {
     cmd
 }
 
+fn run_git_success(args: &[&str], cwd: &Path) {
+    let output = Command::new("git")
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn test_init_from_git_repository_converts_repo() {
     let (temp_root, git_dir) = create_simple_git_repo();
@@ -125,6 +139,136 @@ fn test_init_from_git_repository_converts_repo() {
     assert!(
         branches.contains(&branch_name),
         "local branch '{branch_name}' should exist in branch list: {branches}"
+    );
+}
+
+#[test]
+fn test_init_from_git_repository_converts_all_gitignore_files() {
+    let temp_root = tempdir().unwrap();
+    let git_dir = temp_root.path().join("git-src");
+    fs::create_dir_all(git_dir.join("nested")).unwrap();
+
+    run_git_success(
+        &["init", "-b", "main", git_dir.to_str().unwrap()],
+        temp_root.path(),
+    );
+    run_git_success(&["config", "user.name", "Libra Tester"], &git_dir);
+    run_git_success(&["config", "user.email", "tester@example.com"], &git_dir);
+
+    fs::write(git_dir.join("README.md"), "hello from git\n").unwrap();
+    fs::write(git_dir.join(".gitignore"), "ignored-root.log\ncache/\n").unwrap();
+    fs::write(git_dir.join("nested").join(".gitignore"), "*.tmp\n").unwrap();
+    run_git_success(
+        &["add", "README.md", ".gitignore", "nested/.gitignore"],
+        &git_dir,
+    );
+    run_git_success(&["commit", "-m", "initial with ignore files"], &git_dir);
+
+    let libra_dir = temp_root.path().join("libra-repo");
+    fs::create_dir_all(&libra_dir).unwrap();
+    let output = libra_command(&libra_dir)
+        .args([
+            "init",
+            "--vault",
+            "false",
+            "--from-git-repository",
+            git_dir.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to execute libra init");
+    assert!(
+        output.status.success(),
+        "libra init failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(
+        fs::read_to_string(libra_dir.join(".libraignore")).unwrap(),
+        "ignored-root.log\ncache/\n"
+    );
+    assert_eq!(
+        fs::read_to_string(libra_dir.join("nested").join(".libraignore")).unwrap(),
+        "*.tmp\n"
+    );
+
+    fs::write(libra_dir.join("ignored-root.log"), "ignored\n").unwrap();
+    fs::write(libra_dir.join("nested").join("ignored.tmp"), "ignored\n").unwrap();
+    fs::write(libra_dir.join("visible.txt"), "visible\n").unwrap();
+
+    let status = libra_command(&libra_dir)
+        .args(["status", "--short"])
+        .output()
+        .expect("failed to execute libra status");
+    assert!(
+        status.status.success(),
+        "status failed: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        stdout.contains("?? .libraignore") && stdout.contains("?? nested/.libraignore"),
+        "converted .libraignore files should be visible for commit, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("?? visible.txt"),
+        "non-ignored untracked files should remain visible, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("ignored-root.log") && !stdout.contains("ignored.tmp"),
+        "converted ignore rules should hide matching files, got: {stdout}"
+    );
+}
+
+#[test]
+fn test_init_from_git_repository_json_reports_skipped_libraignore_warning() {
+    let (temp_root, git_dir) = create_simple_git_repo();
+    fs::write(git_dir.join(".gitignore"), "ignored.log\n").unwrap();
+    run_git_success(&["add", ".gitignore"], &git_dir);
+    run_git_success(&["commit", "-m", "add gitignore"], &git_dir);
+
+    let libra_dir = temp_root.path().join("libra-repo-existing-ignore");
+    fs::create_dir_all(&libra_dir).unwrap();
+    fs::write(libra_dir.join(".libraignore"), "user-owned.log\n").unwrap();
+
+    let output = libra_command(&libra_dir)
+        .args([
+            "--json",
+            "init",
+            "--vault",
+            "false",
+            "--from-git-repository",
+            git_dir.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to execute libra init");
+    assert!(
+        output.status.success(),
+        "json init failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.trim().is_empty(),
+        "json init should not print human warning text, got: {stderr}"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|error| panic!("expected JSON output, got: {stdout}\nerror: {error}"));
+    let warnings = parsed["data"]["warnings"]
+        .as_array()
+        .expect("warnings should be an array");
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .is_some_and(|text| text.contains("kept existing .libraignore"))),
+        "expected skipped .libraignore warning, got: {warnings:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(libra_dir.join(".libraignore")).unwrap(),
+        "user-owned.log\n",
+        "conversion must not overwrite a user-owned .libraignore"
     );
 }
 

@@ -15,7 +15,7 @@ pub mod utils;
 
 pub use context::{
     GrepFilesArgs, ListDirArgs, ReadFileArgs, ShellArgs, ToolInvocation, ToolKind, ToolOutput,
-    ToolPayload,
+    ToolPayload, WebSearchArgs,
 };
 pub use error::{ToolError, ToolResult};
 pub use registry::{ToolHandler, ToolRegistry, ToolRegistryBuilder};
@@ -69,6 +69,9 @@ mod tests {
 
         let shell_spec = ToolSpec::shell();
         assert_eq!(shell_spec.function.name, "shell");
+
+        let web_search_spec = ToolSpec::web_search();
+        assert_eq!(web_search_spec.function.name, "web_search");
 
         let intent_spec = ToolSpec::submit_intent_draft();
         assert_eq!(intent_spec.function.name, "submit_intent_draft");

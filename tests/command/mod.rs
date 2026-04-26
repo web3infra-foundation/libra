@@ -197,7 +197,7 @@ fn create_committed_repo_via_cli() -> tempfile::TempDir {
 
     fs::write(repo.path().join("tracked.txt"), "tracked\n").expect("failed to create tracked file");
 
-    let output = run_libra_command(&["add", "tracked.txt"], repo.path());
+    let output = run_libra_command(&["add", ".libraignore", "tracked.txt"], repo.path());
     assert_cli_success(&output, "failed to add tracked file");
 
     let output = run_libra_command(&["commit", "-m", "base", "--no-verify"], repo.path());

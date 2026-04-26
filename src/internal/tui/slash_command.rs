@@ -9,6 +9,7 @@
 pub enum BuiltinCommand {
     Help,
     Clear,
+    Chat,
     Model,
     Status,
     Plan,
@@ -23,6 +24,7 @@ impl BuiltinCommand {
         match self {
             Self::Help => "help",
             Self::Clear => "clear",
+            Self::Chat => "chat",
             Self::Model => "model",
             Self::Status => "status",
             Self::Plan => "plan",
@@ -37,6 +39,7 @@ impl BuiltinCommand {
         match self {
             Self::Help => "Show available commands",
             Self::Clear => "Clear conversation history",
+            Self::Chat => "Send a direct chat message without plan workflow",
             Self::Model => "Show current model info",
             Self::Status => "Show current status",
             Self::Plan => "Generate validated IntentSpec from a request",
@@ -51,6 +54,7 @@ impl BuiltinCommand {
         &[
             Self::Help,
             Self::Clear,
+            Self::Chat,
             Self::Model,
             Self::Status,
             Self::Plan,
@@ -93,6 +97,10 @@ mod tests {
     fn parse_known_commands() {
         assert_eq!(parse_builtin("/help"), Some((BuiltinCommand::Help, "")));
         assert_eq!(parse_builtin("/clear"), Some((BuiltinCommand::Clear, "")));
+        assert_eq!(
+            parse_builtin("/chat what is this"),
+            Some((BuiltinCommand::Chat, "what is this"))
+        );
         assert_eq!(parse_builtin("/quit"), Some((BuiltinCommand::Quit, "")));
         assert_eq!(
             parse_builtin("/plan add auth"),
@@ -105,6 +113,14 @@ mod tests {
         assert_eq!(
             parse_builtin("/intent execute"),
             Some((BuiltinCommand::Intent, "execute"))
+        );
+        assert_eq!(
+            parse_builtin("/intent modify allow network"),
+            Some((BuiltinCommand::Intent, "modify allow network"))
+        );
+        assert_eq!(
+            parse_builtin("/intent cancel"),
+            Some((BuiltinCommand::Intent, "cancel"))
         );
         assert_eq!(
             parse_builtin("/mux next"),
@@ -133,8 +149,9 @@ mod tests {
     #[test]
     fn all_hints_returns_all() {
         let hints = BuiltinCommand::all_hints();
-        assert_eq!(hints.len(), 8);
+        assert_eq!(hints.len(), 9);
         assert!(hints.iter().any(|(n, _)| n == "help"));
+        assert!(hints.iter().any(|(n, _)| n == "chat"));
         assert!(hints.iter().any(|(n, _)| n == "quit"));
         assert!(hints.iter().any(|(n, _)| n == "plan"));
         assert!(hints.iter().any(|(n, _)| n == "intent"));

@@ -63,6 +63,7 @@ impl ToolBoundaryPolicy {
                 "list_dir",
                 "grep_files",
                 "search_files",
+                "web_search",
                 "request_user_input",
                 "mcp_read",
             ]
@@ -74,6 +75,7 @@ impl ToolBoundaryPolicy {
                 "apply_patch",
                 "update_plan",
                 "submit_intent_draft",
+                "submit_plan_draft",
                 "mcp_write",
             ]
             .into_iter()

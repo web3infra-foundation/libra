@@ -557,6 +557,15 @@ fn process_ollama_stream_line(
         }
     }
 
+    if !thinking.is_empty()
+        && let Some(stream_events) = ctx.stream_events
+    {
+        let _ = stream_events.send(CompletionStreamEvent::ThinkingDelta {
+            request_id: Some(ctx.request_id.to_string()),
+            delta: thinking.to_string(),
+        });
+    }
+
     for (tool_index, tool_call) in chunk.message.tool_calls.iter().enumerate() {
         let tool_call_id = tool_call
             .id
@@ -692,6 +701,7 @@ fn ollama_response_to_chat_response(response: OllamaResponse, response_id: Strin
             index: 0,
             message: ChatMessage::Assistant {
                 content,
+                reasoning_content: None,
                 tool_calls,
             },
             finish_reason,
@@ -995,6 +1005,7 @@ impl CompletionModelTrait for Model {
         if let Some(choice) = ollama_response.choices.first()
             && let ChatMessage::Assistant {
                 content,
+                reasoning_content: _,
                 tool_calls,
             } = &choice.message
         {
@@ -1033,6 +1044,7 @@ impl CompletionModelTrait for Model {
         let content = match &choice.message {
             ChatMessage::Assistant {
                 content,
+                reasoning_content: _,
                 tool_calls,
             } => {
                 let mut parsed = Vec::new();
@@ -1069,6 +1081,7 @@ impl CompletionModelTrait for Model {
 
         Ok(CompletionResponse {
             content,
+            reasoning_content: None,
             raw_response: ollama_response,
         })
     }
@@ -1298,12 +1311,44 @@ mod tests {
     }
 
     #[test]
+    fn test_streamed_thinking_emits_delta_event() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = OllamaStreamReadContext {
+            request_id: "req_thinking",
+            model: "glm-5.1",
+            endpoint: "http://127.0.0.1:11434/api/chat",
+            attempt: 1,
+            total_attempts: 1,
+            attempt_started: Instant::now(),
+            stream_events: Some(&tx),
+        };
+        let mut accumulator = OllamaStreamAccumulator::default();
+
+        process_ollama_stream_line(
+            br#"{"model":"glm-5.1","created_at":"2026-04-17T13:04:30Z","message":{"role":"assistant","thinking":"checking repository state","content":""},"done":false}"#,
+            &mut accumulator,
+            &ctx,
+        )
+        .unwrap();
+
+        let event = rx.try_recv().unwrap();
+        match event {
+            CompletionStreamEvent::ThinkingDelta { request_id, delta } => {
+                assert_eq!(request_id.as_deref(), Some("req_thinking"));
+                assert_eq!(delta, "checking repository state");
+            }
+            other => panic!("expected thinking delta event, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_ollama_tool_call_history_serializes_arguments_as_object() {
         let request = CompletionRequest {
             chat_history: vec![
                 Message::user("Read Cargo.toml"),
                 Message::Assistant {
                     id: None,
+                    reasoning_content: None,
                     content: OneOrMany::One(AssistantContent::ToolCall(ToolCall {
                         id: "call_1".to_string(),
                         name: "read_file".to_string(),
@@ -1508,6 +1553,7 @@ mod tests {
         let content = match &response.choices[0].message {
             ChatMessage::Assistant {
                 content,
+                reasoning_content: _,
                 tool_calls,
             } => {
                 assert_eq!(content.as_deref(), Some("done"));
@@ -1560,6 +1606,8 @@ mod tests {
             tools: vec![],
             documents: vec![],
             thinking: None,
+            reasoning_effort: None,
+            stream: None,
             stream_events: None,
         };
 
@@ -1624,6 +1672,7 @@ mod tests {
                 Message::user("Read Cargo.toml, then say OK."),
                 Message::Assistant {
                     id: None,
+                    reasoning_content: None,
                     content: OneOrMany::One(AssistantContent::ToolCall(ToolCall {
                         id: "call_1".to_string(),
                         name: "read_file".to_string(),
@@ -1657,6 +1706,8 @@ mod tests {
             }],
             documents: vec![],
             thinking: None,
+            reasoning_effort: None,
+            stream: None,
             stream_events: None,
         };
 

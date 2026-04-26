@@ -23,7 +23,10 @@ use crate::internal::ai::tools::{
     error::ToolError,
     registry::ToolHandler,
     spec::{FunctionParameters, ToolSpec},
-    utils::{is_reserved_metadata_path, resolve_path},
+    utils::{
+        generated_build_artifact_hidden_message, is_ai_file_tool_hidden_path,
+        is_generated_build_artifact_path, resolve_path,
+    },
 };
 
 pub struct ListDirHandler;
@@ -72,6 +75,11 @@ impl ToolHandler for ListDirHandler {
         }
 
         let path = resolve_list_dir_path(&args.dir_path, &working_dir)?;
+        if is_generated_build_artifact_path(&path, &working_dir) {
+            return Ok(ToolOutput::success(
+                generated_build_artifact_hidden_message(&path),
+            ));
+        }
 
         let entries =
             list_dir_slice(&path, &working_dir, args.offset, args.limit, args.depth).await?;
@@ -86,7 +94,7 @@ impl ToolHandler for ListDirHandler {
     fn schema(&self) -> ToolSpec {
         ToolSpec::new(
             "list_dir",
-            "Lists entries in a local directory with 1-indexed entry numbers and type labels (/ for dirs, @ for symlinks).",
+            "Lists entries in a local directory with 1-indexed entry numbers and type labels (/ for dirs, @ for symlinks). Generated build output directories are hidden.",
         )
         .with_parameters(FunctionParameters::object(
             [
@@ -244,7 +252,7 @@ async fn collect_entries(
                 current_prefix.join(&file_name)
             };
 
-            if is_reserved_metadata_path(&entry.path(), working_dir) {
+            if is_ai_file_tool_hidden_path(&entry.path(), working_dir) {
                 continue;
             }
 
@@ -433,6 +441,34 @@ mod tests {
             first_line.starts_with("Absolute path:"),
             "expected 'Absolute path:' header: {text}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_list_dir_hides_generated_build_outputs() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path();
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::create_dir_all(dir.join("target/debug/.fingerprint")).unwrap();
+        fs::write(dir.join("src/main.rs"), "fn main() {}\n").unwrap();
+        fs::write(
+            dir.join("target/debug/.fingerprint/bin-libra.json"),
+            r#"{"target":"libra"}"#,
+        )
+        .unwrap();
+
+        let result = ListDirHandler
+            .handle(make_invocation(
+                serde_json::json!({ "dir_path": dir, "depth": 3 }),
+                dir.to_path_buf(),
+            ))
+            .await
+            .unwrap();
+
+        let text = result.as_text().unwrap();
+        assert!(text.contains("src/"), "{text}");
+        assert!(text.contains("main.rs"), "{text}");
+        assert!(!text.contains("target/"), "{text}");
+        assert!(!text.contains(".fingerprint"), "{text}");
     }
 
     // ── Pagination ────────────────────────────────────────────────────────────

@@ -181,6 +181,13 @@ enum ParseMode {
 
 fn parse_patch_text(patch: &str, mode: ParseMode) -> Result<ApplyPatchArgs, ParseError> {
     let trimmed = patch.trim();
+    let normalized_final_end_marker;
+    let trimmed = if matches!(mode, ParseMode::Lenient) {
+        normalized_final_end_marker = normalize_accidental_added_end_marker(trimmed);
+        normalized_final_end_marker.as_deref().unwrap_or(trimmed)
+    } else {
+        trimmed
+    };
 
     // In lenient mode, auto-complete a truncated patch that is missing the
     // closing *** End Patch marker. This handles the common model failure of
@@ -226,6 +233,19 @@ fn parse_patch_text(patch: &str, mode: ParseMode) -> Result<ApplyPatchArgs, Pars
     }
     let input = lines.join("\n");
     Ok(ApplyPatchArgs { hunks, input })
+}
+
+fn normalize_accidental_added_end_marker(patch: &str) -> Option<String> {
+    let last_line = patch.lines().last().map(str::trim)?;
+    if last_line != format!("+{END_PATCH_MARKER}") {
+        return None;
+    }
+
+    let mut lines = patch.lines().collect::<Vec<_>>();
+    let last = lines.last_mut()?;
+    let prefix_len = last.find('+')?;
+    *last = &last[prefix_len + 1..];
+    Some(lines.join("\n"))
 }
 
 /// Checks the start and end lines of the patch text for `apply_patch`,
@@ -939,6 +959,22 @@ mod tests {
         let result = parse_patch_text(complete, ParseMode::Lenient);
         assert!(result.is_ok(), "{result:?}");
         assert_eq!(result.unwrap().hunks.len(), 1);
+    }
+
+    #[test]
+    fn test_lenient_mode_normalizes_accidental_added_end_patch_marker() {
+        let patch = "*** Begin Patch\n*** Add File: bar.txt\n+hello\n+*** End Patch";
+        let result = parse_patch_text(patch, ParseMode::Lenient);
+
+        assert!(result.is_ok(), "{result:?}");
+        let args = result.unwrap();
+        match &args.hunks[0] {
+            AddFile { contents, .. } => {
+                assert_eq!(contents, "hello\n");
+                assert!(!contents.contains("*** End Patch"));
+            }
+            _ => panic!("expected AddFile hunk"),
+        }
     }
 
     #[test]

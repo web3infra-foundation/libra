@@ -30,7 +30,9 @@ impl std::fmt::Debug for DeepSeekProvider {
 impl DeepSeekProvider {
     /// Creates a new DeepSeek provider with the given API key.
     pub fn new(api_key: String) -> Self {
-        Self { api_key }
+        Self {
+            api_key: normalize_api_key(&api_key),
+        }
     }
 
     /// Returns the API key.
@@ -42,14 +44,32 @@ impl DeepSeekProvider {
 /// Attaches the `Authorization: Bearer <api_key>` header to every outgoing
 /// request, which is the authentication scheme required by the DeepSeek API.
 impl Provider for DeepSeekProvider {
-    fn on_request(&self, mut request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        // DeepSeek uses Bearer token authentication
-        request = request.header(
-            reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", self.api_key),
-        );
-        request
+    fn on_request(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        // DeepSeek uses standard HTTP bearer authentication.
+        request.bearer_auth(&self.api_key)
     }
+}
+
+fn normalize_api_key(api_key: &str) -> String {
+    let trimmed = api_key.trim();
+    let without_scheme = trimmed
+        .strip_prefix("Bearer ")
+        .or_else(|| trimmed.strip_prefix("bearer "))
+        .unwrap_or(trimmed)
+        .trim();
+
+    if without_scheme.len() >= 2 {
+        let bytes = without_scheme.as_bytes();
+        let is_single_quoted = bytes.first() == Some(&b'\'') && bytes.last() == Some(&b'\'');
+        let is_double_quoted = bytes.first() == Some(&b'"') && bytes.last() == Some(&b'"');
+        if is_single_quoted || is_double_quoted {
+            return without_scheme[1..without_scheme.len() - 1]
+                .trim()
+                .to_string();
+        }
+    }
+
+    without_scheme.to_string()
 }
 
 /// DeepSeek client type.
@@ -110,6 +130,18 @@ mod tests {
     #[test]
     fn test_deepseek_provider_api_key() {
         let provider = DeepSeekProvider::new("test-key".to_string());
+        assert_eq!(provider.api_key(), "test-key");
+    }
+
+    #[test]
+    fn test_deepseek_provider_normalizes_shell_quoted_api_key() {
+        let provider = DeepSeekProvider::new(" 'test-key' \n".to_string());
+        assert_eq!(provider.api_key(), "test-key");
+    }
+
+    #[test]
+    fn test_deepseek_provider_normalizes_bearer_prefixed_api_key() {
+        let provider = DeepSeekProvider::new("Bearer test-key".to_string());
         assert_eq!(provider.api_key(), "test-key");
     }
 }

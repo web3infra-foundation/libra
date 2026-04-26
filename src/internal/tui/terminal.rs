@@ -12,7 +12,7 @@ use std::{
 use crossterm::{
     event::{
         DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-        EnableFocusChange, EnableMouseCapture, KeyEvent, KeyboardEnhancementFlags, MouseEvent,
+        EnableFocusChange, KeyEvent, KeyboardEnhancementFlags, MouseEvent,
         PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute, terminal,
@@ -63,8 +63,10 @@ pub fn init() -> Result<TerminalType> {
 /// Set up terminal modes for TUI.
 fn set_modes() -> Result<()> {
     execute!(stdout(), EnableBracketedPaste)?;
-    execute!(stdout(), EnableMouseCapture)?;
 
+    // Leave mouse capture disabled so the terminal can provide native text
+    // selection and mouse-driven paste. The TUI still accepts mouse events if a
+    // terminal sends them without capture, but selection must take priority.
     terminal::enable_raw_mode()?;
 
     // Enable keyboard enhancement flags for better key event handling.

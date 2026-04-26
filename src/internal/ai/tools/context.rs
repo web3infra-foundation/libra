@@ -328,6 +328,21 @@ fn default_grep_limit() -> usize {
     100
 }
 
+/// Arguments for the web_search tool.
+#[derive(Clone, Deserialize, Debug)]
+pub struct WebSearchArgs {
+    /// Search query to send to the web search provider.
+    #[serde(alias = "q")]
+    pub query: String,
+    /// Maximum number of results to return (default: 5, max enforced by handler).
+    #[serde(default = "default_web_search_limit")]
+    pub limit: usize,
+}
+
+fn default_web_search_limit() -> usize {
+    5
+}
+
 // ── update_plan types ──────────────────────────────────────────────────
 
 /// Status of a single plan step.
@@ -356,6 +371,25 @@ pub struct UpdatePlanArgs {
     pub explanation: Option<String>,
     /// The full plan, expressed as an ordered list of steps.
     pub plan: Vec<PlanStep>,
+}
+
+// ── submit_plan_draft types ───────────────────────────────────────────
+
+/// One provider-proposed step title for an execution plan draft.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PlanDraftStep {
+    /// Human-readable draft step title.
+    pub title: String,
+}
+
+/// Arguments for the `submit_plan_draft` tool.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SubmitPlanDraftArgs {
+    /// Optional explanation for the proposed draft.
+    #[serde(default)]
+    pub explanation: Option<String>,
+    /// Ordered provider-proposed draft steps. Runtime status is intentionally absent.
+    pub steps: Vec<PlanDraftStep>,
 }
 
 // ── submit_intent_draft types ─────────────────────────────────────────

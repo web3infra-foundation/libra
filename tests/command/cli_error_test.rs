@@ -145,3 +145,32 @@ fn runtime_repo_error_uses_repo_exit_code_and_json_report() {
     assert_eq!(report.category, "repo");
     assert_eq!(report.exit_code, 128);
 }
+
+#[test]
+fn runtime_repo_error_in_git_repo_suggests_conversion() {
+    let temp = tempdir().unwrap();
+    let git = temp.path().join(".git");
+    std::fs::create_dir_all(git.join("objects")).unwrap();
+    std::fs::write(git.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+    std::fs::write(
+        git.join("config"),
+        b"[core]\n\trepositoryformatversion = 0\n",
+    )
+    .unwrap();
+
+    let output = run_libra(&["status"], temp.path());
+    assert_eq!(output.status.code(), Some(128));
+
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-REPO-001");
+    assert_eq!(
+        report.hints.first().map(String::as_str),
+        Some("run 'libra init --from-git-repository .' to convert this Git repository to Libra.")
+    );
+    assert!(
+        stderr.contains(
+            "\n\nHint: run 'libra init --from-git-repository .' to convert this Git repository to Libra."
+        ),
+        "expected blank line before conversion hint, got: {stderr}"
+    );
+}

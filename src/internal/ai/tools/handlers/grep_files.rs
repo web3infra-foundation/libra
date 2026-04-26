@@ -20,7 +20,10 @@ use crate::internal::ai::tools::{
     error::ToolError,
     registry::ToolHandler,
     spec::{FunctionParameters, ToolSpec},
-    utils::resolve_path,
+    utils::{
+        generated_build_artifact_hidden_message, is_ai_file_tool_hidden_path,
+        is_generated_build_artifact_path, resolve_path,
+    },
 };
 
 pub struct GrepFilesHandler;
@@ -28,6 +31,12 @@ pub struct SearchFilesHandler;
 
 const MAX_LIMIT: usize = 2000;
 const GREP_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Debug)]
+struct SearchResults {
+    matches: Vec<String>,
+    truncated: bool,
+}
 
 #[async_trait]
 impl ToolHandler for GrepFilesHandler {
@@ -42,7 +51,7 @@ impl ToolHandler for GrepFilesHandler {
     fn schema(&self) -> ToolSpec {
         ToolSpec::new(
             "grep_files",
-            "Finds files whose contents match the pattern and lists them sorted by modification time.",
+            "Finds files whose contents match the pattern and lists them sorted by modification time. Generated build output directories are skipped.",
         )
         .with_parameters(FunctionParameters::object(
             [
@@ -69,7 +78,7 @@ impl ToolHandler for SearchFilesHandler {
     fn schema(&self) -> ToolSpec {
         ToolSpec::new(
             "search_files",
-            "Searches file contents with a regular expression and returns matching file paths sorted by modification time.",
+            "Searches file contents with a regular expression and returns matching file paths sorted by modification time. Generated build output directories are skipped.",
         )
         .with_parameters(FunctionParameters::object(
             [
@@ -124,6 +133,11 @@ async fn handle_search_invocation(
         Some(p) => resolve_path(Path::new(p), &working_dir)?,
         None => working_dir.clone(),
     };
+    if is_generated_build_artifact_path(&search_path, &working_dir) {
+        return Ok(ToolOutput::success(
+            generated_build_artifact_hidden_message(&search_path),
+        ));
+    }
 
     let include = args
         .include
@@ -132,12 +146,25 @@ async fn handle_search_invocation(
         .filter(|s| !s.is_empty())
         .map(str::to_string);
 
-    let results = run_grep_search(pattern, include.as_deref(), &search_path, limit).await?;
+    let results = run_grep_search(
+        pattern,
+        include.as_deref(),
+        &search_path,
+        &working_dir,
+        limit,
+    )
+    .await?;
 
-    if results.is_empty() {
+    if results.matches.is_empty() {
         Ok(ToolOutput::success("No matches found.".to_string()))
     } else {
-        Ok(ToolOutput::success(results.join("\n")))
+        let mut output = results.matches.join("\n");
+        if results.truncated {
+            output.push_str(&format!(
+                "\n[truncated: showing {limit} matches; narrow query or increase limit]"
+            ));
+        }
+        Ok(ToolOutput::success(output))
     }
 }
 
@@ -145,18 +172,20 @@ async fn run_grep_search(
     pattern: &str,
     include: Option<&str>,
     search_path: &Path,
+    working_dir: &Path,
     limit: usize,
-) -> Result<Vec<String>, ToolError> {
+) -> Result<SearchResults, ToolError> {
     let re = Regex::new(pattern)
         .map_err(|e| ToolError::InvalidArguments(format!("invalid regex pattern: {e}")))?;
 
     let include_owned = include.map(str::to_string);
 
     let search = search_path.to_path_buf();
+    let working_dir = working_dir.to_path_buf();
     timeout(
         GREP_TIMEOUT,
         tokio::task::spawn_blocking(move || {
-            grep_files_blocking(&re, include_owned.as_deref(), &search, limit)
+            grep_files_blocking(&re, include_owned.as_deref(), &search, &working_dir, limit)
         }),
     )
     .await
@@ -194,11 +223,18 @@ fn grep_files_blocking(
     re: &Regex,
     glob_pattern: Option<&str>,
     search_path: &Path,
+    working_dir: &Path,
     limit: usize,
-) -> Result<Vec<String>, ToolError> {
+) -> Result<SearchResults, ToolError> {
     let mut matched: Vec<(String, SystemTime)> = Vec::new();
 
-    for entry in WalkDir::new(search_path).into_iter().filter_map(|e| e.ok()) {
+    for entry in WalkDir::new(search_path)
+        .into_iter()
+        .filter_entry(|entry| {
+            entry.path() == search_path || !is_ai_file_tool_hidden_path(entry.path(), working_dir)
+        })
+        .filter_map(|e| e.ok())
+    {
         if !entry.file_type().is_file() {
             continue;
         }
@@ -233,7 +269,10 @@ fn grep_files_blocking(
     // Sort by modification time, most recent first.
     matched.sort_by_key(|entry| std::cmp::Reverse(entry.1));
 
-    Ok(matched.into_iter().map(|(p, _)| p).take(limit).collect())
+    let truncated = matched.len() > limit;
+    let matches = matched.into_iter().map(|(p, _)| p).take(limit).collect();
+
+    Ok(SearchResults { matches, truncated })
 }
 
 #[cfg(test)]
@@ -334,7 +373,12 @@ mod tests {
             .unwrap();
 
         let text = result.as_text().unwrap();
-        assert_eq!(text.lines().count(), 2);
+        let matched_paths = text
+            .lines()
+            .filter(|line| !line.starts_with("[truncated:"))
+            .count();
+        assert_eq!(matched_paths, 2);
+        assert!(text.contains("[truncated: showing 2 matches"));
     }
 
     #[tokio::test]
@@ -386,6 +430,33 @@ mod tests {
 
         let text = result.as_text().unwrap();
         assert!(text.contains("f.txt"));
+    }
+
+    #[tokio::test]
+    async fn test_grep_files_skips_generated_build_outputs() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path().to_path_buf();
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::create_dir_all(dir.join("target/debug/.fingerprint")).unwrap();
+        fs::write(dir.join("src/main.rs"), "libra source marker").unwrap();
+        fs::write(
+            dir.join("target/debug/.fingerprint/bin-libra.json"),
+            "libra generated marker",
+        )
+        .unwrap();
+
+        let result = GrepFilesHandler
+            .handle(make_invocation(
+                serde_json::json!({ "pattern": "libra" }),
+                dir,
+            ))
+            .await
+            .unwrap();
+
+        let text = result.as_text().unwrap();
+        assert!(text.contains("src/main.rs"), "{text}");
+        assert!(!text.contains("target/"), "{text}");
+        assert!(!text.contains(".fingerprint"), "{text}");
     }
 
     #[tokio::test]

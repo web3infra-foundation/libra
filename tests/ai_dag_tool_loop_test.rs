@@ -92,12 +92,14 @@ async fn test_dag_tool_loop_action_applies_patch() {
                     }),
                 },
             })],
+            reasoning_content: None,
             raw_response: (),
         },
         CompletionResponse {
             content: vec![AssistantContent::Text(Text {
                 text: "done".to_string(),
             })],
+            reasoning_content: None,
             raw_response: (),
         },
     ]);

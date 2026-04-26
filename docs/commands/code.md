@@ -15,11 +15,11 @@ libra graph <THREAD_ID> [--repo <PATH>]
 
 ## Description
 
-`libra code` starts an interactive coding session that pairs a human developer with an AI agent. The default mode launches a terminal UI (TUI) built on ratatui/crossterm with a background web server. Plain developer requests in the generic provider TUI are routed through the built-in planning workflow first: Libra generates a reviewable IntentSpec and execution plan, then waits for Execute Plan / Modify Plan / Cancel before running mutating tools. Two alternative modes are available: `--web-only` runs the web server without the TUI (useful for browser access or remote hosting), and `--stdio` runs an MCP server over standard input/output for integration with AI clients like Claude Desktop.
+`libra code` starts an interactive coding session that pairs a human developer with an AI agent. The default mode launches a terminal UI (TUI) built on ratatui/crossterm with a background web server. Plain developer requests in the generic provider TUI are routed through the built-in planning workflow first: Libra generates a reviewable IntentSpec and execution plan, then waits for Execute Plan / Network / Modify Plan / Cancel before running mutating tools. Two alternative modes are available: `--web-only` runs the web server without the TUI (useful for browser access or remote hosting), and `--stdio` runs an MCP server over standard input/output for integration with AI clients like Claude Desktop.
 
 The command supports seven AI provider backends (Gemini, OpenAI, Anthropic, DeepSeek, Zhipu, Ollama, Codex) and three operating contexts (dev, review, research) that tune the agent's behavior for different workflows. Sessions can be persisted and resumed with Libra's canonical `--resume <thread_id>` flow.
 
-A sandboxed tool-execution layer enforces approval policies that control when the agent can run shell commands, apply patches, or perform other potentially destructive operations.
+A sandboxed tool-execution layer enforces approval policies that control when the agent can run shell commands, apply patches, web search, or perform other potentially destructive operations. TUI dev sessions default to workspace-write execution with network access denied. After the execution plan is ready, the Plan review dialog includes a `Network: Deny` / `Network: Allow` toggle; the selected value becomes the execution `IntentSpec` network policy for shell, gate, and `web_search` use. Review and research contexts remain read-only and do not grant network access.
 
 When the TUI exits and Libra can derive the canonical thread ID, `libra code` prints a follow-up `libra graph <thread_id>` command so the thread's Intent/Plan/Task/Run/PatchSet version graph can be inspected in a separate TUI. Use `libra graph <thread_id> --repo <path>` when inspecting a repository other than the current directory.
 
@@ -31,14 +31,19 @@ When the TUI exits and Libra can derive the canonical thread ID, `libra code` pr
 | Port | `-p` | `--port` | `3000` | Web server listen port. |
 | Host | | `--host` | `127.0.0.1` | Web server bind address. |
 | Working directory | | `--cwd` | current dir | Working directory for the session. |
+| Env file | | `--env-file <PATH>` | none | Load provider environment variables from a dotenv-style file; file values take precedence over the process environment. |
 | Provider | | `--provider` | `gemini` | AI provider backend (see Provider Backends below). |
 | Model | | `--model` | provider default | Provider-specific model ID. |
 | Temperature | | `--temperature` | provider default | Sampling temperature for generation. |
 | Ollama thinking | | `--ollama-thinking` / `--thinking` | `OLLAMA_THINK`, then `off` | Ollama thinking mode: `auto`, `off`, `on`, `low`, `medium`, or `high`. |
 | Ollama compact tools | | `--ollama-compact-tools` | `OLLAMA_COMPACT_TOOLS`, then off | Sends compact tool schemas for remote/cloud Ollama endpoints that reject complex JSON schemas. |
+| DeepSeek thinking | | `--deepseek-thinking <enabled\|disabled>` | omitted | Sends DeepSeek's `thinking` object when using `--provider deepseek`. |
+| DeepSeek reasoning effort | | `--deepseek-reasoning-effort <low\|medium\|high\|max>` | omitted | Sends DeepSeek's `reasoning_effort` value when using `--provider deepseek`; `xhigh` is accepted as an alias for `max`. |
+| DeepSeek stream | | `--deepseek-stream <true\|false>` / `--stream <true\|false>` | `false` | Sends DeepSeek's `stream` boolean when using `--provider deepseek`. |
 | Context | | `--context` | none | Operating context: `dev` (alias `development`), `review` (alias `code-review`), `research` (alias `explore`). |
 | Resume | | `--resume <THREAD_ID>` | none | Resume a canonical Libra thread by thread ID. |
 | Approval policy | | `--approval-policy` | `on-request` | Tool approval policy (see Approval Policies below). |
+| Network access | | `--network-access <allow\|deny>` | `deny` | Default TUI network policy for shell and gate execution; can still be toggled at Plan review. |
 | MCP port | | `--mcp-port` | `6789` | MCP server listen port. |
 | Stdio | | `--stdio` / `--mcp-stdio` | off | Run MCP over stdio. Conflicts with `--web-only`. |
 | API base | | `--api-base` | provider default | Provider API base URL override. |
@@ -57,6 +62,9 @@ When the TUI exits and Libra can derive the canonical thread ID, `libra code` pr
 | `zhipu` | Zhipu GLM (default: glm-5) | `ZHIPU_API_KEY` | `ZHIPU_BASE_URL` |
 | `ollama` | Ollama (local models and direct Cloud API) | `OLLAMA_API_KEY` for direct Cloud API | `OLLAMA_BASE_URL`, `OLLAMA_THINK`, `OLLAMA_COMPACT_TOOLS`, `--api-base`, `--ollama-thinking`, or `--ollama-compact-tools` |
 | `codex` | Codex app-server | -- | `--codex-bin` / `--codex-port` |
+
+DeepSeek requests can opt into provider-specific fields with `--deepseek-thinking enabled --deepseek-reasoning-effort high --deepseek-stream true`; these flags are rejected for non-DeepSeek providers.
+Use `--env-file .env.test` when testing with a local dotenv file so provider keys from that file override stale shell environment variables.
 
 Ollama requests stream `/api/chat` responses by default and add a per-request `request_id` to debug logs. They also default to `think:false` so reasoning-capable local models do not spend several minutes generating hidden reasoning before tool calls. Use `--ollama-thinking high` for a single run, or set `OLLAMA_THINK=true`, `low`, `medium`, `high`, or `auto` as the environment default. `auto` omits the `think` field and lets Ollama decide. Use `--ollama-compact-tools` or `OLLAMA_COMPACT_TOOLS=true` when a remote/cloud Ollama endpoint accepts simple tools but returns 503 for Libra's full tool schema payload.
 
@@ -92,6 +100,10 @@ libra code --web-only --port 8080 --host 0.0.0.0
 # Run MCP over stdio for Claude Desktop integration
 libra code --stdio
 
+# Use DeepSeek with reasoning enabled
+libra code --provider deepseek --model deepseek-v4-pro --deepseek-thinking enabled --deepseek-reasoning-effort high --deepseek-stream true
+libra code --env-file .env.test --provider deepseek --model deepseek-v4-pro --deepseek-thinking enabled --deepseek-reasoning-effort high --deepseek-stream true
+
 # Use a local Ollama model; plain requests generate a reviewable plan first
 libra code --provider ollama --model llama3 --api-base http://127.0.0.1:11434/v1
 
@@ -124,7 +136,7 @@ libra code --provider codex --plan-mode
 
 ## Human Output
 
-Output is delivered through the TUI, web interface, or MCP protocol depending on the mode. There is no line-oriented stdout in the default TUI mode. In the generic provider TUI, a normal plain-text request starts the plan workflow automatically; explicit slash commands keep their command-specific behavior. Generic provider planning uses a two-step review: the LLM first drafts an IntentSpec for confirmation, then the confirmed IntentSpec is sent back to the LLM to generate a reviewable execution plan before any execution starts. The web server serves an embedded Next.js application. The stdio mode communicates via JSON-RPC messages following the Model Context Protocol.
+Output is delivered through the TUI, web interface, or MCP protocol depending on the mode. There is no line-oriented stdout in the default TUI mode. In the generic provider TUI, a normal plain-text request starts the plan workflow automatically; explicit slash commands keep their command-specific behavior. Generic provider planning uses a two-step review: the LLM first drafts an IntentSpec for confirmation, then the confirmed IntentSpec is sent back to the LLM to generate a reviewable execution plan before any execution starts. If a confirmed plan executes and fails, or the orchestrator aborts before reaching a final decision, Libra feeds the failure evidence back into the planner, asks it to add or adjust repair steps, and automatically runs the revised plan up to the automatic repair threshold. After the threshold is reached, the TUI waits for the developer to either continue automatic repair with `/plan continue` or provide explicit plan repair guidance. The web server serves an embedded Next.js application. The stdio mode communicates via JSON-RPC messages following the Model Context Protocol.
 
 ## Diagnostics
 
@@ -158,7 +170,7 @@ Different providers excel at different tasks and have different cost/latency pro
 
 ### Why MCP integration?
 
-The Model Context Protocol (MCP) is an open standard for connecting AI clients to tool servers. By supporting `--stdio` mode, Libra can act as a tool server for any MCP-compatible client (e.g., Claude Desktop). Libra exposes an allowlisted `run_libra_vcs` tool for version-control operations such as status, diff, add, commit, branch, log, show, and switch, so external AI agents use Libra directly instead of invoking Git. Libra-managed execution also rejects direct `git` shell commands.
+The Model Context Protocol (MCP) is an open standard for connecting AI clients to tool servers. By supporting `--stdio` mode, Libra can act as a tool server for any MCP-compatible client (e.g., Claude Desktop). Libra exposes an allowlisted `run_libra_vcs` tool for version-control operations such as status, diff, add, commit, branch, log, show, and switch, so external AI agents use Libra directly instead of invoking Git. `run_libra_vcs` only accepts those Libra subcommands; it is not a Git-compatible shell, and agents should use workspace file tools for raw file discovery instead of Git-only commands like `ls-files`. For repository state inspection, prefer `status --json` or `status --porcelain v2 --untracked-files=all`. Libra-managed execution also rejects direct `git` shell commands.
 
 ### Why approval policies?
 

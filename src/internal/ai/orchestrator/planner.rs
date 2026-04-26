@@ -70,8 +70,9 @@ pub fn compile_execution_plan_spec(
     if plan_config.gate_task_per_stage {
         let mut upstream_gate_ids = work_task_ids.clone();
 
-        if has_implementation_work && !spec.acceptance.verification_plan.fast_checks.is_empty() {
-            let fast_gate_checks = spec.acceptance.verification_plan.fast_checks.clone();
+        let fast_gate_checks =
+            repeatable_verification_checks(&spec.acceptance.verification_plan.fast_checks);
+        if has_implementation_work && !fast_gate_checks.is_empty() {
             let mut fast_gate_ids = Vec::new();
             let work_tasks = tasks
                 .iter()
@@ -122,17 +123,19 @@ pub fn compile_execution_plan_spec(
             (
                 GateStage::Integration,
                 "Integration gate",
-                spec.acceptance.verification_plan.integration_checks.clone(),
+                repeatable_verification_checks(
+                    &spec.acceptance.verification_plan.integration_checks,
+                ),
             ),
             (
                 GateStage::Security,
                 "Security gate",
-                spec.acceptance.verification_plan.security_checks.clone(),
+                repeatable_verification_checks(&spec.acceptance.verification_plan.security_checks),
             ),
             (
                 GateStage::Release,
                 "Release gate",
-                spec.acceptance.verification_plan.release_checks.clone(),
+                repeatable_verification_checks(&spec.acceptance.verification_plan.release_checks),
             ),
         ];
 
@@ -188,6 +191,79 @@ pub fn compile_execution_plan_spec(
         max_parallel,
         checkpoints,
     })
+}
+
+fn repeatable_verification_checks(checks: &[Check]) -> Vec<Check> {
+    checks
+        .iter()
+        .filter(|check| is_repeatable_verification_check(check))
+        .cloned()
+        .collect()
+}
+
+fn is_repeatable_verification_check(check: &Check) -> bool {
+    check
+        .command
+        .as_deref()
+        .is_none_or(|command| !command_contains_one_time_setup(command))
+}
+
+fn command_contains_one_time_setup(command: &str) -> bool {
+    const ONE_TIME_SETUP_PHRASES: &[&str] = &[
+        "cargo add",
+        "cargo generate-lockfile",
+        "cargo init",
+        "cargo install",
+        "cargo new",
+        "cargo remove",
+        "cargo update",
+        "cargo vendor",
+        "dotnet add",
+        "dotnet new",
+        "dotnet remove",
+        "go get",
+        "go install",
+        "go mod init",
+        "go mod tidy",
+        "gradle init",
+        "gradle wrapper",
+        "mvn archetype:generate",
+        "npm add",
+        "npm i",
+        "npm init",
+        "npm install",
+        "npm uninstall",
+        "pnpm add",
+        "pnpm init",
+        "pnpm install",
+        "swift package init",
+        "yarn add",
+        "yarn init",
+        "yarn install",
+        "zig init",
+    ];
+
+    let normalized = normalize_shell_command_for_matching(command);
+    let padded = format!(" {normalized} ");
+    ONE_TIME_SETUP_PHRASES
+        .iter()
+        .any(|phrase| padded.contains(&format!(" {phrase} ")))
+}
+
+fn normalize_shell_command_for_matching(command: &str) -> String {
+    command
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '.' | ':' | '_') {
+                ch.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn effective_plan_generation(spec: &IntentSpec) -> PlanGenerationConfig {
@@ -621,10 +697,6 @@ fn find_overlaps(nodes: &[TaskSpec]) -> Vec<String> {
                 .collect::<BTreeSet<_>>();
 
             if !left_files.is_empty() && !right_files.is_empty() {
-                if left_files == right_files && left_files.len() > 1 {
-                    continue;
-                }
-
                 overlaps.extend(left_files.intersection(&right_files).cloned());
                 continue;
             }
@@ -994,9 +1066,8 @@ mod tests {
         let plan = compile_execution_plan_spec(&minimal_spec()).unwrap();
         assert_eq!(plan.tasks.len(), 7);
         let groups = plan.parallel_groups();
-        assert_eq!(groups.len(), 5, "{groups:?}");
-        assert_eq!(groups[0].len(), 2, "{groups:?}");
-        assert_eq!(groups[1].len(), 2, "{groups:?}");
+        assert_eq!(groups.len(), 7, "{groups:?}");
+        assert!(groups.iter().all(|group| group.len() == 1), "{groups:?}");
         assert!(
             plan.tasks
                 .iter()
@@ -1016,9 +1087,74 @@ mod tests {
                 .any(|task| task.gate_stage == Some(GateStage::Fast))
         );
         let groups = plan_spec.parallel_groups();
-        assert_eq!(groups.len(), 5, "{groups:?}");
-        assert_eq!(groups[0].len(), 2, "{groups:?}");
-        assert_eq!(groups[1].len(), 2, "{groups:?}");
+        assert_eq!(groups.len(), 7, "{groups:?}");
+        assert!(groups.iter().all(|group| group.len() == 1), "{groups:?}");
+    }
+
+    #[test]
+    fn test_compile_execution_plan_filters_one_time_setup_commands_from_gates() {
+        let mut spec = minimal_spec();
+        spec.intent.objectives = vec![Objective {
+            title: "Initialize Cargo CLI".into(),
+            kind: ObjectiveKind::Implementation,
+        }];
+        spec.intent.touch_hints = Some(TouchHints {
+            files: vec!["Cargo.toml".into(), "src/main.rs".into()],
+            symbols: vec![],
+            apis: vec![],
+        });
+        spec.acceptance.verification_plan.fast_checks = vec![
+            Check {
+                id: "project-init".into(),
+                kind: CheckKind::Command,
+                command: Some("cargo init --name libra --vcs none".into()),
+                timeout_seconds: Some(30),
+                expected_exit_code: Some(0),
+                required: true,
+                artifacts_produced: vec![],
+            },
+            Check {
+                id: "add-clap".into(),
+                kind: CheckKind::Command,
+                command: Some("cargo add clap --features derive".into()),
+                timeout_seconds: Some(30),
+                expected_exit_code: Some(0),
+                required: true,
+                artifacts_produced: vec![],
+            },
+            Check {
+                id: "build".into(),
+                kind: CheckKind::Command,
+                command: Some("cargo build".into()),
+                timeout_seconds: Some(60),
+                expected_exit_code: Some(0),
+                required: true,
+                artifacts_produced: vec![],
+            },
+            Check {
+                id: "fmt".into(),
+                kind: CheckKind::Command,
+                command: Some("cargo fmt --check".into()),
+                timeout_seconds: Some(30),
+                expected_exit_code: Some(0),
+                required: true,
+                artifacts_produced: vec![],
+            },
+        ];
+
+        let plan = compile_execution_plan_spec(&spec).unwrap();
+        let fast_gate = plan
+            .tasks
+            .iter()
+            .find(|task| task.gate_stage == Some(GateStage::Fast))
+            .expect("verification checks should still create a fast gate");
+        let check_ids = fast_gate
+            .checks
+            .iter()
+            .map(|check| check.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(check_ids, vec!["build", "fmt"]);
     }
 
     #[test]
@@ -1180,6 +1316,41 @@ mod tests {
             implementation_tasks
                 .iter()
                 .map(|task| (task.title().to_string(), task.dependencies().to_vec()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_compile_execution_plan_serializes_identical_touch_file_sets() {
+        let mut spec = minimal_spec();
+        spec.intent.touch_hints = Some(TouchHints {
+            files: vec!["Cargo.toml".into(), "src/main.rs".into()],
+            symbols: vec![],
+            apis: vec![],
+        });
+
+        let plan = compile_execution_plan_spec(&spec).unwrap();
+        let implementation_tasks = plan
+            .tasks
+            .iter()
+            .filter(|task| task.kind == TaskKind::Implementation)
+            .collect::<Vec<_>>();
+
+        assert_eq!(implementation_tasks.len(), 2);
+        assert!(
+            implementation_tasks[1]
+                .dependencies()
+                .contains(&implementation_tasks[0].id()),
+            "{:?}",
+            implementation_tasks
+                .iter()
+                .map(|task| {
+                    (
+                        task.title().to_string(),
+                        task.contract.touch_files.clone(),
+                        task.dependencies().to_vec(),
+                    )
+                })
                 .collect::<Vec<_>>()
         );
     }

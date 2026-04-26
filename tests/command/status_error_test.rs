@@ -119,7 +119,7 @@ fn status_exit_code_dirty_returns_1() {
     configure_identity_via_cli(repo.path());
 
     fs::write(repo.path().join("a.txt"), "a").unwrap();
-    let out = run_libra_command(&["add", "a.txt"], repo.path());
+    let out = run_libra_command(&["add", ".libraignore", "a.txt"], repo.path());
     assert_cli_success(&out, "add a.txt");
     let out = run_libra_command(&["commit", "-m", "init", "--no-verify"], repo.path());
     assert_cli_success(&out, "initial commit");
@@ -146,7 +146,7 @@ fn status_exit_code_clean_returns_0() {
     configure_identity_via_cli(repo.path());
 
     fs::write(repo.path().join("a.txt"), "a").unwrap();
-    let out = run_libra_command(&["add", "a.txt"], repo.path());
+    let out = run_libra_command(&["add", ".libraignore", "a.txt"], repo.path());
     assert_cli_success(&out, "add a.txt");
     let out = run_libra_command(&["commit", "-m", "init", "--no-verify"], repo.path());
     assert_cli_success(&out, "initial commit");
@@ -170,7 +170,7 @@ fn status_exit_code_quiet_dirty_silent_exit_1() {
     configure_identity_via_cli(repo.path());
 
     fs::write(repo.path().join("a.txt"), "a").unwrap();
-    let out = run_libra_command(&["add", "a.txt"], repo.path());
+    let out = run_libra_command(&["add", ".libraignore", "a.txt"], repo.path());
     assert_cli_success(&out, "add a.txt");
     let out = run_libra_command(&["commit", "-m", "init", "--no-verify"], repo.path());
     assert_cli_success(&out, "initial commit");
@@ -195,7 +195,7 @@ fn status_quiet_without_exit_code_always_0() {
     configure_identity_via_cli(repo.path());
 
     fs::write(repo.path().join("a.txt"), "a").unwrap();
-    let out = run_libra_command(&["add", "a.txt"], repo.path());
+    let out = run_libra_command(&["add", ".libraignore", "a.txt"], repo.path());
     assert_cli_success(&out, "add a.txt");
     let out = run_libra_command(&["commit", "-m", "init", "--no-verify"], repo.path());
     assert_cli_success(&out, "initial commit");
@@ -221,7 +221,7 @@ fn status_exit_code_untracked_only_with_filter_is_clean() {
     configure_identity_via_cli(repo.path());
 
     fs::write(repo.path().join("a.txt"), "a").unwrap();
-    let out = run_libra_command(&["add", "a.txt"], repo.path());
+    let out = run_libra_command(&["add", ".libraignore", "a.txt"], repo.path());
     assert_cli_success(&out, "add a.txt");
     let out = run_libra_command(&["commit", "-m", "init", "--no-verify"], repo.path());
     assert_cli_success(&out, "initial commit");
@@ -251,7 +251,7 @@ fn status_exit_code_json_dirty_returns_json_and_exit_1() {
     configure_identity_via_cli(repo.path());
 
     fs::write(repo.path().join("a.txt"), "a").unwrap();
-    let out = run_libra_command(&["add", "a.txt"], repo.path());
+    let out = run_libra_command(&["add", ".libraignore", "a.txt"], repo.path());
     assert_cli_success(&out, "add a.txt");
     let out = run_libra_command(&["commit", "-m", "init", "--no-verify"], repo.path());
     assert_cli_success(&out, "initial commit");

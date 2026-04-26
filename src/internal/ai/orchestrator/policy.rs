@@ -3,11 +3,15 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use super::{
-    acl::{AclVerdict, ScopeVerdict, check_scope, check_tool_acl_with_context},
+    acl::{
+        AclVerdict, ScopeVerdict, cargo_lock_companion_allowed, check_scope,
+        check_tool_acl_with_context,
+    },
     types::{PolicyViolation, TaskKind, TaskSpec, ToolCallRecord, ToolDiffRecord},
 };
 use crate::internal::ai::{
     intentspec::types::{IntentSpec, NetworkPolicy},
+    libra_vcs::unsupported_command_message,
     tools::{
         ToolOutput,
         apply_patch::{ApplyPatchArgs, parse_patch},
@@ -59,6 +63,16 @@ pub fn evaluate_tool_call(
                 });
             }
         }
+    }
+
+    if tool_name == "web_search" && spec.constraints.security.network_policy == NetworkPolicy::Deny
+    {
+        return Err(PolicyViolation {
+            code: "network-policy-deny".into(),
+            message: "web_search requires network access while networkPolicy=deny".into(),
+            tool_name: Some(tool_name.to_string()),
+            path: None,
+        });
     }
 
     if tool_name == "shell" {
@@ -180,8 +194,9 @@ pub fn evaluate_tool_result(
 fn acl_tool_alias(tool_name: &str) -> &str {
     match tool_name {
         "read_file" | "list_dir" | "grep_files" | "search_files" | "apply_patch" => "workspace.fs",
+        "web_search" => "web.search",
         "request_user_input" => "interaction",
-        "submit_intent_draft" => "planning",
+        "submit_intent_draft" | "submit_plan_draft" => "planning",
         _ => tool_name,
     }
 }
@@ -294,12 +309,21 @@ fn task_write_contract_violation(task: &TaskSpec, path: &str) -> Option<String> 
         if let ScopeVerdict::OutOfScope(reason) = check_scope(&[], &task.scope_out, path) {
             return Some(reason);
         }
+        if cargo_lock_companion_allowed(&task.contract.touch_files, path) {
+            return None;
+        }
         return match check_scope(&task.contract.touch_files, &[], path) {
             ScopeVerdict::InScope => None,
             ScopeVerdict::OutOfScope(reason) => Some(format!("not in touchFiles: {reason}")),
         };
     }
 
+    if let ScopeVerdict::OutOfScope(reason) = check_scope(&[], &task.scope_out, path) {
+        return Some(reason);
+    }
+    if cargo_lock_companion_allowed(&task.scope_in, path) {
+        return None;
+    }
     match check_scope(&task.scope_in, &task.scope_out, path) {
         ScopeVerdict::InScope => None,
         ScopeVerdict::OutOfScope(reason) => Some(reason),
@@ -343,6 +367,7 @@ fn derive_tool_footprint(
                 Vec::new(),
             ))
         }
+        "web_search" => Ok(("web.search".into(), "query".into(), Vec::new(), Vec::new())),
         "apply_patch" => {
             let patch_text = parse_patch_text(arguments)?;
             let patch = parse_patch(&patch_text).map_err(|e| e.to_string())?;
@@ -370,7 +395,9 @@ fn derive_tool_footprint(
             Vec::new(),
             Vec::new(),
         )),
-        "submit_intent_draft" => Ok(("planning".into(), "submit".into(), Vec::new(), Vec::new())),
+        "submit_intent_draft" | "submit_plan_draft" => {
+            Ok(("planning".into(), "submit".into(), Vec::new(), Vec::new()))
+        }
         other => Ok((other.to_string(), "execute".into(), Vec::new(), Vec::new())),
     }
 }
@@ -444,9 +471,7 @@ fn libra_vcs_action(command: &str) -> Result<&'static str, String> {
         "status" | "diff" | "branch" | "log" | "show" | "show-ref" => Ok("read"),
         "add" | "commit" | "switch" => Ok("write"),
         "" => Err("missing run_libra_vcs command".to_string()),
-        other => Err(format!(
-            "unsupported run_libra_vcs command '{other}'; use an allowlisted Libra VCS command"
-        )),
+        other => Err(unsupported_command_message("run_libra_vcs", other)),
     }
 }
 
@@ -773,6 +798,39 @@ mod tests {
     }
 
     #[test]
+    fn test_web_search_honors_network_policy() {
+        let mut intent = spec();
+        intent.security.tool_acl.allow.push(ToolRule {
+            tool: "web.search".into(),
+            actions: vec!["query".into()],
+            constraints: BTreeMap::new(),
+        });
+
+        let denied = evaluate_tool_call(
+            &intent,
+            &task(),
+            "web_search",
+            &serde_json::json!({ "query": "Rust 2024 edition stable" }),
+            Path::new("/tmp/work"),
+        )
+        .expect_err("web_search should be blocked when networkPolicy=deny");
+
+        assert_eq!(denied.code, "network-policy-deny");
+
+        intent.constraints.security.network_policy = NetworkPolicy::Allow;
+        let allowed = evaluate_tool_call(
+            &intent,
+            &task(),
+            "web_search",
+            &serde_json::json!({ "query": "Rust 2024 edition stable" }),
+            Path::new("/tmp/work"),
+        )
+        .expect("web_search should be allowed when ACL and network policy allow it");
+
+        assert_eq!(allowed.record.action, "query");
+    }
+
+    #[test]
     fn test_shell_git_version_control_is_rejected() {
         let mut intent = spec();
         intent.constraints.security.network_policy = NetworkPolicy::Allow;
@@ -809,6 +867,15 @@ mod tests {
 
         assert_eq!(preflight.record.tool_name, "run_libra_vcs");
         assert_eq!(preflight.record.action, "read");
+    }
+
+    #[test]
+    fn test_run_libra_vcs_unknown_command_error_is_actionable() {
+        let error = libra_vcs_action("ls-files").unwrap_err();
+
+        assert!(error.contains("allowed commands"));
+        assert!(error.contains("status --json"));
+        assert!(error.contains("workspace file tools"));
     }
 
     #[test]
@@ -973,5 +1040,24 @@ mod tests {
         assert_eq!(violation.code, "scope-creep");
         assert_eq!(violation.path.as_deref(), Some("src/main.rs"));
         assert!(violation.message.contains("not in touchFiles"));
+    }
+
+    #[test]
+    fn test_shell_result_allows_cargo_lock_companion_for_cargo_toml_touch_file() {
+        let mut task = task();
+        task.contract.touch_files = vec!["libra/Cargo.toml".into(), "libra/src/main.rs".into()];
+        let output = ToolOutput::success("Exit code: 0").with_metadata(serde_json::json!({
+            "paths_written": ["libra/Cargo.lock"]
+        }));
+        let mut record = ToolCallRecord {
+            tool_name: "shell".into(),
+            action: "execute".into(),
+            arguments_json: Some(serde_json::json!({ "command": "cargo build" })),
+            ..ToolCallRecord::default()
+        };
+
+        evaluate_tool_result(&spec(), &task, "shell", &output, &mut record).unwrap();
+
+        assert_eq!(record.paths_written, vec!["libra/Cargo.lock".to_string()]);
     }
 }

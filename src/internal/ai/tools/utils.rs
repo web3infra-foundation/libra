@@ -6,7 +6,10 @@ use std::{
 };
 
 use crate::{
-    internal::ai::tools::error::{ToolError, ToolResult},
+    internal::ai::{
+        generated_artifacts,
+        tools::error::{ToolError, ToolResult},
+    },
     utils::{self, util},
 };
 
@@ -89,6 +92,29 @@ pub(crate) fn is_reserved_metadata_path(path: &Path, working_dir: &Path) -> bool
     matches!(
         relative.components().next(),
         Some(Component::Normal(name)) if name == OsStr::new(util::ROOT_DIR)
+    )
+}
+
+pub(crate) fn is_ai_file_tool_hidden_path(path: &Path, working_dir: &Path) -> bool {
+    is_reserved_metadata_path(path, working_dir)
+        || is_generated_build_artifact_path(path, working_dir)
+}
+
+pub(crate) fn is_generated_build_artifact_path(path: &Path, working_dir: &Path) -> bool {
+    let normalized_working_dir = normalize_lexical_absolute(working_dir);
+    let normalized_path = normalize_lexical_absolute(path);
+    let relative = match normalized_path.strip_prefix(&normalized_working_dir) {
+        Ok(relative) => relative,
+        Err(_) => return false,
+    };
+
+    generated_artifacts::relative_path_contains_generated_build_dir(relative)
+}
+
+pub(crate) fn generated_build_artifact_hidden_message(path: &Path) -> String {
+    format!(
+        "path '{}' is generated build output or inside a generated build output directory; AI file tools hide build artifacts. Inspect source files or run the relevant build/test command instead.",
+        path.display()
     )
 }
 
@@ -196,6 +222,28 @@ mod tests {
         let result = validate_path(&reserved_path, &working_dir);
 
         assert!(matches!(result, Err(ToolError::PathReserved(path)) if path == reserved_path));
+    }
+
+    #[test]
+    fn detects_generated_build_artifacts_inside_working_dir() {
+        let working_dir = PathBuf::from("/tmp/work");
+
+        assert!(is_generated_build_artifact_path(
+            &working_dir.join("target/debug/.fingerprint/bin-libra.json"),
+            &working_dir
+        ));
+        assert!(is_generated_build_artifact_path(
+            &working_dir.join("dotnet/bin/Debug/app.dll"),
+            &working_dir
+        ));
+        assert!(!is_generated_build_artifact_path(
+            &working_dir.join("src/bin/tool.rs"),
+            &working_dir
+        ));
+        assert!(!is_generated_build_artifact_path(
+            &working_dir.join("targeted/file.txt"),
+            &working_dir
+        ));
     }
 
     #[test]

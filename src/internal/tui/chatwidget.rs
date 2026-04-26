@@ -3,7 +3,6 @@
 //! Renders the scrollable chat area with history cells.
 
 use std::{
-    collections::BTreeMap,
     path::PathBuf,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -16,12 +15,12 @@ use uuid::Uuid;
 
 use super::{
     bottom_pane::BottomPane,
-    history_cell::{AssistantHistoryCell, HistoryCell, ToolCallHistoryCell},
+    history_cell::{AssistantHistoryCell, HistoryCell, ThinkingHistoryCell, ToolCallHistoryCell},
     theme,
 };
 use crate::internal::ai::orchestrator::types::{
     ExecutionPlanSpec, TaskKind, TaskNodeStatus, TaskRuntimeEvent, TaskRuntimeNoteLevel,
-    TaskRuntimePhase,
+    TaskRuntimePhase, TaskWorkspaceBackend,
 };
 
 #[derive(Debug, Clone)]
@@ -36,24 +35,13 @@ struct DagPanelNode {
 }
 
 #[derive(Debug, Clone, Default)]
-struct DagPanelCell {
-    mask: u8,
-    animated: bool,
-}
-
-#[derive(Debug, Clone)]
 struct DagPanelState {
     revision: u32,
     completed: usize,
     total: usize,
     nodes: Vec<DagPanelNode>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct DagGraphLayout {
-    graph_top: u16,
-    row_step: usize,
-    summary_y: u16,
+    validation_status: DagStageStatus,
+    release_status: DagStageStatus,
 }
 
 impl DagPanelState {
@@ -86,6 +74,8 @@ impl DagPanelState {
             total: plan.tasks.len(),
             completed: 0,
             nodes,
+            validation_status: DagStageStatus::Pending,
+            release_status: DagStageStatus::Pending,
         }
     }
 
@@ -93,11 +83,42 @@ impl DagPanelState {
         if let Some(node) = self.nodes.iter_mut().find(|node| node.task_id == task_id) {
             node.status = status;
         }
+        self.completed = self.active_or_terminal_node_count().min(self.total);
     }
 
     fn update_progress(&mut self, completed: usize, total: usize) {
-        self.completed = completed.min(total);
-        self.total = total.max(self.total);
+        self.total = total.max(self.total).max(self.nodes.len());
+        self.completed = completed
+            .min(self.total)
+            .max(self.active_or_terminal_node_count().min(self.total))
+            .max(self.terminal_node_count().min(self.total));
+    }
+
+    fn update_validation_status(&mut self, passed: bool) {
+        self.validation_status = DagStageStatus::from_passed(passed);
+    }
+
+    fn update_release_status(&mut self, passed: bool) {
+        self.release_status = DagStageStatus::from_passed(passed);
+    }
+
+    fn terminal_node_count(&self) -> usize {
+        self.nodes
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.status,
+                    TaskNodeStatus::Completed | TaskNodeStatus::Failed | TaskNodeStatus::Skipped
+                )
+            })
+            .count()
+    }
+
+    fn active_or_terminal_node_count(&self) -> usize {
+        self.nodes
+            .iter()
+            .filter(|node| node.status != TaskNodeStatus::Pending)
+            .count()
     }
 
     fn lane_count(&self) -> usize {
@@ -129,12 +150,19 @@ impl DagPanelState {
             .filter(|node| node.status == TaskNodeStatus::Failed)
             .count()
     }
+}
 
-    fn running_count(&self) -> usize {
-        self.nodes
-            .iter()
-            .filter(|node| node.status == TaskNodeStatus::Running)
-            .count()
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum DagStageStatus {
+    #[default]
+    Pending,
+    Complete,
+    Failed,
+}
+
+impl DagStageStatus {
+    fn from_passed(passed: bool) -> Self {
+        if passed { Self::Complete } else { Self::Failed }
     }
 }
 
@@ -155,6 +183,7 @@ struct TaskMuxNoteEntry {
 #[derive(Debug, Clone)]
 enum TaskMuxTranscriptEntry {
     Note(TaskMuxNoteEntry),
+    Thinking(ThinkingHistoryCell),
     Assistant(AssistantHistoryCell),
     Tool(ToolCallHistoryCell),
 }
@@ -184,6 +213,8 @@ struct TaskMuxTaskState {
     status: TaskNodeStatus,
     phase: TaskRuntimePhase,
     working_dir: Option<PathBuf>,
+    workspace_backend: Option<TaskWorkspaceBackend>,
+    main_working_dir: Option<PathBuf>,
     isolated: bool,
     transcript: Vec<TaskMuxTranscriptEntry>,
 }
@@ -207,50 +238,9 @@ struct TaskMuxState {
 
 const TASK_MUX_MAX_ENTRIES: usize = 96;
 const TASK_MUX_TRANSITION_DURATION: Duration = Duration::from_millis(220);
+const DAG_PANEL_WIDTH_PERCENT: u16 = 35;
 
 impl TaskMuxState {
-    fn new(plan: &ExecutionPlanSpec) -> Option<Self> {
-        let groups = plan.scheduled_groups();
-        let has_parallel = groups.iter().any(|group| group.len() > 1);
-        if !has_parallel {
-            return None;
-        }
-
-        let mut id_to_depth = std::collections::HashMap::new();
-        for (depth, group) in groups.iter().enumerate() {
-            for id in group {
-                id_to_depth.insert(*id, depth);
-            }
-        }
-
-        let tasks = plan
-            .tasks
-            .iter()
-            .enumerate()
-            .map(|(idx, task)| TaskMuxTaskState {
-                task_id: task.id(),
-                kind: task.kind.clone(),
-                title: task.title().to_string(),
-                depth: id_to_depth.get(&task.id()).copied().unwrap_or_default(),
-                ordinal: idx + 1,
-                status: TaskNodeStatus::Pending,
-                phase: TaskRuntimePhase::Pending,
-                working_dir: None,
-                isolated: false,
-                transcript: Vec::new(),
-            })
-            .collect::<Vec<_>>();
-
-        Some(Self {
-            revision: plan.revision,
-            selected: 0,
-            focused: 0,
-            mode: TaskMuxMode::Focused,
-            transition: None,
-            tasks,
-        })
-    }
-
     fn current_focus_index(&self) -> usize {
         self.transition
             .as_ref()
@@ -285,11 +275,16 @@ impl TaskMuxState {
             TaskRuntimeEvent::WorkspaceReady {
                 working_dir,
                 isolated,
+                backend,
+                main_working_dir,
             } => {
                 task.working_dir = Some(working_dir);
                 task.isolated = isolated;
+                task.workspace_backend = Some(backend);
+                task.main_working_dir = main_working_dir;
             }
             TaskRuntimeEvent::Note { level, text } => {
+                complete_streaming_task_thinking(&mut task.transcript);
                 let trimmed = text.trim();
                 if trimmed.is_empty() {
                     return;
@@ -302,7 +297,26 @@ impl TaskMuxState {
                     }),
                 );
             }
+            TaskRuntimeEvent::ThinkingDelta(delta) => {
+                if delta.is_empty() {
+                    return;
+                }
+                if let Some(TaskMuxTranscriptEntry::Thinking(cell)) = task.transcript.last_mut()
+                    && cell.is_streaming
+                {
+                    cell.append(&delta);
+                    return;
+                }
+
+                let mut cell = ThinkingHistoryCell::streaming();
+                cell.append(&delta);
+                push_task_transcript_entry(
+                    &mut task.transcript,
+                    TaskMuxTranscriptEntry::Thinking(cell),
+                );
+            }
             TaskRuntimeEvent::AssistantMessage(text) => {
+                complete_streaming_task_thinking(&mut task.transcript);
                 let trimmed = text.trim();
                 if trimmed.is_empty() {
                     return;
@@ -319,6 +333,7 @@ impl TaskMuxState {
                 tool_name,
                 arguments,
             } => {
+                complete_streaming_task_thinking(&mut task.transcript);
                 if let Some(TaskMuxTranscriptEntry::Tool(cell)) = task.transcript.last_mut()
                     && cell.can_merge(&tool_name)
                 {
@@ -338,6 +353,7 @@ impl TaskMuxState {
                 tool_name: _tool_name,
                 result,
             } => {
+                complete_streaming_task_thinking(&mut task.transcript);
                 let mut pending_result = Some(result);
                 for idx in (0..task.transcript.len()).rev() {
                     let Some(TaskMuxTranscriptEntry::Tool(cell)) = task.transcript.get_mut(idx)
@@ -544,9 +560,8 @@ impl ChatWidget {
     }
 
     pub fn show_dag_panel(&mut self, plan: ExecutionPlanSpec) {
-        self.task_mux = TaskMuxState::new(&plan);
+        self.task_mux = None;
         self.dag_panel = Some(DagPanelState::new(plan));
-        self.clear_stale_task_mux();
     }
 
     pub fn show_dag_preview(&mut self, plan: ExecutionPlanSpec) {
@@ -567,6 +582,18 @@ impl ChatWidget {
     pub fn update_dag_progress(&mut self, completed: usize, total: usize) {
         if let Some(panel) = self.dag_panel.as_mut() {
             panel.update_progress(completed, total);
+        }
+    }
+
+    pub fn update_dag_validation_status(&mut self, passed: bool) {
+        if let Some(panel) = self.dag_panel.as_mut() {
+            panel.update_validation_status(passed);
+        }
+    }
+
+    pub fn update_dag_release_status(&mut self, passed: bool) {
+        if let Some(panel) = self.dag_panel.as_mut() {
+            panel.update_release_status(passed);
         }
     }
 
@@ -791,10 +818,9 @@ impl ChatWidget {
 
         if self.task_mux.is_some() {
             if area.width >= 108 {
-                let panel_width = (area.width / 3).clamp(30, 40);
                 let chunks = Layout::horizontal([
-                    Constraint::Min(area.width.saturating_sub(panel_width)),
-                    Constraint::Length(panel_width),
+                    Constraint::Percentage(100 - DAG_PANEL_WIDTH_PERCENT),
+                    Constraint::Percentage(DAG_PANEL_WIDTH_PERCENT),
                 ])
                 .split(area);
                 return (chunks[0], Some(chunks[1]));
@@ -806,10 +832,9 @@ impl ChatWidget {
             return (area, None);
         }
 
-        let panel_width = (area.width / 3).clamp(30, 42);
         let chunks = Layout::horizontal([
-            Constraint::Min(area.width.saturating_sub(panel_width)),
-            Constraint::Length(panel_width),
+            Constraint::Percentage(100 - DAG_PANEL_WIDTH_PERCENT),
+            Constraint::Percentage(DAG_PANEL_WIDTH_PERCENT),
         ])
         .split(area);
         (chunks[0], Some(chunks[1]))
@@ -1131,7 +1156,10 @@ impl ChatWidget {
         }
 
         let mut lines = Vec::new();
-        let mode_label = if task.isolated { "isolated" } else { "shared" };
+        let mode_label = task
+            .workspace_backend
+            .map(TaskWorkspaceBackend::label)
+            .unwrap_or(if task.isolated { "isolated" } else { "shared" });
         lines.push(Line::from(vec![
             Span::styled(task_kind_label(&task.kind), task_kind_style(&task.kind)),
             Span::raw(" "),
@@ -1144,14 +1172,24 @@ impl ChatWidget {
             task_phase_span(&task.phase, task.ordinal, area.width),
         ]));
         if let Some(working_dir) = task.working_dir.as_ref() {
-            let dir_label = working_dir
+            let display_dir = if task.isolated {
+                task.main_working_dir.as_ref().unwrap_or(working_dir)
+            } else {
+                working_dir
+            };
+            let dir_label = display_dir
                 .file_name()
                 .and_then(|part| part.to_str())
-                .unwrap_or_else(|| working_dir.as_os_str().to_str().unwrap_or("."));
+                .unwrap_or_else(|| display_dir.as_os_str().to_str().unwrap_or("."));
+            let prefix = if task.isolated { "source" } else { "cwd" };
             lines.push(Line::styled(
                 format!(
-                    "cwd {}",
-                    truncate_label(dir_label, inner.width.saturating_sub(4) as usize)
+                    "{} {}",
+                    prefix,
+                    truncate_label(
+                        dir_label,
+                        inner.width.saturating_sub(prefix.len() as u16 + 1) as usize
+                    )
                 ),
                 theme::text::subtle(),
             ));
@@ -1191,7 +1229,7 @@ impl ChatWidget {
         let Some(panel) = self.dag_panel.as_ref() else {
             return;
         };
-        if area.width < 12 || area.height < 8 {
+        if area.width < 18 || area.height < 6 {
             return;
         }
 
@@ -1200,220 +1238,294 @@ impl ChatWidget {
         } else {
             theme::interactive::title()
         };
-        let lane_count = panel.lane_count().max(1);
-        let depth_count = panel.depth_count().max(1);
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(theme::border::idle())
-            .title(Line::from(vec![
-                Span::styled(
-                    format!(" Workflow r{} ", panel.revision),
-                    title_style.add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!(" {} / {} ", panel.completed, panel.total),
-                    theme::text::muted(),
-                ),
-                Span::styled(
-                    format!(" lanes {} ", lane_count),
-                    theme::text::subtle().add_modifier(Modifier::DIM),
-                ),
-            ]))
-            .title_alignment(Alignment::Center);
-        let inner = block.inner(area);
-        block.render(area, buf);
+        let title = Line::from(vec![
+            Span::styled("⌁ ", theme::interactive::accent()),
+            Span::styled("Workflow · ", title_style.add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("Plan r{}", panel.revision),
+                title_style.add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  {} / {}", panel.completed, panel.total),
+                theme::text::muted(),
+            ),
+        ]);
+        Paragraph::new(title).render(Rect::new(area.x, area.y, area.width, 1), buf);
+        Paragraph::new(Line::styled(
+            "Thread graph",
+            theme::text::primary().add_modifier(Modifier::BOLD),
+        ))
+        .render(
+            Rect::new(area.x, area.y.saturating_add(2), area.width, 1),
+            buf,
+        );
 
-        if inner.width < 12 || inner.height < 7 {
+        let rows_area = Rect::new(
+            area.x,
+            area.y.saturating_add(4),
+            area.width,
+            area.height.saturating_sub(4),
+        );
+        if rows_area.height == 0 {
             return;
         }
+        let rows = workflow_branch_rows(panel, rows_area.height as usize);
+        render_workflow_branch_rows(rows_area, buf, &rows);
+    }
+}
 
-        let layout = dag_graph_layout(inner, depth_count);
-        let usable_width = inner.width.saturating_sub(2) as usize;
-        let lane_span = usable_width.saturating_sub(1);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkflowBranchLane {
+    Main,
+    Task,
+}
 
-        let mut layer_nodes = BTreeMap::<usize, Vec<&DagPanelNode>>::new();
-        for node in &panel.nodes {
-            layer_nodes.entry(node.depth).or_default().push(node);
-        }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkflowBranchStatus {
+    Complete,
+    Active,
+    Pending,
+    Failed,
+    Skipped,
+}
 
-        let mut node_positions = BTreeMap::new();
-        for (depth, nodes) in &layer_nodes {
-            for (index, node) in nodes.iter().enumerate() {
-                let x = inner.x as usize
-                    + 1
-                    + if nodes.len() <= 1 {
-                        lane_span / 2
-                    } else {
-                        index * lane_span / nodes.len().saturating_sub(1)
-                    };
-                let y = layout.graph_top as usize + depth * layout.row_step;
-                node_positions.insert(node.task_id, (x, y));
-            }
-        }
+#[derive(Debug, Clone)]
+struct WorkflowBranchRow {
+    lane: WorkflowBranchLane,
+    status: WorkflowBranchStatus,
+    label: String,
+}
 
-        let phase = animation_phase(110);
-        let mut edge_cells: BTreeMap<(usize, usize), DagPanelCell> = BTreeMap::new();
-        let spine_x = inner.x as usize + 1 + lane_span / 2;
+fn workflow_branch_rows(panel: &DagPanelState, max_rows: usize) -> Vec<WorkflowBranchRow> {
+    if max_rows == 0 {
+        return Vec::new();
+    }
 
-        for depth in 0..depth_count {
-            let Some(layer_nodes) = layer_nodes.get(&depth) else {
-                continue;
-            };
+    let lane_count = panel.lane_count().max(1);
+    let layer_count = panel.depth_count().max(1);
+    let mut rows = Vec::new();
+    rows.push(WorkflowBranchRow {
+        lane: WorkflowBranchLane::Main,
+        status: WorkflowBranchStatus::Complete,
+        label: "intent: confirm".to_string(),
+    });
+    rows.push(WorkflowBranchRow {
+        lane: WorkflowBranchLane::Main,
+        status: WorkflowBranchStatus::Complete,
+        label: format!("plan: exec + test · {lane_count} lanes · {layer_count} layers"),
+    });
+    rows.push(WorkflowBranchRow {
+        lane: WorkflowBranchLane::Main,
+        status: workflow_phase2_status(panel),
+        label: "phase 2: start".to_string(),
+    });
 
-            let layer_y = layout.graph_top as usize + depth * layout.row_step;
-            let min_x = layer_nodes
-                .iter()
-                .filter_map(|node| node_positions.get(&node.task_id).map(|(x, _)| *x))
-                .min()
-                .unwrap_or(spine_x);
-            let max_x = layer_nodes
-                .iter()
-                .filter_map(|node| node_positions.get(&node.task_id).map(|(x, _)| *x))
-                .max()
-                .unwrap_or(spine_x);
-            let animated = layer_nodes
-                .iter()
-                .any(|node| node.status == TaskNodeStatus::Running);
-
-            draw_horizontal_edge(
-                &mut edge_cells,
-                layer_y,
-                min_x.min(spine_x),
-                max_x.max(spine_x),
-                animated,
-            );
-
-            if depth + 1 < depth_count {
-                let next_y = layout.graph_top as usize + (depth + 1) * layout.row_step;
-                let next_layer_running = panel
-                    .nodes
-                    .iter()
-                    .any(|node| node.depth == depth + 1 && node.status == TaskNodeStatus::Running);
-                draw_vertical_edge(
-                    &mut edge_cells,
-                    spine_x,
-                    layer_y,
-                    next_y,
-                    animated || next_layer_running,
-                );
-            }
-        }
-
-        for ((x, y), cell) in edge_cells {
-            if x < area.x as usize || y < area.y as usize {
-                continue;
-            }
-            let color = if cell.animated {
-                theme::animation::executing_gradient()
-                    [(x + y + phase) % theme::animation::executing_gradient().len()]
-            } else {
-                theme::text::subtle().fg.unwrap_or(Color::Reset)
-            };
-            if x <= u16::MAX as usize
-                && y <= u16::MAX as usize
-                && let Some(cell_ref) = buf.cell_mut((x as u16, y as u16))
-            {
-                cell_ref
-                    .set_symbol(panel_edge_glyph(cell.mask).encode_utf8(&mut [0; 4]))
-                    .set_style(Style::default().fg(color));
-            }
-        }
-
-        for node in &panel.nodes {
-            let Some(&(x, y)) = node_positions.get(&node.task_id) else {
-                continue;
-            };
-            if x > u16::MAX as usize || y > u16::MAX as usize {
-                continue;
-            }
-            let node_style = panel_node_style(&node.status);
-            let glyph = panel_node_glyph(node);
-            let x = x as u16;
-            let y = y as u16;
-            if let Some(cell_ref) = buf.cell_mut((x, y)) {
-                cell_ref
-                    .set_symbol(glyph.encode_utf8(&mut [0; 4]))
-                    .set_style(node_style.add_modifier(Modifier::BOLD));
-            }
-
-            let label = format!("{}{:02}", task_kind_prefix(&node.kind), node.ordinal);
-            let label_x = x.saturating_add(2);
-            if label_x < inner.right() {
-                for (offset, ch) in label.chars().enumerate() {
-                    let cell_x = label_x.saturating_add(offset as u16);
-                    if cell_x >= inner.right() {
-                        break;
-                    }
-                    if let Some(cell_ref) = buf.cell_mut((cell_x, y)) {
-                        cell_ref
-                            .set_symbol(ch.encode_utf8(&mut [0; 4]))
-                            .set_style(theme::text::muted());
-                    }
-                }
-            }
-        }
-
-        let summary = format!(
-            "● impl  ■ gate  lanes {}  layers {}  run {}  fail {}",
-            lane_count,
-            depth_count,
-            panel.running_count(),
-            panel.failed_count()
-        );
-        for (offset, ch) in truncate_label(&summary, inner.width.saturating_sub(2) as usize)
-            .chars()
-            .enumerate()
-        {
-            let x = inner.x.saturating_add(1 + offset as u16);
-            if x >= inner.right() {
-                break;
-            }
-            let style = match ch {
-                '●' | '■' => theme::text::primary().add_modifier(Modifier::BOLD),
-                _ => theme::text::muted(),
-            };
-            if let Some(cell_ref) = buf.cell_mut((x, layout.summary_y)) {
-                cell_ref
-                    .set_symbol(ch.encode_utf8(&mut [0; 4]))
-                    .set_style(style);
-            }
-        }
-
-        let mut detail_y = layout.summary_y.saturating_add(1);
-        let detail_bottom = inner.bottom().saturating_sub(1);
-        for node in &panel.nodes {
-            if detail_y >= detail_bottom {
-                break;
-            }
-            let dep_suffix = if node.dependency_count == 0 {
-                String::new()
-            } else {
-                format!(" dep:{}", node.dependency_count)
-            };
-            let line = format!(
-                "{}{:02} {:<7} {}{}",
+    let reserve_for_terminal_rows = 2usize;
+    let task_capacity = max_rows.saturating_sub(rows.len() + reserve_for_terminal_rows);
+    let visible_task_count = panel.nodes.len().min(task_capacity);
+    for node in panel.nodes.iter().take(visible_task_count) {
+        let dep_suffix = if node.dependency_count == 0 {
+            String::new()
+        } else {
+            format!(" · dep {}", node.dependency_count)
+        };
+        rows.push(WorkflowBranchRow {
+            lane: WorkflowBranchLane::Task,
+            status: workflow_status_from_task(&node.status),
+            label: format!(
+                "{}{:02} {}{}",
                 task_kind_prefix(&node.kind),
                 node.ordinal,
-                task_status_label(&node.status),
                 node.title,
                 dep_suffix
-            );
-            for (offset, ch) in truncate_label(&line, inner.width.saturating_sub(2) as usize)
-                .chars()
-                .enumerate()
-            {
-                let x = inner.x.saturating_add(1 + offset as u16);
-                if x >= inner.right() {
-                    break;
-                }
-                if let Some(cell_ref) = buf.cell_mut((x, detail_y)) {
-                    cell_ref
-                        .set_symbol(ch.encode_utf8(&mut [0; 4]))
-                        .set_style(panel_node_style(&node.status));
+            ),
+        });
+    }
+
+    let omitted = panel.nodes.len().saturating_sub(visible_task_count);
+    if omitted > 0 && rows.len() + reserve_for_terminal_rows < max_rows {
+        rows.push(WorkflowBranchRow {
+            lane: WorkflowBranchLane::Task,
+            status: WorkflowBranchStatus::Pending,
+            label: format!("... {omitted} more tasks"),
+        });
+    }
+
+    rows.push(WorkflowBranchRow {
+        lane: WorkflowBranchLane::Main,
+        status: workflow_validation_status(panel),
+        label: "validation".to_string(),
+    });
+    rows.push(WorkflowBranchRow {
+        lane: WorkflowBranchLane::Main,
+        status: workflow_stage_status(panel.release_status),
+        label: "release".to_string(),
+    });
+    rows.truncate(max_rows);
+    rows
+}
+
+fn workflow_phase2_status(panel: &DagPanelState) -> WorkflowBranchStatus {
+    if panel.failed_count() > 0 {
+        WorkflowBranchStatus::Failed
+    } else if panel.has_running() {
+        WorkflowBranchStatus::Active
+    } else if panel.total > 0 && panel.completed >= panel.total {
+        WorkflowBranchStatus::Complete
+    } else {
+        WorkflowBranchStatus::Pending
+    }
+}
+
+fn workflow_validation_status(panel: &DagPanelState) -> WorkflowBranchStatus {
+    match panel.validation_status {
+        DagStageStatus::Complete | DagStageStatus::Failed => {
+            return workflow_stage_status(panel.validation_status);
+        }
+        DagStageStatus::Pending => {}
+    }
+
+    if panel.failed_count() > 0 {
+        WorkflowBranchStatus::Failed
+    } else if panel.total > 0 && panel.completed >= panel.total {
+        WorkflowBranchStatus::Active
+    } else {
+        WorkflowBranchStatus::Pending
+    }
+}
+
+fn workflow_stage_status(status: DagStageStatus) -> WorkflowBranchStatus {
+    match status {
+        DagStageStatus::Pending => WorkflowBranchStatus::Pending,
+        DagStageStatus::Complete => WorkflowBranchStatus::Complete,
+        DagStageStatus::Failed => WorkflowBranchStatus::Failed,
+    }
+}
+
+fn workflow_status_from_task(status: &TaskNodeStatus) -> WorkflowBranchStatus {
+    match status {
+        TaskNodeStatus::Pending => WorkflowBranchStatus::Pending,
+        TaskNodeStatus::Running => WorkflowBranchStatus::Active,
+        TaskNodeStatus::Completed => WorkflowBranchStatus::Complete,
+        TaskNodeStatus::Failed => WorkflowBranchStatus::Failed,
+        TaskNodeStatus::Skipped => WorkflowBranchStatus::Skipped,
+    }
+}
+
+fn render_workflow_branch_rows(area: Rect, buf: &mut Buffer, rows: &[WorkflowBranchRow]) {
+    if rows.is_empty() || area.width < 8 {
+        return;
+    }
+
+    let main_x = area.x.saturating_add(2);
+    let branch_x = area.x.saturating_add(5).min(area.right().saturating_sub(1));
+    let first_branch = rows
+        .iter()
+        .position(|row| row.lane == WorkflowBranchLane::Task);
+    let last_branch = rows
+        .iter()
+        .rposition(|row| row.lane == WorkflowBranchLane::Task);
+    let trunk_style = theme::text::subtle();
+    let branch_style = theme::interactive::accent();
+
+    for (index, row) in rows.iter().enumerate() {
+        let y = area.y.saturating_add(index as u16);
+        if y >= area.bottom() {
+            break;
+        }
+
+        if rows.len() > 1 {
+            set_branch_cell(buf, main_x, y, "│", trunk_style);
+        }
+
+        if row.lane == WorkflowBranchLane::Task {
+            if first_branch == Some(index) && branch_x > main_x {
+                set_branch_cell(buf, main_x, y, "├", branch_style);
+                for x in main_x.saturating_add(1)..branch_x {
+                    set_branch_cell(buf, x, y, "─", branch_style);
                 }
             }
-            detail_y = detail_y.saturating_add(1);
+            if let (Some(first), Some(last)) = (first_branch, last_branch)
+                && index >= first
+                && index <= last
+            {
+                set_branch_cell(buf, branch_x, y, "│", branch_style);
+            }
         }
+
+        let node_x = match row.lane {
+            WorkflowBranchLane::Main => main_x,
+            WorkflowBranchLane::Task => branch_x,
+        };
+        let label_x = match row.lane {
+            WorkflowBranchLane::Main => main_x.saturating_add(4),
+            WorkflowBranchLane::Task => branch_x.saturating_add(3),
+        };
+        set_branch_cell(
+            buf,
+            node_x,
+            y,
+            workflow_branch_glyph(row.status),
+            workflow_branch_style(row.status).add_modifier(Modifier::BOLD),
+        );
+        write_branch_label(buf, label_x, y, area.right(), &row.label, row.status);
+    }
+}
+
+fn set_branch_cell(buf: &mut Buffer, x: u16, y: u16, symbol: &str, style: Style) {
+    if let Some(cell) = buf.cell_mut((x, y)) {
+        cell.set_symbol(symbol).set_style(style);
+    }
+}
+
+fn write_branch_label(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    right: u16,
+    label: &str,
+    status: WorkflowBranchStatus,
+) {
+    if x >= right {
+        return;
+    }
+    let width = right.saturating_sub(x) as usize;
+    let style = match status {
+        WorkflowBranchStatus::Complete => theme::text::primary(),
+        WorkflowBranchStatus::Active => theme::interactive::selected_option(),
+        WorkflowBranchStatus::Pending => theme::text::muted(),
+        WorkflowBranchStatus::Failed => theme::status::danger(),
+        WorkflowBranchStatus::Skipped => theme::text::subtle(),
+    };
+    for (offset, ch) in truncate_label(label, width).chars().enumerate() {
+        let cell_x = x.saturating_add(offset as u16);
+        if cell_x >= right {
+            break;
+        }
+        if let Some(cell) = buf.cell_mut((cell_x, y)) {
+            cell.set_symbol(ch.encode_utf8(&mut [0; 4]))
+                .set_style(style);
+        }
+    }
+}
+
+fn workflow_branch_glyph(status: WorkflowBranchStatus) -> &'static str {
+    match status {
+        WorkflowBranchStatus::Complete => "●",
+        WorkflowBranchStatus::Active => "●",
+        WorkflowBranchStatus::Pending => "○",
+        WorkflowBranchStatus::Failed => "×",
+        WorkflowBranchStatus::Skipped => "○",
+    }
+}
+
+fn workflow_branch_style(status: WorkflowBranchStatus) -> Style {
+    match status {
+        WorkflowBranchStatus::Complete => theme::text::primary(),
+        WorkflowBranchStatus::Active => theme::interactive::accent(),
+        WorkflowBranchStatus::Pending => theme::text::subtle(),
+        WorkflowBranchStatus::Failed => theme::status::danger(),
+        WorkflowBranchStatus::Skipped => theme::text::muted(),
     }
 }
 
@@ -1513,6 +1625,14 @@ fn push_task_transcript_entry(
     transcript.push(entry);
 }
 
+fn complete_streaming_task_thinking(transcript: &mut [TaskMuxTranscriptEntry]) {
+    for entry in transcript.iter_mut() {
+        if let TaskMuxTranscriptEntry::Thinking(cell) = entry {
+            cell.complete();
+        }
+    }
+}
+
 fn render_task_transcript_lines(
     transcript: &[TaskMuxTranscriptEntry],
     width: u16,
@@ -1531,6 +1651,9 @@ fn render_task_transcript_lines(
                     TaskRuntimeNoteLevel::Error => ("! ", theme::status::danger()),
                 };
                 all_lines.extend(wrap_mux_text(&entry.text, prefix, width, style));
+            }
+            TaskMuxTranscriptEntry::Thinking(cell) => {
+                all_lines.extend(cell.display_lines(width));
             }
             TaskMuxTranscriptEntry::Assistant(cell) => {
                 all_lines.extend(cell.display_lines(width));
@@ -1647,116 +1770,6 @@ fn task_status_label(status: &TaskNodeStatus) -> &'static str {
     }
 }
 
-fn dag_graph_layout(inner: Rect, depth_count: usize) -> DagGraphLayout {
-    let available_height = inner.height.saturating_sub(4) as usize;
-    let (row_step, used_height) = if depth_count <= 1 {
-        (1usize, 1usize)
-    } else {
-        let max_fit_step =
-            available_height.saturating_sub(1) / depth_count.saturating_sub(1).max(1);
-        let row_step = max_fit_step.clamp(3, 6);
-        let used_height = depth_count.saturating_sub(1) * row_step + 1;
-        (row_step, used_height)
-    };
-    let graph_top = inner
-        .y
-        .saturating_add(1 + available_height.saturating_sub(used_height) as u16 / 2);
-    let summary_y = (graph_top as usize + used_height + 1)
-        .min(inner.bottom().saturating_sub(2) as usize) as u16;
-
-    DagGraphLayout {
-        graph_top,
-        row_step,
-        summary_y,
-    }
-}
-
-fn draw_horizontal_edge(
-    cells: &mut BTreeMap<(usize, usize), DagPanelCell>,
-    y: usize,
-    start_x: usize,
-    end_x: usize,
-    animated: bool,
-) {
-    let (from, to) = if start_x <= end_x {
-        (start_x, end_x)
-    } else {
-        (end_x, start_x)
-    };
-    for x in from..=to {
-        let cell = cells.entry((x, y)).or_default();
-        if x > from {
-            cell.mask |= 0b1000;
-        }
-        if x < to {
-            cell.mask |= 0b0010;
-        }
-        cell.animated |= animated;
-    }
-}
-
-fn draw_vertical_edge(
-    cells: &mut BTreeMap<(usize, usize), DagPanelCell>,
-    x: usize,
-    start_y: usize,
-    end_y: usize,
-    animated: bool,
-) {
-    let (from, to) = if start_y <= end_y {
-        (start_y, end_y)
-    } else {
-        (end_y, start_y)
-    };
-    for y in from..=to {
-        let cell = cells.entry((x, y)).or_default();
-        if y > from {
-            cell.mask |= 0b0001;
-        }
-        if y < to {
-            cell.mask |= 0b0100;
-        }
-        cell.animated |= animated;
-    }
-}
-
-fn panel_edge_glyph(mask: u8) -> char {
-    match mask {
-        0 => ' ',
-        0b0010 | 0b1000 | 0b1010 => '─',
-        0b0001 | 0b0100 | 0b0101 => '│',
-        0b0110 => '┌',
-        0b1100 => '┐',
-        0b0011 => '└',
-        0b1001 => '┘',
-        0b0111 => '├',
-        0b1101 => '┤',
-        0b1110 => '┬',
-        0b1011 => '┴',
-        0b1111 => '┼',
-        _ => '•',
-    }
-}
-
-fn panel_node_glyph(node: &DagPanelNode) -> char {
-    match (&node.kind, &node.status) {
-        (TaskKind::Implementation, TaskNodeStatus::Completed) => '●',
-        (TaskKind::Implementation, TaskNodeStatus::Running) => '◉',
-        (TaskKind::Implementation, TaskNodeStatus::Failed) => '◍',
-        (TaskKind::Implementation, TaskNodeStatus::Skipped) => '·',
-        (TaskKind::Implementation, TaskNodeStatus::Pending) => '·',
-        (TaskKind::Analysis, TaskNodeStatus::Completed) => '○',
-        (TaskKind::Analysis, TaskNodeStatus::Running) => '◌',
-        (TaskKind::Analysis, TaskNodeStatus::Failed) => '◐',
-        (TaskKind::Analysis, TaskNodeStatus::Skipped) => '◦',
-        (TaskKind::Analysis, TaskNodeStatus::Pending) => '◦',
-        (TaskKind::Gate, TaskNodeStatus::Completed) => '■',
-        (TaskKind::Gate, TaskNodeStatus::Running) => '▣',
-        (TaskKind::Gate, TaskNodeStatus::Failed) => '▨',
-        (TaskKind::Gate, TaskNodeStatus::Skipped) => '□',
-        (TaskKind::Gate, TaskNodeStatus::Pending) => '□',
-    }
-}
-
 fn panel_node_style(status: &TaskNodeStatus) -> Style {
     match status {
         TaskNodeStatus::Pending => theme::text::subtle(),
@@ -1795,12 +1808,18 @@ mod tests {
     use ratatui::{buffer::Buffer, layout::Rect};
     use serde_json::json;
 
-    use super::{ChatWidget, dag_graph_layout};
+    use super::{
+        ChatWidget, TaskMuxTranscriptEntry, WorkflowBranchStatus, render_task_transcript_lines,
+        workflow_branch_rows,
+    };
     use crate::internal::{
         ai::orchestrator::types::{
             ExecutionPlanSpec, TaskContract, TaskKind, TaskNodeStatus, TaskRuntimeEvent, TaskSpec,
         },
-        tui::{history_cell::AssistantHistoryCell, welcome_shader},
+        tui::{
+            history_cell::{AssistantHistoryCell, ThinkingHistoryCell},
+            welcome_shader,
+        },
     };
 
     fn row_text(buf: &Buffer, y: u16, width: u16) -> String {
@@ -1907,9 +1926,23 @@ mod tests {
         widget.show_dag_panel(sample_plan());
 
         let (history, dag) = widget.split_chat_layout(Rect::new(0, 0, 120, 30));
+        let dag = dag.unwrap();
 
-        assert_eq!(history.width + dag.unwrap().width, 120);
+        assert_eq!(history.width + dag.width, 120);
+        assert_eq!(dag.width, 42);
         assert!(history.width < 120);
+    }
+
+    #[test]
+    fn dag_panel_uses_thirty_five_percent_side_column() {
+        let mut widget = ChatWidget::new();
+        widget.show_dag_panel(sample_parallel_plan());
+
+        let (history, dag) = widget.split_chat_layout(Rect::new(0, 0, 140, 32));
+        let dag = dag.unwrap();
+
+        assert_eq!(history.width, 91);
+        assert_eq!(dag.width, 49);
     }
 
     #[test]
@@ -1936,47 +1969,37 @@ mod tests {
     }
 
     #[test]
-    fn task_mux_uses_main_panel_and_keeps_sidebar_for_parallel_plan() {
+    fn execution_workflow_keeps_chat_main_area_and_branch_sidebar() {
         let mut widget = ChatWidget::new();
         widget.show_dag_panel(sample_parallel_plan());
 
         let (main, sidebar) = widget.split_chat_layout(Rect::new(0, 0, 140, 32));
 
-        assert!(widget.has_task_mux());
+        assert!(!widget.has_task_mux());
         assert!(sidebar.is_some());
         assert!(main.width < 140);
         assert!(main.width > sidebar.unwrap().width);
     }
 
     #[test]
-    fn task_mux_focus_command_updates_context_label() {
+    fn task_mux_focus_command_is_inactive_in_chat_mode() {
         let mut widget = ChatWidget::new();
         widget.show_dag_panel(sample_parallel_plan());
 
-        assert!(widget.task_mux_focus_index(1));
-        let label = widget.task_mux_context_label().unwrap();
-
-        assert!(label.contains("02"));
-        assert!(label.contains("Implement B"));
+        assert!(!widget.task_mux_focus_index(1));
+        assert!(widget.task_mux_context_label().is_none());
     }
 
     #[test]
-    fn task_mux_list_includes_all_panes_and_focus_marker() {
+    fn task_mux_list_is_absent_in_chat_mode() {
         let mut widget = ChatWidget::new();
         widget.show_dag_panel(sample_parallel_plan());
 
-        assert!(widget.task_mux_focus_index(1));
-        let lines = widget.task_mux_list_lines().unwrap();
-
-        assert_eq!(lines.len(), 3);
-        assert!(lines[1].starts_with("> 02"));
-        assert!(lines[0].contains("Implement A"));
-        assert!(lines[1].contains("Implement B"));
-        assert!(lines[2].contains("Fast gate"));
+        assert!(widget.task_mux_list_lines().is_none());
     }
 
     #[test]
-    fn parallel_workflow_renders_mux_in_main_area_and_dag_in_sidebar() {
+    fn parallel_workflow_renders_chat_main_area_and_branch_sidebar() {
         let plan = sample_parallel_plan();
         let first_task_id = plan.tasks[0].id();
 
@@ -2007,21 +2030,39 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(rendered.contains("Mux r2"));
-        assert!(rendered.contains("Workflow r2"));
-        assert!(rendered.contains("Running command"));
-        assert!(rendered.contains("cargo test"));
-        assert!(!rendered.contains("transcript sentinel"));
+        assert!(rendered.contains("Workflow"));
+        assert!(rendered.contains("Plan r2"));
+        assert!(rendered.contains("Thread graph"));
+        assert!(rendered.contains("phase 2: start"));
+        assert!(rendered.contains("I01 Implement A"));
+        assert!(rendered.contains("transcript sentinel"));
+        assert!(!rendered.contains("Mux r2"));
     }
 
     #[test]
-    fn serial_replan_clears_previous_parallel_task_mux() {
+    fn task_transcript_renders_thinking_deltas() {
+        let mut cell = ThinkingHistoryCell::streaming();
+        cell.append("checking the failed plan step");
+        let transcript = vec![TaskMuxTranscriptEntry::Thinking(cell)];
+
+        let rendered = render_task_transcript_lines(&transcript, 80, 10)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Think"));
+        assert!(rendered.contains("checking the failed plan step"));
+    }
+
+    #[test]
+    fn serial_replan_keeps_chat_mode_and_updates_workflow_sidebar() {
         let mut widget = ChatWidget::new();
         widget.add_cell(Box::new(AssistantHistoryCell::new(
             "new revision transcript".to_string(),
         )));
         widget.show_dag_panel(sample_parallel_plan());
-        assert!(widget.has_task_mux());
+        assert!(!widget.has_task_mux());
 
         widget.show_dag_panel(sample_serial_replan(3));
 
@@ -2035,7 +2076,7 @@ mod tests {
             .join("\n");
 
         assert!(!widget.has_task_mux());
-        assert!(rendered.contains("Workflow r3"));
+        assert!(rendered.contains("Plan r3"));
         assert!(rendered.contains("new revision transcript"));
         assert!(!rendered.contains("Mux r2"));
         assert!(!rendered.contains("Implement A"));
@@ -2061,7 +2102,7 @@ mod tests {
             .join("\n");
 
         assert!(!widget.has_task_mux());
-        assert!(rendered.contains("Workflow r2"));
+        assert!(rendered.contains("Plan r2"));
         assert!(rendered.contains("verification stage"));
         assert!(!rendered.contains("Mux r2"));
     }
@@ -2085,27 +2126,87 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(rendered.contains("Workflow r1"));
-        assert!(rendered.contains("lanes 1"));
+        assert!(rendered.contains("Plan r1"));
+        assert!(rendered.contains("1 / 2"));
+        assert!(rendered.contains("Thread graph"));
+        assert!(rendered.contains("plan: exec + test"));
         assert!(rendered.contains('●'));
-        assert!(rendered.contains('□'));
+        assert!(rendered.contains('○'));
         assert!(rendered.contains('│') || rendered.contains('─'));
-        assert!(rendered.contains("I01 done"));
-        assert!(rendered.contains("G02 pending"));
-        assert!(rendered.contains("Analyze repository"));
-        assert!(rendered.contains("Fast gate"));
+        assert!(rendered.contains("I01 Analyze repository"));
+        assert!(rendered.contains("G02 Fast gate"));
     }
 
     #[test]
-    fn dag_graph_layout_stays_compact_in_tall_panel() {
-        let layout = dag_graph_layout(Rect::new(0, 0, 40, 40), 3);
+    fn dag_panel_title_progress_tracks_terminal_task_statuses() {
+        let plan = sample_plan();
+        let first_task_id = plan.tasks[0].id();
 
-        assert!((3..=6).contains(&layout.row_step));
-        assert!(layout.summary_y > layout.graph_top);
+        let mut widget = ChatWidget::new();
+        widget.show_dag_panel(plan);
+        widget.update_dag_task_status(first_task_id, TaskNodeStatus::Completed);
+
+        let area = Rect::new(0, 0, 120, 24);
+        let mut buf = Buffer::empty(area);
+        widget.render_chat_area(area, &mut buf);
+
+        let rendered = (0..area.height)
+            .map(|y| row_text(&buf, y, area.width))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Plan r1"));
+        assert!(rendered.contains("1 / 2"));
     }
 
     #[test]
-    fn single_node_layer_is_centered_instead_of_left_aligned() {
+    fn dag_panel_title_progress_counts_running_task_as_active() {
+        let plan = sample_plan();
+        let first_task_id = plan.tasks[0].id();
+
+        let mut widget = ChatWidget::new();
+        widget.show_dag_panel(plan);
+        widget.update_dag_task_status(first_task_id, TaskNodeStatus::Running);
+        widget.update_dag_progress(0, 2);
+
+        let area = Rect::new(0, 0, 120, 24);
+        let mut buf = Buffer::empty(area);
+        widget.render_chat_area(area, &mut buf);
+
+        let rendered = (0..area.height)
+            .map(|y| row_text(&buf, y, area.width))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Plan r1"));
+        assert!(rendered.contains("1 / 2"));
+    }
+
+    #[test]
+    fn dag_panel_terminal_rows_track_validation_and_release_status() {
+        let mut widget = ChatWidget::new();
+        widget.show_dag_panel(sample_plan());
+
+        let panel = widget.dag_panel.as_ref().unwrap();
+        let rows = workflow_branch_rows(panel, 10);
+        let validation = rows.iter().find(|row| row.label == "validation").unwrap();
+        let release = rows.iter().find(|row| row.label == "release").unwrap();
+        assert_eq!(validation.status, WorkflowBranchStatus::Pending);
+        assert_eq!(release.status, WorkflowBranchStatus::Pending);
+
+        widget.update_dag_validation_status(true);
+        widget.update_dag_release_status(true);
+
+        let panel = widget.dag_panel.as_ref().unwrap();
+        let rows = workflow_branch_rows(panel, 10);
+        let validation = rows.iter().find(|row| row.label == "validation").unwrap();
+        let release = rows.iter().find(|row| row.label == "release").unwrap();
+        assert_eq!(validation.status, WorkflowBranchStatus::Complete);
+        assert_eq!(release.status, WorkflowBranchStatus::Complete);
+    }
+
+    #[test]
+    fn single_node_layer_renders_as_branch_row() {
         let first = make_task("A1", TaskKind::Analysis, vec![]);
         let second = make_task("A2", TaskKind::Analysis, vec![]);
         let third = make_task("Gate", TaskKind::Gate, vec![first.id(), second.id()]);
@@ -2128,16 +2229,11 @@ mod tests {
 
         let rendered = (0..area.height)
             .map(|y| row_text(&buf, y, area.width))
-            .collect::<Vec<_>>();
-        let gate_row = rendered
-            .iter()
-            .find(|line| line.contains("03"))
-            .expect("gate row with label 03 should exist");
-        let label_idx = gate_row.find("03").expect("gate label position");
+            .collect::<Vec<_>>()
+            .join("\n");
 
-        assert!(
-            label_idx > 18,
-            "single lower-layer node should be centered in panel, got index {label_idx}"
-        );
+        assert!(rendered.contains("Thread graph"));
+        assert!(rendered.contains("Plan r1"));
+        assert!(rendered.contains("G03 Gate"));
     }
 }
