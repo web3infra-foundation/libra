@@ -2249,4 +2249,159 @@ mod tests {
             result.issues
         );
     }
+
+    // -----------------------------------------------------------------------
+    // check_index: corrupted index parse error
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    #[serial]
+    async fn test_check_index_corrupted_file_parse_error() {
+        let temp_path = tempdir().unwrap();
+        test::setup_with_new_libra_in(temp_path.path()).await;
+        let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+        let storage = ClientStorage::init(path::objects());
+
+        // Write garbage to the index file
+        let index_path = path::index();
+        fs::write(&index_path, b"not a valid index!!!").unwrap();
+
+        let result = check_index(&storage).unwrap();
+
+        assert!(!result.valid, "corrupted index should be detected as invalid");
+        assert!(
+            result.issues.iter().any(|i| i.issue_type == "index_parse_error"),
+            "should report index_parse_error: {:?}",
+            result.issues
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_check_index_no_index_file() {
+        let temp_path = tempdir().unwrap();
+        test::setup_with_new_libra_in(temp_path.path()).await;
+        let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+        let storage = ClientStorage::init(path::objects());
+
+        // Ensure no index file exists
+        let index_path = path::index();
+        if index_path.exists() {
+            fs::remove_file(&index_path).unwrap();
+        }
+
+        let result = check_index(&storage).unwrap();
+
+        assert!(result.valid, "no index file should be treated as valid");
+        assert_eq!(result.entries_checked, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // check_all_objects: --fix flow for broken refs
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    #[serial]
+    async fn test_check_all_objects_fix_broken_refs() {
+        use sea_orm::ActiveModelTrait;
+        use sea_orm::ActiveValue::Set;
+
+        let temp_path = tempdir().unwrap();
+        test::setup_with_new_libra_in(temp_path.path()).await;
+        let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+        let storage = ClientStorage::init(path::objects());
+
+        // Create at least one object so check_all_objects proceeds past the early return
+        let blob = Blob::from_content("dummy");
+        crate::command::save_object(&blob, &blob.id).unwrap();
+
+        // Insert a broken ref pointing to a nonexistent object
+        let fake_hash = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        let db_conn = db::get_db_conn_instance().await;
+        let broken_ref = reference::ActiveModel {
+            name: Set(Some("refs/heads/broken-branch".to_string())),
+            kind: Set(crate::internal::model::reference::ConfigKind::Branch),
+            commit: Set(Some(fake_hash.to_string())),
+            remote: Set(None),
+            ..Default::default()
+        };
+        broken_ref.insert(&db_conn).await.unwrap();
+
+        // Run check with fix=false first — should detect the broken ref
+        let args_no_fix = FsckArgs {
+            verbose: false,
+            no_cross_ref_check: true,
+            no_index_check: true,
+            objects_only: false,
+            fix: false,
+            object: None,
+        };
+        let result_no_fix = check_all_objects(&args_no_fix, &storage).await.unwrap();
+        assert!(
+            result_no_fix.refs_broken > 0,
+            "broken ref should be detected without fix: refs_broken={}",
+            result_no_fix.refs_broken
+        );
+
+        // Run check with fix=true — should delete the broken ref
+        let args_fix = FsckArgs {
+            verbose: false,
+            no_cross_ref_check: true,
+            no_index_check: true,
+            objects_only: false,
+            fix: true,
+            object: None,
+        };
+        let result_fix = check_all_objects(&args_fix, &storage).await.unwrap();
+        assert!(
+            result_fix.refs_broken == 0,
+            "broken ref should be fixed (deleted): refs_broken={}",
+            result_fix.refs_broken
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // check_all_objects: failure_mask computed correctly with multiple failures
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    #[serial]
+    async fn test_failure_mask_objects_and_cross_ref() {
+        let temp_path = tempdir().unwrap();
+        test::setup_with_new_libra_in(temp_path.path()).await;
+        let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+        let storage = ClientStorage::init(path::objects());
+
+        // Create a tree referencing a nonexistent blob (triggers cross_ref issue)
+        let fake_blob_id = ObjectHash::new(&[0xaa; 20]);
+        let tree = Tree::from_tree_items(vec![git_internal::internal::object::tree::TreeItem {
+            mode: git_internal::internal::object::tree::TreeItemMode::Blob,
+            name: "missing.txt".to_string(),
+            id: fake_blob_id,
+        }])
+        .unwrap();
+        crate::command::save_object(&tree, &tree.id).unwrap();
+
+        let args = FsckArgs {
+            verbose: false,
+            no_cross_ref_check: false,
+            no_index_check: true,
+            objects_only: false,
+            fix: false,
+            object: None,
+        };
+
+        let result = check_all_objects(&args, &storage).await.unwrap();
+
+        assert!(result.cross_ref_issues > 0);
+        assert!(
+            result.failure_mask & exit_code::OBJECT_CORRUPT != 0,
+            "failure_mask should include OBJECT_CORRUPT for cross-ref issues: {}",
+            result.failure_mask
+        );
+    }
 }
