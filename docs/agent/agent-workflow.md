@@ -293,6 +293,10 @@ remains in Libra.
    - Only after required execution work completes does Libra compile and
      run `test_dag`.
    - No cross-plan DAG edges are allowed in this baseline policy.
+   - The `test` plan is still a planner-defined task DAG. It is executed
+     in Phase 2, even though its outputs become validation `Evidence`.
+     Phase 3 consumes those artifacts; it does not execute this second
+     plan itself.
 
 1. **Runtime Context Preparation**:
    - Load prerequisite outputs from immutable `PatchSet`,
@@ -369,6 +373,10 @@ validation and assembles the final audit chain.
 Boundary rule:
 - If the system is still executing a task to produce or repair a
   candidate result, it remains in Phase 2.
+- If the system is executing the Phase 1 `test` / verification plan,
+  it also remains in Phase 2. That plan is the second selected plan in
+  the Phase 2 `execution_dag -> test_dag` sequence, not the Phase 3
+  audit pipeline.
 - Once the system starts evaluating the aggregated release candidate as
   a whole, it has entered Phase 3.
 - Phase 3 does not build or execute a planner-defined DAG; it runs a

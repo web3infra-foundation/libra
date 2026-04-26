@@ -468,8 +468,12 @@ impl BottomPane {
             return 1 + 7 + options + 1;
         }
         if self.status == AgentStatus::AwaitingPostPlanChoice {
-            // status(1) + 4 options + 1 blank + help(1) = 7
-            return 7;
+            // status(1) + 3 options + 1 blank + help(1) = 6
+            return 6;
+        }
+        if self.status == AgentStatus::AwaitingNetworkPolicyChoice {
+            // status(1) + 3 options + 1 blank + help(1) = 6
+            return 6;
         }
         if self.status == AgentStatus::AwaitingIntentReviewChoice {
             // status(1) + 3 options + 1 blank + help(1) = 6
@@ -524,6 +528,9 @@ impl BottomPane {
         if self.status == AgentStatus::AwaitingPostPlanChoice {
             return self.render_post_plan_dialog(area, buf);
         }
+        if self.status == AgentStatus::AwaitingNetworkPolicyChoice {
+            return self.render_network_policy_dialog(area, buf);
+        }
         if self.status == AgentStatus::AwaitingIntentReviewChoice {
             return self.render_intent_review_dialog(area, buf);
         }
@@ -554,6 +561,9 @@ impl BottomPane {
             return None;
         }
         if self.status == AgentStatus::AwaitingPostPlanChoice {
+            return None;
+        }
+        if self.status == AgentStatus::AwaitingNetworkPolicyChoice {
             return None;
         }
 
@@ -731,24 +741,26 @@ impl BottomPane {
 
     /// Render the post-plan dialog (Execute Plan / Modify Plan / Cancel).
     fn render_post_plan_dialog(&self, area: Rect, buf: &mut Buffer) -> Option<Position> {
-        let network_label = if self.post_plan_network_access {
-            "Network: Allow"
-        } else {
-            "Network: Deny"
-        };
-        let network_desc = if self.post_plan_network_access {
-            "Shell/gates may use network"
-        } else {
-            "Shell/gates run offline"
-        };
         self.render_choice_dialog(
             area,
             buf,
             &[
                 ("Execute Plan", "Run the Scheduler"),
-                (network_label, network_desc),
                 ("Modify Plan", "Edit the plan"),
                 ("Cancel", "Return to chat"),
+            ],
+        )
+    }
+
+    /// Render the network policy dialog shown after the developer approves the plan.
+    fn render_network_policy_dialog(&self, area: Rect, buf: &mut Buffer) -> Option<Position> {
+        self.render_choice_dialog(
+            area,
+            buf,
+            &[
+                ("Network: Deny", "Run shell/gates offline"),
+                ("Network: Allow", "Shell/gates may use network"),
+                ("Back", "Return to plan choices"),
             ],
         )
     }
@@ -1046,6 +1058,10 @@ impl BottomPane {
                 "● Plan complete — choose next step",
                 theme::status::pending_choice(),
             ),
+            AgentStatus::AwaitingNetworkPolicyChoice => Line::styled(
+                "● Plan confirmed — choose network policy",
+                theme::status::pending_choice(),
+            ),
             AgentStatus::AwaitingIntentReviewChoice => Line::styled(
                 "● IntentSpec ready — confirm before planning",
                 theme::status::pending_choice(),
@@ -1170,7 +1186,10 @@ impl BottomPane {
             }
             AgentStatus::AwaitingApproval => "[Up/Down: Select] [Enter: Confirm] [Esc: Deny]",
             AgentStatus::AwaitingPostPlanChoice => {
-                "[Up/Down: Select] [Enter: Confirm/Toggle] [Esc: Cancel]"
+                "[Up/Down: Select] [Enter: Confirm] [Esc: Cancel]"
+            }
+            AgentStatus::AwaitingNetworkPolicyChoice => {
+                "[Up/Down: Select] [Enter: Confirm] [Esc: Back]"
             }
             AgentStatus::AwaitingIntentReviewChoice => {
                 "[Up/Down: Select] [Enter: Confirm] [Esc: Cancel]"
@@ -1424,7 +1443,7 @@ mod tests {
 
     #[test]
     fn plan_and_intent_review_dialogs_use_phase_specific_labels() {
-        let plan_area = Rect::new(0, 0, 80, 7);
+        let plan_area = Rect::new(0, 0, 80, 6);
 
         let mut plan_pane = BottomPane::new();
         plan_pane.status = AgentStatus::AwaitingPostPlanChoice;
@@ -1435,10 +1454,26 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(plan_text.contains("Execute Plan"));
-        assert!(plan_text.contains("Network: Deny"));
         assert!(plan_text.contains("Modify Plan"));
+        assert!(plan_text.contains("Cancel"));
+        assert!(!plan_text.contains("Network: Deny"));
+        assert!(!plan_text.contains("Network: Allow"));
         assert!(!plan_text.contains("Execute Spec"));
         assert!(!plan_text.contains("Modify Spec"));
+
+        let mut network_pane = BottomPane::new();
+        network_pane.status = AgentStatus::AwaitingNetworkPolicyChoice;
+        let mut network_buf = Buffer::empty(plan_area);
+        let _ = network_pane.render(plan_area, &mut network_buf);
+        let network_text = (0..plan_area.height)
+            .map(|y| row_text(&network_buf, y, plan_area.width))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(network_text.contains("Network: Deny"));
+        assert!(network_text.contains("Network: Allow"));
+        assert!(network_text.contains("Back"));
+        assert!(!network_text.contains("Execute Plan"));
+        assert!(!network_text.contains("Modify Plan"));
 
         let area = Rect::new(0, 0, 80, 6);
         let mut intent_pane = BottomPane::new();

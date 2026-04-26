@@ -67,6 +67,8 @@ pub enum AgentStatus {
     AwaitingApproval,
     /// Waiting for user to choose post-plan action (Execute Plan / Modify Plan / Cancel).
     AwaitingPostPlanChoice,
+    /// Waiting for user to choose the network policy for an approved plan.
+    AwaitingNetworkPolicyChoice,
     /// Waiting for user to confirm, modify, or cancel a generated IntentSpec.
     AwaitingIntentReviewChoice,
 }
@@ -191,6 +193,10 @@ pub enum AppEvent {
         completed: usize,
         total: usize,
     },
+    /// System validation finished and should update the DAG terminal validation row.
+    DagValidationStatus { turn_id: TurnId, passed: bool },
+    /// Final release decision finished and should update the DAG terminal release row.
+    DagReleaseStatus { turn_id: TurnId, passed: bool },
     /// The task mux should leave focus mode while keeping the workflow DAG visible.
     DagTaskMuxClear { turn_id: TurnId },
     /// Orchestrator workflow completed.
@@ -228,6 +234,8 @@ impl AppEvent {
             | AppEvent::DagGraphBegin { turn_id, .. }
             | AppEvent::DagTaskStatus { turn_id, .. }
             | AppEvent::DagGraphProgress { turn_id, .. }
+            | AppEvent::DagValidationStatus { turn_id, .. }
+            | AppEvent::DagReleaseStatus { turn_id, .. }
             | AppEvent::DagTaskMuxClear { turn_id }
             | AppEvent::ExecuteWorkflowComplete { turn_id, .. } => *turn_id,
         }

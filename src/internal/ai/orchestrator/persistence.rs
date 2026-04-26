@@ -225,6 +225,12 @@ impl super::types::OrchestratorObserver for RuntimeAuditObserver {
         task: &super::types::TaskSpec,
         event: super::types::TaskRuntimeEvent,
     ) {
+        // Streaming reasoning deltas are UI-only; persisting each token-sized
+        // fragment can create a large audit backlog before finalization.
+        if matches!(event, super::types::TaskRuntimeEvent::ThinkingDelta(_)) {
+            return;
+        }
+
         let _ = self.tx.send(RuntimeAuditCommand::TaskRuntime {
             task: Box::new(task.clone()),
             event: Box::new(event),
@@ -4150,6 +4156,12 @@ mod tests {
             &plan_spec.tasks[0],
             TaskRuntimeEvent::AssistantMessage(long_assistant_message),
         );
+        for index in 0..25 {
+            observer.on_task_runtime_event(
+                &plan_spec.tasks[0],
+                TaskRuntimeEvent::ThinkingDelta(format!("reasoning delta {index}")),
+            );
+        }
         observer.on_task_runtime_event(
             &plan_spec.tasks[0],
             TaskRuntimeEvent::ToolCallBegin {
@@ -4341,14 +4353,18 @@ mod tests {
         }
         assert!(saw_terminal_step_event);
         let mut assistant_context_frame = None;
+        let mut thinking_context_frame_count = 0;
         for (_, hash) in context_frames {
             let value = storage.get_json::<serde_json::Value>(&hash).await.unwrap();
             let serialized = serde_json::to_string(&value).unwrap();
+            if serialized.contains("\"thinking_delta\"") {
+                thinking_context_frame_count += 1;
+            }
             if serialized.contains("\"assistant_message\"") {
                 assistant_context_frame = Some(serialized);
-                break;
             }
         }
+        assert_eq!(thinking_context_frame_count, 0);
         let assistant_context_frame =
             assistant_context_frame.expect("expected assistant message context frame");
         assert!(assistant_context_frame.contains("\"fullTextStored\":false"));

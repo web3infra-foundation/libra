@@ -247,7 +247,13 @@ struct PendingPostPlan {
     network_access: bool,
     automatic_repair_attempts: u8,
     automatic_repair_max_attempts: u8,
-    selected: usize, // 0=Execute, 1=Network toggle, 2=Modify, 3=Cancel
+    selected: usize, // 0=Execute, 1=Modify, 2=Cancel
+}
+
+/// Network policy dialog state after the user approves the execution plan.
+struct PendingNetworkPolicyChoice {
+    post_plan: PendingPostPlan,
+    selected: usize, // 0=Deny, 1=Allow, 2=Back
 }
 
 /// Execution-plan revision state after the user chooses Modify on the plan review.
@@ -395,6 +401,8 @@ pub struct App<M: CompletionModel> {
     pending_phase_confirmation: Option<PendingPhaseConfirmation>,
     /// Post-plan dialog state (present when user is choosing Execute/Modify/Cancel).
     pending_post_plan: Option<PendingPostPlan>,
+    /// Network policy dialog state after the user has chosen to execute the plan.
+    pending_network_policy: Option<PendingNetworkPolicyChoice>,
     /// IntentSpec dialog state (present when user is choosing Confirm/Modify/Cancel).
     pending_intent_review: Option<PendingIntentReview>,
     /// Base IntentSpec JSON for the next spec-revision request, if the user chose Modify.
@@ -523,6 +531,7 @@ where
             pending_managed_interaction: None,
             pending_phase_confirmation: None,
             pending_post_plan: None,
+            pending_network_policy: None,
             pending_intent_review: None,
             pending_plan_revision: None,
             pending_execution_plan_revision: None,
@@ -947,7 +956,7 @@ where
                 }
                 KeyCode::Down => {
                     if let Some(ref mut p) = self.pending_post_plan {
-                        p.selected = (p.selected + 1).min(3);
+                        p.selected = (p.selected + 1).min(2);
                         self.widget.bottom_pane.post_plan_selected = p.selected;
                     }
                     self.schedule_draw();
@@ -957,6 +966,29 @@ where
                 }
                 KeyCode::Esc => {
                     self.dismiss_post_plan_dialog();
+                }
+                _ => {}
+            },
+            AgentStatus::AwaitingNetworkPolicyChoice => match key.code {
+                KeyCode::Up => {
+                    if let Some(ref mut p) = self.pending_network_policy {
+                        p.selected = p.selected.saturating_sub(1);
+                        self.widget.bottom_pane.post_plan_selected = p.selected;
+                    }
+                    self.schedule_draw();
+                }
+                KeyCode::Down => {
+                    if let Some(ref mut p) = self.pending_network_policy {
+                        p.selected = (p.selected + 1).min(2);
+                        self.widget.bottom_pane.post_plan_selected = p.selected;
+                    }
+                    self.schedule_draw();
+                }
+                KeyCode::Enter => {
+                    self.handle_network_policy_choice().await;
+                }
+                KeyCode::Esc => {
+                    self.return_to_post_plan_dialog();
                 }
                 _ => {}
             },
@@ -2463,18 +2495,8 @@ where
                             CodeUiInteractionOption {
                                 id: "execute".to_string(),
                                 label: "Execute Plan".to_string(),
-                                description: Some("Run the approved plan now".to_string()),
-                            },
-                            CodeUiInteractionOption {
-                                id: "toggle-network".to_string(),
-                                label: if network_access {
-                                    "Network: Allow".to_string()
-                                } else {
-                                    "Network: Deny".to_string()
-                                },
                                 description: Some(
-                                    "Toggle network access for execution gates and shell tools"
-                                        .to_string(),
+                                    "Confirm the plan and choose network policy".to_string(),
                                 ),
                             },
                             CodeUiInteractionOption {
@@ -2770,6 +2792,20 @@ where
                 self.widget.update_dag_progress(completed, total);
                 self.schedule_draw();
             }
+            AppEvent::DagValidationStatus {
+                turn_id: _turn_id,
+                passed,
+            } => {
+                self.widget.update_dag_validation_status(passed);
+                self.schedule_draw();
+            }
+            AppEvent::DagReleaseStatus {
+                turn_id: _turn_id,
+                passed,
+            } => {
+                self.widget.update_dag_release_status(passed);
+                self.schedule_draw();
+            }
             AppEvent::DagTaskMuxClear { turn_id: _turn_id } => {
                 self.widget.clear_task_mux();
                 self.sync_mux_input_context();
@@ -3044,6 +3080,7 @@ where
                             AgentStatus::AwaitingUserInput
                             | AgentStatus::AwaitingApproval
                             | AgentStatus::AwaitingPostPlanChoice
+                            | AgentStatus::AwaitingNetworkPolicyChoice
                             | AgentStatus::AwaitingIntentReviewChoice => {
                                 CodeUiSessionStatus::AwaitingInteraction
                             }
@@ -3696,6 +3733,9 @@ where
         self.cancel_pending_exec_approval();
         if self.pending_post_plan.is_some() {
             self.dismiss_post_plan_dialog();
+        }
+        if self.pending_network_policy.is_some() {
+            self.dismiss_network_policy_dialog();
         }
         if self.pending_intent_review.is_some() {
             self.dismiss_intent_review_dialog();
@@ -4434,17 +4474,6 @@ where
     // ── Post-plan dialog ────────────────────────────────────────────
 
     async fn handle_post_plan_choice(&mut self) {
-        if let Some(pending) = self.pending_post_plan.as_mut()
-            && pending.selected == 1
-        {
-            pending.network_access = !pending.network_access;
-            self.widget
-                .bottom_pane
-                .set_post_plan_network_access(pending.network_access);
-            self.schedule_draw();
-            return;
-        }
-
         let pending = match self.pending_post_plan.take() {
             Some(p) => p,
             None => return,
@@ -4457,22 +4486,10 @@ where
 
         match selected {
             0 => {
-                self.start_execute_workflow(ExecuteWorkflowRequest {
-                    spec_json: pending.spec_json,
-                    persisted_intent_id: pending.intent_id.clone(),
-                    persisted_plan_id: pending.plan_id.clone(),
-                    persisted_plan_bundle: pending.persisted_plan_bundle.clone(),
-                    approved_plan: Some(pending.plan.clone()),
-                    approved_plan_draft: Some(pending.plan_draft.clone()),
-                    plan_warnings: pending.warnings.clone(),
-                    network_access_override: Some(pending.network_access),
-                    automatic_repair_attempts: pending.automatic_repair_attempts,
-                    automatic_repair_max_attempts: pending.automatic_repair_max_attempts,
-                })
-                .await;
+                self.show_network_policy_dialog(pending);
             }
             _ => {
-                if pending.selected == 2 {
+                if pending.selected == 1 {
                     self.pending_execution_plan_revision = Some(PendingExecutionPlanRevision {
                         spec_json: pending.spec_json,
                         intent_id: pending.intent_id.clone(),
@@ -4498,7 +4515,7 @@ where
         }
         if let Some(code_ui_session) = self.code_ui_session.clone() {
             let next_status = if selected == 0 {
-                CodeUiSessionStatus::Thinking
+                CodeUiSessionStatus::AwaitingInteraction
             } else {
                 CodeUiSessionStatus::Idle
             };
@@ -4508,6 +4525,125 @@ where
             });
         }
         self.schedule_draw();
+    }
+
+    fn show_network_policy_dialog(&mut self, pending: PendingPostPlan) {
+        let selected = if pending.network_access { 1 } else { 0 };
+        let interaction_id = network_policy_interaction_id(pending.plan_id.as_deref());
+        let intent_id = pending.intent_id.clone();
+        let plan_id = pending.plan_id.clone();
+        let network_access = pending.network_access;
+        self.pending_network_policy = Some(PendingNetworkPolicyChoice {
+            post_plan: pending,
+            selected,
+        });
+        self.widget.bottom_pane.post_plan_selected = selected;
+        self.widget
+            .bottom_pane
+            .set_post_plan_network_access(network_access);
+        self.widget
+            .bottom_pane
+            .set_status(AgentStatus::AwaitingNetworkPolicyChoice);
+        self.sync_mux_input_context();
+        if let Some(code_ui_session) = self.code_ui_session.clone() {
+            tokio::spawn(async move {
+                code_ui_session
+                    .upsert_interaction(CodeUiInteractionRequest {
+                        id: interaction_id,
+                        kind: CodeUiInteractionKind::PostPlanChoice,
+                        title: Some("Choose network policy".to_string()),
+                        description: Some(
+                            "Select whether shell tools and gates may use the network.".to_string(),
+                        ),
+                        prompt: None,
+                        options: vec![
+                            CodeUiInteractionOption {
+                                id: "network-deny".to_string(),
+                                label: "Network: Deny".to_string(),
+                                description: Some("Run shell/gates offline".to_string()),
+                            },
+                            CodeUiInteractionOption {
+                                id: "network-allow".to_string(),
+                                label: "Network: Allow".to_string(),
+                                description: Some("Allow network for shell/gates".to_string()),
+                            },
+                            CodeUiInteractionOption {
+                                id: "back".to_string(),
+                                label: "Back".to_string(),
+                                description: Some("Return to plan choices".to_string()),
+                            },
+                        ],
+                        status: CodeUiInteractionStatus::Pending,
+                        metadata: serde_json::json!({
+                            "intentId": intent_id,
+                            "planId": plan_id,
+                            "networkAccess": network_access,
+                            "phase": "networkPolicy",
+                        }),
+                        requested_at: Utc::now(),
+                        resolved_at: None,
+                    })
+                    .await;
+                code_ui_session
+                    .set_status(CodeUiSessionStatus::AwaitingInteraction)
+                    .await;
+            });
+        }
+    }
+
+    async fn handle_network_policy_choice(&mut self) {
+        let pending = match self.pending_network_policy.take() {
+            Some(p) => p,
+            None => return,
+        };
+        let selected = pending.selected;
+        if selected == 2 {
+            self.restore_post_plan_dialog(pending.post_plan);
+            self.schedule_draw();
+            return;
+        }
+
+        let network_access = selected == 1;
+        let interaction_id = network_policy_interaction_id(pending.post_plan.plan_id.as_deref());
+        let request = Self::execute_request_from_post_plan(pending.post_plan, network_access);
+        self.start_execute_workflow(request).await;
+
+        if let Some(code_ui_session) = self.code_ui_session.clone() {
+            tokio::spawn(async move {
+                code_ui_session.resolve_interaction(&interaction_id).await;
+                code_ui_session
+                    .set_status(CodeUiSessionStatus::Thinking)
+                    .await;
+            });
+        }
+        self.schedule_draw();
+    }
+
+    fn return_to_post_plan_dialog(&mut self) {
+        let Some(pending) = self.pending_network_policy.take() else {
+            return;
+        };
+        self.restore_post_plan_dialog(pending.post_plan);
+        self.schedule_draw();
+    }
+
+    fn restore_post_plan_dialog(&mut self, mut pending: PendingPostPlan) {
+        pending.selected = 0;
+        let interaction_id = network_policy_interaction_id(pending.plan_id.as_deref());
+        self.pending_post_plan = Some(pending);
+        self.widget.bottom_pane.reset_post_plan_selection();
+        self.widget
+            .bottom_pane
+            .set_status(AgentStatus::AwaitingPostPlanChoice);
+        self.sync_mux_input_context();
+        if let Some(code_ui_session) = self.code_ui_session.clone() {
+            tokio::spawn(async move {
+                code_ui_session.clear_interaction(&interaction_id).await;
+                code_ui_session
+                    .set_status(CodeUiSessionStatus::AwaitingInteraction)
+                    .await;
+            });
+        }
     }
 
     fn dismiss_post_plan_dialog(&mut self) {
@@ -4523,6 +4659,39 @@ where
         }
         self.pending_post_plan = None;
         self.set_idle_and_draw();
+    }
+
+    fn dismiss_network_policy_dialog(&mut self) {
+        if let Some(interaction_id) = self
+            .pending_network_policy
+            .as_ref()
+            .map(|pending| network_policy_interaction_id(pending.post_plan.plan_id.as_deref()))
+            && let Some(code_ui_session) = self.code_ui_session.clone()
+        {
+            tokio::spawn(async move {
+                code_ui_session.clear_interaction(&interaction_id).await;
+            });
+        }
+        self.pending_network_policy = None;
+        self.set_idle_and_draw();
+    }
+
+    fn execute_request_from_post_plan(
+        pending: PendingPostPlan,
+        network_access: bool,
+    ) -> ExecuteWorkflowRequest {
+        ExecuteWorkflowRequest {
+            spec_json: pending.spec_json,
+            persisted_intent_id: pending.intent_id.clone(),
+            persisted_plan_id: pending.plan_id.clone(),
+            persisted_plan_bundle: pending.persisted_plan_bundle.clone(),
+            approved_plan: Some(pending.plan.clone()),
+            approved_plan_draft: Some(pending.plan_draft.clone()),
+            plan_warnings: pending.warnings.clone(),
+            network_access_override: Some(network_access),
+            automatic_repair_attempts: pending.automatic_repair_attempts,
+            automatic_repair_max_attempts: pending.automatic_repair_max_attempts,
+        }
     }
 
     async fn start_execute_workflow(&mut self, request: ExecuteWorkflowRequest) {
@@ -4777,10 +4946,21 @@ where
                     let _ = self.tx.send(AppEvent::DagTaskMuxClear {
                         turn_id: self.turn_id,
                     });
+                    let _ = self.tx.send(AppEvent::DagValidationStatus {
+                        turn_id: self.turn_id,
+                        passed: report.overall_passed,
+                    });
                     self.send_note(format_system_verification_stage_note(plan, report));
                 }
 
                 fn on_decision(&self, plan: &ExecutionPlanSpec, decision: &DecisionOutcome) {
+                    let _ = self.tx.send(AppEvent::DagReleaseStatus {
+                        turn_id: self.turn_id,
+                        passed: matches!(
+                            decision,
+                            DecisionOutcome::Commit | DecisionOutcome::HumanReviewRequired
+                        ),
+                    });
                     self.send_note(format_decision_stage_note(plan, decision));
                 }
 
@@ -5422,6 +5602,8 @@ where
     fn update_status_after_tool_progress(&mut self) {
         let next_status = if self.pending_intent_review.is_some() {
             AgentStatus::AwaitingIntentReviewChoice
+        } else if self.pending_network_policy.is_some() {
+            AgentStatus::AwaitingNetworkPolicyChoice
         } else if self.pending_post_plan.is_some() {
             AgentStatus::AwaitingPostPlanChoice
         } else if self.pending_phase_confirmation.is_some() || self.pending_exec_approval.is_some()
@@ -8285,6 +8467,13 @@ fn apply_developer_network_access(spec: &mut IntentSpec, network_access: bool) {
     } else {
         NetworkPolicy::Deny
     };
+}
+
+fn network_policy_interaction_id(plan_id: Option<&str>) -> String {
+    match plan_id {
+        Some(plan_id) => format!("{plan_id}:network-policy"),
+        None => "post-plan-network-policy".to_string(),
+    }
 }
 
 fn is_phase1_plan_draft_tool(tool_name: &str) -> bool {

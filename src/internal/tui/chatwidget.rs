@@ -40,6 +40,8 @@ struct DagPanelState {
     completed: usize,
     total: usize,
     nodes: Vec<DagPanelNode>,
+    validation_status: DagStageStatus,
+    release_status: DagStageStatus,
 }
 
 impl DagPanelState {
@@ -72,6 +74,8 @@ impl DagPanelState {
             total: plan.tasks.len(),
             completed: 0,
             nodes,
+            validation_status: DagStageStatus::Pending,
+            release_status: DagStageStatus::Pending,
         }
     }
 
@@ -79,14 +83,23 @@ impl DagPanelState {
         if let Some(node) = self.nodes.iter_mut().find(|node| node.task_id == task_id) {
             node.status = status;
         }
-        self.completed = self.terminal_node_count().min(self.total);
+        self.completed = self.active_or_terminal_node_count().min(self.total);
     }
 
     fn update_progress(&mut self, completed: usize, total: usize) {
         self.total = total.max(self.total).max(self.nodes.len());
         self.completed = completed
             .min(self.total)
+            .max(self.active_or_terminal_node_count().min(self.total))
             .max(self.terminal_node_count().min(self.total));
+    }
+
+    fn update_validation_status(&mut self, passed: bool) {
+        self.validation_status = DagStageStatus::from_passed(passed);
+    }
+
+    fn update_release_status(&mut self, passed: bool) {
+        self.release_status = DagStageStatus::from_passed(passed);
     }
 
     fn terminal_node_count(&self) -> usize {
@@ -98,6 +111,13 @@ impl DagPanelState {
                     TaskNodeStatus::Completed | TaskNodeStatus::Failed | TaskNodeStatus::Skipped
                 )
             })
+            .count()
+    }
+
+    fn active_or_terminal_node_count(&self) -> usize {
+        self.nodes
+            .iter()
+            .filter(|node| node.status != TaskNodeStatus::Pending)
             .count()
     }
 
@@ -129,6 +149,20 @@ impl DagPanelState {
             .iter()
             .filter(|node| node.status == TaskNodeStatus::Failed)
             .count()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum DagStageStatus {
+    #[default]
+    Pending,
+    Complete,
+    Failed,
+}
+
+impl DagStageStatus {
+    fn from_passed(passed: bool) -> Self {
+        if passed { Self::Complete } else { Self::Failed }
     }
 }
 
@@ -542,6 +576,18 @@ impl ChatWidget {
     pub fn update_dag_progress(&mut self, completed: usize, total: usize) {
         if let Some(panel) = self.dag_panel.as_mut() {
             panel.update_progress(completed, total);
+        }
+    }
+
+    pub fn update_dag_validation_status(&mut self, passed: bool) {
+        if let Some(panel) = self.dag_panel.as_mut() {
+            panel.update_validation_status(passed);
+        }
+    }
+
+    pub fn update_dag_release_status(&mut self, passed: bool) {
+        if let Some(panel) = self.dag_panel.as_mut() {
+            panel.update_release_status(passed);
         }
     }
 
@@ -1293,7 +1339,7 @@ fn workflow_branch_rows(panel: &DagPanelState, max_rows: usize) -> Vec<WorkflowB
     });
     rows.push(WorkflowBranchRow {
         lane: WorkflowBranchLane::Main,
-        status: WorkflowBranchStatus::Pending,
+        status: workflow_stage_status(panel.release_status),
         label: "release".to_string(),
     });
     rows.truncate(max_rows);
@@ -1313,12 +1359,27 @@ fn workflow_phase2_status(panel: &DagPanelState) -> WorkflowBranchStatus {
 }
 
 fn workflow_validation_status(panel: &DagPanelState) -> WorkflowBranchStatus {
+    match panel.validation_status {
+        DagStageStatus::Complete | DagStageStatus::Failed => {
+            return workflow_stage_status(panel.validation_status);
+        }
+        DagStageStatus::Pending => {}
+    }
+
     if panel.failed_count() > 0 {
         WorkflowBranchStatus::Failed
     } else if panel.total > 0 && panel.completed >= panel.total {
         WorkflowBranchStatus::Active
     } else {
         WorkflowBranchStatus::Pending
+    }
+}
+
+fn workflow_stage_status(status: DagStageStatus) -> WorkflowBranchStatus {
+    match status {
+        DagStageStatus::Pending => WorkflowBranchStatus::Pending,
+        DagStageStatus::Complete => WorkflowBranchStatus::Complete,
+        DagStageStatus::Failed => WorkflowBranchStatus::Failed,
     }
 }
 
@@ -1728,7 +1789,10 @@ mod tests {
     use ratatui::{buffer::Buffer, layout::Rect};
     use serde_json::json;
 
-    use super::{ChatWidget, TaskMuxTranscriptEntry, render_task_transcript_lines};
+    use super::{
+        ChatWidget, TaskMuxTranscriptEntry, WorkflowBranchStatus, render_task_transcript_lines,
+        workflow_branch_rows,
+    };
     use crate::internal::{
         ai::orchestrator::types::{
             ExecutionPlanSpec, TaskContract, TaskKind, TaskNodeStatus, TaskRuntimeEvent, TaskSpec,
@@ -2074,6 +2138,52 @@ mod tests {
 
         assert!(rendered.contains("Plan r1"));
         assert!(rendered.contains("1 / 2"));
+    }
+
+    #[test]
+    fn dag_panel_title_progress_counts_running_task_as_active() {
+        let plan = sample_plan();
+        let first_task_id = plan.tasks[0].id();
+
+        let mut widget = ChatWidget::new();
+        widget.show_dag_panel(plan);
+        widget.update_dag_task_status(first_task_id, TaskNodeStatus::Running);
+        widget.update_dag_progress(0, 2);
+
+        let area = Rect::new(0, 0, 120, 24);
+        let mut buf = Buffer::empty(area);
+        widget.render_chat_area(area, &mut buf);
+
+        let rendered = (0..area.height)
+            .map(|y| row_text(&buf, y, area.width))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Plan r1"));
+        assert!(rendered.contains("1 / 2"));
+    }
+
+    #[test]
+    fn dag_panel_terminal_rows_track_validation_and_release_status() {
+        let mut widget = ChatWidget::new();
+        widget.show_dag_panel(sample_plan());
+
+        let panel = widget.dag_panel.as_ref().unwrap();
+        let rows = workflow_branch_rows(panel, 10);
+        let validation = rows.iter().find(|row| row.label == "validation").unwrap();
+        let release = rows.iter().find(|row| row.label == "release").unwrap();
+        assert_eq!(validation.status, WorkflowBranchStatus::Pending);
+        assert_eq!(release.status, WorkflowBranchStatus::Pending);
+
+        widget.update_dag_validation_status(true);
+        widget.update_dag_release_status(true);
+
+        let panel = widget.dag_panel.as_ref().unwrap();
+        let rows = workflow_branch_rows(panel, 10);
+        let validation = rows.iter().find(|row| row.label == "validation").unwrap();
+        let release = rows.iter().find(|row| row.label == "release").unwrap();
+        assert_eq!(validation.status, WorkflowBranchStatus::Complete);
+        assert_eq!(release.status, WorkflowBranchStatus::Complete);
     }
 
     #[test]

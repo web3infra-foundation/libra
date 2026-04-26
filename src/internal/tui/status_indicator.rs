@@ -81,6 +81,7 @@ impl StatusIndicator {
             AgentStatus::AwaitingApproval => "Awaiting approval",
             AgentStatus::Idle
             | AgentStatus::AwaitingPostPlanChoice
+            | AgentStatus::AwaitingNetworkPolicyChoice
             | AgentStatus::AwaitingIntentReviewChoice => return,
         };
 
