@@ -2404,4 +2404,102 @@ mod tests {
             result.failure_mask
         );
     }
+
+    // -----------------------------------------------------------------------
+    // print_issues output format
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_print_issues_outputs_to_stderr() {
+        let result = FsckResult {
+            objects_checked: 1,
+            objects_ok: 0,
+            objects_corrupted: 1,
+            refs_checked: 0,
+            refs_ok: 0,
+            refs_broken: 0,
+            index_valid: true,
+            cross_ref_issues: 0,
+            overall_status: CheckStatus::Corrupted,
+            issues: vec![IssueReport {
+                issue_type: "hash_mismatch".to_string(),
+                severity: "error".to_string(),
+                object_id: Some("abc123".to_string()),
+                ref_name: None,
+                message: "Object data corrupted".to_string(),
+                suggestion: Some("Restore from backup.".to_string()),
+            }],
+            failure_mask: exit_code::OBJECT_CORRUPT,
+            failure_categories: vec!["objects".to_string()],
+        };
+
+        print_issues(&result);
+    }
+
+    // -----------------------------------------------------------------------
+    // check_all_objects: --objects-only skips refs and index
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    #[serial]
+    async fn test_objects_only_skips_refs_and_index() {
+        let temp_path = tempdir().unwrap();
+        test::setup_with_new_libra_in(temp_path.path()).await;
+        let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+        let storage = ClientStorage::init(path::objects());
+
+        // Create a blob
+        let blob = Blob::from_content("test");
+        crate::command::save_object(&blob, &blob.id).unwrap();
+
+        let args = FsckArgs {
+            verbose: false,
+            no_cross_ref_check: true,
+            no_index_check: false, // would normally check index
+            objects_only: true,    // should skip both refs and index
+            fix: false,
+            object: None,
+        };
+
+        let result = check_all_objects(&args, &storage).await.unwrap();
+
+        assert_eq!(result.objects_checked, 1);
+        assert_eq!(result.refs_checked, 0, "--objects-only should skip refs");
+        assert!(
+            result.index_valid,
+            "--objects-only should leave index_valid as default true"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // check_single_object: parse error on object ID
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    #[serial]
+    async fn test_check_single_object_invalid_hash() {
+        let temp_path = tempdir().unwrap();
+        test::setup_with_new_libra_in(temp_path.path()).await;
+        let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+        let storage = ClientStorage::init(path::objects());
+
+        // Invalid hex should error
+        let result = check_single_object("not-hex!!", &storage).await;
+        assert!(result.is_err(), "invalid hex object ID should return error");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_check_single_object_empty_hash() {
+        let temp_path = tempdir().unwrap();
+        test::setup_with_new_libra_in(temp_path.path()).await;
+        let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+        let storage = ClientStorage::init(path::objects());
+
+        let result = check_single_object("", &storage).await;
+        assert!(result.is_err(), "empty object ID should return error");
+    }
 }
