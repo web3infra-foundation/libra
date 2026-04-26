@@ -373,6 +373,8 @@ pub struct TaskResult {
     pub model_usage: Option<CompletionUsageSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<ReviewOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
 }
 
 /// Final decision outcome for the orchestration run.
@@ -538,12 +540,32 @@ pub enum TaskRuntimeNoteLevel {
     Error,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskWorkspaceBackend {
+    Shared,
+    Copy,
+    Fuse,
+}
+
+impl TaskWorkspaceBackend {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Shared => "shared workspace",
+            Self::Copy => "copy worktree",
+            Self::Fuse => "FUSE worktree",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum TaskRuntimeEvent {
     Phase(TaskRuntimePhase),
     WorkspaceReady {
         working_dir: PathBuf,
         isolated: bool,
+        backend: TaskWorkspaceBackend,
+        main_working_dir: Option<PathBuf>,
     },
     Note {
         level: TaskRuntimeNoteLevel,

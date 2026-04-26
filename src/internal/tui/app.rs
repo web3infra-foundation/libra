@@ -73,7 +73,7 @@ use crate::{
                 DecisionOutcome, ExecutionPlanSpec, GateReport, OrchestratorPhaseConfirmer,
                 OrchestratorResult, PersistedPlanReviewBundle, PhaseConfirmationDecision,
                 PhaseConfirmationPrompt, PolicyViolation, SystemReport, TaskKind, TaskNodeStatus,
-                TaskRuntimeEvent, TaskRuntimeNoteLevel, TaskRuntimePhase,
+                TaskRuntimeEvent, TaskRuntimeNoteLevel, TaskRuntimePhase, TaskWorkspaceBackend,
             },
         },
         projection::ProjectionRebuilder,
@@ -302,6 +302,32 @@ struct PendingIntentReview {
     warnings: Vec<String>,
     interaction_id: String,
     selected: usize, // 0=Confirm, 1=Modify, 2=Cancel
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IntentReviewScrollAction {
+    Top,
+    Bottom,
+    Up(usize),
+    Down(usize),
+}
+
+fn intent_review_scroll_action(
+    key: crossterm::event::KeyEvent,
+) -> Option<IntentReviewScrollAction> {
+    let has_scroll_modifier = key.modifiers.contains(KeyModifiers::CONTROL)
+        || key.modifiers.contains(KeyModifiers::ALT)
+        || key.modifiers.contains(KeyModifiers::SHIFT);
+
+    match key.code {
+        KeyCode::Home => Some(IntentReviewScrollAction::Top),
+        KeyCode::End => Some(IntentReviewScrollAction::Bottom),
+        KeyCode::PageUp => Some(IntentReviewScrollAction::Up(10)),
+        KeyCode::PageDown => Some(IntentReviewScrollAction::Down(10)),
+        KeyCode::Up if has_scroll_modifier => Some(IntentReviewScrollAction::Up(1)),
+        KeyCode::Down if has_scroll_modifier => Some(IntentReviewScrollAction::Down(1)),
+        _ => None,
+    }
 }
 
 /// Pending sandbox approval state.
@@ -992,29 +1018,37 @@ where
                 }
                 _ => {}
             },
-            AgentStatus::AwaitingIntentReviewChoice => match key.code {
-                KeyCode::Up => {
-                    if let Some(ref mut p) = self.pending_intent_review {
-                        p.selected = p.selected.saturating_sub(1);
-                        self.widget.bottom_pane.post_plan_selected = p.selected;
-                    }
+            AgentStatus::AwaitingIntentReviewChoice => {
+                if let Some(action) = intent_review_scroll_action(key) {
+                    self.apply_intent_review_scroll_action(action);
                     self.schedule_draw();
+                    return Ok(());
                 }
-                KeyCode::Down => {
-                    if let Some(ref mut p) = self.pending_intent_review {
-                        p.selected = (p.selected + 1).min(2);
-                        self.widget.bottom_pane.post_plan_selected = p.selected;
+
+                match key.code {
+                    KeyCode::Up => {
+                        if let Some(ref mut p) = self.pending_intent_review {
+                            p.selected = p.selected.saturating_sub(1);
+                            self.widget.bottom_pane.post_plan_selected = p.selected;
+                        }
+                        self.schedule_draw();
                     }
-                    self.schedule_draw();
+                    KeyCode::Down => {
+                        if let Some(ref mut p) = self.pending_intent_review {
+                            p.selected = (p.selected + 1).min(2);
+                            self.widget.bottom_pane.post_plan_selected = p.selected;
+                        }
+                        self.schedule_draw();
+                    }
+                    KeyCode::Enter => {
+                        self.handle_intent_review_choice().await;
+                    }
+                    KeyCode::Esc => {
+                        self.dismiss_intent_review_dialog();
+                    }
+                    _ => {}
                 }
-                KeyCode::Enter => {
-                    self.handle_intent_review_choice().await;
-                }
-                KeyCode::Esc => {
-                    self.dismiss_intent_review_dialog();
-                }
-                _ => {}
-            },
+            }
             AgentStatus::Thinking | AgentStatus::Retrying | AgentStatus::ExecutingTool => {
                 let mux_visible = self.widget.has_task_mux();
                 match key.code {
@@ -1100,6 +1134,15 @@ where
         }
 
         Ok(())
+    }
+
+    fn apply_intent_review_scroll_action(&mut self, action: IntentReviewScrollAction) {
+        match action {
+            IntentReviewScrollAction::Top => self.widget.scroll_to_top(),
+            IntentReviewScrollAction::Bottom => self.widget.scroll_to_bottom(),
+            IntentReviewScrollAction::Up(lines) => self.widget.scroll_up_lines(lines),
+            IntentReviewScrollAction::Down(lines) => self.widget.scroll_down_lines(lines),
+        }
     }
 
     /// Handle keyboard input while in the AwaitingUserInput state.
@@ -4868,11 +4911,15 @@ where
                         TaskRuntimeEvent::WorkspaceReady {
                             working_dir,
                             isolated,
+                            backend,
+                            main_working_dir,
                         } => {
                             self.send_note(format_task_workspace_note(
                                 task.title(),
                                 working_dir,
                                 *isolated,
+                                *backend,
+                                main_working_dir.as_deref(),
                             ));
                         }
                         TaskRuntimeEvent::Note { level, text } => {
@@ -6495,11 +6542,12 @@ fn escape_markdown_cell(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use git_internal::internal::object::{task::Task as GitTask, types::ActorRef};
     use serde_json::json;
 
     use super::{
-        DEFAULT_AUTOMATIC_PLAN_REPAIR_ATTEMPTS, ExecutionFailureRevision,
+        DEFAULT_AUTOMATIC_PLAN_REPAIR_ATTEMPTS, ExecutionFailureRevision, IntentReviewScrollAction,
         MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS, PendingPlanRevisionCommand, ProviderPlanDraft,
         ProviderPlanDraftStep, append_to_last_tool_group_cell,
         append_to_last_tool_group_preview_cell, apply_developer_network_access,
@@ -6512,9 +6560,9 @@ mod tests {
         format_intentspec_target_mismatch, format_orchestrator_result,
         format_plan_compiled_stage_note, format_plan_execution_stage_note,
         format_replan_stage_note, format_system_verification_stage_note,
-        intentspec_failure_revision_message_from_report, intentspec_with_plan_draft_objectives,
-        is_default_chat_tool, is_global_quit_command_input, is_phase1_plan_draft_tool,
-        mark_visible_tool_call_running, newest_managed_assistant_text,
+        intent_review_scroll_action, intentspec_failure_revision_message_from_report,
+        intentspec_with_plan_draft_objectives, is_default_chat_tool, is_global_quit_command_input,
+        is_phase1_plan_draft_tool, mark_visible_tool_call_running, newest_managed_assistant_text,
         normalize_terminal_paste_text, parse_pending_plan_revision_command,
         pending_execution_plan_revision_help_message, pending_plan_revision_help_message,
         phase0_plan_tool_loop_config, phase1_plan_tool_loop_config, provider_plan_draft_from_args,
@@ -6568,6 +6616,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn intent_review_scroll_keys_preserve_plain_selection_arrows() {
+        assert_eq!(
+            intent_review_scroll_action(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE)),
+            Some(IntentReviewScrollAction::Top)
+        );
+        assert_eq!(
+            intent_review_scroll_action(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)),
+            Some(IntentReviewScrollAction::Bottom)
+        );
+        assert_eq!(
+            intent_review_scroll_action(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE)),
+            Some(IntentReviewScrollAction::Up(10))
+        );
+        assert_eq!(
+            intent_review_scroll_action(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)),
+            Some(IntentReviewScrollAction::Down(10))
+        );
+        assert_eq!(
+            intent_review_scroll_action(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL)),
+            Some(IntentReviewScrollAction::Up(1))
+        );
+        assert_eq!(
+            intent_review_scroll_action(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT)),
+            Some(IntentReviewScrollAction::Down(1))
+        );
+        assert_eq!(
+            intent_review_scroll_action(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            None
+        );
+        assert_eq!(
+            intent_review_scroll_action(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            None
+        );
+    }
+
     fn orchestrator_fixture() -> OrchestratorResult {
         let first = make_task("Inspect sources", TaskKind::Implementation);
         let second = make_task("Run checks", TaskKind::Gate);
@@ -6595,6 +6679,7 @@ mod tests {
                 policy_violations: vec![],
                 model_usage: None,
                 review: None,
+                thinking: None,
             }],
             system_report: SystemReport {
                 integration: GateReport::empty(),
@@ -8953,16 +9038,23 @@ fn format_task_workspace_note(
     title: &str,
     working_dir: &std::path::Path,
     isolated: bool,
+    backend: TaskWorkspaceBackend,
+    main_working_dir: Option<&std::path::Path>,
 ) -> String {
-    let mode = if isolated {
-        "isolated worktree"
-    } else {
-        "shared workspace"
-    };
+    if isolated {
+        let source = main_working_dir.unwrap_or(working_dir);
+        return format!(
+            "Workspace · {}  \nisolated {} · source {}  \nruntime path hidden · changes sync back after task",
+            title.trim(),
+            backend.label(),
+            source.display()
+        );
+    }
+
     format!(
         "Workspace · {}  \n{} · {}",
         title.trim(),
-        mode,
+        backend.label(),
         working_dir.display()
     )
 }
@@ -9085,7 +9177,7 @@ mod orchestrator_result_tests {
             types::{
                 DecisionOutcome, ExecutionPlanSpec, GateReport, GateResult, OrchestratorResult,
                 ReviewOutcome, SystemReport, TaskContract, TaskKind, TaskNodeStatus, TaskResult,
-                TaskSpec,
+                TaskSpec, TaskWorkspaceBackend,
             },
         },
     };
@@ -9265,6 +9357,7 @@ mod orchestrator_result_tests {
                     summary: "response is incomplete".into(),
                     issues: vec!["missing final diagnosis".into()],
                 }),
+                thinking: None,
             },
         );
 
@@ -9286,6 +9379,7 @@ mod orchestrator_result_tests {
                 policy_violations: vec![],
                 model_usage: None,
                 review: None,
+                thinking: None,
             },
         );
 
@@ -9318,6 +9412,7 @@ mod orchestrator_result_tests {
                 policy_violations: vec![],
                 model_usage: None,
                 review: None,
+                thinking: None,
             },
         );
 
@@ -9330,13 +9425,22 @@ mod orchestrator_result_tests {
             "Implement parser",
             std::path::Path::new("/tmp/libra/.libra/worktrees/task-1"),
             true,
+            TaskWorkspaceBackend::Copy,
+            Some(std::path::Path::new("/tmp/libra")),
         );
         assert!(isolated_note.contains("Workspace · Implement parser"));
-        assert!(isolated_note.contains("isolated worktree"));
-        assert!(isolated_note.contains("/tmp/libra/.libra/worktrees/task-1"));
+        assert!(isolated_note.contains("isolated copy worktree"));
+        assert!(isolated_note.contains("source /tmp/libra"));
+        assert!(isolated_note.contains("runtime path hidden"));
+        assert!(!isolated_note.contains(".libra/worktrees/task-1"));
 
-        let shared_note =
-            format_task_workspace_note("Run gate", std::path::Path::new("/tmp/libra"), false);
+        let shared_note = format_task_workspace_note(
+            "Run gate",
+            std::path::Path::new("/tmp/libra"),
+            false,
+            TaskWorkspaceBackend::Shared,
+            None,
+        );
         assert!(shared_note.contains("shared workspace"));
         assert!(shared_note.contains("/tmp/libra"));
     }
@@ -9442,6 +9546,7 @@ mod orchestrator_result_tests {
                         summary: "analysis is complete".into(),
                         issues: vec![],
                     }),
+                    thinking: None,
                 },
                 TaskResult {
                     task_id: failed_task.id(),
@@ -9455,6 +9560,7 @@ mod orchestrator_result_tests {
                     policy_violations: vec![],
                     model_usage: None,
                     review: None,
+                    thinking: None,
                 },
             ],
             system_report: SystemReport {
@@ -9520,6 +9626,7 @@ mod orchestrator_result_tests {
                 policy_violations: vec![],
                 model_usage: None,
                 review: None,
+                thinking: None,
             }],
             system_report: SystemReport {
                 integration: GateReport::empty(),

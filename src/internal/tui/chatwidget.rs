@@ -20,7 +20,7 @@ use super::{
 };
 use crate::internal::ai::orchestrator::types::{
     ExecutionPlanSpec, TaskKind, TaskNodeStatus, TaskRuntimeEvent, TaskRuntimeNoteLevel,
-    TaskRuntimePhase,
+    TaskRuntimePhase, TaskWorkspaceBackend,
 };
 
 #[derive(Debug, Clone)]
@@ -213,6 +213,8 @@ struct TaskMuxTaskState {
     status: TaskNodeStatus,
     phase: TaskRuntimePhase,
     working_dir: Option<PathBuf>,
+    workspace_backend: Option<TaskWorkspaceBackend>,
+    main_working_dir: Option<PathBuf>,
     isolated: bool,
     transcript: Vec<TaskMuxTranscriptEntry>,
 }
@@ -273,9 +275,13 @@ impl TaskMuxState {
             TaskRuntimeEvent::WorkspaceReady {
                 working_dir,
                 isolated,
+                backend,
+                main_working_dir,
             } => {
                 task.working_dir = Some(working_dir);
                 task.isolated = isolated;
+                task.workspace_backend = Some(backend);
+                task.main_working_dir = main_working_dir;
             }
             TaskRuntimeEvent::Note { level, text } => {
                 complete_streaming_task_thinking(&mut task.transcript);
@@ -1150,7 +1156,10 @@ impl ChatWidget {
         }
 
         let mut lines = Vec::new();
-        let mode_label = if task.isolated { "isolated" } else { "shared" };
+        let mode_label = task
+            .workspace_backend
+            .map(TaskWorkspaceBackend::label)
+            .unwrap_or(if task.isolated { "isolated" } else { "shared" });
         lines.push(Line::from(vec![
             Span::styled(task_kind_label(&task.kind), task_kind_style(&task.kind)),
             Span::raw(" "),
@@ -1163,14 +1172,24 @@ impl ChatWidget {
             task_phase_span(&task.phase, task.ordinal, area.width),
         ]));
         if let Some(working_dir) = task.working_dir.as_ref() {
-            let dir_label = working_dir
+            let display_dir = if task.isolated {
+                task.main_working_dir.as_ref().unwrap_or(working_dir)
+            } else {
+                working_dir
+            };
+            let dir_label = display_dir
                 .file_name()
                 .and_then(|part| part.to_str())
-                .unwrap_or_else(|| working_dir.as_os_str().to_str().unwrap_or("."));
+                .unwrap_or_else(|| display_dir.as_os_str().to_str().unwrap_or("."));
+            let prefix = if task.isolated { "source" } else { "cwd" };
             lines.push(Line::styled(
                 format!(
-                    "cwd {}",
-                    truncate_label(dir_label, inner.width.saturating_sub(4) as usize)
+                    "{} {}",
+                    prefix,
+                    truncate_label(
+                        dir_label,
+                        inner.width.saturating_sub(prefix.len() as u16 + 1) as usize
+                    )
                 ),
                 theme::text::subtle(),
             ));

@@ -24,7 +24,7 @@ use super::{
     types::{
         ExecutionPlanSpec, GateReport, OrchestratorError, OrchestratorObserver, ReviewOutcome,
         TaskKind, TaskNodeStatus, TaskResult, TaskRuntimeEvent, TaskRuntimeNoteLevel,
-        TaskRuntimePhase, TaskSpec, ToolCallRecord,
+        TaskRuntimePhase, TaskSpec, TaskWorkspaceBackend, ToolCallRecord,
     },
     workspace::{detect_contract_violations, format_contract_violation_message},
 };
@@ -64,6 +64,14 @@ pub struct ExecutorConfig {
 }
 
 const NO_CHANGES_NEEDED_TOKEN: &str = "[NO_CHANGES_NEEDED]";
+const MAX_STORED_THINKING_CHARS: usize = 64_000;
+
+struct TaskExecutionArtifacts {
+    tool_calls: Vec<ToolCallRecord>,
+    policy_violations: Vec<super::types::PolicyViolation>,
+    model_usage: Option<CompletionUsageSummary>,
+    thinking: Option<String>,
+}
 
 struct TaskExecutionObserver {
     spec: Arc<IntentSpec>,
@@ -73,6 +81,8 @@ struct TaskExecutionObserver {
     tool_calls: Vec<ToolCallRecord>,
     violations: Vec<super::types::PolicyViolation>,
     model_usage: CompletionUsageSummary,
+    thinking: String,
+    thinking_truncated: bool,
     observer: Option<Arc<dyn OrchestratorObserver>>,
 }
 
@@ -91,19 +101,37 @@ impl TaskExecutionObserver {
             tool_calls: Vec::new(),
             violations: Vec::new(),
             model_usage: CompletionUsageSummary::default(),
+            thinking: String::new(),
+            thinking_truncated: false,
             observer,
         }
     }
 
-    fn finish(
-        self,
-    ) -> (
-        Vec<ToolCallRecord>,
-        Vec<super::types::PolicyViolation>,
-        Option<CompletionUsageSummary>,
-    ) {
+    fn finish(self) -> TaskExecutionArtifacts {
         let usage = (!self.model_usage.is_zero()).then_some(self.model_usage);
-        (self.tool_calls, self.violations, usage)
+        TaskExecutionArtifacts {
+            tool_calls: self.tool_calls,
+            policy_violations: self.violations,
+            model_usage: usage,
+            thinking: non_empty_text(self.thinking),
+        }
+    }
+
+    fn append_thinking_delta(&mut self, delta: &str) {
+        if self.thinking_truncated {
+            return;
+        }
+
+        let remaining = MAX_STORED_THINKING_CHARS.saturating_sub(self.thinking.chars().count());
+        if delta.chars().count() <= remaining {
+            self.thinking.push_str(delta);
+            return;
+        }
+
+        self.thinking
+            .extend(delta.chars().take(remaining.saturating_sub(1)));
+        self.thinking.push_str("\n[thinking truncated]");
+        self.thinking_truncated = true;
     }
 }
 
@@ -133,10 +161,14 @@ impl ToolLoopObserver for TaskExecutionObserver {
     fn on_model_stream_event(&mut self, event: &CompletionStreamEvent) {
         if let CompletionStreamEvent::ThinkingDelta { delta, .. } = event
             && !delta.is_empty()
-            && let Some(observer) = &self.observer
         {
-            observer
-                .on_task_runtime_event(&self.task, TaskRuntimeEvent::ThinkingDelta(delta.clone()));
+            self.append_thinking_delta(delta);
+            if let Some(observer) = &self.observer {
+                observer.on_task_runtime_event(
+                    &self.task,
+                    TaskRuntimeEvent::ThinkingDelta(delta.clone()),
+                );
+            }
         }
     }
 
@@ -235,6 +267,7 @@ struct ReviewerPassArtifacts {
     tool_calls: Vec<ToolCallRecord>,
     policy_violations: Vec<super::types::PolicyViolation>,
     model_usage: Option<CompletionUsageSummary>,
+    thinking: Option<String>,
 }
 
 /// Execute a single task with retry logic.
@@ -270,6 +303,7 @@ where
     let mut accumulated_tool_calls = Vec::new();
     let mut accumulated_policy_violations = Vec::new();
     let mut accumulated_model_usage = CompletionUsageSummary::default();
+    let mut accumulated_thinking = String::new();
     let mut last_review = None;
     let mut retry_feedback: Option<String> = None;
 
@@ -301,12 +335,19 @@ where
             &mut observer,
         )
         .await;
-        let (tool_calls, policy_violations, model_usage) = observer.finish();
+        let artifacts = observer.finish();
+        let TaskExecutionArtifacts {
+            tool_calls,
+            policy_violations,
+            model_usage,
+            thinking,
+        } = artifacts;
         accumulated_tool_calls.extend(tool_calls.iter().cloned());
         accumulated_policy_violations.extend(policy_violations.iter().cloned());
         if let Some(usage) = model_usage.as_ref() {
             accumulated_model_usage.merge(usage);
         }
+        append_optional_text(&mut accumulated_thinking, thinking);
 
         let retryable_failure = match agent_result {
             Ok(turn) if policy_violations.is_empty() => {
@@ -346,30 +387,30 @@ where
                     if let Some(usage) = review_artifacts.model_usage.as_ref() {
                         accumulated_model_usage.merge(usage);
                     }
+                    append_optional_text(
+                        &mut accumulated_thinking,
+                        review_artifacts.thinking.clone(),
+                    );
+                    let mut reviewer_infrastructure_failure = false;
                     let review = match review_artifacts.outcome {
                         Ok(review) => review,
                         Err(message) => {
+                            reviewer_infrastructure_failure = true;
+                            let review = Some(reviewer_infrastructure_failure_outcome(&message));
                             if let Some(observer) = &config.observer {
                                 observer.on_task_runtime_event(
                                     task,
-                                    TaskRuntimeEvent::Phase(TaskRuntimePhase::Failed),
+                                    TaskRuntimeEvent::Note {
+                                        level: TaskRuntimeNoteLevel::Error,
+                                        text: format!("review inconclusive · {message}"),
+                                    },
                                 );
                             }
-                            return TaskResult {
-                                task_id: task.id(),
-                                status: TaskNodeStatus::Failed,
-                                gate_report: None,
-                                agent_output: Some(message),
-                                retry_count,
-                                tool_calls: accumulated_tool_calls,
-                                policy_violations: accumulated_policy_violations,
-                                model_usage: (!accumulated_model_usage.is_zero())
-                                    .then_some(accumulated_model_usage),
-                                review: None,
-                            };
+                            review
                         }
                     };
                     if let Some(review) = review.as_ref()
+                        && !reviewer_infrastructure_failure
                         && !review.approved
                     {
                         last_review = Some(review.clone());
@@ -405,6 +446,7 @@ where
                             model_usage: (!accumulated_model_usage.is_zero())
                                 .then_some(accumulated_model_usage),
                             review,
+                            thinking: non_empty_text(accumulated_thinking),
                         };
                     }
                 }
@@ -438,6 +480,7 @@ where
                     model_usage: (!accumulated_model_usage.is_zero())
                         .then_some(accumulated_model_usage),
                     review: last_review,
+                    thinking: non_empty_text(accumulated_thinking),
                 };
             }
         };
@@ -459,6 +502,7 @@ where
                 model_usage: (!accumulated_model_usage.is_zero())
                     .then_some(accumulated_model_usage),
                 review: last_review,
+                thinking: non_empty_text(accumulated_thinking),
             };
         }
 
@@ -535,6 +579,36 @@ fn has_noop_evidence(tool_calls: &[ToolCallRecord]) -> bool {
 
 fn agent_declared_no_changes_needed(agent_output: &str) -> bool {
     agent_output.trim_end().ends_with(NO_CHANGES_NEEDED_TOKEN)
+}
+
+fn reviewer_infrastructure_failure_outcome(message: &str) -> ReviewOutcome {
+    ReviewOutcome {
+        approved: false,
+        summary: "automated review did not complete; human review required".to_string(),
+        issues: vec![message.to_string()],
+    }
+}
+
+fn append_optional_text(target: &mut String, text: Option<String>) {
+    let Some(text) = text else {
+        return;
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if !target.trim().is_empty() {
+        target.push_str("\n\n");
+    }
+    target.push_str(trimmed);
+}
+
+fn non_empty_text(text: String) -> Option<String> {
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 async fn execute_gate_task(
@@ -616,6 +690,7 @@ async fn execute_gate_task(
         policy_violations: Vec::new(),
         model_usage: None,
         review: None,
+        thinking: None,
     }
 }
 
@@ -642,6 +717,8 @@ async fn execute_gate_task_in_task_worktree(
             TaskRuntimeEvent::WorkspaceReady {
                 working_dir: task_worktree_root.clone(),
                 isolated: true,
+                backend: environment.backend(),
+                main_working_dir: Some(working_dir.to_path_buf()),
             },
         );
     }
@@ -677,6 +754,7 @@ where
             tool_calls: Vec::new(),
             policy_violations: Vec::new(),
             model_usage: None,
+            thinking: None,
         };
     };
 
@@ -717,7 +795,13 @@ where
         &mut observer,
     )
     .await;
-    let (tool_calls, policy_violations, model_usage) = observer.finish();
+    let artifacts = observer.finish();
+    let TaskExecutionArtifacts {
+        tool_calls,
+        policy_violations,
+        model_usage,
+        thinking,
+    } = artifacts;
     let turn = match turn {
         Ok(turn) => turn,
         Err(err) => {
@@ -726,6 +810,7 @@ where
                 tool_calls,
                 policy_violations,
                 model_usage,
+                thinking,
             };
         }
     };
@@ -738,6 +823,7 @@ where
                 tool_calls,
                 policy_violations,
                 model_usage,
+                thinking,
             };
         }
     };
@@ -772,6 +858,7 @@ where
         tool_calls,
         policy_violations,
         model_usage,
+        thinking,
     }
 }
 
@@ -811,7 +898,11 @@ where
     let task_worktree_root = environment.root().to_path_buf();
     let baseline = environment.baseline_snapshot();
 
-    let task_registry = Arc::new(registry.clone_with_working_dir(task_worktree_root.clone()));
+    let task_registry =
+        Arc::new(registry.clone_with_working_dir_and_alias(
+            task_worktree_root.clone(),
+            config.working_dir.clone(),
+        ));
     let mut task_config = config.clone();
     task_config.working_dir = task_worktree_root.clone();
     task_config.tool_loop_config =
@@ -823,6 +914,8 @@ where
             TaskRuntimeEvent::WorkspaceReady {
                 working_dir: task_worktree_root.clone(),
                 isolated: true,
+                backend: environment.backend(),
+                main_working_dir: Some(config.working_dir.clone()),
             },
         );
     }
@@ -888,6 +981,7 @@ fn task_workspace_failure(task: &TaskSpec, err: io::Error) -> TaskResult {
         policy_violations: Vec::new(),
         model_usage: None,
         review: None,
+        thinking: None,
     }
 }
 
@@ -906,6 +1000,7 @@ fn terminal_task_result(
         policy_violations: Vec::new(),
         model_usage: None,
         review: None,
+        thinking: None,
     }
 }
 
@@ -1098,6 +1193,8 @@ where
                 TaskRuntimeEvent::WorkspaceReady {
                     working_dir: self.config.working_dir.clone(),
                     isolated: false,
+                    backend: TaskWorkspaceBackend::Shared,
+                    main_working_dir: None,
                 },
             );
         }
@@ -1485,7 +1582,7 @@ fn build_task_prompt(task: &TaskSpec, working_dir: &Path, allowed_tools: &[Strin
     }
 
     parts.push(format!(
-        "## Runtime Workspace\nWorking directory: {}\nAll file access must stay inside this directory.",
+        "## Runtime Workspace\nRepository root: `.`\nInternal absolute path: {}\nAll file access must stay inside this workspace. Treat the internal path as diagnostic only; do not pass it to file tools or shell `cd` commands.",
         working_dir.display()
     ));
 
@@ -1494,7 +1591,7 @@ fn build_task_prompt(task: &TaskSpec, working_dir: &Path, allowed_tools: &[Strin
     }
 
     parts.push(
-        "## Path Rules\nUse repository-relative paths for read_file, list_dir, and grep_files. The runtime will resolve them from the working directory. Never invent or use paths outside the current workspace.".to_string(),
+        "## Path Rules\nUse `.` or repository-relative paths for read_file, list_dir, grep_files, apply_patch, and shell commands. The runtime already executes tools from the task workspace. Do not use the original --repo path or /var/folders/.../libra-task-worktree-* paths as tool arguments.".to_string(),
     );
     parts.push(format!(
         "## Version Control\nDo not use git for status, diff, add, commit, branch, log, \
@@ -1631,10 +1728,11 @@ fn build_reviewer_prompt(
         format!("## Review Task\n{}", task.title()),
         format!("## Objective\n{}", task.objective),
         format!(
-            "## Runtime Workspace\nWorking directory: {}\nAll file access must stay inside this directory.",
+            "## Runtime Workspace\nRepository root: `.`\nInternal absolute path: {}\nAll file access must stay inside this workspace. Treat the internal path as diagnostic only; do not pass it to file tools or shell `cd` commands.",
             working_dir.display()
         ),
         format!("## Allowed Tools\n{}", allowed_tools.join(", ")),
+        "## Path Rules\nUse `.` or repository-relative paths. The runtime resolves file tools and shell commands from the task workspace; do not use the original --repo path or /var/folders/.../libra-task-worktree-* paths.".to_string(),
         format!("## Candidate Output\n{}", agent_output.trim()),
         "Return JSON only in this exact shape: {\"approved\":true|false,\"summary\":\"...\",\"issues\":[\"...\"]}".to_string(),
     ];
@@ -2019,7 +2117,7 @@ mod tests {
             intentspec::{profiles, types::*},
             orchestrator::types::{ExecutionPlanSpec, TaskContract, TaskKind, TaskSpec},
             tools::{
-                handlers::{ApplyPatchHandler, ShellHandler},
+                handlers::{ApplyPatchHandler, ListDirHandler, ShellHandler},
                 registry::ToolRegistry,
             },
         },
@@ -2270,6 +2368,76 @@ mod tests {
             &self,
             request: CompletionRequest,
         ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+            let has_tool_result = request.chat_history.iter().any(|message| match message {
+                Message::User { content } => content
+                    .iter()
+                    .any(|item| matches!(item, UserContent::ToolResult(_))),
+                _ => false,
+            });
+            if has_tool_result {
+                return Ok(CompletionResponse {
+                    content: vec![AssistantContent::Text(Text {
+                        text: "done".to_string(),
+                    })],
+                    reasoning_content: None,
+                    raw_response: (),
+                });
+            }
+
+            Ok(CompletionResponse {
+                content: vec![AssistantContent::ToolCall(ToolCall {
+                    id: "call_src_main".to_string(),
+                    name: "apply_patch".to_string(),
+                    function: Function {
+                        name: "apply_patch".to_string(),
+                        arguments: serde_json::json!({
+                            "input": "*** Begin Patch\n*** Update File: src/main.rs\n@@\n-fn main() {}\n+fn main() { println!(\"hello\"); }\n*** End Patch"
+                        }),
+                    },
+                })],
+                reasoning_content: None,
+                raw_response: (),
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct ReviewerLoopLimitModel;
+
+    impl CompletionModel for ReviewerLoopLimitModel {
+        type Response = ();
+
+        async fn completion(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+            let prompt = request
+                .chat_history
+                .iter()
+                .rev()
+                .find_map(|message| match message {
+                    Message::User { content } => content.iter().find_map(|item| match item {
+                        UserContent::Text(text) => Some(text.text.clone()),
+                        _ => None,
+                    }),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            if prompt.contains("## Review Task") {
+                return Ok(CompletionResponse {
+                    content: vec![AssistantContent::ToolCall(ToolCall {
+                        id: "call_review_list".to_string(),
+                        name: "list_dir".to_string(),
+                        function: Function {
+                            name: "list_dir".to_string(),
+                            arguments: serde_json::json!({ "dir_path": "." }),
+                        },
+                    })],
+                    reasoning_content: None,
+                    raw_response: (),
+                });
+            }
+
             let has_tool_result = request.chat_history.iter().any(|message| match message {
                 Message::User { content } => content
                     .iter()
@@ -2658,6 +2826,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn task_execution_observer_persists_streamed_thinking() {
+        let mut observer = TaskExecutionObserver::new(
+            spec(),
+            implementation_task(),
+            PathBuf::from("/tmp/workspace"),
+            None,
+        );
+
+        observer.on_model_stream_event(&CompletionStreamEvent::ThinkingDelta {
+            request_id: None,
+            delta: "inspect ".to_string(),
+        });
+        observer.on_model_stream_event(&CompletionStreamEvent::ThinkingDelta {
+            request_id: None,
+            delta: "workspace".to_string(),
+        });
+
+        let artifacts = observer.finish();
+
+        assert_eq!(artifacts.thinking.as_deref(), Some("inspect workspace"));
+    }
+
     fn scoped_implementation_task(title: &str, file: &str) -> TaskSpec {
         let actor = ActorRef::agent("test-executor").unwrap();
         let mut task = GitTask::new(actor, title, None).unwrap();
@@ -2852,6 +3043,57 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.path().join("src/main.rs")).unwrap(),
             "fn main() { println!(\"hello\"); }\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_implementation_task_preserves_output_when_reviewer_hits_turn_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        let mut registry = ToolRegistry::with_working_dir(dir.path().to_path_buf());
+        registry.register("apply_patch", Arc::new(ApplyPatchHandler));
+        registry.register("list_dir", Arc::new(ListDirHandler));
+        let registry = Arc::new(registry);
+        let config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig {
+                max_turns: Some(3),
+                ..ToolLoopConfig::default()
+            },
+            max_retries: 0,
+            backoff_seconds: 0,
+            working_dir: dir.path().to_path_buf(),
+            spec: spec(),
+            reviewer_preamble: Some("review the candidate and return JSON".into()),
+            dagrs_resume_checkpoint_id: None,
+            observer: None,
+            workspace_baseline: None,
+        };
+
+        let result = execute_task(
+            &implementation_task(),
+            &ReviewerLoopLimitModel,
+            &registry,
+            &config,
+        )
+        .await;
+
+        assert_eq!(result.status, TaskNodeStatus::Completed);
+        assert_eq!(result.agent_output.as_deref(), Some("done"));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("src/main.rs")).unwrap(),
+            "fn main() { println!(\"hello\"); }\n"
+        );
+        let review = result
+            .review
+            .expect("reviewer infrastructure failure should be preserved as a review finding");
+        assert!(!review.approved);
+        assert!(review.summary.contains("review did not complete"));
+        assert!(
+            review
+                .issues
+                .iter()
+                .any(|issue| issue.contains("Tool loop exceeded maximum turns"))
         );
     }
 
@@ -3112,7 +3354,9 @@ mod tests {
             Path::new("/tmp/workspace"),
             &["read_file".into(), "apply_patch".into()],
         );
-        assert!(prompt.contains("Working directory: /tmp/workspace"));
+        assert!(prompt.contains("Repository root: `.`"));
+        assert!(prompt.contains("Internal absolute path: /tmp/workspace"));
+        assert!(prompt.contains("do not pass it to file tools or shell `cd` commands"));
         assert!(prompt.contains("Allowed Tools"));
     }
 

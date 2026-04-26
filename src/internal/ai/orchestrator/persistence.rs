@@ -1415,6 +1415,8 @@ async fn persist_runtime_event(
         super::types::TaskRuntimeEvent::WorkspaceReady {
             working_dir,
             isolated,
+            backend,
+            main_working_dir,
         } => {
             persist_context_frame(
                 mcp_server,
@@ -1429,7 +1431,9 @@ async fn persist_runtime_event(
                 json!({
                     "event": "workspace_ready",
                     "isolated": isolated,
+                    "backend": backend,
                     "workingDir": working_dir,
+                    "mainWorkingDir": main_working_dir,
                     "taskId": task.id().to_string(),
                     "taskTitle": task.title(),
                 }),
@@ -3954,6 +3958,7 @@ mod tests {
                 policy_violations: vec![],
                 model_usage: None,
                 review: None,
+                thinking: None,
             },
             TaskResult {
                 task_id: gate_task_id,
@@ -3977,6 +3982,7 @@ mod tests {
                 policy_violations: vec![],
                 model_usage: None,
                 review: None,
+                thinking: None,
             },
         ];
         let system_report = SystemReport {
@@ -4205,6 +4211,7 @@ mod tests {
                 cost_usd: None,
             }),
             review: None,
+            thinking: None,
         }];
         let system_report = SystemReport {
             integration: GateReport::empty(),
@@ -4436,6 +4443,7 @@ mod tests {
             policy_violations: vec![],
             model_usage: None,
             review: None,
+            thinking: None,
         }];
         let run_state = RunStateSnapshot {
             intent_spec_id: plan_spec.intent_spec_id.clone(),

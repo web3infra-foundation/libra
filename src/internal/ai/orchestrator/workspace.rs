@@ -18,7 +18,10 @@ use tokio::runtime::Handle;
 use tracing::warn;
 use uuid::Uuid;
 
-use super::acl::{ScopeVerdict, cargo_lock_companion_allowed, check_scope};
+use super::{
+    acl::{ScopeVerdict, cargo_lock_companion_allowed, check_scope},
+    types::TaskWorkspaceBackend,
+};
 use crate::{
     internal::ai::workspace_snapshot::{
         WorkspaceSnapshot, changed_paths_since_baseline, snapshot_workspace,
@@ -31,6 +34,16 @@ pub(crate) struct TaskWorktree {
     pub(crate) root: PathBuf,
     pub(crate) baseline: WorkspaceSnapshot,
     backend: TaskWorktreeBackend,
+}
+
+impl TaskWorktree {
+    pub(crate) fn backend(&self) -> TaskWorkspaceBackend {
+        match &self.backend {
+            TaskWorktreeBackend::Copy { .. } => TaskWorkspaceBackend::Copy,
+            #[cfg(unix)]
+            TaskWorktreeBackend::Fuse(_) => TaskWorkspaceBackend::Fuse,
+        }
+    }
 }
 
 enum TaskWorktreeBackend {

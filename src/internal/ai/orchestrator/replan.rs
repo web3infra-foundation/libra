@@ -391,6 +391,7 @@ mod tests {
                 policy_violations: vec![],
                 model_usage: None,
                 review: None,
+                thinking: None,
             }]),
             &SystemReport {
                 integration: GateReport::empty(),
@@ -438,6 +439,7 @@ mod tests {
                 policy_violations: vec![],
                 model_usage: None,
                 review: None,
+                thinking: None,
             }]),
             &SystemReport {
                 integration: GateReport::empty(),
@@ -482,6 +484,7 @@ mod tests {
                 policy_violations: vec![],
                 model_usage: None,
                 review: None,
+                thinking: None,
             }]),
             &SystemReport {
                 integration: GateReport::empty(),

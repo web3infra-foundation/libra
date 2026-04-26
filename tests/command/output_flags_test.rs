@@ -239,8 +239,13 @@ fn json_status_success_returns_structured_data() {
         data["untracked"].is_array(),
         "data must have untracked array"
     );
-    // Clean repo should be empty.
-    assert_eq!(data["is_clean"], true);
+    assert_eq!(data["is_clean"], false);
+    assert!(
+        data["untracked"]
+            .as_array()
+            .is_some_and(|paths| paths.iter().any(|path| path == ".libraignore")),
+        "init-created .libraignore should be reported as untracked: {data}"
+    );
 }
 
 #[test]

@@ -630,11 +630,11 @@ fn summarize_tool_call(tool_name: &str, arguments: &Value) -> String {
     match tool_name {
         "read_file" => format!(
             "Read {}",
-            argument_string(arguments, "file_path").unwrap_or("?")
+            redact_internal_workspace_paths(argument_string(arguments, "file_path").unwrap_or("?"))
         ),
         "list_dir" => format!(
             "List {}",
-            argument_string(arguments, "dir_path").unwrap_or(".")
+            redact_internal_workspace_paths(argument_string(arguments, "dir_path").unwrap_or("."))
         ),
         "grep_files" | "search_files" => {
             let pattern = argument_string(arguments, "pattern")
@@ -644,7 +644,7 @@ fn summarize_tool_call(tool_name: &str, arguments: &Value) -> String {
             format!(
                 "Search {} in {}",
                 truncate_utf8(pattern, 80),
-                truncate_utf8(path, 80)
+                truncate_utf8(&redact_internal_workspace_paths(path), 80)
             )
         }
         "web_search" => {
@@ -654,7 +654,9 @@ fn summarize_tool_call(tool_name: &str, arguments: &Value) -> String {
         "shell" => format!(
             "Run {}",
             truncate_utf8(
-                argument_string(arguments, "command").unwrap_or("(command)"),
+                &redact_internal_workspace_paths(
+                    argument_string(arguments, "command").unwrap_or("(command)")
+                ),
                 120
             )
         ),
@@ -699,7 +701,7 @@ fn summarize_apply_patch(arguments: &Value) -> String {
 fn summarize_tool_output_failure(output: &ToolOutput) -> String {
     match output {
         ToolOutput::Function { content, .. } => first_non_empty_line(content)
-            .map(|line| truncate_utf8(line, 180))
+            .map(|line| truncate_utf8(&redact_internal_workspace_paths(line), 180))
             .unwrap_or_else(|| "Tool failed".to_string()),
         ToolOutput::Mcp { .. } => "MCP tool failed".to_string(),
     }
@@ -720,6 +722,7 @@ fn summarize_tool_output_success(tool_name: &str, output: &ToolOutput) -> Option
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .filter(|line| !line.starts_with("Exit code: 0"))
+        .map(redact_internal_workspace_paths)
         .take(3)
         .collect::<Vec<_>>();
 
@@ -732,6 +735,39 @@ fn summarize_tool_output_success(tool_name: &str, output: &ToolOutput) -> Option
 
 fn first_non_empty_line(text: &str) -> Option<&str> {
     text.lines().map(str::trim).find(|line| !line.is_empty())
+}
+
+fn redact_internal_workspace_paths(text: &str) -> String {
+    const MARKERS: [&str; 2] = ["libra-task-worktree-copy-", "libra-task-worktree-fuse-"];
+    let mut redacted = text.to_string();
+
+    while let Some((marker_index, _)) = MARKERS
+        .iter()
+        .filter_map(|marker| redacted.find(marker).map(|index| (index, marker)))
+        .min_by_key(|(index, _)| *index)
+    {
+        let start = redacted[..marker_index]
+            .char_indices()
+            .rev()
+            .find_map(|(index, ch)| path_token_boundary(ch).then_some(index + ch.len_utf8()))
+            .unwrap_or(0);
+        let end = redacted[marker_index..]
+            .char_indices()
+            .find_map(|(offset, ch)| path_token_boundary(ch).then_some(marker_index + offset))
+            .unwrap_or(redacted.len());
+
+        redacted.replace_range(start..end, "<task workspace>");
+    }
+
+    redacted
+}
+
+fn path_token_boundary(ch: char) -> bool {
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            '"' | '\'' | '`' | '<' | '>' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ':' | ';'
+        )
 }
 
 fn argument_string<'a>(arguments: &'a Value, key: &str) -> Option<&'a str> {
@@ -1984,6 +2020,7 @@ mod tests {
                     policy_violations: vec![],
                     model_usage: None,
                     review: None,
+                    thinking: None,
                 },
                 TaskResult {
                     task_id: plan.tasks[1].id(),
@@ -1995,6 +2032,7 @@ mod tests {
                     policy_violations: vec![],
                     model_usage: None,
                     review: None,
+                    thinking: None,
                 },
             ],
             system_report: SystemReport {
@@ -2206,6 +2244,29 @@ mod tests {
         assert!(joined.contains("Run cargo test"));
         assert!(joined.contains("running 3 tests"));
         assert!(joined.contains("test result: ok"));
+    }
+
+    #[test]
+    fn tool_cell_redacts_internal_task_worktree_paths() {
+        let internal_path = "/var/folders/x/y/T/libra-task-worktree-copy-123-019dc9dd-44a7-70f1-8a75-3811b7660261/workspace";
+        let mut cell = ToolCallHistoryCell::new(
+            "1".to_string(),
+            "shell".to_string(),
+            json!({"command": format!("cd {internal_path} && cargo test")}),
+        );
+        cell.complete_call(
+            "1",
+            Ok(ToolOutput::success(format!(
+                "Exit code: 0\nAbsolute path: {internal_path}/src"
+            ))),
+        );
+
+        let rendered = to_strings(cell.display_lines(140));
+        let joined = rendered.join("\n");
+
+        assert!(joined.contains("cd <task workspace> && cargo test"));
+        assert!(joined.contains("Absolute path: <task workspace>"));
+        assert!(!joined.contains("libra-task-worktree-copy"));
     }
 
     #[test]

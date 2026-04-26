@@ -327,7 +327,7 @@ async fn test_reset_hard_io_failure_rolls_back_index_and_keeps_head() {
 
     fs::write("base.txt", "base\n").unwrap();
     add::execute(AddArgs {
-        pathspec: vec!["base.txt".to_string()],
+        pathspec: vec![".libraignore".to_string(), "base.txt".to_string()],
         all: false,
         update: false,
         verbose: false,

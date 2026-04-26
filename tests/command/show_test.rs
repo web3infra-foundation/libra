@@ -531,9 +531,14 @@ async fn test_show_tree_output_uses_git_modes_and_types() {
     let json = parse_json_stdout(&output);
     assert_eq!(json["command"], "show");
     assert_eq!(json["data"]["type"], "tree");
-    assert_eq!(json["data"]["entries"][0]["mode"], "100644");
-    assert_eq!(json["data"]["entries"][0]["object_type"], "blob");
-    assert_eq!(json["data"]["entries"][0]["name"], "tracked.txt");
+    let tracked_entry = json["data"]["entries"]
+        .as_array()
+        .expect("tree entries should be an array")
+        .iter()
+        .find(|entry| entry["name"] == "tracked.txt")
+        .expect("tracked.txt should be present in tree output");
+    assert_eq!(tracked_entry["mode"], "100644");
+    assert_eq!(tracked_entry["object_type"], "blob");
 }
 
 /// Test that show can display a lightweight tag.

@@ -1,6 +1,10 @@
 //! Tool registry for managing and dispatching tool handlers.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 
@@ -59,7 +63,9 @@ pub struct ToolRegistry {
     /// Map of tool name to handler implementation.
     handlers: HashMap<String, Arc<dyn ToolHandler>>,
     /// Working directory for file operations.
-    working_dir: std::path::PathBuf,
+    working_dir: PathBuf,
+    /// Absolute path aliases that should be rebased into `working_dir`.
+    path_aliases: Vec<(PathBuf, PathBuf)>,
     /// Optional runtime boundary policy and audit pipeline.
     hardening: Option<ToolBoundaryRuntime>,
 }
@@ -77,24 +83,46 @@ impl ToolRegistry {
         Ok(Self {
             handlers: HashMap::new(),
             working_dir: std::env::current_dir()?,
+            path_aliases: Vec::new(),
             hardening: None,
         })
     }
 
     /// Create a new ToolRegistry with a specific working directory.
-    pub fn with_working_dir(working_dir: std::path::PathBuf) -> Self {
+    pub fn with_working_dir(working_dir: PathBuf) -> Self {
         Self {
             handlers: HashMap::new(),
             working_dir,
+            path_aliases: Vec::new(),
             hardening: None,
         }
     }
 
     /// Clone this registry while rebasing all tool dispatch onto a new working directory.
-    pub fn clone_with_working_dir(&self, working_dir: std::path::PathBuf) -> Self {
+    pub fn clone_with_working_dir(&self, working_dir: PathBuf) -> Self {
         Self {
             handlers: self.handlers.clone(),
             working_dir,
+            path_aliases: self.path_aliases.clone(),
+            hardening: self.hardening.clone(),
+        }
+    }
+
+    /// Clone this registry while allowing one outside absolute path to resolve
+    /// to the new working directory. This keeps tools sandboxed while handling
+    /// provider calls that reuse the user-facing repository path inside an
+    /// isolated task worktree.
+    pub fn clone_with_working_dir_and_alias(
+        &self,
+        working_dir: PathBuf,
+        alias_from: PathBuf,
+    ) -> Self {
+        let mut path_aliases = self.path_aliases.clone();
+        path_aliases.push((alias_from, working_dir.clone()));
+        Self {
+            handlers: self.handlers.clone(),
+            working_dir,
+            path_aliases,
             hardening: self.hardening.clone(),
         }
     }
@@ -166,6 +194,7 @@ impl ToolRegistry {
         // The registry working directory is the single source of truth for sandboxing.
         // Ignore any caller-provided working_dir to prevent sandbox bypass.
         invocation.working_dir = self.working_dir.clone();
+        invocation.payload = rebase_payload_path_aliases(invocation.payload, &self.path_aliases)?;
 
         let mutates_state = handler.is_mutating(&invocation).await;
         let requires_network = handler.requires_network(&invocation).await;
@@ -199,7 +228,9 @@ impl ToolRegistry {
                 return Err(ToolError::ExecutionFailed(decision.reason));
             }
 
-            let result = handler.handle(invocation).await;
+            let result = handler.handle(invocation).await.map(|output| {
+                redact_workspace_paths_in_output(output, &self.working_dir, &self.path_aliases)
+            });
             let summary = match &result {
                 Ok(output) => format!(
                     "success={} output={}",
@@ -222,7 +253,9 @@ impl ToolRegistry {
             return result;
         }
 
-        handler.handle(invocation).await
+        handler.handle(invocation).await.map(|output| {
+            redact_workspace_paths_in_output(output, &self.working_dir, &self.path_aliases)
+        })
     }
 
     /// Get the current working directory.
@@ -254,6 +287,105 @@ impl ToolRegistry {
     pub fn is_empty(&self) -> bool {
         self.handlers.is_empty()
     }
+}
+
+fn rebase_payload_path_aliases(
+    payload: ToolPayload,
+    aliases: &[(PathBuf, PathBuf)],
+) -> ToolResult<ToolPayload> {
+    if aliases.is_empty() {
+        return Ok(payload);
+    }
+
+    let ToolPayload::Function { arguments } = payload else {
+        return Ok(payload);
+    };
+
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&arguments) else {
+        return Ok(ToolPayload::Function { arguments });
+    };
+    rebase_path_fields(&mut value, aliases);
+    let arguments = serde_json::to_string(&value).map_err(|err| {
+        ToolError::InvalidArguments(format!("failed to rewrite path aliases: {err}"))
+    })?;
+    Ok(ToolPayload::Function { arguments })
+}
+
+fn rebase_path_fields(value: &mut serde_json::Value, aliases: &[(PathBuf, PathBuf)]) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+
+    for key in ["file_path", "dir_path", "path", "workdir"] {
+        let Some(field) = object.get_mut(key) else {
+            continue;
+        };
+        let Some(raw) = field.as_str() else {
+            continue;
+        };
+        if let Some(rebased) = rebase_path_alias(raw, aliases) {
+            *field = serde_json::Value::String(rebased);
+        }
+    }
+}
+
+fn rebase_path_alias(raw: &str, aliases: &[(PathBuf, PathBuf)]) -> Option<String> {
+    let path = Path::new(raw);
+    if !path.is_absolute() {
+        return None;
+    }
+
+    for (from, to) in aliases {
+        if let Ok(suffix) = path.strip_prefix(from) {
+            return Some(to.join(suffix).display().to_string());
+        }
+    }
+    None
+}
+
+fn redact_workspace_paths_in_output(
+    output: ToolOutput,
+    working_dir: &Path,
+    aliases: &[(PathBuf, PathBuf)],
+) -> ToolOutput {
+    if aliases.is_empty() {
+        return output;
+    }
+
+    match output {
+        ToolOutput::Function {
+            content,
+            success,
+            metadata,
+        } => {
+            let content = redact_workspace_path_mentions(&content, working_dir);
+            ToolOutput::Function {
+                content,
+                success,
+                metadata,
+            }
+        }
+        other => other,
+    }
+}
+
+fn redact_workspace_path_mentions(content: &str, working_dir: &Path) -> String {
+    let mut needles = vec![working_dir.display().to_string()];
+    if let Ok(canonical) = std::fs::canonicalize(working_dir) {
+        let canonical = canonical.display().to_string();
+        if !needles.iter().any(|needle| needle == &canonical) {
+            needles.push(canonical);
+        }
+    }
+    needles.sort_by_key(|needle| std::cmp::Reverse(needle.len()));
+
+    let mut redacted = content.to_string();
+    for needle in needles {
+        if !needle.is_empty() {
+            redacted = redacted.replace(&needle, ".");
+        }
+    }
+    redacted
 }
 
 impl Default for ToolRegistry {
@@ -470,6 +602,48 @@ mod tests {
 
         assert!(cloned.contains_tool("mock"));
         assert_eq!(cloned.working_dir(), std::path::Path::new("/tmp/cloned"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_rebases_original_workspace_alias_into_task_worktree() {
+        let original = TempDir::new().unwrap();
+        let task_worktree = TempDir::new().unwrap();
+        tokio::fs::create_dir_all(task_worktree.path().join("src"))
+            .await
+            .unwrap();
+        tokio::fs::write(task_worktree.path().join("src/lib.rs"), "pub fn ok() {}")
+            .await
+            .unwrap();
+
+        let mut registry = ToolRegistry::with_working_dir(original.path().to_path_buf());
+        registry.register("list_dir", Arc::new(ListDirHandler));
+        let task_registry = registry.clone_with_working_dir_and_alias(
+            task_worktree.path().to_path_buf(),
+            original.path().to_path_buf(),
+        );
+
+        let invocation = ToolInvocation::new(
+            "call-list",
+            "list_dir",
+            ToolPayload::Function {
+                arguments: serde_json::json!({
+                    "dir_path": original.path().join("src"),
+                    "offset": 1,
+                    "limit": 25,
+                    "depth": 1
+                })
+                .to_string(),
+            },
+            original.path().to_path_buf(),
+        );
+
+        let output = task_registry.dispatch(invocation).await.unwrap();
+
+        let text = output.as_text().unwrap();
+        assert!(text.contains("lib.rs"));
+        assert!(text.contains("Absolute path: ./src"));
+        assert!(!text.contains(&task_worktree.path().display().to_string()));
+        assert!(!text.contains(&original.path().join("src").display().to_string()));
     }
 
     #[tokio::test]
