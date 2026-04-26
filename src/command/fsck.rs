@@ -1851,4 +1851,100 @@ mod tests {
         print_verbose_result(&result);
         print_issues(&result);
     }
+
+    // -----------------------------------------------------------------------
+    // Failure mask / exit code bitmask tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_exit_code_bitmask_objects_only() {
+        assert_eq!(exit_code::OK, 0);
+        assert_eq!(exit_code::OBJECT_CORRUPT, 1);
+        assert_eq!(exit_code::REF_BROKEN, 2);
+        assert_eq!(exit_code::INDEX_CORRUPT, 4);
+    }
+
+    #[test]
+    fn test_exit_code_bitmask_combinations() {
+        assert_eq!(exit_code::OBJECT_CORRUPT | exit_code::REF_BROKEN, 3);
+        assert_eq!(exit_code::OBJECT_CORRUPT | exit_code::INDEX_CORRUPT, 5);
+        assert_eq!(exit_code::REF_BROKEN | exit_code::INDEX_CORRUPT, 6);
+        assert_eq!(
+            exit_code::OBJECT_CORRUPT | exit_code::REF_BROKEN | exit_code::INDEX_CORRUPT,
+            7
+        );
+    }
+
+    #[test]
+    fn test_failure_mask_serialization_skipped_when_zero() {
+        let result = FsckResult {
+            objects_checked: 1,
+            objects_ok: 1,
+            objects_corrupted: 0,
+            refs_checked: 0,
+            refs_ok: 0,
+            refs_broken: 0,
+            index_valid: true,
+            cross_ref_issues: 0,
+            overall_status: CheckStatus::Ok,
+            issues: vec![],
+            failure_mask: 0,
+            failure_categories: vec![],
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(
+            !json.contains("failure_mask"),
+            "failure_mask should be skipped when zero: {json}"
+        );
+    }
+
+    #[test]
+    fn test_failure_categories_serialization_skipped_when_empty() {
+        let result = FsckResult {
+            objects_checked: 1,
+            objects_ok: 1,
+            objects_corrupted: 0,
+            refs_checked: 0,
+            refs_ok: 0,
+            refs_broken: 0,
+            index_valid: true,
+            cross_ref_issues: 0,
+            overall_status: CheckStatus::Ok,
+            issues: vec![],
+            failure_mask: 0,
+            failure_categories: vec![],
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(
+            !json.contains("failure_categories"),
+            "failure_categories should be skipped when empty: {json}"
+        );
+    }
+
+    #[test]
+    fn test_failure_mask_serialized_when_nonzero() {
+        let result = FsckResult {
+            objects_checked: 2,
+            objects_ok: 1,
+            objects_corrupted: 1,
+            refs_checked: 0,
+            refs_ok: 0,
+            refs_broken: 0,
+            index_valid: true,
+            cross_ref_issues: 0,
+            overall_status: CheckStatus::Corrupted,
+            issues: vec![],
+            failure_mask: exit_code::OBJECT_CORRUPT,
+            failure_categories: vec!["objects".to_string()],
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(
+            json.contains("\"failure_mask\":1"),
+            "failure_mask should appear when nonzero: {json}"
+        );
+        assert!(
+            json.contains("\"failure_categories\":[\"objects\"]"),
+            "failure_categories should appear: {json}"
+        );
+    }
 }

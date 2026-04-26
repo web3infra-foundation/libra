@@ -308,16 +308,14 @@ fn test_fsck_with_unicode_content() {
 fn test_fsck_single_object_valid() {
     let repo = create_committed_repo_via_cli();
 
-    // Get the commit hash from log
-    let log_output = run_libra_command(&["log", "--oneline"], repo.path());
+    // Get the commit hash from log (full hash, not abbreviated)
+    let log_output = run_libra_command(&["log", "--pretty=%H"], repo.path());
     let stdout = String::from_utf8_lossy(&log_output.stdout);
     let commit_hash = stdout
         .lines()
         .next()
         .unwrap()
-        .split_whitespace()
-        .next()
-        .unwrap();
+        .trim();
 
     let output = run_libra_command(&["fsck", commit_hash], repo.path());
     assert!(
@@ -775,15 +773,13 @@ fn test_fsck_sha256_missing_object_detected() {
 fn test_fsck_sha256_single_object_valid() {
     let repo = create_sha256_committed_repo_via_cli();
 
-    let log_output = run_libra_command(&["log", "--oneline"], repo.path());
+    let log_output = run_libra_command(&["log", "--pretty=%H"], repo.path());
     let stdout = String::from_utf8_lossy(&log_output.stdout);
     let commit_hash = stdout
         .lines()
         .next()
         .unwrap()
-        .split_whitespace()
-        .next()
-        .unwrap();
+        .trim();
 
     // SHA-256 hashes are 64 hex chars
     assert_eq!(
