@@ -3004,8 +3004,10 @@ async fn chat_managed_fullscreen_tui(
                     _ => {}
                 }
             }
-            Event::Paste(text) if state.is_ready() => {
-                state.insert_text(&text);
+            Event::Paste(text) => {
+                if state.is_ready() {
+                    state.insert_text(&text);
+                }
             }
             Event::Resize(_, _) => {}
             _ => {}
@@ -3391,8 +3393,10 @@ fn read_chat_turn(stdin: &io::Stdin, show_prompt: bool) -> Result<Option<String>
                     buffer.clear();
                     rendered_lines = render_chat_buffer(rendered_lines, &buffer)?;
                 }
-                KeyCode::Backspace if buffer.pop().is_some() => {
-                    rendered_lines = render_chat_buffer(rendered_lines, &buffer)?;
+                KeyCode::Backspace => {
+                    if buffer.pop().is_some() {
+                        rendered_lines = render_chat_buffer(rendered_lines, &buffer)?;
+                    }
                 }
                 KeyCode::Char(c)
                     if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>

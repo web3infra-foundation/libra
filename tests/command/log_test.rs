@@ -452,13 +452,16 @@ async fn test_execute_log() {
 
     let commit_hash = Head::current_commit().await.unwrap().to_string();
 
-    let reachable_commits = get_reachable_commits(commit_hash.clone(), None)
+    let mut reachable_commits = get_reachable_commits(commit_hash.clone(), None)
         .await
         .unwrap();
+    // newest first
+    reachable_commits.sort_by_key(|c| std::cmp::Reverse(c.committer.timestamp));
+
     //the last seven commits
     let max_output_number = min(6, reachable_commits.len());
     let expected_msgs = [
-        "Commit_6", "Commit_3", "Commit_5", "Commit_2", "Commit_4", "Commit_1",
+        "Commit_6", "Commit_5", "Commit_4", "Commit_3", "Commit_2", "Commit_1",
     ];
     for (i, commit) in reachable_commits.iter().take(max_output_number).enumerate() {
         let msg = commit.message.trim_start_matches('\n');
@@ -561,14 +564,15 @@ async fn test_log_oneline() {
     let args = LogArgs::try_parse_from(["libra", "--number", "3", "--oneline"]);
 
     // Since execute function writes to stdout, we'll test the logic directly
-    let sorted_commits = reachable_commits.clone();
+    let mut sorted_commits = reachable_commits.clone();
+    sorted_commits.sort_by_key(|c| std::cmp::Reverse(c.committer.timestamp));
 
     let max_commits = std::cmp::min(
         args.unwrap().number.unwrap_or(usize::MAX),
         sorted_commits.len(),
     );
 
-    let expected_msgs = ["Commit_6", "Commit_3", "Commit_5"];
+    let expected_msgs = ["Commit_6", "Commit_5", "Commit_4"];
     for (i, commit) in sorted_commits.iter().take(max_commits).enumerate() {
         // Test short hash format (should be 7 characters)
         let short_hash = &commit.id.to_string()[..7];
