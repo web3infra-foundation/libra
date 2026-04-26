@@ -2,6 +2,21 @@
 //!
 //! DeepSeek exposes an OpenAI-compatible Chat Completions endpoint. Common wire
 //! types and helpers are imported from [`openai_compat`](super::super::openai_compat).
+//!
+//! # DeepSeek-specific behaviour
+//!
+//! - **Thinking mode**: When `thinking.type = "enabled"` is set, the API expects every
+//!   prior assistant turn to either carry `reasoning_content` *or* be downgraded to a
+//!   plain user note. [`normalize_messages_for_deepseek_thinking`] performs that
+//!   downgrade for synthetic history (e.g. tool-only intent flows) so the API does
+//!   not reject the request.
+//! - **Streaming**: `stream = true` switches the response shape to NDJSON `data: ...`
+//!   chunks terminated by `data: [DONE]`. [`DeepSeekStreamAccumulator`] reassembles
+//!   chunks into a final [`ChatResponse`]; on partial-body failure the request is
+//!   transparently retried in non-streaming mode (see
+//!   [`should_retry_deepseek_stream_without_stream`]).
+//! - **`reasoning_effort`**: a four-valued discrete control (`low`/`medium`/`high`/`max`)
+//!   that tunes the depth of the chain-of-thought.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -27,7 +42,10 @@ use crate::internal::ai::{
     },
 };
 
-/// DeepSeek completion model.
+/// DeepSeek completion model bound to a specific model identifier and HTTP [`Client`].
+///
+/// Construct via [`CompletionClient::completion_model`] (preferred) or
+/// [`Model::new`].
 #[derive(Clone, Debug)]
 pub struct Model {
     client: Client,
@@ -36,6 +54,10 @@ pub struct Model {
 
 impl Model {
     /// Creates a new DeepSeek completion model.
+    ///
+    /// Boundary conditions:
+    /// - The `model` string is forwarded verbatim; unknown ids fail at request
+    ///   time with a 404.
     pub fn new(client: Client, model: impl Into<String>) -> Self {
         Self {
             client,
@@ -48,6 +70,20 @@ impl Model {
         &self.model
     }
 
+    /// Send a single `POST /chat/completions` request and translate non-2xx responses
+    /// into [`CompletionError::ProviderError`].
+    ///
+    /// Functional scope:
+    /// - On HTTP success the raw `reqwest::Response` is returned so the caller can
+    ///   choose to read the body as JSON (non-streaming) or as a byte stream.
+    /// - On HTTP failure the body is consumed and an attempt is made to decode it as
+    ///   an OpenAI-style `{"error":{"message": ...}}` envelope. If decoding fails the
+    ///   raw body is embedded in the error message instead.
+    ///
+    /// Boundary conditions:
+    /// - Network-level failures bubble up via [`CompletionError::HttpError`].
+    /// - Tracing emits `provider = "deepseek"` for every code path so production logs
+    ///   can be filtered by provider.
     async fn send_chat_completion_request(
         &self,
         request: &DeepSeekRequest,
@@ -101,7 +137,15 @@ impl Model {
 // DeepSeek-specific Request / ToolChoice Types
 // ================================================================
 
-/// DeepSeek request body.
+/// DeepSeek request body sent to `POST /chat/completions`.
+///
+/// Mostly identical to OpenAI's request shape but adds two DeepSeek-specific
+/// fields:
+/// - `thinking` — toggles chain-of-thought emission.
+/// - `reasoning_effort` — a discrete budget knob for depth of reasoning.
+///
+/// `stream` is *always* serialised (no `skip_serializing_if`) because DeepSeek
+/// treats omission as opt-in to streaming for some models.
 #[derive(Debug, Serialize)]
 struct DeepSeekRequest {
     model: String,
@@ -165,6 +209,12 @@ struct DeepSeekToolChoiceFunction {
     name: String,
 }
 
+/// Map Libra's provider-agnostic [`CompletionThinking`] enum to the DeepSeek wire
+/// shape.
+///
+/// Functional scope: Libra's `Auto` is treated as "do not send the field" because
+/// DeepSeek defaults to disabled when the field is absent; explicit `Disabled`
+/// sends `type = "disabled"` so users can override per-request.
 fn deepseek_thinking(thinking: Option<CompletionThinking>) -> Option<DeepSeekThinking> {
     match thinking {
         Some(CompletionThinking::Disabled) => Some(DeepSeekThinking {
@@ -182,6 +232,10 @@ fn deepseek_thinking(thinking: Option<CompletionThinking>) -> Option<DeepSeekThi
     }
 }
 
+/// Convert Libra's [`CompletionReasoningEffort`] into the DeepSeek wire enum.
+///
+/// Functional scope: identity mapping; preserved as a function so the conversion
+/// stays explicit and is easy to extend if either enum gains new variants.
 fn deepseek_reasoning_effort(
     reasoning_effort: Option<CompletionReasoningEffort>,
 ) -> Option<DeepSeekReasoningEffort> {
@@ -194,6 +248,9 @@ fn deepseek_reasoning_effort(
     }
 }
 
+/// Tell whether the request will instruct DeepSeek to emit reasoning content.
+///
+/// Used to decide whether [`normalize_messages_for_deepseek_thinking`] needs to run.
 fn deepseek_thinking_enabled(thinking: &Option<DeepSeekThinking>) -> bool {
     matches!(
         thinking,
@@ -203,6 +260,26 @@ fn deepseek_thinking_enabled(thinking: &Option<DeepSeekThinking>) -> bool {
     )
 }
 
+/// Rewrite history so DeepSeek's thinking mode does not reject the request.
+///
+/// Functional scope:
+/// - DeepSeek thinking models require every prior assistant turn to either carry
+///   `reasoning_content` or be replaced with a synthetic user note that summarises
+///   the previous text and any tool exchange.
+/// - Walks the message list in order, collapses each `Assistant` turn that lacks
+///   `reasoning_content` (plus any directly-following `Tool` results that reference
+///   one of its tool calls) into a single user-role recap message.
+///
+/// Boundary conditions:
+/// - Returns `(rewritten_messages, count)` so the caller can log how many turns
+///   were collapsed; `count == 0` means the request was already compatible.
+/// - Tool messages whose `tool_call_id` does not match any of the collapsed
+///   assistant tool calls are passed through unmodified — they continue to belong
+///   to a *different* assistant turn that did carry `reasoning_content`.
+///
+/// See: `tests::deepseek_thinking_normalizes_synthetic_assistant_messages_without_reasoning`,
+/// `tests::deepseek_thinking_keeps_assistant_messages_with_reasoning_content`,
+/// `tests::deepseek_thinking_collapses_unusable_tool_history_without_reasoning_content`.
 fn normalize_messages_for_deepseek_thinking(
     messages: Vec<ChatMessage>,
 ) -> (Vec<ChatMessage>, usize) {
@@ -273,13 +350,28 @@ fn normalize_messages_for_deepseek_thinking(
     (normalized, converted)
 }
 
+/// Classification of a DeepSeek response choice used purely for observability.
+///
+/// `ReasoningOnly` is a known DeepSeek failure mode where the model returns
+/// only chain-of-thought but no actionable output; logging it separately makes
+/// these incidents easy to spot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DeepSeekResponseKind {
+    /// At least one text part or tool call is present — the agent loop has work to do.
     TextOrTool,
+    /// Only `reasoning_content` is populated; the model produced thinking but no answer.
     ReasoningOnly,
+    /// No content fields at all — the response is unusable.
     Empty,
 }
 
+/// Categorise an assistant choice for tracing/observability.
+///
+/// Functional scope:
+/// - Returns `TextOrTool` when there is at least one non-blank text part or one
+///   tool call.
+/// - Returns `ReasoningOnly` when only chain-of-thought is present.
+/// - Returns `Empty` for whitespace-only / no-content responses.
 fn classify_deepseek_choice(choice: &ChatChoice) -> DeepSeekResponseKind {
     let ChatMessage::Assistant {
         content,
@@ -308,6 +400,10 @@ fn classify_deepseek_choice(choice: &ChatChoice) -> DeepSeekResponseKind {
     DeepSeekResponseKind::Empty
 }
 
+/// A single NDJSON chunk emitted by the streaming `/chat/completions` endpoint.
+///
+/// Each `data: ...` line decodes into one of these. Final `data: [DONE]` markers
+/// are handled by [`process_deepseek_stream_line`] before this struct is touched.
 #[derive(Debug, Deserialize)]
 struct DeepSeekStreamChunk {
     id: String,
@@ -373,6 +469,13 @@ struct DeepSeekStreamToolCallBuilder {
 }
 
 impl DeepSeekStreamToolCallBuilder {
+    /// Tell whether the builder has accumulated enough fragments to form a valid
+    /// tool call.
+    ///
+    /// Functional scope:
+    /// - Requires a non-empty function name.
+    /// - Either the arguments buffer is empty (a zero-argument call), or it parses
+    ///   as valid JSON. Anything in between is treated as a partial fragment.
     fn is_complete(&self) -> bool {
         !self.name.is_empty()
             && (self.arguments.trim().is_empty()
@@ -381,6 +484,11 @@ impl DeepSeekStreamToolCallBuilder {
 }
 
 impl DeepSeekStreamAccumulator {
+    /// Is there enough decoded content that the agent can usefully act on it?
+    ///
+    /// Used to decide whether a mid-stream body error should still be reported as
+    /// success ("we got a usable response, log a warning and continue") versus
+    /// surfaced to the caller as a hard failure.
     fn has_salvageable_response(&self) -> bool {
         !self.content.trim().is_empty()
             || self
@@ -389,12 +497,27 @@ impl DeepSeekStreamAccumulator {
                 .any(DeepSeekStreamToolCallBuilder::is_complete)
     }
 
+    /// Has the stream emitted *any* fragment, even if it is not yet usable?
+    ///
+    /// Distinguishes "stream produced reasoning-only or partial tool calls" from
+    /// "stream produced absolutely nothing"; the former must be wrapped in a
+    /// descriptive error so log readers can see what was lost.
     fn has_partial_output(&self) -> bool {
         !self.content.is_empty()
             || !self.reasoning_content.is_empty()
             || !self.tool_calls.is_empty()
     }
 
+    /// Merge a freshly-decoded NDJSON chunk into the accumulator and emit any
+    /// stream events the consumer can render incrementally.
+    ///
+    /// Functional scope:
+    /// - Captures `id`, `created`, `model`, and `usage` once per stream so the
+    ///   later [`Self::into_response`] can produce a complete final response even
+    ///   when fields appear only on the first or last chunk.
+    /// - Forwards `TextDelta`, `ThinkingDelta`, and (for completed tool calls)
+    ///   `ToolCallPreview` events to `stream_events`, allowing the TUI to render
+    ///   characters as they arrive.
     fn push_chunk(
         &mut self,
         chunk: DeepSeekStreamChunk,
@@ -443,6 +566,18 @@ impl DeepSeekStreamAccumulator {
         }
     }
 
+    /// Apply a tool-call fragment delta to the accumulator.
+    ///
+    /// Functional scope:
+    /// - Tool call fragments may arrive across many chunks: the first chunk
+    ///   typically supplies the `id` and function `name`; subsequent chunks
+    ///   stream the JSON `arguments` payload character-by-character.
+    /// - Once a builder's arguments parse as valid JSON, a `ToolCallPreview` event
+    ///   is published so the UI can render the call before the stream completes.
+    ///
+    /// Boundary conditions:
+    /// - DeepSeek occasionally omits the per-tool-call `index`; in that case the
+    ///   choice's index is used as a fallback so concurrent calls do not collide.
     fn push_tool_call_delta(
         &mut self,
         fallback_index: usize,
@@ -484,6 +619,20 @@ impl DeepSeekStreamAccumulator {
         }
     }
 
+    /// Finalise the accumulator into a single [`ChatResponse`] equivalent to a
+    /// non-streaming request response.
+    ///
+    /// Functional scope:
+    /// - Fills in sensible defaults for `id`, `model`, and `finish_reason` when
+    ///   the stream omitted them.
+    /// - Forces empty arguments to `"{}"` so the resulting tool call is still
+    ///   valid JSON.
+    ///
+    /// Boundary conditions:
+    /// - Returns [`CompletionError::ResponseError`] if any tool-call builder lacks
+    ///   a function name. This indicates a server-side protocol violation; the
+    ///   caller must surface it to the user rather than silently dropping the
+    ///   broken tool call.
     fn into_response(self, fallback_model: &str) -> Result<ChatResponse, CompletionError> {
         let mut tool_calls = Vec::new();
         for (index, builder) in self.tool_calls {
@@ -544,6 +693,19 @@ impl DeepSeekStreamAccumulator {
     }
 }
 
+/// Decode and apply one logical line from the streaming response body.
+///
+/// Functional scope:
+/// - Skips empty lines and SSE comments (lines beginning with `:`).
+/// - Recognises the literal `data: [DONE]` terminator and signals end-of-stream
+///   via the returned `bool`.
+/// - Decodes any other `data: ...` payload as a [`DeepSeekStreamChunk`] and
+///   merges it into `accumulator`.
+///
+/// Boundary conditions:
+/// - Invalid UTF-8 lines surface as [`CompletionError::ResponseError`].
+/// - JSON decode errors propagate via the `From<serde_json::Error>` impl on
+///   [`CompletionError`].
 fn process_deepseek_stream_line(
     line: &[u8],
     accumulator: &mut DeepSeekStreamAccumulator,
@@ -569,6 +731,20 @@ fn process_deepseek_stream_line(
     Ok(false)
 }
 
+/// Drive the streaming HTTP body to completion and assemble the final response.
+///
+/// Functional scope:
+/// - Reads bytes from `response`'s `bytes_stream`, splits them on newlines, and
+///   dispatches each line to [`process_deepseek_stream_line`].
+/// - Salvages the response when a body read error arrives *after* the model has
+///   already produced a usable answer; otherwise the error is wrapped in a
+///   [`CompletionError`] that explains how much partial state was lost.
+///
+/// Boundary conditions:
+/// - Trailing bytes that do not end in a newline are still attempted as a final
+///   line so the last `data: ...` chunk is not silently discarded.
+/// - The `fallback_model` is only used when DeepSeek omits the `model` field
+///   from every chunk, which the spec allows.
 async fn read_deepseek_stream_response(
     response: reqwest::Response,
     fallback_model: &str,
@@ -623,6 +799,12 @@ async fn read_deepseek_stream_response(
     accumulator.into_response(fallback_model)
 }
 
+/// Wrap a `reqwest` body-read error with a description of any partial output that
+/// was lost.
+///
+/// Functional scope: keeps the original `reqwest::Error` when there is nothing to
+/// report; otherwise emits a [`CompletionError::ResponseError`] message with a
+/// byte/fragment count so operators can correlate the failure with logs.
 fn deepseek_stream_body_error(
     error: reqwest::Error,
     accumulator: &DeepSeekStreamAccumulator,
@@ -640,6 +822,11 @@ fn deepseek_stream_body_error(
     CompletionError::HttpError(error)
 }
 
+/// Read a non-streaming JSON response body and decode it into a [`ChatResponse`].
+///
+/// Functional scope: emits a `tracing::debug!` event with byte counts and per-token
+/// usage on success so production logs include billing information without
+/// requiring a separate metrics path.
 async fn read_deepseek_json_response(
     response: reqwest::Response,
 ) -> Result<ChatResponse, CompletionError> {
@@ -670,6 +857,15 @@ async fn read_deepseek_json_response(
     Ok(response)
 }
 
+/// Decide whether a stream failure should be retried as a non-streaming request.
+///
+/// Functional scope:
+/// - Body and timeout errors are retryable: DeepSeek occasionally drops the
+///   socket mid-stream while the same request would have succeeded synchronously.
+/// - Custom `ResponseError` messages emitted by [`deepseek_stream_body_error`] are
+///   matched verbatim so the retry path stays in lockstep with the wrapper.
+/// - All other error categories (HTTP 4xx, JSON malformed, non-implemented) are
+///   *not* retried — re-issuing them would only burn tokens.
 fn should_retry_deepseek_stream_without_stream(error: &CompletionError) -> bool {
     match error {
         CompletionError::HttpError(error) => error.is_body() || error.is_timeout(),
@@ -690,6 +886,26 @@ fn should_retry_deepseek_stream_without_stream(error: &CompletionError) -> bool 
 impl CompletionModelTrait for Model {
     type Response = ChatResponse;
 
+    /// Drive a single chat completion against DeepSeek.
+    ///
+    /// Functional scope:
+    /// 1. Build messages — `build_messages_with_reasoning_content` because
+    ///    DeepSeek thinking mode requires the previous reasoning to be echoed.
+    /// 2. If thinking is enabled, run [`normalize_messages_for_deepseek_thinking`]
+    ///    so prior assistant turns without `reasoning_content` are downgraded to
+    ///    user notes (otherwise the API rejects the request).
+    /// 3. Send the request. For streaming responses, parse with
+    ///    [`read_deepseek_stream_response`]; on a salvageable mid-body failure,
+    ///    retry once in non-streaming mode.
+    /// 4. Decode the chosen result, classify it for tracing, and return the
+    ///    provider-agnostic [`CompletionResponse`].
+    ///
+    /// Boundary conditions:
+    /// - Empty `choices` arrays produce [`CompletionError::ResponseError`].
+    /// - The retry policy is intentionally limited to a single fallback attempt
+    ///   to avoid burning tokens on persistent failures.
+    /// - All `tracing::debug!` events tag `provider = "deepseek"` so logs can be
+    ///   filtered or aggregated across providers.
     async fn completion(
         &self,
         request: CompletionRequest,
@@ -836,6 +1052,7 @@ impl CompletionModelTrait for Model {
 impl CompletionClient for Client {
     type Model = Model;
 
+    /// Bind a model identifier to this client and return a ready-to-use [`Model`].
     fn completion_model(&self, model: impl Into<String>) -> Self::Model {
         Model::new(self.clone(), model)
     }
@@ -852,6 +1069,8 @@ mod tests {
     use super::*;
     use crate::internal::ai::providers::openai_compat::{ChatFunctionDefinition, ChatMessage};
 
+    /// Scenario: pin the on-the-wire request shape, especially `stream` which is
+    /// always serialised to avoid DeepSeek's "absent means streaming" quirk.
     #[test]
     fn test_deepseek_request_serialization() {
         let request = DeepSeekRequest {
@@ -878,6 +1097,8 @@ mod tests {
         assert!(json.contains("\"stream\":false"));
     }
 
+    /// Scenario: DeepSeek serialises `tool_choice = Auto` as a bare string
+    /// (`"auto"`), not the OpenAI-style object form. Pin that distinction.
     #[test]
     fn test_deepseek_tool_choice_serialization() {
         let request = DeepSeekRequest {
@@ -910,6 +1131,9 @@ mod tests {
         assert_eq!(json["tool_choice"], "auto");
     }
 
+    /// Scenario: when thinking + reasoning_effort are both supplied, they must
+    /// arrive on the wire as the nested `thinking.type = enabled` object plus a
+    /// flat `reasoning_effort` string.
     #[test]
     fn test_deepseek_reasoning_request_serialization() {
         let request = DeepSeekRequest {
@@ -931,6 +1155,9 @@ mod tests {
         assert_eq!(json["stream"], false);
     }
 
+    /// Scenario: prior assistant turns without `reasoning_content` are
+    /// disallowed in thinking mode. Verify the helper rewrites them as
+    /// user-role recap notes that carry forward the original text.
     #[test]
     fn deepseek_thinking_normalizes_synthetic_assistant_messages_without_reasoning() {
         let messages = vec![
@@ -959,6 +1186,8 @@ mod tests {
         ));
     }
 
+    /// Scenario: assistant messages that *do* carry `reasoning_content` are
+    /// already valid in thinking mode and must pass through untouched.
     #[test]
     fn deepseek_thinking_keeps_assistant_messages_with_reasoning_content() {
         let messages = vec![ChatMessage::Assistant {
@@ -987,6 +1216,9 @@ mod tests {
         ));
     }
 
+    /// Scenario: tool exchanges that follow an assistant turn without
+    /// `reasoning_content` must collapse into a single user recap, dropping
+    /// only the turns that thinking mode cannot accept.
     #[test]
     fn deepseek_thinking_collapses_unusable_tool_history_without_reasoning_content() {
         let messages = vec![
@@ -1026,6 +1258,8 @@ mod tests {
         assert!(matches!(&normalized[1], ChatMessage::User { content } if content == "Continue"));
     }
 
+    /// Scenario: opt-in streaming must surface as `"stream": true` so the API
+    /// dispatches the SSE codepath rather than the JSON one.
     #[test]
     fn test_deepseek_stream_request_serialization() {
         let request = DeepSeekRequest {
@@ -1045,6 +1279,9 @@ mod tests {
         assert_eq!(json["stream"], true);
     }
 
+    /// Scenario: a multi-chunk text stream with intermediate reasoning content
+    /// and a final `[DONE]` marker must produce a fully-merged response while
+    /// also publishing the per-delta stream events the TUI consumes.
     #[test]
     fn test_deepseek_stream_accumulates_text_and_usage() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1110,6 +1347,9 @@ mod tests {
         ));
     }
 
+    /// Scenario: a streaming tool call with full arguments in a single chunk
+    /// must reconstruct as a complete tool call and emit a `ToolCallPreview`
+    /// event so the UI can render the call before completion.
     #[test]
     fn test_deepseek_stream_accumulates_tool_calls() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1139,6 +1379,9 @@ mod tests {
         ));
     }
 
+    /// Scenario: only text or completed tool calls count as "salvageable" —
+    /// reasoning-only output must not trigger the warn-and-continue path,
+    /// because the agent loop has nothing to act on.
     #[test]
     fn test_deepseek_stream_salvageable_response_detection() {
         let mut reasoning_only = DeepSeekStreamAccumulator::default();
@@ -1170,6 +1413,9 @@ mod tests {
         assert!(with_tool_call.has_salvageable_response());
     }
 
+    /// Scenario: the descriptive `ResponseError` produced when a stream ends
+    /// before usable output must be matched by the retry predicate so the
+    /// agent transparently falls back to the non-streaming endpoint.
     #[test]
     fn test_deepseek_stream_body_error_triggers_non_stream_fallback() {
         let error = CompletionError::ResponseError(
@@ -1180,6 +1426,8 @@ mod tests {
         assert!(should_retry_deepseek_stream_without_stream(&error));
     }
 
+    /// Scenario: `Max` must serialise as the lowercase string `"max"` per
+    /// DeepSeek's wire spec; a stray capitalisation would be silently rejected.
     #[test]
     fn test_deepseek_max_reasoning_effort_serialization() {
         let effort = deepseek_reasoning_effort(Some(CompletionReasoningEffort::Max));
@@ -1188,6 +1436,8 @@ mod tests {
         assert_eq!(json, "max");
     }
 
+    /// Scenario: a canonical text-only response should round-trip through
+    /// serde with usage stats intact.
     #[test]
     fn test_deepseek_response_deserialization() {
         let json = r#"
@@ -1219,6 +1469,9 @@ mod tests {
         assert_eq!(response.usage.unwrap().total_tokens, 21);
     }
 
+    /// Scenario: thinking-mode responses arrive with `reasoning_content` plus
+    /// a tool call; both fields must decode and surface through the helper
+    /// accessors.
     #[test]
     fn test_deepseek_reasoning_content_deserialization() {
         let json = r#"
@@ -1264,6 +1517,8 @@ mod tests {
         ));
     }
 
+    /// Scenario: cover all four classifier branches — text only, text+tool,
+    /// reasoning only, and empty — so the tracing labels never drift.
     #[test]
     fn deepseek_classifies_text_tool_reasoning_only_and_empty_responses() {
         let text_choice = ChatChoice {
@@ -1330,6 +1585,8 @@ mod tests {
         );
     }
 
+    /// Scenario: smoke-test that `Model::new` stores the model identifier
+    /// verbatim.
     #[test]
     fn test_model_new() {
         let client = Client::with_api_key("test-key".to_string());
@@ -1337,6 +1594,9 @@ mod tests {
         assert_eq!(model.model_name(), "deepseek-chat");
     }
 
+    /// Scenario: `CompletionClient::completion_model` is the canonical entry
+    /// point used by the agent runtime; verify it produces a `Model` bound to
+    /// the requested identifier.
     #[test]
     fn test_client_completion_model() {
         let client = Client::with_api_key("test-key".to_string());

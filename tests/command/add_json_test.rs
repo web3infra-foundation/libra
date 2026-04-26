@@ -1,6 +1,14 @@
 //! Structured JSON output tests for `libra add`.
 //!
 //! **Layer:** L1 — deterministic, no external dependencies.
+//!
+//! These tests pin the JSON envelope shape (`ok`, `command`, `data { added,
+//! modified, removed, refreshed, ignored, failed, dry_run }`) and the error
+//! envelope (`ok=false`, `error_code`) emitted on stderr. Each test uses a
+//! fresh `tempdir()` and either an empty repo or `create_committed_repo()`
+//! which lays down `base.txt` plus an initial commit so subsequent staging
+//! can produce `modified`/`refreshed` rows. Schema regressions here are
+//! breaking changes for downstream consumers (CI parsers, AI agents, MCP).
 
 use std::fs;
 
@@ -12,13 +20,17 @@ use super::{assert_cli_success, configure_identity_via_cli, init_repo_via_cli, r
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Parse the trimmed stdout of an Output as JSON or panic with the raw bytes
+/// for diagnostic purposes. Local copy that includes the failing string in the
+/// panic message (the `mod.rs` version does not).
 fn parse_json_stdout(output: &std::process::Output) -> serde_json::Value {
     let stdout = String::from_utf8_lossy(&output.stdout);
     serde_json::from_str(stdout.trim())
         .unwrap_or_else(|e| panic!("expected JSON output, got: {stdout}\nerror: {e}"))
 }
 
-/// Create a repo with identity configured and an initial commit.
+/// Create a repo with identity configured and an initial commit on `base.txt`.
+/// Used as a baseline for every test that needs an existing tracked file.
 fn create_committed_repo() -> tempfile::TempDir {
     let repo = tempdir().expect("tempdir");
     init_repo_via_cli(repo.path());
@@ -37,6 +49,10 @@ fn create_committed_repo() -> tempfile::TempDir {
 // Schema completeness
 // ---------------------------------------------------------------------------
 
+/// Scenario: `libra --json add <new>` emits the canonical envelope with
+/// `ok=true`, `command="add"`, the new file in `data.added`, and every other
+/// bucket (`modified`, `removed`, `refreshed`, `ignored`, `failed`) empty.
+/// `dry_run` must be `false`. Pins the schema for first-time adds.
 #[test]
 fn json_add_new_file_returns_structured_schema() {
     let repo = tempdir().unwrap();
@@ -67,6 +83,9 @@ fn json_add_new_file_returns_structured_schema() {
     assert_eq!(data["dry_run"], false);
 }
 
+/// Scenario: editing an already-tracked file and re-running `add` should put
+/// the path in `data.modified` (not `added`). Confirms the bucket selection
+/// logic distinguishes new vs. updated content.
 #[test]
 fn json_add_modified_file() {
     let repo = create_committed_repo();
@@ -94,6 +113,10 @@ fn json_add_modified_file() {
 // --dry-run --json
 // ---------------------------------------------------------------------------
 
+/// Scenario: `--dry-run` must report what would be staged in `data.added`,
+/// set `data.dry_run=true`, and leave the index untouched (cross-checked via
+/// `status --short`). Guards both the JSON shape and the side-effect-free
+/// invariant.
 #[test]
 fn json_dry_run_does_not_modify_index() {
     let repo = tempdir().unwrap();
@@ -128,6 +151,11 @@ fn json_dry_run_does_not_modify_index() {
 // --refresh --json
 // ---------------------------------------------------------------------------
 
+/// Scenario: `add --refresh` only updates index stat metadata when content
+/// hashes are unchanged. The JSON output must always include a `refreshed`
+/// array (possibly empty depending on platform mtime granularity) and leave
+/// `added`/`modified`/`removed` empty. Touches the file by rewriting the
+/// same bytes after a 50 ms sleep so mtime can advance.
 #[test]
 fn json_refresh_returns_refreshed_array() {
     let repo = create_committed_repo();
@@ -157,6 +185,9 @@ fn json_refresh_returns_refreshed_array() {
 // -A --json
 // ---------------------------------------------------------------------------
 
+/// Scenario: `-A` must include both new and modified files in the
+/// appropriate buckets in a single invocation. Pins the multi-bucket
+/// behavior of the all-changes flag.
 #[test]
 fn json_add_all_includes_all_changes() {
     let repo = create_committed_repo();
@@ -193,6 +224,9 @@ fn json_add_all_includes_all_changes() {
 // -u --json (update tracked only, no new files)
 // ---------------------------------------------------------------------------
 
+/// Scenario: `-u` (update tracked-only) must NOT report new files in
+/// `data.added`; only the modified tracked file should appear in
+/// `data.modified`. Locks in the difference between `-A` and `-u`.
 #[test]
 fn json_add_update_excludes_new_files() {
     let repo = create_committed_repo();
@@ -223,6 +257,9 @@ fn json_add_update_excludes_new_files() {
 // --force --json
 // ---------------------------------------------------------------------------
 
+/// Scenario: `-f` overrides `.libraignore` so an ignored path is staged
+/// (appears in `data.added`) and the `data.ignored` bucket stays empty.
+/// Locks in the override semantics.
 #[test]
 fn json_force_add_ignored_file() {
     let repo = tempdir().unwrap();
@@ -259,6 +296,9 @@ fn json_force_add_ignored_file() {
 // --force --dry-run --json
 // ---------------------------------------------------------------------------
 
+/// Scenario: combining `-f --dry-run` must preview the ignored file in
+/// `data.added` with `data.dry_run=true` while leaving the index unchanged.
+/// Verifies that `--force` does not bypass the `--dry-run` guard.
 #[test]
 fn json_force_dry_run_previews_ignored_file() {
     let repo = tempdir().unwrap();
@@ -295,6 +335,9 @@ fn json_force_dry_run_previews_ignored_file() {
 // ignored-only JSON: ok == false
 // ---------------------------------------------------------------------------
 
+/// Scenario: pointing `--json add` at a single ignored path must produce
+/// a structured error envelope on stderr with `ok=false` and
+/// `error_code="LBR-ADD-001"`. Pins the error-code contract.
 #[test]
 fn json_ignored_only_returns_error() {
     let repo = tempdir().unwrap();
@@ -318,6 +361,9 @@ fn json_ignored_only_returns_error() {
 // Nothing specified JSON
 // ---------------------------------------------------------------------------
 
+/// Scenario: `--json add` with no pathspec must exit 129 (CLI usage) and
+/// emit a structured error envelope with `error_code="LBR-CLI-002"`. Guards
+/// the no-arg failure path.
 #[test]
 fn json_nothing_specified_returns_error() {
     let repo = tempdir().unwrap();
@@ -337,6 +383,8 @@ fn json_nothing_specified_returns_error() {
 // No changes scenario
 // ---------------------------------------------------------------------------
 
+/// Scenario: re-adding an unchanged tracked file must succeed with all
+/// buckets empty. Confirms that "no-op" still produces a valid envelope.
 #[test]
 fn json_add_no_changes() {
     let repo = create_committed_repo();
@@ -357,6 +405,9 @@ fn json_add_no_changes() {
 // Paths are relative, no leading /
 // ---------------------------------------------------------------------------
 
+/// Scenario: paths emitted in JSON `data.added` must be repository-relative
+/// (no absolute-path leak). Cross-platform regression guard against accidental
+/// absolute-path serialization.
 #[test]
 fn json_paths_are_relative_no_leading_slash() {
     let repo = tempdir().unwrap();
@@ -380,6 +431,9 @@ fn json_paths_are_relative_no_leading_slash() {
 // --machine produces single-line JSON
 // ---------------------------------------------------------------------------
 
+/// Scenario: `--machine add` must emit exactly one non-empty stdout line
+/// containing valid JSON (NDJSON-friendly). Regression guard for tooling
+/// that pipes Libra into line-oriented JSON consumers.
 #[test]
 fn machine_add_is_single_line_json() {
     let repo = tempdir().unwrap();
@@ -405,6 +459,10 @@ fn machine_add_is_single_line_json() {
 // Partial ignore JSON: ok == true + ignored list
 // ---------------------------------------------------------------------------
 
+/// Scenario: when `add` receives a mix of staged and ignored paths, the
+/// envelope must still report `ok=true` with the staged file in `data.added`
+/// and the ignored file enumerated in `data.ignored`. Pins the partial-success
+/// contract.
 #[test]
 fn json_partial_ignore_returns_ok_with_ignored_list() {
     let repo = tempdir().unwrap();
@@ -445,6 +503,9 @@ fn json_partial_ignore_returns_ok_with_ignored_list() {
 // Error JSON: pathspec not matched
 // ---------------------------------------------------------------------------
 
+/// Scenario: a pathspec that matches no file must yield exit code 129 and
+/// a structured error envelope with `error_code="LBR-CLI-003"` and the
+/// offending path in `message`. Locks the error tag and message contract.
 #[test]
 fn json_pathspec_not_matched_returns_error() {
     let repo = tempdir().unwrap();

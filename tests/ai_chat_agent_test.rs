@@ -1,25 +1,50 @@
 //! L3 integration test for stateful ChatAgent conversation with real Gemini API.
 //!
-//! **Layer:** L3 — requires `GEMINI_API_KEY`. Skipped silently when unset.
+//! Drives a `ChatAgent` (which wraps a base `Agent` plus a turn history) across two
+//! prompts to confirm history is forwarded into subsequent completion requests — the
+//! canonical test of the runtime's "memory" wiring against a live provider.
+//!
+//! **Layer:** L3 — opt-in live gate. Skipped unless `LIBRA_AI_LIVE_GEMINI=1`
+//! and `GEMINI_API_KEY` are both set so default tests do not depend on Google
+//! Cloud project API enablement.
 
 use libra::internal::ai::{
     agent::{AgentBuilder, ChatAgent},
     providers::gemini::Client,
 };
 
+/// Return `true` only for an explicit live Gemini run.
+///
+/// Boundary: a configured `GEMINI_API_KEY` alone is insufficient because `.env.test`
+/// may contain a key for a project where the Generative Language API is disabled.
+fn live_gemini_enabled() -> bool {
+    std::env::var("LIBRA_AI_LIVE_GEMINI").is_ok_and(|value| value == "1")
+        && std::env::var("GEMINI_API_KEY").is_ok_and(|value| !value.is_empty())
+}
+
 /// Integration test for ChatAgent state management with real Gemini API.
+///
+/// Scenario: opens a two-turn conversation. Turn 1 establishes the user's name; Turn 2
+/// asks for it back. The test passes only when the second response references "libra",
+/// proving that the `ChatAgent` actually replays history into each completion request.
+/// Also asserts the in-memory transcript is exactly four messages (user/asst x 2),
+/// catching regressions where history is dropped or duplicated.
+///
+/// Boundary: skipped unless `LIBRA_AI_LIVE_GEMINI=1` and `GEMINI_API_KEY` are both
+/// set.
 ///
 /// # Setup
 /// This test requires a valid `GEMINI_API_KEY` environment variable.
 ///
 /// ```bash
+/// export LIBRA_AI_LIVE_GEMINI=1
 /// export GEMINI_API_KEY="your_key_here"
 /// cargo test --test ai_chat_agent_test test_chat_agent_conversation
 /// ```
 #[tokio::test]
 async fn test_chat_agent_conversation() {
-    if std::env::var("GEMINI_API_KEY").map_or(true, |v| v.is_empty()) {
-        eprintln!("skipped (GEMINI_API_KEY not set)");
+    if !live_gemini_enabled() {
+        eprintln!("skipped (set LIBRA_AI_LIVE_GEMINI=1 and GEMINI_API_KEY to run Gemini gate)");
         return;
     }
 

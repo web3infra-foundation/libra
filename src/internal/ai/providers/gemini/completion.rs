@@ -53,6 +53,9 @@ impl CompletionModel {
     /// # Arguments
     /// * `client` - The configured Gemini client.
     /// * `model` - The model identifier.
+    ///
+    /// Boundary conditions: the model id is forwarded verbatim and not validated;
+    /// unknown identifiers fail at request time with HTTP 404.
     pub fn new(client: Client, model: impl Into<String>) -> Self {
         Self {
             client,
@@ -60,7 +63,7 @@ impl CompletionModel {
         }
     }
 
-    /// Returns the model name.
+    /// Returns the model name as supplied at construction.
     pub fn model_name(&self) -> &str {
         &self.model
     }
@@ -69,6 +72,27 @@ impl CompletionModel {
 impl CompletionModelTrait for CompletionModel {
     type Response = GenerateContentResponse;
 
+    /// Drive a single chat completion against the Gemini API.
+    ///
+    /// Functional scope:
+    /// - Translates each [`Message`] into Gemini's [`Content`] entries, mapping
+    ///   the assistant role to `"model"` and merging `Message::System` entries
+    ///   into `"user"` content (Gemini has no `"system"` role inside `contents`).
+    /// - Hoists the optional preamble into the dedicated `system_instruction`
+    ///   field — the only correct location per the Gemini wire format.
+    /// - Converts tools through [`convert_tools_to_gemini`] which produces a
+    ///   single `[ToolDeclaration]` containing every function declaration.
+    ///
+    /// Boundary conditions:
+    /// - User images return [`CompletionError::NotImplemented`]; the Gemini
+    ///   provider is currently text-only inside Libra.
+    /// - On non-2xx responses, only the first 1KB of the body is read to bound
+    ///   memory usage on pathological error pages and avoid blocking on a slow
+    ///   error stream.
+    /// - Successful responses are deserialised eagerly via
+    ///   [`reqwest::Response::json`]; deserialisation failures surface as
+    ///   [`CompletionError::HttpError`] (the type Gemini's `reqwest` JSON path
+    ///   returns).
     async fn completion(
         &self,
         request: CompletionRequest,
@@ -224,14 +248,20 @@ impl CompletionUsage for GenerateContentResponse {
 /// Extracts text segments and function calls from the first candidate in a
 /// Gemini `GenerateContentResponse`.
 ///
-/// Each [`Part`] in the candidate content is inspected: text parts become
-/// [`AssistantContent::Text`] and function-call parts become
-/// [`AssistantContent::ToolCall`]. Because the Gemini API does not return
-/// tool-call IDs, a synthetic ID is generated from the function name and
-/// the part index (e.g., `call-get_weather-1`).
+/// Functional scope:
+/// - Each [`Part`] in the candidate content is inspected: text parts become
+///   [`AssistantContent::Text`] and function-call parts become
+///   [`AssistantContent::ToolCall`].
+/// - Because the Gemini API does not return tool-call IDs, a synthetic ID is
+///   generated from the function name and the part index (e.g.,
+///   `call-get_weather-1`). Down-stream code must use this ID when echoing the
+///   tool result back, otherwise the model cannot correlate it.
 ///
-/// Returns an error if the response contains no candidates or if no
-/// actionable content (text or tool calls) is found.
+/// Boundary conditions:
+/// - Returns [`CompletionError::ResponseError`] if the response contains no
+///   candidates (typical for safety-blocked outputs) or if no actionable content
+///   (text or tool calls) is found.
+/// - Whitespace-only text parts are dropped to keep downstream rendering clean.
 fn parse_assistant_output(
     api_resp: &GenerateContentResponse,
 ) -> Result<Vec<AssistantContent>, CompletionError> {
@@ -276,11 +306,17 @@ fn parse_assistant_output(
 /// Converts generic [`ToolDefinition`] values into Gemini's
 /// [`ToolDeclaration`] / [`FunctionDeclaration`] wire format.
 ///
-/// Each tool's JSON Schema `parameters` object is destructured into
-/// Gemini's [`FunctionParameters`] (type, properties, required). All
-/// function declarations are grouped into a single [`ToolDeclaration`],
-/// which matches the Gemini API expectation of a top-level `tools` array
-/// containing objects with `function_declarations`.
+/// Functional scope:
+/// - Each tool's JSON Schema `parameters` object is destructured into Gemini's
+///   [`FunctionParameters`] (type, properties, required).
+/// - All function declarations are grouped into a single [`ToolDeclaration`],
+///   which matches the Gemini API expectation of a top-level `tools` array
+///   containing objects with `function_declarations`.
+///
+/// Boundary conditions:
+/// - Tools whose `parameters` are not a JSON object (or lack a `type` field)
+///   produce a function declaration with no parameters — Gemini treats this as
+///   a zero-argument tool rather than rejecting the request.
 fn convert_tools_to_gemini(tools: &[ToolDefinition]) -> Vec<ToolDeclaration> {
     let mut function_declarations = Vec::new();
 

@@ -1,3 +1,8 @@
+//! Mock completion model used by runtime and tool-loop tests.
+//!
+//! Scenario focus: deterministic provider responses, injected failures, and captured
+//! follow-up requests so tests can assert orchestration behavior without live AI calls.
+
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},

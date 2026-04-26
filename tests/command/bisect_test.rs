@@ -1,6 +1,15 @@
-//! Tests bisect command functionality for finding commits that introduced bugs.
+//! Tests `libra bisect` for finding the commit that introduced a regression.
 //!
 //! **Layer:** L1 — deterministic, no external dependencies.
+//!
+//! Fixture convention: each test sets up a fresh repo via
+//! `setup_with_new_libra_in()`, configures a stable identity, and uses
+//! `create_linear_commits(n)` to lay down a straight chain of commits whose
+//! hashes are returned newest-first. The sub-state machine `BisectState` is
+//! inspected directly to verify that `start`/`bad`/`good`/`skip`/`reset`
+//! transitions write the expected on-disk state. CLI-level smoke tests at
+//! the bottom run the binary outside or inside an empty repo to confirm
+//! the user-visible failure behaviour.
 
 use std::process::Command;
 
@@ -52,7 +61,8 @@ fn init_repo_via_cli(repo: &std::path::Path) {
     );
 }
 
-/// Configure test identity for commits
+/// Configure test identity directly through the in-process config layer.
+/// Required before any commit because Libra refuses to author without it.
 async fn configure_identity() {
     ConfigKv::set("user.name", "Bisect Test", false)
         .await
@@ -62,8 +72,12 @@ async fn configure_identity() {
         .unwrap();
 }
 
-/// Create a linear chain of commits and return their hashes in order (newest first)
-/// So hashes[0] = latest commit, hashes[n-1] = oldest commit
+/// Create a linear chain of `count` commits, each modifying `file.txt`.
+///
+/// Returns the commit hashes ordered newest-first: `hashes[0]` is HEAD and
+/// `hashes[count - 1]` is the root commit. The first commit also stages
+/// `.libraignore` so subsequent runs see a clean tree. Assumes the caller
+/// already holds a `ChangeDirGuard` rooted in a fresh repo.
 async fn create_linear_commits(count: usize) -> Vec<String> {
     let mut hashes = Vec::new();
 
@@ -110,6 +124,9 @@ async fn create_linear_commits(count: usize) -> Vec<String> {
     hashes
 }
 
+/// Scenario: `bisect start` (no bounds) must transition the repo into the
+/// `in_progress` state with empty `bad` and `good` slots. Pins the initial
+/// state shape.
 #[tokio::test]
 #[serial]
 async fn test_bisect_start_creates_state() {
@@ -137,6 +154,9 @@ async fn test_bisect_start_creates_state() {
     assert!(state.good.is_empty());
 }
 
+/// Scenario: `bisect start <bad> <good>` must record both bounds and
+/// immediately check out a midpoint commit (`state.current` populated).
+/// Confirms the binary search seeding behaviour.
 #[tokio::test]
 #[serial]
 async fn test_bisect_start_with_bad_and_good() {
@@ -167,6 +187,9 @@ async fn test_bisect_start_with_bad_and_good() {
     assert!(state.current.is_some());
 }
 
+/// Scenario: marking `bad` followed by `good` on a 3-commit chain narrows
+/// the search to the single middle commit, which becomes `state.current`.
+/// Locks in the bisection convergence path.
 #[tokio::test]
 #[serial]
 async fn test_bisect_mark_bad_then_good() {
@@ -206,6 +229,10 @@ async fn test_bisect_mark_bad_then_good() {
     assert_eq!(state.current.unwrap().to_string(), hashes[1]);
 }
 
+/// Scenario: end-to-end bisection over 7 commits where commits 4-6 are
+/// "bad". The loop drives the algorithm to termination using the index of
+/// the current commit as ground truth. Confirms the algorithm terminates
+/// and exits the bisect session cleanly.
 #[tokio::test]
 #[serial]
 async fn test_bisect_find_first_bad_commit() {
@@ -259,6 +286,10 @@ async fn test_bisect_find_first_bad_commit() {
     assert!(!BisectState::is_in_progress().await.unwrap());
 }
 
+/// Scenario: `bisect reset` must clear the in-progress state and return
+/// HEAD to its pre-bisect commit. Pins both the state-cleanup and the
+/// HEAD-restore behaviour after a session is started and `bad`/`good`
+/// have moved HEAD off the original tip.
 #[tokio::test]
 #[serial]
 async fn test_bisect_reset() {
@@ -304,6 +335,9 @@ async fn test_bisect_reset() {
     assert_eq!(Head::current_commit().await.unwrap().to_string(), orig_head);
 }
 
+/// Scenario: `bisect skip` must record the current commit in
+/// `state.skipped` and advance to a different commit. Locks in the skip
+/// behaviour for untestable commits.
 #[tokio::test]
 #[serial]
 async fn test_bisect_skip() {
@@ -342,6 +376,9 @@ async fn test_bisect_skip() {
     assert_ne!(state.current.unwrap().to_string(), current);
 }
 
+/// Scenario: `bisect log` must execute without error during an active
+/// session. Smoke-tests the log subcommand path (the actual log content is
+/// not asserted here).
 #[tokio::test]
 #[serial]
 async fn test_bisect_log() {
@@ -365,6 +402,8 @@ async fn test_bisect_log() {
     execute_safe(args, &OutputConfig::default()).await.unwrap();
 }
 
+/// Scenario: starting a second bisect session while one is active must
+/// return an error. Pins the "single active session" invariant.
 #[tokio::test]
 #[serial]
 async fn test_bisect_start_already_in_progress_fails() {
@@ -392,6 +431,8 @@ async fn test_bisect_start_already_in_progress_fails() {
     assert!(result.is_err());
 }
 
+/// Scenario: `bad`, `good`, and `skip` must all return errors when no
+/// bisect session has been started. Pins the no-implicit-session contract.
 #[tokio::test]
 #[serial]
 async fn test_bisect_operations_without_session_fails() {
@@ -419,6 +460,10 @@ async fn test_bisect_operations_without_session_fails() {
     assert!(result.is_err());
 }
 
+/// Scenario: invoking `libra bisect start` outside any repo through the
+/// real binary must exit 128 and emit a "fatal" message on stderr. Note
+/// the explicit `#[::std::prelude::rust_2024::test]` path because the
+/// surrounding async tests pull `tokio::test` into scope.
 #[::std::prelude::rust_2024::test]
 fn test_bisect_cli_outside_repository_returns_fatal() {
     let temp = tempdir().unwrap();
@@ -432,6 +477,8 @@ fn test_bisect_cli_outside_repository_returns_fatal() {
     );
 }
 
+/// Scenario: `libra bisect start` against a repo with no commits must
+/// fail (no objects to walk). Captures the "empty history" error path.
 #[::std::prelude::rust_2024::test]
 fn test_bisect_cli_empty_repository_returns_fatal() {
     let repo = tempdir().unwrap();

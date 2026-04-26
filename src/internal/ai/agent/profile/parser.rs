@@ -1,8 +1,23 @@
-//! Agent profile parser: markdown + YAML frontmatter → AgentProfile.
+//! Agent profile parser: markdown + YAML frontmatter → [`AgentProfile`].
+//!
+//! Profiles are author-friendly: a markdown file fronted by a `---` fenced YAML block
+//! whose keys (`name`, `description`, `tools`, `model`) describe the agent and whose
+//! body contains the system prompt. The intentionally minimal parser tolerates only the
+//! shapes that the embedded defaults and project agents actually use, keeping startup
+//! costs low and avoiding a YAML dependency on this hot path.
+//!
+//! Companion modules:
+//! - [`super::router`] — discovers profile files on disk, resolves the three-tier
+//!   hierarchy, and matches a profile against user input.
+//! - [`super`] — re-exports the public API and pins deprecated aliases.
 
 use std::path::Path;
 
 /// A parsed agent profile from a markdown file with YAML frontmatter.
+///
+/// One instance corresponds to one `agents/<name>.md` file. The struct is constructed
+/// only by [`parse_agent_profile`] (or callers that already validated the content) so
+/// every field is guaranteed to come from a fenced frontmatter block.
 #[derive(Debug, Clone)]
 pub struct AgentProfile {
     /// Unique name for this agent.
@@ -19,9 +34,20 @@ pub struct AgentProfile {
 
 /// Parse a markdown string with YAML frontmatter into an AgentProfile.
 ///
-/// The parser is intentionally simple and supports only single-line `key: value` fields and
-/// array-style tool lists like `tools: ["read_file", "list_dir"]`. It does not currently
-/// support multiline values or quoted values containing `:`.
+/// Functional scope:
+/// - Locates the opening `---` fence, finds the matching closing fence, and treats
+///   everything between them as flat `key: value` lines. Anything after the closing
+///   fence becomes the system prompt body.
+/// - Accepts the four well-known keys (`name`, `description`, `tools`, `model`) and
+///   ignores unknown keys so future schema additions are forward-compatible.
+///
+/// Boundary conditions:
+/// - Returns `None` when the content does not start with `---`, when no closing fence
+///   exists, or when the mandatory `name` field is absent. `description` defaults to
+///   the empty string, `tools` to an empty list, and `model_preference` to `"default"`.
+/// - The parser is intentionally simple and supports only single-line `key: value`
+///   fields and array-style tool lists like `tools: ["read_file", "list_dir"]`. It
+///   does not currently support multiline values or quoted values containing `:`.
 ///
 /// Expected format:
 /// ```text
@@ -34,12 +60,16 @@ pub struct AgentProfile {
 ///
 /// You are an implementation planner...
 /// ```
+///
+/// See: `tests::test_parse_agent_profile`, `tests::test_parse_no_frontmatter`,
+/// `tests::test_parse_missing_name`.
 pub fn parse_agent_profile(content: &str) -> Option<AgentProfile> {
     let content = content.trim();
     if !content.starts_with("---") {
         return None;
     }
 
+    // Skip the opening fence and split frontmatter / body at the first subsequent `---`.
     let after_first_fence = &content[3..];
     let end_fence = after_first_fence.find("---")?;
     let frontmatter = after_first_fence[..end_fence].trim();
@@ -73,6 +103,18 @@ pub fn parse_agent_profile(content: &str) -> Option<AgentProfile> {
 }
 
 /// Load an agent profile from a file path.
+///
+/// Functional scope: reads `path` synchronously and forwards the contents to
+/// [`parse_agent_profile`]. On any IO or parse failure the function returns `None` and
+/// emits a `tracing::warn!` so misconfigured files do not abort the whole router but
+/// still surface in operator logs.
+///
+/// Boundary conditions:
+/// - File-not-found, permission errors, and any other `std::io::Error` are downgraded
+///   to a warning and `None`.
+/// - A successfully read file that lacks the `---` frontmatter or omits the `name`
+///   field is logged separately so the operator can distinguish IO problems from
+///   schema problems.
 pub fn load_agent_profile_from_file(path: &Path) -> Option<AgentProfile> {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
@@ -104,7 +146,18 @@ pub fn load_agent_from_file(path: &Path) -> Option<AgentProfile> {
     load_agent_profile_from_file(path)
 }
 
-/// Parse a YAML-style string list: `["a", "b", "c"]` → Vec<String>.
+/// Parse a YAML-style string list: `["a", "b", "c"]` → `Vec<String>`.
+///
+/// Functional scope: strips optional `[` / `]` brackets, splits on commas, and trims
+/// surrounding whitespace as well as one layer of single or double quotes around each
+/// element.
+///
+/// Boundary conditions:
+/// - Empty list (`[]`) yields an empty `Vec`.
+/// - A bare comma-separated string without brackets is also accepted, which keeps the
+///   parser permissive for hand-written profiles.
+/// - Items that become empty after trimming are filtered out so a stray trailing comma
+///   does not introduce a phantom tool name.
 fn parse_string_list(s: &str) -> Vec<String> {
     let s = s.trim();
     let s = s.strip_prefix('[').unwrap_or(s);
@@ -134,6 +187,7 @@ You are an implementation planner.
 2. Explore codebase
 "#;
 
+    /// Scenario: a complete profile with all four frontmatter keys parses round-trip.
     #[test]
     fn test_parse_agent_profile() {
         let def = parse_agent_profile(SAMPLE_AGENT).unwrap();
@@ -144,17 +198,23 @@ You are an implementation planner.
         assert!(def.system_prompt.contains("implementation planner"));
     }
 
+    /// Scenario: a markdown blob with no `---` fence is rejected with `None` rather
+    /// than silently producing an empty profile.
     #[test]
     fn test_parse_no_frontmatter() {
         assert!(parse_agent_profile("No frontmatter here").is_none());
     }
 
+    /// Scenario: the mandatory `name:` field is missing — parser must return `None`
+    /// instead of relying on a default.
     #[test]
     fn test_parse_missing_name() {
         let content = "---\ndescription: test\n---\nbody";
         assert!(parse_agent_profile(content).is_none());
     }
 
+    /// Scenario: bracket/quote stripping behaves correctly, including for empty lists
+    /// and single-element lists.
     #[test]
     fn test_parse_string_list() {
         assert_eq!(parse_string_list(r#"["a", "b", "c"]"#), vec!["a", "b", "c"]);
@@ -162,6 +222,8 @@ You are an implementation planner.
         assert_eq!(parse_string_list(r#"["single"]"#), vec!["single"]);
     }
 
+    /// Scenario: the four embedded default profiles ship inside the binary and must
+    /// remain parseable with this minimal grammar.
     #[test]
     fn test_parse_embedded_agents() {
         let planner = include_str!("embedded/planner.md");

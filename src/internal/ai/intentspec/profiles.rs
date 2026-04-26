@@ -1,3 +1,10 @@
+//! IntentSpec profile templates that convert common request classes into default
+//! checks, artifacts, and risk metadata.
+//!
+//! Boundary: profiles provide defaults only; user-supplied constraints and acceptance
+//! criteria remain authoritative. Intent draft tests cover profile selection and ensure
+//! generated defaults do not remove explicit user fields.
+
 use std::collections::BTreeMap;
 
 use super::types::{

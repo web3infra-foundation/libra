@@ -1,3 +1,9 @@
+//! Gemini CLI settings manipulation for installing and removing Libra hook entries.
+//!
+//! Boundary: operations preserve unrelated user settings and only touch the hook specs
+//! owned by Libra. Provider hook tests cover idempotent install, partial existing
+//! config, and cleanup behavior.
+
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},

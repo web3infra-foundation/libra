@@ -1,3 +1,9 @@
+//! Workspace snapshot utilities used to compare task worktrees against a baseline.
+//!
+//! Boundary: snapshots record relative paths, file content hashes, metadata kind, and
+//! deletion state without following symlinks outside the workspace. Orchestrator
+//! workspace tests cover symlink, deletion, and changed-file edge cases.
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs, io,

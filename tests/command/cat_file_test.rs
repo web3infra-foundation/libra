@@ -1,13 +1,23 @@
-//! Tests for the `cat-file` command, verifying object type, size, content display,
-//! existence checks, and AI object inspection.
+//! Tests for the `cat-file` command, verifying object type, size, content
+//! display, existence checks, AI object inspection, and structured-error
+//! envelopes.
 //!
 //! **Layer:** L1 — deterministic, no external dependencies.
+//!
+//! Fixture conventions: each test uses `init_temp_repo()` to spawn a
+//! fresh `libra init` repo in a tempdir, optionally calls
+//! `configure_user_identity()` and `create_commit()` to lay down a known
+//! object graph, and runs `libra cat-file ...` through `Command`. The
+//! tests cross-reference object hashes by parsing the human-readable
+//! output (`tree <hash>`, tree entries `mode blob <hash>\t<name>`); these
+//! parsers must therefore stay in sync with the cat-file pretty-printer.
 
 use std::process::Command;
 
 use super::{parse_cli_error_stderr, parse_json_stdout};
 
-/// Initialize a temporary repository using CLI.
+/// Spawn `libra init` in a fresh tempdir and return the `TempDir` (kept
+/// alive by the caller for RAII cleanup).
 fn init_temp_repo() -> tempfile::TempDir {
     let temp_dir = tempfile::tempdir().expect("Failed to create temporary directory");
     let temp_path = temp_dir.path();
@@ -28,7 +38,8 @@ fn init_temp_repo() -> tempfile::TempDir {
     temp_dir
 }
 
-/// Configure user identity for commits using CLI.
+/// Configure `user.name` / `user.email` through the CLI so subsequent
+/// commits can be authored. Required before `create_commit()`.
 fn configure_user_identity(temp_path: &std::path::Path) {
     let output = Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(temp_path)
@@ -45,7 +56,9 @@ fn configure_user_identity(temp_path: &std::path::Path) {
     assert!(output.status.success(), "Failed to configure user.email");
 }
 
-/// Create a commit with a file.
+/// Write `content` to `filename`, stage it, and create a commit through
+/// the CLI. Skips the pre-commit hook with `--no-verify` so the test does
+/// not rely on hook availability.
 fn create_commit(temp_path: &std::path::Path, filename: &str, content: &str, message: &str) {
     std::fs::write(temp_path.join(filename), content).expect("Failed to create file");
 
@@ -72,7 +85,8 @@ fn create_commit(temp_path: &std::path::Path, filename: &str, content: &str, mes
     );
 }
 
-/// Test `cat-file -t` prints the object type for a commit.
+/// Scenario: `cat-file -t HEAD` against a commit must print exactly
+/// `commit` on stdout. Pins the canonical object-type vocabulary.
 #[tokio::test]
 async fn test_cat_file_type_commit() {
     let temp_dir = init_temp_repo();
@@ -101,7 +115,9 @@ async fn test_cat_file_type_commit() {
     );
 }
 
-/// Test `cat-file -s` prints the object size for a commit.
+/// Scenario: `cat-file -s HEAD` must emit a positive numeric size.
+/// Smoke test for the size pathway; the exact bytes are commit-shape
+/// dependent so only `> 0` is asserted.
 #[tokio::test]
 async fn test_cat_file_size_commit() {
     let temp_dir = init_temp_repo();
@@ -126,7 +142,9 @@ async fn test_cat_file_size_commit() {
     assert!(size > 0, "Commit object size should be > 0, got {}", size);
 }
 
-/// Test `cat-file -t --json` returns the structured type contract.
+/// Scenario: `cat-file -t --json HEAD` must emit
+/// `command="cat-file"`, `data.mode="type"`, `data.object="HEAD"` and
+/// `data.object_type="commit"`. Schema pin for the type-mode envelope.
 #[tokio::test]
 async fn test_cat_file_type_json_output() {
     let temp_dir = init_temp_repo();
@@ -154,7 +172,10 @@ async fn test_cat_file_type_json_output() {
     assert_eq!(json["data"]["object_type"], "commit");
 }
 
-/// Test `cat-file -p` pretty-prints a commit object.
+/// Scenario: `cat-file -p HEAD` on a commit must include `tree `,
+/// `author `, `committer `, and the commit message. Locks the
+/// commit-pretty-printer's stable headers so other tests can grep for
+/// them (e.g. tree-hash extraction in subsequent cases).
 #[tokio::test]
 async fn test_cat_file_pretty_commit() {
     let temp_dir = init_temp_repo();
@@ -198,7 +219,10 @@ async fn test_cat_file_pretty_commit() {
     );
 }
 
-/// Test `cat-file -p` pretty-prints a tree object given a commit's tree hash.
+/// Scenario: end-to-end commit → tree path. Extracts the tree hash from
+/// the commit's pretty output, then verifies `cat-file -p <tree>` lists
+/// the blob entry (`blob` + filename) and `cat-file -t <tree>` returns
+/// `tree`. Pins both the tree-pretty format and tree type tagging.
 #[tokio::test]
 async fn test_cat_file_pretty_tree() {
     let temp_dir = init_temp_repo();
@@ -258,7 +282,12 @@ async fn test_cat_file_pretty_tree() {
     assert_eq!(stdout.trim(), "tree");
 }
 
-/// Test `cat-file -p` pretty-prints a blob object.
+/// Scenario: end-to-end commit → tree → blob. Resolves the blob hash by
+/// parsing the tree entry line, then asserts:
+/// - `cat-file -p <blob>` echoes the original file content verbatim,
+/// - `cat-file -t <blob>` returns `blob`,
+/// - `cat-file -s <blob>` returns `14` (matching `"Hello, Libra!\n"`).
+/// Pins type/size/content invariants for blob objects.
 #[tokio::test]
 async fn test_cat_file_pretty_blob() {
     let temp_dir = init_temp_repo();
@@ -335,7 +364,10 @@ async fn test_cat_file_pretty_blob() {
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "14");
 }
 
-/// Test `cat-file` panic handling for corrupted/invalid objects.
+/// Scenario: a syntactically-valid but unknown 40-zero hash must surface
+/// a structured `LBR-CLI-003` error (exit 129, `fatal:` on stderr). The
+/// command must NOT panic when an object is missing — regression guard
+/// against unwrap-on-load bugs.
 #[tokio::test]
 async fn test_cat_file_panic_handling() {
     let temp_dir = init_temp_repo();
@@ -356,7 +388,10 @@ async fn test_cat_file_panic_handling() {
     assert!(stderr.contains("fatal:"));
 }
 
-/// Test `cat-file -e` preserves Git-compatible silent status-only semantics.
+/// Scenario: `cat-file -e <object>` must be silent in both directions —
+/// existing object → exit 0 with empty stderr; missing object → exit 1
+/// with empty stderr. Pins Git-compatible status-only semantics so
+/// scripts can `if libra cat-file -e $hash; then ...`.
 #[tokio::test]
 async fn test_cat_file_exist_check() {
     let temp_dir = init_temp_repo();
@@ -395,7 +430,8 @@ async fn test_cat_file_exist_check() {
     );
 }
 
-/// Test that mutually exclusive flags are enforced.
+/// Scenario: `-t -s` together must be rejected — clap's mutual-exclusion
+/// guards prevent ambiguous output. Confirms the CLI grammar.
 #[tokio::test]
 async fn test_cat_file_mutual_exclusion() {
     let temp_dir = init_temp_repo();

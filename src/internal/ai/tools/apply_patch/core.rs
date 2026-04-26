@@ -240,7 +240,6 @@ pub fn apply_hunks(hunks: &[Hunk], cwd: &Path) -> Result<ApplyResult, ApplyPatch
 }
 
 struct AppliedPatch {
-    #[allow(dead_code)]
     original_contents: String,
     new_contents: String,
 }

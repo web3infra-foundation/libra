@@ -1,3 +1,9 @@
+//! Human-readable summaries for IntentSpecs used in CLI, MCP, and review output.
+//!
+//! Boundary: summaries are presentation-only and must not feed back into canonical
+//! storage. Intent-flow coverage checks that high-risk constraints and acceptance
+//! criteria remain visible after normalization.
+
 use super::types::IntentSpec;
 
 pub fn render_summary(spec: &IntentSpec, intent_id: Option<&str>) -> String {

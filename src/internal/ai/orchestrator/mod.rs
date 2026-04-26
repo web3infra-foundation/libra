@@ -1,3 +1,10 @@
+//! AI orchestrator subsystem.
+//!
+//! Boundary: this layer coordinates planning, workspace preparation, execution,
+//! verification, decisions, checkpointing, and persistence for formal AI runs. Provider
+//! adapters and raw completion APIs stay outside this module. End-to-end coverage lives
+//! in the AI runtime, scheduler, storage-flow, and validation-decision tests.
+
 pub mod acl;
 mod checkpoint_policy;
 pub mod decider;

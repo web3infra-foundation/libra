@@ -1,3 +1,9 @@
+//! Provider-neutral chat message primitives for completion requests.
+//!
+//! Boundary: message roles and parts must round-trip across all configured providers;
+//! provider adapters are responsible for translating unsupported fields. Mock provider
+//! tests cover empty content, tool messages, and multi-part messages.
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

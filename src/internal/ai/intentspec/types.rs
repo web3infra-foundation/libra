@@ -1,3 +1,11 @@
+//! Canonical IntentSpec data model shared by drafting, validation, persistence, and
+//! orchestration.
+//!
+//! Boundary: structs here are serialization contracts, so defaults must remain
+//! backward compatible with existing JSON fixtures and stored intent objects. Tests in
+//! `tests/intent_flow_test.rs` and `tests/ai_validation_decision_flow_test.rs` exercise
+//! the edge cases where missing optional fields are filled by defaults.
+
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};

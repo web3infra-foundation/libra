@@ -1,3 +1,10 @@
+//! IntentSpec subsystem: draft extraction, canonicalization, validation, repair,
+//! persistence, and summary rendering for AI-driven work.
+//!
+//! Boundary: this module owns the "what should be done" contract. Execution planning,
+//! workspace mutation, and final gate decisions live under `orchestrator`. End-to-end
+//! coverage is in `tests/intent_flow_test.rs` and the AI validation decision tests.
+
 pub mod canonical;
 pub mod draft;
 pub mod persistence;

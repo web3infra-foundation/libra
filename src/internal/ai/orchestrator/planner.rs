@@ -1,3 +1,9 @@
+//! Planner that turns a validated IntentSpec into executable orchestrator tasks.
+//!
+//! Boundary: planning creates task graphs and quality gates but does not execute them.
+//! Scheduler plan-set tests cover duplicate steps, missing acceptance checks, and
+//! risk-aware verification tasks.
+
 use std::collections::BTreeSet;
 
 use git_internal::internal::object::{

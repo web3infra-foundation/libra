@@ -1,3 +1,9 @@
+//! Access-control checks for orchestrator workspace mutations.
+//!
+//! Boundary: ACL decisions are path- and intent-scope based and must reject traversal,
+//! hidden out-of-scope writes, and unrelated lockfile changes. Workspace tests cover
+//! allowed edits, cargo-lock companions, and violation diagnostics.
+
 use serde_json::Value;
 use wax::Glob;
 

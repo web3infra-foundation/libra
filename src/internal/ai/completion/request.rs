@@ -1,3 +1,9 @@
+//! Provider-neutral completion request envelope.
+//!
+//! Boundary: requests carry normalized model, message, tool, and reasoning settings
+//! but avoid provider-specific HTTP payload details. Provider tests cover optional
+//! reasoning fields, absent tools, and streaming flags.
+
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
 

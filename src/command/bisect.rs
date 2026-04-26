@@ -1,8 +1,25 @@
-//! Bisect implementation that uses binary search to find the commit that introduced a bug.
+//! Binary-search regression hunting (`libra bisect`).
 //!
-//! This module provides the `bisect` command which helps locate the specific commit
-//! that introduced a regression by systematically testing commits between a known
-//! "good" and "bad" state.
+//! Implements the full `bisect` subcommand family (`start`, `bad`, `good`,
+//! `reset`, `skip`, `log`) by walking the commit graph between a known "good"
+//! ancestor and a known "bad" descendant.
+//!
+//! Persistent state lives in a dedicated `bisect_state` table inside the
+//! repository's SQLite store; the schema is created lazily by
+//! [`BisectState::ensure_bisect_state_table_exists`] and migrated in place
+//! when the `completed` column is missing on older databases.
+//!
+//! Non-obvious responsibilities:
+//! - Detached vs. branch HEAD recovery: `start` records the original branch
+//!   name (if any) so `reset` can re-attach instead of leaving the user in a
+//!   detached state.
+//! - Working-tree safety: every `bisect good/bad/skip` calls
+//!   [`restore_to_commit`], which clears the worktree (preserving `.libra/`)
+//!   before re-laying the target tree. `start` therefore refuses to run with
+//!   uncommitted or ignored changes that could be lost.
+//! - Convergence semantics: [`BisectNext`] distinguishes between "more
+//!   candidates", "single culprit found", and "all candidates skipped" so
+//!   each handler can render the right user message.
 
 use std::{
     collections::{HashSet, VecDeque},
@@ -32,7 +49,12 @@ use crate::{
     },
 };
 
-/// Bisect state stored in the repo database
+/// Bisect state stored in the repo database.
+///
+/// Persisted as a single row in the `bisect_state` SQLite table. Vector
+/// fields (`good`, `skipped`) are serialised as JSON. `completed = true`
+/// means the search converged; the row is preserved through completion so
+/// `bisect reset` still has somewhere to read `orig_head` from.
 #[derive(Debug, Clone)]
 pub struct BisectState {
     /// Original HEAD commit before bisect started
@@ -54,22 +76,27 @@ pub struct BisectState {
 }
 
 impl BisectState {
-    /// Check if a bisect session is in progress (active, not completed)
+    /// Returns true when a non-completed bisect session row exists. Used by
+    /// the bare-repo guard and by `start` to refuse re-entry.
     pub async fn is_in_progress() -> Result<bool, String> {
         let db = get_db_conn_instance().await;
         Self::ensure_bisect_state_table_exists(&db).await?;
         Self::has_active_state_in_db(&db).await
     }
 
-    /// Check if there's any bisect state (active or completed)
-    /// Used by reset to allow cleanup after bisect completes
+    /// Returns true when any row exists, including converged sessions whose
+    /// state was preserved for `bisect reset`.
     pub async fn has_state() -> Result<bool, String> {
         let db = get_db_conn_instance().await;
         Self::ensure_bisect_state_table_exists(&db).await?;
         Self::has_any_state_in_db(&db).await
     }
 
-    /// Save bisect state to the database
+    /// Persist `self` as the single row in `bisect_state`.
+    ///
+    /// Boundary conditions:
+    /// - Wipes any pre-existing row first (the table is always single-row),
+    ///   so concurrent writers race for last-writer-wins semantics.
     pub async fn save(&self) -> Result<(), String> {
         let db = get_db_conn_instance().await;
         Self::ensure_bisect_state_table_exists(&db).await?;
@@ -77,7 +104,11 @@ impl BisectState {
         Self::save_with_conn(&db, self).await
     }
 
-    /// Load bisect state from the database
+    /// Load the persisted bisect state.
+    ///
+    /// Boundary conditions:
+    /// - Returns `Err("No bisect in progress")` if the row is missing — this
+    ///   propagates as a fatal CLI error in every caller.
     pub async fn load() -> Result<Self, String> {
         let db = get_db_conn_instance().await;
         Self::ensure_bisect_state_table_exists(&db).await?;
@@ -86,14 +117,26 @@ impl BisectState {
             .ok_or_else(|| "No bisect in progress".to_string())
     }
 
-    /// Remove the bisect state from the database
+    /// Drop the bisect state row. Idempotent on an empty table.
     pub async fn cleanup() -> Result<(), String> {
         let db = get_db_conn_instance().await;
         Self::ensure_bisect_state_table_exists(&db).await?;
         Self::clear_state_in_db(&db).await
     }
 
-    /// Create the bisect_state table if it doesn't exist, and migrate schema if needed
+    /// Lazy DDL: ensure the `bisect_state` table exists and has the
+    /// `completed` column.
+    ///
+    /// Functional scope:
+    /// - Creates the table with `CREATE TABLE IF NOT EXISTS`.
+    /// - Inspects `pragma_table_info` to detect older schemas missing the
+    ///   `completed` column and adds it via `ALTER TABLE`.
+    ///
+    /// Boundary conditions:
+    /// - Concurrent migrations are tolerated: if `ALTER TABLE` fails with
+    ///   `"duplicate column name"` because another process won the race, the
+    ///   error is swallowed and the function returns `Ok(())`.
+    /// - Any other DDL failure is bubbled up as a `String` error.
     async fn ensure_bisect_state_table_exists<C: ConnectionTrait>(db: &C) -> Result<(), String> {
         // Use IF NOT EXISTS for idempotency (handles concurrent creation)
         let create_table_stmt = Statement::from_string(
@@ -161,6 +204,7 @@ impl BisectState {
         Ok(())
     }
 
+    /// Counts rows where `completed = 0`. Returns false on an empty table.
     async fn has_active_state_in_db<C: ConnectionTrait>(db: &C) -> Result<bool, String> {
         // Check if there's an in-progress (not completed) bisect session
         let stmt = Statement::from_string(
@@ -180,6 +224,8 @@ impl BisectState {
         Ok(false)
     }
 
+    /// Counts rows regardless of `completed`. Used by `reset` to recover even
+    /// after the search converged.
     async fn has_any_state_in_db<C: ConnectionTrait>(db: &C) -> Result<bool, String> {
         // Check if there's any bisect state (active or completed)
         let stmt = Statement::from_string(
@@ -199,6 +245,8 @@ impl BisectState {
         Ok(false)
     }
 
+    /// Insert `state` into `bisect_state`. Vector fields are JSON-encoded.
+    /// Caller is responsible for clearing any existing row first.
     async fn save_with_conn<C: ConnectionTrait>(db: &C, state: &BisectState) -> Result<(), String> {
         let good_json = serde_json::to_string(&state.good)
             .map_err(|e| format!("failed to serialize good commits: {e}"))?;
@@ -244,6 +292,9 @@ impl BisectState {
         Ok(())
     }
 
+    /// Read the single bisect-state row, decoding the JSON-encoded
+    /// `good`/`skipped` vectors and re-parsing each `ObjectHash`. Returns
+    /// `Ok(None)` when no row exists.
     async fn load_from_db<C: ConnectionTrait>(db: &C) -> Result<Option<BisectState>, String> {
         let stmt = Statement::from_string(
             DbBackend::Sqlite,
@@ -297,6 +348,8 @@ impl BisectState {
         Ok(None)
     }
 
+    /// Truncate the bisect-state table. Used by both `save` (before insert)
+    /// and `cleanup` (after a session ends).
     async fn clear_state_in_db<C: ConnectionTrait>(db: &C) -> Result<(), String> {
         let stmt =
             Statement::from_string(DbBackend::Sqlite, "DELETE FROM bisect_state;".to_string());
@@ -309,7 +362,12 @@ impl BisectState {
     }
 }
 
-/// Entry point for the bisect command
+/// Entry point for the bisect command — dispatches the [`Bisect`] subvariant
+/// to the matching `handle_*` function.
+///
+/// Boundary conditions:
+/// - All variants forward their errors as `Err(CliError::fatal)` derived from
+///   either DB failures, missing state, or rev-resolution failures.
 pub async fn execute_safe(bisect_cmd: Bisect, output: &OutputConfig) -> CliResult<()> {
     match bisect_cmd {
         Bisect::Start { bad, good } => handle_start(bad, good, output).await,
@@ -321,9 +379,17 @@ pub async fn execute_safe(bisect_cmd: Bisect, output: &OutputConfig) -> CliResul
     }
 }
 
-/// Check if the repository is bare (no working tree)
-/// Parses Git boolean values: true/yes/on/1, false/no/off/0
-/// Returns error on unreadable or invalid config (fail-closed for safety)
+/// Read `core.bare` and decide whether the repository has a working tree.
+///
+/// Functional scope:
+/// - Parses any of Git's boolean spellings (`true/yes/on/1`,
+///   `false/no/off/0`) case-insensitively.
+///
+/// Boundary conditions:
+/// - Missing config row -> `Ok(false)` (default to non-bare).
+/// - Unparseable value -> fatal `CliError`. Fails closed: bisect cannot run
+///   safely if we cannot tell whether a worktree exists.
+/// - Underlying DB read failure -> fatal `CliError`.
 async fn is_bare_repository() -> CliResult<bool> {
     fn parse_git_bool(value: &str) -> Option<bool> {
         match value.trim() {
@@ -359,7 +425,28 @@ async fn is_bare_repository() -> CliResult<bool> {
     }
 }
 
-/// Handle `bisect start` - initialize a new bisect session
+/// Handle `bisect start` — initialise a new search session.
+///
+/// Functional scope:
+/// - Refuses to run on bare repos and on dirty worktrees (staged or unstaged
+///   changes, ignored files included — see [`IgnorePolicy::IncludeIgnored`]).
+/// - Captures the original branch (or detached commit) and stores it inside
+///   [`BisectState`] so `reset` can recover it.
+/// - When both `bad` and `good` are supplied, validates the bounds via
+///   [`find_next_bisect_point`] *before* persisting state to avoid orphaned
+///   rows on invalid input.
+/// - May immediately converge: a one-commit interval is reported as the
+///   culprit and the session is marked `completed`.
+///
+/// Boundary conditions:
+/// - Returns fatal errors with hints describing recovery (commit/stash,
+///   `bisect reset`, etc.).
+/// - Returns fatal error in an empty repository (no current commit).
+///
+/// See: tests::test_bisect_start_creates_state in
+/// tests/command/bisect_test.rs:115;
+/// tests::test_bisect_start_already_in_progress_fails in
+/// tests/command/bisect_test.rs:370.
 async fn handle_start(
     bad: Option<String>,
     good: Option<String>,
@@ -496,7 +583,22 @@ async fn handle_start(
     Ok(())
 }
 
-/// Handle `bisect bad` - mark a commit as bad
+/// Handle `bisect bad` — mark `rev` (or HEAD) as containing the bug.
+///
+/// Functional scope:
+/// - Loads existing state, refuses to run on a completed session, then
+///   updates `state.bad` and either waits for a good commit, advances to the
+///   next test point, or converges.
+///
+/// Boundary conditions:
+/// - Resolution failures return fatal errors via [`resolve_ref`].
+/// - When `state.good` is empty the session simply records the bad commit
+///   and prints "waiting for good commit(s)".
+///
+/// See: tests::test_bisect_mark_bad_then_good in
+/// tests/command/bisect_test.rs:172;
+/// tests::test_bisect_find_first_bad_commit in
+/// tests/command/bisect_test.rs:211.
 async fn handle_bad(rev: Option<String>, output: &OutputConfig) -> CliResult<()> {
     let mut state = BisectState::load().await.map_err(CliError::fatal)?;
 
@@ -572,7 +674,14 @@ async fn handle_bad(rev: Option<String>, output: &OutputConfig) -> CliResult<()>
     Ok(())
 }
 
-/// Handle `bisect good` - mark a commit as good
+/// Handle `bisect good` — push `rev` (or HEAD) onto the known-good list.
+///
+/// Functional scope:
+/// - Mirror image of [`handle_bad`]: appends to `state.good` and either waits
+///   for a bad commit, advances to the next test point, or converges.
+///
+/// Boundary conditions:
+/// - Refuses to run on a completed session (the user must `bisect reset`).
 async fn handle_good(rev: Option<String>, output: &OutputConfig) -> CliResult<()> {
     let mut state = BisectState::load().await.map_err(CliError::fatal)?;
 
@@ -648,7 +757,20 @@ async fn handle_good(rev: Option<String>, output: &OutputConfig) -> CliResult<()
     Ok(())
 }
 
-/// Handle `bisect reset` - end the bisect session
+/// Handle `bisect reset` — terminate the session and restore HEAD.
+///
+/// Functional scope:
+/// - With an explicit `rev`, jumps HEAD to that commit (detached).
+/// - With the original branch still available, re-attaches HEAD to it via
+///   [`restore_to_branch`]; otherwise falls back to a detached checkout of
+///   the original commit.
+/// - Always cleans up the bisect-state row last.
+///
+/// Boundary conditions:
+/// - With no state row at all, prints "No bisect in progress" and returns
+///   `Ok(())` — `reset` is the supported escape hatch for stale state.
+///
+/// See: tests::test_bisect_reset in tests/command/bisect_test.rs:264.
 async fn handle_reset(rev: Option<String>, output: &OutputConfig) -> CliResult<()> {
     // Use has_state to check if there's any bisect state (active or completed)
     let has_state = BisectState::has_state().await.map_err(CliError::fatal)?;
@@ -695,7 +817,18 @@ async fn handle_reset(rev: Option<String>, output: &OutputConfig) -> CliResult<(
     Ok(())
 }
 
-/// Restore HEAD to a branch (avoids detached state after reset)
+/// Re-attach HEAD to `branch_name` and restore the worktree to `commit_hash`.
+///
+/// Functional scope:
+/// - Updates HEAD inside a transaction, then verifies the update visibly
+///   succeeded because [`Head::update_with_conn`] swallows write errors and
+///   only logs them.
+/// - Calls [`restore_to_commit`] to populate the worktree from the target
+///   tree.
+///
+/// Boundary conditions:
+/// - Transaction begin/commit failures and HEAD-mismatch detection both
+///   return fatal `CliError`s with diagnostic messages.
 async fn restore_to_branch(
     branch_name: String,
     commit_hash: ObjectHash,
@@ -737,7 +870,19 @@ async fn restore_to_branch(
     Ok(())
 }
 
-/// Handle `bisect skip` - skip the current commit
+/// Handle `bisect skip` — exclude the current (or named) commit from
+/// further candidates.
+///
+/// Functional scope:
+/// - Pushes the commit to `state.skipped` and re-runs the search. The set of
+///   skipped commits is consulted by [`get_testable_commits`].
+///
+/// Boundary conditions:
+/// - Refuses to run on a completed session.
+/// - Returns `BisectNext::AllSkipped` when every remaining candidate has been
+///   skipped — the search reports the deadlock and saves state for `reset`.
+///
+/// See: tests::test_bisect_skip in tests/command/bisect_test.rs:309.
 async fn handle_skip(rev: Option<String>, output: &OutputConfig) -> CliResult<()> {
     let mut state = BisectState::load().await.map_err(CliError::fatal)?;
 
@@ -790,7 +935,13 @@ async fn handle_skip(rev: Option<String>, output: &OutputConfig) -> CliResult<()
     Ok(())
 }
 
-/// Handle `bisect log` - show the bisect log
+/// Handle `bisect log` — print a human-readable status of the active session.
+///
+/// Boundary conditions:
+/// - Returns the underlying load error when no session row exists; this is
+///   the only handler that intentionally lacks a "no-state" early return.
+///
+/// See: tests::test_bisect_log in tests/command/bisect_test.rs:347.
 async fn handle_log(output: &OutputConfig) -> CliResult<()> {
     let state = BisectState::load().await.map_err(CliError::fatal)?;
 
@@ -821,14 +972,22 @@ async fn handle_log(output: &OutputConfig) -> CliResult<()> {
     Ok(())
 }
 
-/// Resolve a reference (branch name, commit hash, etc.) to a commit hash
+/// Convert a user-supplied revision string (branch, tag, hash) into the
+/// concrete commit it points at. Errors out fatally with the underlying
+/// resolver message if it cannot be resolved.
 async fn resolve_ref(ref_str: &str) -> CliResult<ObjectHash> {
     util::get_commit_base(ref_str)
         .await
         .map_err(|e| CliError::fatal(format!("Cannot resolve '{}': {}", ref_str, e)))
 }
 
-/// Checkout to a specific commit (for bisect)
+/// Move HEAD to `commit_hash` in detached mode and lay the matching tree on
+/// the worktree.
+///
+/// Boundary conditions:
+/// - The HEAD update happens inside a SQLite transaction. The worktree
+///   restore runs after commit, so a partial failure between them leaves the
+///   worktree out of sync until `bisect reset`.
 async fn checkout_to_commit(commit_hash: ObjectHash, output: &OutputConfig) -> CliResult<()> {
     let db = get_db_conn_instance().await;
 
@@ -851,7 +1010,12 @@ async fn checkout_to_commit(commit_hash: ObjectHash, output: &OutputConfig) -> C
     Ok(())
 }
 
-/// Checkout to a bisect point and update state
+/// Checkout to a candidate commit, record it as `state.current`, and update
+/// the steps-remaining estimate.
+///
+/// Boundary conditions:
+/// - The "remaining steps" count is only updated when `state.bad` is set;
+///   otherwise the user is still in the bounds-collection phase.
 async fn checkout_to_bisect_point(
     commit_hash: ObjectHash,
     state: &mut BisectState,
@@ -882,7 +1046,20 @@ async fn checkout_to_bisect_point(
     Ok(())
 }
 
-/// Restore working directory to a commit's tree
+/// Repaint the worktree from the tree of `commit_hash`.
+///
+/// Functional scope:
+/// - Loads the commit and its root tree, identifies the working directory by
+///   stripping `.libra` from the storage path, clears the worktree (keeping
+///   the `.libra` directory itself), and restores every plain entry through
+///   [`restore::restore_to_file`] so LFS pointers are honoured.
+///
+/// Boundary conditions:
+/// - Failures to load the commit or tree are fatal — partial restoration
+///   would leave the worktree corrupt.
+/// - Calling this function effectively *deletes* every file under the
+///   working tree that is not part of `commit_hash`'s tree, including
+///   ignored files. `start` therefore guards against dirty worktrees.
 async fn restore_to_commit(commit_hash: ObjectHash, _output: &OutputConfig) -> CliResult<()> {
     let commit = load_object::<Commit>(&commit_hash)
         .map_err(|e| CliError::fatal(format!("Failed to load commit: {e}")))?;
@@ -906,7 +1083,12 @@ async fn restore_to_commit(commit_hash: ObjectHash, _output: &OutputConfig) -> C
     Ok(())
 }
 
-/// Clear working directory, preserving .libra directory
+/// Delete every top-level entry inside `workdir` except the `.libra/`
+/// directory.
+///
+/// Boundary conditions:
+/// - Used only in bisect's "burn down and lay back" worktree restore path.
+///   Any I/O error aborts the restore with a fatal `CliError`.
 fn clear_workdir_except_libra(workdir: &std::path::Path) -> CliResult<()> {
     for entry in std::fs::read_dir(workdir)
         .map_err(|e| CliError::fatal(format!("Failed to read workdir: {e}")))?
@@ -933,8 +1115,12 @@ fn clear_workdir_except_libra(workdir: &std::path::Path) -> CliResult<()> {
     Ok(())
 }
 
-/// Restore tree contents to working directory
-/// Uses restore::restore_to_file to properly handle LFS pointers
+/// Materialise every plain (non-tree) item from `tree` onto disk via
+/// [`restore::restore_to_file`].
+///
+/// Boundary conditions:
+/// - Stops at the first failure with a fatal error tagged with the offending
+///   path. The worktree may already be partially restored.
 async fn restore_tree_to_workdir(tree: &Tree) -> CliResult<()> {
     let items = tree.get_plain_items();
     for (path, hash) in items {
@@ -947,8 +1133,10 @@ async fn restore_tree_to_workdir(tree: &Tree) -> CliResult<()> {
     Ok(())
 }
 
-/// Result of finding the next bisect point
-/// Used to distinguish between convergence (culprit found) and all-skipped cases
+/// Result of one bisect-search iteration.
+///
+/// Drives caller branching: keep going (`Next`), report the culprit
+/// (`Converged`), or surface the deadlock (`AllSkipped`).
 enum BisectNext {
     /// There are more commits to test - return the next midpoint
     Next(ObjectHash),
@@ -958,7 +1146,18 @@ enum BisectNext {
     AllSkipped,
 }
 
-/// Find the next commit to test using binary search
+/// Compute the next commit to check out under binary search.
+///
+/// Functional scope:
+/// - Calls [`get_testable_commits`] to enumerate descendants of `bad` that
+///   are not also ancestors of any `good` commit and have not been skipped.
+/// - Returns `Converged` when only one candidate remains, `AllSkipped` when
+///   the list is empty due to skips, or `Next(midpoint)` otherwise.
+///
+/// Boundary conditions:
+/// - Returns an error string when state has no `bad` or no `good` set, or
+///   when the bounds are inconsistent (no commits between them) — the
+///   caller surfaces this as a fatal CLI error.
 async fn find_next_bisect_point(state: &BisectState) -> Result<BisectNext, String> {
     let bad = state.bad.ok_or("No bad commit set")?;
 
@@ -1002,7 +1201,18 @@ async fn find_next_bisect_point(state: &BisectState) -> Result<BisectNext, Strin
     Ok(BisectNext::Next(testable[mid]))
 }
 
-/// Get all commits that could be tested (ancestors of bad, not ancestors of good)
+/// Enumerate the candidate commits between `bad` and any `good`.
+///
+/// Functional scope:
+/// - Builds the set of ancestors of every `good` commit, then BFS-walks
+///   from `bad` skipping anything in that set or in `skipped`.
+/// - Returns the candidates in oldest-first order, suitable for
+///   midpoint selection by [`find_next_bisect_point`].
+///
+/// Boundary conditions:
+/// - Returns an empty vector when the bounds are inconsistent or all
+///   candidates have been skipped; callers must distinguish the two cases.
+/// - Each commit object load is fatal on I/O / corruption errors.
 async fn get_testable_commits(
     bad: &ObjectHash,
     good: &[ObjectHash],
@@ -1056,7 +1266,11 @@ async fn get_testable_commits(
     Ok(testable)
 }
 
-/// Get all ancestors of a set of commits
+/// Collect every transitive parent of the input commits into one set.
+///
+/// Boundary conditions:
+/// - Each commit appears in the result; the search terminates naturally on
+///   root commits whose `parent_commit_ids` is empty.
 async fn get_all_ancestors(commits: &[ObjectHash]) -> Result<HashSet<ObjectHash>, String> {
     let mut ancestors = HashSet::new();
     let mut queue = VecDeque::new();
@@ -1082,7 +1296,9 @@ async fn get_all_ancestors(commits: &[ObjectHash]) -> Result<HashSet<ObjectHash>
     Ok(ancestors)
 }
 
-/// Count remaining commits to test
+/// Length of the candidate list — i.e. the number of binary-search steps
+/// remaining before convergence. Used purely for the user-visible
+/// "X revisions left to test" message.
 async fn count_commits_to_test(state: &BisectState) -> Result<usize, String> {
     let bad = state.bad.ok_or("No bad commit set")?;
 

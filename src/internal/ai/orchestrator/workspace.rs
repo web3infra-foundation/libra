@@ -1,3 +1,9 @@
+//! Task workspace preparation and synchronization for orchestrated AI execution.
+//!
+//! Boundary: each task receives an isolated copy or FUSE overlay of the main workspace,
+//! then allowed changes are synced back after scope checks. Tests in this module cover
+//! file copy, symlink handling, deletion, contract violations, and cleanup behavior.
+
 #[cfg(unix)]
 use std::sync::Arc;
 use std::{
@@ -642,10 +648,8 @@ mod tests {
 
     use super::{
         cleanup_task_worktree, clone_or_copy_file, detect_contract_violations,
-        materialize_workspace, prepare_task_worktree, sync_task_worktree_back,
-        cleanup_task_worktree, clone_or_copy_file, materialize_workspace,
-        prepare_copy_task_worktree, prepare_task_worktree, prepare_task_worktree_root,
-        sync_task_worktree_back, task_worktree_paths,
+        materialize_workspace, prepare_copy_task_worktree, prepare_task_worktree,
+        prepare_task_worktree_root, sync_task_worktree_back, task_worktree_paths,
     };
     use crate::{
         internal::ai::workspace_snapshot::{WorkspaceEntry, snapshot_workspace},

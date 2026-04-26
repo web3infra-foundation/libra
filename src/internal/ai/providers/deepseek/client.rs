@@ -29,6 +29,11 @@ impl std::fmt::Debug for DeepSeekProvider {
 
 impl DeepSeekProvider {
     /// Creates a new DeepSeek provider with the given API key.
+    ///
+    /// Functional scope: stores the API key after passing it through
+    /// [`normalize_api_key`] so that pasted shell-quoted values
+    /// (`'...'`, `"..."`) and a leading `Bearer ` prefix are stripped before
+    /// the key reaches `Authorization`.
     pub fn new(api_key: String) -> Self {
         Self {
             api_key: normalize_api_key(&api_key),
@@ -50,6 +55,18 @@ impl Provider for DeepSeekProvider {
     }
 }
 
+/// Strip common pasting artefacts from a DeepSeek API key.
+///
+/// Functional scope:
+/// - Trims surrounding whitespace.
+/// - Removes a `Bearer ` / `bearer ` prefix copied from documentation.
+/// - Removes a balanced pair of single or double quotes from a shell-style paste
+///   (`'sk-...'`, `"sk-..."`).
+///
+/// Boundary conditions:
+/// - Quoting is only stripped when both ends match; mismatched quotes are left in
+///   place so the user sees the auth failure rather than silently mangling the key.
+/// - Empty strings are returned untouched; callers handle the missing-key case.
 fn normalize_api_key(api_key: &str) -> String {
     let trimmed = api_key.trim();
     let without_scheme = trimmed
@@ -119,6 +136,8 @@ impl Client {
 mod tests {
     use super::*;
 
+    /// Scenario: Debug formatting must mask the secret so it cannot leak into
+    /// `tracing` output or panic backtraces.
     #[test]
     fn test_deepseek_provider_debug() {
         let provider = DeepSeekProvider::new("test-key".to_string());
@@ -127,18 +146,25 @@ mod tests {
         assert!(debug_str.contains("***"));
     }
 
+    /// Scenario: a clean key must round-trip through the constructor unchanged.
     #[test]
     fn test_deepseek_provider_api_key() {
         let provider = DeepSeekProvider::new("test-key".to_string());
         assert_eq!(provider.api_key(), "test-key");
     }
 
+    /// Scenario: keys pasted from shell scripts often arrive with surrounding
+    /// quotes and trailing whitespace. The normaliser must strip both before
+    /// the value reaches the `Authorization` header.
     #[test]
     fn test_deepseek_provider_normalizes_shell_quoted_api_key() {
         let provider = DeepSeekProvider::new(" 'test-key' \n".to_string());
         assert_eq!(provider.api_key(), "test-key");
     }
 
+    /// Scenario: documentation samples sometimes embed `Bearer ` in the key;
+    /// the normaliser strips it so users do not produce a header with two
+    /// `Bearer` tokens.
     #[test]
     fn test_deepseek_provider_normalizes_bearer_prefixed_api_key() {
         let provider = DeepSeekProvider::new("Bearer test-key".to_string());

@@ -1,3 +1,23 @@
+//! Iterative model-and-tool execution loop.
+//!
+//! This is the heart of the agent runtime: every assistant turn that may include tool
+//! calls funnels through [`run_tool_loop_with_history_and_observer`]. The loop:
+//!
+//! 1. Sends the current chat history to the [`CompletionModel`] together with the
+//!    available tool definitions.
+//! 2. Splits the response into text fragments and tool calls.
+//! 3. Either dispatches each tool call (with hook integration, allow-list enforcement,
+//!    and repeated-call protection) and folds the results back into the history, or —
+//!    when the model produced only text — returns the text as the final answer.
+//!
+//! The loop also enforces three safety budgets that protect against runaway agents:
+//!
+//! - `max_turns` — hard upper bound on iterations.
+//! - Repeated-call detection (warning + abort thresholds over a sliding window) —
+//!   stops the model from looping on the same tool call.
+//! - Identical-blocked-call counter — if a hook or allow-list keeps blocking the
+//!   exact same call, abort instead of letting the model retry forever.
+
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::Arc,
@@ -20,6 +40,12 @@ use crate::internal::ai::{
 };
 
 /// A single complete tool-loop turn result.
+///
+/// Returned by [`run_tool_loop_with_history_and_observer`]. `final_text` is what the
+/// model produced as its final answer (after all tool calls resolved), and `history`
+/// is the full history including the user prompt, every assistant turn, and every
+/// tool result, ready to be fed into another `run_tool_loop_*` call to continue the
+/// conversation.
 #[derive(Clone, Debug)]
 pub struct ToolLoopTurn {
     pub final_text: String,
@@ -27,6 +53,11 @@ pub struct ToolLoopTurn {
 }
 
 /// Observer hooks for tool-loop execution.
+///
+/// Implementations receive call-by-call notifications without affecting the loop
+/// itself (except for [`Self::on_tool_call_preflight`], which can cancel a tool call).
+/// Used by the TUI to render thoughts/calls/results live, and by tests to assert the
+/// expected sequence of events.
 ///
 /// All callbacks are best-effort and must be non-panicking.
 pub trait ToolLoopObserver: Send {
@@ -58,11 +89,17 @@ pub trait ToolLoopObserver: Send {
     }
 }
 
+/// Default observer used when callers do not provide one (the simple `run_tool_loop`
+/// entrypoint). Every method falls back to the trait's no-op default.
 struct NoopObserver;
 
 impl ToolLoopObserver for NoopObserver {}
 
 /// Runtime configuration for iterative tool-calling execution.
+///
+/// Every knob is optional; the [`Default`] impl wires sensible thresholds that match
+/// the typical interactive `libra code` usage. Callers (multi-agent plan executors,
+/// MCP server, etc.) override individual fields as needed.
 #[derive(Clone, Debug)]
 pub struct ToolLoopConfig {
     pub preamble: Option<String>,
@@ -111,13 +148,31 @@ impl Default for ToolLoopConfig {
     }
 }
 
+/// Maximum model turns when `ToolLoopConfig::max_turns` is unset.
+///
+/// 64 is enough for the longest real interactive turn we have observed (deep file
+/// exploration with many small reads) while still bounding pathological agent loops.
 const DEFAULT_MAX_TOOL_LOOP_TURNS: usize = 64;
+/// Sliding window (in executed tool calls) used by the repeat detector.
 const DEFAULT_REPEAT_DETECTION_WINDOW: usize = 10;
+/// Repeat count at which we inject a "you keep calling the same thing" warning into
+/// the next tool result.
 const DEFAULT_REPEAT_WARNING_THRESHOLD: usize = 3;
+/// Repeat count at which we hard-abort the loop with `CompletionError::ResponseError`.
 const DEFAULT_REPEAT_ABORT_THRESHOLD: usize = 5;
+/// Cap on identical *blocked* tool calls (hook deny / allow-list miss / preflight
+/// rejection). Exceeding this means the model is stuck retrying a forbidden call and
+/// the loop aborts to avoid wasted tokens.
 const MAX_IDENTICAL_BLOCKED_TOOL_CALLS: usize = 3;
 
 /// Run a prompt through a completion model, allowing iterative tool calls.
+///
+/// Functional scope: the simplest entry point — starts with no history, no observer,
+/// returns just the final assistant text. Used by the codex executor and any caller
+/// that does not need streaming events or to extend the conversation afterwards.
+///
+/// Boundary conditions: every error case from the underlying loop bubbles up
+/// unchanged (max-turns, repeated tool calls, hook denials, etc.).
 pub async fn run_tool_loop<M: CompletionModel>(
     model: &M,
     prompt: impl Into<String>,
@@ -142,6 +197,30 @@ where
 
 /// Run a prompt through a completion model with an existing conversation history,
 /// allowing iterative tool calls and emitting observer callbacks.
+///
+/// Functional scope:
+/// - Appends the user `prompt` to `existing_history` and iterates: request →
+///   inspect response → either dispatch tools and loop, or return the final text.
+/// - Streams `CompletionStreamEvent`s from the model task to the observer using a
+///   `tokio::select!` between the awaiting completion future and an `mpsc` receiver,
+///   so progressive UIs see chunks as they arrive instead of only at end-of-turn.
+/// - Stamps each tool call into the history (assistant turn) and each tool result
+///   back into the history (synthetic user turn) so the next request includes the
+///   full context.
+/// - Honors hooks, allow-listed tools, and three independent safety budgets.
+///
+/// Boundary conditions:
+/// - `max_turns == 0` is rejected up-front because zero would mean "never call the
+///   model" while still expecting an answer.
+/// - When the model emits no tool calls and no text but produced reasoning content,
+///   the loop returns a `ResponseError` rather than spinning forever — see
+///   [`empty_or_reasoning_only_error`].
+/// - `terminal_tools` short-circuits the loop the moment a successful call to one of
+///   them is recorded; the call's text output (if any) becomes `final_text`.
+/// - `MAX_IDENTICAL_BLOCKED_TOOL_CALLS` aborts the loop if hooks/allow-list/preflight
+///   reject the same call signature this many times.
+/// - `repeat_abort_threshold` aborts the loop if the model successfully repeats the
+///   same tool/argument signature too often within the rolling window.
 pub async fn run_tool_loop_with_history_and_observer<M: CompletionModel, O: ToolLoopObserver>(
     model: &M,
     mut existing_history: Vec<Message>,
@@ -183,7 +262,9 @@ where
 
     let mut tools = registry_tool_definitions(registry);
 
-    // Apply agent tool restriction
+    // Apply agent tool restriction at the *definition* level so the model never sees
+    // tools outside its allow-list. The same list is re-checked at execution time
+    // below to defend against models that hallucinate names regardless.
     if let Some(ref allowed) = config.allowed_tools {
         tools.retain(|t| allowed.iter().any(|a| a == &t.name));
     }
@@ -211,6 +292,9 @@ where
 
         observer.on_model_turn_start(turn_count);
         let response = {
+            // Drive the completion future and stream events concurrently. When the
+            // future resolves we drain any events still buffered on the channel before
+            // breaking out, otherwise late events would be lost.
             let completion = model.completion(request);
             tokio::pin!(completion);
 
@@ -475,6 +559,11 @@ where
     }
 }
 
+/// Normalize tool-call arguments to the JSON string shape that tool dispatch expects.
+///
+/// Models may already emit a JSON-serialized string for arguments (some providers do
+/// this for backward compatibility with pre-tool-use APIs). When the value is a string
+/// that itself parses as JSON we forward it verbatim; otherwise we re-serialize.
 fn tool_arguments_json(arguments: &Value) -> String {
     match arguments {
         Value::String(raw) => {
@@ -488,10 +577,15 @@ fn tool_arguments_json(arguments: &Value) -> String {
     }
 }
 
+/// Build a signature `"<tool>|<canonical-args>"` used to detect repeated *blocked*
+/// calls. The canonical form sorts object keys so semantically identical arguments
+/// produce identical signatures regardless of JSON ordering.
 fn blocked_tool_call_signature(tool_name: &str, arguments: &Value) -> String {
     format!("{tool_name}|{}", canonical_json_value(arguments))
 }
 
+/// Increment and return the blocked count for `signature`, mutating the cache in
+/// place. The caller compares the returned count against `MAX_IDENTICAL_BLOCKED_TOOL_CALLS`.
 fn increment_blocked_count(
     blocked_signatures: &mut HashMap<String, usize>,
     signature: &str,
@@ -501,6 +595,11 @@ fn increment_blocked_count(
     *count
 }
 
+/// Decide whether to keep the model's reasoning content in subsequent requests.
+///
+/// Some providers (notably reasoning models) charge for re-sending long thoughts; we
+/// drop them by default. Setting `preserve_reasoning_content` is opt-in for callers
+/// that want exact replay (e.g. plan executors that need the same chain of thought).
 fn history_reasoning_content(
     reasoning_content: Option<String>,
     preserve_reasoning_content: bool,
@@ -512,12 +611,28 @@ fn history_reasoning_content(
     }
 }
 
+/// Outcome of recording an executed tool call against the rolling window.
+///
+/// `count` is the number of times the same signature appears in the current window
+/// (after recording the new call); `warning` is set when the count crosses the warn
+/// threshold so the loop can surface a system message back to the model.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct RepeatToolCallStatus {
     count: usize,
     warning: Option<String>,
 }
 
+/// Record an executed tool call and update the rolling window.
+///
+/// Functional scope: pushes the new signature, increments its count, and evicts the
+/// oldest entry if the window grew beyond `window`. Returns the updated count and a
+/// warning string when the count crosses `threshold`.
+///
+/// Boundary conditions:
+/// - `window == 0` disables repeat detection entirely; `threshold == 0` disables the
+///   warning while leaving the counter intact for the abort check.
+/// - When a signature's eviction drops its count to zero the entry is removed from
+///   the count map to keep memory bounded over very long sessions.
 fn record_executed_tool_signature(
     recent_signatures: &mut VecDeque<String>,
     signature_counts: &mut HashMap<String, usize>,
@@ -559,10 +674,21 @@ fn record_executed_tool_signature(
     RepeatToolCallStatus { count, warning }
 }
 
+/// Decide whether the loop must abort because the same tool signature has executed
+/// too often. `abort_threshold == 0` disables the abort check.
 fn should_abort_repeated_tool_call(count: usize, abort_threshold: usize) -> bool {
     abort_threshold > 0 && count >= abort_threshold
 }
 
+/// Build a `CompletionError::ResponseError` that explains why the loop refused to
+/// continue with the given response.
+///
+/// Three cases produce specific messages:
+/// 1. Empty content with non-empty reasoning content — the model is "thinking out
+///    loud" but never producing visible text or tool calls.
+/// 2. Empty content overall — provider returned a malformed response.
+/// 3. Non-empty content that contains nothing actionable (e.g. only thoughts as
+///    `AssistantContent` blocks).
 fn empty_or_reasoning_only_error<R>(response: &CompletionResponse<R>) -> CompletionError {
     if response.content.is_empty() {
         if response
@@ -584,6 +710,10 @@ fn empty_or_reasoning_only_error<R>(response: &CompletionResponse<R>) -> Complet
     )
 }
 
+/// Render a compact preview of repeated arguments for the abort error message.
+///
+/// `MAX_LEN` of 240 keeps the error readable even for large argument blobs; we count
+/// chars (not bytes) so multibyte content does not slice through a code point.
 fn truncate_signature_arguments(arguments: &Value) -> String {
     let serialized = canonical_json_value(arguments);
     const MAX_LEN: usize = 240;
@@ -596,6 +726,11 @@ fn truncate_signature_arguments(arguments: &Value) -> String {
     }
 }
 
+/// Compute the `final_text` to surface when a terminal tool short-circuits the loop.
+///
+/// Prefers the tool's textual output, falls back to a human-readable confirmation,
+/// and on failure uses the error message verbatim so the caller still learns what
+/// went wrong.
 fn terminal_tool_final_text(tool_name: &str, tool_result: &Result<ToolOutput, String>) -> String {
     match tool_result {
         Ok(output) => output
@@ -608,6 +743,14 @@ fn terminal_tool_final_text(tool_name: &str, tool_result: &Result<ToolOutput, St
     }
 }
 
+/// Inject the repeat-call warning into the next tool result so the model sees it on
+/// its next turn.
+///
+/// The injection point depends on the result shape:
+/// - Function tools: append to the textual content with a blank-line separator.
+/// - MCP tools: add a `repeat_warning` key to the JSON object so structured callers
+///   can detect it without regex.
+/// - Errors: append to the error string the same way as function content.
 fn append_repeat_warning_to_tool_result(result: &mut Result<ToolOutput, String>, warning: &str) {
     match result {
         Ok(ToolOutput::Function { content, .. }) => {
@@ -633,6 +776,10 @@ fn append_repeat_warning_to_tool_result(result: &mut Result<ToolOutput, String>,
     }
 }
 
+/// Stable string representation of a JSON value with object keys sorted.
+///
+/// Used to compare argument payloads for equality regardless of how the LLM emitted
+/// the keys. Cheaper than re-parsing because we walk the in-memory `Value` directly.
 fn canonical_json_value(value: &Value) -> String {
     match value {
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => value.to_string(),
@@ -663,6 +810,11 @@ fn canonical_json_value(value: &Value) -> String {
     }
 }
 
+/// Convert a [`ToolRegistry`] into `ToolDefinition`s shaped for the completion model.
+///
+/// Functional scope: pulls the registry's specs and converts each parameter schema to
+/// JSON. `FunctionParameters::Empty` is rewritten to an explicit empty-object schema
+/// because some providers reject tools with no `parameters` field.
 fn registry_tool_definitions(registry: &ToolRegistry) -> Vec<ToolDefinition> {
     registry
         .tool_specs()
@@ -807,6 +959,8 @@ mod tests {
         }
     }
 
+    /// Scenario: a model that emits text and thinking deltas via the stream channel
+    /// has every event delivered to the observer before the loop returns.
     #[tokio::test]
     async fn tool_loop_forwards_completion_stream_events() {
         #[derive(Clone)]
@@ -883,6 +1037,8 @@ mod tests {
         assert_eq!(streamed, "hello");
     }
 
+    /// Scenario: a tool-call preview event surfaces in the observer's stream history
+    /// but does not trigger tool execution — previews are pure UI hints.
     #[tokio::test]
     async fn tool_loop_forwards_tool_call_preview_without_execution() {
         #[derive(Clone)]
@@ -949,6 +1105,9 @@ mod tests {
         }
     }
 
+    /// Scenario: a single tool call followed by a text response yields the canonical
+    /// four-message history (user, assistant tool-call, user tool-result, assistant
+    /// text) and emits the matching begin/end events.
     #[tokio::test]
     async fn tool_loop_emits_tool_events_and_updates_history() {
         let temp_dir = TempDir::new().unwrap();
@@ -1000,6 +1159,8 @@ mod tests {
         assert!(matches!(&turn.history[3], Message::Assistant { .. }));
     }
 
+    /// Scenario: when `preserve_reasoning_content` is `false` (default), assistant
+    /// reasoning is dropped before being re-sent to the model on the next turn.
     #[tokio::test]
     async fn tool_loop_clears_assistant_reasoning_content_by_default() {
         #[derive(Clone)]
@@ -1091,6 +1252,8 @@ mod tests {
         ));
     }
 
+    /// Scenario: when `preserve_reasoning_content` is `true`, the model's chain of
+    /// thought is replayed in the next request — used by long-horizon plan executors.
     #[tokio::test]
     async fn tool_loop_preserves_assistant_reasoning_content_when_configured() {
         #[derive(Clone)]
@@ -1188,6 +1351,8 @@ mod tests {
         ));
     }
 
+    /// Scenario: a `PreToolUse` hook returns `Block`. The tool is never dispatched,
+    /// the model receives the failure as a tool result, and the loop continues.
     #[tokio::test]
     async fn tool_loop_hook_blocks_tool_call() {
         use crate::internal::ai::hooks::{
@@ -1249,6 +1414,8 @@ mod tests {
         assert_eq!(turn.history.len(), 4);
     }
 
+    /// Scenario: a tool that returns an error has the error text fed back to the
+    /// model so it can recover, rather than aborting the whole loop.
     #[tokio::test]
     async fn tool_loop_tool_error_is_reported_to_model() {
         /// A handler that always fails.
@@ -1360,6 +1527,8 @@ mod tests {
         assert_eq!(turn.final_text, "handled error");
     }
 
+    /// Scenario: `allowed_tools` removes filtered tools from the definition list sent
+    /// to the model so they never appear as available choices.
     #[tokio::test]
     async fn tool_loop_allowed_tools_filters_definitions() {
         let temp_dir = TempDir::new().unwrap();
@@ -1389,6 +1558,8 @@ mod tests {
         assert_eq!(filtered.len(), 1);
     }
 
+    /// Scenario: even if a model hallucinates a tool name outside `allowed_tools`,
+    /// execution is rejected and the model receives a structured failure message.
     #[tokio::test]
     async fn tool_loop_allowed_tools_blocks_execution() {
         // MockModel always calls "mock_tool" on first turn.
@@ -1439,6 +1610,8 @@ mod tests {
         );
     }
 
+    /// Scenario: a runaway model that never stops calling tools is stopped at the
+    /// configured `max_turns` cap with a `ResponseError`.
     #[tokio::test]
     async fn tool_loop_stops_when_max_turns_is_reached() {
         #[derive(Clone)]
@@ -1489,6 +1662,9 @@ mod tests {
         );
     }
 
+    /// Scenario: model returns reasoning content but no text and no tool calls. The
+    /// loop must error rather than retrying — repeated reasoning-only responses would
+    /// infinitely loop without progress.
     #[tokio::test]
     async fn tool_loop_errors_on_reasoning_only_empty_content() {
         #[derive(Clone)]
@@ -1536,6 +1712,8 @@ mod tests {
         );
     }
 
+    /// Scenario: a completely empty response (no content, no reasoning) errors out
+    /// immediately rather than burning through `max_turns` retrying.
     #[tokio::test]
     async fn tool_loop_errors_on_empty_response_without_retrying_to_max_turns() {
         #[derive(Clone)]
@@ -1586,6 +1764,9 @@ mod tests {
         );
     }
 
+    /// Scenario: when a model repeats the same tool/argument signature past the warn
+    /// threshold, the next tool result includes a system warning so the model has a
+    /// chance to change strategy.
     #[tokio::test]
     async fn tool_loop_warns_on_repeated_executed_tool_call() {
         #[derive(Clone)]
@@ -1673,6 +1854,8 @@ mod tests {
         assert!(tool_result_contents[2].contains("same arguments 3 times"));
     }
 
+    /// Scenario: if the model ignores the repeat warning and continues, the loop
+    /// hard-aborts at the abort threshold.
     #[tokio::test]
     async fn tool_loop_warns_then_aborts_repeated_successful_tool_call() {
         #[derive(Clone)]
@@ -1742,6 +1925,8 @@ mod tests {
         assert!(observer.result_texts[4].contains("same arguments 5 times"));
     }
 
+    /// Scenario: a successful call to a tool listed in `terminal_tools` short-circuits
+    /// the loop and returns its output as the final answer.
     #[tokio::test]
     async fn tool_loop_stops_after_successful_terminal_tool() {
         #[derive(Clone)]
@@ -1801,6 +1986,8 @@ mod tests {
         assert_eq!(turn.history.len(), 3);
     }
 
+    /// Helper: asserts the terminal-tool short-circuit works for a specific tool
+    /// name. Used by the two `submit_*_draft` regression tests below.
     async fn assert_successful_named_terminal_tool(tool_name: &'static str) {
         #[derive(Clone)]
         struct TerminalToolModel {
@@ -1858,16 +2045,22 @@ mod tests {
         assert_eq!(turn.final_text, "ok");
     }
 
+    /// Scenario: regression — `submit_intent_draft` is one of the terminal tools used
+    /// by intent flows; a successful call must end the loop with the tool's text.
     #[tokio::test]
     async fn tool_loop_stops_after_successful_submit_intent_draft_terminal_tool() {
         assert_successful_named_terminal_tool("submit_intent_draft").await;
     }
 
+    /// Scenario: regression — same as above for `submit_plan_draft`, used by plan
+    /// generation flows.
     #[tokio::test]
     async fn tool_loop_stops_after_successful_submit_plan_draft_terminal_tool() {
         assert_successful_named_terminal_tool("submit_plan_draft").await;
     }
 
+    /// Scenario: a *failed* terminal tool call must NOT short-circuit the loop —
+    /// only successful ones count, so the model can retry or reroute.
     #[tokio::test]
     async fn tool_loop_does_not_stop_on_failed_terminal_tool() {
         struct FailingTerminalHandler;
@@ -1954,6 +2147,9 @@ mod tests {
         assert_eq!(turn.final_text, "handled terminal failure");
     }
 
+    /// Scenario: when an observer's preflight keeps blocking the same call signature,
+    /// the loop aborts after `MAX_IDENTICAL_BLOCKED_TOOL_CALLS` rejections instead of
+    /// letting the model retry forever.
     #[tokio::test]
     async fn tool_loop_stops_on_repeated_blocked_identical_calls() {
         #[derive(Clone)]

@@ -1,3 +1,9 @@
+//! `libra open` command implementation for opening repository remotes in a browser.
+//!
+//! Boundary: this command parses common Git remote URL forms and delegates launching to
+//! the host OS; it does not validate network reachability. Command tests cover HTTPS,
+//! SSH/SCP-like URLs, missing remotes, and malformed input.
+
 use std::process::Command;
 
 use clap::Parser;

@@ -24,6 +24,8 @@ use crate::internal::ai::{
 /// A message in an OpenAI-compatible chat conversation, tagged by `role`.
 ///
 /// Used by all OpenAI-compatible providers (OpenAI, Ollama, DeepSeek, Zhipu).
+/// The discriminant `role` is serialized as a lowercase string so it matches
+/// the on-the-wire JSON shape (`"role": "user"`, `"role": "assistant"`, etc.).
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "lowercase")]
 pub enum ChatMessage {
@@ -32,6 +34,10 @@ pub enum ChatMessage {
     /// A user message containing plain text.
     User { content: String },
     /// An assistant response, which may include both text and tool calls.
+    ///
+    /// `reasoning_content` is only populated for providers that surface chain-of-thought
+    /// (currently DeepSeek's `reasoner` models). It is intentionally skipped during
+    /// serialisation when `None` so providers that reject the field do not see it.
     Assistant {
         content: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -48,6 +54,10 @@ pub enum ChatMessage {
 }
 
 /// A tool definition in the OpenAI function-calling format.
+///
+/// `r#type` is always `"function"` in the current schema, but is kept as a
+/// `String` so future tool kinds (e.g. `"code_interpreter"`) can be supported
+/// without a breaking change.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChatToolDefinition {
     pub r#type: String,
@@ -55,6 +65,9 @@ pub struct ChatToolDefinition {
 }
 
 /// Metadata for a callable function exposed as a tool.
+///
+/// `parameters` is a free-form JSON Schema object, which the provider will
+/// validate before dispatching the call.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChatFunctionDefinition {
     pub name: String,
@@ -63,6 +76,9 @@ pub struct ChatFunctionDefinition {
 }
 
 /// A tool call emitted by the assistant in a response message.
+///
+/// `id` is the provider-issued correlation token that must be echoed back via
+/// [`ChatMessage::Tool`] so the API can pair each result with its originating call.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChatToolCall {
     pub id: String,
@@ -71,6 +87,9 @@ pub struct ChatToolCall {
 }
 
 /// The function name and its JSON-encoded arguments within a tool call.
+///
+/// `arguments` is a JSON-encoded *string* (not a JSON object) per the OpenAI
+/// schema; callers must `serde_json::from_str` it to recover the structured value.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChatFunctionCall {
     pub name: String,
@@ -78,6 +97,9 @@ pub struct ChatFunctionCall {
 }
 
 /// A single completion choice from the response.
+///
+/// Most providers return exactly one choice; multi-choice responses are
+/// supported but not exercised by Libra today.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChatChoice {
     pub index: usize,
@@ -94,6 +116,9 @@ pub struct ChatUsage {
 }
 
 /// Top-level response from an OpenAI-compatible `/chat/completions` endpoint.
+///
+/// `usage` is `Option` because some providers (notably Ollama and certain
+/// streaming-only paths) omit token accounting from the final response.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChatResponse {
     pub id: String,
@@ -121,6 +146,10 @@ pub struct ChatError {
 }
 
 /// Wrapper for the `{ "error": { ... } }` JSON error shape.
+///
+/// Most OpenAI-compatible providers nest a single error inside this envelope.
+/// Other shapes (e.g. plain-text 5xx bodies) must be handled by the caller
+/// before invoking this struct's deserializer.
 #[derive(Debug, Deserialize)]
 pub struct ChatErrorResponse {
     pub error: ChatError,
@@ -131,6 +160,17 @@ pub struct ChatErrorResponse {
 // ================================================================
 
 /// Converts generic [`ToolDefinition`]s into the OpenAI function-calling format.
+///
+/// Functional scope:
+/// - One-to-one mapping: each tool is wrapped in a `{ "type": "function", "function": {...} }`
+///   envelope to match the OpenAI schema.
+/// - The JSON Schema in `parameters` is forwarded verbatim — no validation is performed
+///   here because Libra's tool registry is the source of truth.
+///
+/// Boundary conditions:
+/// - The function clones every field (name, description, parameters) so the caller's
+///   `&[ToolDefinition]` stays untouched. This is fine for the typical small tool list
+///   but should be revisited if tool counts grow into the hundreds.
 pub fn parse_tools(tools: &[ToolDefinition]) -> Vec<ChatToolDefinition> {
     tools
         .iter()
@@ -147,25 +187,45 @@ pub fn parse_tools(tools: &[ToolDefinition]) -> Vec<ChatToolDefinition> {
 
 /// Builds the ordered list of [`ChatMessage`]s from a [`CompletionRequest`].
 ///
-/// The optional `preamble` becomes a leading `System` message. User messages
-/// are expanded per-item (text -> `User`, tool results -> `Tool`). Assistant
-/// messages collect text and tool calls into a single message. Image content
-/// returns a [`CompletionError::NotImplemented`] error.
+/// Functional scope:
+/// - The optional `preamble` becomes a leading `System` message.
+/// - User messages are expanded per-item (text -> `User`, tool results -> `Tool`).
+/// - Assistant messages collect text and tool calls into a single message.
+///
+/// Boundary conditions:
+/// - Image content returns a [`CompletionError::NotImplemented`] error because the
+///   shared OpenAI-compatible path is text-only; provider-specific multimodal paths
+///   bypass this helper.
+/// - Empty assistant text segments are dropped to keep the wire payload compact;
+///   if all segments are empty, `content` is `None` (which the provider must accept
+///   when at least one tool call is present).
 pub fn build_messages(request: &CompletionRequest) -> Result<Vec<ChatMessage>, CompletionError> {
     build_messages_internal(request, false)
 }
 
 /// Builds messages while preserving assistant `reasoning_content`.
 ///
-/// This is provider-specific for DeepSeek thinking mode. Other OpenAI-compatible
-/// providers should use [`build_messages`] so they do not receive unsupported
-/// message fields.
+/// Functional scope:
+/// - Provider-specific helper for DeepSeek's thinking mode where the chain-of-thought
+///   tokens emitted by the previous turn must be echoed back to keep the model
+///   "thinking" coherent across turns.
+///
+/// Boundary conditions:
+/// - Other OpenAI-compatible providers should use [`build_messages`] so they do not
+///   receive unsupported message fields. Sending `reasoning_content` to OpenAI itself
+///   triggers a 400 response.
 pub fn build_messages_with_reasoning_content(
     request: &CompletionRequest,
 ) -> Result<Vec<ChatMessage>, CompletionError> {
     build_messages_internal(request, true)
 }
 
+/// Internal implementation backing [`build_messages`] and
+/// [`build_messages_with_reasoning_content`].
+///
+/// The `include_reasoning_content` flag controls whether assistant turns retain
+/// their `reasoning_content` field; it is the only behavioural difference between
+/// the two public entry points.
 fn build_messages_internal(
     request: &CompletionRequest,
     include_reasoning_content: bool,
@@ -187,6 +247,9 @@ fn build_messages_internal(
                             content: t.text.clone(),
                         }),
                         UserContent::ToolResult(tool_result) => {
+                            // Tool results must be JSON-encoded strings; fall back to
+                            // the raw display form if serialization fails so the model
+                            // still sees something rather than an empty content field.
                             let content = serde_json::to_string(&tool_result.result)
                                 .unwrap_or_else(|_| tool_result.result.to_string());
                             messages.push(ChatMessage::Tool {
@@ -266,9 +329,18 @@ fn build_messages_internal(
 
 /// Extracts [`AssistantContent`] items from a response [`ChatChoice`].
 ///
-/// Non-empty text is emitted as [`AssistantContent::Text`]; each tool call
-/// has its JSON arguments string parsed back into a [`serde_json::Value`].
-/// Returns an error if the message is not an `Assistant` variant.
+/// Functional scope:
+/// - Non-empty text is emitted as [`AssistantContent::Text`]; whitespace-only
+///   text is dropped so downstream consumers don't see meaningless blanks.
+/// - Each tool call has its JSON arguments string parsed back into a
+///   [`serde_json::Value`]; failure to parse falls back to a `Value::String`
+///   containing the original raw payload so a malformed tool call is still
+///   addressable.
+///
+/// Boundary conditions:
+/// - Returns [`CompletionError::ResponseError`] if the message is not an
+///   `Assistant` variant — the OpenAI schema guarantees `Assistant` here, so
+///   any other variant indicates a server-side protocol violation.
 pub fn parse_choice_content(choice: &ChatChoice) -> Result<Vec<AssistantContent>, CompletionError> {
     match &choice.message {
         ChatMessage::Assistant {
@@ -306,6 +378,13 @@ pub fn parse_choice_content(choice: &ChatChoice) -> Result<Vec<AssistantContent>
 }
 
 /// Extracts provider-specific reasoning content from an assistant choice.
+///
+/// Functional scope:
+/// - Currently only DeepSeek's `reasoner` models populate this field.
+///
+/// Boundary conditions:
+/// - Whitespace-only `reasoning_content` is treated as absent so downstream code
+///   does not display empty thinking blocks.
 pub fn choice_reasoning_content(choice: &ChatChoice) -> Option<String> {
     match &choice.message {
         ChatMessage::Assistant {
@@ -320,9 +399,18 @@ pub fn choice_reasoning_content(choice: &ChatChoice) -> Option<String> {
 
 /// Ensures tool arguments are serialized as a JSON string.
 ///
-/// If `arguments` is a [`serde_json::Value::String`] containing valid JSON,
-/// it is returned as-is (avoiding double-encoding). Otherwise the value is
-/// serialized via `to_string()`.
+/// Functional scope:
+/// - If `arguments` is a [`serde_json::Value::String`] containing valid JSON,
+///   it is returned as-is (avoiding double-encoding into a JSON string of a JSON
+///   string). This handles the common case where the assistant produced an already
+///   stringified payload.
+/// - Otherwise the value is serialized via `to_string()` to produce the canonical
+///   JSON encoding required by the OpenAI schema (`arguments` must be a string).
+///
+/// Boundary conditions:
+/// - A `Value::String` whose contents are *not* valid JSON is treated as a literal
+///   token: it is wrapped in JSON quoting via `to_string()` so the wire payload
+///   remains parseable, even though the model will likely reject it downstream.
 pub fn tool_arguments_json(arguments: &serde_json::Value) -> String {
     match arguments {
         serde_json::Value::String(raw) => {
@@ -345,6 +433,10 @@ pub fn tool_arguments_json(arguments: &serde_json::Value) -> String {
 /// Only extracts the first content item per message — **not** suitable for
 /// production use where messages may carry multiple content items, tool calls,
 /// or tool results. Use [`build_messages`] instead.
+///
+/// Boundary conditions:
+/// - Tool calls and tool results are silently dropped. Image content collapses to
+///   an empty string. Provided exclusively as a fixture builder for unit tests.
 #[cfg(test)]
 impl From<&Message> for ChatMessage {
     fn from(msg: &Message) -> Self {
@@ -395,6 +487,8 @@ mod tests {
     use super::*;
     use crate::internal::ai::completion::Message;
 
+    /// Scenario: smoke-test the `From<&Message>` conversion for each role variant
+    /// so a regression in the test-only conversion is caught early.
     #[test]
     fn test_message_to_chat_message() {
         let user_msg = Message::user("Hello");
@@ -424,6 +518,9 @@ mod tests {
         assert!(matches!(chat_msg, ChatMessage::System { .. }));
     }
 
+    /// Scenario: DeepSeek thinking-mode requires the previous assistant turn's
+    /// `reasoning_content` to be echoed back so the model continues from the same
+    /// chain-of-thought. Verifies the DeepSeek-only path keeps that field on the wire.
     #[test]
     fn build_messages_with_reasoning_content_preserves_assistant_reasoning_content() {
         let request = CompletionRequest {
@@ -454,6 +551,9 @@ mod tests {
         assert_eq!(json[0]["tool_calls"][0]["id"], "call_1");
     }
 
+    /// Scenario: providers other than DeepSeek (notably OpenAI itself) reject the
+    /// `reasoning_content` field with an HTTP 400. This test guards the default
+    /// path — `build_messages` — so that field is always stripped.
     #[test]
     fn build_messages_omits_assistant_reasoning_content_by_default() {
         let request = CompletionRequest {

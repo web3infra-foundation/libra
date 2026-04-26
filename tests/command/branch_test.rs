@@ -1,6 +1,20 @@
-//! Tests branch subcommand for creation, listing, deletion, and switching logic.
+//! Tests `libra branch` for creation, listing, deletion, renaming,
+//! upstream tracking, and `--contains`/`--no-contains` filtering.
 //!
 //! **Layer:** L1 — deterministic, no external dependencies.
+//!
+//! Fixture conventions:
+//! - CLI cases use `create_committed_repo_via_cli()` and exercise the
+//!   binary so we cover error-code/exit-code surfaces (`LBR-CLI-003`,
+//!   `LBR-REPO-002`, `LBR-REPO-003`, `LBR-IO-002`).
+//! - In-process cases call `setup_with_new_libra_in()` plus an empty
+//!   commit chain (`commit::execute` with `allow_empty=true`,
+//!   `disable_pre=true`) and assert against `Branch::find_branch` /
+//!   `Head::current()`.
+//! - The `--contains` test builds a divergent two-branch graph (master:
+//!   base/m1/m2, dev: base/d1/d2) and exhaustively exercises filter
+//!   semantics. Several Unix-only cases force `permission-denied` writes
+//!   on the SQLite file, so they `skip_permission_denied_test_if_root`.
 
 #![cfg(test)]
 
@@ -15,6 +29,9 @@ use tempfile::tempdir;
 
 use super::*;
 
+/// Scenario: `libra branch <new> <bad-ref>` must reject the invalid start
+/// point with exit 129 and a structured `LBR-CLI-003` error. Pins the CLI
+/// usage error envelope.
 #[test]
 fn test_branch_cli_invalid_start_point_returns_cli_exit_code() {
     let repo = create_committed_repo_via_cli();
@@ -27,6 +44,9 @@ fn test_branch_cli_invalid_start_point_returns_cli_exit_code() {
     assert!(stderr.contains("Error-Code: LBR-CLI-003"));
 }
 
+/// Scenario: `--json branch <name>` must emit `command="branch"`,
+/// `data.action="create"`, `data.name=<name>` and a non-empty
+/// `data.commit`. Schema pin for branch-create JSON output.
 #[test]
 fn test_branch_json_create_output_reports_branch() {
     let repo = create_committed_repo_via_cli();
@@ -45,6 +65,8 @@ fn test_branch_json_create_output_reports_branch() {
     assert!(json["data"]["commit"].as_str().is_some());
 }
 
+/// Scenario: human-readable branch creation must print "Created branch
+/// 'feature' at <hash>" on stdout. Pins the confirmation message format.
 #[test]
 fn test_branch_create_outputs_confirmation() {
     let repo = create_committed_repo_via_cli();
@@ -59,6 +81,10 @@ fn test_branch_create_outputs_confirmation() {
     );
 }
 
+/// Scenario: in a freshly initialised repo with no commits but registered
+/// remote refs, `branch -a` must still display the unborn HEAD (`* main`)
+/// plus the remote ref. Regression guard against treating "unborn" as
+/// "no branches".
 #[tokio::test]
 #[serial]
 async fn test_branch_all_shows_unborn_head_even_with_remote_refs() {
@@ -99,6 +125,9 @@ async fn test_branch_all_shows_unborn_head_even_with_remote_refs() {
     );
 }
 
+/// Scenario: when `branch -d` targets a misspelled branch, the structured
+/// error must include a "did you mean" suggestion based on existing branch
+/// names. Pins the typo-suggestion contract (`LBR-CLI-003`, exit 129).
 #[test]
 fn test_branch_not_found_suggests_similar_name() {
     let repo = create_committed_repo_via_cli();
@@ -117,6 +146,10 @@ fn test_branch_not_found_suggests_similar_name() {
     );
 }
 
+/// Scenario: `branch --set-upstream-to` from detached HEAD must fail with
+/// `LBR-REPO-003` (exit 128) and the message must mention "HEAD is
+/// detached" plus a "checkout a branch first" hint. Pins both the error
+/// tag and the user-facing remediation.
 #[test]
 fn test_branch_set_upstream_detached_head_returns_repo_state_error() {
     let repo = create_committed_repo_via_cli();
@@ -137,6 +170,12 @@ fn test_branch_set_upstream_detached_head_returns_repo_state_error() {
     assert!(stderr.contains("checkout a branch first"));
 }
 
+/// Scenario (Unix only): if SQLite write permission is revoked
+/// (`chmod 0o444`), `branch --set-upstream-to` must surface an
+/// `LBR-IO-002` error mentioning the failing config key. The original
+/// permission mode is restored before assertions to avoid TempDir
+/// teardown failures. Skipped under root because the chmod injection
+/// has no effect.
 #[cfg(unix)]
 #[test]
 fn test_branch_set_upstream_surfaces_config_write_failure() {
@@ -162,6 +201,11 @@ fn test_branch_set_upstream_surfaces_config_write_failure() {
     );
 }
 
+/// Scenario (Unix only): if the upstream is already configured, a
+/// repeat `--set-upstream-to` call must NOT touch the config file. This
+/// is verified by making the SQLite file read-only between invocations
+/// and confirming the second call still succeeds. Pins the "no redundant
+/// write" optimisation. Skipped under root.
 #[cfg(unix)]
 #[test]
 fn test_branch_set_upstream_idempotent_path_skips_redundant_write() {
@@ -186,6 +230,8 @@ fn test_branch_set_upstream_idempotent_path_skips_redundant_write() {
     assert_cli_success(&second, "idempotent set-upstream");
 }
 
+/// Scenario: `branch -D <name>` must print "Deleted branch <name> (was
+/// <hash>)" on stdout. Pins the force-delete confirmation message.
 #[test]
 fn test_branch_force_delete_outputs_confirmation() {
     let repo = create_committed_repo_via_cli();
@@ -203,10 +249,14 @@ fn test_branch_force_delete_outputs_confirmation() {
     );
 }
 
+/// Scenario: in-process happy path for branch creation:
+/// 1. Two empty commits on `main` produce two distinct commit hashes.
+/// 2. Creating `first_branch` at the older hash must record that hash.
+/// 3. Creating `second_branch` without an explicit start point must
+///    inherit the current HEAD hash.
+/// Also exercises `--show-current` (output not asserted, just non-panic).
 #[tokio::test]
 #[serial]
-/// Tests core branch management functionality including creation and listing.
-/// Verifies branches can be created from specific commits.
 async fn test_branch() {
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
@@ -324,10 +374,11 @@ async fn test_branch() {
     // execute(BranchArgs::parse_from([""])).await; // default list
 }
 
+/// Scenario: a local branch can be created from `origin/main` (a
+/// remote-tracking ref). Verifies the resulting branch points to the
+/// same hash that the remote ref recorded.
 #[tokio::test]
 #[serial]
-/// Tests branch creation using remote branches as starting points.
-/// Verifies that local branches can be created from remote branch references.
 async fn test_create_branch_from_remote() {
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
@@ -376,6 +427,10 @@ async fn test_create_branch_from_remote() {
     assert_eq!(branch.commit, hash);
 }
 
+/// Scenario: branch creation accepts the fully-qualified
+/// `refs/remotes/origin/main` form (in addition to the short `origin/main`
+/// form covered by the previous test). Confirms ref resolution accepts
+/// both spellings.
 #[tokio::test]
 #[serial]
 async fn test_create_branch_from_remote_tracking_ref() {
@@ -425,6 +480,12 @@ async fn test_create_branch_from_remote_tracking_ref() {
     assert_eq!(branch.commit, hash);
 }
 
+/// Scenario: corrupt HEAD storage (the `main` ref points at a
+/// non-existent hash) must surface as `LBR-REPO-002` (exit 128) when
+/// trying to create a branch off HEAD, with messages "failed to resolve
+/// HEAD commit" and "stored branch reference 'main' is corrupt". The
+/// inner block uses a guard so the corruption is applied with the test
+/// CWD set to the repo before reverting.
 #[tokio::test]
 #[serial]
 async fn test_branch_create_without_base_surfaces_corrupt_head_storage() {
@@ -451,6 +512,10 @@ async fn test_branch_create_without_base_surfaces_corrupt_head_storage() {
     );
 }
 
+/// Scenario: same corruption pattern as above, but exercised through
+/// `branch -d`. The safe-delete path must also surface `LBR-REPO-002`
+/// with the corrupt-HEAD message rather than crash or report a misleading
+/// "branch not merged" error.
 #[tokio::test]
 #[serial]
 async fn test_branch_delete_safe_surfaces_corrupt_head_storage() {
@@ -480,6 +545,9 @@ async fn test_branch_delete_safe_surfaces_corrupt_head_storage() {
     );
 }
 
+/// Scenario: same corruption pattern, exercised through
+/// `branch --show-current`. The display-only path must NOT silently
+/// succeed when HEAD storage is broken; it must surface `LBR-REPO-002`.
 #[tokio::test]
 #[serial]
 async fn test_branch_show_current_surfaces_corrupt_head_storage() {
@@ -506,6 +574,10 @@ async fn test_branch_show_current_surfaces_corrupt_head_storage() {
     );
 }
 
+/// Scenario: a stray branch with an invalid commit hash
+/// (`broken-topic`) must trip the listing path with `LBR-REPO-002` and a
+/// "stored branch reference 'broken-topic' is corrupt" message. Confirms
+/// listing validates every branch row, not only HEAD.
 #[tokio::test]
 #[serial]
 async fn test_branch_list_surfaces_corrupt_reference_name() {
@@ -528,9 +600,11 @@ async fn test_branch_list_surfaces_corrupt_reference_name() {
     );
 }
 
+/// Scenario: branch names rejected by `is_valid_git_branch_name`
+/// (e.g. `@{mega}`) must not be created. Asserts both the validator's
+/// return value and the post-condition that the branch does not exist.
 #[tokio::test]
 #[serial]
-/// Tests the behavior of creating a branch with an invalid name.
 async fn test_invalid_branch_name() {
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
@@ -560,10 +634,11 @@ async fn test_invalid_branch_name() {
     assert!(branch.is_none(), "invalid branch should not be created");
 }
 
+/// Scenario: `branch -m old new` renames a non-current branch. Verifies
+/// the old name no longer resolves and the new name carries the same
+/// commit hash.
 #[tokio::test]
 #[serial]
-/// Tests branch renaming functionality.
-/// Verifies that branches can be renamed and HEAD is updated when renaming current branch.
 async fn test_branch_rename() {
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
@@ -639,10 +714,12 @@ async fn test_branch_rename() {
     assert_eq!(new_branch.unwrap().commit, commit_id_1);
 }
 
+/// Scenario: renaming the currently checked-out branch must update HEAD
+/// to the new name. Uses the single-argument `rename: vec![new]` form
+/// which renames *the current* branch. Pins the HEAD-follows-rename
+/// invariant.
 #[tokio::test]
 #[serial]
-/// Tests renaming the current branch.
-/// Verifies that HEAD is updated when renaming the current branch.
 async fn test_rename_current_branch() {
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
@@ -725,9 +802,11 @@ async fn test_rename_current_branch() {
     assert_eq!(new_branch.unwrap().commit, commit_id);
 }
 
+/// Scenario: renaming `branch1` to `branch2` while `branch2` already
+/// exists must fail and leave both branches intact. Pins the
+/// "no overwrite without -M" guard.
 #[tokio::test]
 #[serial]
-/// Tests that renaming to an existing branch name fails.
 async fn test_rename_to_existing_branch() {
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
@@ -805,9 +884,12 @@ async fn test_rename_to_existing_branch() {
     assert!(Branch::find_branch("branch2", None).await.is_some());
 }
 
+/// Scenario: `branch -a` must list both local and remote branches
+/// without crashing. The output is not directly captured (it just goes
+/// to stdout); the assertion is that both local (`feature_branch`) and
+/// remote (`origin/remote_branch`) refs resolve through `Branch::find_branch`.
 #[tokio::test]
 #[serial]
-/// Tests listing all branches (local + remote).
 async fn test_list_all_branches() {
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
@@ -884,10 +966,12 @@ async fn test_list_all_branches() {
     );
 }
 
+/// Scenario: `branch -d <name>` must refuse to delete an unmerged branch
+/// and succeed once the branch has been merged into the current head.
+/// Uses a fast-forward "merge" by directly updating `main` to the
+/// feature branch's commit. Pins the safe-delete merge gate.
 #[tokio::test]
 #[serial]
-/// Tests safe delete (branch -d) functionality
-/// Verifies that -d refuses to delete unmerged branches but allows merged ones
 async fn test_branch_delete_safe() {
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
@@ -1023,11 +1107,8 @@ async fn test_branch_delete_safe() {
     assert!(Branch::find_branch("feature", None).await.is_none());
 }
 
-#[tokio::test]
-#[serial]
-/// Comprehensive tests for `branch --contains` and `branch --no-contains` filters.
-///
-/// Builds a classic divergent branch topology:
+/// Scenario: comprehensive coverage of `--contains` and `--no-contains`
+/// filter semantics over a divergent branch topology:
 ///
 /// ```text
 ///   master:  base ← m1 ← m2
@@ -1044,6 +1125,13 @@ async fn test_branch_delete_safe() {
 /// 1. Single filters (`--contains` or `--no-contains` alone)
 /// 2. Combined filters (`--contains` AND `--no-contains`)
 /// 3. Multiple values (OR semantics for `--contains`, AND for `--no-contains`)
+/// 4. Chain dependency edge cases (e.g. `--contains d1 --no-contains d2`
+///    is empty because d2 contains d1).
+///
+/// The `libra/intent` agent branch is filtered out before assertions to
+/// keep the expected sets clean.
+#[tokio::test]
+#[serial]
 async fn test_branch_contains_commit_filter() {
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
@@ -1315,10 +1403,11 @@ async fn test_branch_contains_commit_filter() {
     );
 }
 
-/// Verifies that `filter_branches` propagates errors instead of silently
-/// skipping corrupt branches. When a branch points to a non-existent commit
-/// hash, the BFS in `commit_contains` should fail and that error must surface
-/// from `filter_branches`.
+/// Scenario: `filter_branches` must propagate (not swallow) errors when
+/// a branch row points at a non-existent commit hash. The BFS inside
+/// `commit_contains` should fail to load the bogus commit, and the
+/// outer call must surface that error with a "failed to load commit"
+/// message. Regression guard for silent-skip bugs.
 #[test]
 #[serial]
 fn test_filter_branches_propagates_error_for_corrupt_commit() {

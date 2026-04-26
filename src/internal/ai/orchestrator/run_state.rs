@@ -1,3 +1,9 @@
+//! Mutable in-memory run state used while an orchestrated AI workflow is active.
+//!
+//! Boundary: this state coordinates phase progress before persistence snapshots are
+//! written; it should not own durable serialization formats. Scheduler and runtime
+//! tests cover transition ordering and incomplete-run recovery boundaries.
+
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,

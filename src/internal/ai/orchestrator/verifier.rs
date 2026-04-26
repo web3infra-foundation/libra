@@ -1,3 +1,10 @@
+//! Verification helpers for checking task evidence against IntentSpec acceptance
+//! criteria.
+//!
+//! Boundary: verifier reads evidence and emits validation reports; it does not change
+//! workspace state or final decisions. Validation-decision tests cover missing checks,
+//! failing checks, and successful acceptance gates.
+
 use std::collections::BTreeSet;
 
 use super::{

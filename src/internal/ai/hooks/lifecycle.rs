@@ -1,4 +1,14 @@
 //! Canonical lifecycle event types and shared hook-ingestion helpers.
+//!
+//! Provider-specific hook adapters (Claude, Gemini, etc.) parse their own JSON wire
+//! formats and lower them into the agent-agnostic [`LifecycleEvent`] structure
+//! defined here. Downstream code (session storage, projection, audit logs) consumes
+//! only this normalised form, so adding a new provider does not require changes to
+//! the rest of the agent pipeline.
+//!
+//! Helpers in this module also enforce envelope validation (preventing path
+//! traversal in `session_id`, capping `transcript_path` length) and produce stable
+//! dedup keys so duplicate hook deliveries can be filtered out at ingestion time.
 
 use std::{
     collections::{BTreeMap, hash_map::DefaultHasher},
@@ -14,6 +24,12 @@ use serde_json::{Map, Value, json};
 use crate::internal::ai::session::SessionState;
 
 /// Agent-agnostic lifecycle event kinds.
+///
+/// These map roughly onto the union of every provider's hook taxonomy. Variants are
+/// intentionally finer-grained than the public `HookEvent` enum so that internal
+/// projection logic can distinguish, for example, `TurnStart` (a new user prompt
+/// arrived) from `Compaction` (the model summarised history to fit its context
+/// window).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LifecycleEventKind {
     SessionStart,
@@ -41,6 +57,10 @@ impl fmt::Display for LifecycleEventKind {
 }
 
 /// A normalized lifecycle event produced by a provider hook adapter.
+///
+/// All optional fields are populated only when the source envelope supplies them.
+/// `timestamp` is recorded at parse time, not from the envelope, to keep ordering
+/// authoritative even when providers omit it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LifecycleEvent {
     pub kind: LifecycleEventKind,
@@ -57,6 +77,11 @@ pub struct LifecycleEvent {
 }
 
 /// Common hook payload envelope shared by provider-specific parsers.
+///
+/// The `#[serde(flatten)]` `extra` map captures any provider-specific keys that the
+/// canonical envelope does not name explicitly, allowing downstream parsers to look
+/// up `tool_name`, `prompt`, `model`, etc. without forcing every provider to share
+/// an identical wire schema.
 #[derive(Debug, Deserialize, Clone)]
 pub struct SessionHookEnvelope {
     pub hook_event_name: String,
@@ -69,6 +94,19 @@ pub struct SessionHookEnvelope {
 }
 
 /// Core envelope validation shared by all providers.
+///
+/// Functional scope:
+/// - Verifies the four required fields (`hook_event_name`, `session_id`, `cwd`,
+///   and optionally a non-empty `transcript_path`) are populated.
+/// - Restricts `session_id` to a safe ASCII alphabet so it can be used as part of
+///   on-disk paths without sanitisation.
+/// - Caps `transcript_path` length and rejects embedded NUL bytes to defend
+///   downstream FS code from unsafe paths.
+///
+/// Boundary conditions:
+/// - Returns `Err` (via `bail!`) on the first failed check; callers see one
+///   actionable message rather than a list.
+/// - Whitespace-only fields are treated as empty.
 pub fn validate_session_hook_envelope(
     envelope: &SessionHookEnvelope,
     max_transcript_path_bytes: usize,
@@ -90,6 +128,18 @@ pub fn validate_session_hook_envelope(
 }
 
 /// Append normalized raw event fragments for audit/debug.
+///
+/// Functional scope:
+/// - Stashes a JSON snapshot of the inbound envelope into
+///   `session.metadata["raw_hook_events"]`, preserving the on-the-wire shape for
+///   later inspection.
+/// - Bounds the array to `max_raw_hook_events`, dropping the oldest entries once
+///   the cap is reached.
+///
+/// Boundary conditions:
+/// - If the metadata slot exists but is not a JSON array (schema drift from an
+///   older session), it is overwritten with a fresh single-element array rather
+///   than panicking.
 pub fn append_raw_hook_event(
     session: &mut SessionState,
     envelope: &SessionHookEnvelope,
@@ -124,6 +174,21 @@ pub fn append_raw_hook_event(
 }
 
 /// Apply a normalized lifecycle event to the in-memory session state.
+///
+/// Functional scope:
+/// - Mutates `session` in place to reflect the event:
+///   - `SessionStart` / `ModelUpdate` write `model` and `source` metadata.
+///   - `TurnStart` appends a user message when a prompt is present.
+///   - `ToolUse` appends to a bounded `tool_events` array.
+///   - `Compaction` increments a counter so the UI can flag context compaction.
+///   - `TurnEnd` records the final assistant message.
+///   - `SessionEnd` is a no-op marker (state is flushed by the caller).
+///
+/// Boundary conditions:
+/// - The `tool_events` array uses the same defensive overwrite path as
+///   [`append_raw_hook_event`] when the slot is the wrong JSON shape.
+/// - `tool_events` is capped at `max_tool_events`; oldest entries are dropped to
+///   keep memory and persistence size bounded.
 pub fn apply_lifecycle_event(
     session: &mut SessionState,
     event: &LifecycleEvent,
@@ -201,6 +266,19 @@ pub fn apply_lifecycle_event(
 }
 
 /// Build a dedup key using provider-configured identity fields and lifecycle fallbacks.
+///
+/// Functional scope:
+/// - Walks `identity_keys` in order; the first non-null match becomes the
+///   primary identity for the event and is hashed together with the envelope.
+/// - When no identity field is found but the event name is in
+///   `lifecycle_fallback_events`, falls back to `session_id` so events that
+///   genuinely repeat per-session (e.g. SessionStart) still produce a stable key.
+///
+/// Boundary conditions:
+/// - Returns `None` when no identity key matches and the event is not in the
+///   fallback list — callers may then choose to forward the event without dedup.
+/// - The hash mixes in `session_id`, `cwd`, `transcript_path`, and the full
+///   `extra` map so that semantically distinct payloads never collide.
 pub fn make_dedup_key(
     identity_keys: &[&str],
     lifecycle_fallback_events: &[&str],
@@ -232,6 +310,15 @@ pub fn make_dedup_key(
 }
 
 /// Canonicalize JSON for deterministic blob generation.
+///
+/// Functional scope:
+/// - Recursively sorts object keys alphabetically using a `BTreeMap` so that two
+///   semantically equal payloads always serialise to the same byte sequence.
+/// - Arrays preserve order; only object key order is normalised.
+///
+/// Boundary conditions:
+/// - Numbers, strings, booleans, and nulls are returned untouched.
+/// - The function is `O(n log n)` in total node count due to the per-object sort.
 pub fn normalize_json_value(value: Value) -> Value {
     match value {
         Value::Array(items) => Value::Array(items.into_iter().map(normalize_json_value).collect()),
@@ -246,6 +333,15 @@ pub fn normalize_json_value(value: Value) -> Value {
     }
 }
 
+/// Build a [`LifecycleEvent`] from a parsed envelope of the given kind.
+///
+/// Functional scope: probes a small set of well-known field names in `envelope.extra`
+/// (`prompt`/`message`/`user_prompt`, `tool_input`/`tool_request`,
+/// `tool_response`/`tool_result`, etc.) so that providers using slightly different
+/// vocabulary still flow through the same downstream pipeline.
+///
+/// Boundary conditions: any missing field is left as `None` so callers can detect
+/// and ignore events that don't carry the expected payload.
 pub(crate) fn build_lifecycle_event(
     kind: LifecycleEventKind,
     envelope: &SessionHookEnvelope,
@@ -276,6 +372,11 @@ pub(crate) fn build_lifecycle_event(
     }
 }
 
+/// Hash an event into a stable dedup key.
+///
+/// The textual prefix `event:key:` is preserved so logs remain human-readable;
+/// the trailing hex digest is the deterministic `DefaultHasher` digest of the
+/// canonicalised payload.
 fn make_event_key(
     event_name: &str,
     key_name: &str,
@@ -297,6 +398,11 @@ fn make_event_key(
     format!("{event_name}:{key_name}:{:x}", hasher.finish())
 }
 
+/// Reject session IDs that are too long or contain unsafe characters.
+///
+/// Functional scope: limits the alphabet to `[A-Za-z0-9._-]` and the length to 128
+/// characters. The conservative alphabet keeps session IDs usable as filename
+/// segments without per-platform escaping.
 fn validate_session_id(session_id: &str) -> Result<()> {
     if session_id.len() > 128 {
         bail!("invalid session_id: exceeds 128 characters");
@@ -310,6 +416,10 @@ fn validate_session_id(session_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Verify the transcript path is plausible: non-empty, no NUL byte, bounded length.
+///
+/// Boundary conditions: the upper bound is configurable so embedding contexts that
+/// know they only see short transcript paths can tighten the limit.
 fn validate_transcript_path(transcript_path: &str, max_transcript_path_bytes: usize) -> Result<()> {
     if transcript_path.trim().is_empty() {
         bail!("invalid transcript_path: value cannot be empty");
@@ -326,6 +436,10 @@ fn validate_transcript_path(transcript_path: &str, max_transcript_path_bytes: us
     Ok(())
 }
 
+/// Return the first string value found among the listed keys, if any.
+///
+/// Used to fall back across renamed fields between provider versions without forcing
+/// the rest of the parser to know each provider's vocabulary.
 fn find_string(payload: &Map<String, Value>, keys: &[&str]) -> Option<String> {
     for key in keys {
         if let Some(Value::String(value)) = payload.get(*key) {
@@ -335,6 +449,8 @@ fn find_string(payload: &Map<String, Value>, keys: &[&str]) -> Option<String> {
     None
 }
 
+/// Locate the model identifier in either the top-level `model` field or inside the
+/// nested `llm_request.model` object emitted by some providers.
 fn extract_model(payload: &Map<String, Value>) -> Option<Value> {
     if let Some(model) = payload.get("model") {
         return Some(model.clone());
@@ -351,6 +467,7 @@ fn extract_model(payload: &Map<String, Value>) -> Option<Value> {
 mod tests {
     use super::*;
 
+    // Scenario: each lifecycle kind formats as the documented snake_case string.
     #[test]
     fn lifecycle_event_kind_display() {
         assert_eq!(
@@ -365,6 +482,7 @@ mod tests {
         assert_eq!(LifecycleEventKind::SessionEnd.to_string(), "session_end");
     }
 
+    // Scenario: a path-traversal style session ID is rejected by the validator.
     #[test]
     fn validate_envelope_rejects_bad_session_id() {
         let envelope = SessionHookEnvelope {
@@ -377,6 +495,8 @@ mod tests {
         assert!(validate_session_hook_envelope(&envelope, 4096).is_err());
     }
 
+    // Scenario: when an identity field is present it wins; otherwise the lifecycle
+    // fallback kicks in for events listed as fallback-eligible.
     #[test]
     fn make_dedup_key_identity_then_lifecycle_fallback() {
         let with_identity = SessionHookEnvelope {
@@ -402,6 +522,8 @@ mod tests {
         assert!(make_dedup_key(&["event_id"], &["SessionStart"], &lifecycle_no_identity).is_some());
     }
 
+    // Scenario: payload differences must produce different dedup keys, otherwise
+    // distinct events would be silently merged.
     #[test]
     fn make_dedup_key_changes_when_payload_changes() {
         let first = SessionHookEnvelope {
@@ -433,6 +555,7 @@ mod tests {
         );
     }
 
+    // Scenario: object keys are sorted recursively so canonical JSON is stable.
     #[test]
     fn normalize_value_sorts_object_keys() {
         let value = json!({
@@ -447,6 +570,7 @@ mod tests {
         assert_eq!(canonical, r#"{"a":{"k1":1,"k2":2},"z":1}"#);
     }
 
+    // Scenario: a transcript path containing a NUL byte is rejected as unsafe.
     #[test]
     fn validate_envelope_rejects_invalid_transcript_path() {
         let envelope = SessionHookEnvelope {
@@ -459,6 +583,7 @@ mod tests {
         assert!(validate_session_hook_envelope(&envelope, 4096).is_err());
     }
 
+    // Scenario: a transcript path that's only whitespace is treated as empty.
     #[test]
     fn validate_envelope_rejects_empty_transcript_path() {
         let envelope = SessionHookEnvelope {

@@ -1,3 +1,8 @@
+//! Unit tests for the MCP resource and tool bridge.
+//!
+//! Scenario focus: command normalization, allowlisted Libra VCS execution, resource
+//! URI parsing, and error envelopes that external MCP clients depend on.
+
 use std::sync::Arc;
 
 use sea_orm::{ConnectionTrait, Database, Schema};

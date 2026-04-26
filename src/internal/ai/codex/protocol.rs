@@ -1,7 +1,19 @@
 //! Protocol handling for Agent Codex WebSocket communication.
-//! Handles all notification processing and message parsing.
+//!
+//! The Codex executor (the external `codex` binary that backs Libra's agent runs)
+//! speaks an app-server JSON-RPC schema over WebSocket. This module defines the small
+//! enum we use to classify the hundreds of possible method names into the dozen-ish
+//! "buckets" the rest of the runtime cares about.
+//!
+//! Method strings come from the `method` field of incoming notifications. We treat
+//! anything we do not recognize as `Unknown` and let the caller decide whether to log
+//! or drop it — schema additions in newer Codex builds therefore degrade gracefully.
 
-/// Known notification methods we care about (app-server schema v2 subset)
+/// Known notification methods we care about (app-server schema v2 subset).
+///
+/// Each variant maps to one or more raw method strings. Where the schema underwent
+/// renaming (e.g. `turnStarted` → `turn/started`), both spellings are accepted so the
+/// client works against current and legacy server builds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MethodKind {
     ThreadStarted,
@@ -32,6 +44,16 @@ pub enum MethodKind {
 }
 
 impl MethodKind {
+    /// Classify a raw `method` string from a JSON-RPC notification.
+    ///
+    /// Functional scope: pattern-matches both legacy and current spellings. The catch-
+    /// all `Unknown` arm is what makes the matching forward-compatible — new methods
+    /// appear as `Unknown` until they are explicitly handled.
+    ///
+    /// Boundary conditions:
+    /// - The order of the `m if ...` guard arms matters because more-specific prefixes
+    ///   (e.g. `item/commandExecution/requestApproval`) are tested before the generic
+    ///   `requestApproval` suffix arm.
     pub fn from(method: &str) -> Self {
         match method {
             "thread/started" => Self::ThreadStarted,

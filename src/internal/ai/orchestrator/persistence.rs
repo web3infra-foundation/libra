@@ -1,3 +1,11 @@
+//! Persistence layer for orchestrator plans, tasks, runs, evidence, decisions, and
+//! projection records.
+//!
+//! Boundary: persistence writes immutable AI objects plus index rows; it must preserve
+//! idempotency for retries and produce rebuildable projection state. Storage-flow,
+//! schema-migration, and scheduler tests cover replay, duplicate writes, and missing
+//! preview artifacts.
+
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fs,

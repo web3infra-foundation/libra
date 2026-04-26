@@ -1,3 +1,8 @@
+//! Mock Codex HTTP server helpers shared by AI integration tests.
+//!
+//! Scenario focus: deterministic streaming responses, tool-call events, and provider
+//! edge cases without relying on live network services.
+
 use std::{net::SocketAddr, sync::Arc};
 
 use serde::{Deserialize, Serialize};

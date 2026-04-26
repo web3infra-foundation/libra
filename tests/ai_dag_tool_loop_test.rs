@@ -1,6 +1,11 @@
 //! L1 unit tests for the DAG-based tool loop using a scripted (mock) completion model.
 //!
-//! **Layer:** L1 — deterministic, no external dependencies.
+//! Exercises `ToolLoopAction` end to end inside a `dagrs` graph by feeding scripted
+//! provider responses (`tool_call` followed by `text`) and asserting the requested
+//! tool actually executes against a real temp-dir filesystem.
+//!
+//! **Layer:** L1 — deterministic, no external dependencies. Uses `tempfile::TempDir`
+//! for filesystem isolation; tool effects are scoped to that directory.
 
 use std::{
     collections::VecDeque,
@@ -21,12 +26,20 @@ use libra::internal::ai::{
 };
 use tempfile::TempDir;
 
+/// `CompletionModel` impl that returns a queue of pre-baked responses in order.
+///
+/// Lets the test author script "first the model emits a tool call, then it emits a
+/// final text response" without spinning up a real provider. The internal queue is
+/// `Arc<Mutex<...>>` so `ScriptedModel` can satisfy the `Clone` bound that
+/// `ToolLoopAction` requires while still preserving consumption order across clones.
 #[derive(Clone)]
 struct ScriptedModel {
     responses: Arc<Mutex<VecDeque<CompletionResponse<()>>>>,
 }
 
 impl ScriptedModel {
+    /// Build a `ScriptedModel` that will yield `responses` in order on successive
+    /// `completion` calls and then return an error once exhausted.
     fn new(responses: Vec<CompletionResponse<()>>) -> Self {
         Self {
             responses: Arc::new(Mutex::new(VecDeque::from(responses))),
@@ -47,6 +60,9 @@ impl CompletionModel for ScriptedModel {
     }
 }
 
+/// Trivial source action that broadcasts a fixed prompt to the downstream tool-loop
+/// node. Mirrors the input node used in `ai_agent_test.rs` so the two test files share
+/// a recognisable shape.
 struct InputGenerator {
     prompt: String,
 }
@@ -65,6 +81,13 @@ impl Action for InputGenerator {
     }
 }
 
+/// Scenario: drive the full `ToolLoopAction` cycle end to end with a scripted model.
+/// The first scripted response is an `apply_patch` tool call against a target file in
+/// a temp dir; the second is a plain "done" text. The test asserts (a) the patch was
+/// applied — verifying the tool registry, working-dir wiring, and patch dispatch all
+/// work — and (b) the final DAG output equals "done", proving the tool loop terminated
+/// cleanly on the text response. Acts as a regression guard for the tool-call→tool-
+/// result→text-completion sequence.
 #[tokio::test]
 async fn test_dag_tool_loop_action_applies_patch() {
     let temp_dir = TempDir::new().unwrap();

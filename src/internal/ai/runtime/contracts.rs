@@ -1,3 +1,10 @@
+//! Formal runtime contracts shared by prompt builders, execution phases, validators,
+//! and persistence.
+//!
+//! Boundary: these structs are stable internal APIs. Additive fields need defaults and
+//! tests because persisted runs and projection rebuilds deserialize older records.
+//! Runtime contract tests cover phase transitions and required evidence fields.
+
 use std::{collections::HashSet, path::PathBuf};
 
 use async_trait::async_trait;

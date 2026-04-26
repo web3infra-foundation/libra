@@ -1,3 +1,9 @@
+//! Runtime enforcement for sandboxed AI tool execution.
+//!
+//! Boundary: this module applies parsed policy to concrete process/file operations and
+//! must preserve explicit denial reasons for user-facing diagnostics. Hardening tests
+//! cover denied commands, allowed commands, and path escape attempts.
+
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},

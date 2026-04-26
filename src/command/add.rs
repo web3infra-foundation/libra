@@ -1,5 +1,22 @@
-//! Stages changes for commit by parsing pathspecs and modes, respecting ignore
-//! policy, refreshing index entries, and writing blob objects.
+//! Stages changes for the next commit (`libra add`).
+//!
+//! Implements the `add` subcommand: parses pathspecs and mode flags, applies
+//! ignore policy (`.libraignore`), classifies each path against the working
+//! tree and the on-disk index, writes new blob objects under the repository's
+//! object storage, and finally persists the updated index.
+//!
+//! Non-obvious responsibilities:
+//! - Maps low-level [`GitError`] / [`io::Error`] variants into structured
+//!   [`AddError`] cases that each carry stable error codes and human-readable
+//!   hints (see the `From<AddError> for CliError` impl).
+//! - Supports four output channels in [`render_add_output`]: JSON, quiet
+//!   (warnings only on stderr), normal (summary), and verbose (per-path).
+//! - Provides a "refresh-only" mode that updates index stat metadata without
+//!   rewriting blobs.
+//! - Filters the running `libra` executable from staging candidates so a
+//!   self-build does not accidentally stage its own binary.
+//! - Honors the `force` flag by folding ignored paths back into the visible
+//!   change set before pathspec validation runs.
 
 use std::{
     env,
@@ -81,26 +98,53 @@ pub struct AddArgs {
     pub ignore_errors: bool,
 }
 
+/// Domain error for `libra add`.
+///
+/// Each variant maps to a specific failure mode of the staging pipeline and is
+/// translated into a [`CliError`] (with a stable code and hints) by the
+/// `From<AddError> for CliError` impl below. Variants are not numbered in the
+/// public API; classification happens inside that impl.
 #[derive(thiserror::Error, Debug)]
 pub enum AddError {
+    /// No `.libra` directory was found walking up from the CWD. Surfaced as
+    /// [`StableErrorCode::RepoNotFound`].
     #[error("not a libra repository (or any of the parent directories): .libra")]
     NotInRepo,
+    /// A user-supplied pathspec matched neither tracked files, working-tree
+    /// changes, nor an ignored entry — typically a typo. Mapped to
+    /// [`StableErrorCode::CliInvalidTarget`].
     #[error("pathspec '{pathspec}' did not match any files")]
     PathspecNotMatched { pathspec: String },
+    /// The (canonical) pathspec resolves outside the repository working tree,
+    /// for example via `..` traversal or an absolute path to another repo.
     #[error("'{path}' is outside repository at '{repo_root}'")]
     PathOutsideRepo { path: String, repo_root: PathBuf },
+    /// `Index::load` failed — usually means a corrupt or truncated
+    /// `.libra/index`. Mapped to [`StableErrorCode::RepoCorrupt`].
     #[error("unable to read index '{path}': {source}")]
     IndexLoad { path: PathBuf, source: GitError },
+    /// Persisting the updated index back to disk failed (e.g. permission
+    /// denied or out of space).
     #[error("unable to write index '{path}': {source}")]
     IndexSave { path: PathBuf, source: GitError },
+    /// `Index::refresh` could not stat a tracked file in `--refresh` mode.
     #[error("failed to refresh '{path}': {source}")]
     RefreshFailed { path: PathBuf, source: GitError },
+    /// Building an [`IndexEntry`] from a worktree file failed (typically an
+    /// `lstat`/`open` error).
     #[error("failed to create index entry for '{path}': {source}")]
     CreateIndexEntry { path: PathBuf, source: io::Error },
+    /// Path bytes are not valid UTF-8 — Libra's index does not yet preserve
+    /// non-UTF-8 paths verbatim.
     #[error("path '{path}' is not valid UTF-8")]
     InvalidPathEncoding { path: PathBuf },
+    /// Failure resolving the working directory (CWD missing, permission
+    /// denied, etc.). The `From` impl below distinguishes "missing" (treated
+    /// as `RepoNotFound`) from other I/O errors.
     #[error("failed to determine repository working directory: {source}")]
     Workdir { source: io::Error },
+    /// The status engine failed before staging could proceed; the underlying
+    /// [`status::StatusError`] is preserved as a source.
     #[error("failed to inspect repository status: {source}")]
     Status { source: status::StatusError },
 }
@@ -153,12 +197,19 @@ impl From<AddError> for CliError {
 // Structured output types
 // ---------------------------------------------------------------------------
 
+/// One entry in [`AddOutput::failed`]: a path that could not be staged when
+/// `--ignore-errors` was set. The `message` is the rendered [`AddError`].
 #[derive(Debug, Clone, Serialize)]
 pub struct AddFailure {
     pub path: String,
     pub message: String,
 }
 
+/// Structured result of a single `libra add` invocation.
+///
+/// Built by [`run_add`] and consumed by [`render_add_output`] (text mode) or
+/// emitted directly through `output::emit_json_data` (JSON mode). The fields
+/// always reference paths relative to the working directory.
 #[derive(Debug, Clone, Serialize)]
 pub struct AddOutput {
     /// New files staged
@@ -178,6 +229,8 @@ pub struct AddOutput {
 }
 
 impl AddOutput {
+    /// Construct an empty result, preserving the user's `--dry-run` choice so
+    /// downstream rendering can switch on it.
     fn empty(dry_run: bool) -> Self {
         Self {
             added: Vec::new(),
@@ -190,10 +243,17 @@ impl AddOutput {
         }
     }
 
+    /// Sum of paths that produced an actual index change. Excludes
+    /// `refreshed`, since refreshing only updates stat metadata.
+    ///
+    /// See: tests::add_output_total_and_empty in src/command/add.rs:840.
     fn total_staged(&self) -> usize {
         self.added.len() + self.modified.len() + self.removed.len()
     }
 
+    /// True when no path was staged or refreshed. Used together with
+    /// [`Self::ignored`] in [`check_ignored_only_error`] to detect the
+    /// "everything was filtered out" failure mode.
     fn is_empty(&self) -> bool {
         self.total_staged() == 0 && self.refreshed.is_empty()
     }
@@ -203,6 +263,8 @@ impl AddOutput {
 // Action tracking for add_a_file
 // ---------------------------------------------------------------------------
 
+/// The outcome of staging a single path. Returned by [`stage_a_file`] so the
+/// caller can sort each path into the correct [`AddOutput`] bucket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StagedAction {
     Added,
@@ -215,6 +277,9 @@ enum StagedAction {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+/// Result of [`validate_pathspecs`]: the canonicalised set of pathspecs that
+/// should drive staging, plus any pathspecs that only matched
+/// `.libraignore`d entries (reported as warnings).
 #[derive(Default)]
 struct ValidatedPathspecs {
     files: Vec<PathBuf>,
@@ -225,15 +290,36 @@ struct ValidatedPathspecs {
 // Public entry points
 // ---------------------------------------------------------------------------
 
+/// Fire-and-forget entry used by the simple CLI dispatcher.
+///
+/// Functional scope:
+/// - Delegates to [`execute_safe`] using the default [`OutputConfig`].
+/// - On error, prints the rendered [`CliError`] to stderr and returns; the
+///   process exit code is the dispatcher's responsibility.
+///
+/// Boundary conditions:
+/// - Does not propagate errors, so callers that care about the exit status
+///   should call [`execute_safe`] directly.
 pub async fn execute(args: AddArgs) {
     if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
         err.print_stderr();
     }
 }
 
-/// Safe entry point that returns structured [`CliResult`] instead of printing
-/// errors and exiting. Stages changes by resolving pathspecs, respecting
-/// ignore policy, and writing blob objects to storage.
+/// Structured entry point used by `cli::parse` and integration tests.
+///
+/// Functional scope:
+/// - Runs the full staging pipeline via [`run_add`].
+/// - Renders the [`AddOutput`] in the format the user requested
+///   (`OutputConfig::is_json`, `quiet`, normal, verbose).
+/// - Records a process-level warning (via [`output::record_warning`]) when any
+///   path was ignored or fell through `--ignore-errors`.
+///
+/// Boundary conditions:
+/// - Returns the same `Err(CliError)` produced by [`run_add`]; rendering only
+///   runs after a successful staging pass.
+///
+/// See: tests::test_add_single_file in tests/command/add_test.rs:12.
 pub async fn execute_safe(args: AddArgs, output: &OutputConfig) -> CliResult<()> {
     let verbose = args.verbose;
     let dry_run = args.dry_run;
@@ -250,8 +336,31 @@ pub async fn execute_safe(args: AddArgs, output: &OutputConfig) -> CliResult<()>
     Ok(())
 }
 
-/// Pure execution entry point. Performs all staging logic and returns a
-/// structured [`AddOutput`] without printing anything.
+/// Pure staging implementation that produces [`AddOutput`] without printing.
+///
+/// Functional scope:
+/// - Resolves repository paths (`workdir`, `.libra/index`, object storage),
+///   loads the index, and runs `status::changes_to_be_staged_split_safe`.
+/// - Validates pathspecs, optionally folding ignored paths in when `--force`
+///   is set, and short-circuits to refresh-mode when `--refresh` is set.
+/// - Filters tree changes against the requested pathspec set, then either
+///   classifies (dry-run) or stages each file via [`stage_a_file`].
+/// - Persists the index back to disk on the non-dry-run path.
+///
+/// Boundary conditions:
+/// - Returns [`AddError::NotInRepo`] when the working dir, index, or storage
+///   path lookups raise [`io::ErrorKind::NotFound`]; other I/O errors map to
+///   [`AddError::Workdir`].
+/// - Returns a `CliError::command_usage` (stable code
+///   `CliInvalidArguments`) when no pathspec is given and none of `-A`,
+///   `-u`, `--refresh` is set — see
+///   `tests::test_add_without_path_should_error` in
+///   `tests/command/add_test.rs:518`.
+/// - Returns `Err(AddError::PathspecNotMatched)` for unknown pathspecs unless
+///   `--ignore-errors` was set during the per-file staging loop.
+///
+/// See: tests::test_add_all_flag in tests/command/add_test.rs:100;
+/// tests::test_add_force_tracks_ignored_file in tests/command/add_test.rs:319.
 pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
     let workdir = util::try_working_dir().map_err(|source| {
         if source.kind() == io::ErrorKind::NotFound {
@@ -411,7 +520,18 @@ pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
     check_ignored_only_error(add_output)
 }
 
-/// If the output has ignored files but nothing was staged, return an error.
+/// Convert "all paths ignored, nothing staged" into a hard error.
+///
+/// Functional scope:
+/// - When `output.ignored` is non-empty *and* nothing else was staged or
+///   refreshed, builds an error message listing each ignored path and
+///   attaches a hint to use `-f`.
+/// - Otherwise returns the input unchanged.
+///
+/// Boundary conditions:
+/// - Always passes through when [`AddOutput::is_empty`] is false, even if
+///   some paths were ignored — those become warnings instead.
+/// - Stable code is [`StableErrorCode::AddNothingStaged`].
 fn check_ignored_only_error(output: AddOutput) -> CliResult<AddOutput> {
     if !output.ignored.is_empty() && output.is_empty() {
         let mut message =
@@ -431,6 +551,19 @@ fn check_ignored_only_error(output: AddOutput) -> CliResult<AddOutput> {
 // Rendering
 // ---------------------------------------------------------------------------
 
+/// Top-level dispatcher for the four output modes (JSON, quiet, dry-run,
+/// refresh, normal).
+///
+/// Functional scope:
+/// - Picks one body renderer based on flags and writes the result to stdout.
+/// - Always emits warnings to stderr last, regardless of mode, so that users
+///   who pipe stdout still see ignore/skip notices.
+///
+/// Boundary conditions:
+/// - In quiet mode, stdout is suppressed entirely but stderr warnings still
+///   flow.
+/// - JSON mode bypasses stdout-locking and short-circuits with the structured
+///   payload via [`output::emit_json_data`].
 fn render_add_output(
     result: &AddOutput,
     output: &OutputConfig,
@@ -465,6 +598,8 @@ fn render_add_output(
     Ok(())
 }
 
+/// Render the `--dry-run` preview: one line per would-be-changed path,
+/// suffixed with the explicit `(dry run, no files were staged)` footer.
 fn render_dry_run(w: &mut impl Write, result: &AddOutput) -> CliResult<()> {
     for f in &result.added {
         writeln!(w, "add: {f}").map_err(write_err)?;
@@ -482,6 +617,8 @@ fn render_dry_run(w: &mut impl Write, result: &AddOutput) -> CliResult<()> {
     Ok(())
 }
 
+/// Render the output of `--refresh`. In verbose mode each refreshed file is
+/// printed; otherwise just a `refreshed N file(s)` summary is emitted.
 fn render_refresh(w: &mut impl Write, result: &AddOutput, verbose: bool) -> CliResult<()> {
     if verbose {
         for f in &result.refreshed {
@@ -498,6 +635,12 @@ fn render_refresh(w: &mut impl Write, result: &AddOutput, verbose: bool) -> CliR
     Ok(())
 }
 
+/// Render the default text output: optional per-file lines (verbose) followed
+/// by either a single-file message or a multi-file summary.
+///
+/// Boundary conditions:
+/// - Returns [`CliError::internal`] if `total == 1` but every bucket is empty
+///   — this is an internal invariant violation, not a user-visible state.
 fn render_normal(w: &mut impl Write, result: &AddOutput, verbose: bool) -> CliResult<()> {
     let total = result.total_staged();
 
@@ -550,6 +693,9 @@ fn render_normal(w: &mut impl Write, result: &AddOutput, verbose: bool) -> CliRe
     Ok(())
 }
 
+/// Emit the always-on warning footer: which paths were ignored, which paths
+/// were skipped under `--ignore-errors`. Output goes to stderr so it survives
+/// stdout redirection.
 fn render_warnings_stderr(result: &AddOutput) {
     if !result.ignored.is_empty() {
         eprintln!("warning: the following paths are ignored by one of your .libraignore files:");
@@ -571,6 +717,8 @@ fn render_warnings_stderr(result: &AddOutput) {
     }
 }
 
+/// Convert a `writeln!` failure into the standardized I/O [`CliError`] so the
+/// caller does not need to repeat the format string at every call site.
 fn write_err(e: io::Error) -> CliError {
     CliError::io(format!("failed to write add output: {e}"))
 }
@@ -579,6 +727,23 @@ fn write_err(e: io::Error) -> CliError {
 // Core staging logic
 // ---------------------------------------------------------------------------
 
+/// Resolve, canonicalise and classify each user-supplied pathspec.
+///
+/// Functional scope:
+/// - When `raw_pathspecs` is empty, returns `requested_paths` unchanged
+///   (caller passes the workdir as the implicit pathspec for `-A` / `-u`).
+/// - For each pathspec, makes the path absolute, rejects anything outside
+///   `workdir`, and probes three candidate sets in order: visible changes,
+///   tracked files in the index, and ignored changes.
+/// - Pathspecs that match only an ignored entry are returned in
+///   [`ValidatedPathspecs::ignored`] so they can be reported as warnings.
+///
+/// Boundary conditions:
+/// - Returns [`AddError::PathOutsideRepo`] for any pathspec resolving outside
+///   the working tree (including via `..`).
+/// - Returns [`AddError::PathspecNotMatched`] for the first pathspec that
+///   matches no candidate at all — `--ignore-errors` does not affect this
+///   pre-flight stage.
 fn validate_pathspecs(
     raw_pathspecs: &[String],
     requested_paths: &[PathBuf],
@@ -631,6 +796,8 @@ fn validate_pathspecs(
     Ok(ValidatedPathspecs { files, ignored })
 }
 
+/// Flatten the three change buckets (`new`, `modified`, `deleted`) into a
+/// single ordered candidate list for pathspec matching.
 fn collect_change_candidates(changes: &Changes) -> Vec<PathBuf> {
     let mut files = Vec::new();
     files.extend(changes.new.iter().cloned());
@@ -639,6 +806,9 @@ fn collect_change_candidates(changes: &Changes) -> Vec<PathBuf> {
     files
 }
 
+/// Make a user-supplied pathspec absolute by joining onto `current_dir` when
+/// it is relative. Mirrors how Git's pathspec parser anchors specs to the
+/// invoking shell's CWD rather than to the worktree root.
 fn resolve_pathspec(pathspec: &Path, current_dir: &Path) -> PathBuf {
     if pathspec.is_absolute() {
         pathspec.to_path_buf()
@@ -647,6 +817,9 @@ fn resolve_pathspec(pathspec: &Path, current_dir: &Path) -> PathBuf {
     }
 }
 
+/// True iff any path in `candidates` (interpreted relative to `workdir`) is a
+/// subpath of `requested_abs`. Used both for tracked-file matching and for
+/// status-change matching.
 fn pathspec_matches_any(requested_abs: &Path, candidates: &[PathBuf], workdir: &Path) -> bool {
     candidates.iter().any(|candidate| {
         let candidate_abs = workdir.join(candidate);
@@ -654,6 +827,9 @@ fn pathspec_matches_any(requested_abs: &Path, candidates: &[PathBuf], workdir: &
     })
 }
 
+/// Restrict `files` (workdir-relative) to entries that fall under at least
+/// one of the user's pathspecs. Used to scope `-A`/`-u`-derived candidate
+/// sets to the explicit positional arguments.
 fn filter_candidates(
     files: &[PathBuf],
     requested_paths: &[PathBuf],
@@ -673,6 +849,9 @@ fn filter_candidates(
         .collect()
 }
 
+/// Alias of [`filter_candidates`] used in `--refresh` mode. Kept separate so
+/// future divergence in semantics (e.g. submodule handling) only needs to
+/// touch one branch.
 fn filter_refresh_candidates(
     files: &[PathBuf],
     requested_paths: &[PathBuf],
@@ -682,6 +861,18 @@ fn filter_refresh_candidates(
     filter_candidates(files, requested_paths, workdir, current_dir)
 }
 
+/// Remove the running `libra` binary from the candidate list.
+///
+/// Functional scope:
+/// - Detects the executable via `current_exe` + `canonicalize`, and drops any
+///   candidate whose absolute, canonicalised path matches.
+///
+/// Boundary conditions:
+/// - Silent no-op when `current_exe()` or `canonicalize()` fail; we never
+///   skip files based on speculative information.
+/// - Important when running `libra add .` from inside a Libra checkout that
+///   has compiled the binary into a tracked location (`target/`), which would
+///   otherwise stage the freshly produced executable.
 fn filter_out_current_executable(files: &mut Vec<PathBuf>) {
     if let Some(exe_path) = std::env::current_exe()
         .ok()
@@ -697,6 +888,16 @@ fn filter_out_current_executable(files: &mut Vec<PathBuf>) {
 }
 
 /// Refresh files and return the list of files actually refreshed.
+///
+/// Functional scope:
+/// - Calls `Index::refresh` for each file. The underlying call returns
+///   `true` only when the index entry's stat info actually changed; entries
+///   whose mtime/size still match are silently skipped (and not added to the
+///   returned vector).
+///
+/// Boundary conditions:
+/// - The first refresh failure short-circuits the loop with
+///   [`AddError::RefreshFailed`]; no rollback is performed on the index.
 fn do_refresh_files(
     index: &mut Index,
     files: &[PathBuf],
@@ -719,7 +920,20 @@ fn do_refresh_files(
 
 /// Stage a single file and return the action taken.
 ///
-/// `file` path must be relative to the working directory.
+/// Functional scope:
+/// - Translates the file's [`FileStatus`] into the corresponding index
+///   mutation: writes a new blob and inserts an [`IndexEntry`] for `New`,
+///   updates the entry only when the on-disk hash differs for `Modified`,
+///   and removes the entry for `Deleted`.
+/// - Skips files that live inside `storage_path` (the `.libra/` storage
+///   directory) by returning `Unchanged` without touching the index.
+///
+/// Boundary conditions:
+/// - `file` must be relative to `workdir`. Absolute paths or paths that
+///   resolve outside the worktree return [`AddError::PathOutsideRepo`].
+/// - Non-UTF-8 paths return [`AddError::InvalidPathEncoding`].
+/// - LFS-tracked files are written as pointer blobs through
+///   [`gen_blob_from_file`].
 async fn stage_a_file(
     file: &Path,
     index: &mut Index,
@@ -782,6 +996,8 @@ async fn stage_a_file(
     }
 }
 
+/// Internal classification of a path relative to the index. Drives the
+/// branching in [`stage_a_file`] and the dry-run preview in [`run_add`].
 enum FileStatus {
     /// file is new
     New,
@@ -795,6 +1011,16 @@ enum FileStatus {
     NotFound,
 }
 
+/// Compute a [`FileStatus`] for `file` (relative to `workdir`) using the
+/// in-memory `index`.
+///
+/// Functional scope:
+/// - Uses `index.tracked` and `index.is_modified` to discriminate the four
+///   live states; missing files are reported as `Deleted` when tracked, else
+///   `NotFound`.
+///
+/// Boundary conditions:
+/// - Returns [`AddError::InvalidPathEncoding`] when `file` is not UTF-8.
 fn check_file_status(file: &Path, index: &Index, workdir: &Path) -> Result<FileStatus, AddError> {
     let file_str = file.to_str().ok_or_else(|| AddError::InvalidPathEncoding {
         path: file.to_path_buf(),
@@ -815,8 +1041,12 @@ fn check_file_status(file: &Path, index: &Index, workdir: &Path) -> Result<FileS
     }
 }
 
-/// Generate a `Blob` from a file
-/// - if the file is tracked by LFS, generate a `Blob` with pointer file
+/// Generate a `Blob` from a file.
+///
+/// Functional scope:
+/// - When the file matches a `.libraattributes` LFS filter, returns a pointer
+///   blob via [`Blob::from_lfs_file`]; otherwise reads the file content
+///   verbatim into a regular blob.
 fn gen_blob_from_file(path: impl AsRef<Path>) -> Blob {
     if lfs::is_lfs_tracked(&path) {
         Blob::from_lfs_file(&path)
@@ -829,6 +1059,9 @@ fn gen_blob_from_file(path: impl AsRef<Path>) -> Blob {
 mod test {
     use super::*;
 
+    /// Scenario: clap should reject incompatible mode flags up front so the
+    /// user gets a parse-time error rather than ambiguous staging behavior.
+    /// The `mode` clap group ties `-A`, `-u`, and `--refresh` together.
     #[test]
     fn test_args_conflict_with_refresh() {
         // "--refresh" cannot be combined with "-A", "--refresh" or "-u"
@@ -837,6 +1070,9 @@ mod test {
         assert!(AddArgs::try_parse_from(["test", "-A", "-u", "--refresh"]).is_err());
     }
 
+    /// Scenario: smoke-test `total_staged` and `is_empty` because every
+    /// rendering branch keys off these helpers — a regression here would
+    /// produce wrong summary lines or wrong "nothing to add" detection.
     #[test]
     fn add_output_total_and_empty() {
         let mut out = AddOutput::empty(false);

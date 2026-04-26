@@ -1,5 +1,13 @@
-//! CLI entry for Libra, defining clap subcommands, setting the hash algorithm from config,
-//! and dispatching each command handler.
+//! CLI entry for Libra.
+//!
+//! Defines the clap subcommand grammar, performs cross-cutting preflight (locating the
+//! repository database and pinning the global hash algorithm to whatever is recorded
+//! in `core.objectformat`), and dispatches every parsed command to its `command::*`
+//! handler.
+//!
+//! Because every subcommand reads or writes objects whose hash kind must match the
+//! repository's recorded `core.objectformat`, this module is the single point where
+//! that global is configured before any handler runs.
 
 use std::{env, io::Write, path::Path};
 
@@ -30,9 +38,23 @@ Output Examples:
 
 const ERROR_CODES_HELP: &str = include_str!("../docs/error-codes.md");
 
-/// Reads the repository's configuration and sets the global hash kind.
-/// This must be called for any command that operates within an existing repository.
-/// Returns an error if the repository database is missing or corrupted.
+/// Read the repository's `core.objectformat` and pin the global hash algorithm.
+///
+/// Functional scope:
+/// - Opens the SQLite database at `<storage>/<DATABASE>` and reads
+///   `core.objectformat`, defaulting to `"sha1"` when the row is absent.
+/// - Calls `git_internal::hash::set_hash_kind` so every object hashed by the rest of
+///   the process matches the repository's storage format.
+///
+/// Boundary conditions:
+/// - Returns a fatal error when the database file is missing — every non-`init`,
+///   non-`clone` command requires a repository, and silently continuing would hash
+///   objects with the wrong algorithm.
+/// - Returns a fatal error when the database cannot be opened (permissions, disk
+///   corruption) so the user sees the underlying message instead of a downstream
+///   panic.
+/// - Currently accepts only `"sha1"` and `"sha256"`; anything else is rejected with a
+///   fatal error.
 async fn set_local_hash_kind_for_storage(storage: &Path) -> CliResult<()> {
     let db_path = storage.join(utils::util::DATABASE);
     if !db_path.exists() {
@@ -330,9 +352,19 @@ pub enum Bisect {
     Log,
 }
 
-/// The main function is the entry point of the Libra application.
-/// It parses the command-line arguments and executes the corresponding function.
-/// - `args`: parse from command line if it's `None`, otherwise parse from the given args
+/// Synchronous CLI entry — used by both the `libra` binary and embedders that cannot
+/// (or do not wish to) own their own Tokio runtime.
+///
+/// Functional scope:
+/// - Builds a multi-thread Tokio runtime, then drives [`parse_async`] to completion.
+/// - When `args` is `None`, the underlying parser falls back to `std::env::args`.
+///
+/// Boundary conditions:
+/// - Calling this from inside an existing Tokio runtime panics; embedders that are
+///   already async must call [`parse_async`] directly. See the embedding contract in
+///   [`crate::exec`].
+/// - Returns `CliError::fatal` if the runtime itself cannot be constructed (extremely
+///   unlikely outside of OOM scenarios).
 pub fn parse(args: Option<&[&str]>) -> CliResult<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -342,7 +374,23 @@ pub fn parse(args: Option<&[&str]>) -> CliResult<()> {
     runtime.block_on(Box::pin(parse_async(args)))
 }
 
-// Rewrite `log -<n>` into `log -n <n>` only when `log` is the actual subcommand.
+/// Rewrite Git-style `-<n>` shortcuts into the long-form `-n <n>` flag, but only when
+/// the active subcommand is `log`.
+///
+/// Git accepts `git log -3` as shorthand for `git log -n 3`, but clap cannot express a
+/// purely numeric flag without conflicting with positional revisions. This helper
+/// patches argv before clap sees it so users keep the familiar shortcut.
+///
+/// Boundary conditions:
+/// - The rewrite only fires for arguments before any `--` separator inside the `log`
+///   subcommand, so paths or revisions that happen to look like `-3` are preserved
+///   verbatim once the user explicitly closes the option list.
+/// - When `log` is not the active subcommand the original argv is returned unchanged,
+///   leaving every other command's `-<n>` semantics untouched.
+///
+/// See: [`tests::clap_alias_br_resolves_to_branch`] and friends for related parser
+/// behaviour. The exact rewrite is exercised end-to-end by the integration tests in
+/// `tests/command/log_test.rs`.
 fn rewrite_log_short_number_args(args: Vec<String>) -> Vec<String> {
     // Detect the real subcommand position to avoid rewriting positional args for other commands.
     let subcommand = find_subcommand_index(&args);
@@ -391,8 +439,17 @@ fn rewrite_log_short_number_args(args: Vec<String>) -> Vec<String> {
     out
 }
 
-// Find the first argument that represents the subcommand.
-// If `--` appears, treat the next argument as the subcommand.
+/// Locate the first non-flag token in `args` and return its index plus whether it was
+/// produced by an explicit `--` separator.
+///
+/// Boundary conditions:
+/// - Skips over any leading flags (`-x`, `--long`) so `libra --json status` still
+///   identifies `status` as the subcommand.
+/// - When `--` appears, the *next* argument is treated as the subcommand and the
+///   returned `bool` is `true` to signal the caller to drop the separator. Returns
+///   `None` if `--` is the last token.
+/// - Returns `None` when no non-flag token exists (e.g. argv is `["libra"]` or
+///   `["libra", "--help"]`).
 fn find_subcommand_index(args: &[String]) -> Option<(usize, bool)> {
     let mut i = 1;
     while i < args.len() {
@@ -671,7 +728,35 @@ fn classify_parse_error(argv: &[String], err: &clap::Error) -> CliError {
     cli_error
 }
 
-/// `async` version of the [parse] function
+/// Async CLI dispatcher — the actual orchestrator behind every Libra invocation.
+///
+/// Functional scope:
+/// 1. Normalises argv (rewrites `log -<n>` shortcuts, strips a leading `--`).
+/// 2. Resets the per-process warning tracker so `--exit-code-on-warning` cannot be
+///    polluted by a previous invocation in long-lived processes (TUI, tests).
+/// 3. Short-circuits the `help error-codes` topic before clap parsing because it
+///    would otherwise be treated as an unknown subcommand.
+/// 4. Parses with clap and translates every parse failure into a structured
+///    [`CliError`] (see [`classify_parse_error`]).
+/// 5. Validates command-specific arg constraints that clap cannot express (e.g.
+///    [`command::tag::validate_cli_args`]).
+/// 6. For commands that operate on a repository, runs [`command_preflight_storage`]
+///    and primes the global hash kind via [`set_local_hash_kind_for_storage`].
+/// 7. Resolves the global output flags into a single [`OutputConfig`] and dispatches
+///    to the matching `command::*::execute_safe` handler.
+/// 8. After the command returns, waits for any background storage tasks (object
+///    indexing, cache flushes) so they cannot be killed by process exit.
+///
+/// Boundary conditions:
+/// - `--help` / `--version` are still rendered through clap so output matches user
+///   expectations exactly; the function then returns `Ok(())` without dispatching.
+/// - The `Init` arm explicitly restores the original CWD afterwards because the
+///   handler may `cd` into a freshly-created repo and downstream callers (notably
+///   the integration test suite and `--from-git-repository`) rely on the CWD being
+///   stable across invocations.
+/// - When `--exit-code-on-warning` is set and at least one warning was recorded, the
+///   function returns a `CliError::failure` with stable code `WarningEmitted` even
+///   though the underlying command succeeded.
 pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
     let argv = match args {
         Some(args) => args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
@@ -809,8 +894,11 @@ mod tests {
     use super::*;
     use crate::utils::{output, test};
 
-    /// this test is to verify that the CLI can be built without panicking
-    /// according [clap dock](https://docs.rs/clap/latest/clap/_derive/_tutorial/chapter_4/index.html)
+    /// Scenario: clap's `debug_assert` walks the entire command tree and panics on any
+    /// structural mistake (duplicate flags, conflicting aliases, malformed value
+    /// parsers). This test is the cheapest way to keep the giant `Commands` enum
+    /// honest as new subcommands are added.
+    /// See: <https://docs.rs/clap/latest/clap/_derive/_tutorial/chapter_4/index.html>
     #[test]
     fn verify_cli() {
         use clap::CommandFactory;
@@ -818,6 +906,10 @@ mod tests {
         Cli::command().debug_assert()
     }
 
+    /// Scenario: `libra import` is intentionally not a subcommand because importing
+    /// is exposed via `libra config --import`. This test guards the redirect hint
+    /// emitted by [`parse_error_hints`] / [`REDIRECTED_COMMANDS`] so users typing the
+    /// natural-but-wrong word are pointed at the real flag.
     #[tokio::test]
     async fn parse_error_shows_import_hint() {
         let err = parse_async(Some(&["libra", "import"])).await.unwrap_err();
@@ -828,6 +920,9 @@ mod tests {
         );
     }
 
+    /// Scenario: the `branch` command advertises a `br` alias for ergonomics. This
+    /// test ensures the alias keeps resolving even after the `Commands` enum is
+    /// reordered or extended.
     #[test]
     fn clap_alias_br_resolves_to_branch() {
         let cli = Cli::try_parse_from(["libra", "br"]).unwrap();
@@ -837,6 +932,9 @@ mod tests {
         );
     }
 
+    /// Scenario: the `config` command advertises a `cfg` alias. Mirrors
+    /// [`clap_alias_br_resolves_to_branch`] for the second alias that tends to break
+    /// when the subcommand list is touched.
     #[test]
     fn clap_alias_cfg_resolves_to_config() {
         let cli = Cli::try_parse_from(["libra", "cfg"]).unwrap();
@@ -846,6 +944,9 @@ mod tests {
         );
     }
 
+    /// Scenario: clap's built-in Levenshtein matcher should suggest `init` for the
+    /// typo `initt`. We accept either "Hint:" (Libra-formatted) or "similar"
+    /// (clap-formatted) so the test survives clap upgrades that re-word the message.
     #[tokio::test]
     async fn clap_fuzzy_suggests_similar_command() {
         // "initt" is close enough to "init" for clap's built-in fuzzy match.
@@ -858,6 +959,11 @@ mod tests {
         );
     }
 
+    /// Scenario: the warning tracker is a process-global static. In long-lived
+    /// processes (TUI, tests) a previously-recorded warning would otherwise leak
+    /// into the next invocation and silently flip the exit code under
+    /// `--exit-code-on-warning`. This test seeds a stale warning, then verifies that
+    /// [`parse_async`] clears it before any handler runs.
     #[tokio::test(flavor = "current_thread")]
     #[serial]
     async fn parse_async_resets_warning_tracker_before_dispatch() {
@@ -872,6 +978,12 @@ mod tests {
         );
     }
 
+    /// Scenario: `libra code --repo <path>` should perform repository preflight
+    /// against `<path>`, *not* the process CWD. The test arranges for the CWD to be
+    /// outside any repo, sets `--repo` to a freshly-initialised one, and confirms
+    /// that the error we hit is the *next* validation step (missing ollama model)
+    /// rather than "not a libra repository". This guards a regression where preflight
+    /// was hitting CWD before honoring `--repo`.
     #[tokio::test(flavor = "current_thread")]
     #[serial]
     async fn code_repo_flag_uses_target_repo_during_preflight() {
@@ -908,6 +1020,11 @@ mod tests {
         );
     }
 
+    /// Scenario: `libra help error-codes` (and its `errors` alias) should bypass
+    /// clap and stream the bundled error-code reference. Tests cover the two valid
+    /// spellings plus two negative cases — a different `help <topic>` and the global
+    /// `--help` flag — so the matcher in [`is_error_codes_help_topic`] stays tight
+    /// enough that we don't accidentally swallow other help requests.
     #[test]
     fn detects_help_error_codes_topic() {
         assert!(is_error_codes_help_topic(&[
@@ -931,6 +1048,10 @@ mod tests {
         ]));
     }
 
+    /// Scenario (Unix): paths embedded in conversion-hint messages must be
+    /// shell-safe. POSIX shells require `'...'` quoting with `'\'\''` escapes for
+    /// embedded single quotes; this test pins that rule using a path containing an
+    /// apostrophe, the canonical breakage case.
     #[cfg(not(windows))]
     #[test]
     fn shell_quote_path_uses_posix_single_quote_escaping() {
@@ -940,6 +1061,10 @@ mod tests {
         );
     }
 
+    /// Scenario (Windows): cmd.exe and PowerShell expect double-quoted paths and
+    /// tolerate spaces inside them. This test pins the simpler Windows behaviour and
+    /// exists as a sibling to the POSIX test so both platforms have explicit
+    /// coverage when [`shell_quote_path`] is touched.
     #[cfg(windows)]
     #[test]
     fn shell_quote_path_uses_windows_double_quotes() {

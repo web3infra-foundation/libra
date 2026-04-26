@@ -17,6 +17,9 @@ use crate::internal::ai::client::{Client as HttpClient, Provider};
 
 /// Gemini API provider that carries the API key and injects the
 /// `x-goog-api-key` authentication header into every request.
+///
+/// The `Debug` impl masks the secret to keep it out of `tracing` output and
+/// panic backtraces.
 #[derive(Clone)]
 pub struct GeminiProvider {
     api_key: String,
@@ -33,6 +36,9 @@ impl fmt::Debug for GeminiProvider {
 
 impl GeminiProvider {
     /// Creates a new GeminiProvider with the given API key.
+    ///
+    /// Boundary conditions: the key is not validated; an invalid key surfaces
+    /// at request time as an HTTP 403 from the Gemini API.
     pub fn new(api_key: String) -> Self {
         Self { api_key }
     }
@@ -56,6 +62,14 @@ pub type Client = HttpClient<GeminiProvider>;
 
 impl Client {
     /// Creates a Gemini Client from environment variables.
+    ///
+    /// Functional scope: reads `GEMINI_API_KEY` and points at the public
+    /// `generativelanguage.googleapis.com` endpoint.
+    ///
+    /// Boundary conditions: returns `env::VarError::NotPresent` when
+    /// `GEMINI_API_KEY` is unset so callers can render a friendly "no API key"
+    /// message; no base-URL override is supported because Gemini's public API
+    /// does not have a stable proxy contract.
     pub fn from_env() -> Result<Self, env::VarError> {
         let api_key = env::var("GEMINI_API_KEY")?;
         let provider = GeminiProvider::new(api_key);
@@ -68,6 +82,9 @@ impl Client {
     /// Creates a [`CompletionModel`](super::completion::CompletionModel) bound
     /// to this client for the given Gemini model identifier (e.g.,
     /// `"gemini-2.5-flash"` or one of the constants from [`super`]).
+    ///
+    /// Boundary conditions: the model id is forwarded verbatim; unknown ids
+    /// fail at request time with a 404.
     pub fn completion_model(&self, model: &str) -> super::completion::CompletionModel {
         super::completion::CompletionModel::new(self.clone(), model)
     }

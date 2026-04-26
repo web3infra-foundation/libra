@@ -1,24 +1,45 @@
-//! Data structures for Git LFS operations, including transfer modes, operations, actions, locks, and batch request/response payloads.
+//! Data structures for the Git LFS HTTP API.
+//!
+//! These types encode/decode the JSON payloads exchanged with an LFS server: batch
+//! requests, transfer adapter selection, signed action URLs (download/upload/verify),
+//! file locks, and chunked transfer metadata.
+//!
+//! All structs match the wire format defined by the LFS spec
+//! (<https://github.com/git-lfs/git-lfs/blob/main/docs/api>) and rely on `serde` rename
+//! attributes to bridge `snake_case` Rust identifiers with the API's `lowercase`
+//! conventions. None of these types perform I/O; they are pure data carriers used by
+//! [`crate::internal::protocol::lfs_client`] and [`crate::command::lfs`].
 
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+/// Negotiated transfer adapter for a batch request.
+///
+/// The LFS server advertises which adapters it supports; clients echo back the one
+/// they want to use. `BASIC` is the only adapter every server must implement.
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub enum TransferMode {
+    /// Single-shot download/upload through the URL returned in `actions`.
     #[default]
     #[serde(rename = "basic")]
     BASIC,
+    /// Object split into discrete pieces, each with its own URL — typically used for
+    /// objects larger than the configured chunk threshold.
     #[serde(rename = "multipart")]
     MULTIPART,
-    //not implement yet
+    /// Streaming uploads via TUS-like resumable PATCH semantics. Reserved by the spec
+    /// but not yet implemented in Libra.
     STREAMING,
 }
 
+/// Direction of an LFS batch request.
 #[derive(Serialize, Deserialize, PartialEq, Eq, Hash, Debug, Clone)]
 pub enum Operation {
+    /// Server-to-client: fetch object content.
     #[serde(rename = "download")]
     Download,
+    /// Client-to-server: push object content.
     #[serde(rename = "upload")]
     Upload,
 }
@@ -98,6 +119,18 @@ pub struct Link {
 }
 
 impl Link {
+    /// Build a [`Link`] for an LFS action URL with sensible defaults.
+    ///
+    /// Functional scope:
+    /// - Sets the `Accept: application/vnd.git-lfs` header so downstream HTTP clients
+    ///   negotiate the LFS media type without having to remember it.
+    /// - Stamps `expires_at` 24 hours into the future (RFC 3339), the default LFS
+    ///   action lifetime expected by Git LFS clients.
+    ///
+    /// Boundary conditions:
+    /// - `href` is stored verbatim; callers are responsible for URL encoding.
+    /// - The 24-hour expiry is not configurable here; servers that wish to issue
+    ///   shorter-lived URLs should construct the struct manually.
     pub fn new(href: &str) -> Self {
         let mut header = HashMap::new();
         header.insert("Accept".to_string(), "application/vnd.git-lfs".to_owned());
@@ -141,6 +174,25 @@ pub struct ResCondition {
 }
 
 impl ResponseObject {
+    /// Build a [`ResponseObject`] for the four `(file_exist, operation)` combinations
+    /// defined by the LFS batch API.
+    ///
+    /// Functional scope, by `res_condition`:
+    /// - `(file_exist=true, Upload)`: omit `actions` entirely so the client knows the
+    ///   server already has the object and skips the upload — required by spec.
+    /// - `(file_exist=true, Download)`: emit a single `Download` action pointing at
+    ///   `download_url`.
+    /// - `(file_exist=false, Upload)`: emit a single `Upload` action pointing at
+    ///   `upload_url`. (TUS verification is wired up but currently disabled — see the
+    ///   commented-out block in source.)
+    /// - `(file_exist=false, Download)`: cannot serve the object; populate `error`
+    ///   with HTTP-style code 404.
+    ///
+    /// Boundary conditions:
+    /// - `meta.oid` and `meta.size` are echoed back verbatim so the LFS client can
+    ///   correlate the response with its own request even when reordering occurs.
+    /// - `authenticated` is always `Some(true)` because Libra only returns response
+    ///   objects after the surrounding handler has authenticated the caller.
     pub fn new(
         meta: &MetaObject,
         res_condition: ResCondition,
@@ -204,6 +256,11 @@ impl ResponseObject {
         res
     }
 
+    /// Construct a failure-only response for `object` carrying `err`.
+    ///
+    /// Used when the server cannot even compute a [`MetaObject`] (e.g. the OID is
+    /// malformed or storage is unreachable), so the normal [`ResponseObject::new`]
+    /// path cannot run.
     pub fn failed_with_err(object: &RequestObject, err: ObjectError) -> ResponseObject {
         ResponseObject {
             oid: object.oid.to_owned(),

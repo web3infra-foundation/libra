@@ -1,4 +1,10 @@
 //! Utilities for converting existing Git repositories into Libra repositories by reusing fetch and clone logic.
+//!
+//! `libra init --from-git-repository <path>` calls into this module after the empty
+//! Libra database has been bootstrapped. The conversion path treats the source Git
+//! repository as a remote named `origin`, runs a normal `fetch` and `setup_repository`
+//! against it, and then translates `.gitignore` files into `.libraignore` siblings so
+//! ignore rules survive the migration.
 
 use std::{
     env,
@@ -14,10 +20,20 @@ use crate::{
     },
 };
 
+/// Outcome of a successful Git -> Libra conversion.
+///
+/// Captures the canonical source location, the URL recorded as `origin`, and any
+/// non-fatal warnings (typically from gitignore translation) that the caller may
+/// surface to the user.
 #[derive(Debug, Clone)]
 pub struct ConversionReport {
+    /// Absolute, canonical path to the source `.git` directory (or bare repo).
     pub source_git_dir: String,
+    /// URL value written to `remote.origin.url`. Equal to `source_git_dir` for
+    /// local-path conversions.
     pub remote_url: String,
+    /// Non-fatal messages collected during conversion (e.g. unreadable
+    /// `.gitignore` files that were skipped).
     pub warnings: Vec<String>,
 }
 
@@ -29,6 +45,21 @@ pub struct ConversionReport {
 /// - Fetch all objects and references from the Git repository.
 /// - Configure the `origin` remote, local branches, and HEAD using the same
 ///   logic as the `clone` command.
+///
+/// Boundary conditions:
+/// - Returns `InitError::InvalidUtf8Path` when the canonicalised source path is not
+///   valid UTF-8 (Git remote URLs are stored as strings, so non-UTF-8 paths cannot
+///   be recorded as the origin URL).
+/// - Returns `InitError::ConversionFailed { stage: "fetch" | "setup" }` when the
+///   underlying fetch or remote setup fails. The `stage` field lets the user see
+///   which phase broke.
+/// - Returns `InitError::ConversionFailed { stage: "setup" }` when the source
+///   repository has no refs at all — converting an empty Git repo would otherwise
+///   produce an unusable Libra repo with no branches.
+/// - Bare conversions skip the `.gitignore` -> `.libraignore` translation because
+///   bare repositories have no working tree.
+/// - Output is forced into quiet/no-progress mode so the host `libra init` command
+///   stays in control of stdout formatting.
 pub async fn convert_from_git_repository(
     git_repo: &Path,
     is_bare: bool,
@@ -102,6 +133,19 @@ pub async fn convert_from_git_repository(
     })
 }
 
+/// Locate the Git directory inside `git_repo`, supporting both bare and
+/// working-tree layouts.
+///
+/// Functional scope:
+/// - When `<git_repo>/.git` exists, returns its canonicalised path. Otherwise
+///   treats `git_repo` itself as the Git directory (bare-repo layout).
+///
+/// Boundary conditions:
+/// - Returns `InitError::InvalidGitRepository` if any of the marker files
+///   (`HEAD`, `config`, `objects`) are missing — these are the minimal set
+///   required for `fetch` against a local file:// URL to succeed.
+/// - Returns `InitError::Io` when `canonicalize` fails (path no longer exists,
+///   permission denied, etc.).
 pub(crate) fn resolve_git_source_dir(git_repo: &Path) -> Result<PathBuf, InitError> {
     let git_dir = if git_repo.join(".git").exists() {
         git_repo.join(".git")
@@ -121,6 +165,19 @@ pub(crate) fn resolve_git_source_dir(git_repo: &Path) -> Result<PathBuf, InitErr
     git_dir.canonicalize().map_err(InitError::Io)
 }
 
+/// Resolve the working-tree root of the source Git repository if one exists.
+///
+/// Functional scope:
+/// - When the source has a `.git` subdirectory and that subdirectory canonicalises
+///   to `git_dir`, returns the working-tree path so `.gitignore` translation can
+///   walk the tree.
+///
+/// Boundary conditions:
+/// - Returns `None` for bare repositories (no `.git` subdirectory) — there is no
+///   working tree to walk.
+/// - Returns `None` when `.git` is a regular file (worktree linkfile) or when
+///   canonicalisation fails for any reason; the caller falls back to using the
+///   target directory as the source root.
 fn source_worktree_root(git_repo: &Path, git_dir: &Path) -> Option<PathBuf> {
     let dot_git = git_repo.join(".git");
     if !dot_git.exists() {

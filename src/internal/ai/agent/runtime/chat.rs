@@ -1,3 +1,11 @@
+//! Stateful conversation wrapper around [`super::Agent`].
+//!
+//! While [`super::Agent`] is intentionally stateless (it is reused by the multi-agent
+//! plan executor where every step needs an isolated context), [`ChatAgent`] is the
+//! type that interactive callers — the TUI, MCP, and `libra code` — own across many
+//! turns. It records each user/assistant turn so subsequent calls implicitly include
+//! the running conversation.
+
 use super::Agent;
 use crate::internal::ai::completion::{CompletionError, CompletionModel, Message};
 
@@ -41,13 +49,23 @@ impl<M: CompletionModel> ChatAgent<M> {
 
     /// Sends a message to the agent and gets a response, updating the history.
     ///
-    /// This method:
+    /// Functional scope:
     /// 1. Adds the user's message to the history.
     /// 2. Calls the underlying agent to generate a response using the full history.
     /// 3. Adds the agent's response to the history.
     ///
+    /// Boundary conditions:
+    /// - On a `CompletionError` the user message is *retained* in the history but no
+    ///   assistant turn is appended. The next `chat()` call will therefore retry with
+    ///   the same user message at the tail; callers that want to drop it must pop it
+    ///   explicitly.
+    /// - The whole history is cloned per call because [`Agent::run_with_history`]
+    ///   takes ownership; the cost is acceptable for chat-sized turn counts.
+    ///
     /// # Arguments
     /// * `prompt` - The user's input message.
+    ///
+    /// See: `tests::test_chat_agent_maintains_history`.
     pub async fn chat(
         &mut self,
         prompt: impl Into<String> + Send,
@@ -78,23 +96,32 @@ impl<M: CompletionModel> ChatAgent<M> {
 
     /// Clears the conversation history.
     ///
-    /// Use this to reset the conversation context.
+    /// Use this to reset the conversation context. After this call the chat agent
+    /// behaves identically to a freshly constructed one with the same underlying
+    /// `Agent`.
     pub fn clear_history(&mut self) {
         self.history.clear();
     }
 
     /// Clone the inner agent for background execution.
     ///
-    /// This is useful when you need to execute the agent in a separate task
-    /// while still being able to update the history afterwards.
+    /// Functional scope: returns a clone of the wrapped [`Agent`]. Because the agent
+    /// holds its model behind an `Arc`, the clone shares the same model handle and
+    /// network client. Use this together with [`Self::update_history`] to drive the
+    /// agent from a background task while still letting the foreground update the
+    /// canonical history once the task finishes.
     pub fn clone_agent(&self) -> Agent<M> {
         self.agent.clone()
     }
 
     /// Update the history after a response is complete.
     ///
-    /// This is used in conjunction with `clone_agent` to update the local history
-    /// after the agent call completes in a background task.
+    /// Functional scope: appends the original user message and the produced assistant
+    /// response to the canonical history.
+    ///
+    /// Boundary conditions: the caller must ensure ordering — typically this is called
+    /// exactly once after a background task that used [`Self::clone_agent`] returns.
+    /// Calling it twice for the same turn would duplicate the messages.
     pub fn update_history(&mut self, user_msg: String, assistant_response: String) {
         self.history.push(Message::user(user_msg));
         self.history.push(Message::assistant(assistant_response));
@@ -137,6 +164,8 @@ mod tests {
         }
     }
 
+    /// Scenario: two consecutive chat turns each grow the history by exactly two
+    /// messages (user + assistant) — verifies the bookkeeping in `chat`.
     #[tokio::test]
     async fn test_chat_agent_maintains_history() {
         let agent = Agent::new(MockModel);
@@ -151,6 +180,8 @@ mod tests {
         assert_eq!(chat_agent.history().len(), 4); // User + Assistant + User + Assistant
     }
 
+    /// Scenario: `clear_history` empties the buffer, returning the agent to a virgin
+    /// state.
     #[tokio::test]
     async fn test_clear_history() {
         let agent = Agent::new(MockModel);

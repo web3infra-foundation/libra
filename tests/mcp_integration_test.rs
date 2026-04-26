@@ -1,6 +1,22 @@
 //! MCP server handler integration tests verifying tool listing, resource access, and prompt serving.
 //!
-//! **Layer:** L1 — deterministic, no external dependencies.
+//! Calls `LibraMcpServer::*_impl` methods directly (bypassing the
+//! `RequestContext`-bearing `ServerHandler` trait dispatch) so we can exercise the
+//! tool router, resource router, validation rules, and actor-resolution behaviour
+//! without spinning up an HTTP transport. Each test seeds objects via
+//! `LocalStorage::put_tracked` against an in-memory SQLite then exercises one
+//! create/read/update path.
+//!
+//! Coverage spans:
+//! - Server info / tool router exposure / resource list bootstrap
+//! - Cross-object validation rules (run requires task, patchset requires run, etc.)
+//! - HEAD/unborn-HEAD/uuid-prefixed-id alias handling
+//! - Cross-intent and cross-run reference rejection
+//! - Listing endpoints render summary text correctly
+//! - Default vs explicit actor (human, agent, mcp_client) selection
+//!
+//! **Layer:** L1 — deterministic, in-process SQLite + temp-dir storage, no external
+//! dependencies.
 
 use std::sync::Arc;
 
@@ -40,6 +56,9 @@ use sea_orm::{ActiveModelTrait, ConnectionTrait, Database, Schema, Set};
 use tempfile::tempdir;
 use uuid::Uuid;
 
+/// Build an in-memory SQLite, create only the `reference` table (the minimum these
+/// tests need), and return the connection. Lighter-weight than running the full
+/// bootstrap SQL because most MCP tests only need head/branch resolution.
 async fn setup_test_db() -> sea_orm::DatabaseConnection {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     let builder = db.get_database_backend();
@@ -49,6 +68,9 @@ async fn setup_test_db() -> sea_orm::DatabaseConnection {
     db
 }
 
+/// Insert a detached-HEAD row (`name = None`, `commit = Some(commit)`) so tests can
+/// exercise the `HEAD` alias path of `create_run_impl` without committing real
+/// git objects.
 async fn seed_detached_head(history_manager: &HistoryManager, commit: &str) {
     let db = history_manager.database_connection();
     reference::ActiveModel {
@@ -63,6 +85,9 @@ async fn seed_detached_head(history_manager: &HistoryManager, commit: &str) {
     .unwrap();
 }
 
+/// Insert an unborn-branch HEAD row (`name = Some(branch)`, `commit = None`) so
+/// tests can exercise the "HEAD on a branch that has no commits yet" code path —
+/// the commit anchor must normalise to forty zeros.
 async fn seed_unborn_branch_head(history_manager: &HistoryManager, branch: &str) {
     let db = history_manager.database_connection();
     reference::ActiveModel {
@@ -77,6 +102,9 @@ async fn seed_unborn_branch_head(history_manager: &HistoryManager, branch: &str)
     .unwrap();
 }
 
+/// Scenario: instantiate the MCP server and confirm `ServerHandler::get_info`
+/// reports the canonical server name "libra". Smoke-tests the handler trait
+/// implementation without exercising any tool or resource path.
 #[tokio::test]
 async fn test_mcp_integration_server_info() {
     let temp_dir = tempdir().unwrap();
@@ -93,6 +121,10 @@ async fn test_mcp_integration_server_info() {
     assert_eq!(info.server_info.name, "libra");
 }
 
+/// Scenario: confirm the auto-generated tool router exposes `create_task` and
+/// `list_tasks` (the canonical MCP tools) and refuses to resolve an unknown name.
+/// Acts as a wiring pin so refactors of the tool registration macro cannot silently
+/// drop tools from the public surface.
 #[tokio::test]
 async fn test_mcp_integration_tool_router_exposes_generated_tools() {
     let (server, _storage, _history_manager, _temp_dir) = setup_server().await;
@@ -111,6 +143,10 @@ async fn test_mcp_integration_tool_router_exposes_generated_tools() {
     );
 }
 
+/// Scenario: call `list_resources_impl` and confirm the response includes
+/// `libra://history/latest` (the canonical "what is the latest AI history hash?"
+/// pointer). Boundary: avoids the trait dispatch path because that requires a
+/// `RequestContext` we cannot easily fabricate in tests.
 #[tokio::test]
 async fn test_mcp_integration_list_resources() {
     let temp_dir = tempdir().unwrap();
@@ -129,6 +165,11 @@ async fn test_mcp_integration_list_resources() {
     assert!(resources.iter().any(|r| r.uri == "libra://history/latest"));
 }
 
+/// Scenario: end-to-end create + read + list flow for a Task object via MCP.
+/// Steps: `create_task_impl` → parse the returned ID out of the success message →
+/// `read_resource_impl(libra://object/<id>)` → `list_tasks` and confirm the new ID
+/// shows up in the listing text. Pins the round-trip contract that drives the
+/// minimal MCP client experience.
 #[tokio::test]
 async fn test_mcp_integration_create_and_read_task() {
     let temp_dir = tempdir().unwrap();
@@ -213,6 +254,9 @@ async fn test_mcp_integration_create_and_read_task() {
     assert!(list_text.contains("Integration Test Task"));
 }
 
+/// Scenario: `create_run_impl` with a random `task_id` UUID that has no
+/// corresponding Task object must fail with an error message containing
+/// "task_id not found". Pins the foreign-key validation contract for runs.
 #[tokio::test]
 async fn test_create_run_requires_existing_task() {
     let (server, _storage, _history_manager, _temp_dir) = setup_server().await;
@@ -249,6 +293,10 @@ async fn test_create_run_requires_existing_task() {
     );
 }
 
+/// Scenario: when `base_commit_sha = "HEAD"` is supplied, the server resolves it
+/// against the seeded detached-HEAD row and stores the canonical 40-char hash on
+/// the Run object. Pins the HEAD alias contract so MCP clients can use literal
+/// "HEAD" without pre-resolving it.
 #[tokio::test]
 async fn test_create_run_accepts_head_base_commit() {
     let (server, storage, history_manager, _temp_dir) = setup_server().await;
@@ -305,6 +353,10 @@ async fn test_create_run_accepts_head_base_commit() {
     );
 }
 
+/// Scenario: HEAD points at an unborn branch (no commits yet). Resolving "HEAD"
+/// must yield the all-zeros sentinel commit (`"0".repeat(40)`) so callers can
+/// create a Run on a freshly-initialized repo. Boundary case for the HEAD alias
+/// path that pairs with the detached-HEAD test.
 #[tokio::test]
 async fn test_create_run_accepts_unborn_head_base_commit() {
     let (server, storage, history_manager, _temp_dir) = setup_server().await;
@@ -360,6 +412,8 @@ async fn test_create_run_accepts_unborn_head_base_commit() {
     );
 }
 
+/// Scenario: `create_patchset_impl` with a random `run_id` must fail with
+/// "run_id not found". Pins the parent-foreign-key contract for patchsets.
 #[tokio::test]
 async fn test_create_patchset_requires_existing_run() {
     let (server, _storage, _history_manager, _temp_dir) = setup_server().await;
@@ -397,6 +451,8 @@ async fn test_create_patchset_requires_existing_run() {
     );
 }
 
+/// Scenario: `create_tool_invocation_impl` with a random `run_id` must fail with
+/// "run_id not found". Pins the parent-foreign-key contract for tool invocations.
 #[tokio::test]
 async fn test_create_tool_invocation_requires_existing_run() {
     let (server, _storage, _history_manager, _temp_dir) = setup_server().await;
@@ -433,6 +489,8 @@ async fn test_create_tool_invocation_requires_existing_run() {
     );
 }
 
+/// Scenario: `create_provenance_impl` with a random `run_id` must fail with
+/// "run_id not found". Pins the parent-foreign-key contract for provenance.
 #[tokio::test]
 async fn test_create_provenance_requires_existing_run() {
     let (server, _storage, _history_manager, _temp_dir) = setup_server().await;
@@ -468,6 +526,9 @@ async fn test_create_provenance_requires_existing_run() {
     );
 }
 
+/// Scenario: `create_task_impl` with `intent_id` referencing a UUID that has no
+/// Intent object must fail with "intent_id not found". Pins the optional-foreign-
+/// key validation: when supplied, the intent must exist.
 #[tokio::test]
 async fn test_create_task_rejects_missing_intent_reference() {
     let (server, _storage, _history_manager, _temp_dir) = setup_server().await;
@@ -510,6 +571,9 @@ async fn test_create_task_rejects_missing_intent_reference() {
     );
 }
 
+/// Scenario: `update_intent_impl` accepts the user-friendly status alias
+/// `"discarded"` and translates it into the canonical `Cancelled` lifecycle event.
+/// Pins the alias surface area for human-driven MCP clients.
 #[tokio::test]
 async fn test_update_intent_accepts_discarded_alias() {
     let (server, storage, history_manager, _temp_dir) = setup_server().await;
@@ -538,6 +602,9 @@ async fn test_update_intent_accepts_discarded_alias() {
     );
 }
 
+/// Scenario: `create_decision_impl` accepts both `run_id` and
+/// `chosen_patchset_id` strings prefixed with `uuid:` (an optional disambiguator
+/// some MCP clients emit). Pins the input-tolerant ID parser.
 #[tokio::test]
 async fn test_create_decision_accepts_uuid_prefixed_ids() {
     let (server, storage, history_manager, _temp_dir) = setup_server().await;
@@ -577,6 +644,8 @@ async fn test_create_decision_accepts_uuid_prefixed_ids() {
     assert!(result.is_ok(), "uuid: prefixed ids should be accepted");
 }
 
+/// Scenario: `update_intent_impl` accepts an `intent_id` prefixed with `uuid:`.
+/// Companion to the decision-side test for the same input-tolerance contract.
 #[tokio::test]
 async fn test_update_intent_accepts_uuid_prefixed_intent_id() {
     let (server, storage, history_manager, _temp_dir) = setup_server().await;
@@ -605,6 +674,10 @@ async fn test_update_intent_accepts_uuid_prefixed_intent_id() {
     );
 }
 
+/// Scenario: a plan being created for `intent_b` references a parent plan that
+/// belongs to `intent_a`. The server rejects with "parent_plan_ids must belong to
+/// intent". Pins the cross-intent integrity rule that keeps each intent's plan DAG
+/// self-contained.
 #[tokio::test]
 async fn test_create_plan_rejects_parent_from_other_intent() {
     let (server, storage, history_manager, _temp_dir) = setup_server().await;
@@ -656,6 +729,10 @@ async fn test_create_plan_rejects_parent_from_other_intent() {
     );
 }
 
+/// Scenario: a Run pairs a task whose intent is `intent_task` with a plan whose
+/// intent is `intent_plan`. The server rejects because the plan must belong to the
+/// same intent as the task. Error message must contain "plan_id intent" so callers
+/// can identify which side of the mismatch failed.
 #[tokio::test]
 async fn test_create_run_rejects_plan_with_mismatched_task_intent() {
     let (server, storage, history_manager, _temp_dir) = setup_server().await;
@@ -713,6 +790,11 @@ async fn test_create_run_rejects_plan_with_mismatched_task_intent() {
     );
 }
 
+/// Scenario: an Evidence record claims a `patchset_id` that actually belongs to a
+/// different Run than the one the evidence is being attached to. The server must
+/// reject with an error mentioning `patchset_id`, "belongs to run", and the actual
+/// owning run ID so callers can correct the wiring. Pins cross-run integrity for
+/// patchset references in evidence.
 #[tokio::test]
 async fn test_create_evidence_rejects_patchset_from_different_run() {
     let (server, storage, history_manager, _temp_dir) = setup_server().await;
@@ -769,6 +851,9 @@ async fn test_create_evidence_rejects_patchset_from_different_run() {
     );
 }
 
+/// Scenario: same as the evidence cross-run test, but for `Decision` —
+/// `chosen_patchset_id` must belong to the decision's own run. Pins the matching
+/// integrity rule across both Evidence and Decision objects.
 #[tokio::test]
 async fn test_create_decision_rejects_patchset_from_different_run() {
     let (server, storage, history_manager, _temp_dir) = setup_server().await;
@@ -824,6 +909,11 @@ async fn test_create_decision_rejects_patchset_from_different_run() {
 }
 
 /// Helper: create a server with storage and history, returning all components.
+///
+/// Returns the server alongside the underlying `LocalStorage`, `HistoryManager`, and
+/// `TempDir` so callers can both drive MCP calls and seed the history layer
+/// directly. The `TempDir` must be held alive — dropping it removes the on-disk
+/// objects.
 async fn setup_server() -> (
     LibraMcpServer,
     Arc<LocalStorage>,
@@ -842,6 +932,10 @@ async fn setup_server() -> (
     (server, storage, history_manager, temp_dir)
 }
 
+/// Scenario: `libra://history/latest` returns the literal "no history" before any
+/// AI history exists, then returns the real 40+ hex-char hash once a Task is
+/// `put_tracked`'d (which writes a history commit). Pins the resource's two-state
+/// behaviour for the read-only "what's the latest?" pointer.
 #[tokio::test]
 async fn test_history_latest_returns_real_hash() {
     let (server, storage, history_manager, _temp_dir) = setup_server().await;
@@ -877,6 +971,9 @@ async fn test_history_latest_returns_real_hash() {
     );
 }
 
+/// Scenario: with no live thread/run anchored, `libra://context/active` returns
+/// JSON with `active = false`. Pins the inactive-state contract for the active
+/// context resource.
 #[tokio::test]
 async fn test_context_active_no_active() {
     let (server, _, _, _temp_dir) = setup_server().await;
@@ -891,6 +988,9 @@ async fn test_context_active_no_active() {
     assert_eq!(json["active"], false);
 }
 
+/// Scenario: store a `ContextSnapshot` with a custom summary, then call
+/// `list_context_snapshots` and confirm the rendered text shows "Strategy:",
+/// "Items:", and the summary string. Pins the listing endpoint's text format.
 #[tokio::test]
 async fn test_list_context_snapshots_with_summary() {
     let (server, storage, history_manager, _temp_dir) = setup_server().await;
@@ -914,6 +1014,8 @@ async fn test_list_context_snapshots_with_summary() {
     assert!(text.contains("test summary"));
 }
 
+/// Scenario: store a `Plan` with a single `PlanStep`, then `list_plans` must
+/// render "Steps: 1" in the summary text. Pins the step-count rendering contract.
 #[tokio::test]
 async fn test_list_plans_with_summary() {
     let (server, storage, history_manager, _temp_dir) = setup_server().await;
@@ -936,6 +1038,9 @@ async fn test_list_plans_with_summary() {
     assert!(text.contains("Steps: 1"));
 }
 
+/// Scenario: store a `PatchSet` with one touched file, then `list_patchsets` must
+/// render "Files: 1" and "Format:" in the summary text. Pins per-patchset summary
+/// rendering for the listing endpoint.
 #[tokio::test]
 async fn test_list_patchsets_with_summary() {
     let (server, storage, history_manager, _temp_dir) = setup_server().await;
@@ -960,6 +1065,9 @@ async fn test_list_patchsets_with_summary() {
     assert!(text.contains("Format:"));
 }
 
+/// Scenario: store an `Evidence` with kind=Test, tool="cargo", exit_code=0, and a
+/// summary, then `list_evidences` must render "Kind:", "Tool: cargo", "Exit: 0",
+/// and the summary string. Pins evidence summary text fields.
 #[tokio::test]
 async fn test_list_evidences_with_summary() {
     let (server, storage, history_manager, _temp_dir) = setup_server().await;
@@ -985,6 +1093,9 @@ async fn test_list_evidences_with_summary() {
     assert!(text.contains("all tests passed"));
 }
 
+/// Scenario: store a `ToolInvocation` with status=Ok and a result summary, then
+/// `list_tool_invocations` must render "Tool: read_file", "Ok", and the summary.
+/// Pins tool invocation summary rendering.
 #[tokio::test]
 async fn test_list_tool_invocations_with_summary() {
     let (server, storage, history_manager, _temp_dir) = setup_server().await;
@@ -1009,6 +1120,9 @@ async fn test_list_tool_invocations_with_summary() {
     assert!(text.contains("read 100 lines"));
 }
 
+/// Scenario: store a `Provenance` with provider="openai" and model="gpt-4o", then
+/// `list_provenances` must render "Provider: openai" and "Model: gpt-4o". Pins
+/// provenance summary rendering.
 #[tokio::test]
 async fn test_list_provenances_with_summary() {
     let (server, storage, history_manager, _temp_dir) = setup_server().await;
@@ -1030,6 +1144,9 @@ async fn test_list_provenances_with_summary() {
     assert!(text.contains("Model: gpt-4o"));
 }
 
+/// Scenario: store a `Decision` (DecisionType::Commit) with a rationale, then
+/// `list_decisions` must render the decision type ("Commit") and the rationale
+/// text. Pins decision summary rendering.
 #[tokio::test]
 async fn test_list_decisions_with_summary() {
     let (server, storage, history_manager, _temp_dir) = setup_server().await;
@@ -1052,7 +1169,10 @@ async fn test_list_decisions_with_summary() {
     assert!(text.contains("all tests pass"));
 }
 
-/// Test that explicit actor_kind/actor_id params override the MCP default.
+/// Scenario: pass explicit `actor_kind = "human"` / `actor_id = "jackie"` to
+/// `create_task_impl` and confirm the task is created (and shows up in
+/// `list_tasks` output). Pins the override path so MCP clients can attribute
+/// actions to the calling user, not the MCP default.
 #[tokio::test]
 async fn test_create_task_with_explicit_human_actor() {
     let (server, _storage, _history_manager, _temp_dir) = setup_server().await;
@@ -1106,7 +1226,9 @@ async fn test_create_task_with_explicit_human_actor() {
     assert!(list_text.contains(task_id));
 }
 
-/// Test creating a task with agent actor kind.
+/// Scenario: same as the explicit-human variant but with `actor_kind = "agent"` /
+/// `actor_id = "coder-bot"`. Pins the agent-attribution path used by autonomous
+/// AI workflows.
 #[tokio::test]
 async fn test_create_task_with_agent_actor() {
     let (server, _storage, _history_manager, _temp_dir) = setup_server().await;
@@ -1138,7 +1260,9 @@ async fn test_create_task_with_agent_actor() {
     assert!(text.contains("Task created with ID:"));
 }
 
-/// Test that omitting actor_kind/actor_id defaults to mcp_client.
+/// Scenario: omit both `actor_kind` and `actor_id`. The server falls back to
+/// `default_actor()` which yields an `ActorKind::McpClient`. The task creates
+/// successfully. Pins the unauthenticated default attribution path.
 #[tokio::test]
 async fn test_create_task_default_actor_is_mcp() {
     let (server, _storage, _history_manager, _temp_dir) = setup_server().await;

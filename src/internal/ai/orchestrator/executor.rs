@@ -1,3 +1,9 @@
+//! Task executor for running planned AI work through providers and tool loops.
+//!
+//! Boundary: executor launches attempts and captures outputs, while policy, workspace
+//! sync, verification, and persistence remain separate. DAG/tool-loop and runtime
+//! tests cover tool events, provider errors, and timeout boundaries.
+
 use std::{
     collections::{HashMap, HashSet},
     io,

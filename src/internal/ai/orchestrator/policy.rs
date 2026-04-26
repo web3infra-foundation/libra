@@ -1,3 +1,9 @@
+//! Execution policy helpers for orchestrated AI runs.
+//!
+//! Boundary: this module computes allowed paths, commands, and workspace constraints;
+//! concrete process execution and object persistence live in sibling modules. ACL and
+//! hardening tests cover traversal, cargo-lock companion, and denied command cases.
+
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;

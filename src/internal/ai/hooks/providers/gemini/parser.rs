@@ -1,3 +1,9 @@
+//! Gemini hook event parser.
+//!
+//! Boundary: parser accepts the canonical Gemini hook envelope and rejects unknown or
+//! malformed event shapes with contextual errors. Unit tests cover every supported hook
+//! name and missing-field edge cases.
+
 use anyhow::{Result, bail};
 use serde_json::Value;
 
