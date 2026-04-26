@@ -1947,4 +1947,141 @@ mod tests {
             "failure_categories should appear: {json}"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Issue type / severity JSON serialization tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_issue_report_issue_types() {
+        let issue_types = [
+            "hash_mismatch",
+            "invalid_format",
+            "missing_object",
+            "missing_tree_entry",
+            "missing_commit_tree",
+            "missing_parent_commit",
+            "broken_ref",
+            "invalid_ref_hash",
+            "index_parse_error",
+            "invalid_index_mode",
+            "invalid_index_stage",
+            "index_entry_missing_object",
+            "index_entry_wrong_type",
+            "index_conflict_marker",
+            "tree_entry_type_mismatch",
+        ];
+        for itype in issue_types {
+            let issue = IssueReport {
+                issue_type: itype.to_string(),
+                severity: "error".to_string(),
+                object_id: Some("abc123".to_string()),
+                ref_name: None,
+                message: format!("Test {itype}"),
+                suggestion: None,
+            };
+            let json = serde_json::to_string(&issue).unwrap();
+            assert!(
+                json.contains(itype),
+                "JSON should contain issue type '{itype}': {json}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // is_valid_index_mode tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_is_valid_index_mode_valid_modes() {
+        assert!(is_valid_index_mode(0o100644)); // regular file
+        assert!(is_valid_index_mode(0o100755)); // executable
+        assert!(is_valid_index_mode(0o120000)); // symlink
+        assert!(is_valid_index_mode(0o160000)); // gitlink
+        assert!(is_valid_index_mode(0o040000)); // directory/tree
+    }
+
+    #[test]
+    fn test_is_valid_index_mode_invalid_modes() {
+        assert!(!is_valid_index_mode(0o000000));
+        assert!(!is_valid_index_mode(0o010000));
+        assert!(!is_valid_index_mode(0o077777));
+        assert!(!is_valid_index_mode(0o100000)); // missing permission bits
+        assert!(!is_valid_index_mode(0o777777));
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_object_hash edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_object_hash_odd_length() {
+        // Odd-length hex strings should still be decodable by hex::decode? Actually no.
+        let hash = parse_object_hash("abc");
+        assert!(hash.is_none(), "odd-length hex should fail: {hash:?}");
+    }
+
+    #[test]
+    fn test_parse_object_hash_non_hex() {
+        let hash = parse_object_hash("zzzzzzzz");
+        assert!(hash.is_none(), "non-hex should fail: {hash:?}");
+    }
+
+    #[test]
+    fn test_parse_object_hash_with_uppercase() {
+        // hex::decode accepts both uppercase and lowercase
+        // Use a proper 40-char (even length) uppercase hex string
+        let hash = parse_object_hash("ABCDEF0123456789ABCDEF0123456789ABCDEF01");
+        assert!(
+            hash.is_some(),
+            "uppercase hex should be accepted: {hash:?}"
+        );
+    }
+
+    #[test]
+    fn test_parse_object_hash_zero_hash() {
+        let zero_40 = "0000000000000000000000000000000000000000";
+        let hash = parse_object_hash(zero_40);
+        assert!(
+            hash.is_some(),
+            "all-zero hash should parse (valid hex): {hash:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // list_all_objects_in_storage edge cases
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    #[serial]
+    async fn test_list_all_objects_nonexistent_dir() {
+        let temp_path = tempdir().unwrap();
+        test::setup_with_new_libra_in(temp_path.path()).await;
+        let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+        // Remove the objects directory entirely
+        let objects_dir = path::objects();
+        if objects_dir.exists() {
+            fs::remove_dir_all(&objects_dir).unwrap();
+        }
+
+        let storage = ClientStorage::init(path::objects());
+        let hashes = list_all_objects_in_storage(&storage).unwrap();
+        assert!(
+            hashes.is_empty(),
+            "should return empty list for nonexistent dir"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_list_all_objects_empty_dir() {
+        let temp_path = tempdir().unwrap();
+        test::setup_with_new_libra_in(temp_path.path()).await;
+        let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+        let storage = ClientStorage::init(path::objects());
+        let hashes = list_all_objects_in_storage(&storage).unwrap();
+        assert!(hashes.is_empty(), "empty objects dir should return no hashes");
+    }
 }
