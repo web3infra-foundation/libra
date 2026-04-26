@@ -599,6 +599,140 @@ fn test_fsck_exit_code_combination_objects_and_refs() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Verbose output detail tests
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn test_fsck_verbose_shows_per_object_progress() {
+    let repo = create_committed_repo_via_cli();
+
+    fs::write(repo.path().join("extra.txt"), "extra content\n").expect("failed to create file");
+    let output = run_libra_command(&["add", "extra.txt"], repo.path());
+    assert_cli_success(&output, "add extra file");
+
+    let output = run_libra_command(&["commit", "-m", "extra", "--no-verify"], repo.path());
+    assert_cli_success(&output, "commit extra");
+
+    let output = run_libra_command(&["fsck", "--verbose"], repo.path());
+    assert!(output.status.success(), "fsck --verbose should pass");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("Checking") && stdout.contains("objects"),
+        "verbose should show object count: {stdout}"
+    );
+    assert!(
+        stdout.contains("Objects checked"),
+        "verbose should show Objects checked: {stdout}"
+    );
+    assert!(
+        stdout.contains("Refs checked"),
+        "verbose should show Refs checked: {stdout}"
+    );
+    assert!(
+        stdout.contains("Index valid"),
+        "verbose should show Index valid: {stdout}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// JSON output structure tests
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn test_fsck_json_has_required_fields() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["fsck", "--json"], repo.path());
+    assert!(output.status.success(), "fsck --json should pass");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
+
+    assert!(json.get("ok").is_some(), "JSON should have 'ok' field");
+    assert!(json.get("command").is_some(), "JSON should have 'command' field");
+    assert!(json.get("data").is_some(), "JSON should have 'data' field");
+
+    let data = json.get("data").unwrap();
+    assert!(data.get("objects_checked").is_some(), "data should have objects_checked");
+    assert!(data.get("objects_ok").is_some(), "data should have objects_ok");
+    assert!(data.get("index_valid").is_some(), "data should have index_valid");
+    assert!(data.get("overall_status").is_some(), "data should have overall_status");
+    assert!(data.get("issues").is_some(), "data should have issues array");
+}
+
+#[test]
+#[serial]
+fn test_fsck_json_issues_array_empty_on_success() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["fsck", "--json"], repo.path());
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
+    let data = json.get("data").unwrap();
+    let issues = data.get("issues").unwrap();
+
+    assert!(issues.is_array(), "issues should be an array: {stdout}");
+    assert!(issues.as_array().unwrap().is_empty(), "issues should be empty on healthy repo: {stdout}");
+}
+
+// ---------------------------------------------------------------------------
+// --no-cross-ref-check and --no-index-check combined
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn test_fsck_no_cross_ref_and_no_index_check() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(
+        &["fsck", "--no-cross-ref-check", "--no-index-check"],
+        repo.path(),
+    );
+    assert!(
+        output.status.success(),
+        "fsck with both flags should pass: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SHA-256: additional tests
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn test_fsck_sha256_fix_on_clean_repo() {
+    let repo = create_sha256_committed_repo_via_cli();
+
+    let output = run_libra_command(&["fsck", "--fix"], repo.path());
+    assert!(
+        output.status.success(),
+        "fsck --fix on clean SHA-256 repo should pass: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[serial]
+fn test_fsck_sha256_verbose_shows_progress() {
+    let repo = create_sha256_committed_repo_via_cli();
+
+    let output = run_libra_command(&["fsck", "--verbose"], repo.path());
+    assert!(output.status.success(), "fsck --verbose on SHA-256 repo should pass");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("Checking") && stdout.contains("objects"),
+        "verbose should show object count: {stdout}"
+    );
+}
+
 #[test]
 #[serial]
 fn test_fsck_missing_nonexistent_object() {
