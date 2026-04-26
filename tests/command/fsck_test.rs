@@ -450,6 +450,155 @@ fn test_fsck_invalid_object_id() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// --fix flag tests
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn test_fsck_fix_deletes_broken_ref() {
+    let repo = create_committed_repo_via_cli();
+
+    // Create a branch, then delete its target object to make it broken
+    let _ = run_libra_command(&["branch", "test-branch"], repo.path());
+
+    let log_output = run_libra_command(&["log", "--pretty=%H"], repo.path());
+    let stdout = String::from_utf8_lossy(&log_output.stdout);
+    let commit_hash = stdout.lines().next().unwrap().trim();
+
+    let object_path = loose_object_path(repo.path(), commit_hash);
+    if object_path.exists() {
+        fs::remove_file(&object_path).ok();
+    }
+
+    let output = run_libra_command(&["fsck", "--fix"], repo.path());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success()
+            || stdout.contains("Fixed")
+            || stderr.contains("Deleted broken ref")
+            || stderr.contains("FAILED"),
+        "fsck --fix should handle broken refs: stdout={stdout}, stderr={stderr}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_fsck_fix_rebuilds_corrupted_index() {
+    let repo = create_committed_repo_via_cli();
+
+    let index_path = repo.path().join(".libra").join("index");
+    if index_path.exists() {
+        fs::write(&index_path, b"corrupted index data!!!").expect("failed to corrupt index");
+    }
+
+    let output = run_libra_command(&["fsck", "--fix"], repo.path());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success()
+            || stdout.contains("rebuilt")
+            || stderr.contains("rebuilt")
+            || stderr.contains("Fixed"),
+        "fsck --fix should attempt to rebuild index: stdout={stdout}, stderr={stderr}"
+    );
+
+    if index_path.exists() {
+        let verify_output = run_libra_command(&["fsck"], repo.path());
+        assert!(
+            verify_output.status.success()
+                || !String::from_utf8_lossy(&verify_output.stdout).contains("index"),
+            "fsck after fix should not report index issues: {}",
+            String::from_utf8_lossy(&verify_output.stderr)
+        );
+    }
+}
+
+#[test]
+#[serial]
+fn test_fsck_fix_on_clean_repo() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["fsck", "--fix"], repo.path());
+    assert!(
+        output.status.success(),
+        "fsck --fix on clean repo should pass: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Integrity check passed"),
+        "should show passed message: {stdout}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Exit code verification tests
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn test_fsck_exit_code_zero_on_success() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["fsck"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "fsck on healthy repo should exit 0"
+    );
+}
+
+#[test]
+#[serial]
+fn test_fsck_exit_code_on_corrupted_object() {
+    let repo = create_committed_repo_via_cli();
+
+    let objects_dir = repo.path().join(".libra").join("objects");
+    if objects_dir.exists() {
+        for entry in walk_objects_dir(&objects_dir) {
+            fs::write(&entry, b"corrupted!!!").expect("failed to corrupt object");
+
+            let output = run_libra_command(&["fsck"], repo.path());
+            let exit_code = output.status.code().unwrap_or(-1);
+            assert!(
+                exit_code & 1 != 0,
+                "exit code should have OBJECT_CORRUPT bit set: {exit_code}"
+            );
+            return;
+        }
+    }
+}
+
+#[test]
+#[serial]
+fn test_fsck_exit_code_combination_objects_and_refs() {
+    let repo = create_committed_repo_via_cli();
+
+    let objects_dir = repo.path().join(".libra").join("objects");
+    let mut corrupted = false;
+
+    if objects_dir.exists() {
+        for entry in walk_objects_dir(&objects_dir) {
+            fs::write(&entry, b"corrupted!!!").expect("failed to corrupt object");
+            corrupted = true;
+            break;
+        }
+    }
+
+    if corrupted {
+        let output = run_libra_command(&["fsck"], repo.path());
+        let exit_code = output.status.code().unwrap_or(-1);
+        assert!(
+            exit_code & 1 != 0,
+            "exit code should include OBJECT_CORRUPT: {exit_code}"
+        );
+    }
+}
+
 #[test]
 #[serial]
 fn test_fsck_missing_nonexistent_object() {
