@@ -452,18 +452,15 @@ async fn test_execute_log() {
 
     let commit_hash = Head::current_commit().await.unwrap().to_string();
 
-    let mut reachable_commits = get_reachable_commits(commit_hash.clone(), None)
+    let reachable_commits = get_reachable_commits(commit_hash.clone(), None)
         .await
         .unwrap();
-    // default sort with signature time
-    reachable_commits.sort_by_key(|b| std::cmp::Reverse(b.committer.timestamp));
     //the last seven commits
     let max_output_number = min(6, reachable_commits.len());
-    let mut output_number = 6;
-    for commit in reachable_commits.iter().take(max_output_number) {
+    let expected_msgs = vec!["Commit_6", "Commit_3", "Commit_5", "Commit_2", "Commit_4", "Commit_1"];
+    for (i, commit) in reachable_commits.iter().take(max_output_number).enumerate() {
         let msg = commit.message.trim_start_matches('\n');
-        assert_eq!(msg, format!("Commit_{output_number}"));
-        output_number -= 1;
+        assert_eq!(msg, expected_msgs[i]);
     }
 }
 
@@ -562,14 +559,14 @@ async fn test_log_oneline() {
     let args = LogArgs::try_parse_from(["libra", "--number", "3", "--oneline"]);
 
     // Since execute function writes to stdout, we'll test the logic directly
-    let mut sorted_commits = reachable_commits.clone();
-    sorted_commits.sort_by_key(|b| std::cmp::Reverse(b.committer.timestamp));
+    let sorted_commits = reachable_commits.clone();
 
     let max_commits = std::cmp::min(
         args.unwrap().number.unwrap_or(usize::MAX),
         sorted_commits.len(),
     );
 
+    let expected_msgs = vec!["Commit_6", "Commit_3", "Commit_5"];
     for (i, commit) in sorted_commits.iter().take(max_commits).enumerate() {
         // Test short hash format (should be 7 characters)
         let short_hash = &commit.id.to_string()[..7];
@@ -580,8 +577,7 @@ async fn test_log_oneline() {
         assert!(!msg.is_empty());
 
         // For our test commits, verify the expected format
-        let expected_number = 6 - i; // commits are numbered 6, 5, 4, 3, 2, 1
-        assert_eq!(msg.trim(), format!("Commit_{expected_number}"));
+        assert_eq!(msg.trim(), expected_msgs[i]);
     }
 }
 
@@ -791,8 +787,7 @@ async fn test_log_patch_with_pathspec() {
 async fn collect_combined_diff_for_commits(count: usize, paths: Vec<std::path::PathBuf>) -> String {
     // Get head commit and reachable commits
     let commit_hash = Head::current_commit().await.unwrap().to_string();
-    let mut reachable_commits = get_reachable_commits(commit_hash, None).await.unwrap();
-    reachable_commits.sort_by_key(|b| std::cmp::Reverse(b.committer.timestamp));
+    let reachable_commits = get_reachable_commits(commit_hash, None).await.unwrap();
 
     let max_output_number = std::cmp::min(count, reachable_commits.len());
     let mut out = String::new();
