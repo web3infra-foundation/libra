@@ -58,8 +58,7 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
     let commit = util::get_commit_base_typed(spec)
         .await
         .map_err(|err| rev_list_target_error(spec, err))?;
-    let mut commits = log::get_reachable_commits(commit.to_string(), None).await?;
-    commits.sort_by_key(|commit| std::cmp::Reverse(commit.committer.timestamp));
+    let commits = log::get_reachable_commits(commit.to_string(), None).await?;
 
     let commits = commits
         .into_iter()

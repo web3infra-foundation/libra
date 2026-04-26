@@ -663,8 +663,7 @@ async fn run_log(args: &LogArgs) -> CliResult<LogOutput> {
     let (branch_name, current_head_commit) = resolve_log_head_commit().await?;
     let commit_hash = current_head_commit.to_string();
 
-    let mut reachable_commits = get_reachable_commits(commit_hash, None).await?;
-    reachable_commits.sort_by_key(|commit| std::cmp::Reverse(commit.committer.timestamp));
+    let reachable_commits = get_reachable_commits(commit_hash, None).await?;
 
     let max_output_number = min(args.number.unwrap_or(usize::MAX), reachable_commits.len());
     let include_total = args.number.is_none();

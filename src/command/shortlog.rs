@@ -315,13 +315,11 @@ async fn get_commits_for_shortlog(
         .map_err(|error| shortlog_commit_base_error(revision, error))?
         .to_string();
 
-    let mut commits: Vec<Commit> = get_reachable_commits(commit_hash, None)
+    let commits: Vec<Commit> = get_reachable_commits(commit_hash, None)
         .await?
         .into_iter()
         .filter(|c| passes_filter(c, since_ts, until_ts))
         .collect();
-
-    commits.sort_by_key(|b| std::cmp::Reverse(b.author.timestamp));
 
     Ok(commits)
 }
