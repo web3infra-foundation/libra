@@ -311,11 +311,7 @@ fn test_fsck_single_object_valid() {
     // Get the commit hash from log (full hash, not abbreviated)
     let log_output = run_libra_command(&["log", "--pretty=%H"], repo.path());
     let stdout = String::from_utf8_lossy(&log_output.stdout);
-    let commit_hash = stdout
-        .lines()
-        .next()
-        .unwrap()
-        .trim();
+    let commit_hash = stdout.lines().next().unwrap().trim();
 
     let output = run_libra_command(&["fsck", commit_hash], repo.path());
     assert!(
@@ -653,15 +649,33 @@ fn test_fsck_json_has_required_fields() {
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
 
     assert!(json.get("ok").is_some(), "JSON should have 'ok' field");
-    assert!(json.get("command").is_some(), "JSON should have 'command' field");
+    assert!(
+        json.get("command").is_some(),
+        "JSON should have 'command' field"
+    );
     assert!(json.get("data").is_some(), "JSON should have 'data' field");
 
     let data = json.get("data").unwrap();
-    assert!(data.get("objects_checked").is_some(), "data should have objects_checked");
-    assert!(data.get("objects_ok").is_some(), "data should have objects_ok");
-    assert!(data.get("index_valid").is_some(), "data should have index_valid");
-    assert!(data.get("overall_status").is_some(), "data should have overall_status");
-    assert!(data.get("issues").is_some(), "data should have issues array");
+    assert!(
+        data.get("objects_checked").is_some(),
+        "data should have objects_checked"
+    );
+    assert!(
+        data.get("objects_ok").is_some(),
+        "data should have objects_ok"
+    );
+    assert!(
+        data.get("index_valid").is_some(),
+        "data should have index_valid"
+    );
+    assert!(
+        data.get("overall_status").is_some(),
+        "data should have overall_status"
+    );
+    assert!(
+        data.get("issues").is_some(),
+        "data should have issues array"
+    );
 }
 
 #[test]
@@ -678,7 +692,10 @@ fn test_fsck_json_issues_array_empty_on_success() {
     let issues = data.get("issues").unwrap();
 
     assert!(issues.is_array(), "issues should be an array: {stdout}");
-    assert!(issues.as_array().unwrap().is_empty(), "issues should be empty on healthy repo: {stdout}");
+    assert!(
+        issues.as_array().unwrap().is_empty(),
+        "issues should be empty on healthy repo: {stdout}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -724,7 +741,10 @@ fn test_fsck_sha256_verbose_shows_progress() {
     let repo = create_sha256_committed_repo_via_cli();
 
     let output = run_libra_command(&["fsck", "--verbose"], repo.path());
-    assert!(output.status.success(), "fsck --verbose on SHA-256 repo should pass");
+    assert!(
+        output.status.success(),
+        "fsck --verbose on SHA-256 repo should pass"
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(
@@ -1058,11 +1078,7 @@ fn test_fsck_sha256_single_object_valid() {
 
     let log_output = run_libra_command(&["log", "--pretty=%H"], repo.path());
     let stdout = String::from_utf8_lossy(&log_output.stdout);
-    let commit_hash = stdout
-        .lines()
-        .next()
-        .unwrap()
-        .trim();
+    let commit_hash = stdout.lines().next().unwrap().trim();
 
     // SHA-256 hashes are 64 hex chars
     assert_eq!(
@@ -1122,4 +1138,3 @@ fn test_fsck_sha256_invalid_object_id() {
         "should report invalid hash: {stderr}"
     );
 }
-

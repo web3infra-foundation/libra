@@ -13,7 +13,7 @@
 //! - 1 (bit 0): Object corruption
 //! - 2 (bit 1): Broken refs
 //! - 4 (bit 2): Index corruption
-//! Bits are OR'd when multiple categories fail (e.g. 5 = objects + index)
+//!   Bits are OR'd when multiple categories fail (e.g. 5 = objects + index)
 
 use std::{fs, io};
 
@@ -44,9 +44,9 @@ use crate::{
 /// Bitmask flags for fsck exit codes. Multiple failure categories are OR'd together.
 mod exit_code {
     pub const OK: i32 = 0;
-    pub const OBJECT_CORRUPT: i32 = 1;   // bit 0
-    pub const REF_BROKEN: i32 = 2;       // bit 1
-    pub const INDEX_CORRUPT: i32 = 4;    // bit 2
+    pub const OBJECT_CORRUPT: i32 = 1; // bit 0
+    pub const REF_BROKEN: i32 = 2; // bit 1
+    pub const INDEX_CORRUPT: i32 = 4; // bit 2
 }
 
 const FSCK_LONG_ABOUT: &str =
@@ -245,48 +245,92 @@ fn parse_object_hash(hex_str: &str) -> Option<ObjectHash> {
     ObjectHash::from_bytes(&bytes).ok()
 }
 
+/// Try to parse a loose object file path into an ObjectHash.
+/// `dir_name` is the 2-char prefix directory (e.g. "ab"),
+/// `sub_path` is the file inside that directory.
+fn try_parse_loose_object(dir_name: &str, sub_path: &std::path::Path) -> Option<ObjectHash> {
+    let file_name = sub_path.file_name().and_then(|n| n.to_str())?;
+    let full_hash = format!("{dir_name}{file_name}");
+    parse_object_hash(&full_hash)
+}
+
 /// List all object hashes in storage
 fn list_all_objects_in_storage(storage: &ClientStorage) -> io::Result<Vec<ObjectHash>> {
-    let mut hashes = Vec::new();
-
-    // storage.base_path is already the objects directory (e.g., .libra/objects)
     let objects_dir = storage.base_path();
-
     if !objects_dir.exists() {
-        return Ok(hashes);
+        return Ok(Vec::new());
     }
 
-    // Iterate through object directories (loose objects)
+    let mut hashes = Vec::new();
     for entry in fs::read_dir(objects_dir)? {
         let entry = entry?;
         let path = entry.path();
         if !path.is_dir() {
             continue;
         }
-
-        let dir_name = path.file_name().and_then(|n| n.to_str());
-        if dir_name.is_none() || dir_name.unwrap().len() != 2 {
+        let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if dir_name.len() != 2 {
             continue;
         }
 
-        // Read files in subdirectory - clone path to avoid borrow/move issue
-        let dir_path = path.clone();
-        for sub_entry in fs::read_dir(dir_path)? {
+        for sub_entry in fs::read_dir(&path)? {
             let sub_entry = sub_entry?;
             let sub_path = sub_entry.path();
-            if sub_path.is_file() {
-                let file_name = sub_path.file_name().and_then(|n| n.to_str());
-                if let Some(name) = file_name {
-                    let full_hash = format!("{}{}", dir_name.unwrap(), name);
-                    if let Some(hash) = parse_object_hash(&full_hash) {
-                        hashes.push(hash);
-                    }
-                }
+            if sub_path.is_file()
+                && let Some(hash) = try_parse_loose_object(dir_name, &sub_path)
+            {
+                hashes.push(hash);
             }
         }
     }
 
     Ok(hashes)
+}
+
+/// Build an IssueReport from a failed single-object check.
+fn issue_for_single_object_status(
+    check_result: &ObjectCheckResult,
+    object_id: &str,
+) -> IssueReport {
+    match check_result.status {
+        CheckStatus::Corrupted | CheckStatus::HashMismatch => IssueReport {
+            issue_type: "object_corruption".to_string(),
+            severity: "error".to_string(),
+            object_id: Some(object_id.to_string()),
+            ref_name: None,
+            message: check_result.error_message.clone().unwrap_or_default(),
+            suggestion: Some(
+                "Object data is corrupted. Consider restoring from backup or remote.".to_string(),
+            ),
+        },
+        CheckStatus::InvalidFormat => IssueReport {
+            issue_type: "invalid_format".to_string(),
+            severity: "error".to_string(),
+            object_id: Some(object_id.to_string()),
+            ref_name: None,
+            message: check_result.error_message.clone().unwrap_or_default(),
+            suggestion: Some("Object has invalid format.".to_string()),
+        },
+        CheckStatus::Missing => IssueReport {
+            issue_type: "missing_object".to_string(),
+            severity: "error".to_string(),
+            object_id: Some(object_id.to_string()),
+            ref_name: None,
+            message: "Object not found in storage".to_string(),
+            suggestion: Some("Object may have been deleted or never created.".to_string()),
+        },
+        CheckStatus::Ok => unreachable!("should not build issue for Ok status"),
+    }
+}
+
+/// Compute failure mask and categories for a single-object check.
+fn failure_for_single_status(status: &CheckStatus) -> (i32, Vec<String>) {
+    match status {
+        CheckStatus::Ok => (exit_code::OK, vec![]),
+        _ => (exit_code::OBJECT_CORRUPT, vec!["objects".to_string()]),
+    }
 }
 
 async fn check_single_object(object_id: &str, storage: &ClientStorage) -> CliResult<FsckResult> {
@@ -295,68 +339,24 @@ async fn check_single_object(object_id: &str, storage: &ClientStorage) -> CliRes
 
     let check_result = verify_object(&hash, storage).await?;
 
-    let mut issues = Vec::new();
-    let overall_status = match check_result.status {
+    let (overall_status, issues) = match check_result.status {
         CheckStatus::Ok => {
             println!("Object {} is valid", object_id);
-            CheckStatus::Ok
+            (CheckStatus::Ok, Vec::new())
         }
-        CheckStatus::Corrupted | CheckStatus::HashMismatch => {
-            issues.push(IssueReport {
-                issue_type: "object_corruption".to_string(),
-                severity: "error".to_string(),
-                object_id: Some(object_id.to_string()),
-                ref_name: None,
-                message: check_result.error_message.unwrap_or_default(),
-                suggestion: Some(
-                    "Object data is corrupted. Consider restoring from backup or remote."
-                        .to_string(),
-                ),
-            });
-            CheckStatus::Corrupted
-        }
-        CheckStatus::InvalidFormat => {
-            issues.push(IssueReport {
-                issue_type: "invalid_format".to_string(),
-                severity: "error".to_string(),
-                object_id: Some(object_id.to_string()),
-                ref_name: None,
-                message: check_result.error_message.unwrap_or_default(),
-                suggestion: Some("Object has invalid format.".to_string()),
-            });
-            CheckStatus::InvalidFormat
-        }
-        CheckStatus::Missing => {
-            issues.push(IssueReport {
-                issue_type: "missing_object".to_string(),
-                severity: "error".to_string(),
-                object_id: Some(object_id.to_string()),
-                ref_name: None,
-                message: "Object not found in storage".to_string(),
-                suggestion: Some("Object may have been deleted or never created.".to_string()),
-            });
-            CheckStatus::Missing
+        _ => {
+            let issue = issue_for_single_object_status(&check_result, object_id);
+            (check_result.status, vec![issue])
         }
     };
 
-    let (failure_mask, failure_categories) = match overall_status {
-        CheckStatus::Ok => (exit_code::OK, vec![]),
-        CheckStatus::Missing => (exit_code::OBJECT_CORRUPT, vec!["objects".to_string()]),
-        _ => (exit_code::OBJECT_CORRUPT, vec!["objects".to_string()]),
-    };
+    let (failure_mask, failure_categories) = failure_for_single_status(&overall_status);
+    let is_ok = overall_status == CheckStatus::Ok;
 
     Ok(FsckResult {
         objects_checked: 1,
-        objects_ok: if overall_status == CheckStatus::Ok {
-            1
-        } else {
-            0
-        },
-        objects_corrupted: if overall_status == CheckStatus::Ok {
-            0
-        } else {
-            1
-        },
+        objects_ok: if is_ok { 1 } else { 0 },
+        objects_corrupted: if is_ok { 0 } else { 1 },
         refs_checked: 0,
         refs_ok: 0,
         refs_broken: 0,
@@ -399,10 +399,35 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
         println!("Checking {} objects...", total);
     }
 
-    // Verify each object
+    check_objects(&all_hashes, args, storage, &mut result).await?;
+
+    if !args.objects_only {
+        check_and_fix_refs(args, storage, &mut result).await?;
+    }
+
+    if !args.no_index_check && !args.objects_only {
+        check_and_fix_index(args, storage, &mut result).await?;
+    }
+
+    if !args.no_cross_ref_check && !args.objects_only {
+        check_cross_references(storage, &mut result).await?;
+    }
+
+    compute_failure_mask(&mut result);
+
+    Ok(result)
+}
+
+/// Verify all objects in storage, updating `result` with per-object outcomes.
+async fn check_objects(
+    all_hashes: &[ObjectHash],
+    args: &FsckArgs,
+    storage: &ClientStorage,
+    result: &mut FsckResult,
+) -> CliResult<()> {
     for (i, hash) in all_hashes.iter().enumerate() {
         if args.verbose {
-            println!("Checking object {}/{}: {}", i + 1, total, hash);
+            println!("Checking object {}/{}: {}", i + 1, all_hashes.len(), hash);
         }
 
         let check_result = verify_object(hash, storage).await?;
@@ -415,89 +440,121 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
             _ => {
                 result.objects_corrupted += 1;
                 result.overall_status = check_result.status.clone();
-                result.issues.push(IssueReport {
-                    issue_type: match check_result.status {
-                        CheckStatus::Corrupted | CheckStatus::HashMismatch => {
-                            "hash_mismatch".to_string()
-                        }
-                        CheckStatus::InvalidFormat => "invalid_format".to_string(),
-                        CheckStatus::Missing => "missing_object".to_string(),
-                        _ => "unknown".to_string(),
-                    },
-                    severity: "error".to_string(),
-                    object_id: Some(hash.to_string()),
-                    ref_name: None,
-                    message: check_result
-                        .error_message
-                        .unwrap_or_else(|| "Object verification failed".to_string()),
-                    suggestion: Some("Consider restoring from backup or remote.".to_string()),
-                });
+                result.issues.push(object_issue_report(hash, &check_result));
             }
         }
     }
+    Ok(())
+}
 
-    // Check refs unless --objects-only
-    if !args.objects_only {
-        let ref_result = check_refs(storage).await?;
-        result.refs_checked = ref_result.checked;
-        result.refs_ok = ref_result.ok;
-        result.refs_broken = ref_result.broken;
-        result.issues.extend(ref_result.issues.clone());
+/// Build an IssueReport for a corrupted object found during full scan.
+fn object_issue_report(hash: &ObjectHash, check_result: &ObjectCheckResult) -> IssueReport {
+    IssueReport {
+        issue_type: match check_result.status {
+            CheckStatus::Corrupted | CheckStatus::HashMismatch => "hash_mismatch".to_string(),
+            CheckStatus::InvalidFormat => "invalid_format".to_string(),
+            CheckStatus::Missing => "missing_object".to_string(),
+            _ => "unknown".to_string(),
+        },
+        severity: "error".to_string(),
+        object_id: Some(hash.to_string()),
+        ref_name: None,
+        message: check_result
+            .error_message
+            .clone()
+            .unwrap_or_else(|| "Object verification failed".to_string()),
+        suggestion: Some("Consider restoring from backup or remote.".to_string()),
+    }
+}
 
-        if ref_result.broken > 0 {
-            if args.fix {
-                let fixed = fix_broken_refs(&ref_result.broken_ref_names).await?;
-                if fixed > 0 {
-                    println!("Fixed: deleted {} broken ref(s)", fixed);
-                    result.refs_broken = 0;
-                    result.issues.retain(|i| {
-                        !ref_result
-                            .broken_ref_names
-                            .iter()
-                            .any(|n| i.ref_name.as_deref() == Some(n))
-                    });
-                }
-            } else {
-                result.overall_status = CheckStatus::Missing;
-            }
+/// Check refs and optionally fix broken ones.
+async fn check_and_fix_refs(
+    args: &FsckArgs,
+    storage: &ClientStorage,
+    result: &mut FsckResult,
+) -> CliResult<()> {
+    let ref_result = check_refs(storage).await?;
+    result.refs_checked = ref_result.checked;
+    result.refs_ok = ref_result.ok;
+    result.refs_broken = ref_result.broken;
+    result.issues.extend(ref_result.issues.clone());
+
+    if ref_result.broken > 0 {
+        if args.fix {
+            apply_fix_broken_refs(&ref_result.broken_ref_names, result).await?;
+        } else {
+            result.overall_status = CheckStatus::Missing;
         }
     }
+    Ok(())
+}
 
-    // Check index unless --no-index-check or --objects-only
-    if !args.no_index_check && !args.objects_only {
-        let index_result = check_index(storage)?;
-        result.index_valid = index_result.valid;
-        result.issues.extend(index_result.issues);
-
-        if !index_result.valid {
-            if args.fix {
-                let fixed = fix_corrupted_index().await?;
-                if fixed {
-                    println!("Fixed: rebuilt corrupted index");
-                    result.index_valid = true;
-                    result
-                        .issues
-                        .retain(|i| i.severity != "error" || i.issue_type.contains("index"));
-                }
-            } else {
-                result.overall_status = CheckStatus::Corrupted;
-            }
-        }
+/// Delete broken refs and update result counters.
+async fn apply_fix_broken_refs(
+    broken_ref_names: &[String],
+    result: &mut FsckResult,
+) -> CliResult<()> {
+    let fixed = fix_broken_refs(broken_ref_names).await?;
+    if fixed > 0 {
+        println!("Fixed: deleted {} broken ref(s)", fixed);
+        result.refs_broken = 0;
+        result.issues.retain(|i| {
+            i.ref_name
+                .as_deref()
+                .is_none_or(|n| !broken_ref_names.iter().any(|bn| bn == n))
+        });
     }
+    Ok(())
+}
 
-    // Cross-reference validation unless --no-cross-ref-check
-    if !args.no_cross_ref_check && !args.objects_only {
-        let cross_ref_issues = validate_cross_references(storage).await?;
-        let issue_count = cross_ref_issues.len();
-        result.cross_ref_issues = issue_count;
-        result.issues.extend(cross_ref_issues);
+/// Check index and optionally fix corruption.
+async fn check_and_fix_index(
+    args: &FsckArgs,
+    storage: &ClientStorage,
+    result: &mut FsckResult,
+) -> CliResult<()> {
+    let index_result = check_index(storage)?;
+    result.index_valid = index_result.valid;
+    result.issues.extend(index_result.issues);
 
-        if issue_count > 0 {
+    if !index_result.valid {
+        if args.fix {
+            apply_fix_corrupted_index(result).await?;
+        } else {
             result.overall_status = CheckStatus::Corrupted;
         }
     }
+    Ok(())
+}
 
-    // Compute failure bitmask from the actual state after all checks and fixes.
+/// Rebuild corrupted index and update result.
+async fn apply_fix_corrupted_index(result: &mut FsckResult) -> CliResult<()> {
+    let fixed = fix_corrupted_index().await?;
+    if fixed {
+        println!("Fixed: rebuilt corrupted index");
+        result.index_valid = true;
+        result
+            .issues
+            .retain(|i| i.severity != "error" || !i.issue_type.contains("index"));
+    }
+    Ok(())
+}
+
+/// Validate cross-references and update result.
+async fn check_cross_references(storage: &ClientStorage, result: &mut FsckResult) -> CliResult<()> {
+    let cross_ref_issues = validate_cross_references(storage).await?;
+    let issue_count = cross_ref_issues.len();
+    result.cross_ref_issues = issue_count;
+    result.issues.extend(cross_ref_issues);
+
+    if issue_count > 0 {
+        result.overall_status = CheckStatus::Corrupted;
+    }
+    Ok(())
+}
+
+/// Compute failure bitmask and human-readable categories from current result state.
+fn compute_failure_mask(result: &mut FsckResult) {
     let mut mask = exit_code::OK;
     let mut categories = Vec::new();
     if result.objects_corrupted > 0 || result.cross_ref_issues > 0 {
@@ -514,8 +571,6 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
     }
     result.failure_mask = mask;
     result.failure_categories = categories;
-
-    Ok(result)
 }
 
 /// Verify a single object's integrity
@@ -773,78 +828,10 @@ fn check_index(storage: &ClientStorage) -> CliResult<IndexCheckResult> {
     for entry in entries {
         result.entries_checked += 1;
 
-        // Validate entry mode (must be a valid git file mode)
-        if !is_valid_index_mode(entry.mode) {
+        if let Some(issue) = validate_index_entry(entry, storage) {
             result.entries_corrupted += 1;
             result.valid = false;
-            result.issues.push(IssueReport {
-                issue_type: "invalid_index_mode".to_string(),
-                severity: "error".to_string(),
-                object_id: None,
-                ref_name: Some(entry.name.clone()),
-                message: format!(
-                    "Index entry '{}' has invalid mode 0o{:o}",
-                    entry.name, entry.mode
-                ),
-                suggestion: Some("Remove and re-add this file to fix.".to_string()),
-            });
-            continue;
-        }
-
-        // Validate entry stage (0 = normal, 1-3 = merge conflict)
-        if entry.flags.stage > 3 {
-            result.entries_corrupted += 1;
-            result.valid = false;
-            result.issues.push(IssueReport {
-                issue_type: "invalid_index_stage".to_string(),
-                severity: "error".to_string(),
-                object_id: None,
-                ref_name: Some(entry.name.clone()),
-                message: format!(
-                    "Index entry '{}' has invalid stage {}",
-                    entry.name, entry.flags.stage
-                ),
-                suggestion: Some("This may indicate a corrupted merge state.".to_string()),
-            });
-            continue;
-        }
-
-        // Cross-reference: verify the entry's hash points to an existing blob
-        if !storage.exist(&entry.hash) {
-            result.missing_objects += 1;
-            result.entries_corrupted += 1;
-            result.valid = false;
-            result.issues.push(IssueReport {
-                issue_type: "index_entry_missing_object".to_string(),
-                severity: "error".to_string(),
-                object_id: Some(entry.hash.to_string()),
-                ref_name: Some(entry.name.clone()),
-                message: format!(
-                    "Index entry '{}' references missing object {}",
-                    entry.name, entry.hash
-                ),
-                suggestion: Some("Run 'libra add <file>' to re-stage this file.".to_string()),
-            });
-            continue;
-        }
-
-        // Verify the object is actually a blob
-        if let Ok(obj_type) = storage.get_object_type(&entry.hash)
-            && obj_type != ObjectType::Blob
-        {
-            result.entries_corrupted += 1;
-            result.valid = false;
-            result.issues.push(IssueReport {
-                issue_type: "index_entry_wrong_type".to_string(),
-                severity: "error".to_string(),
-                object_id: Some(entry.hash.to_string()),
-                ref_name: Some(entry.name.clone()),
-                message: format!(
-                    "Index entry '{}' references a {} object instead of a blob",
-                    entry.name, obj_type
-                ),
-                suggestion: Some("Re-stage this file to fix the reference.".to_string()),
-            });
+            result.issues.push(issue);
             continue;
         }
 
@@ -953,6 +940,72 @@ fn is_valid_index_mode(mode: u32) -> bool {
     )
 }
 
+/// Validate a single index entry against storage. Returns Some(issue) on failure.
+fn validate_index_entry(
+    entry: &git_internal::internal::index::IndexEntry,
+    storage: &ClientStorage,
+) -> Option<IssueReport> {
+    if !is_valid_index_mode(entry.mode) {
+        return Some(IssueReport {
+            issue_type: "invalid_index_mode".to_string(),
+            severity: "error".to_string(),
+            object_id: None,
+            ref_name: Some(entry.name.clone()),
+            message: format!(
+                "Index entry '{}' has invalid mode 0o{:o}",
+                entry.name, entry.mode
+            ),
+            suggestion: Some("Remove and re-add this file to fix.".to_string()),
+        });
+    }
+
+    if entry.flags.stage > 3 {
+        return Some(IssueReport {
+            issue_type: "invalid_index_stage".to_string(),
+            severity: "error".to_string(),
+            object_id: None,
+            ref_name: Some(entry.name.clone()),
+            message: format!(
+                "Index entry '{}' has invalid stage {}",
+                entry.name, entry.flags.stage
+            ),
+            suggestion: Some("This may indicate a corrupted merge state.".to_string()),
+        });
+    }
+
+    if !storage.exist(&entry.hash) {
+        return Some(IssueReport {
+            issue_type: "index_entry_missing_object".to_string(),
+            severity: "error".to_string(),
+            object_id: Some(entry.hash.to_string()),
+            ref_name: Some(entry.name.clone()),
+            message: format!(
+                "Index entry '{}' references missing object {}",
+                entry.name, entry.hash
+            ),
+            suggestion: Some("Run 'libra add <file>' to re-stage this file.".to_string()),
+        });
+    }
+
+    if let Ok(obj_type) = storage.get_object_type(&entry.hash)
+        && obj_type != ObjectType::Blob
+    {
+        return Some(IssueReport {
+            issue_type: "index_entry_wrong_type".to_string(),
+            severity: "error".to_string(),
+            object_id: Some(entry.hash.to_string()),
+            ref_name: Some(entry.name.clone()),
+            message: format!(
+                "Index entry '{}' references a {} object instead of a blob",
+                entry.name, obj_type
+            ),
+            suggestion: Some("Re-stage this file to fix the reference.".to_string()),
+        });
+    }
+
+    None
+}
+
 /// Validate cross-references between objects (trees reference valid blobs/trees)
 ///
 /// Checks that:
@@ -1039,10 +1092,7 @@ async fn validate_cross_references(storage: &ClientStorage) -> CliResult<Vec<Iss
                     severity: "error".to_string(),
                     object_id: Some(commit.tree_id.to_string()),
                     ref_name: None,
-                    message: format!(
-                        "Commit {} references missing tree {}",
-                        hash, commit.tree_id
-                    ),
+                    message: format!("Commit {} references missing tree {}", hash, commit.tree_id),
                     suggestion: Some("The commit's tree is missing.".to_string()),
                 });
             }
@@ -1054,10 +1104,7 @@ async fn validate_cross_references(storage: &ClientStorage) -> CliResult<Vec<Iss
                         severity: "warning".to_string(),
                         object_id: Some(parent.to_string()),
                         ref_name: None,
-                        message: format!(
-                            "Commit {} references missing parent {}",
-                            hash, parent
-                        ),
+                        message: format!("Commit {} references missing parent {}", hash, parent),
                         suggestion: Some(
                             "Parent commit is missing - history may be incomplete.".to_string(),
                         ),
@@ -2032,10 +2079,7 @@ mod tests {
         // hex::decode accepts both uppercase and lowercase
         // Use a proper 40-char (even length) uppercase hex string
         let hash = parse_object_hash("ABCDEF0123456789ABCDEF0123456789ABCDEF01");
-        assert!(
-            hash.is_some(),
-            "uppercase hex should be accepted: {hash:?}"
-        );
+        assert!(hash.is_some(), "uppercase hex should be accepted: {hash:?}");
     }
 
     #[test]
@@ -2082,7 +2126,10 @@ mod tests {
 
         let storage = ClientStorage::init(path::objects());
         let hashes = list_all_objects_in_storage(&storage).unwrap();
-        assert!(hashes.is_empty(), "empty objects dir should return no hashes");
+        assert!(
+            hashes.is_empty(),
+            "empty objects dir should return no hashes"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2269,9 +2316,15 @@ mod tests {
 
         let result = check_index(&storage).unwrap();
 
-        assert!(!result.valid, "corrupted index should be detected as invalid");
         assert!(
-            result.issues.iter().any(|i| i.issue_type == "index_parse_error"),
+            !result.valid,
+            "corrupted index should be detected as invalid"
+        );
+        assert!(
+            result
+                .issues
+                .iter()
+                .any(|i| i.issue_type == "index_parse_error"),
             "should report index_parse_error: {:?}",
             result.issues
         );
@@ -2305,8 +2358,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_check_all_objects_fix_broken_refs() {
-        use sea_orm::ActiveModelTrait;
-        use sea_orm::ActiveValue::Set;
+        use sea_orm::{ActiveModelTrait, ActiveValue::Set};
 
         let temp_path = tempdir().unwrap();
         test::setup_with_new_libra_in(temp_path.path()).await;
