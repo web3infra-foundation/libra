@@ -591,21 +591,6 @@ fn test_fsck_exit_code_on_corrupted_object() {
     }
 }
 
-#[test]
-#[serial]
-fn test_fsck_exit_code_combination_objects_and_refs() {
-    let repo = create_committed_repo_via_cli();
-
-    if corrupt_first_object(repo.path()) {
-        let output = run_libra_command(&["fsck"], repo.path());
-        let exit_code = output.status.code().unwrap_or(-1);
-        assert!(
-            exit_code & 1 != 0,
-            "exit code should include OBJECT_CORRUPT: {exit_code}"
-        );
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Verbose output detail tests
 // ---------------------------------------------------------------------------

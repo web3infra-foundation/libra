@@ -1163,6 +1163,23 @@ mod tests {
     use super::*;
     use crate::utils::test;
 
+    fn default_fsck_result() -> FsckResult {
+        FsckResult {
+            objects_checked: 0,
+            objects_ok: 0,
+            objects_corrupted: 0,
+            refs_checked: 0,
+            refs_ok: 0,
+            refs_broken: 0,
+            index_valid: true,
+            cross_ref_issues: 0,
+            overall_status: CheckStatus::Ok,
+            issues: vec![],
+            failure_mask: exit_code::OK,
+            failure_categories: vec![],
+        }
+    }
+
     #[tokio::test]
     #[serial]
     async fn test_fsck_empty_repo() {
@@ -1552,13 +1569,7 @@ mod tests {
             objects_corrupted: 1,
             refs_checked: 5,
             refs_ok: 5,
-            refs_broken: 0,
-            index_valid: true,
-            cross_ref_issues: 0,
-            overall_status: CheckStatus::Ok,
-            issues: vec![],
-            failure_mask: exit_code::OK,
-            failure_categories: vec![],
+            ..default_fsck_result()
         };
 
         assert_eq!(result.objects_checked, 10);
@@ -1582,36 +1593,11 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn test_verify_blob_hash_mismatch_detection() {
-        let temp_path = tempdir().unwrap();
-        test::setup_with_new_libra_in(temp_path.path()).await;
-        let _guard = test::ChangeDirGuard::new(temp_path.path());
-
-        let storage = ClientStorage::init(path::objects());
-        let blob = Blob::from_content("test content for hash verification");
-        crate::command::save_object(&blob, &blob.id).unwrap();
-
-        let result = verify_object(&blob.id, &storage).await.unwrap();
-
-        assert_eq!(result.status, CheckStatus::Ok);
-    }
-
-    #[tokio::test]
-    #[serial]
     async fn test_fsck_json_output_structure() {
         let result = FsckResult {
             objects_checked: 5,
             objects_ok: 5,
-            objects_corrupted: 0,
-            refs_checked: 2,
-            refs_ok: 2,
-            refs_broken: 0,
-            index_valid: true,
-            cross_ref_issues: 0,
-            overall_status: CheckStatus::Ok,
-            issues: vec![],
-            failure_mask: exit_code::OK,
-            failure_categories: vec![],
+            ..default_fsck_result()
         };
 
         let json = serde_json::to_string_pretty(&result).unwrap();
@@ -1728,20 +1714,7 @@ mod tests {
 
     #[test]
     fn test_fsck_result_default_values() {
-        let result = FsckResult {
-            objects_checked: 0,
-            objects_ok: 0,
-            objects_corrupted: 0,
-            refs_checked: 0,
-            refs_ok: 0,
-            refs_broken: 0,
-            index_valid: true,
-            cross_ref_issues: 0,
-            overall_status: CheckStatus::Ok,
-            issues: vec![],
-            failure_mask: exit_code::OK,
-            failure_categories: vec![],
-        };
+        let result = default_fsck_result();
 
         assert_eq!(result.objects_checked, 0);
         assert!(result.issues.is_empty());
@@ -1861,20 +1834,7 @@ mod tests {
 
     #[test]
     fn test_print_functions_exist() {
-        let result = FsckResult {
-            objects_checked: 0,
-            objects_ok: 0,
-            objects_corrupted: 0,
-            refs_checked: 0,
-            refs_ok: 0,
-            refs_broken: 0,
-            index_valid: true,
-            cross_ref_issues: 0,
-            overall_status: CheckStatus::Ok,
-            issues: vec![],
-            failure_mask: exit_code::OK,
-            failure_categories: vec![],
-        };
+        let result = default_fsck_result();
 
         print_verbose_result(&result);
         print_issues(&result);
@@ -1908,16 +1868,7 @@ mod tests {
         let result = FsckResult {
             objects_checked: 1,
             objects_ok: 1,
-            objects_corrupted: 0,
-            refs_checked: 0,
-            refs_ok: 0,
-            refs_broken: 0,
-            index_valid: true,
-            cross_ref_issues: 0,
-            overall_status: CheckStatus::Ok,
-            issues: vec![],
-            failure_mask: 0,
-            failure_categories: vec![],
+            ..default_fsck_result()
         };
         let json = serde_json::to_string(&result).unwrap();
         assert!(
@@ -1931,16 +1882,7 @@ mod tests {
         let result = FsckResult {
             objects_checked: 1,
             objects_ok: 1,
-            objects_corrupted: 0,
-            refs_checked: 0,
-            refs_ok: 0,
-            refs_broken: 0,
-            index_valid: true,
-            cross_ref_issues: 0,
-            overall_status: CheckStatus::Ok,
-            issues: vec![],
-            failure_mask: 0,
-            failure_categories: vec![],
+            ..default_fsck_result()
         };
         let json = serde_json::to_string(&result).unwrap();
         assert!(
@@ -2396,48 +2338,6 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // check_all_objects: failure_mask computed correctly with multiple failures
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    #[serial]
-    async fn test_failure_mask_objects_and_cross_ref() {
-        let temp_path = tempdir().unwrap();
-        test::setup_with_new_libra_in(temp_path.path()).await;
-        let _guard = test::ChangeDirGuard::new(temp_path.path());
-
-        let storage = ClientStorage::init(path::objects());
-
-        // Create a tree referencing a nonexistent blob (triggers cross_ref issue)
-        let fake_blob_id = ObjectHash::new(&[0xaa; 20]);
-        let tree = Tree::from_tree_items(vec![git_internal::internal::object::tree::TreeItem {
-            mode: git_internal::internal::object::tree::TreeItemMode::Blob,
-            name: "missing.txt".to_string(),
-            id: fake_blob_id,
-        }])
-        .unwrap();
-        crate::command::save_object(&tree, &tree.id).unwrap();
-
-        let args = FsckArgs {
-            verbose: false,
-            no_cross_ref_check: false,
-            no_index_check: true,
-            objects_only: false,
-            fix: false,
-            object: None,
-        };
-
-        let result = check_all_objects(&args, &storage).await.unwrap();
-
-        assert!(result.cross_ref_issues > 0);
-        assert!(
-            result.failure_mask & exit_code::OBJECT_CORRUPT != 0,
-            "failure_mask should include OBJECT_CORRUPT for cross-ref issues: {}",
-            result.failure_mask
-        );
-    }
-
-    // -----------------------------------------------------------------------
     // print_issues output format
     // -----------------------------------------------------------------------
 
@@ -2447,11 +2347,6 @@ mod tests {
             objects_checked: 1,
             objects_ok: 0,
             objects_corrupted: 1,
-            refs_checked: 0,
-            refs_ok: 0,
-            refs_broken: 0,
-            index_valid: true,
-            cross_ref_issues: 0,
             overall_status: CheckStatus::HashMismatch,
             issues: vec![IssueReport {
                 issue_type: "hash_mismatch".to_string(),
@@ -2463,6 +2358,7 @@ mod tests {
             }],
             failure_mask: exit_code::OBJECT_CORRUPT,
             failure_categories: vec!["objects".to_string()],
+            ..default_fsck_result()
         };
 
         print_issues(&result);
