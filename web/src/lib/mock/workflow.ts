@@ -1,3 +1,14 @@
+/**
+ * Static workflow demo fixture.
+ *
+ * Matches the {@link WorkflowState} contract; the pipeline pane, git timeline,
+ * detail panel, and summary all read from this single source so the demo is
+ * internally consistent (e.g. `runs[*].step` ids must exist in
+ * `plans.execution.steps[*].id`).
+ *
+ * Replace this with a websocket-fed store once the Rust backend exposes the
+ * thread state stream.
+ */
 import type { WorkflowState } from "./types";
 
 export const WORKFLOW: WorkflowState = {

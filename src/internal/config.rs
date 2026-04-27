@@ -1,10 +1,26 @@
-//! Config storage helpers backed by SeaORM to insert, update, and retrieve values, manage remote/branch settings, and merge scoped configs.
+//! Config storage helpers backed by sea-orm.
 //!
-//! ## New `ConfigKv` API
+//! Two APIs exist side-by-side:
 //!
-//! The `ConfigKv` struct provides flat key/value access to the `config_kv` table,
-//! with optional vault encryption. All new code should use `ConfigKv` instead of
-//! the deprecated `Config` struct.
+//! 1. [`ConfigKv`] (preferred) — flat dotted keys like `remote.origin.url` stored
+//!    in the `config_kv` table, with per-row encryption support and a richer
+//!    set of CRUD primitives (`set`, `add`, `unset`, `unset_all`, regex/prefix
+//!    queries). All new code should use this API.
+//! 2. [`Config`] (deprecated) — three-column form `(configuration, name, key)`
+//!    stored in the legacy `config` table. Retained for backwards-compatible
+//!    repos that have not yet migrated.
+//!
+//! Both APIs follow the same `*_with_conn` transaction-safety convention used
+//! by [`crate::internal::branch`]: callers inside an open transaction must use
+//! the `_with_conn` variants to avoid acquiring a second pool connection
+//! (which deadlocks under SQLite's writer-serialisation).
+//!
+//! Cross-cutting helpers in this module:
+//! - [`resolve_env`] / [`resolve_env_for_target`]: cascading env-var resolution
+//!   (process env > local repo config > global config).
+//! - [`is_sensitive_key`] / [`is_vault_internal_key`]: heuristics that drive the
+//!   encrypt-by-default policy in `libra config`.
+//! - [`encrypt_value`] / [`decrypt_value`]: thin wrappers over the vault module.
 
 use std::{collections::HashSet, mem::swap, path::Path};
 
@@ -31,15 +47,23 @@ use crate::{
 // ConfigKv — new flat key/value API backed by the `config_kv` table
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// A single entry from the `config_kv` table.
+/// One row from the `config_kv` table, decoded for application use.
+///
+/// `encrypted == true` means `value` is hex-encoded ciphertext that must be
+/// decrypted via [`decrypt_value`] before display. The encrypt flag is stored
+/// as INTEGER (0/1) in SQLite; this struct normalises it to `bool`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigKvEntry {
+    /// Dotted config key, e.g. `remote.origin.url` or `vault.env.GEMINI_API_KEY`.
     pub key: String,
+    /// Either plaintext or hex ciphertext depending on `encrypted`.
     pub value: String,
+    /// `true` when `value` is hex-encoded ciphertext.
     pub encrypted: bool,
 }
 
 impl ConfigKvEntry {
+    /// Convert a sea-orm row into the public [`ConfigKvEntry`] shape.
     fn from_model(m: &config_kv::Model) -> Self {
         Self {
             key: m.key.clone(),
@@ -51,14 +75,23 @@ impl ConfigKvEntry {
 
 /// Flat key/value configuration access backed by the `config_kv` table.
 ///
-/// All methods follow the `_with_conn` pattern for transaction safety.
-/// See the module-level documentation on [`Config`] for details.
+/// Marker struct; all methods are associated functions. Calling a method
+/// without `_with_conn` acquires its own connection — do **not** call those
+/// from inside a `db.transaction(|txn| { ... })` block (deadlock).
 pub struct ConfigKv;
 
 impl ConfigKv {
     // ── Core CRUD (_with_conn) ───────────────────────────────────────────
 
     /// Get the last value for a key (last-one-wins for multi-value keys).
+    ///
+    /// Boundary conditions:
+    /// - Returns `Ok(None)` if no row exists.
+    /// - When multiple rows share the key (multi-value config like
+    ///   `remote.origin.fetch`), the row with the highest `id` wins,
+    ///   matching git's "last write" rule.
+    /// - The returned value is *not* decrypted; callers must inspect
+    ///   `encrypted` and call [`decrypt_value`] themselves.
     pub async fn get_with_conn<C: ConnectionTrait>(
         db: &C,
         key: &str,
@@ -72,7 +105,10 @@ impl ConfigKv {
         Ok(row.as_ref().map(ConfigKvEntry::from_model))
     }
 
-    /// Get all values for a key (preserves insertion order).
+    /// Get all values for a key (preserves insertion order via ascending `id`).
+    ///
+    /// Used by multi-value keys (e.g. `remote.origin.fetch` may have several
+    /// refspec entries). Returns an empty `Vec` when no rows match.
     pub async fn get_all_with_conn<C: ConnectionTrait>(
         db: &C,
         key: &str,
@@ -87,6 +123,9 @@ impl ConfigKv {
     }
 
     /// Count values for a key.
+    ///
+    /// Returns `Ok(0)` when no rows exist. Used by callers that need to decide
+    /// between `set` (single-value) and `add` (multi-value) semantics.
     pub async fn count_values_with_conn<C: ConnectionTrait>(db: &C, key: &str) -> Result<usize> {
         let rows = config_kv::Entity::find()
             .filter(config_kv::Column::Key.eq(key))
@@ -96,8 +135,19 @@ impl ConfigKv {
         Ok(rows.len())
     }
 
-    /// Set a config value (upsert). Errors with exit-code 5 if the key has
-    /// multiple values — caller must use `unset_all` first or use `add`.
+    /// Set a config value (upsert).
+    ///
+    /// Functional scope:
+    /// - If exactly one row exists for `key`, updates it in place.
+    /// - If no row exists, inserts a fresh row.
+    /// - When the existing row is encrypted but `encrypted == false` is
+    ///   passed, the encryption flag is *inherited* (preserved). This avoids
+    ///   accidentally downgrading a sensitive value to plaintext.
+    ///
+    /// Boundary conditions:
+    /// - Returns `Err` if multiple rows already exist for `key` — the caller
+    ///   must explicitly `unset_all` first or use `add`. Mirrors `git config`'s
+    ///   exit code 5.
     pub async fn set_with_conn<C: ConnectionTrait>(
         db: &C,
         key: &str,
@@ -148,6 +198,11 @@ impl ConfigKv {
     /// different encryption state, the insert is rejected. If existing entries
     /// are encrypted and `encrypted` is false, the encryption state is
     /// inherited (auto-promoted to encrypted).
+    ///
+    /// Boundary conditions:
+    /// - First-write (no rows yet) is always accepted with the requested flag.
+    /// - Returns `Err` when mixing plaintext and encrypted values would result.
+    ///   This is a hard invariant of `config_kv`; callers cannot opt out.
     pub async fn add_with_conn<C: ConnectionTrait>(
         db: &C,
         key: &str,
@@ -191,6 +246,9 @@ impl ConfigKv {
 
     /// Delete the first matching entry for a key.
     /// Returns the number of rows deleted (0 or 1).
+    ///
+    /// Boundary conditions: returns `Err` if multiple rows match — caller must
+    /// use [`Self::unset_all_with_conn`] explicitly to remove every row.
     pub async fn unset_with_conn<C: ConnectionTrait>(db: &C, key: &str) -> Result<usize> {
         let rows = config_kv::Entity::find()
             .filter(config_kv::Column::Key.eq(key))
@@ -217,7 +275,7 @@ impl ConfigKv {
     }
 
     /// Delete all matching entries for a key.
-    /// Returns the number of rows deleted.
+    /// Returns the number of rows deleted (0 if none matched).
     pub async fn unset_all_with_conn<C: ConnectionTrait>(db: &C, key: &str) -> Result<usize> {
         let rows = config_kv::Entity::find()
             .filter(config_kv::Column::Key.eq(key))
@@ -234,7 +292,10 @@ impl ConfigKv {
         Ok(count)
     }
 
-    /// List all config entries.
+    /// List all config entries, sorted by key.
+    ///
+    /// Useful for `libra config --list`. Encrypted values are returned as
+    /// hex ciphertext; the CLI is responsible for redaction.
     pub async fn list_all_with_conn<C: ConnectionTrait>(db: &C) -> Result<Vec<ConfigKvEntry>> {
         let rows = config_kv::Entity::find()
             .order_by_asc(config_kv::Column::Key)
@@ -245,6 +306,10 @@ impl ConfigKv {
     }
 
     /// Get all entries whose key starts with the given prefix.
+    ///
+    /// Used by domain helpers (`all_remote_configs`, etc.) to scope searches
+    /// without having to enumerate every section name. Empty prefix returns
+    /// all rows in key order.
     pub async fn get_by_prefix_with_conn<C: ConnectionTrait>(
         db: &C,
         prefix: &str,
@@ -259,6 +324,11 @@ impl ConfigKv {
     }
 
     /// Get all entries whose key matches a regex pattern.
+    ///
+    /// Boundary conditions:
+    /// - Returns `Err` for invalid regex syntax.
+    /// - SQLite has no native `REGEXP`, so we fetch every row and filter in
+    ///   Rust. Acceptable cost given config tables are small.
     pub async fn get_regexp_with_conn<C: ConnectionTrait>(
         db: &C,
         pattern: &str,
@@ -279,42 +349,54 @@ impl ConfigKv {
     }
 
     // ── Convenience wrappers (acquire DB conn from pool) ─────────────────
+    // Each of these pairs with a `*_with_conn` variant above. They acquire
+    // a connection from the global pool; do not call them inside a
+    // `db.transaction(|txn| { ... })` block — that deadlocks. Use the
+    // `_with_conn` variant instead.
 
+    /// Pool-acquiring counterpart of [`Self::get_with_conn`].
     pub async fn get(key: &str) -> Result<Option<ConfigKvEntry>> {
         let db = get_db_conn_instance().await;
         Self::get_with_conn(&db, key).await
     }
 
+    /// Pool-acquiring counterpart of [`Self::get_all_with_conn`].
     pub async fn get_all(key: &str) -> Result<Vec<ConfigKvEntry>> {
         let db = get_db_conn_instance().await;
         Self::get_all_with_conn(&db, key).await
     }
 
+    /// Pool-acquiring counterpart of [`Self::set_with_conn`].
     pub async fn set(key: &str, value: &str, encrypted: bool) -> Result<()> {
         let db = get_db_conn_instance().await;
         Self::set_with_conn(&db, key, value, encrypted).await
     }
 
+    /// Pool-acquiring counterpart of [`Self::add_with_conn`].
     pub async fn add(key: &str, value: &str, encrypted: bool) -> Result<()> {
         let db = get_db_conn_instance().await;
         Self::add_with_conn(&db, key, value, encrypted).await
     }
 
+    /// Pool-acquiring counterpart of [`Self::unset_with_conn`].
     pub async fn unset(key: &str) -> Result<usize> {
         let db = get_db_conn_instance().await;
         Self::unset_with_conn(&db, key).await
     }
 
+    /// Pool-acquiring counterpart of [`Self::unset_all_with_conn`].
     pub async fn unset_all(key: &str) -> Result<usize> {
         let db = get_db_conn_instance().await;
         Self::unset_all_with_conn(&db, key).await
     }
 
+    /// Pool-acquiring counterpart of [`Self::list_all_with_conn`].
     pub async fn list_all() -> Result<Vec<ConfigKvEntry>> {
         let db = get_db_conn_instance().await;
         Self::list_all_with_conn(&db).await
     }
 
+    /// Pool-acquiring counterpart of [`Self::get_by_prefix_with_conn`].
     pub async fn get_by_prefix(prefix: &str) -> Result<Vec<ConfigKvEntry>> {
         let db = get_db_conn_instance().await;
         Self::get_by_prefix_with_conn(&db, prefix).await
@@ -322,8 +404,15 @@ impl ConfigKv {
 
     // ── Type helpers ─────────────────────────────────────────────────────
 
-    /// Get a boolean config value. Normalises `true/yes/on/1` → `true`,
-    /// `false/no/off/0` → `false`.
+    /// Get a boolean config value. Normalises `true/yes/on/1` -> `true`,
+    /// `false/no/off/0` -> `false`.
+    ///
+    /// Boundary conditions:
+    /// - Returns `Ok(None)` when the key is absent.
+    /// - Returns `Err` if the value is present but does not match any of the
+    ///   recognised tokens.
+    /// - Encrypted values display as `<REDACTED>` in the error message so
+    ///   ciphertext is not echoed back to the user.
     pub async fn get_bool_with_conn<C: ConnectionTrait>(db: &C, key: &str) -> Result<Option<bool>> {
         let entry = Self::get_with_conn(db, key).await?;
         match entry {
@@ -344,6 +433,10 @@ impl ConfigKv {
     }
 
     /// Get an integer config value. Supports `k`/`m`/`g` suffixes.
+    ///
+    /// Multipliers are 1024-based (KiB/MiB/GiB) to mirror `git config --int`
+    /// behaviour. Returns `Ok(None)` for missing keys, `Err` for unparseable
+    /// values, with the same `<REDACTED>` policy as [`Self::get_bool_with_conn`].
     pub async fn get_int_with_conn<C: ConnectionTrait>(db: &C, key: &str) -> Result<Option<i64>> {
         let entry = Self::get_with_conn(db, key).await?;
         match entry {
@@ -374,6 +467,9 @@ impl ConfigKv {
     // ── Domain helpers (replace old Config methods) ──────────────────────
 
     /// Get the value of `remote.<remote>.url`.
+    ///
+    /// Returns a user-friendly `fatal:` error when the key is absent —
+    /// commands like `push`/`fetch` rely on this exact message format.
     pub async fn get_remote_url_with_conn<C: ConnectionTrait>(
         db: &C,
         remote: &str,
@@ -385,12 +481,15 @@ impl ConfigKv {
         }
     }
 
+    /// Pool-acquiring counterpart of [`Self::get_remote_url_with_conn`].
     pub async fn get_remote_url(remote: &str) -> Result<String> {
         let db = get_db_conn_instance().await;
         Self::get_remote_url_with_conn(&db, remote).await
     }
 
     /// Get remote name for a branch from `branch.<branch>.remote`.
+    ///
+    /// Returns `Ok(None)` for branches that have no upstream configured.
     pub async fn get_remote_with_conn<C: ConnectionTrait>(
         db: &C,
         branch: &str,
@@ -399,12 +498,18 @@ impl ConfigKv {
         Ok(Self::get_with_conn(db, &key).await?.map(|e| e.value))
     }
 
+    /// Pool-acquiring counterpart of [`Self::get_remote_with_conn`].
     pub async fn get_remote(branch: &str) -> Result<Option<String>> {
         let db = get_db_conn_instance().await;
         Self::get_remote_with_conn(&db, branch).await
     }
 
     /// Get remote for the current HEAD branch.
+    ///
+    /// Boundary conditions:
+    /// - Returns `Ok(None)` when HEAD points to a valid branch but no upstream.
+    /// - Returns `Err` when HEAD is detached, since "the current branch's
+    ///   remote" is undefined in that state.
     pub async fn get_current_remote_with_conn<C: ConnectionTrait>(
         db: &C,
     ) -> Result<Option<String>> {
@@ -414,12 +519,17 @@ impl ConfigKv {
         }
     }
 
+    /// Pool-acquiring counterpart of [`Self::get_current_remote_with_conn`].
     pub async fn get_current_remote() -> Result<Option<String>> {
         let db = get_db_conn_instance().await;
         Self::get_current_remote_with_conn(&db).await
     }
 
     /// Get remote URL for the current HEAD branch.
+    ///
+    /// Returns `Ok(None)` when no upstream is configured. Returns `Err` if
+    /// the upstream is set to a remote that itself has no `url` configured
+    /// — this is treated as repository corruption.
     pub async fn get_current_remote_url_with_conn<C: ConnectionTrait>(
         db: &C,
     ) -> Result<Option<String>> {
@@ -429,12 +539,18 @@ impl ConfigKv {
         }
     }
 
+    /// Pool-acquiring counterpart of [`Self::get_current_remote_url_with_conn`].
     pub async fn get_current_remote_url() -> Result<Option<String>> {
         let db = get_db_conn_instance().await;
         Self::get_current_remote_url_with_conn(&db).await
     }
 
-    /// Get all remote configs.
+    /// Enumerate every configured remote and its URL.
+    ///
+    /// Discovery rule: walks rows under the `remote.` prefix, treating any
+    /// key of the form `remote.<name>.url` as a remote definition. Other keys
+    /// (`fetch`, `push`, etc.) are ignored here. Returns each remote at most
+    /// once, preserving discovery order.
     pub async fn all_remote_configs_with_conn<C: ConnectionTrait>(
         db: &C,
     ) -> Result<Vec<RemoteConfig>> {
@@ -463,12 +579,13 @@ impl ConfigKv {
         Ok(configs)
     }
 
+    /// Pool-acquiring counterpart of [`Self::all_remote_configs_with_conn`].
     pub async fn all_remote_configs() -> Result<Vec<RemoteConfig>> {
         let db = get_db_conn_instance().await;
         Self::all_remote_configs_with_conn(&db).await
     }
 
-    /// Get a specific remote's config.
+    /// Get a specific remote's config (`Ok(None)` when no `remote.<name>.url`).
     pub async fn remote_config_with_conn<C: ConnectionTrait>(
         db: &C,
         name: &str,
@@ -483,12 +600,20 @@ impl ConfigKv {
         }
     }
 
+    /// Pool-acquiring counterpart of [`Self::remote_config_with_conn`].
     pub async fn remote_config(name: &str) -> Result<Option<RemoteConfig>> {
         let db = get_db_conn_instance().await;
         Self::remote_config_with_conn(&db, name).await
     }
 
-    /// Get branch tracking configuration.
+    /// Get branch tracking configuration (the upstream remote and merge ref).
+    ///
+    /// Boundary conditions:
+    /// - Returns `Ok(None)` when either `branch.<name>.remote` or
+    ///   `branch.<name>.merge` is missing. Both must be set together for
+    ///   tracking to be valid.
+    /// - The returned `merge` field has `refs/heads/` stripped if present so
+    ///   callers can compare it directly against short branch names.
     pub async fn branch_config_with_conn<C: ConnectionTrait>(
         db: &C,
         name: &str,
@@ -514,12 +639,21 @@ impl ConfigKv {
         }
     }
 
+    /// Pool-acquiring counterpart of [`Self::branch_config_with_conn`].
     pub async fn branch_config(name: &str) -> Result<Option<BranchConfig>> {
         let db = get_db_conn_instance().await;
         Self::branch_config_with_conn(&db, name).await
     }
 
-    /// Remove all config entries for a remote.
+    /// Remove all config entries for a remote, including its SSH credentials.
+    ///
+    /// Cascading deletes:
+    /// 1. Every `remote.<name>.*` row.
+    /// 2. Every `vault.ssh.<name>.*` row (private keys, host fingerprints).
+    ///
+    /// Boundary condition: returns `Err("fatal: No such remote ...")` when the
+    /// `remote.<name>.*` namespace is empty. The SSH cleanup never errors on
+    /// its own — orphan vault rows are tolerated.
     pub async fn remove_remote_with_conn<C: ConnectionTrait>(db: &C, name: &str) -> Result<()> {
         let prefix = format!("remote.{name}.");
         let entries = config_kv::Entity::find()
@@ -556,12 +690,26 @@ impl ConfigKv {
         Ok(())
     }
 
+    /// Pool-acquiring counterpart of [`Self::remove_remote_with_conn`].
     pub async fn remove_remote(name: &str) -> Result<()> {
         let db = get_db_conn_instance().await;
         Self::remove_remote_with_conn(&db, name).await
     }
 
-    /// Rename a remote, updating all related config entries.
+    /// Rename a remote, updating all related config entries atomically.
+    ///
+    /// Performs three cascading rewrites:
+    /// 1. `remote.<old>.*` keys are renamed to `remote.<new>.*`.
+    /// 2. Any `branch.*.remote = <old>` value is updated to `<new>`.
+    /// 3. `vault.ssh.<old>.*` SSH key namespace is renamed to
+    ///    `vault.ssh.<new>.*` so credentials follow the rename.
+    ///
+    /// Boundary conditions:
+    /// - Returns `Err` if `<old>` does not exist or `<new>` already exists,
+    ///   matching git's "fatal: ..." error format.
+    /// - This function is *not* atomic across rewrites. Wrap in a sea-orm
+    ///   transaction (and call this `_with_conn` variant with `txn`) when
+    ///   atomicity matters.
     pub async fn rename_remote_with_conn<C: ConnectionTrait>(
         db: &C,
         old: &str,
@@ -635,6 +783,7 @@ impl ConfigKv {
         Ok(())
     }
 
+    /// Pool-acquiring counterpart of [`Self::rename_remote_with_conn`].
     pub async fn rename_remote(old: &str, new: &str) -> Result<()> {
         let db = get_db_conn_instance().await;
         Self::rename_remote_with_conn(&db, old, new).await
@@ -646,7 +795,10 @@ impl ConfigKv {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Decrypt a hex-encoded ciphertext using the vault unseal key for the given scope.
-/// `scope` should be `"local"` or `"global"`.
+///
+/// `scope` should be `"local"` (current repo's `.libra/libra.db`) or `"global"`
+/// (`~/.libra/config.db`). Returns `Err` if the vault for that scope is sealed
+/// or the ciphertext is malformed.
 pub async fn decrypt_value(hex_ciphertext: &str, scope: &str) -> Result<String> {
     let unseal_key = load_unseal_key_for_scope(scope)
         .await
@@ -654,6 +806,11 @@ pub async fn decrypt_value(hex_ciphertext: &str, scope: &str) -> Result<String> 
     decrypt_value_with_unseal_key(hex_ciphertext, &unseal_key)
 }
 
+/// Decrypt a value using the unseal key tied to a specific local target.
+///
+/// Used when the resolution chain points at a non-default repository (for
+/// example when `libra config --file path/to/db get`). Returns `Err` if the
+/// requested vault is sealed or has no unseal key.
 async fn decrypt_value_for_local_target(
     hex_ciphertext: &str,
     local_target: LocalIdentityTarget<'_>,
@@ -672,6 +829,10 @@ async fn decrypt_value_for_local_target(
     decrypt_value_with_unseal_key(hex_ciphertext, &unseal_key)
 }
 
+/// Hex-decode `hex_ciphertext` and pass the bytes to [`decrypt_token`].
+///
+/// Centralised here so that scope-aware decrypt paths share the same hex
+/// parsing and error wrapping.
 fn decrypt_value_with_unseal_key(hex_ciphertext: &str, unseal_key: &[u8]) -> Result<String> {
     let ciphertext =
         hex::decode(hex_ciphertext).context("failed to decode encrypted config value hex")?;
@@ -680,6 +841,9 @@ fn decrypt_value_with_unseal_key(hex_ciphertext: &str, unseal_key: &[u8]) -> Res
 
 /// Encrypt a value using the vault unseal key for the given scope.
 /// Returns the hex-encoded ciphertext.
+///
+/// Used by `libra config set`/`add` when the key is sensitive
+/// (see [`is_sensitive_key`]) or `--encrypted` was passed.
 pub async fn encrypt_value(value: &str, scope: &str) -> Result<String> {
     let unseal_key = load_unseal_key_for_scope(scope)
         .await
@@ -688,23 +852,27 @@ pub async fn encrypt_value(value: &str, scope: &str) -> Result<String> {
     Ok(hex::encode(ciphertext))
 }
 
-/// Resolve an environment variable by priority chain:
+/// Resolve an environment variable by priority chain.
+///
+/// Functional scope:
 /// 1. System environment variable (`std::env::var`)
 /// 2. Local config (`vault.env.<name>` in `.libra/libra.db`)
 /// 3. Global config (`vault.env.<name>` in `~/.libra/config.db`)
 ///
-/// `name` is the raw env var name (e.g. `"GEMINI_API_KEY"`).
-/// Returns `Err` if a vault/DB query fails (not the same as "not configured").
+/// Boundary conditions:
+/// - `name` is the raw env var name (e.g. `"GEMINI_API_KEY"`).
+/// - Returns `Ok(None)` only when *all three* sources are exhausted.
+/// - Returns `Err` if a vault/DB query fails (a hard error — not the same
+///   as "not configured").
 pub async fn resolve_env(name: &str) -> Result<Option<String>> {
     resolve_env_for_target(name, LocalIdentityTarget::CurrentRepo).await
 }
 
 /// Resolve an environment variable using an explicit local config target.
 ///
-/// Resolution order remains:
-/// 1. System environment variable (`std::env::var`)
-/// 2. Local config for `local_target` (`vault.env.<name>`)
-/// 3. Global config (`vault.env.<name>` in `~/.libra/config.db`)
+/// Same priority chain as [`resolve_env`] but lets callers point at a
+/// non-default repo (e.g. when running `libra config --file ...`). The local
+/// scope can also be skipped entirely with [`LocalIdentityTarget::None`].
 pub async fn resolve_env_for_target(
     name: &str,
     local_target: LocalIdentityTarget<'_>,
@@ -727,8 +895,11 @@ pub async fn resolve_env_for_target(
 
 /// Resolve the global config database path.
 ///
-/// Checks `LIBRA_CONFIG_GLOBAL_DB` env var first, then falls back to
-/// `~/.libra/config.db`.
+/// Boundary conditions:
+/// - `LIBRA_CONFIG_GLOBAL_DB` env var wins (used by integration tests to
+///   sandbox a global config without touching `$HOME`).
+/// - Falls back to `~/.libra/config.db`. Returns `None` if no home directory
+///   can be discovered (rare, but possible inside containers).
 fn global_config_path() -> Option<std::path::PathBuf> {
     if let Some(p) = std::env::var_os("LIBRA_CONFIG_GLOBAL_DB") {
         return Some(std::path::PathBuf::from(p));
@@ -743,13 +914,24 @@ fn global_config_path() -> Option<std::path::PathBuf> {
 /// `commit` can still enforce `user.useConfigOnly`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UserIdentitySources {
+    /// `user.name` from local-then-global config (encrypted values are
+    /// transparently decrypted before populating this field).
     pub config_name: Option<String>,
+    /// `user.email` from local-then-global config.
     pub config_email: Option<String>,
+    /// First non-empty value from the env var list (`GIT_COMMITTER_NAME`,
+    /// `GIT_AUTHOR_NAME`, `LIBRA_COMMITTER_NAME`).
     pub env_name: Option<String>,
+    /// First non-empty value from the env var list (`GIT_COMMITTER_EMAIL`,
+    /// `GIT_AUTHOR_EMAIL`, `EMAIL`, `LIBRA_COMMITTER_EMAIL`).
     pub env_email: Option<String>,
 }
 
 /// Which local repository, if any, should participate in config resolution.
+///
+/// Used as a parameter to [`resolve_env_for_target`] and friends so callers
+/// can bypass the implicit "discover from cwd" lookup when needed (tests,
+/// `--file path` flags).
 #[derive(Debug, Clone, Copy)]
 pub enum LocalIdentityTarget<'a> {
     /// Read local config from the current repository discovered from cwd.
@@ -761,6 +943,9 @@ pub enum LocalIdentityTarget<'a> {
 }
 
 /// Return the first non-empty environment variable value from `keys`.
+///
+/// Whitespace-only values are treated as empty so users can clear an env
+/// var by setting it to a single space.
 pub fn env_first_non_empty(keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|key| {
         std::env::var(key)
@@ -771,6 +956,9 @@ pub fn env_first_non_empty(keys: &[&str]) -> Option<String> {
 }
 
 /// Read a config value for the given target using local-first, then global.
+///
+/// Encrypted values are transparently decrypted via the appropriate vault.
+/// Returns `Ok(None)` when both local and global are absent or empty.
 pub async fn read_cascaded_config_value(
     local_target: LocalIdentityTarget<'_>,
     key: &str,
@@ -783,6 +971,11 @@ pub async fn read_cascaded_config_value(
 
 /// Resolve user identity values from config and environment while preserving
 /// the source boundary between the two.
+///
+/// The returned [`UserIdentitySources`] keeps config-derived and env-derived
+/// values in separate fields so callers (notably `libra commit`) can apply
+/// `user.useConfigOnly` semantics — refusing to fall back to env vars when
+/// the user has explicitly opted into config-only identity.
 pub async fn resolve_user_identity_sources(
     local_target: LocalIdentityTarget<'_>,
 ) -> Result<UserIdentitySources> {
@@ -803,6 +996,10 @@ pub async fn resolve_user_identity_sources(
     })
 }
 
+/// Read a `vault.env.*` entry from the local target, decrypting if needed.
+///
+/// Boundary condition: encrypted entries with no available unseal key
+/// produce `Err`. A missing row produces `Ok(None)`.
 async fn local_env_value_for_target(
     local_target: LocalIdentityTarget<'_>,
     vault_key: &str,
@@ -821,6 +1018,10 @@ async fn local_env_value_for_target(
     Ok(Some(entry.value))
 }
 
+/// Resolve the storage path for the given local target and read a single key.
+///
+/// Returns `Ok(None)` when the target's `.libra/libra.db` does not exist
+/// (pre-init repos) or [`LocalIdentityTarget::None`] is selected.
 async fn local_config_entry_for_target(
     local_target: LocalIdentityTarget<'_>,
     key: &str,
@@ -839,6 +1040,11 @@ async fn local_config_entry_for_target(
     }
 }
 
+/// Look up a `vault.env.<name>` value from the global config DB.
+///
+/// Returns `Ok(None)` if the global DB does not exist (user has never
+/// configured global settings). Otherwise behaves like
+/// [`local_env_value_for_target`].
 async fn global_env_value(name: &str, vault_key: &str) -> Result<Option<String>> {
     let Some(global_path) = global_config_path() else {
         return Ok(None);
@@ -863,6 +1069,11 @@ async fn global_env_value(name: &str, vault_key: &str) -> Result<Option<String>>
     Ok(Some(entry.value))
 }
 
+/// Read a (non-vault) config value scoped to the given local target.
+///
+/// Used by [`read_cascaded_config_value`]; differs from
+/// [`local_env_value_for_target`] in that it skips vault decryption and
+/// trims whitespace-only values to `None`.
 async fn local_config_value_for_target(
     local_target: LocalIdentityTarget<'_>,
     key: &str,
@@ -881,6 +1092,8 @@ async fn local_config_value_for_target(
     }
 }
 
+/// Read a single key from the global config DB, returning `Ok(None)` if no
+/// global DB exists or the key is missing.
 async fn global_config_value(key: &str) -> Result<Option<String>> {
     let Some(db_path) = global_config_path() else {
         return Ok(None);
@@ -891,6 +1104,9 @@ async fn global_config_value(key: &str) -> Result<Option<String>> {
     read_config_value_from_db_path(&db_path, key).await
 }
 
+/// Read a config value from `db_path`, trimming whitespace and treating empty
+/// strings as missing. Used for non-vault keys where surrounding whitespace
+/// is almost certainly a typo.
 async fn read_config_value_from_db_path(db_path: &Path, key: &str) -> Result<Option<String>> {
     let entry = read_config_entry_from_db_path(db_path, key).await?;
     Ok(entry.and_then(|entry| {
@@ -899,6 +1115,11 @@ async fn read_config_value_from_db_path(db_path: &Path, key: &str) -> Result<Opt
     }))
 }
 
+/// Open the SQLite DB at `db_path` and read a single `config_kv` entry.
+///
+/// Returns `Ok(None)` when the file does not exist (so callers can probe
+/// optional config locations cheaply). Errors are wrapped with the path so
+/// the user can diagnose `permission denied`/`schema mismatch` problems.
 async fn read_config_entry_from_db_path(
     db_path: &Path,
     key: &str,
@@ -924,6 +1145,16 @@ async fn read_config_entry_from_db_path(
 
 /// Returns `true` if the key holds sensitive material that should be
 /// encrypted and redacted by default.
+///
+/// Detection rules (applied case-insensitively):
+/// 1. `vault.env.*` — every entry under the env vault namespace.
+/// 2. Anything ending in `.privkey` — SSH/PGP private keys.
+/// 3. Hardcoded vault internals (`vault.unsealkey`, `vault.roottoken`).
+/// 4. Substring match on the *last* dotted segment (after stripping `_`/`-`):
+///    `secret`, `token`, `password`, `credential`, `privatekey`, `accesskey`,
+///    `apikey`, `secretkey`.
+/// 5. Explicit exemption: keys ending in `pubkey` / `publickey` are treated
+///    as non-sensitive even though they contain `key`.
 pub fn is_sensitive_key(key: &str) -> bool {
     let lower = key.to_ascii_lowercase();
 
@@ -966,6 +1197,10 @@ pub fn is_sensitive_key(key: &str) -> bool {
 
 /// Returns `true` if the key is a vault internal credential that cannot
 /// be `--reveal`ed or stored with `--plaintext`.
+///
+/// Vault internals (unseal key, root token, repo private key) must remain
+/// encrypted at all times. The CLI consults this predicate before honouring
+/// `--reveal` or `--plaintext` flags.
 pub fn is_vault_internal_key(key: &str) -> bool {
     let lower = key.to_ascii_lowercase();
     lower.ends_with(".privkey")
@@ -977,10 +1212,22 @@ pub fn is_vault_internal_key(key: &str) -> bool {
 // ─────────────────────────────────────────────────────────────────────────────
 // Legacy Config API (deprecated)
 // ─────────────────────────────────────────────────────────────────────────────
+//
+// The methods below are retained for backwards compatibility with the original
+// three-column `config` table. New code should use [`ConfigKv`] instead, which
+// supports encryption and richer multi-value semantics.
+//
+// Many of these legacy helpers `unwrap()` on storage errors. That's deliberate
+// for the deprecation period: once a migration is complete the table will be
+// dropped, and surfacing failures loudly is preferable to silent fallback.
 
+/// Marker type for the deprecated three-column config API. Use [`ConfigKv`].
 #[deprecated(note = "use ConfigKv instead")]
 pub struct Config;
 
+/// Internal helper: lets us treat both `DatabaseConnection` and
+/// `&DatabaseConnection` uniformly when wiring legacy `Config::*` methods.
+/// Avoids extra clones inside the deprecated layer.
 trait DatabaseConnectionRef {
     fn as_db_conn_ref(&self) -> &DatabaseConnection;
 }
@@ -997,15 +1244,27 @@ impl DatabaseConnectionRef for &DatabaseConnection {
     }
 }
 
+/// Resolved view of a `remote.<name>.*` section.
+///
+/// Carries only the bare minimum needed by `push`/`fetch`/`clone` flows; the
+/// raw URL is whatever the user typed (no scheme normalisation).
 #[derive(Clone, Debug)]
 pub struct RemoteConfig {
+    /// Remote alias, e.g. `origin`.
     pub name: String,
+    /// Fetch URL exactly as configured.
     pub url: String,
 }
+/// Resolved view of `branch.<name>.{remote,merge}` for upstream tracking.
+///
+/// `merge` is normalised to a short branch name (no `refs/heads/` prefix).
 #[allow(dead_code)]
 pub struct BranchConfig {
+    /// Local branch name.
     pub name: String,
+    /// Upstream branch name (e.g. `main`), already stripped of `refs/heads/`.
     pub merge: String,
+    /// Upstream remote alias (e.g. `origin`).
     pub remote: String,
 }
 
@@ -1033,7 +1292,9 @@ pub struct BranchConfig {
  */
 #[allow(deprecated)]
 impl Config {
-    // _with_conn version for insert
+    /// Insert a row into the legacy `config` table without checking for
+    /// existing entries. Panics on storage errors — this is the deprecated
+    /// path; new code should call [`ConfigKv::add`] / [`ConfigKv::set`].
     pub async fn insert_with_conn<C: ConnectionTrait>(
         db: &C,
         configuration: &str,
@@ -1051,7 +1312,8 @@ impl Config {
         config.save(db).await.unwrap();
     }
 
-    // _with_conn version for update
+    /// Update an existing config row's value. Panics if no matching row
+    /// exists. Deprecated; prefer [`ConfigKv::set`].
     pub async fn update_with_conn<C: ConnectionTrait>(
         db: &C,
         configuration: &str,
@@ -1075,7 +1337,8 @@ impl Config {
         config.update(db).await.unwrap()
     }
 
-    // _with_conn version for query
+    /// Internal: list every legacy row matching `(configuration, name, key)`.
+    /// Used by `get*`/`get_all*` and the delete pipeline.
     async fn query_with_conn<C: ConnectionTrait>(
         db: &C,
         configuration: &str,
@@ -1094,7 +1357,8 @@ impl Config {
             .unwrap()
     }
 
-    // _with_conn version for get
+    /// Get the first matching value (insertion order). Returns `None` for
+    /// missing keys. Deprecated; prefer [`ConfigKv::get`].
     pub async fn get_with_conn<C: ConnectionTrait>(
         db: &C,
         configuration: &str,
@@ -1105,12 +1369,15 @@ impl Config {
         values.first().map(|c| c.value.to_owned())
     }
 
-    // _with_conn version for get_remote
+    /// Legacy `branch.<branch>.remote` lookup. Deprecated;
+    /// prefer [`ConfigKv::get_remote_with_conn`].
     pub async fn get_remote_with_conn<C: ConnectionTrait>(db: &C, branch: &str) -> Option<String> {
         Config::get_with_conn(db, "branch", Some(branch), "remote").await
     }
 
-    // _with_conn version for get_current_remote
+    /// Legacy upstream-remote lookup. Returns `Err(())` (note: unit error,
+    /// not anyhow) when HEAD is detached. Deprecated; prefer
+    /// [`ConfigKv::get_current_remote_with_conn`].
     pub async fn get_current_remote_with_conn<C: ConnectionTrait>(
         db: &C,
     ) -> Result<Option<String>, ()> {
@@ -1123,7 +1390,9 @@ impl Config {
         }
     }
 
-    // _with_conn version for get_remote_url
+    /// Legacy fetch-URL lookup. **Panics** when the URL is missing — this
+    /// pre-dates the structured error path and is preserved for compatibility
+    /// only. Deprecated; prefer [`ConfigKv::get_remote_url_with_conn`].
     pub async fn get_remote_url_with_conn<C: ConnectionTrait>(db: &C, remote: &str) -> String {
         match Config::get_with_conn(db, "remote", Some(remote), "url").await {
             Some(url) => url,
@@ -1131,7 +1400,7 @@ impl Config {
         }
     }
 
-    // _with_conn version for get_current_remote_url
+    /// Legacy "URL of the current branch's upstream" lookup.
     pub async fn get_current_remote_url_with_conn<C: ConnectionTrait>(db: &C) -> Option<String> {
         match Config::get_current_remote_with_conn(db).await.unwrap() {
             Some(remote) => Some(Config::get_remote_url_with_conn(db, &remote).await),
@@ -1139,7 +1408,8 @@ impl Config {
         }
     }
 
-    // _with_conn version for get_all
+    /// Legacy multi-value getter. Returns every `value` for the matching
+    /// triple in insertion order. Deprecated.
     pub async fn get_all_with_conn<C: ConnectionTrait>(
         db: &C,
         configuration: &str,
@@ -1153,7 +1423,8 @@ impl Config {
             .collect()
     }
 
-    // _with_conn version for list_all
+    /// Legacy `git config --list` equivalent: emits `(dotted_key, value)`
+    /// pairs for every row in the table. Deprecated.
     pub async fn list_all_with_conn<C: ConnectionTrait>(db: &C) -> Vec<(String, String)> {
         config::Entity::find()
             .all(db)
@@ -1172,7 +1443,14 @@ impl Config {
             .collect()
     }
 
-    // _with_conn version for remove_config
+    /// Delete one or all matching legacy config rows.
+    ///
+    /// Boundary conditions:
+    /// - `valuepattern` filters by substring match against the row's value.
+    /// - `delete_all = false` stops after the first deletion (mirrors
+    ///   `git config --unset`).
+    /// - Returns the underlying `DbErr` on failure; rows already deleted
+    ///   before the failure remain deleted (no implicit transaction).
     pub async fn remove_config_with_conn<C: ConnectionTrait>(
         db: &C,
         configuration: &str,
@@ -1202,7 +1480,8 @@ impl Config {
         Ok(())
     }
 
-    // _with_conn version for remove_remote
+    /// Legacy "remove every `remote.<name>.*` row" helper. Returns
+    /// `Err(String)` (note: not anyhow) when the remote does not exist.
     pub async fn remove_remote_with_conn<C: ConnectionTrait>(
         db: &C,
         name: &str,
@@ -1223,6 +1502,9 @@ impl Config {
         Ok(())
     }
 
+    /// Legacy remote-rename helper. Performs the same cascade as
+    /// [`ConfigKv::rename_remote_with_conn`] but without the SSH key
+    /// rewrite (the legacy table has no vault namespace).
     pub async fn rename_remote_with_conn<C: ConnectionTrait>(
         db: &C,
         old: &str,
@@ -1268,7 +1550,8 @@ impl Config {
         Ok(())
     }
 
-    // _with_conn version for all_remote_configs
+    /// Legacy "list every remote" helper. Deprecated; prefer
+    /// [`ConfigKv::all_remote_configs_with_conn`].
     pub async fn all_remote_configs_with_conn<C: ConnectionTrait>(db: &C) -> Vec<RemoteConfig> {
         let remotes = config::Entity::find()
             .filter(config::Column::Configuration.eq("remote"))
@@ -1297,7 +1580,7 @@ impl Config {
             .collect()
     }
 
-    // _with_conn version for remote_config
+    /// Legacy single-remote lookup. Returns `None` when missing.
     pub async fn remote_config_with_conn<C: ConnectionTrait>(
         db: &C,
         name: &str,
@@ -1314,7 +1597,15 @@ impl Config {
         })
     }
 
-    // _with_conn version for branch_config
+    /// Legacy branch-tracking lookup.
+    ///
+    /// Boundary conditions:
+    /// - Returns `None` when the branch has no rows in the legacy table.
+    /// - Asserts there are exactly two rows (`merge` + `remote`). Earlier
+    ///   versions of Libra always wrote both together; a different count
+    ///   indicates external tampering.
+    /// - The `merge` field is normalised by stripping `refs/heads/` (the
+    ///   leading 11 bytes); see the `[11..]` slice below.
     pub async fn branch_config_with_conn<C: ConnectionTrait>(
         db: &C,
         name: &str,
@@ -1356,62 +1647,66 @@ impl Config {
         }
     }
 
+    /// Pool-acquiring counterpart of [`Self::insert_with_conn`]. Deprecated.
     pub async fn insert(configuration: &str, name: Option<&str>, key: &str, value: &str) {
         let db = get_db_conn_instance().await;
         Self::insert_with_conn(&db, configuration, name, key, value).await;
     }
 
-    // Update one configuration entry in database using given configuration, name, key and value
+    /// Update one configuration entry in database using given configuration, name, key and value.
     pub async fn update(configuration: &str, name: Option<&str>, key: &str, value: &str) -> Model {
         let db = get_db_conn_instance().await;
         Self::update_with_conn(&db, configuration, name, key, value).await
     }
 
-    /// Get one configuration value
+    /// Get one configuration value (legacy table). Deprecated.
     pub async fn get(configuration: &str, name: Option<&str>, key: &str) -> Option<String> {
         let db = get_db_conn_instance().await;
         Self::get_with_conn(&db, configuration, name, key).await
     }
 
-    /// Get remote repo name by branch name
-    /// - You may need to `[branch::set-upstream]` if return `None`
+    /// Get remote repo name by branch name (legacy).
+    /// - Returns `None` when `branch.<name>.remote` is unset; callers usually
+    ///   need to `branch --set-upstream` first.
     pub async fn get_remote(branch: &str) -> Option<String> {
         let db = get_db_conn_instance().await;
         Self::get_remote_with_conn(&db, branch).await
     }
 
-    /// Get remote repo name of current branch
-    /// - `Error` if `HEAD` is detached
+    /// Get remote repo name of current branch (legacy).
+    /// Returns `Err(())` when HEAD is detached.
     pub async fn get_current_remote() -> Result<Option<String>, ()> {
         let db = get_db_conn_instance().await;
         Self::get_current_remote_with_conn(&db).await
     }
 
+    /// Pool-acquiring counterpart of [`Self::get_remote_url_with_conn`].
+    /// Panics when no URL is configured (legacy behaviour).
     pub async fn get_remote_url(remote: &str) -> String {
         let db = get_db_conn_instance().await;
         Self::get_remote_url_with_conn(&db, remote).await
     }
 
-    /// return `None` if no remote is set
+    /// Returns `None` if no remote is set on the current branch.
     pub async fn get_current_remote_url() -> Option<String> {
         let db = get_db_conn_instance().await;
         Self::get_current_remote_url_with_conn(&db).await
     }
 
-    /// Get all configuration values
-    /// - e.g. remote.origin.url can be multiple
+    /// Get all configuration values (legacy multi-value reader).
+    /// e.g. `remote.origin.fetch` may have multiple entries.
     pub async fn get_all(configuration: &str, name: Option<&str>, key: &str) -> Vec<String> {
         let db = get_db_conn_instance().await;
         Self::get_all_with_conn(&db, configuration, name, key).await
     }
 
-    /// Get literally all the entries in database without any filtering
+    /// Get literally all the entries in database without any filtering.
     pub async fn list_all() -> Vec<(String, String)> {
         let db = get_db_conn_instance().await;
         Self::list_all_with_conn(&db).await
     }
 
-    /// Delete one or all configuration using given key and value pattern
+    /// Delete one or all configuration entries using given key and value pattern.
     pub async fn remove_config(
         configuration: &str,
         name: Option<&str>,
@@ -1431,7 +1726,7 @@ impl Config {
         .await
     }
 
-    /// Remove all entries matching the given configuration/name/key triple.
+    /// Remove every row matching the given `(configuration, name, key)` triple.
     pub async fn remove(
         configuration: &str,
         name: Option<&str>,
@@ -1440,30 +1735,35 @@ impl Config {
         Self::remove_config(configuration, name, key, None, true).await
     }
 
-    /// Delete all the configuration entries using given configuration field (--remove-section)
-    // pub async fn remove_by_section(configuration: &str) {
-    //     unimplemented!();
-    // }
+    // NOTE: `remove_by_section` was once contemplated as a `--remove-section`
+    // implementation but never landed; new section-wide deletion goes through
+    // [`ConfigKv::get_by_prefix`] + per-row delete.
+
+    /// Pool-acquiring counterpart of [`Self::remove_remote_with_conn`].
     pub async fn remove_remote(name: &str) -> Result<(), String> {
         let db = get_db_conn_instance().await;
         Self::remove_remote_with_conn(&db, name).await
     }
 
+    /// Pool-acquiring counterpart of [`Self::rename_remote_with_conn`].
     pub async fn rename_remote(old: &str, new: &str) -> Result<(), String> {
         let db = get_db_conn_instance().await;
         Self::rename_remote_with_conn(&db, old, new).await
     }
 
+    /// Pool-acquiring counterpart of [`Self::all_remote_configs_with_conn`].
     pub async fn all_remote_configs() -> Vec<RemoteConfig> {
         let db = get_db_conn_instance().await;
         Self::all_remote_configs_with_conn(&db).await
     }
 
+    /// Pool-acquiring counterpart of [`Self::remote_config_with_conn`].
     pub async fn remote_config(name: &str) -> Option<RemoteConfig> {
         let db = get_db_conn_instance().await;
         Self::remote_config_with_conn(&db, name).await
     }
 
+    /// Pool-acquiring counterpart of [`Self::branch_config_with_conn`].
     pub async fn branch_config(name: &str) -> Option<BranchConfig> {
         let db = get_db_conn_instance().await;
         Self::branch_config_with_conn(&db, name).await

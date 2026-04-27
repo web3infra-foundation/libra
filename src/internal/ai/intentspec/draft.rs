@@ -1,3 +1,11 @@
+//! Draft-facing IntentSpec shapes used while turning free-form user requests into the
+//! canonical model.
+//!
+//! Boundary: draft types accept partial and user-authored data, then normalize into
+//! `types::IntentSpec`; validation of final invariants is deliberately delegated to
+//! `validator`. The intent-flow tests cover missing optional sections and legacy draft
+//! spellings.
+
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::types::{ChangeType, CheckKind, Objective, RiskLevel, TouchHints};

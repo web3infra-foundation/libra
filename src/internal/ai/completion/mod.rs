@@ -1,3 +1,8 @@
+//! Provider-neutral completion abstractions used by AI clients and runtime phases.
+//!
+//! Boundary: this module defines request/response/retry/throttle contracts only;
+//! provider-specific authentication and HTTP details live under `providers`.
+
 pub mod message;
 pub mod request;
 pub mod retry;

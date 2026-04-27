@@ -1,3 +1,9 @@
+//! Sandbox subsystem for AI tool calls.
+//!
+//! Boundary: exposes policy parsing, command-safety checks, and runtime enforcement;
+//! it does not decide workflow phase state. AI hardening contract tests exercise the
+//! public guarantees of this module.
+
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},

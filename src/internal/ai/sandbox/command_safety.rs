@@ -1,3 +1,9 @@
+//! Static command-safety checks for shell-like AI tool invocations.
+//!
+//! Boundary: checks identify obviously dangerous command forms before runtime launch,
+//! but they are not a replacement for filesystem sandbox enforcement. Hardening tests
+//! cover separators, redirects, destructive commands, and allowlisted cases.
+
 use std::path::Path;
 
 use shlex::split as shlex_split;

@@ -1,3 +1,10 @@
+//! Scope classification helpers for deciding which files, commands, and artifacts an
+//! IntentSpec is allowed to touch.
+//!
+//! Boundary: scope decisions are conservative and deny ambiguous paths rather than
+//! expanding access. Orchestrator ACL tests exercise traversal, cargo-lock companion,
+//! and workspace-boundary edge cases.
+
 use std::collections::BTreeSet;
 
 use super::types::Intent;

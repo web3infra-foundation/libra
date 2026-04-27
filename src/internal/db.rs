@@ -1,4 +1,20 @@
-//! Database utilities for establishing SQLite connections, managing per-test connection pools, creating schemas, and exposing pooled handles.
+//! SQLite connection bootstrapping and schema migration.
+//!
+//! Responsibilities:
+//! - Open SQLite databases under `.libra/libra.db` (per-repo) and
+//!   `~/.libra/config.db` (global), cached by path.
+//! - Bootstrap the schema from the embedded `sqlite_20260309_init.sql`.
+//! - Run idempotent on-connect migrations:
+//!   - [`ensure_config_kv_schema`] adds the `config_kv` table to old DBs.
+//!   - [`ensure_ai_projection_schema`] adds the AI projection tables (using
+//!     the bootstrap section delimited by `BEGIN/END AI PROJECTION SCHEMA`).
+//!   - [`ensure_ai_runtime_contract_schema`] applies Phase 0 contract DDL.
+//! - Provide a process-wide cache ([`TEST_DB_CONNECTIONS`]) keyed by absolute
+//!   path so concurrent callers share a single sea-orm `DbConn` per database
+//!   (matching SQLite's "one writer at a time" model).
+//!
+//! Hash and ref invariants are not enforced here; that work lives in the
+//! `reference` model and `branch`/`tag` modules.
 
 use std::{
     io,
@@ -8,17 +24,21 @@ use std::{
 };
 
 use sea_orm::{
-    ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbConn, DbErr, Schema,
-    Statement, TransactionError, TransactionTrait,
+    ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbConn, DbErr, Statement,
+    TransactionError, TransactionTrait,
 };
 
-use crate::{internal::model::*, utils::path};
+use crate::utils::path;
 
 // #[cfg(not(test))]
 // use tokio::sync::OnceCell;
 
 /// Normalize a file path for use in a SQLite connection string.
-/// On Windows, this removes the `\\?\` prefix and converts backslashes to forward slashes.
+///
+/// Boundary conditions:
+/// - On Windows, strips the `\\?\` extended-length prefix and converts
+///   backslashes to forward slashes so sqlx accepts the URL.
+/// - On Unix, returns the input unchanged (allocation-only).
 fn normalize_path_for_sqlite(db_path: &str) -> String {
     #[cfg(windows)]
     {
@@ -33,9 +53,14 @@ fn normalize_path_for_sqlite(db_path: &str) -> String {
     }
 }
 
-/// Establish a connection to the database.
-///  - `db_path` is the path to the SQLite database file.
-/// - Returns a `DatabaseConnection` if successful, or an `IOError` if the database file does not exist.
+/// Establish a connection to the database with the default 30-second busy timeout.
+///
+/// Functional scope: opens the file, applies all idempotent on-connect
+/// migrations (`config_kv`, AI projection, AI runtime contract).
+///
+/// Boundary conditions:
+/// - Returns `IOError(NotFound)` if the database file does not exist on disk.
+/// - Schema migrations failures are surfaced as `IOError::other` with context.
 #[allow(dead_code)]
 pub async fn establish_connection(db_path: &str) -> Result<DatabaseConnection, IOError> {
     establish_connection_with_busy_timeout(db_path, Duration::from_secs(30)).await
@@ -44,7 +69,8 @@ pub async fn establish_connection(db_path: &str) -> Result<DatabaseConnection, I
 /// Establish a SQLite connection with a caller-specified busy timeout.
 ///
 /// This is useful for best-effort/background jobs that should fail fast on lock
-/// contention instead of waiting for long periods.
+/// contention instead of waiting for long periods. The same migrations as
+/// [`establish_connection`] are applied.
 #[allow(dead_code)]
 pub async fn establish_connection_with_busy_timeout(
     db_path: &str,
@@ -102,10 +128,23 @@ use once_cell::sync::Lazy;
 // #[cfg(test)]
 use tokio::sync::Mutex;
 
-// Shared SQLite connections cached by database path.
+/// Shared sea-orm connections cached by absolute database path.
+///
+/// Despite the historical `TEST_` prefix, this cache is used in production
+/// too. Sharing one connection per file matches SQLite's lock model and lets
+/// callers run multiple concurrent reads without re-opening the file.
 static TEST_DB_CONNECTIONS: Lazy<Mutex<HashMap<PathBuf, DbConn>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+/// Lookup-or-create routine for [`TEST_DB_CONNECTIONS`].
+///
+/// Functional scope:
+/// - Verifies the file exists; missing files evict any stale cache entry and
+///   return `IOError(NotFound)`.
+/// - Returns a clone of the cached `DbConn` on hit.
+/// - On miss, opens a new connection (running all on-connect migrations) and
+///   re-acquires the lock to publish it. The double-check pattern is used to
+///   avoid two threads racing to install the same connection.
 async fn get_or_init_db_conn_instance(db_path: PathBuf) -> io::Result<DbConn> {
     let mut connections = TEST_DB_CONNECTIONS.lock().await;
 
@@ -132,10 +171,17 @@ async fn get_or_init_db_conn_instance(db_path: PathBuf) -> io::Result<DbConn> {
     Ok(conn)
 }
 
-/// Get global database connection instance (singleton per SQLite file).
+/// Get global database connection instance for the current repository.
 ///
-/// TODO(error): migrate legacy call sites to `get_db_conn_instance_for_path`
-/// and make this convenience wrapper return `io::Result` instead of panicking.
+/// Functional scope: discovers `.libra/libra.db` via [`path::database`] and
+/// returns a shared sea-orm connection from the process-wide cache.
+///
+/// Boundary conditions:
+/// - **Panics** when the database is missing or cannot be opened. This is the
+///   convenience entry point used by every command after `libra init`; the
+///   panic message includes the resolved path and the underlying error.
+/// - TODO(error): migrate legacy call sites to `get_db_conn_instance_for_path`
+///   and make this wrapper return `io::Result` instead of panicking.
 pub async fn get_db_conn_instance() -> DbConn {
     let db_path = path::database();
     get_db_conn_instance_for_path(&db_path)
@@ -144,11 +190,19 @@ pub async fn get_db_conn_instance() -> DbConn {
 }
 
 /// Get a shared database connection instance for an explicit SQLite file path.
+///
+/// The connection is cached, so concurrent callers see the same handle.
+/// Returns `Err(IOError)` when the file is missing or the schema migrations
+/// fail.
 pub async fn get_db_conn_instance_for_path(db_path: &Path) -> io::Result<DbConn> {
     get_or_init_db_conn_instance(db_path.to_path_buf()).await
 }
 
 /// Drop a cached shared connection for an explicit SQLite file path.
+///
+/// Used by tests and by `libra config` flows that recreate the underlying
+/// database. Logs (but does not surface) any errors raised while closing the
+/// connection — the cache entry is removed regardless.
 pub async fn reset_db_conn_instance_for_path(db_path: &Path) {
     let mut connections = TEST_DB_CONNECTIONS.lock().await;
     let removed = connections.remove(db_path);
@@ -165,6 +219,7 @@ pub async fn reset_db_conn_instance_for_path(db_path: &Path) {
     }
 }
 
+/// Internal: convert a `Path` to a UTF-8 string and call [`establish_connection`].
 async fn get_db_conn_for_path(db_path: &Path) -> io::Result<DatabaseConnection> {
     let db_path = db_path.to_str().ok_or_else(|| {
         IOError::new(
@@ -175,37 +230,20 @@ async fn get_db_conn_for_path(db_path: &Path) -> io::Result<DatabaseConnection> 
     establish_connection(db_path).await
 }
 
-/// create table according to the Model
-#[deprecated]
-#[allow(dead_code)]
-async fn setup_database_model(conn: &DatabaseConnection) -> Result<(), TransactionError<DbErr>> {
-    // start a transaction
-    conn.transaction::<_, _, DbErr>(|txn| {
-        Box::pin(async move {
-            let backend = txn.get_database_backend();
-            let schema = Schema::new(backend);
-
-            // reference table
-            let table_create_statement = schema.create_table_from_entity(reference::Entity);
-            txn.execute(backend.build(&table_create_statement)).await?;
-
-            // config_section table
-            let table_create_statement = schema.create_table_from_entity(config::Entity);
-            txn.execute(backend.build(&table_create_statement)).await?;
-
-            Ok(())
-        })
-    })
-    .await
-}
-
+/// Embedded canonical SQLite schema. Compiled into the binary via `include_str!`.
 const BOOTSTRAP_SQL: &str = include_str!("../../sql/sqlite_20260309_init.sql");
+/// Phase 0 AI runtime contract migration; safe to run repeatedly.
 const AI_RUNTIME_CONTRACT_MIGRATION_SQL: &str =
     include_str!("../../sql/sqlite_20260415_ai_runtime_contract.sql");
+/// Marker delimiting the start of the AI projection schema inside `BOOTSTRAP_SQL`.
 const AI_PROJECTION_SCHEMA_START: &str = "-- BEGIN AI PROJECTION SCHEMA";
+/// Marker delimiting the end of the AI projection schema inside `BOOTSTRAP_SQL`.
 const AI_PROJECTION_SCHEMA_END: &str = "-- END AI PROJECTION SCHEMA";
 
-/// create table using the SQLite bootstrap schema
+/// Apply the entire bootstrap SQL to a fresh database in a single transaction.
+///
+/// Used by [`create_database`]. Existing databases use the idempotent
+/// `ensure_*` migrators instead.
 async fn setup_database_sql(conn: &DatabaseConnection) -> Result<(), TransactionError<DbErr>> {
     conn.transaction::<_, _, DbErr>(|txn| {
         Box::pin(async move {
@@ -220,6 +258,14 @@ async fn setup_database_sql(conn: &DatabaseConnection) -> Result<(), Transaction
     .await
 }
 
+/// Extract the AI projection section from `BOOTSTRAP_SQL`.
+///
+/// Functional scope: locates the `BEGIN/END AI PROJECTION SCHEMA` markers and
+/// returns the text between them, trimmed.
+///
+/// Boundary conditions:
+/// - Returns `IOError(InvalidData)` if either marker is missing or the section
+///   is empty (which would indicate a corrupt bootstrap SQL file).
 fn ai_projection_sql() -> io::Result<&'static str> {
     let start = BOOTSTRAP_SQL
         .find(AI_PROJECTION_SCHEMA_START)
@@ -382,10 +428,13 @@ mod tests {
     use sea_orm::{
         ActiveModelTrait, ActiveValue::NotSet, ColumnTrait, EntityTrait, QueryFilter, Set,
     };
-    use tests::{object_index, reference::ConfigKind};
     use tokio::sync::Barrier;
 
     use super::*;
+    use crate::internal::model::{
+        config, object_index,
+        reference::{self, ConfigKind},
+    };
 
     /// TestDbPath is a helper struct create and delete test database file
     struct TestDbPath(String);

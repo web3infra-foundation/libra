@@ -1,4 +1,17 @@
-//! Hook runner: executes hooks and evaluates results.
+//! Hook runner: spawns hook commands, feeds them JSON, and interprets exit codes.
+//!
+//! The runner is the bridge between Libra's internal lifecycle events and the user's
+//! external scripts. It spawns each matching hook in a `sh -c` subshell, writes the
+//! [`HookInput`] JSON payload to stdin, and translates the resulting exit code into
+//! a [`HookAction`]:
+//! - `0` - allow.
+//! - `129` - block (PreToolUse only); the rejection reason is read from stdout,
+//!   falling back to `"Blocked by hook"`.
+//! - Any other exit code - error, logged at `warn` level but never blocks.
+//!
+//! Hooks are isolated per invocation: the runner uses `kill_on_drop(true)` so a
+//! hook that overruns its `timeout_ms` is terminated together with the pending
+//! agent step.
 
 use std::{io::ErrorKind, path::Path, time::Duration};
 
@@ -9,7 +22,11 @@ use super::{
     event::{HookAction, HookEvent, HookInput, HookOutput},
 };
 
-/// Executes hooks based on configuration.
+/// Stateful hook executor parameterised by a loaded [`HookConfig`].
+///
+/// Held by the agent runtime for the duration of a session. The runner is
+/// inexpensive to clone-via-`HookRunner::load` and intentionally does not perform
+/// any work in its constructor.
 #[derive(Debug)]
 pub struct HookRunner {
     config: HookConfig,
@@ -17,7 +34,10 @@ pub struct HookRunner {
 }
 
 impl HookRunner {
-    /// Create a new hook runner from configuration.
+    /// Construct a runner bound to a pre-loaded config.
+    ///
+    /// Useful for tests that want to inject a synthetic config without touching the
+    /// filesystem.
     pub fn new(config: HookConfig, working_dir: std::path::PathBuf) -> Self {
         Self {
             config,
@@ -25,18 +45,36 @@ impl HookRunner {
         }
     }
 
-    /// Load hook configuration and create a runner.
+    /// Load `hooks.json` from the project + user tiers and build a runner.
+    ///
+    /// Boundary conditions: missing config files are tolerated (see
+    /// [`super::config::load_hook_config`]), so this constructor never fails.
     pub fn load(working_dir: &Path) -> Self {
         let config = super::config::load_hook_config(working_dir);
         Self::new(config, working_dir.to_path_buf())
     }
 
-    /// Returns true if there are any enabled hooks.
+    /// Quick existence check used by the agent runtime to skip hook plumbing
+    /// entirely when no hooks are configured.
     pub fn has_hooks(&self) -> bool {
         self.config.hooks.iter().any(|h| h.enabled)
     }
 
-    /// Run all matching PreToolUse hooks. Returns Block if any hook blocks.
+    /// Run every enabled `PreToolUse` hook that matches `tool_name`.
+    ///
+    /// Functional scope: hooks are evaluated in the order they appear in the
+    /// merged config; the first hook to return [`HookResult::Block`] aborts the
+    /// chain and the runner returns the corresponding [`HookAction::Block`].
+    ///
+    /// Boundary conditions:
+    /// - Hook errors and timeouts are logged but do **not** block. This is a
+    ///   conscious safety/availability trade-off — a misconfigured hook should
+    ///   not strand the user.
+    /// - When no hooks match, `HookAction::Allow` is returned without spawning a
+    ///   subshell.
+    ///
+    /// See: `tests::test_pre_tool_use_block`,
+    /// `tests::test_pre_tool_use_no_matching_hooks`.
     pub async fn run_pre_tool_use(
         &self,
         tool_name: &str,
@@ -71,7 +109,13 @@ impl HookRunner {
         HookAction::Allow
     }
 
-    /// Run all matching PostToolUse hooks.
+    /// Fire matching `PostToolUse` hooks for observability/automation.
+    ///
+    /// Functional scope: receives both the tool input and output JSON so observer
+    /// hooks (formatters, log shippers, etc.) can see the full request/response
+    /// pair.
+    ///
+    /// Boundary conditions: post-hooks cannot block — only errors are logged.
     pub async fn run_post_tool_use(
         &self,
         tool_name: &str,
@@ -103,7 +147,10 @@ impl HookRunner {
         }
     }
 
-    /// Run all matching session lifecycle hooks.
+    /// Run all matching session lifecycle hooks (`SessionStart` / `SessionEnd`).
+    ///
+    /// Functional scope: session events do not have an associated tool and so the
+    /// matcher is bypassed; only the event kind is filtered.
     pub async fn run_session_event(&self, event: HookEvent) {
         let matching: Vec<&HookDefinition> = self
             .config
@@ -125,7 +172,15 @@ impl HookRunner {
         }
     }
 
-    /// Execute a single hook command.
+    /// Spawn `sh -c <hook.command>`, write the input JSON to stdin, and translate
+    /// the resulting `Output` into a [`HookResult`].
+    ///
+    /// Boundary conditions:
+    /// - Stdin closure (`BrokenPipe`) is treated as benign: a hook that intentionally
+    ///   closes stdin still gets to influence outcome via its exit code.
+    /// - Other I/O errors propagate up as [`HookResult::Error`].
+    /// - The whole future is wrapped in `tokio::time::timeout(timeout_ms)`; on
+    ///   timeout the result is reported as an error rather than a block.
     async fn execute_hook(&self, hook: &HookDefinition, input: &HookInput) -> HookResult {
         let input_json = match serde_json::to_string(input) {
             Ok(json) => json,
@@ -199,6 +254,10 @@ impl HookRunner {
 }
 
 /// Internal result of executing a hook.
+///
+/// Distinct from [`HookAction`] in that it carries a third `Error` variant —
+/// callers translate `Error` into "log and continue" so misconfigured hooks
+/// cannot wedge the agent.
 enum HookResult {
     Allow,
     Block(String),
@@ -226,6 +285,7 @@ mod tests {
         }
     }
 
+    // Scenario: a benign hook that exits 0 results in `HookAction::Allow`.
     #[tokio::test]
     async fn test_pre_tool_use_allow() {
         let (runner, _tmp) = make_runner(vec![make_hook(
@@ -240,6 +300,7 @@ mod tests {
         assert_eq!(action, HookAction::Allow);
     }
 
+    // Scenario: a hook exiting 129 with a JSON message blocks with that reason.
     #[tokio::test]
     async fn test_pre_tool_use_block() {
         let (runner, _tmp) = make_runner(vec![make_hook(
@@ -257,6 +318,7 @@ mod tests {
         }
     }
 
+    // Scenario: when no hook matches the tool name, the runner short-circuits.
     #[tokio::test]
     async fn test_pre_tool_use_no_matching_hooks() {
         let (runner, _tmp) =
@@ -268,6 +330,8 @@ mod tests {
         assert_eq!(action, HookAction::Allow);
     }
 
+    // Scenario: a hook that exceeds its timeout is killed and treated as Allow,
+    // matching the "errors don't block" rule.
     #[tokio::test]
     async fn test_pre_tool_use_timeout() {
         let (runner, _tmp) = make_runner(vec![HookDefinition {
@@ -286,6 +350,7 @@ mod tests {
         assert_eq!(action, HookAction::Allow);
     }
 
+    // Scenario: hooks whose `enabled` flag is false are skipped without spawning.
     #[tokio::test]
     async fn test_disabled_hooks_skipped() {
         let (runner, _tmp) = make_runner(vec![HookDefinition {
@@ -303,6 +368,7 @@ mod tests {
         assert_eq!(action, HookAction::Allow);
     }
 
+    // Scenario: empty config has no hooks; a single-hook config does.
     #[tokio::test]
     async fn test_has_hooks() {
         let (runner, _tmp) = make_runner(vec![]);

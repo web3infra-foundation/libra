@@ -7,7 +7,11 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Function call from the model.
+/// Function call emitted by the model.
+///
+/// Gemini returns this struct inside a [`Part`] when the model decides to invoke
+/// a declared tool. `args` is a JSON object whose schema is dictated by the
+/// associated [`FunctionDeclaration`].
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct FunctionCall {
     pub name: String,
@@ -15,6 +19,10 @@ pub struct FunctionCall {
 }
 
 /// Function response sent back to the model.
+///
+/// The `response` field is forwarded verbatim to the model on the next turn so
+/// it can reason about the tool's output. Gemini does not introspect the JSON
+/// shape; any structure is acceptable.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct FunctionResponse {
     pub name: String,
@@ -22,7 +30,11 @@ pub struct FunctionResponse {
 }
 
 impl FunctionResponse {
-    /// Create a new function response from a tool result.
+    /// Create a function response from a structured tool result.
+    ///
+    /// Functional scope: clones the value so the caller's serde tree stays
+    /// untouched. Use [`from_text`](Self::from_text) when the tool returned
+    /// human-readable text rather than structured JSON.
     pub fn from_result(name: String, result: &serde_json::Value) -> Self {
         Self {
             name,
@@ -31,6 +43,9 @@ impl FunctionResponse {
     }
 
     /// Create a function response from a text result.
+    ///
+    /// Wraps the text in a `{ "result": ... }` envelope so the model sees a
+    /// stable JSON shape regardless of the tool's output type.
     pub fn from_text(name: String, text: &str) -> Self {
         Self {
             name,
@@ -39,7 +54,12 @@ impl FunctionResponse {
     }
 }
 
-/// A part of the content, which may contain text, function calls, or function responses.
+/// A single piece of content within a Gemini message.
+///
+/// In the Gemini wire format a [`Content`] is a list of `Part`s; a single Part
+/// must carry exactly one of `text`, `function_call`, or `function_response`,
+/// but the schema models them as separate optional fields rather than a tagged
+/// enum. The `is_*` helpers below are the canonical way to discriminate.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Part {
@@ -61,7 +81,7 @@ impl Part {
         }
     }
 
-    /// Create a function call part.
+    /// Create a function call part used when the assistant invokes a tool.
     pub fn function_call(name: impl Into<String>, args: serde_json::Value) -> Self {
         Self {
             text: None,
@@ -73,7 +93,7 @@ impl Part {
         }
     }
 
-    /// Create a function response part.
+    /// Create a function response part used by the user to send tool output back.
     pub fn function_response(name: impl Into<String>, response: serde_json::Value) -> Self {
         Self {
             text: None,
@@ -85,17 +105,17 @@ impl Part {
         }
     }
 
-    /// Check if this part contains a function call.
+    /// Returns true when this part carries a function call.
     pub fn is_function_call(&self) -> bool {
         self.function_call.is_some()
     }
 
-    /// Check if this part contains a function response.
+    /// Returns true when this part carries a function response.
     pub fn is_function_response(&self) -> bool {
         self.function_response.is_some()
     }
 
-    /// Check if this part contains text.
+    /// Returns true when this part carries plain text.
     pub fn is_text(&self) -> bool {
         self.text.is_some()
     }

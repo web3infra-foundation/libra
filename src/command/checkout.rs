@@ -47,8 +47,18 @@ pub async fn execute(args: CheckoutArgs) {
 }
 
 /// Safe entry point that returns structured [`CliResult`] instead of printing
-/// errors and exiting. Validates arguments, checks for local changes, then
-/// delegates to branch switching or creation via restore utilities.
+/// errors and exiting.
+///
+/// # Side Effects
+/// - Validates target branch names and blocks the internal `intent` branch.
+/// - May create a branch when `-b` is supplied.
+/// - Switches HEAD/current branch and restores the working tree to the target.
+/// - Emits status messages through [`OutputConfig`].
+///
+/// # Errors
+/// Returns [`CliError`] when the target branch is invalid or missing, local
+/// changes would be overwritten, branch creation fails, or checkout/restore
+/// writes fail.
 pub async fn execute_safe(args: CheckoutArgs, output: &OutputConfig) -> CliResult<()> {
     if let Some(ref branch_name) = args.branch
         && branch_name == INTENT_BRANCH

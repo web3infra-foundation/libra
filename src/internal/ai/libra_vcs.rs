@@ -1,3 +1,9 @@
+//! Allowlist for Libra VCS commands that external AI tool bridges may execute.
+//!
+//! Boundary: the allowlist intentionally exposes repository-inspection and safe VCS
+//! commands only; raw shell/git execution stays outside this contract. MCP tests cover
+//! accepted commands, rejected commands, and argument normalization.
+
 pub const ALLOWED_COMMANDS: &[&str] = &[
     "status", "diff", "branch", "log", "show", "show-ref", "add", "commit", "switch",
 ];

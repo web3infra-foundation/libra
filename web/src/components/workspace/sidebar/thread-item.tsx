@@ -1,15 +1,32 @@
+/**
+ * Single row in the sidebar's thread list.
+ *
+ * Renders the thread title (single line, ellipsis), the current phase
+ * (`P{n} · {label}`), and a relative-time chip. Active rows are highlighted
+ * with a paper background and an accent rail on the left edge.
+ */
 "use client";
 
 import { cn } from "@/lib/utils";
 import type { Thread } from "@/lib/mock";
 
+/** Props for {@link ThreadItem}. */
 type Props = {
   thread: Thread;
+  /** Pre-resolved phase label (e.g. "Phase 2") so the row doesn't re-look-up. */
   phaseLabel: string;
+  /** When true, applies the active highlight + accent rail. */
   active: boolean;
+  /** Click handler — caller is responsible for selection state. */
   onSelect: () => void;
 };
 
+/**
+ * Row UI for a single saved thread.
+ *
+ * Boundary: long titles overflow with `text-ellipsis`; the row is a button
+ * for native focus/keyboard support.
+ */
 export function ThreadItem({ thread, phaseLabel, active, onSelect }: Props) {
   return (
     <button

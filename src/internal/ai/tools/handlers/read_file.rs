@@ -20,6 +20,11 @@ use crate::internal::ai::tools::{
 };
 
 /// Handler for reading file contents.
+///
+/// AI user story: let the agent inspect exact source text with stable line
+/// numbers before planning edits or producing review comments. The tool is
+/// intentionally read-only, paginated, and hides generated artifacts so model
+/// context is spent on maintainable source files.
 pub struct ReadFileHandler;
 
 const MAX_LINE_LENGTH: usize = 500;

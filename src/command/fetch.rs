@@ -682,8 +682,18 @@ pub async fn execute(args: FetchArgs) {
 }
 
 /// Safe entry point that returns structured [`CliResult`] instead of printing
-/// errors and exiting. Negotiates with remotes, downloads pack data, and
-/// updates remote-tracking refs.
+/// errors and exiting.
+///
+/// # Side Effects
+/// - Reads remote configuration and negotiates refs with one or more remotes.
+/// - Downloads pack data and writes received objects into local storage.
+/// - Updates remote-tracking refs for fetched branches.
+/// - Renders fetch status in the requested output format.
+///
+/// # Errors
+/// Returns [`CliError`] when remote configuration is invalid or missing,
+/// authentication/network/pack negotiation fails, object writes fail, or
+/// remote-tracking refs cannot be updated.
 pub async fn execute_safe(args: FetchArgs, output: &OutputConfig) -> CliResult<()> {
     let result = run_fetch(args, output).await?;
     render_fetch_output(&result, output)

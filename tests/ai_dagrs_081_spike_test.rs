@@ -1,4 +1,13 @@
 //! Phase 0 spike for dagrs 0.8.1 API assumptions.
+//!
+//! Pins the `dagrs` 0.8.1 surface area we depend on so a future `dagrs` upgrade cannot
+//! silently break the AI runtime. Specifically validates:
+//! - `Graph::add_node` returns the `NodeId` we already obtained from `Node::id()`.
+//! - `async_start` returns a `CompletionReport` with accurate `node_total` /
+//!   `node_succeeded`.
+//! - `subscribe` delivers an `ExecutionTerminated` event with the correct status.
+//!
+//! **Layer:** L1 — deterministic, no I/O, no external dependencies.
 
 use std::sync::Arc;
 
@@ -9,6 +18,9 @@ use dagrs::{
     event::{GraphEvent, TerminationStatus},
 };
 
+/// Empty `Action` used as a placeholder node. The spike only needs to verify dagrs's
+/// graph-shape / event contracts, so each node's body returns immediately with
+/// `Output::empty()`.
 struct NoopAction;
 
 #[async_trait]
@@ -23,6 +35,18 @@ impl Action for NoopAction {
     }
 }
 
+/// Scenario: build a two-node DAG with a single edge, run it, and assert the two
+/// surface contracts the AI runtime depends on:
+/// - `Graph::add_node` returns the same `NodeId` that `Node::id()` previously reported
+///   (we use this for downstream wiring).
+/// - The post-run `CompletionReport` and an `ExecutionTerminated` event from the
+///   subscription channel both report `Succeeded`, with `node_total == node_succeeded
+///   == 2` and no error attached.
+///
+/// Boundary: the event drain loops up to 16 times with a 1-second timeout each so that
+/// transient ordering between non-termination events and termination cannot make the
+/// test flaky. Failure to receive a termination event panics deliberately — that would
+/// mean the dagrs upgrade silently broke our event contract.
 #[tokio::test]
 async fn dagrs_081_graph_build_report_and_termination_event_contract() {
     let mut node_table = NodeTable::new();

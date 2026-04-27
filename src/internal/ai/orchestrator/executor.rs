@@ -1,3 +1,9 @@
+//! Task executor for running planned AI work through providers and tool loops.
+//!
+//! Boundary: executor launches attempts and captures outputs, while policy, workspace
+//! sync, verification, and persistence remain separate. DAG/tool-loop and runtime
+//! tests cover tool events, provider errors, and timeout boundaries.
+
 use std::{
     collections::{HashMap, HashSet},
     io,
@@ -26,7 +32,10 @@ use super::{
         TaskKind, TaskNodeStatus, TaskResult, TaskRuntimeEvent, TaskRuntimeNoteLevel,
         TaskRuntimePhase, TaskSpec, TaskWorkspaceBackend, ToolCallRecord,
     },
-    workspace::{detect_contract_violations, format_contract_violation_message},
+    workspace::{
+        FuseAttemptOutcome, FuseProvisionState, detect_contract_violations,
+        format_contract_violation_message,
+    },
 };
 use crate::internal::ai::{
     agent::{ToolLoopConfig, ToolLoopObserver, run_tool_loop_with_history_and_observer},
@@ -61,6 +70,11 @@ pub struct ExecutorConfig {
     /// so out-of-scope writes surface as retryable feedback to the LLM instead
     /// of escaping as terminal sync-back failures that force a replan.
     pub(crate) workspace_baseline: Option<Arc<WorkspaceSnapshot>>,
+    /// Session-scoped FUSE provisioning gate. Once any task fails to mount FUSE,
+    /// every subsequent provisioning skips FUSE and falls back to the copy
+    /// backend immediately, with one user-visible note emitted at the moment
+    /// of the first failure.
+    pub fuse_state: FuseProvisionState,
 }
 
 const NO_CHANGES_NEEDED_TOKEN: &str = "[NO_CHANGES_NEEDED]";
@@ -287,6 +301,7 @@ where
             &config.spec,
             config.tool_loop_config.runtime_context.as_ref(),
             config.observer.as_ref(),
+            &config.fuse_state,
         )
         .await;
     }
@@ -318,6 +333,23 @@ where
             allowed_tools: Some(allowed_tools.clone()),
             runtime_context: Some(runtime_context.clone()),
             max_turns: Some(config.tool_loop_config.max_turns.unwrap_or(24)),
+            // Convergence safeguards: a successful `submit_task_complete` call
+            // ends the loop immediately, and tighter repeat thresholds catch
+            // pathological "re-run the same shell command every turn" loops
+            // (see L1499/L8434 in /Volumes/Data/libra.log for the I05 case).
+            terminal_tools: Some(vec!["submit_task_complete".to_string()]),
+            repeat_detection_window: Some(
+                config.tool_loop_config.repeat_detection_window.unwrap_or(6),
+            ),
+            repeat_warning_threshold: Some(
+                config
+                    .tool_loop_config
+                    .repeat_warning_threshold
+                    .unwrap_or(2),
+            ),
+            repeat_abort_threshold: Some(
+                config.tool_loop_config.repeat_abort_threshold.unwrap_or(3),
+            ),
             ..config.tool_loop_config.clone()
         };
         let attempt_prompt = match retry_feedback.as_deref() {
@@ -700,10 +732,11 @@ async fn execute_gate_task_in_task_worktree(
     spec: &IntentSpec,
     inherited_runtime: Option<&ToolRuntimeContext>,
     observer: Option<&Arc<dyn OrchestratorObserver>>,
+    fuse_state: &FuseProvisionState,
 ) -> TaskResult {
     let environment_provider = ExecutionEnvironmentProvider;
     let environment = match environment_provider
-        .provision_task_worktree(working_dir.to_path_buf(), task.id())
+        .provision_task_worktree(working_dir.to_path_buf(), task.id(), fuse_state.clone())
         .await
     {
         Ok(environment) => environment,
@@ -712,6 +745,7 @@ async fn execute_gate_task_in_task_worktree(
     let task_worktree_root = environment.root().to_path_buf();
 
     if let Some(observer) = observer {
+        emit_fuse_disabled_note_if_needed(task, environment.fuse_outcome(), Some(observer));
         observer.on_task_runtime_event(
             task,
             TaskRuntimeEvent::WorkspaceReady {
@@ -889,7 +923,11 @@ where
 {
     let environment_provider = ExecutionEnvironmentProvider;
     let environment = match environment_provider
-        .provision_task_worktree(config.working_dir.clone(), task.id())
+        .provision_task_worktree(
+            config.working_dir.clone(),
+            task.id(),
+            config.fuse_state.clone(),
+        )
         .await
     {
         Ok(environment) => environment,
@@ -909,6 +947,7 @@ where
         clone_tool_loop_config_for_workdir(&config.tool_loop_config, &task_worktree_root);
     task_config.workspace_baseline = Some(Arc::new(baseline));
     if let Some(observer) = &config.observer {
+        emit_fuse_disabled_note_if_needed(task, environment.fuse_outcome(), Some(observer));
         observer.on_task_runtime_event(
             task,
             TaskRuntimeEvent::WorkspaceReady {
@@ -983,6 +1022,27 @@ fn task_workspace_failure(task: &TaskSpec, err: io::Error) -> TaskResult {
         review: None,
         thinking: None,
     }
+}
+
+/// Emit a single user-visible TUI note when this task was the first to fail
+/// FUSE provisioning and triggered the session-wide disable. All subsequent
+/// task worktree provisioning will skip FUSE silently.
+fn emit_fuse_disabled_note_if_needed(
+    task: &TaskSpec,
+    outcome: FuseAttemptOutcome,
+    observer: Option<&Arc<dyn OrchestratorObserver>>,
+) {
+    if outcome != FuseAttemptOutcome::JustDisabled {
+        return;
+    }
+    let Some(observer) = observer else { return };
+    observer.on_task_runtime_event(
+        task,
+        TaskRuntimeEvent::Note {
+            level: TaskRuntimeNoteLevel::Info,
+            text: "FUSE worktree mount failed — disabled for this session, using copy backend (slightly slower startup, identical behavior).".to_string(),
+        },
+    );
 }
 
 fn terminal_task_result(
@@ -1667,6 +1727,17 @@ fn build_task_prompt(task: &TaskSpec, working_dir: &Path, allowed_tools: &[Strin
         ));
     }
 
+    if matches!(task.kind, TaskKind::Implementation | TaskKind::Analysis) {
+        parts.push(
+            "## Task Termination\nWhen you have produced enough evidence to report a verdict, call `submit_task_complete` ONCE with:\n\
+             - `result`: \"pass\" if every acceptance criterion is verified, \"fail\" if any criterion failed or the task is blocked, or \"no_changes_needed\" if the workspace already satisfies the criteria.\n\
+             - `summary`: one paragraph describing what changed (or why nothing was needed) and which evidence supports `result`.\n\
+             - `evidence`: command + exit_code (+ optional output_excerpt) for each verification command you ran.\n\
+             The tool loop ends as soon as `submit_task_complete` succeeds. Do NOT re-run a shell command that you already executed in this task — read the prior tool result from history instead."
+                .to_string(),
+        );
+    }
+
     if !task.constraints().is_empty() {
         parts.push(format!(
             "## Constraints\n{}",
@@ -1806,6 +1877,13 @@ fn allowed_tools_for_task(spec: &IntentSpec, task: &TaskSpec) -> Vec<String> {
         && acl_allows(&spec.security.tool_acl, "web.search", "query")
     {
         tools.push("web_search".to_string());
+    }
+
+    // `submit_task_complete` is the agent's terminal handshake — required for
+    // every Implementation/Analysis task so the tool loop can converge
+    // deterministically. Always available regardless of ACL.
+    if matches!(task.kind, TaskKind::Implementation | TaskKind::Analysis) {
+        tools.push("submit_task_complete".to_string());
     }
 
     tools
@@ -3015,6 +3093,7 @@ mod tests {
             dagrs_resume_checkpoint_id: None,
             observer: None,
             workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
         };
         let registry = ToolRegistry::new();
         let model = MockModel {
@@ -3049,6 +3128,7 @@ mod tests {
             dagrs_resume_checkpoint_id: None,
             observer: None,
             workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
         };
         let task = implementation_task();
         let result = execute_task(&task, &SrcMainPatchModel, &registry, &config).await;
@@ -3082,6 +3162,7 @@ mod tests {
             dagrs_resume_checkpoint_id: None,
             observer: None,
             workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
         };
 
         let result = execute_task(
@@ -3128,6 +3209,7 @@ mod tests {
             dagrs_resume_checkpoint_id: None,
             observer: None,
             workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
         };
         let task = implementation_task();
 
@@ -3161,6 +3243,7 @@ mod tests {
             dagrs_resume_checkpoint_id: None,
             observer: None,
             workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
         };
 
         let result = execute_task(
@@ -3196,6 +3279,7 @@ mod tests {
             dagrs_resume_checkpoint_id: None,
             observer: None,
             workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
         };
         let plan = plan_for_tasks(vec![implementation_task()], 1);
         let model = MockModel {
@@ -3239,6 +3323,7 @@ mod tests {
             dagrs_resume_checkpoint_id: None,
             observer: None,
             workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
         };
 
         let plan = plan_for_tasks(
@@ -3289,6 +3374,7 @@ mod tests {
             dagrs_resume_checkpoint_id: None,
             observer: None,
             workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
         };
 
         let mut task = scoped_implementation_task("Initialize Cargo project", "libra/Cargo.toml");
@@ -3343,6 +3429,7 @@ mod tests {
             dagrs_resume_checkpoint_id: None,
             observer: None,
             workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
         };
 
         let plan = plan_for_tasks(vec![scoped_implementation_task("Task A", "task_a.txt")], 1);
@@ -3476,6 +3563,7 @@ mod tests {
             dagrs_resume_checkpoint_id: None,
             observer: None,
             workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
         };
         // Without baseline, the precheck is a no-op.
         assert!(workspace_contract_failure(&implementation_task(), &config).is_none());
@@ -3518,6 +3606,7 @@ mod tests {
             dagrs_resume_checkpoint_id: None,
             observer: None,
             workspace_baseline: Some(Arc::new(baseline)),
+            fuse_state: FuseProvisionState::default(),
         };
 
         assert!(
@@ -3739,6 +3828,7 @@ Done.";
                 events: Arc::clone(&events),
             })),
             workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
         };
 
         let a = scoped_implementation_task("A", "src/a.txt");
@@ -3798,6 +3888,7 @@ Done.";
                 events: Arc::clone(&events),
             })),
             workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
         };
 
         let mut failing = implementation_task();
@@ -3865,6 +3956,7 @@ Done.";
             dagrs_resume_checkpoint_id: None,
             observer: None,
             workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
         };
 
         let first = implementation_task();
@@ -3939,6 +4031,7 @@ Done.";
             dagrs_resume_checkpoint_id: Some("todo".into()),
             observer: None,
             workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
         };
         let err = execute_dag(
             &plan,

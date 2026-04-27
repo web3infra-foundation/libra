@@ -1,7 +1,22 @@
 //! Diff rendering for TUI display.
 //!
-//! This module provides functionality to render file changes (add/delete/update)
-//! as styled terminal lines with colors, line numbers, and wrapping support.
+//! This module is a self-contained renderer that converts a map of file
+//! changes (each carrying a unified-diff string produced by
+//! `diffy::create_patch`) into styled `ratatui::text::Line` rows ready for
+//! `Paragraph::render`. The output is consumed by `DiffHistoryCell` and the
+//! orchestrator's plan-summary cells.
+//!
+//! Layout per file:
+//! ```text
+//! ● Update(src/main.rs)
+//! └ Added 3 lines, removed 2 lines
+//!     12 -old line
+//!     12 +new line
+//!     14  context line
+//! ```
+//!
+//! Multi-file summaries are indented and separated by blank lines so the
+//! reader can visually scan file headers.
 
 use std::{
     collections::HashMap,
@@ -18,25 +33,32 @@ use super::theme;
 /// File change type for diff display.
 ///
 /// All variants store a unified diff string produced by `diffy::create_patch`.
+/// `Update` additionally tracks the destination path for renames so the
+/// header can render `Update(old -> new)`.
 #[derive(Debug, Clone)]
 pub enum FileChange {
-    /// New file being added.
+    /// New file being added; the diff describes additions from an empty file.
     Add { unified_diff: String },
-    /// File being deleted.
+    /// File being deleted; the diff describes removals down to an empty file.
     Delete { unified_diff: String },
-    /// File being modified.
+    /// File being modified, optionally renamed via `move_path`.
     Update {
         unified_diff: String,
+        /// New path when the change is also a rename; `None` for in-place
+        /// edits.
         move_path: Option<PathBuf>,
     },
 }
 
 /// Summary of file changes for display.
+///
+/// Bundles a map of changes with a cwd anchor so callers can build a
+/// summary once and pass it around without losing the relative-path context.
 #[derive(Debug, Clone)]
 pub struct DiffSummary {
     /// Map of file paths to their changes.
     pub changes: HashMap<PathBuf, FileChange>,
-    /// Current working directory for relative path display.
+    /// Current working directory used for relative path display.
     pub cwd: PathBuf,
 }
 
@@ -47,7 +69,9 @@ impl DiffSummary {
     }
 }
 
-// Internal representation for diff line rendering
+// Internal representation for diff line rendering: tags each rendered line
+// with whether it's an addition, deletion, or unchanged context so the
+// renderer can pick the right colour and sign character.
 enum DiffLineType {
     Insert,
     Delete,
@@ -56,7 +80,17 @@ enum DiffLineType {
 
 /// Create styled lines for diff summary display.
 ///
-/// This is the main entry point for rendering file changes as TUI lines.
+/// Functional scope: the public entry point. Collects per-file metadata,
+/// sorts deterministically by path, then renders headers + diff bodies.
+///
+/// Boundary conditions:
+/// - `wrap_cols` is the *visible* terminal column count; the renderer
+///   subtracts indents and gutters internally before splitting long lines.
+/// - The output is `Vec<Line<'static>>` because callers cache it inside
+///   history cells that outlive the originating diff buffers.
+///
+/// See: [`tests::test_create_diff_summary_single_file`],
+/// [`tests::test_create_diff_summary_update`], [`tests::test_multiple_files`].
 pub fn create_diff_summary(
     changes: &HashMap<PathBuf, FileChange>,
     cwd: &Path,
@@ -66,10 +100,11 @@ pub fn create_diff_summary(
     render_changes_block(rows, wrap_cols, cwd)
 }
 
-// Shared row for per-file presentation
+// Shared row for per-file presentation. `Row` aggregates the path, optional
+// rename target, derived line counts, and the original FileChange so the
+// renderer doesn't have to re-parse the diff for header information.
 #[derive(Clone)]
 struct Row {
-    #[allow(dead_code)]
     path: PathBuf,
     move_path: Option<PathBuf>,
     added: usize,
@@ -77,6 +112,10 @@ struct Row {
     change: FileChange,
 }
 
+/// Convert the raw `(path, change)` map into deterministically ordered Rows.
+///
+/// Sort is by path so output is reproducible across runs even though
+/// `HashMap` iteration order is randomised.
 fn collect_rows(changes: &HashMap<PathBuf, FileChange>) -> Vec<Row> {
     let mut rows: Vec<Row> = Vec::new();
     for (path, change) in changes.iter() {
@@ -105,6 +144,12 @@ fn collect_rows(changes: &HashMap<PathBuf, FileChange>) -> Vec<Row> {
     rows
 }
 
+/// Build the human-readable "Added N lines, removed M lines" summary string.
+///
+/// Boundary conditions:
+/// - Returns an empty string when both counts are zero, signalling the
+///   caller to omit the summary line entirely.
+/// - Pluralises `line` correctly for both fields independently.
 fn render_line_count_summary_text(added: usize, removed: usize) -> String {
     let mut parts = Vec::new();
     if added > 0 {
@@ -121,6 +166,15 @@ fn render_line_count_summary_text(added: usize, removed: usize) -> String {
     parts.join(", ")
 }
 
+/// Render every row's header, summary line, and diff body, joining them with
+/// blank-line separators when there are multiple files.
+///
+/// Functional scope: the actual layout machine. Picks an indent ("" for
+/// single-file output, "  " for multi-file) so multi-file diffs visually
+/// nest under a shared root.
+///
+/// Boundary conditions: diff bodies are wrapped to `wrap_cols - indent` so
+/// continuation lines align with the gutter rather than overflowing.
 fn render_changes_block(rows: Vec<Row>, wrap_cols: usize, cwd: &Path) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
     let indent = if rows.len() > 1 { "  " } else { "" };
@@ -174,6 +228,19 @@ fn render_changes_block(rows: Vec<Row>, wrap_cols: usize, cwd: &Path) -> Vec<Lin
     out
 }
 
+/// Render the body of a single `FileChange` (hunks, gutter, sign column).
+///
+/// Functional scope: parses the unified diff with `diffy`, computes the
+/// widest line number so the gutter stays aligned, then walks each hunk and
+/// emits per-line rows. Hunks are visually separated with a `...` spacer to
+/// indicate skipped content.
+///
+/// Boundary conditions:
+/// - Bails silently when the diff string fails to parse — the parent
+///   summary header still renders so the user is not left wondering why a
+///   row appeared without details.
+/// - `width` is the available content width *after* outer indent; the
+///   per-line renderer subtracts the gutter and sign column further.
 fn render_change(change: &FileChange, out: &mut Vec<Line<'static>>, width: usize) {
     let unified_diff = match change {
         FileChange::Add { unified_diff }
@@ -262,7 +329,17 @@ fn render_change(change: &FileChange, out: &mut Vec<Line<'static>>, width: usize
 
 /// Format a path for display relative to the current working directory.
 ///
-/// Prefers relative paths when possible for cleaner display.
+/// Functional scope: tries (in order) the literal relative path,
+/// `strip_prefix(cwd)`, `pathdiff::diff_paths`, and finally a `~/` home-
+/// directory shortening before falling back to the full absolute path.
+///
+/// Boundary conditions:
+/// - Already-relative paths are returned verbatim.
+/// - Paths outside `cwd` and not under the home directory render absolute,
+///   ensuring no path ambiguity in the transcript.
+///
+/// See: [`tests::test_display_path_relative`],
+/// [`tests::test_display_path_already_relative`].
 pub fn display_path_for(path: &Path, cwd: &Path) -> String {
     if path.is_relative() {
         return path.display().to_string();
@@ -289,6 +366,15 @@ pub fn display_path_for(path: &Path, cwd: &Path) -> String {
 }
 
 /// Calculate the number of added and removed lines from a unified diff.
+///
+/// Functional scope: parses with `diffy::Patch::from_str` and counts insert
+/// / delete hunks across all files.
+///
+/// Boundary conditions: returns `(0, 0)` when the diff cannot be parsed so
+/// callers can render summaries safely without panicking on malformed
+/// input.
+///
+/// See: [`tests::test_calculate_add_remove_from_diff`].
 pub fn calculate_add_remove_from_diff(diff: &str) -> (usize, usize) {
     if let Ok(patch) = diffy::Patch::from_str(diff) {
         patch
@@ -306,6 +392,19 @@ pub fn calculate_add_remove_from_diff(diff: &str) -> (usize, usize) {
     }
 }
 
+/// Render a single diff line with line-number gutter, sign column, and
+/// soft-wrap continuation rows when the content overruns `width`.
+///
+/// Functional scope: produces one or more `Line<'static>` rows depending on
+/// width; the first row carries the line number and sign character, while
+/// continuation rows pad those columns with spaces so wrapped content stays
+/// visually aligned with the original gutter.
+///
+/// Boundary conditions:
+/// - Splits at UTF-8 character boundaries rather than byte counts to avoid
+///   producing invalid strings on multi-byte characters.
+/// - Always emits at least one row so the caller never has to special-case
+///   short text.
 fn push_wrapped_diff_line(
     line_number: usize,
     kind: DiffLineType,
@@ -367,6 +466,8 @@ fn push_wrapped_diff_line(
     lines
 }
 
+/// Width in characters of the largest line number; minimum 1 so single-digit
+/// diffs still get a coherent gutter.
 fn line_number_width(max_line_number: usize) -> usize {
     if max_line_number == 0 {
         1
@@ -375,23 +476,31 @@ fn line_number_width(max_line_number: usize) -> usize {
     }
 }
 
+/// Style for the line-number gutter.
 fn style_gutter() -> Style {
     theme::diff::gutter()
 }
 
+/// Style for unchanged context lines.
 fn style_context() -> Style {
     theme::diff::context()
 }
 
+/// Style for `+` insertion lines.
 fn style_add() -> Style {
     theme::diff::added_line()
 }
 
+/// Style for `-` deletion lines.
 fn style_del() -> Style {
     theme::diff::removed_line()
 }
 
 /// Add a prefix to each line in the vector.
+///
+/// Functional scope: takes a different prefix for the first line vs rest so
+/// callers can emit nested bullet structures without writing it themselves.
+/// Used to indent multi-file diff bodies under their per-file headers.
 fn prefix_lines(
     lines: Vec<Line<'static>>,
     first_prefix: &str,
@@ -414,6 +523,8 @@ mod tests {
     use super::*;
     use crate::internal::tui::theme;
 
+    /// Scenario: a one-line edit produces exactly one insert and one delete.
+    /// Pin the count parser so changes to `diffy` semantics surface here.
     #[test]
     fn test_calculate_add_remove_from_diff() {
         let original = "line one\nline two\nline three\n";
@@ -425,6 +536,7 @@ mod tests {
         assert_eq!(removed, 1);
     }
 
+    /// Scenario: an absolute path inside cwd is rendered relative for clarity.
     #[test]
     fn test_display_path_relative() {
         let cwd = std::path::PathBuf::from("/workspace/project");
@@ -434,6 +546,8 @@ mod tests {
         assert_eq!(rendered, "src/main.rs");
     }
 
+    /// Scenario: an already-relative path passes through unchanged so the
+    /// renderer doesn't accidentally absolutise paths it was given relative.
     #[test]
     fn test_display_path_already_relative() {
         let cwd = std::path::PathBuf::from("/workspace/project");
@@ -443,6 +557,9 @@ mod tests {
         assert_eq!(rendered, "src/main.rs");
     }
 
+    /// Scenario: a single-file Add change should produce at least a header
+    /// and a body. We don't pin the exact line layout to avoid brittleness
+    /// when styling changes; we just guarantee non-emptiness.
     #[test]
     fn test_create_diff_summary_single_file() {
         let mut changes: HashMap<PathBuf, FileChange> = HashMap::new();
@@ -460,6 +577,8 @@ mod tests {
         assert!(!lines.is_empty());
     }
 
+    /// Scenario: an Update change produces output. Mirrors
+    /// `test_create_diff_summary_single_file` for the rename-capable variant.
     #[test]
     fn test_create_diff_summary_update() {
         let mut changes: HashMap<PathBuf, FileChange> = HashMap::new();
@@ -481,6 +600,8 @@ mod tests {
         assert!(!lines.is_empty());
     }
 
+    /// Scenario: a short line fits in one row regardless of width policy,
+    /// so the wrapper must not produce continuation rows for it.
     #[test]
     fn test_push_wrapped_diff_line_short() {
         let lines = push_wrapped_diff_line(1, DiffLineType::Insert, "short line", 80, 1);
@@ -489,6 +610,9 @@ mod tests {
         assert_eq!(lines.len(), 1);
     }
 
+    /// Scenario: an over-long line wraps into multiple rows. The first row
+    /// keeps the line-number gutter and `+` sign; continuation rows drop
+    /// them so users can tell at a glance which row owns the line number.
     #[test]
     fn test_push_wrapped_diff_line_long() {
         let long_line = "this is a very long line that should wrap across multiple terminal columns and continue";
@@ -506,6 +630,8 @@ mod tests {
         assert!(!second_line.spans[1].content.starts_with('+'));
     }
 
+    /// Scenario: every diff row must use the shared theme so palette tweaks
+    /// propagate. Pin gutter + add + delete + context to `theme::diff::*`.
     #[test]
     fn diff_line_styles_follow_theme() {
         let insert = push_wrapped_diff_line(1, DiffLineType::Insert, "added", 40, 1);

@@ -1,6 +1,12 @@
 //! L3 integration tests for the Gemini AI agent DAG execution and tool-use pipeline.
 //!
-//! **Layer:** L3 — requires `GEMINI_API_KEY`. Skipped silently when unset.
+//! Exercises end-to-end `dagrs` graph execution where one node feeds a prompt into a
+//! Gemini-backed `AgentAction`, optionally with registered tools. These tests live at
+//! the highest test layer because they reach a live Gemini endpoint.
+//!
+//! **Layer:** L3 — opt-in live gate. Skipped unless `LIBRA_AI_LIVE_GEMINI=1`
+//! and `GEMINI_API_KEY` are both set so the default README test gate does not
+//! depend on an enabled Google Cloud project.
 
 use std::sync::{
     Arc,
@@ -19,6 +25,19 @@ use libra::internal::ai::{
 };
 use serde_json::json;
 
+/// Return `true` only when the developer intentionally enables the live Gemini gate
+/// and supplies an API key. Having a key in `.env.test` is not enough because the
+/// backing Google Cloud project may have the Generative Language API disabled, which
+/// would make the default `cargo test --all` gate depend on external account state.
+fn live_gemini_enabled() -> bool {
+    std::env::var("LIBRA_AI_LIVE_GEMINI").is_ok_and(|value| value == "1")
+        && std::env::var("GEMINI_API_KEY").is_ok_and(|value| !value.is_empty())
+}
+
+/// Trivial `Action` that broadcasts a fixed prompt as the source node of the DAG.
+///
+/// Used as the upstream node feeding the Gemini-backed agent under test. Holding the
+/// prompt as owned `String` keeps it self-contained inside the spawned task.
 struct InputGenerator {
     prompt: String,
 }
@@ -39,18 +58,28 @@ impl Action for InputGenerator {
 
 /// Integration test for Gemini agent execution.
 ///
+/// Scenario: builds a two-node DAG where an `InputGenerator` feeds a prompt into a
+/// Gemini-backed `AgentAction`, runs the graph against the live Gemini API, and asserts
+/// that a non-empty translation comes back. This exercises the boundary between the
+/// agent runtime and the provider client.
+///
+/// Boundary: the live gate is skipped unless `LIBRA_AI_LIVE_GEMINI=1` and
+/// `GEMINI_API_KEY` are both set. This prevents default local/CI runs from depending
+/// on a particular Google Cloud project's API enablement state.
+///
 /// # Setup
 /// This test requires a valid `GEMINI_API_KEY` environment variable.
 /// The test will be skipped if the key is not set.
 ///
 /// ```bash
+/// export LIBRA_AI_LIVE_GEMINI=1
 /// export GEMINI_API_KEY="your_key_here"
 /// cargo test --test ai_agent_test test_gemini_agent_execution
 /// ```
 #[tokio::test]
 async fn test_gemini_agent_execution() {
-    if std::env::var("GEMINI_API_KEY").map_or(true, |v| v.is_empty()) {
-        eprintln!("skipped (GEMINI_API_KEY not set)");
+    if !live_gemini_enabled() {
+        eprintln!("skipped (set LIBRA_AI_LIVE_GEMINI=1 and GEMINI_API_KEY to run Gemini gate)");
         return;
     }
 
@@ -104,6 +133,11 @@ async fn test_gemini_agent_execution() {
     }
 }
 
+/// Test fixture tool that records whether the agent invoked it.
+///
+/// The `called` flag is shared with the test harness via `Arc<AtomicBool>` so the
+/// assertion can detect whether Gemini actually emitted a function call instead of
+/// answering directly in natural language.
 struct WeatherTool {
     called: Arc<AtomicBool>,
 }
@@ -141,17 +175,28 @@ impl Tool for WeatherTool {
 
 /// Integration test for Gemini agent execution with Tools.
 ///
+/// Scenario: registers a fixture `WeatherTool`, drives the agent with a prompt that
+/// would naturally call it, and asserts the response either invokes the tool or at
+/// minimum produces a plausible weather-shaped answer. This is intentionally lenient
+/// because Gemini's tool-call routing is non-deterministic — the test exists to guard
+/// the wiring (tool spec is reachable, response shape is parseable), not the model's
+/// behavior.
+///
+/// Boundary: skipped unless `LIBRA_AI_LIVE_GEMINI=1` and `GEMINI_API_KEY` are both
+/// set, matching [`test_gemini_agent_execution`].
+///
 /// # Setup
 /// This test requires a valid `GEMINI_API_KEY` environment variable.
 ///
 /// ```bash
+/// export LIBRA_AI_LIVE_GEMINI=1
 /// export GEMINI_API_KEY="your_key_here"
 /// cargo test --test ai_agent_test test_gemini_agent_with_tools
 /// ```
 #[tokio::test]
 async fn test_gemini_agent_with_tools() {
-    if std::env::var("GEMINI_API_KEY").map_or(true, |v| v.is_empty()) {
-        eprintln!("skipped (GEMINI_API_KEY not set)");
+    if !live_gemini_enabled() {
+        eprintln!("skipped (set LIBRA_AI_LIVE_GEMINI=1 and GEMINI_API_KEY to run Gemini gate)");
         return;
     }
 

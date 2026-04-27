@@ -1,26 +1,53 @@
-//! Agent profile router: auto-selects the appropriate profile based on user input.
+//! Agent profile router: discovers profiles on disk and auto-selects the appropriate
+//! one based on free-form user input.
+//!
+//! The router is the bridge between the profile authoring format ([`super::parser`])
+//! and the agent runtime ([`super::super::runtime`]). The TUI dispatches a chat turn to
+//! the matched profile so the LLM sees the right system prompt and tool whitelist.
 
 use super::parser::AgentProfile;
 
+/// Minimum number of description-keyword matches required for a profile to be considered.
+///
+/// Two matches is the empirical sweet spot: a single match would route generic words
+/// (e.g. "test", "build") to specialized agents, while requiring three would drop too
+/// many legitimate matches against short user prompts.
 const MIN_MATCH_SCORE: usize = 2;
+/// Hard upper bound on the size of a profile file we are willing to read from disk.
+///
+/// 1 MiB is far more than legitimate prompts need; the limit guards against accidental
+/// or malicious large files in `.libra/agents/` from being slurped into memory.
 const MAX_PROFILE_FILE_BYTES: u64 = 1024 * 1024;
 
 /// Routes user input to the most appropriate agent profile.
+///
+/// Holds an immutable list of profiles. Selection is purely lexical: the description
+/// of each profile is tokenized into keywords, and the user input is scored by how
+/// many of those keywords appear (case-insensitively).
 pub struct AgentProfileRouter {
     profiles: Vec<AgentProfile>,
 }
 
 impl AgentProfileRouter {
     /// Create a new router with the given agent profiles.
+    ///
+    /// Functional scope: stores the list verbatim. The relative order is preserved so
+    /// callers can rely on first-wins tie-breaking in [`Self::select`].
     pub fn new(profiles: Vec<AgentProfile>) -> Self {
         Self { profiles }
     }
 
     /// Select the best matching profile for the given user input.
     ///
-    /// Matching is done by checking if keywords from the profile description
-    /// appear in the user input. Returns the profile with the highest match score,
-    /// or None if no profile matches above a minimum threshold.
+    /// Functional scope:
+    /// - Lower-cases the input once to avoid repeated work in the inner loop.
+    /// - Computes a keyword-overlap score for every profile and keeps the highest one.
+    ///
+    /// Boundary conditions:
+    /// - Returns `None` when no profile clears [`MIN_MATCH_SCORE`]. The caller should
+    ///   then fall back to its default agent.
+    /// - When two profiles tie on score the first one wins (registration order). See
+    ///   `tests::test_router_tie_breaking_prefers_first`.
     pub fn select(&self, input: &str) -> Option<&AgentProfile> {
         let input_lower = input.to_lowercase();
         let mut best: Option<(&AgentProfile, usize)> = None;
@@ -42,16 +69,26 @@ impl AgentProfileRouter {
     }
 
     /// Get all registered profiles.
+    ///
+    /// Used by the TUI to render an "/agents" menu and by introspection helpers.
     pub fn profiles(&self) -> &[AgentProfile] {
         &self.profiles
     }
 
     /// Get a profile by name.
+    ///
+    /// Returns `None` for unknown names; case-sensitive comparison matches the way
+    /// names are written in the frontmatter `name:` field.
     pub fn get(&self, name: &str) -> Option<&AgentProfile> {
         self.profiles.iter().find(|a| a.name == name)
     }
 
     /// Calculate a match score for a profile against user input.
+    ///
+    /// Functional scope: counts how many keywords extracted from the profile's
+    /// description appear as substrings of the lower-cased input. The substring check
+    /// is intentional so that plurals and inflections still match (e.g. "reviews" hits
+    /// the "review" keyword).
     fn match_score(input_lower: &str, profile: &AgentProfile) -> usize {
         let keywords = Self::extract_keywords(&profile.description);
         keywords
@@ -61,6 +98,16 @@ impl AgentProfileRouter {
     }
 
     /// Extract meaningful keywords from a description string.
+    ///
+    /// Functional scope: lower-cases the description, splits on non-alphanumeric
+    /// characters, drops tokens shorter than three characters, and removes a
+    /// hand-curated English stop-word list. The result is the keyword set used by
+    /// [`Self::match_score`].
+    ///
+    /// Boundary conditions: the stop-word list is intentionally conservative — it only
+    /// removes pronouns, articles, common conjunctions/prepositions, and auxiliary
+    /// verbs. Domain-specific words (e.g. "code", "build", "review") are preserved
+    /// because they carry the routing signal.
     fn extract_keywords(description: &str) -> Vec<String> {
         let stop_words = [
             "a", "an", "the", "is", "are", "was", "were", "be", "been", "being", "have", "has",
@@ -80,6 +127,15 @@ impl AgentProfileRouter {
 }
 
 /// Load all embedded default agent profiles.
+///
+/// Functional scope: parses the markdown blobs that are baked into the binary at
+/// compile time via `include_str!`. Profiles that fail to parse are silently dropped
+/// (the parser already emits diagnostics) so the binary still boots even if a default
+/// is malformed in a future change.
+///
+/// Boundary conditions: the list of embedded files is hard-coded; adding a new default
+/// requires editing both this function and the matching markdown file under
+/// `embedded/`.
 pub fn load_embedded_profiles() -> Vec<AgentProfile> {
     let sources = [
         include_str!("embedded/planner.md"),
@@ -98,10 +154,24 @@ pub fn load_embedded_profiles() -> Vec<AgentProfile> {
 
 /// Load agent profiles from a directory, with embedded profiles as fallback.
 ///
-/// Checks for agent files in:
+/// Functional scope:
+/// - Walks the project-local then user-global directories, collecting profiles into
+///   a single list while remembering already-seen names to enforce override priority.
+/// - Adds any embedded default whose `name` was not already loaded so projects can
+///   override individual defaults without re-shipping all of them.
+///
+/// Boundary conditions:
+/// - Missing directories are not an error; they simply contribute nothing.
+/// - When `dirs::config_dir()` returns `None` (no `$HOME`, sandboxed runtime, ...) the
+///   user-global tier is skipped and we go straight to embedded fallback.
+///
+/// Lookup order (highest priority first):
 /// 1. `{working_dir}/.libra/agents/*.md`
 /// 2. `~/.config/libra/agents/*.md`
 /// 3. Embedded defaults
+///
+/// See: `tests::test_load_profiles_with_project_override`,
+/// `tests::test_load_profiles_skips_oversized_files`.
 pub fn load_profiles(working_dir: &std::path::Path) -> Vec<AgentProfile> {
     let mut profiles = Vec::new();
     let mut loaded_names = std::collections::HashSet::new();
@@ -126,6 +196,18 @@ pub fn load_profiles(working_dir: &std::path::Path) -> Vec<AgentProfile> {
     profiles
 }
 
+/// Helper for [`load_profiles`]: scan one directory and append fresh profiles.
+///
+/// Functional scope: lists the directory, filters to `.md` files, applies the size
+/// limit, parses each, and appends every profile whose `name` is not already in
+/// `loaded_names`.
+///
+/// Boundary conditions:
+/// - Missing directory: the function silently returns. Callers can call it for both
+///   the project and user tiers without pre-checking existence.
+/// - Oversized file (`> MAX_PROFILE_FILE_BYTES`): logs a warning and skips, so a stray
+///   gigabyte file does not OOM startup.
+/// - Files with no extension or non-`md` extension are skipped without warning.
 fn load_profiles_from_dir(
     dir: &std::path::Path,
     profiles: &mut Vec<AgentProfile>,
@@ -169,6 +251,8 @@ fn load_profiles_from_dir(
 mod tests {
     use super::*;
 
+    /// Scenario: a malicious or accidental large file in `.libra/agents/` is skipped
+    /// while siblings of normal size still load.
     #[test]
     fn test_load_profiles_skips_oversized_files() {
         let tmp = tempfile::tempdir().unwrap();
@@ -194,6 +278,9 @@ mod tests {
         assert!(!names.contains(&"oversized"));
     }
 
+    /// Scenario: every embedded markdown file ships with a parseable frontmatter and
+    /// the expected canonical names. Acts as a regression guard against renaming an
+    /// embedded default without updating downstream lookups.
     #[test]
     fn test_load_embedded_profiles() {
         let profiles = load_embedded_profiles();
@@ -207,6 +294,7 @@ mod tests {
         assert!(names.contains(&"build_error_resolver"));
     }
 
+    /// Scenario: a planning-flavored prompt routes to the `planner` profile.
     #[test]
     fn test_router_select_planner() {
         let profiles = load_embedded_profiles();
@@ -217,6 +305,7 @@ mod tests {
         assert_eq!(selected.unwrap().name, "planner");
     }
 
+    /// Scenario: a code-review prompt routes to the `code_reviewer` profile.
     #[test]
     fn test_router_select_reviewer() {
         let profiles = load_embedded_profiles();
@@ -227,6 +316,7 @@ mod tests {
         assert_eq!(selected.unwrap().name, "code_reviewer");
     }
 
+    /// Scenario: a system-design prompt routes to the `architect` profile.
     #[test]
     fn test_router_select_architect() {
         let profiles = load_embedded_profiles();
@@ -237,6 +327,7 @@ mod tests {
         assert_eq!(selected.unwrap().name, "architect");
     }
 
+    /// Scenario: a build-failure prompt routes to the `build_error_resolver` profile.
     #[test]
     fn test_router_select_build_resolver() {
         let profiles = load_embedded_profiles();
@@ -247,6 +338,8 @@ mod tests {
         assert_eq!(selected.unwrap().name, "build_error_resolver");
     }
 
+    /// Scenario: a generic greeting matches nothing and the router returns `None`,
+    /// allowing the caller to fall back to the default agent.
     #[test]
     fn test_router_no_match() {
         let profiles = load_embedded_profiles();
@@ -256,6 +349,8 @@ mod tests {
         assert!(selected.is_none());
     }
 
+    /// Scenario: lookup by canonical name returns the profile, unknown names yield
+    /// `None`.
     #[test]
     fn test_router_get_by_name() {
         let profiles = load_embedded_profiles();
@@ -265,6 +360,8 @@ mod tests {
         assert!(router.get("nonexistent").is_none());
     }
 
+    /// Scenario: when two profiles have identical descriptions and therefore identical
+    /// scores, registration order wins (first-seen, not last-seen).
     #[test]
     fn test_router_tie_breaking_prefers_first() {
         // When two profiles have the same score, the first one encountered wins
@@ -292,6 +389,8 @@ mod tests {
         assert_eq!(selected.unwrap().name, "agent_a");
     }
 
+    /// Scenario: a project-local `.libra/agents/planner.md` shadows the embedded
+    /// `planner` default — verifies the three-tier override logic.
     #[test]
     fn test_load_profiles_with_project_override() {
         let tmp = tempfile::TempDir::new().unwrap();

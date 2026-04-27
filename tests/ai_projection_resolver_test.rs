@@ -1,4 +1,16 @@
 //! Phase B projection resolver and scheduler repository contract tests.
+//!
+//! Pin the contracts that `ProjectionResolver`, `SchedulerStateRepository`, and
+//! `ProjectionRebuilder` expose to the AI runtime:
+//! - The scheduler repository round-trips a `SelectedPlanSet` and rejects stale
+//!   compare-and-swap attempts via `SchedulerStateCasError::VersionConflict`.
+//! - When a thread row exists but no scheduler row does, the resolver returns a
+//!   `StaleReadOnly` bundle so callers know not to write to it.
+//! - When neither row exists, the rebuilder can reconstruct a fresh bundle from the
+//!   on-disk history (Intent + Task objects).
+//!
+//! **Layer:** L1 — uses an in-memory SQLite plus a temp-dir Libra repo. The history
+//! rebuild test mutates CWD via `ChangeDirGuard` and is therefore `#[serial]`.
 
 use std::sync::Arc;
 
@@ -28,6 +40,9 @@ use uuid::Uuid;
 
 const BOOTSTRAP_SQL: &str = include_str!("../sql/sqlite_20260309_init.sql");
 
+/// Spin up an in-memory SQLite, run the canonical bootstrap SQL, and return the
+/// connection. Used by tests that only need the schema (not a full Libra repo on
+/// disk).
 async fn setup_db() -> DatabaseConnection {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     db.execute(Statement::from_string(
@@ -39,6 +54,12 @@ async fn setup_db() -> DatabaseConnection {
     db
 }
 
+/// Provision a temp-dir Libra repository, switch CWD into it, and wire up the
+/// `LocalStorage` + `HistoryManager` + DB connection that the rebuild test exercises.
+///
+/// Must be called from inside a `#[serial]` test because `ChangeDirGuard` mutates the
+/// process-wide CWD. The returned `TempDir` must be held alive for the duration of
+/// the test — dropping it removes the on-disk repo.
 async fn setup_projection_history() -> (
     tempfile::TempDir,
     Arc<LocalStorage>,
@@ -60,14 +81,20 @@ async fn setup_projection_history() -> (
     (dir, storage, history, db_conn)
 }
 
+/// Build a deterministic UTC timestamp from a Unix-seconds value for fixtures.
 fn ts(seconds: i64) -> DateTime<Utc> {
     DateTime::<Utc>::from_timestamp(seconds, 0).unwrap()
 }
 
+/// Parse a hard-coded UUID literal used in fixtures. Panics on malformed input — the
+/// literals are author-owned so this is a programming-error fast path.
 fn id(value: &str) -> Uuid {
     Uuid::parse_str(value).unwrap()
 }
 
+/// Construct a minimal `ThreadProjection` fixture rooted at `thread_id` with one
+/// intent and a single owner participant. Used as the precondition row when testing
+/// the scheduler/resolver: the thread must exist before either component reads.
 fn sample_thread(thread_id: Uuid) -> ThreadProjection {
     let owner = ActorRef::human("projection-test").unwrap();
     let intent_id = id("22222222-2222-4222-8222-222222222222");
@@ -97,6 +124,9 @@ fn sample_thread(thread_id: Uuid) -> ThreadProjection {
     }
 }
 
+/// Construct a minimal `SchedulerState` fixture: two selected plans (an execution
+/// plan and a test plan) with the execution plan as the current head, plus one
+/// pinned live-context frame. Mirrors the shape the runtime persists at v1.
 fn sample_scheduler(thread_id: Uuid) -> SchedulerState {
     let execution_plan_id = id("33333333-3333-4333-8333-333333333333");
     let test_plan_id = id("44444444-4444-4444-8444-444444444444");
@@ -132,6 +162,11 @@ fn sample_scheduler(thread_id: Uuid) -> SchedulerState {
     }
 }
 
+/// Scenario: insert a `SchedulerState` at version 1, load it back, then perform two
+/// compare-and-swap attempts — one valid (1 → 2) and one stale (1 → next, after the
+/// row is already at 2). Asserts the load preserves the selected-plan set ordering
+/// and the live-context source kind, and that the stale CAS surfaces a
+/// `VersionConflict { expected: 1, actual: Some(2) }` so callers can retry the read.
 #[tokio::test]
 async fn scheduler_repository_loads_selected_plan_set_and_enforces_cas() {
     let db = setup_db().await;
@@ -182,6 +217,10 @@ async fn scheduler_repository_loads_selected_plan_set_and_enforces_cas() {
     ));
 }
 
+/// Scenario: when a thread projection row exists but its scheduler row is missing,
+/// `ProjectionResolver::load_thread_bundle` must return a `StaleReadOnly` bundle with
+/// an empty selected-plan set rather than an error. This is the contract the runtime
+/// relies on to know when callers should not perform writes.
 #[tokio::test]
 async fn projection_resolver_returns_stale_read_only_when_scheduler_row_is_missing() {
     let db = setup_db().await;
@@ -200,6 +239,13 @@ async fn projection_resolver_returns_stale_read_only_when_scheduler_row_is_missi
     assert!(bundle.scheduler.selected_plan_ids.is_empty());
 }
 
+/// Scenario: when neither projection nor scheduler rows exist but the underlying
+/// history has Intent + Task objects, `load_or_rebuild_thread_bundle` reconstructs a
+/// `Fresh` bundle from the AI history. Confirms the rebuild path is reachable end to
+/// end (storage put_tracked → resolver → rebuilder), and that the rebuilt bundle
+/// carries the right thread/intent identity.
+///
+/// `#[serial]` because `ChangeDirGuard` mutates process CWD.
 #[tokio::test]
 #[serial]
 async fn projection_resolver_rebuilds_missing_thread_projection_from_history() {

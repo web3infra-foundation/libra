@@ -226,6 +226,61 @@ libra code --provider ollama --model qwen3.6 --ollama-thinking high
 
 ---
 
+## Optional FUSE Backend
+
+Libra Code can use a FUSE overlay backend for temporary Agent task worktrees on
+Unix platforms. This backend is optional: if FUSE is unavailable or fails its
+health check, Libra logs a warning and falls back to the copy backend.
+
+### macOS
+
+Install [macFUSE](https://macfuse.github.io/) before using the FUSE backend.
+The upstream project recommends downloading the latest installer from the
+[macFUSE website or GitHub releases](https://github.com/macfuse/macfuse/wiki/Getting-Started).
+
+Homebrew can also install the cask for development machines:
+
+```bash
+brew install --cask macfuse
+```
+
+Follow any macOS System Settings prompts to allow macFUSE if required by the
+selected backend. After installation, verify that the mount helper expected by
+Libra's FUSE library exists:
+
+```bash
+test -x /Library/Filesystems/macfuse.fs/Contents/Resources/mount_macfuse
+```
+
+If Libra logs `macfuse mount binary not found`, macFUSE is not installed or the
+mount helper is not present at the expected path. Install or repair macFUSE, then
+start `libra code` again.
+
+### Linux
+
+Install FUSE 3 with your distribution package manager. Common package names are:
+
+```bash
+# Debian / Ubuntu
+sudo apt-get update
+sudo apt-get install -y fuse3
+
+# Fedora / RHEL
+sudo dnf install fuse3
+
+# Arch Linux
+sudo pacman -S fuse3
+```
+
+Verify that `fusermount3` is available:
+
+```bash
+command -v fusermount3
+```
+
+If the command is missing, Libra cannot use the unprivileged FUSE mount path and
+will use the copy backend instead.
+
 ## Features
 
 ### Clean Code

@@ -305,27 +305,27 @@ struct PendingIntentReview {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum IntentReviewScrollAction {
+enum ReviewScrollAction {
     Top,
     Bottom,
     Up(usize),
     Down(usize),
 }
 
-fn intent_review_scroll_action(
-    key: crossterm::event::KeyEvent,
-) -> Option<IntentReviewScrollAction> {
+fn review_scroll_action(key: crossterm::event::KeyEvent) -> Option<ReviewScrollAction> {
     let has_scroll_modifier = key.modifiers.contains(KeyModifiers::CONTROL)
         || key.modifiers.contains(KeyModifiers::ALT)
         || key.modifiers.contains(KeyModifiers::SHIFT);
 
     match key.code {
-        KeyCode::Home => Some(IntentReviewScrollAction::Top),
-        KeyCode::End => Some(IntentReviewScrollAction::Bottom),
-        KeyCode::PageUp => Some(IntentReviewScrollAction::Up(10)),
-        KeyCode::PageDown => Some(IntentReviewScrollAction::Down(10)),
-        KeyCode::Up if has_scroll_modifier => Some(IntentReviewScrollAction::Up(1)),
-        KeyCode::Down if has_scroll_modifier => Some(IntentReviewScrollAction::Down(1)),
+        KeyCode::Home => Some(ReviewScrollAction::Top),
+        KeyCode::End => Some(ReviewScrollAction::Bottom),
+        KeyCode::PageUp => Some(ReviewScrollAction::Up(10)),
+        KeyCode::PageDown => Some(ReviewScrollAction::Down(10)),
+        KeyCode::Up if has_scroll_modifier => Some(ReviewScrollAction::Up(1)),
+        KeyCode::Down if has_scroll_modifier => Some(ReviewScrollAction::Down(1)),
+        KeyCode::Char('j') if key.modifiers.is_empty() => Some(ReviewScrollAction::Up(1)),
+        KeyCode::Char('l') if key.modifiers.is_empty() => Some(ReviewScrollAction::Down(1)),
         _ => None,
     }
 }
@@ -972,55 +972,71 @@ where
                 }
                 _ => {}
             },
-            AgentStatus::AwaitingPostPlanChoice => match key.code {
-                KeyCode::Up => {
-                    if let Some(ref mut p) = self.pending_post_plan {
-                        p.selected = p.selected.saturating_sub(1);
-                        self.widget.bottom_pane.post_plan_selected = p.selected;
-                    }
+            AgentStatus::AwaitingPostPlanChoice => {
+                if let Some(action) = review_scroll_action(key) {
+                    self.apply_review_scroll_action(action);
                     self.schedule_draw();
+                    return Ok(());
                 }
-                KeyCode::Down => {
-                    if let Some(ref mut p) = self.pending_post_plan {
-                        p.selected = (p.selected + 1).min(2);
-                        self.widget.bottom_pane.post_plan_selected = p.selected;
+
+                match key.code {
+                    KeyCode::Up => {
+                        if let Some(ref mut p) = self.pending_post_plan {
+                            p.selected = p.selected.saturating_sub(1);
+                            self.widget.bottom_pane.post_plan_selected = p.selected;
+                        }
+                        self.schedule_draw();
                     }
-                    self.schedule_draw();
-                }
-                KeyCode::Enter => {
-                    self.handle_post_plan_choice().await;
-                }
-                KeyCode::Esc => {
-                    self.dismiss_post_plan_dialog();
-                }
-                _ => {}
-            },
-            AgentStatus::AwaitingNetworkPolicyChoice => match key.code {
-                KeyCode::Up => {
-                    if let Some(ref mut p) = self.pending_network_policy {
-                        p.selected = p.selected.saturating_sub(1);
-                        self.widget.bottom_pane.post_plan_selected = p.selected;
+                    KeyCode::Down => {
+                        if let Some(ref mut p) = self.pending_post_plan {
+                            p.selected = (p.selected + 1).min(2);
+                            self.widget.bottom_pane.post_plan_selected = p.selected;
+                        }
+                        self.schedule_draw();
                     }
-                    self.schedule_draw();
-                }
-                KeyCode::Down => {
-                    if let Some(ref mut p) = self.pending_network_policy {
-                        p.selected = (p.selected + 1).min(2);
-                        self.widget.bottom_pane.post_plan_selected = p.selected;
+                    KeyCode::Enter => {
+                        self.handle_post_plan_choice().await;
                     }
+                    KeyCode::Esc => {
+                        self.dismiss_post_plan_dialog();
+                    }
+                    _ => {}
+                }
+            }
+            AgentStatus::AwaitingNetworkPolicyChoice => {
+                if let Some(action) = review_scroll_action(key) {
+                    self.apply_review_scroll_action(action);
                     self.schedule_draw();
+                    return Ok(());
                 }
-                KeyCode::Enter => {
-                    self.handle_network_policy_choice().await;
+
+                match key.code {
+                    KeyCode::Up => {
+                        if let Some(ref mut p) = self.pending_network_policy {
+                            p.selected = p.selected.saturating_sub(1);
+                            self.widget.bottom_pane.post_plan_selected = p.selected;
+                        }
+                        self.schedule_draw();
+                    }
+                    KeyCode::Down => {
+                        if let Some(ref mut p) = self.pending_network_policy {
+                            p.selected = (p.selected + 1).min(2);
+                            self.widget.bottom_pane.post_plan_selected = p.selected;
+                        }
+                        self.schedule_draw();
+                    }
+                    KeyCode::Enter => {
+                        self.handle_network_policy_choice().await;
+                    }
+                    KeyCode::Esc => {
+                        self.return_to_post_plan_dialog();
+                    }
+                    _ => {}
                 }
-                KeyCode::Esc => {
-                    self.return_to_post_plan_dialog();
-                }
-                _ => {}
-            },
+            }
             AgentStatus::AwaitingIntentReviewChoice => {
-                if let Some(action) = intent_review_scroll_action(key) {
-                    self.apply_intent_review_scroll_action(action);
+                if let Some(action) = review_scroll_action(key) {
+                    self.apply_review_scroll_action(action);
                     self.schedule_draw();
                     return Ok(());
                 }
@@ -1136,12 +1152,12 @@ where
         Ok(())
     }
 
-    fn apply_intent_review_scroll_action(&mut self, action: IntentReviewScrollAction) {
+    fn apply_review_scroll_action(&mut self, action: ReviewScrollAction) {
         match action {
-            IntentReviewScrollAction::Top => self.widget.scroll_to_top(),
-            IntentReviewScrollAction::Bottom => self.widget.scroll_to_bottom(),
-            IntentReviewScrollAction::Up(lines) => self.widget.scroll_up_lines(lines),
-            IntentReviewScrollAction::Down(lines) => self.widget.scroll_down_lines(lines),
+            ReviewScrollAction::Top => self.widget.scroll_to_top(),
+            ReviewScrollAction::Bottom => self.widget.scroll_to_bottom(),
+            ReviewScrollAction::Up(lines) => self.widget.scroll_up_lines(lines),
+            ReviewScrollAction::Down(lines) => self.widget.scroll_down_lines(lines),
         }
     }
 
@@ -6547,9 +6563,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        DEFAULT_AUTOMATIC_PLAN_REPAIR_ATTEMPTS, ExecutionFailureRevision, IntentReviewScrollAction,
+        DEFAULT_AUTOMATIC_PLAN_REPAIR_ATTEMPTS, ExecutionFailureRevision,
         MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS, PendingPlanRevisionCommand, ProviderPlanDraft,
-        ProviderPlanDraftStep, append_to_last_tool_group_cell,
+        ProviderPlanDraftStep, ReviewScrollAction, append_to_last_tool_group_cell,
         append_to_last_tool_group_preview_cell, apply_developer_network_access,
         automatic_plan_repair_request_from_report, automatic_plan_repair_threshold_message,
         build_execution_plan_prompt, build_execution_plan_revision_prompt, build_plan_prompt,
@@ -6560,13 +6576,13 @@ mod tests {
         format_intentspec_target_mismatch, format_orchestrator_result,
         format_plan_compiled_stage_note, format_plan_execution_stage_note,
         format_replan_stage_note, format_system_verification_stage_note,
-        intent_review_scroll_action, intentspec_failure_revision_message_from_report,
-        intentspec_with_plan_draft_objectives, is_default_chat_tool, is_global_quit_command_input,
-        is_phase1_plan_draft_tool, mark_visible_tool_call_running, newest_managed_assistant_text,
+        intentspec_failure_revision_message_from_report, intentspec_with_plan_draft_objectives,
+        is_default_chat_tool, is_global_quit_command_input, is_phase1_plan_draft_tool,
+        mark_visible_tool_call_running, newest_managed_assistant_text,
         normalize_terminal_paste_text, parse_pending_plan_revision_command,
         pending_execution_plan_revision_help_message, pending_plan_revision_help_message,
         phase0_plan_tool_loop_config, phase1_plan_tool_loop_config, provider_plan_draft_from_args,
-        provider_plan_draft_from_plan, should_auto_repair_execution_failure,
+        provider_plan_draft_from_plan, review_scroll_action, should_auto_repair_execution_failure,
         should_forward_phase0_model_text_delta, should_forward_phase1_model_text_delta,
         should_route_plain_message_to_plan,
     };
@@ -6617,37 +6633,45 @@ mod tests {
     }
 
     #[test]
-    fn intent_review_scroll_keys_preserve_plain_selection_arrows() {
+    fn review_scroll_keys_preserve_plain_selection_arrows() {
         assert_eq!(
-            intent_review_scroll_action(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE)),
-            Some(IntentReviewScrollAction::Top)
+            review_scroll_action(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE)),
+            Some(ReviewScrollAction::Top)
         );
         assert_eq!(
-            intent_review_scroll_action(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)),
-            Some(IntentReviewScrollAction::Bottom)
+            review_scroll_action(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)),
+            Some(ReviewScrollAction::Bottom)
         );
         assert_eq!(
-            intent_review_scroll_action(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE)),
-            Some(IntentReviewScrollAction::Up(10))
+            review_scroll_action(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE)),
+            Some(ReviewScrollAction::Up(10))
         );
         assert_eq!(
-            intent_review_scroll_action(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)),
-            Some(IntentReviewScrollAction::Down(10))
+            review_scroll_action(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)),
+            Some(ReviewScrollAction::Down(10))
         );
         assert_eq!(
-            intent_review_scroll_action(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL)),
-            Some(IntentReviewScrollAction::Up(1))
+            review_scroll_action(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL)),
+            Some(ReviewScrollAction::Up(1))
         );
         assert_eq!(
-            intent_review_scroll_action(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT)),
-            Some(IntentReviewScrollAction::Down(1))
+            review_scroll_action(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT)),
+            Some(ReviewScrollAction::Down(1))
         );
         assert_eq!(
-            intent_review_scroll_action(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            review_scroll_action(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+            Some(ReviewScrollAction::Up(1))
+        );
+        assert_eq!(
+            review_scroll_action(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)),
+            Some(ReviewScrollAction::Down(1))
+        );
+        assert_eq!(
+            review_scroll_action(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
             None
         );
         assert_eq!(
-            intent_review_scroll_action(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            review_scroll_action(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
             None
         );
     }

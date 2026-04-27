@@ -240,7 +240,6 @@ pub fn apply_hunks(hunks: &[Hunk], cwd: &Path) -> Result<ApplyResult, ApplyPatch
 }
 
 struct AppliedPatch {
-    #[allow(dead_code)]
     original_contents: String,
     new_contents: String,
 }
@@ -335,14 +334,21 @@ fn compute_replacements(
         // located reliably.
 
         let mut pattern: &[String] = &chunk.old_lines;
+        let mut new_slice: &[String] = &chunk.new_lines;
+        if let Some(ctx_line) = &chunk.change_context
+            && pattern.first().is_some_and(|line| line == ctx_line)
+            && new_slice.first().is_some_and(|line| line == ctx_line)
+        {
+            pattern = &pattern[1..];
+            new_slice = &new_slice[1..];
+        }
+
         let mut found = super::seek_sequence::seek_sequence(
             original_lines,
             pattern,
             line_index,
             chunk.is_end_of_file,
         );
-
-        let mut new_slice: &[String] = &chunk.new_lines;
 
         if found.is_none() && pattern.last().is_some_and(String::is_empty) {
             // Retry without the trailing empty line which represents the final
@@ -691,6 +697,33 @@ mod tests {
         assert_eq!(result, expected);
         let contents = fs::read_to_string(&path).unwrap();
         assert_eq!(contents, "foo\nbaz\n");
+    }
+
+    #[test]
+    fn test_update_file_hunk_tolerates_repeated_context_after_context_marker() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("main.rs");
+        fs::write(&path, "fn main() {\n    println!(\"Hello, world!\");\n}\n").unwrap();
+        let patch = wrap_patch(&format!(
+            r#"*** Update File: {}
+@@ fn main() {{
+ fn main() {{
+-    println!("Hello, world!");
++    println!("code");
+ }}"#,
+            path.display()
+        ));
+
+        let result = apply_patch(&patch, dir.path()).unwrap();
+
+        let expected = AffectedPaths {
+            added: vec![],
+            modified: vec![path.clone()],
+            deleted: vec![],
+        };
+        assert_eq!(result, expected);
+        let contents = fs::read_to_string(&path).unwrap();
+        assert_eq!(contents, "fn main() {\n    println!(\"code\");\n}\n");
     }
 
     #[test]

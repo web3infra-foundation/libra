@@ -1,3 +1,10 @@
+//! Derived record creation for projecting runtime phase outputs into auditable AI
+//! history objects.
+//!
+//! Boundary: derived records must be deterministic from runtime inputs so replay and
+//! migration checks can compare object graphs. Storage-flow and schema-migration tests
+//! exercise missing artifacts, duplicate IDs, and validation decisions.
+
 use anyhow::{Context, Result};
 use chrono::Utc;
 use sea_orm::{ActiveValue::Set, ConnectionTrait, EntityTrait, sea_query::OnConflict};

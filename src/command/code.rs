@@ -49,6 +49,11 @@
 //!
 //! Conversation history is persisted via `SessionStore` under the `.libra/` storage
 //! directory, supporting `--resume <thread_id>` to continue a canonical Libra thread.
+//!
+//! Cross-references for agents extending this command:
+//! - Agent workflow and object model: `docs/agent/agent-workflow.md`
+//! - MCP upgrade and transport notes: `docs/agent/mcp-upgrade-report.md`
+//! - IntentSpec contract examples: `docs/agent/intentspec_typical.yaml`
 
 use std::{
     collections::BTreeMap,
@@ -118,7 +123,7 @@ use crate::{
                     ApplyPatchHandler, GrepFilesHandler, ListDirHandler, McpBridgeHandler,
                     PlanHandler, ReadFileHandler, RequestUserInputHandler, SearchFilesHandler,
                     ShellHandler, SubmitIntentDraftHandler, SubmitPlanDraftHandler,
-                    WebSearchHandler,
+                    SubmitTaskCompleteHandler, WebSearchHandler,
                 },
             },
             web::{
@@ -464,6 +469,19 @@ pub struct CodeArgs {
 /// Validates CLI flag combinations, then dispatches to one of three mode-specific
 /// execution paths: stdio (MCP over stdin/stdout), web-only (headless HTTP servers),
 /// or TUI (full interactive terminal with background servers).
+///
+/// # Side Effects
+/// - May start local web, MCP, and Codex app-server processes depending on mode.
+/// - May create `.libra/objects` and connect to `.libra/libra.db` for history.
+/// - In TUI mode, may mutate the workspace through registered tools, subject to
+///   sandbox and approval policy.
+/// - In stdio mode, owns stdin/stdout for the MCP session.
+///
+/// # Errors
+/// Returns [`CliError`] for invalid mode combinations, provider credential
+/// failures, network bind failures, Codex app-server startup failures, or
+/// terminal/session initialization failures. Error classification follows
+/// `docs/development/cli-error-contract-design.md`.
 pub async fn execute(args: CodeArgs, output: &OutputConfig) -> CliResult<()> {
     validate_mode_args(&args, output).map_err(CliError::command_usage)?;
     if args.stdio {
@@ -516,6 +534,17 @@ impl McpServerHandle {
 /// Blocks on `Ctrl-C`, then performs graceful shutdown of both servers.
 /// This mode is useful for remote/headless environments where the user
 /// interacts through a browser or external MCP client.
+///
+/// # Side Effects
+/// - Starts the embedded web server and Streamable HTTP MCP server.
+/// - For the Codex provider, starts and later shuts down a managed Codex
+///   app-server child process.
+/// - Prints connection details to stdout and listens for `Ctrl-C`.
+///
+/// # Errors
+/// Returns [`CliError`] when the working directory cannot be resolved, the web
+/// or MCP listener cannot bind, the Codex app-server fails to start, or the
+/// selected host would expose loopback-only browser control.
 async fn execute_web_only(args: &CodeArgs) -> CliResult<()> {
     let working_dir = resolve_code_working_dir(args)?;
     let mcp_server = init_mcp_server(&working_dir).await;
@@ -755,6 +784,18 @@ fn provider_env_value_with_lookup(
 ///
 /// This function handles provider-specific client creation (API key validation,
 /// model selection) and delegates the actual TUI lifecycle to [`run_tui_with_model`].
+///
+/// # Side Effects
+/// - Reads provider credentials from environment variables and optional dotenv
+///   files.
+/// - Registers local file, shell, planning, and MCP bridge tools for the agent.
+/// - May start web/MCP background services and a managed Codex app-server.
+/// - May mutate the workspace through tools when the selected context permits it.
+///
+/// # Errors
+/// Returns [`CliError`] for missing credentials, invalid provider configuration,
+/// unsafe mode/host combinations, provider bootstrap failures, or failures from
+/// the shared TUI lifecycle.
 async fn execute_tui(args: CodeArgs) -> CliResult<()> {
     let working_dir = resolve_code_working_dir(&args)?;
     let env_file = load_code_env_file(args.env_file.as_deref())?;
@@ -800,7 +841,10 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
         .and_then(|thread_id| Uuid::parse_str(thread_id).ok())
         .unwrap_or_else(Uuid::new_v4);
 
-    // Prepare MCP server instance shared between the HTTP transport and TUI bridge
+    // Prepare MCP server instance shared between the HTTP transport and TUI bridge.
+    // INVARIANT: the same server instance backs both transports so an agent sees
+    // one coherent history/object store regardless of whether a tool is invoked
+    // through HTTP MCP or the in-process TUI bridge.
     let mcp_server = init_mcp_server(&working_dir).await;
 
     // Create the bridge channel for request_user_input tool <-> TUI communication.
@@ -808,7 +852,12 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
     let (exec_approval_tx, exec_approval_rx) =
         tokio::sync::mpsc::unbounded_channel::<ExecApprovalRequest>();
 
-    // Build registry: basic file tools + MCP workflow tools
+    // Build registry: basic file tools + MCP workflow tools.
+    //
+    // AI user story: let a coding agent inspect files, search context, make
+    // bounded edits, run verification commands, ask the human for missing
+    // choices, and record structured planning artifacts without leaving the
+    // sandbox/approval model.
     let mut builder = ToolRegistryBuilder::with_working_dir(working_dir.clone())
         .hardening(ToolBoundaryRuntime::system(
             trace_id,
@@ -824,11 +873,16 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
         .register("update_plan", Arc::new(PlanHandler))
         .register("submit_intent_draft", Arc::new(SubmitIntentDraftHandler))
         .register("submit_plan_draft", Arc::new(SubmitPlanDraftHandler))
+        .register("submit_task_complete", Arc::new(SubmitTaskCompleteHandler))
         .register(
             "request_user_input",
             Arc::new(RequestUserInputHandler::new(user_input_tx.clone())),
         );
 
+    // AI user story: MCP bridge tools let the agent persist intent/task/run,
+    // evidence, provenance, and Libra VCS operations in the same workflow graph
+    // that external MCP clients use. Keep these names aligned with
+    // `docs/agent/intentspec_typical.yaml` and `docs/agent/agent-workflow.md`.
     for (name, handler) in McpBridgeHandler::all_handlers(mcp_server.clone()) {
         builder = builder.register(name, handler);
     }
@@ -1516,6 +1570,18 @@ async fn load_code_ui_projection_bundle(
 /// 6. Restore or create a new session.
 /// 7. Run the `App` event loop until the user exits.
 /// 8. Gracefully shut down all background servers.
+///
+/// # Side Effects
+/// - Switches the terminal into TUI mode and restores it on exit.
+/// - Starts background web and MCP listeners when their ports are available.
+/// - Reads hook, slash-command, profile, session, and projection state from the
+///   working directory.
+/// - Persists session updates and may drive tool-mediated workspace writes.
+///
+/// # Errors
+/// Returns [`CliError`] for terminal initialization failures, invalid resume
+/// thread IDs, missing sessions, session/projection load failures, or fatal app
+/// exits reported by the TUI event loop.
 async fn run_tui_with_model<M>(
     model: M,
     params: TuiLaunchConfig,
@@ -1587,13 +1653,15 @@ where
         ..Default::default()
     };
 
-    // Initialize terminal
+    // Initialize terminal.
     let terminal = match tui_init() {
         Ok(t) => t,
         Err(e) => return Err(CliError::io(format!("failed to initialize terminal: {e}"))),
     };
 
-    // Ensure terminal is restored on exit
+    // INVARIANT: every successful `tui_init` must install this guard before any
+    // await point that can fail, otherwise a later error could leave the user's
+    // terminal in raw/alternate-screen mode.
     let _guard = scopeguard::guard((), |_| {
         let _ = tui_restore();
     });
@@ -1903,6 +1971,16 @@ fn default_tui_runtime_context(
 /// Sets up the local object storage directory and SQLite database under the
 /// `.libra/` storage root. If any step fails (directory creation, DB connection),
 /// falls back to a read-only MCP server with history disabled, printing a warning.
+///
+/// # Side Effects
+/// - Creates the local object storage directory when possible.
+/// - Opens a SQLite connection for intent/run history when the DB path is usable.
+/// - Prints warnings to stderr before falling back to history-disabled mode.
+///
+/// # Errors
+/// This helper intentionally does not return errors. It converts storage/DB
+/// setup failures into a read-only MCP server so AI clients can still inspect
+/// files and continue a degraded session.
 async fn init_mcp_server(working_dir: &std::path::Path) -> Arc<LibraMcpServer> {
     let storage_dir = resolve_storage_root(working_dir);
     let objects_dir = storage_dir.join("objects");
@@ -1984,6 +2062,14 @@ pub(crate) fn resolve_storage_root(working_dir: &std::path::Path) -> std::path::
 /// Claude Desktop) that communicate via the Model Context Protocol over pipes.
 ///
 /// Blocks until the MCP session ends (client disconnects or EOF on stdin).
+///
+/// # Side Effects
+/// - Takes ownership of process stdin/stdout for the MCP transport.
+/// - Initializes the same history/object-backed MCP server used by other modes.
+///
+/// # Errors
+/// Returns [`CliError`] when working-dir resolution fails, the MCP server cannot
+/// start on stdio, or the running MCP session reports an unrecoverable error.
 async fn execute_stdio(args: &CodeArgs) -> CliResult<()> {
     let working_dir = resolve_code_working_dir(args)?;
 

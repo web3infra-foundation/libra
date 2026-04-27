@@ -1,3 +1,9 @@
+//! Decision logic for accepting, rejecting, or requesting revisions during an AI run.
+//!
+//! Boundary: decider consumes evidence and validation reports; it must not execute
+//! tools or mutate workspaces. Validation decision-flow tests cover accepted, rejected,
+//! and needs-revision branches.
+
 use super::{
     run_state::RunStateSnapshot,
     types::{DecisionOutcome, SystemReport, TaskNodeStatus},

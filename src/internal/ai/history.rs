@@ -1,3 +1,34 @@
+//! AI workflow history persistence backed by an orphan Git branch.
+//!
+//! Libra records every AI process artefact (Intent, Task, Run, Plan,
+//! PatchSet, Evidence, ToolInvocation, Provenance, Decision, ContextFrame,
+//! ...) on a parallel branch named [`AI_REF`] (`libra/intent`). The branch
+//! is *orphan*: it shares no history with the user's code branches but
+//! lives inside the same object database, which means:
+//!
+//! * The same `git gc` policy keeps both AI history and code history
+//!   reachable.
+//! * AI artefacts are content-addressed under standard Git rules and can be
+//!   transferred via the same protocol as the rest of the repository.
+//!
+//! Each commit on this ref points to a tree that is partitioned by object
+//! type (`intent/`, `task/`, `plan/`, ...), with one blob per object id
+//! beneath the type subtree. The flow for `append` is:
+//!
+//! 1. Read the current head (with retry on a busy SQLite) — see
+//!    [`HistoryManager::resolve_history_head`].
+//! 2. Load that head's root tree, splice the new entry in beneath its type
+//!    subtree, write a fresh root tree, and create a child commit — see
+//!    [`HistoryManager::create_append_commit`].
+//! 3. Compare-and-swap the ref forward, retrying on a stale head — see
+//!    [`HistoryManager::update_ref_if_matches`].
+//!
+//! Concurrency is handled via two retry loops: a SQLite-busy retry that
+//! covers transient lock contention, and a head-conflict retry that re-reads
+//! the head and retries the splice when another process advanced the ref.
+//! Both loops have bounded iteration counts so misuse cannot deadlock the
+//! caller.
+
 use std::{path::PathBuf, str::FromStr, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
@@ -35,21 +66,54 @@ use crate::{
 ///
 /// In the database, this is stored with kind='Branch' and name='libra/intent'.
 pub const AI_REF: &str = "libra/intent";
+/// Maximum attempts to retry a SQLite operation that returns a transient
+/// "database is locked" error before propagating the failure.
 const SQLITE_BUSY_MAX_RETRIES: usize = 15;
+/// Base delay (ms) for the linear backoff applied between SQLite-busy retries.
+/// The actual delay is `BASE * attempt`, so the worst-case wait is roughly
+/// `BASE * SUM(1..=MAX_RETRIES)` which keeps total time bounded.
 const SQLITE_BUSY_RETRY_BASE_MS: u64 = 100;
+/// Maximum attempts to re-read the history head and retry a splice when a
+/// concurrent writer advances the ref between read and CAS. The bound is
+/// generous because each retry is purely local (no network I/O).
 const HISTORY_HEAD_CONFLICT_MAX_RETRIES: usize = 32;
 
+/// Outcome of a compare-and-swap reference update.
+///
+/// Used by [`HistoryManager::update_ref_if_matches`] to communicate whether
+/// the ref moved successfully (`Updated`) or whether the expected head was
+/// stale and the caller must restart the splice (`HeadChanged`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RefUpdateOutcome {
+    /// The ref was atomically advanced to the new commit.
     Updated,
+    /// Another writer advanced the ref before our CAS — caller should
+    /// re-read the head and rebuild the commit on top of it.
     HeadChanged,
 }
 
+/// Detect transient SQLite contention that should trigger a retry.
+///
+/// Functional scope:
+/// - Inspects the error message for the well-known "database is locked" or
+///   "database schema is locked" substrings emitted by SQLite under busy
+///   contention.
+///
+/// Boundary conditions:
+/// - This is intentionally a string match: the SeaORM error wraps the
+///   underlying SQLite text, and there is no stable error-code variant for
+///   busy/lock conditions in the wrapping layer.
 fn is_sqlite_busy(err: &DbErr) -> bool {
     let message = err.to_string();
     message.contains("database is locked") || message.contains("database schema is locked")
 }
 
+/// Detect unique-constraint violations on the `reference` table.
+///
+/// Functional scope:
+/// - Used by the optimistic CAS path: when two writers race to insert the
+///   same ref name, one will see a unique-constraint violation; we treat
+///   that as a `HeadChanged` outcome rather than a hard error.
 fn is_sqlite_unique_violation(err: &DbErr) -> bool {
     matches!(err.sql_err(), Some(SqlErr::UniqueConstraintViolation(_)))
 }
@@ -70,6 +134,11 @@ fn is_sqlite_unique_violation(err: &DbErr) -> bool {
 ///   ├── plan/
 ///   │   └── <plan_id>
 ///   └── …
+///
+/// The manager is cheap to clone (all state lives behind `Arc` or owned
+/// `String`/`PathBuf`) and is safe to share across async tasks. Concurrent
+/// `append` calls on the same manager are serialised via the SQLite-side
+/// CAS in [`Self::update_ref_if_matches`].
 pub struct HistoryManager {
     #[allow(dead_code)]
     storage: Arc<dyn Storage + Send + Sync>,
@@ -80,6 +149,11 @@ pub struct HistoryManager {
 }
 
 impl HistoryManager {
+    /// Build a manager bound to the canonical [`AI_REF`].
+    ///
+    /// Functional scope:
+    /// - Convenience constructor that delegates to [`Self::new_with_ref`]
+    ///   with the standard `libra/intent` branch.
     pub fn new(
         storage: Arc<dyn Storage + Send + Sync>,
         repo_path: PathBuf,
@@ -88,6 +162,17 @@ impl HistoryManager {
         Self::new_with_ref(storage, repo_path, db_conn, AI_REF)
     }
 
+    /// Build a manager bound to an arbitrary ref name.
+    ///
+    /// Functional scope:
+    /// - Used by tests and tooling that need to write a parallel AI history
+    ///   under a custom ref (e.g. for staging, comparison, or namespace
+    ///   isolation).
+    ///
+    /// Boundary conditions:
+    /// - The ref name is not validated here; callers must ensure it is a
+    ///   legal Git ref. The CAS path will fail loudly if the database
+    ///   constraint rejects it.
     pub fn new_with_ref(
         storage: Arc<dyn Storage + Send + Sync>,
         repo_path: PathBuf,
@@ -102,6 +187,12 @@ impl HistoryManager {
         }
     }
 
+    /// Hand back a clone of the underlying SeaORM connection.
+    ///
+    /// Functional scope:
+    /// - Convenience accessor for callers that need to issue auxiliary
+    ///   queries against the same database (e.g. listing references for the
+    ///   TUI) without having to thread a separate `Arc` around.
     pub fn database_connection(&self) -> DatabaseConnection {
         self.db_conn.as_ref().clone()
     }
@@ -111,6 +202,19 @@ impl HistoryManager {
     /// This should be called once during `libra init` so that the AI ref
     /// exists from the start (parallel to `refs/heads/<branch>`).
     /// If the ref already exists this is a no-op.
+    ///
+    /// Functional scope:
+    /// - Writes a single empty-tree commit and points the ref at it. The
+    ///   commit has no parents (it is the root of the orphan branch) and
+    ///   uses the canonical `Libra <ai@libra>` signatures so authorship is
+    ///   traceable.
+    ///
+    /// Boundary conditions:
+    /// - Returns early if the ref already exists; this makes the call
+    ///   idempotent and safe to invoke from `libra init` regardless of
+    ///   whether previous initialisations completed.
+    /// - Surfaces errors from object serialisation, blob writing, or the
+    ///   ref CAS so the caller can present an actionable message.
     pub async fn init_branch(&self) -> Result<()> {
         // Already initialised — nothing to do.
         if self.resolve_history_head().await?.is_some() {
@@ -149,12 +253,37 @@ impl HistoryManager {
     }
 
     /// Return the ref name this manager writes to.
+    ///
+    /// Functional scope:
+    /// - Useful for diagnostics, log messages, and TUI labels that need to
+    ///   present the active AI history branch to the user.
     pub fn ref_name(&self) -> &str {
         &self.ref_name
     }
 
     /// Append an object to the history log.
     /// This operation is synchronous (commits immediately) for the MVP.
+    ///
+    /// Functional scope:
+    /// - Implements the read-merge-CAS loop:
+    ///   1. Read the current head.
+    ///   2. Write a new commit that adds `<object_type>/<object_id>`
+    ///      (replacing any prior entry under that path).
+    ///   3. CAS the ref forward.
+    /// - Reuses [`Self::create_append_commit`] for splice logic and
+    ///   [`Self::update_ref_if_matches`] for the optimistic ref update.
+    ///
+    /// Boundary conditions:
+    /// - Retries up to [`HISTORY_HEAD_CONFLICT_MAX_RETRIES`] times when a
+    ///   concurrent writer advances the ref between read and CAS. After the
+    ///   bound is exhausted the call fails with a contextual error so the
+    ///   caller can decide whether to back off and retry.
+    /// - The intermediate commit objects from failed CAS attempts remain in
+    ///   the object database as garbage; they are unreachable and will be
+    ///   collected by the next `libra gc` cycle.
+    ///
+    /// See: `tests::test_history_append_simple` and
+    /// `tests::test_update_ref_if_matches_rejects_stale_history_head`.
     pub async fn append(
         &self,
         object_type: &str,
@@ -162,10 +291,14 @@ impl HistoryManager {
         blob_hash: ObjectHash,
     ) -> Result<()> {
         for attempt in 0..=HISTORY_HEAD_CONFLICT_MAX_RETRIES {
+            // Phase 1: snapshot the head we are racing against.
             let parent_commit_id = self.resolve_history_head().await?;
+            // Phase 2: build the new commit on top of the snapshot.
             let commit_hash =
                 self.create_append_commit(parent_commit_id, object_type, object_id, blob_hash)?;
 
+            // Phase 3: atomically advance the ref iff its current value still
+            // equals the snapshot. On `HeadChanged`, restart from phase 1.
             match self
                 .update_ref_if_matches(&self.ref_name, parent_commit_id, commit_hash)
                 .await?
@@ -188,6 +321,16 @@ impl HistoryManager {
     }
 
     /// Retrieve the object hash for a given type and ID from the current history.
+    ///
+    /// Functional scope:
+    /// - Resolves the head commit, walks `<root_tree>/<object_type>/<object_id>`,
+    ///   and returns the leaf blob hash if it exists.
+    ///
+    /// Boundary conditions:
+    /// - Returns `Ok(None)` when the ref is not initialised, when no
+    ///   subtree exists for `object_type`, or when the `object_id` entry is
+    ///   missing under that subtree.
+    /// - Surfaces `Err` only for object-store / parse failures.
     pub async fn get_object_hash(
         &self,
         object_type: &str,
@@ -208,11 +351,32 @@ impl HistoryManager {
 
     /// Find an object by ID across all types in the history.
     /// Returns (hash, type).
+    ///
+    /// Functional scope:
+    /// - Convenience wrapper around [`Self::find_object_hashes`] that
+    ///   returns only the first match.
+    ///
+    /// Boundary conditions:
+    /// - When the same object id exists under multiple type subtrees the
+    ///   caller has no control over which is chosen; use
+    ///   [`Self::find_object_hashes`] when a deterministic tie-break is
+    ///   required.
     pub async fn find_object_hash(&self, object_id: &str) -> Result<Option<(ObjectHash, String)>> {
         Ok(self.find_object_hashes(object_id).await?.into_iter().next())
     }
 
     /// Find all objects that share the same object ID across history types.
+    ///
+    /// Functional scope:
+    /// - Walks every type subtree under the head root tree and collects
+    ///   `(blob_hash, type_name)` tuples for every subtree containing
+    ///   `object_id`.
+    ///
+    /// Boundary conditions:
+    /// - Returns an empty vector when the ref is not initialised or the id
+    ///   does not appear under any type.
+    ///
+    /// See: `tests::test_find_object_hashes_returns_all_matching_types`.
     pub async fn find_object_hashes(&self, object_id: &str) -> Result<Vec<(ObjectHash, String)>> {
         let parent_commit_id = self.resolve_history_head().await?;
         if let Some(parent_id) = parent_commit_id {
@@ -231,6 +395,14 @@ impl HistoryManager {
 
     /// List all objects of a specific type from the current history.
     /// Returns a list of (object_id, object_hash).
+    ///
+    /// Functional scope:
+    /// - Loads the head commit's `<object_type>` subtree and yields its
+    ///   contents as `(name, blob_hash)` pairs in tree-order.
+    ///
+    /// Boundary conditions:
+    /// - Returns an empty vector when the ref is not initialised or no
+    ///   subtree exists for `object_type`.
     pub async fn list_objects(&self, object_type: &str) -> Result<Vec<(String, ObjectHash)>> {
         let parent_commit_id = self.resolve_history_head().await?;
         if let Some(parent_id) = parent_commit_id {
@@ -247,6 +419,17 @@ impl HistoryManager {
     }
 
     /// List all object types present at the current history head.
+    ///
+    /// Functional scope:
+    /// - Returns the names of every top-level subtree under the head root,
+    ///   sorted lexicographically for stable output.
+    ///
+    /// Boundary conditions:
+    /// - Returns an empty vector when the ref is not initialised. The empty
+    ///   tree case (initialised ref with no objects) likewise yields an
+    ///   empty vector.
+    ///
+    /// See: `tests::test_list_object_types_returns_sorted_types`.
     pub async fn list_object_types(&self) -> Result<Vec<String>> {
         let parent_commit_id = self.resolve_history_head().await?;
         if let Some(parent_id) = parent_commit_id {
@@ -257,6 +440,22 @@ impl HistoryManager {
         Ok(Vec::new())
     }
 
+    /// Resolve the current head commit of the AI history ref.
+    ///
+    /// Functional scope:
+    /// - Queries the `reference` table for the row that matches
+    ///   `(name=ref_name, kind=Branch)` and parses its `commit` column into
+    ///   an [`ObjectHash`].
+    /// - Tolerates transient SQLite-busy errors with a bounded linear
+    ///   backoff governed by [`SQLITE_BUSY_MAX_RETRIES`] /
+    ///   [`SQLITE_BUSY_RETRY_BASE_MS`].
+    ///
+    /// Boundary conditions:
+    /// - Returns `Ok(None)` when the ref row is missing or its `commit`
+    ///   column is `NULL` (the ref exists but points nowhere yet).
+    /// - Returns `Err` if the stored commit string is not a valid object
+    ///   hash — this indicates database corruption and the caller should
+    ///   surface it rather than silently treating it as missing.
     pub async fn resolve_history_head(&self) -> Result<Option<ObjectHash>> {
         let mut attempt = 0;
         let ref_model = loop {
@@ -269,6 +468,7 @@ impl HistoryManager {
                 Ok(found) => break found,
                 Err(err) if is_sqlite_busy(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
                     attempt += 1;
+                    // Linear backoff (BASE * attempt) — see SQLITE_BUSY_* constants.
                     sleep(Duration::from_millis(
                         SQLITE_BUSY_RETRY_BASE_MS * attempt as u64,
                     ))
@@ -289,6 +489,17 @@ impl HistoryManager {
         }
     }
 
+    /// Load the root tree of a commit by parsing its `tree <hash>` header
+    /// line.
+    ///
+    /// Functional scope:
+    /// - Reads the commit blob, scans its text lines for the leading
+    ///   `tree ` header, parses the referenced tree, and returns its items.
+    ///
+    /// Boundary conditions:
+    /// - Returns an error when the commit blob is missing the `tree`
+    ///   header. That should never happen for objects we wrote ourselves
+    ///   but we guard against repository corruption.
     fn load_commit_tree(&self, commit_id: &ObjectHash) -> Result<Vec<TreeItem>> {
         let data = read_git_object(&self.repo_path, commit_id)?;
         // Commit format: tree <hash>\nparent...
@@ -303,6 +514,12 @@ impl HistoryManager {
         Err(anyhow!("Commit has no tree"))
     }
 
+    /// Load and parse a tree object's items.
+    ///
+    /// Functional scope:
+    /// - Thin wrapper around `Tree::from_bytes` for the AI-history call
+    ///   sites; centralised so all tree reads go through the same error
+    ///   path.
     fn load_tree(&self, tree_id: &ObjectHash) -> Result<Vec<TreeItem>> {
         let data = read_git_object(&self.repo_path, tree_id)?;
 
@@ -310,6 +527,21 @@ impl HistoryManager {
         Ok(tree.tree_items)
     }
 
+    /// Serialise tree items into Git's binary tree format and persist as
+    /// an object.
+    ///
+    /// Functional scope:
+    /// - Encodes each item as `<mode> <name>\0<binary_hash>` per the Git
+    ///   tree spec, concatenates them in caller-provided order, and writes
+    ///   the bytes to the object database under type `tree`.
+    ///
+    /// Boundary conditions:
+    /// - Items must already be sorted by the caller (`append`/the splice
+    ///   helpers do this). Unsorted items would still parse but would
+    ///   produce a different tree hash than canonical Git.
+    /// - Rejects hashes whose binary length is not 20 (SHA-1) or 32
+    ///   (SHA-256) — protection against malformed inputs that would
+    ///   otherwise corrupt the object store.
     fn write_tree(&self, tree_items: &[TreeItem]) -> Result<ObjectHash> {
         let mut data = Vec::new();
         for item in tree_items {
@@ -327,6 +559,8 @@ impl HistoryManager {
             let hash_hex = item.id.to_string();
             let hash_bytes =
                 hex::decode(&hash_hex).map_err(|e| anyhow!("Invalid hash hex: {}", e))?;
+            // 20 bytes for SHA-1, 32 for SHA-256. Anything else is a
+            // signal that we are about to corrupt the object database.
             if hash_bytes.len() != 20 && hash_bytes.len() != 32 {
                 return Err(anyhow!("Invalid object hash length: {}", hash_bytes.len()));
             }

@@ -1,12 +1,13 @@
 //! Test support utilities including change-dir guards, repository setup/cleanup helpers, fixture copying, and isolated command execution helpers.
 
 use std::{
+    cell::Cell,
     env,
     ffi::{OsStr, OsString},
     fs,
     io::Write,
     path::{Path, PathBuf},
-    sync::Once,
+    sync::{Condvar, Mutex, Once, OnceLock},
 };
 
 use tracing::level_filters::LevelFilter;
@@ -18,6 +19,95 @@ use crate::{
 };
 
 static MARK_TEST_NON_INTERACTIVE: Once = Once::new();
+
+static CWD_LOCK: OnceLock<CwdLock> = OnceLock::new();
+thread_local! {
+    static CWD_LOCK_OWNER: Cell<Option<u64>> = const { Cell::new(None) };
+}
+
+struct CwdLock {
+    state: Mutex<CwdLockState>,
+    available: Condvar,
+}
+
+struct CwdLockState {
+    owner: Option<u64>,
+    depth: usize,
+    next_owner: u64,
+}
+
+struct CwdLockGuard {
+    lock: &'static CwdLock,
+    owner: u64,
+}
+
+impl CwdLock {
+    fn acquire(&'static self) -> CwdLockGuard {
+        let current_owner = CWD_LOCK_OWNER.with(Cell::get);
+        let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+
+        loop {
+            match state.owner {
+                None => {
+                    let owner = state.next_owner;
+                    state.next_owner = state.next_owner.wrapping_add(1).max(1);
+                    state.owner = Some(owner);
+                    state.depth = 1;
+                    CWD_LOCK_OWNER.with(|current| current.set(Some(owner)));
+                    return CwdLockGuard { lock: self, owner };
+                }
+                Some(owner) if Some(owner) == current_owner => {
+                    state.depth += 1;
+                    return CwdLockGuard { lock: self, owner };
+                }
+                Some(_) => {
+                    state = self
+                        .available
+                        .wait(state)
+                        .unwrap_or_else(|err| err.into_inner());
+                }
+            }
+        }
+    }
+
+    fn release(&self, owner: u64) {
+        let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+
+        if state.owner != Some(owner) {
+            return;
+        }
+
+        state.depth -= 1;
+        if state.depth == 0 {
+            state.owner = None;
+            self.available.notify_one();
+            CWD_LOCK_OWNER.with(|current| {
+                if current.get() == Some(owner) {
+                    current.set(None);
+                }
+            });
+        }
+    }
+}
+
+impl Drop for CwdLockGuard {
+    fn drop(&mut self) {
+        self.lock.release(self.owner);
+    }
+}
+
+fn cwd_lock() -> CwdLockGuard {
+    CWD_LOCK
+        .get_or_init(|| CwdLock {
+            state: Mutex::new(CwdLockState {
+                owner: None,
+                depth: 0,
+                next_owner: 1,
+            }),
+            available: Condvar::new(),
+        })
+        .acquire()
+}
 
 pub struct ScopedEnvVar {
     key: String,
@@ -51,13 +141,15 @@ impl Drop for ScopedEnvVar {
 
 pub struct ChangeDirGuard {
     old_dir: PathBuf,
+    _cwd_lock: CwdLockGuard,
 }
 
 impl ChangeDirGuard {
     /// Creates a new `ChangeDirGuard` that changes the current directory to `new_dir`.
     /// This will automatically change the directory back to the original one when the guard is dropped.
     ///
-    /// However, it **MUST** be used in a single-threaded context.
+    /// The guard serializes process-wide current-directory changes so parallel
+    /// tests using `ChangeDirGuard` do not observe each other's repositories.
     ///
     /// # Arguments
     ///
@@ -68,9 +160,13 @@ impl ChangeDirGuard {
     /// * A `ChangeDirGuard` instance that will change the directory back to the original one when dropped.
     ///
     pub fn new(new_dir: impl AsRef<Path>) -> Self {
+        let cwd_lock = cwd_lock();
         let old_dir = env::current_dir().unwrap_or_else(|_| find_cargo_dir());
         env::set_current_dir(new_dir).unwrap();
-        Self { old_dir }
+        Self {
+            old_dir,
+            _cwd_lock: cwd_lock,
+        }
     }
 }
 

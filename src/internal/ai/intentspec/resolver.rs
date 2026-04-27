@@ -1,3 +1,10 @@
+//! Resolver that locates IntentSpecs from user-supplied identifiers, stored objects,
+//! or active scheduler context.
+//!
+//! Boundary: resolution should be deterministic and must distinguish "not found" from
+//! malformed IDs so callers can show actionable errors. MCP and intent-flow tests cover
+//! plain UUIDs, prefixed object IDs, and absent references.
+
 use std::{
     collections::{BTreeMap, HashSet},
     path::{Path, PathBuf},

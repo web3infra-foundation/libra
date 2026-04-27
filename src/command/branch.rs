@@ -1,4 +1,20 @@
-//! Branch management utilities for creating, deleting, listing, and switching branches while handling upstream metadata.
+//! Branch management subcommand (`libra branch`).
+//!
+//! Implements creation, deletion, listing, renaming, upstream tracking, and
+//! current-branch reporting. The single [`run_branch`] entry inspects the
+//! parsed [`BranchArgs`] and delegates to one of the `*_impl` helpers.
+//!
+//! Non-obvious responsibilities:
+//! - Maps [`branch::BranchStoreError`] to the local [`BranchError`] domain so
+//!   the CLI surface is decoupled from the storage layer; see
+//!   `map_branch_store_error`.
+//! - For deletes, walks reachable commits from HEAD via
+//!   [`get_reachable_commits`] to detect "not fully merged" branches before
+//!   permitting deletion (skipped under `-D`).
+//! - Suggests near-matches via Levenshtein distance when the user names a
+//!   missing branch.
+//! - For listing, supports `--contains` / `--no-contains` commit filters
+//!   that BFS-walk the commit graph from each branch tip.
 
 use std::collections::{HashSet, VecDeque};
 
@@ -25,9 +41,13 @@ use crate::{
     },
 };
 
+/// Which branch namespace to enumerate during `libra branch -l`.
 pub enum BranchListMode {
+    /// Only branches stored under `refs/heads/`.
     Local,
+    /// Only branches stored under `refs/remotes/<remote>/`.
     Remote,
+    /// Combined local + remote listing (`-a`).
     All,
 }
 
@@ -45,9 +65,18 @@ EXAMPLES:
                                           Set upstream for the current branch
   libra branch --json --show-current      Structured JSON output for agents";
 
+/// Tagged-union output type for `libra branch`.
+///
+/// Each variant corresponds to one of the action paths in [`run_branch`].
+/// JSON serialisation is driven by `#[serde(tag = "action")]` so each
+/// variant produces an object with a distinct `"action"` field.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "action")]
 pub enum BranchOutput {
+    /// Result of a list operation. The `head_name`, `detached_head`, and
+    /// `show_unborn_head` fields are skipped from JSON; they only exist to
+    /// drive the human renderer's "*"-prefixed current-branch line and
+    /// detached/unborn HEAD banners.
     #[serde(rename = "list")]
     List {
         branches: Vec<BranchListEntry>,
@@ -58,18 +87,26 @@ pub enum BranchOutput {
         #[serde(skip_serializing)]
         show_unborn_head: bool,
     },
+    /// `branch <name> [base]` succeeded.
     #[serde(rename = "create")]
     Create { name: String, commit: String },
+    /// `-d` / `-D` succeeded. `force = true` corresponds to `-D` (the merged
+    /// check was bypassed).
     #[serde(rename = "delete")]
     Delete {
         name: String,
         commit: String,
         force: bool,
     },
+    /// `-m` succeeded. Both names are recorded so callers can update local
+    /// state references.
     #[serde(rename = "rename")]
     Rename { old_name: String, new_name: String },
+    /// `--set-upstream-to` succeeded. `upstream` is in `remote/branch` form.
     #[serde(rename = "set-upstream")]
     SetUpstream { branch: String, upstream: String },
+    /// `--show-current` result. `detached` is true when HEAD is detached;
+    /// `name` is `None` in that case.
     #[serde(rename = "show-current")]
     ShowCurrent {
         name: Option<String>,
@@ -78,6 +115,8 @@ pub enum BranchOutput {
     },
 }
 
+/// One row in [`BranchOutput::List`]. `display_name` carries the colorised
+/// label for the human renderer and is omitted from JSON.
 #[derive(Debug, Clone, Serialize)]
 pub struct BranchListEntry {
     pub name: String,
@@ -152,20 +191,32 @@ pub struct BranchArgs {
     #[clap(long, group = "query", alias = "without", value_name = "commit", num_args = 0..=1, default_missing_value = "HEAD", action = clap::ArgAction::Append)]
     pub no_contains: Vec<String>,
 }
+/// Fire-and-forget entry: prints the rendered error to stderr but does not
+/// signal exit code.
 pub async fn execute(args: BranchArgs) {
     if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
         err.print_stderr();
     }
 }
 
-/// Safe entry point that returns structured [`CliResult`] instead of printing
-/// errors and exiting. Creates, deletes, renames, or lists branches depending
-/// on the provided arguments.
+/// Structured entry: returns [`CliResult`] for the dispatcher.
+///
+/// Functional scope:
+/// - Runs [`run_branch`] then forwards to [`render_branch_output`].
+///
+/// Boundary conditions:
+/// - All [`BranchError`] variants are mapped to [`CliError`] via the
+///   `From` impl which sets stable codes and hints.
 pub async fn execute_safe(args: BranchArgs, output: &OutputConfig) -> CliResult<()> {
     let result = run_branch(&args).await.map_err(CliError::from)?;
     render_branch_output(&result, output)
 }
 
+/// Domain error for `libra branch`.
+///
+/// `DelegatedCli` exists to forward already-built [`CliError`]s (typically
+/// from upstream helpers like [`get_reachable_commits`]) without
+/// double-wrapping their stable codes.
 #[derive(Debug, thiserror::Error)]
 enum BranchError {
     #[error("not a libra repository")]
@@ -308,10 +359,17 @@ impl From<BranchError> for CliError {
     }
 }
 
+/// Sentinel constructor — keeps the call site readable when building errors
+/// at multiple branches that all need the same `DetachedHead` message.
 fn detached_head_branch_error() -> BranchError {
     BranchError::DetachedHead
 }
 
+/// Translate an internal storage error into the user-facing [`BranchError`].
+///
+/// Boundary conditions:
+/// - `NotFound` is mapped without similarity suggestions; callers that want
+///   "did you mean…" hints must use [`branch_not_found_error`] instead.
 fn map_branch_store_error(error: branch::BranchStoreError) -> BranchError {
     match error {
         branch::BranchStoreError::Query(detail) => BranchError::StorageQueryFailed(detail),
@@ -329,6 +387,14 @@ fn map_branch_store_error(error: branch::BranchStoreError) -> BranchError {
     }
 }
 
+/// Translate a storage error encountered while resolving HEAD's commit.
+///
+/// Functional scope:
+/// - Query failures map to `IoReadFailed`; everything else is treated as
+///   structural corruption (`RepoCorrupt`).
+///
+/// See: tests::test_head_commit_query_error_maps_to_io_read_failed in
+/// src/command/branch.rs:1104.
 fn map_head_commit_store_error(error: branch::BranchStoreError) -> BranchError {
     let cli_error = match error {
         branch::BranchStoreError::Query(detail) => {
@@ -341,6 +407,14 @@ fn map_head_commit_store_error(error: branch::BranchStoreError) -> BranchError {
     BranchError::DelegatedCli(cli_error)
 }
 
+/// Suggest a "did you mean…" alternative for `branch_name` based on
+/// Levenshtein distance.
+///
+/// Functional scope:
+/// - Skips candidates whose name length differs by more than 2 chars.
+/// - Returns the single best (lowest distance, lexicographically smallest)
+///   match within distance 2; returns an empty vector if no candidate
+///   qualifies.
 fn find_similar_branch_names(branch_name: &str, branches: &[Branch]) -> Vec<String> {
     let target_len = branch_name.chars().count();
     let mut best: Option<(usize, String)> = None;
@@ -371,6 +445,8 @@ fn find_similar_branch_names(branch_name: &str, branches: &[Branch]) -> Vec<Stri
     best.into_iter().map(|(_, name)| name).collect()
 }
 
+/// Build a `NotFound` error with similarity suggestions; falls back to a
+/// store error if the branch listing itself fails.
 async fn branch_not_found_error(branch_name: &str) -> BranchError {
     match Branch::list_branches_result(None).await {
         Ok(branches) => BranchError::NotFound {
@@ -381,6 +457,8 @@ async fn branch_not_found_error(branch_name: &str) -> BranchError {
     }
 }
 
+/// Resolve `branch_name` to a [`Branch`], returning a friendly NotFound
+/// error (with suggestions) when missing.
 async fn require_existing_local_branch(branch_name: &str) -> Result<Branch, BranchError> {
     match Branch::find_branch_result(branch_name, None)
         .await
@@ -391,11 +469,14 @@ async fn require_existing_local_branch(branch_name: &str) -> Result<Branch, Bran
     }
 }
 
+/// Build a config-read error, prefixing with a human-readable `scope`
+/// (e.g. "remote configuration").
 fn branch_config_read_error(scope: impl Into<String>, error: impl ToString) -> BranchError {
     let scope = scope.into();
     BranchError::ConfigReadFailed(format!("failed to read {scope}: {}", error.to_string()))
 }
 
+/// Build a config-write error tagged with the offending key.
 fn branch_config_write_error(key: &str, error: impl ToString) -> BranchError {
     BranchError::ConfigWriteFailed {
         key: key.to_string(),
@@ -403,6 +484,21 @@ fn branch_config_write_error(key: &str, error: impl ToString) -> BranchError {
     }
 }
 
+/// Persist `branch.<name>.{remote,merge}` for `branch`, tracking
+/// `upstream` (in `remote/branch` form).
+///
+/// Functional scope:
+/// - Splits `upstream` at the first `/` to derive the remote and remote
+///   branch.
+/// - Compares the existing config (if any) to avoid pointless writes — the
+///   stored `merge` value is normalised to the short branch name, so the
+///   comparison is also against the short name even though the stored value
+///   on disk is `refs/heads/<name>`.
+///
+/// Boundary conditions:
+/// - Returns [`BranchError::InvalidUpstream`] when `upstream` lacks a `/`.
+/// - Each underlying SQL failure becomes a [`BranchError::ConfigReadFailed`]
+///   or [`BranchError::ConfigWriteFailed`] keyed by the config key.
 async fn set_upstream_with_conn<C: ConnectionTrait>(
     db: &C,
     branch: &str,
@@ -438,11 +534,26 @@ async fn set_upstream_with_conn<C: ConnectionTrait>(
     Ok(())
 }
 
+/// Convenience wrapper that grabs the global SQLite connection before
+/// calling [`set_upstream_with_conn`].
 async fn set_upstream_impl(branch: &str, upstream: &str) -> Result<(), BranchError> {
     let db = get_db_conn_instance().await;
     set_upstream_with_conn(&db, branch, upstream).await
 }
 
+/// Enumerate every branch stored under each known remote.
+///
+/// Functional scope:
+/// - Reads all `[remote "..."]` sections, then asks the branch store for
+///   branches scoped to each remote, concatenating results.
+///
+/// Boundary conditions:
+/// - Config read failures raise [`BranchError::ConfigReadFailed`].
+/// - Per-remote enumeration failures bubble up as
+///   [`BranchError::StorageQueryFailed`] via [`map_branch_store_error`].
+///
+/// See: tests::test_load_remote_branches_with_conn_surfaces_config_read_failure
+/// in src/command/branch.rs:1090.
 async fn load_remote_branches_with_conn<C: ConnectionTrait>(
     db: &C,
 ) -> Result<Vec<Branch>, BranchError> {
@@ -460,11 +571,26 @@ async fn load_remote_branches_with_conn<C: ConnectionTrait>(
     Ok(remote_branches)
 }
 
+/// Convenience wrapper around [`load_remote_branches_with_conn`] that uses
+/// the process-wide SQLite handle.
 async fn load_remote_branches() -> Result<Vec<Branch>, BranchError> {
     let db = get_db_conn_instance().await;
     load_remote_branches_with_conn(&db).await
 }
 
+/// Body of `libra branch <new> [base]`.
+///
+/// Functional scope:
+/// - Validates the new name, refuses locked names and pre-existing
+///   branches, then resolves either an explicit base ref or HEAD.
+/// - Loads the resolved commit object to confirm it actually exists in the
+///   object store before writing the branch row.
+///
+/// Boundary conditions:
+/// - HEAD with no commit (unborn branch) and no explicit base produces
+///   [`BranchError::InvalidCommit`] tagged with the current HEAD label so
+///   the user sees something actionable.
+/// - Branch-store write failures map to [`BranchError::CreateFailed`].
 async fn create_branch_impl(
     new_branch: String,
     branch_or_commit: Option<String>,
@@ -530,6 +656,17 @@ async fn create_branch_impl(
     })
 }
 
+/// Body of `libra branch -d <name>` / `-D <name>`.
+///
+/// Functional scope:
+/// - Refuses to delete a locked branch or the currently checked-out branch.
+/// - When `force == false`, walks `get_reachable_commits` from HEAD and
+///   ensures the branch tip is reachable; otherwise reports
+///   [`BranchError::NotFullyMerged`] (recoverable failure, exit code stays
+///   non-fatal).
+///
+/// Boundary conditions:
+/// - In detached HEAD mode the merged-check uses the detached commit hash.
 async fn delete_branch_impl(branch_name: String, force: bool) -> Result<BranchOutput, BranchError> {
     if branch::is_locked_branch(&branch_name) {
         return Err(BranchError::Locked(branch_name));
@@ -578,6 +715,18 @@ async fn delete_branch_impl(branch_name: String, force: bool) -> Result<BranchOu
     })
 }
 
+/// Body of `libra branch -m [old] new`.
+///
+/// Functional scope:
+/// - One argument: rename the current branch (errors on detached HEAD).
+/// - Two arguments: rename the named source branch.
+/// - When the rename touches the checked-out branch, HEAD is updated to
+///   point at the new name before deleting the old row.
+///
+/// Boundary conditions:
+/// - Returns [`BranchError::RenameTooManyArgs`] for argv with >2 names.
+/// - Returns [`BranchError::AlreadyExists`] if the destination already
+///   exists; the rename is non-destructive.
 async fn rename_branch_impl(args: &[String]) -> Result<BranchOutput, BranchError> {
     let (old_name, new_name) = match args.len() {
         1 => match Head::current().await {
@@ -628,6 +777,15 @@ async fn rename_branch_impl(args: &[String]) -> Result<BranchOutput, BranchError
     Ok(BranchOutput::Rename { old_name, new_name })
 }
 
+/// Body of `libra branch -l` / `-r` / `-a` (with optional commit filters).
+///
+/// Functional scope:
+/// - Picks a [`BranchListMode`] from `args.all`/`args.remotes`, fetches
+///   the matching branches, and runs [`filter_branches`] for any
+///   `--contains`/`--no-contains` arguments.
+/// - Records HEAD (branch name vs detached commit) so the human renderer
+///   can mark the current branch and emit "HEAD detached at" / "(unborn)"
+///   banners.
 async fn collect_branch_output(args: &BranchArgs) -> Result<BranchOutput, BranchError> {
     let list_mode = if args.all {
         BranchListMode::All
@@ -699,6 +857,16 @@ async fn collect_branch_output(args: &BranchArgs) -> Result<BranchOutput, Branch
     })
 }
 
+/// Top-level dispatcher: pick the right `*_impl` for the parsed args.
+///
+/// Functional scope:
+/// - Honours the clap `action` group: at most one of create/delete/rename/
+///   set-upstream/show-current is taken; the default falls through to
+///   listing.
+///
+/// Boundary conditions:
+/// - Returns [`BranchError::NotInRepo`] if the CWD is outside a `.libra`
+///   repository.
 async fn run_branch(args: &BranchArgs) -> Result<BranchOutput, BranchError> {
     require_repo().map_err(|_| BranchError::NotInRepo)?;
 
@@ -743,6 +911,13 @@ async fn run_branch(args: &BranchArgs) -> Result<BranchOutput, BranchError> {
     }
 }
 
+/// Render [`BranchOutput`] for the chosen output mode.
+///
+/// Functional scope:
+/// - JSON mode emits via `emit_json_data`; quiet mode prints nothing.
+/// - Human mode formats the list with a `*` prefix on the current branch,
+///   sorts so the current branch sits at the top, prints a "detached at"
+///   banner when relevant, and shows an unborn HEAD label as appropriate.
 fn render_branch_output(result: &BranchOutput, output: &OutputConfig) -> CliResult<()> {
     if output.is_json() {
         return emit_json_data("branch", result, output);
@@ -827,16 +1002,21 @@ fn render_branch_output(result: &BranchOutput, output: &OutputConfig) -> CliResu
     Ok(())
 }
 
+/// Public helper for callers (clone, fetch) that need to wire up an upstream.
+/// Prints any error to stderr but does not propagate the failure.
 pub async fn set_upstream(branch: &str, upstream: &str) {
     if let Err(err) = set_upstream_safe(branch, upstream).await {
         err.print_stderr();
     }
 }
 
+/// Structured variant of [`set_upstream`] using the default output config.
 pub async fn set_upstream_safe(branch: &str, upstream: &str) -> CliResult<()> {
     set_upstream_safe_with_output(branch, upstream, &OutputConfig::default()).await
 }
 
+/// Structured variant that respects the provided [`OutputConfig`]
+/// (used by `clone`/`fetch` so quiet mode is honoured).
 pub async fn set_upstream_safe_with_output(
     branch: &str,
     upstream: &str,
@@ -852,12 +1032,19 @@ pub async fn set_upstream_safe_with_output(
     Ok(())
 }
 
+/// Public helper for callers that need to create a branch programmatically
+/// (clone, etc.). Suppresses errors to stderr.
 pub async fn create_branch(new_branch: String, branch_or_commit: Option<String>) {
     if let Err(err) = create_branch_safe(new_branch, branch_or_commit).await {
         err.print_stderr();
     }
 }
 
+/// Structured variant of [`create_branch`].
+///
+/// Functional scope:
+/// - Calls [`create_branch_impl`] and discards the [`BranchOutput`]; just
+///   returns success/failure.
 pub async fn create_branch_safe(
     new_branch: String,
     branch_or_commit: Option<String>,
@@ -869,6 +1056,18 @@ pub async fn create_branch_safe(
     Ok(())
 }
 
+/// Render a branch's display label for the human-mode listing.
+///
+/// Functional scope:
+/// - Strips the `refs/remotes/` prefix when present.
+/// - Falls back to `<remote>/<short>` when `branch.remote` is set, else the
+///   bare name.
+/// - Colors the result red to distinguish remote branches in the list.
+///
+/// See: tests::test_format_branch_name_with_full_remote_ref in
+/// src/command/branch.rs:1062;
+/// tests::test_format_branch_name_with_short_remote_ref in
+/// src/command/branch.rs:1076.
 fn format_branch_name(branch: &Branch) -> String {
     let display_name = if let Some(stripped) = branch.name.strip_prefix("refs/remotes/") {
         stripped.to_string()

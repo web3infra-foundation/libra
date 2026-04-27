@@ -1,3 +1,9 @@
+//! View-model builders for rendering Codex thread state in CLI and Code UI surfaces.
+//!
+//! Boundary: view construction is read-only and must not change persisted thread
+//! records. Code UI projection tests cover incomplete streams, missing metadata, and
+//! stable ordering.
+
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};

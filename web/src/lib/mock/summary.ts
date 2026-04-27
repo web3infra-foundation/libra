@@ -1,3 +1,9 @@
+/**
+ * Summary tab fixture.
+ *
+ * Drives the "Summary" view in the workflow pane: progress checklist, branch
+ * state row, captured artifacts, and the in-progress to-do list.
+ */
 import type { SummaryState } from "./types";
 
 export const SUMMARY: SummaryState = {

@@ -1,4 +1,16 @@
 //! Shared runtime for provider lifecycle hook ingestion.
+//!
+//! When an external provider invokes `libra hooks <command>`, control lands in
+//! [`process_hook_event_from_stdin`]. This function:
+//! 1. Reads, size-bounds, and JSON-parses the stdin envelope.
+//! 2. Validates it against the canonical schema.
+//! 3. Asks the provider adapter to lower it into a [`LifecycleEvent`].
+//! 4. Loads (or recovers) the persistent [`SessionState`], deduplicates the event,
+//!    applies it, and on `SessionEnd` writes a content-addressed `ai_session` blob
+//!    plus a history reference so other tools can read the session later.
+//!
+//! All bounded constants below (`MAX_*`) protect the runtime from runaway providers
+//! that emit pathologically large or repetitive payloads.
 
 use std::{io::Read, path::Path, sync::Arc};
 
@@ -27,13 +39,20 @@ use crate::{
     utils::{error::emit_warning, object::write_git_object, storage::local::LocalStorage, util},
 };
 
+// Metadata keys persisted on `SessionState`. Centralised here so that ingestion,
+// projection, and tests all see the same names.
 const PROCESSED_EVENT_KEYS: &str = "processed_event_keys";
 const NORMALIZED_EVENTS_KEY: &str = "normalized_events";
 const PROVIDER_METADATA_KEY: &str = "provider";
 const PROVIDER_SESSION_ID_METADATA_KEY: &str = "provider_session_id";
 const SESSION_PHASE_METADATA_KEY: &str = "session_phase";
+/// Separator inserted between provider name and the provider's native session ID
+/// when forming Libra's namespaced AI session ID.
 const SESSION_ID_DELIMITER: &str = "__";
 
+// Resource bounds. The values are deliberately small enough to stay in memory for
+// the longest plausible session while large enough to capture the events the agent
+// actually needs for projection.
 const MAX_STDIN_BYTES: usize = 1_048_576;
 const MAX_PROCESSED_EVENT_KEYS: usize = 200;
 const MAX_NORMALIZED_EVENTS: usize = 400;
@@ -41,9 +60,15 @@ const MAX_RAW_HOOK_EVENTS: usize = 200;
 const MAX_TOOL_EVENTS: usize = 200;
 const MAX_TRANSCRIPT_PATH_BYTES: usize = 4096;
 
+/// Object type tag stamped on persisted AI session blobs.
 pub const AI_SESSION_TYPE: &str = "ai_session";
+/// Schema version. Bump when the persisted shape changes incompatibly.
 pub const AI_SESSION_SCHEMA: &str = "libra.ai_session.v2";
 
+/// Coarse session lifecycle phase recorded as `session_phase` metadata.
+///
+/// Distinct from [`LifecycleEventKind`] — the latter is per-event, the former is
+/// aggregated state suitable for UIs (a single status badge per session).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionPhase {
     Active,
@@ -51,16 +76,32 @@ enum SessionPhase {
     Ended,
 }
 
+/// Outcome of attempting to persist a session at SessionEnd.
+///
+/// Carries the resulting blob's object hash so callers can advertise it on the
+/// session's metadata, and `already_exists` to distinguish a fresh write from a
+/// retry that reused a previous blob (idempotent SessionEnd handling).
 #[derive(Debug)]
 struct PersistOutcome {
     object_hash: String,
     already_exists: bool,
 }
 
+/// Combine a provider name with the provider's native session ID into Libra's
+/// canonical ID.
+///
+/// Functional scope: the resulting string is used as a directory name and as a
+/// metadata key, so it must round-trip without escaping. Both inputs are assumed
+/// to come from validated envelopes (see [`validate_session_hook_envelope`]).
 pub fn build_ai_session_id(provider: &str, provider_session_id: &str) -> String {
     format!("{provider}{SESSION_ID_DELIMITER}{provider_session_id}")
 }
 
+/// Strip session IDs down to a non-secret prefix for log output.
+///
+/// Functional scope: keeps the first eight characters and replaces the rest with
+/// `***`. For very short IDs the entire value is masked. Used in `tracing` and
+/// `eprintln!` calls to avoid leaking provider session identifiers into logs.
 fn redact_session_id(session_id: &str) -> String {
     let mut chars = session_id.chars();
     let prefix: String = chars.by_ref().take(8).collect();
@@ -71,6 +112,30 @@ fn redact_session_id(session_id: &str) -> String {
     }
 }
 
+/// Top-level entry for `libra hooks <command>`.
+///
+/// Functional scope:
+/// - Reads up to `MAX_STDIN_BYTES + 1` bytes from stdin and rejects oversize
+///   payloads early.
+/// - Parses the canonical [`SessionHookEnvelope`] and validates it.
+/// - Asks `provider` to lower the envelope into a [`LifecycleEvent`] and confirms
+///   the result matches the expected `expected_kind`.
+/// - Loads the persistent session (creating a fresh one if missing, recovering
+///   from corruption by archiving the bad cache file and starting clean).
+/// - Updates session metadata, applies the lifecycle event, records dedup keys,
+///   and on `SessionEnd` writes the final blob to the AI history ref.
+///
+/// Boundary conditions:
+/// - Out-of-order delivery (e.g. the very first observed event is `ToolUse`)
+///   creates a synthetic session marked with `recovered_from_out_of_order`.
+/// - Corrupt session caches are archived for forensic inspection rather than
+///   discarded silently — operators can still retrieve the original bytes from
+///   the path in `corrupt_session_backup`.
+/// - Errors during final persistence are surfaced; the partially-mutated session
+///   is still saved so retries can converge.
+///
+/// See: `tests::v2_payload_contains_state_machine_and_summary`,
+/// `tests::dedup_keys_remain_stable_across_providers`.
 pub async fn process_hook_event_from_stdin(
     command: super::provider::ProviderHookCommand,
     expected_kind: LifecycleEventKind,
@@ -281,6 +346,11 @@ pub async fn process_hook_event_from_stdin(
     Ok(())
 }
 
+/// Load `core.objectformat` from the local repository and pin the global hash kind.
+///
+/// Mirrors `cli::set_local_hash_kind_for_storage` but reads via the already-open
+/// connection that the hook runtime obtains. Defaults to `sha1` for repositories
+/// initialised before SHA-256 support landed.
 async fn set_hash_kind_from_repo() -> Result<()> {
     let object_format = ConfigKv::get("core.objectformat")
         .await
@@ -298,6 +368,13 @@ async fn set_hash_kind_from_repo() -> Result<()> {
     Ok(())
 }
 
+/// Apply the canonical event together with bookkeeping into `session`.
+///
+/// Functional scope: bumps `updated_at`, records the transcript path if any,
+/// appends the raw envelope to the audit ring, applies the lifecycle delta, and
+/// transitions the coarse phase. Finally appends a normalized projection-friendly
+/// fragment to `normalized_events` so downstream consumers don't re-parse the raw
+/// envelope.
 fn apply_hook_event(
     session: &mut SessionState,
     envelope: &SessionHookEnvelope,
@@ -319,6 +396,13 @@ fn apply_hook_event(
     append_normalized_event(session, event, provider_name);
 }
 
+/// Compute the new [`SessionPhase`] given the previous phase and the incoming
+/// event kind, then record it back on the session.
+///
+/// Functional scope: `SessionEnd` always wins, transitioning to `Ended`; any
+/// activity event resets to `Active`; `TurnEnd` parks at `Stopped`; `ModelUpdate`
+/// is a no-op preserving the current phase. This produces a small, deterministic
+/// state machine usable as a UI badge.
 fn transition_phase(session: &mut SessionState, event_kind: LifecycleEventKind) {
     let current_phase = session
         .metadata
@@ -347,6 +431,14 @@ fn transition_phase(session: &mut SessionState, event_kind: LifecycleEventKind) 
     );
 }
 
+/// Append a small projection-friendly summary of the event.
+///
+/// Functional scope: includes the kind, timestamp, prompt, tool name, assistant
+/// message, and a few `has_*` flags so projections can render activity feeds
+/// without paying the cost of streaming every raw envelope.
+///
+/// Boundary conditions: capped at `MAX_NORMALIZED_EVENTS`; oldest entries are
+/// dropped first.
 fn append_normalized_event(
     session: &mut SessionState,
     event: &LifecycleEvent,
@@ -384,6 +476,10 @@ fn append_normalized_event(
     }
 }
 
+/// Return true when `key` is already in the processed-keys ring.
+///
+/// Boundary conditions: a `None` key always returns false because callers asked
+/// for "no dedup".
 fn dedup_hit(session: &SessionState, key: Option<&str>) -> bool {
     let Some(key) = key else {
         return false;
@@ -396,6 +492,9 @@ fn dedup_hit(session: &SessionState, key: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
+/// Push `key` onto the processed-keys ring, evicting old entries past
+/// `MAX_PROCESSED_EVENT_KEYS`. The same defensive overwrite pattern as
+/// [`append_normalized_event`] applies when the slot is the wrong shape.
 fn append_processed_event_key(session: &mut SessionState, key: String) {
     let entry = session
         .metadata
@@ -417,6 +516,10 @@ fn append_processed_event_key(session: &mut SessionState, key: String) {
     }
 }
 
+/// Whether the session has already been written to the AI history ref.
+///
+/// Used together with `dedup_hit` so a duplicate `SessionEnd` doesn't repeat the
+/// blob write but still updates metadata fields that may have changed.
 fn session_persisted(session: &SessionState) -> bool {
     session
         .metadata
@@ -425,6 +528,17 @@ fn session_persisted(session: &SessionState) -> bool {
         .unwrap_or(false)
 }
 
+/// Materialise the final session as a Git blob and append it to the AI history.
+///
+/// Functional scope:
+/// - If a blob already exists for this session ID under [`AI_SESSION_TYPE`], reuse
+///   its hash without writing a new one (idempotent).
+/// - Otherwise serialise [`build_ai_session_payload`], write a Git blob, and
+///   append a `(type, id, hash)` triple to the AI history ref.
+///
+/// Boundary conditions: any I/O error short-circuits with context; the caller
+/// catches and surfaces it via session metadata so the user sees an actionable
+/// message and can retry.
 async fn persist_session_history(
     storage_path: &Path,
     session: &SessionState,
@@ -461,6 +575,12 @@ async fn persist_session_history(
     })
 }
 
+/// Construct the canonical JSON payload persisted as an `ai_session` blob.
+///
+/// Functional scope: bundles a state-machine summary, a message-count summary, the
+/// transcript pointer, the projected event stream, the raw event ring, and the
+/// in-memory session itself. The whole document is keyed by the
+/// [`AI_SESSION_SCHEMA`] string so future schema migrations can detect old blobs.
 fn build_ai_session_payload(session: &SessionState, provider: &dyn HookProvider) -> Value {
     let events = session
         .metadata
@@ -531,6 +651,10 @@ fn build_ai_session_payload(session: &SessionState, provider: &dyn HookProvider)
     })
 }
 
+/// Translate a phase string into a UI-friendly status label.
+///
+/// Boundary conditions: an unknown phase falls back to `"running"` so a
+/// schema-drift session never produces an empty status.
 fn phase_status_label(phase: &str) -> &'static str {
     match phase {
         "active" => "running",
@@ -540,6 +664,8 @@ fn phase_status_label(phase: &str) -> &'static str {
     }
 }
 
+/// Count normalized events with the given `kind`. Used to populate per-session
+/// summary counters (tool uses, compactions, etc.).
 fn count_events(events: &[Value], kind: &str) -> usize {
     events
         .iter()
@@ -547,6 +673,9 @@ fn count_events(events: &[Value], kind: &str) -> usize {
         .count()
 }
 
+/// Return the timestamp of the first matching event, or `None` if no event has the
+/// requested kind. Used to populate `started_at`/`ended_at` on the persisted
+/// state-machine summary.
 fn first_event_timestamp(events: &[Value], kind: &str) -> Option<String> {
     events
         .iter()
@@ -557,6 +686,7 @@ fn first_event_timestamp(events: &[Value], kind: &str) -> Option<String> {
 }
 
 impl SessionPhase {
+    /// Stable string form persisted in `session_phase` metadata.
     fn as_str(self) -> &'static str {
         match self {
             SessionPhase::Active => "active",
@@ -573,6 +703,8 @@ mod tests {
     use super::*;
     use crate::internal::ai::hooks::providers::{claude_provider, gemini_provider};
 
+    // Scenario: pushing many keys past the cap evicts the oldest, never exceeding
+    // `MAX_PROCESSED_EVENT_KEYS`.
     #[test]
     fn processed_event_keys_capped() {
         let mut session = SessionState::new("/tmp");
@@ -589,6 +721,7 @@ mod tests {
         assert_eq!(len, MAX_PROCESSED_EVENT_KEYS);
     }
 
+    // Scenario: a SessionStart event sets the session phase to "active".
     #[test]
     fn unified_phase_metadata_key_is_used() {
         let envelope = SessionHookEnvelope {
@@ -611,6 +744,9 @@ mod tests {
         );
     }
 
+    // Scenario: the same envelope yields identical dedup keys regardless of
+    // which provider's identity-key list is supplied, because both lists pull
+    // from `CANONICAL_DEDUP_IDENTITY_KEYS`.
     #[test]
     fn dedup_keys_remain_stable_across_providers() {
         let envelope = SessionHookEnvelope {
@@ -638,6 +774,8 @@ mod tests {
         assert_eq!(claude_key, gemini_key);
     }
 
+    // Scenario: identical native session IDs from different providers do not
+    // collide because the namespacing prefix differs.
     #[test]
     fn session_id_is_namespaced_by_provider() {
         assert_eq!(
@@ -650,12 +788,16 @@ mod tests {
         );
     }
 
+    // Scenario: long IDs keep their first eight characters; short IDs are fully
+    // masked.
     #[test]
     fn session_id_redaction_masks_suffix() {
         assert_eq!(redact_session_id("gemini__session-123"), "gemini__***");
         assert_eq!(redact_session_id("short"), "***");
     }
 
+    // Scenario: a synthetic ended session includes the schema id, state machine
+    // counters, message-count summary, and transcript path in the payload.
     #[test]
     fn v2_payload_contains_state_machine_and_summary() {
         let mut session = SessionState::new("/tmp/repo");

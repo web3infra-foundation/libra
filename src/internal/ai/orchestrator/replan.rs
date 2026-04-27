@@ -1,3 +1,10 @@
+//! Replanning helpers for turning failed or incomplete validation into follow-up
+//! tasks.
+//!
+//! Boundary: replanning produces revised task specs; it does not directly apply
+//! patches or mark decisions final. Validation-decision and scheduler tests cover
+//! needs-revision, missing evidence, and repeated-failure cases.
+
 use chrono::Utc;
 
 use super::{

@@ -1,3 +1,9 @@
+/**
+ * Sidebar threads fixture.
+ *
+ * The thread with `active: true` is selected on mount; `phase` indexes into
+ * {@link PHASES} to render the phase chip on each row.
+ */
 import type { Thread } from "./types";
 
 export const THREADS: Thread[] = [

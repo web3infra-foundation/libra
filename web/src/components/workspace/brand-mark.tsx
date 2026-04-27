@@ -1,8 +1,27 @@
+/**
+ * Libra brand mark.
+ *
+ * Inline SVG so the logo is tree-shaken with the rest of the bundle, requires
+ * no network round-trip, and can be tinted via Tailwind text utilities.
+ *
+ * The vector colours are baked in (the brand uses fixed blues) and do not
+ * inherit `currentColor`, unlike the icons in `components/icons`.
+ */
+
+/** Props for the brand mark. */
 type Props = {
+  /** Pixel size for both width and height; defaults to 18. */
   size?: number;
+  /** Optional className forwarded onto the `<svg>`. */
   className?: string;
 };
 
+/**
+ * Renders the Libra logo as an SVG.
+ *
+ * Includes an `aria-label="Libra"` so assistive tech announces the mark
+ * meaningfully when it is the only label of an interactive element.
+ */
 export function BrandMark({ size = 18, className }: Props) {
   return (
     <svg

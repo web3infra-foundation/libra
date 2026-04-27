@@ -1,3 +1,9 @@
+//! Retry policy helpers for transient completion-provider failures.
+//!
+//! Boundary: retries are bounded and only wrap errors classified as transient; caller
+//! cancellation and validation errors must surface immediately. Provider tests exercise
+//! retryable transport failures and non-retryable schema errors.
+
 use std::{sync::Arc, time::Duration};
 
 use super::{CompletionError, CompletionModel, CompletionRequest, CompletionResponse};

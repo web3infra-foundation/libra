@@ -4,6 +4,25 @@
 
 use super::*;
 
+/// Assert that `rev-parse --show-toplevel` prints the expected repository root.
+///
+/// Test coverage: the three direct worktree/storage-dir tests below pass temp
+/// paths through both `/var` and canonical `/private/var` spellings on macOS,
+/// while the symlink case verifies that an entered storage symlink still maps to
+/// the canonical worktree root.
+fn assert_show_toplevel_stdout_eq(output: &std::process::Output, expected: &std::path::Path) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let actual = std::path::PathBuf::from(stdout.trim());
+    assert_eq!(
+        actual
+            .canonicalize()
+            .expect("failed to canonicalize rev-parse output path"),
+        expected
+            .canonicalize()
+            .expect("failed to canonicalize expected repo path")
+    );
+}
+
 #[test]
 fn test_rev_parse_head_resolves_commit() {
     let repo = create_committed_repo_via_cli();
@@ -254,10 +273,9 @@ fn test_rev_parse_show_toplevel_repo_named_storage_dir_returns_repo_root() {
         "rev-parse --show-toplevel from repo root named .libra",
     );
 
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout).trim(),
-        repo_path.to_string_lossy()
-    );
+    // Scenario: a repository whose worktree itself is named `.libra` must not
+    // be mistaken for the internal storage directory.
+    assert_show_toplevel_stdout_eq(&output, &repo_path);
 }
 
 #[test]
@@ -268,10 +286,9 @@ fn test_rev_parse_show_toplevel_returns_repo_root() {
     let output = run_libra_command(&["rev-parse", "--show-toplevel"], repo.path());
     assert_cli_success(&output, "rev-parse --show-toplevel from repo root");
 
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout).trim(),
-        repo.path().to_string_lossy()
-    );
+    // Scenario: the normal worktree-root invocation returns the root path,
+    // allowing platform-specific tempdir symlinks to differ only in spelling.
+    assert_show_toplevel_stdout_eq(&output, repo.path());
 }
 
 #[test]
@@ -283,10 +300,9 @@ fn test_rev_parse_show_toplevel_from_storage_dir_returns_repo_root() {
     let output = run_libra_command(&["rev-parse", "--show-toplevel"], &storage);
     assert_cli_success(&output, "rev-parse --show-toplevel from .libra");
 
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout).trim(),
-        repo.path().to_string_lossy()
-    );
+    // Scenario: entering the physical `.libra` storage directory reports the
+    // enclosing worktree root rather than the storage path itself.
+    assert_show_toplevel_stdout_eq(&output, repo.path());
 }
 
 #[cfg(unix)]
@@ -305,12 +321,9 @@ fn test_rev_parse_show_toplevel_from_symlinked_storage_dir_returns_repo_root() {
     let output = run_libra_command(&["rev-parse", "--show-toplevel"], &storage_link);
     assert_cli_success(&output, "rev-parse --show-toplevel from symlinked .libra");
 
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout).trim(),
-        repo.canonicalize()
-            .expect("failed to canonicalize repo path")
-            .to_string_lossy()
-    );
+    // Scenario: a symlink pointing at `.libra` is resolved back to the real
+    // worktree root, matching Git's behavior for storage-directory traversal.
+    assert_show_toplevel_stdout_eq(&output, &repo);
 }
 
 #[test]

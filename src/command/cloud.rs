@@ -791,14 +791,21 @@ async fn restore_metadata(
 
     for ref_model in references {
         // Build query to find matching reference
+        let remote_filter = match &ref_model.remote {
+            Some(remote) => reference::Column::Remote.eq(remote),
+            None => reference::Column::Remote.is_null(),
+        };
         let mut query = reference::Entity::find()
             .filter(reference::Column::Kind.eq(ref_model.kind.clone()))
-            .filter(reference::Column::Remote.eq(ref_model.remote.clone()));
+            .filter(remote_filter);
 
         // Head references are unique by kind and remote, name is the mutable current branch.
         // For other types, match by name as well.
         if ref_model.kind != reference::ConfigKind::Head {
-            query = query.filter(reference::Column::Name.eq(ref_model.name.clone()));
+            query = match &ref_model.name {
+                Some(name) => query.filter(reference::Column::Name.eq(name)),
+                None => query.filter(reference::Column::Name.is_null()),
+            };
         }
 
         let existing = query
@@ -841,8 +848,9 @@ async fn restore_metadata(
 
 #[cfg(test)]
 mod tests {
-    use std::{env, ffi::OsString, fs};
+    use std::{env, ffi::OsString, fs, sync::Arc};
 
+    use object_store::memory::InMemory;
     use serial_test::serial;
     use tempfile::tempdir;
 
@@ -902,6 +910,67 @@ mod tests {
     fn test_restore_args_missing() {
         let result = RestoreArgs::try_parse_from(["restore"]);
         assert!(result.is_err());
+    }
+
+    /// Scenario: metadata restore into a freshly initialized repo where local refs
+    /// have `remote = NULL`. This is the edge hit by live cloud restore: SQL
+    /// `remote = NULL` does not match existing rows, so the restore must use
+    /// `IS NULL` and update the existing HEAD/branch rows instead of inserting
+    /// duplicates that leave HEAD pointing at the init-time repository state.
+    #[test]
+    #[serial]
+    fn restore_metadata_updates_existing_null_remote_references() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let repo = tempdir().unwrap();
+        rt.block_on(setup_with_new_libra_in(repo.path()));
+        let _cwd = ChangeDirGuard::new(repo.path());
+
+        rt.block_on(async {
+            let db_conn = db::get_db_conn_instance().await;
+            let restored_commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+            let restored_refs = vec![
+                reference::Model {
+                    id: 0,
+                    name: Some("restored-main".to_string()),
+                    kind: reference::ConfigKind::Head,
+                    commit: None,
+                    remote: None,
+                },
+                reference::Model {
+                    id: 0,
+                    name: Some("intent".to_string()),
+                    kind: reference::ConfigKind::Branch,
+                    commit: Some(restored_commit.clone()),
+                    remote: None,
+                },
+            ];
+            let remote = RemoteStorage::new(Arc::new(InMemory::new()));
+            let metadata = serde_json::to_vec(&restored_refs).unwrap();
+            remote.put_metadata(&metadata).await.unwrap();
+
+            restore_metadata(&db_conn, &remote)
+                .await
+                .expect("metadata restore should update existing NULL-remote refs");
+
+            let heads = reference::Entity::find()
+                .filter(reference::Column::Kind.eq(reference::ConfigKind::Head))
+                .filter(reference::Column::Remote.is_null())
+                .all(&db_conn)
+                .await
+                .unwrap();
+            assert_eq!(heads.len(), 1);
+            assert_eq!(heads[0].name.as_deref(), Some("restored-main"));
+
+            let intent_refs = reference::Entity::find()
+                .filter(reference::Column::Kind.eq(reference::ConfigKind::Branch))
+                .filter(reference::Column::Name.eq("intent"))
+                .filter(reference::Column::Remote.is_null())
+                .all(&db_conn)
+                .await
+                .unwrap();
+            assert_eq!(intent_refs.len(), 1);
+            assert_eq!(intent_refs[0].commit.as_ref(), Some(&restored_commit));
+        });
     }
 
     #[test]

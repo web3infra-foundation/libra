@@ -1,8 +1,16 @@
-#[cfg(unix)]
-use std::sync::Arc;
+//! Task workspace preparation and synchronization for orchestrated AI execution.
+//!
+//! Boundary: each task receives an isolated copy or FUSE overlay of the main workspace,
+//! then allowed changes are synced back after scope checks. Tests in this module cover
+//! file copy, symlink handling, deletion, contract violations, and cleanup behavior.
+
 use std::{
     fs, io,
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 #[cfg(unix)]
@@ -67,34 +75,141 @@ struct TaskWorktreePaths {
     upper_root: PathBuf,
 }
 
+/// Session-scoped FUSE provisioning gate. Once `disabled` flips to `true`,
+/// `prepare_task_worktree` skips FUSE entirely for the rest of the session
+/// and goes directly to the copy backend.
+///
+/// The flag is shared via a single `Arc<AtomicBool>` so concurrent task
+/// provisioning sees consistent state. Tasks that race into the *first*
+/// FUSE attempt all run their mounts in parallel (matching the existing
+/// timing); whichever attempts finish first set the flag, and every
+/// subsequent task short-circuits past the FUSE path. We deliberately do
+/// NOT serialize the mount calls themselves — doing so would let one
+/// task's sync-back land before another task's worktree materialization,
+/// poisoning the later task's baseline view of the workspace.
+#[derive(Clone, Debug)]
+pub struct FuseProvisionState {
+    disabled: Arc<AtomicBool>,
+}
+
+impl Default for FuseProvisionState {
+    fn default() -> Self {
+        Self {
+            disabled: Arc::new(AtomicBool::new(fuse_disabled_by_default())),
+        }
+    }
+}
+
+impl FuseProvisionState {
+    /// Atomically mark FUSE disabled for this session. Returns `true` iff this
+    /// call was the first to flip the flag; the caller is then responsible for
+    /// emitting the one-time TUI note.
+    pub fn disable_first_time(&self) -> bool {
+        self.disabled
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    pub fn is_disabled(&self) -> bool {
+        self.disabled.load(Ordering::Acquire)
+    }
+}
+
+fn fuse_disabled_by_default() -> bool {
+    #[cfg(test)]
+    {
+        true
+    }
+    #[cfg(not(test))]
+    {
+        std::env::var_os(crate::utils::pager::LIBRA_TEST_ENV).is_some()
+    }
+}
+
+/// Outcome of a FUSE provisioning attempt during `prepare_task_worktree`.
+/// Reported back to the caller so the orchestrator can emit a single
+/// user-visible note when FUSE flips from "available" to "disabled".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FuseAttemptOutcome {
+    /// FUSE overlay mounted successfully and is the active backend.
+    Mounted,
+    /// FUSE was already disabled session-wide before this task; copy backend used.
+    Skipped,
+    /// FUSE was already disabled by an earlier failure; copy backend used.
+    AlreadyDisabled,
+    /// This task was the first to fail FUSE — it triggered the session disable.
+    /// The caller must emit the one-time "FUSE disabled" TUI note.
+    JustDisabled,
+    /// Platform without FUSE support (non-unix); copy backend used.
+    Unsupported,
+}
+
 pub(crate) fn prepare_task_worktree(
     main_working_dir: &Path,
     task_id: Uuid,
-) -> io::Result<TaskWorktree> {
+    fuse_state: &FuseProvisionState,
+) -> io::Result<(TaskWorktree, FuseAttemptOutcome)> {
     let baseline = snapshot_workspace(main_working_dir)?;
 
     #[cfg(unix)]
     {
-        let fuse_paths = task_worktree_paths(task_id, "fuse");
-        if let Some(backend) = prepare_fuse_task_worktree(main_working_dir, &fuse_paths, &baseline)?
-        {
-            return Ok(TaskWorktree {
-                root: fuse_paths.workspace_root,
-                baseline,
-                backend,
-            });
+        if !fuse_state.is_disabled() {
+            let fuse_paths = task_worktree_paths(task_id, "fuse");
+            match prepare_fuse_task_worktree(main_working_dir, &fuse_paths, &baseline)? {
+                Some(backend) => {
+                    return Ok((
+                        TaskWorktree {
+                            root: fuse_paths.workspace_root,
+                            baseline,
+                            backend,
+                        },
+                        FuseAttemptOutcome::Mounted,
+                    ));
+                }
+                None => {
+                    // Mount or health check failed; flip the session-wide flag.
+                    let outcome = if fuse_state.disable_first_time() {
+                        FuseAttemptOutcome::JustDisabled
+                    } else {
+                        FuseAttemptOutcome::AlreadyDisabled
+                    };
+                    return prepare_task_worktree_copy_fallback(
+                        main_working_dir,
+                        task_id,
+                        baseline,
+                        outcome,
+                    );
+                }
+            }
         }
     }
 
+    #[cfg(unix)]
+    let outcome = FuseAttemptOutcome::AlreadyDisabled;
+    #[cfg(not(unix))]
+    let outcome = FuseAttemptOutcome::Unsupported;
+
+    prepare_task_worktree_copy_fallback(main_working_dir, task_id, baseline, outcome)
+}
+
+fn prepare_task_worktree_copy_fallback(
+    main_working_dir: &Path,
+    task_id: Uuid,
+    baseline: WorkspaceSnapshot,
+    outcome: FuseAttemptOutcome,
+) -> io::Result<(TaskWorktree, FuseAttemptOutcome)> {
     let copy_paths = task_worktree_paths(task_id, "copy");
     prepare_task_worktree_root(&copy_paths.cleanup_root)?;
     let backend = prepare_copy_task_worktree(main_working_dir, &copy_paths, &baseline)?;
 
-    Ok(TaskWorktree {
-        root: copy_paths.workspace_root,
-        baseline,
-        backend,
-    })
+    Ok((
+        TaskWorktree {
+            root: copy_paths.workspace_root,
+            baseline,
+            backend,
+        },
+        outcome,
+    ))
 }
 
 fn task_worktree_paths(task_id: Uuid, backend: &str) -> TaskWorktreePaths {
@@ -641,11 +756,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        cleanup_task_worktree, clone_or_copy_file, detect_contract_violations,
-        materialize_workspace, prepare_task_worktree, sync_task_worktree_back,
-        cleanup_task_worktree, clone_or_copy_file, materialize_workspace,
-        prepare_copy_task_worktree, prepare_task_worktree, prepare_task_worktree_root,
-        sync_task_worktree_back, task_worktree_paths,
+        FuseProvisionState, cleanup_task_worktree, clone_or_copy_file, detect_contract_violations,
+        materialize_workspace, prepare_copy_task_worktree, prepare_task_worktree,
+        prepare_task_worktree_root, sync_task_worktree_back, task_worktree_paths,
     };
     use crate::{
         internal::ai::workspace_snapshot::{WorkspaceEntry, snapshot_workspace},
@@ -907,7 +1020,8 @@ mod tests {
         std::fs::create_dir_all(main.join("src")).unwrap();
         std::fs::write(main.join("src/lib.rs"), "fn main() {}\n").unwrap();
 
-        let task_worktree = prepare_task_worktree(&main, Uuid::new_v4()).unwrap();
+        let (task_worktree, _) =
+            prepare_task_worktree(&main, Uuid::new_v4(), &FuseProvisionState::default()).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(task_worktree.root.join("src/lib.rs")).unwrap(),
@@ -928,12 +1042,18 @@ mod tests {
         std::fs::write(main.join("src/lib.rs"), "fn main() {}\n").unwrap();
         std::fs::write(main.join("target/debug/app"), "compiled\n").unwrap();
 
-        let task_worktree = prepare_task_worktree(&main, Uuid::new_v4()).unwrap();
+        let (task_worktree, _) =
+            prepare_task_worktree(&main, Uuid::new_v4(), &FuseProvisionState::default()).unwrap();
 
         assert!(task_worktree.root.join("src/lib.rs").exists());
         assert!(!task_worktree.root.join("target").exists());
 
         cleanup_task_worktree(task_worktree).unwrap();
+    }
+
+    #[test]
+    fn fuse_provision_state_defaults_disabled_in_unit_tests() {
+        assert!(FuseProvisionState::default().is_disabled());
     }
 
     #[test]
@@ -979,8 +1099,12 @@ mod tests {
         std::fs::write(repo.join("src/lib.rs"), "pub fn worktree() {}\n").unwrap();
 
         let repo_for_prepare = repo.clone();
-        let task_worktree = tokio::task::spawn_blocking(move || {
-            prepare_task_worktree(&repo_for_prepare, Uuid::new_v4())
+        let (task_worktree, _) = tokio::task::spawn_blocking(move || {
+            prepare_task_worktree(
+                &repo_for_prepare,
+                Uuid::new_v4(),
+                &FuseProvisionState::default(),
+            )
         })
         .await
         .unwrap()

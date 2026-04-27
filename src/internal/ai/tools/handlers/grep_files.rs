@@ -26,7 +26,17 @@ use crate::internal::ai::tools::{
     },
 };
 
+/// Handler for finding source files by content pattern.
+///
+/// AI user story: let the agent locate definitions, call sites, tests, and
+/// documentation before editing. Results are capped, timed, and sorted by
+/// recency so follow-up reads can stay narrow and auditable.
 pub struct GrepFilesHandler;
+
+/// Alias-style search handler with the same execution semantics as grep.
+///
+/// AI user story: support model/tool schemas that prefer "search" language
+/// while preserving the same bounded, read-only implementation.
 pub struct SearchFilesHandler;
 
 const MAX_LIMIT: usize = 2000;

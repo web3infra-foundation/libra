@@ -24,6 +24,10 @@ use crate::internal::ai::tools::{
 ///    via the `request_tx` channel.
 /// 3. It awaits the response on the `oneshot` receiver.
 /// 4. The user's answers are returned as JSON to the model.
+///
+/// AI user story: let the agent pause for a small number of explicit human
+/// decisions when local context is insufficient or assumptions would be risky,
+/// then resume with structured answers instead of guessing.
 pub struct RequestUserInputHandler {
     request_tx: UnboundedSender<UserInputRequest>,
 }

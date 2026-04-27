@@ -430,7 +430,9 @@ pub async fn run_commit(
         return Err(CommitError::NothingToCommit);
     }
 
-    // Run pre-commit hook
+    // INVARIANT: hooks and message validation must run before creating the
+    // commit object or updating HEAD; once those writes happen, hook failure can
+    // no longer block the commit without explicit rollback logic.
     if !skip_hooks {
         run_pre_commit_hook(output)?;
     }
@@ -527,6 +529,8 @@ pub async fn run_commit(
             &format_commit_msg(&commit_message, gpg_sig.as_deref()),
         );
 
+        // INVARIANT: persist the commit object before moving HEAD so a crash
+        // after ref update never points the branch at a missing object.
         save_commit_object(&storage, &commit)?;
         update_head_and_reflog(&commit.id.to_string(), &commit_message).await?;
 
@@ -580,6 +584,8 @@ pub async fn run_commit(
         &format_commit_msg(&commit_message, gpg_sig.as_deref()),
     );
 
+    // INVARIANT: persist the commit object before moving HEAD so a crash after
+    // ref update never points the branch at a missing object.
     save_commit_object(&storage, &commit)?;
     update_head_and_reflog(&commit.id.to_string(), &commit_message).await?;
 
@@ -763,8 +769,19 @@ pub async fn execute(args: CommitArgs) {
 }
 
 /// Safe entry point that returns structured [`CliResult`] instead of printing
-/// errors and exiting. Collects staged changes, resolves committer identity,
-/// builds tree and commit objects, and updates HEAD.
+/// errors and exiting.
+///
+/// # Side Effects
+/// - Reads the index and staged objects to build a new tree and commit object.
+/// - Resolves author/committer identity and optionally signs the commit through
+///   the vault when signing is enabled.
+/// - Writes new objects, updates HEAD/current branch, records reflog state, and
+///   renders the requested success output.
+///
+/// # Errors
+/// Returns [`CliError`] when the repository is missing or corrupt, there is
+/// nothing to commit, identity/signing setup fails, object writes fail, or HEAD
+/// cannot be updated.
 pub async fn execute_safe(args: CommitArgs, output: &OutputConfig) -> CliResult<()> {
     let result = run_commit(args, output).await.map_err(CliError::from)?;
     render_commit_output(&result, output)

@@ -1,3 +1,9 @@
+/**
+ * Static descriptors for the five Libra agent pipeline phases.
+ *
+ * `n` doubles as the canonical zero-based phase index used elsewhere in the
+ * UI (compared against `WorkflowState.currentPhase`, etc.).
+ */
 import type { PhaseDescriptor } from "./types";
 
 export const PHASES: PhaseDescriptor[] = [

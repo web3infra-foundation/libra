@@ -1,3 +1,11 @@
+/**
+ * Avatar primitive set built on Base UI.
+ *
+ * Exposes the composable parts (`Avatar`, `AvatarImage`, `AvatarFallback`,
+ * `AvatarBadge`, `AvatarGroup`, `AvatarGroupCount`) styled with the project's
+ * Tailwind tokens. Sizing is propagated via `data-size` so descendants can
+ * react with `group-data-[size=…]` selectors.
+ */
 "use client"
 
 import * as React from "react"
@@ -5,6 +13,14 @@ import { Avatar as AvatarPrimitive } from "@base-ui/react/avatar"
 
 import { cn } from "@/lib/utils"
 
+/**
+ * Avatar root container. Establishes the circle clip, ring, and `data-size`
+ * attribute that downstream parts read from.
+ *
+ * Props extend Base UI's Avatar.Root.Props with a discrete `size` enum
+ * because sizing isn't a visual variant of the primitive — it controls
+ * descendant layout via the `group/avatar` selector.
+ */
 function Avatar({
   className,
   size = "default",
@@ -25,6 +41,7 @@ function Avatar({
   )
 }
 
+/** `<img>` slot rendered when the source loads successfully. */
 function AvatarImage({ className, ...props }: AvatarPrimitive.Image.Props) {
   return (
     <AvatarPrimitive.Image
@@ -38,6 +55,10 @@ function AvatarImage({ className, ...props }: AvatarPrimitive.Image.Props) {
   )
 }
 
+/**
+ * Fallback content rendered when the image is missing or fails to load.
+ * Typically holds initials.
+ */
 function AvatarFallback({
   className,
   ...props
@@ -54,6 +75,11 @@ function AvatarFallback({
   )
 }
 
+/**
+ * Small accent badge anchored to the avatar's bottom-right corner. Sized
+ * relative to the avatar via `group-data-[size=…]` selectors. SVG children
+ * are sized automatically; pass empty children for a flat dot.
+ */
 function AvatarBadge({ className, ...props }: React.ComponentProps<"span">) {
   return (
     <span
@@ -70,6 +96,10 @@ function AvatarBadge({ className, ...props }: React.ComponentProps<"span">) {
   )
 }
 
+/**
+ * Container that overlaps several avatars into a stack. Passes the size hint
+ * downward so {@link AvatarGroupCount} can match the avatar dimensions.
+ */
 function AvatarGroup({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
@@ -83,6 +113,7 @@ function AvatarGroup({ className, ...props }: React.ComponentProps<"div">) {
   )
 }
 
+/** Numeric "+N" indicator shown after the visible avatars in an {@link AvatarGroup}. */
 function AvatarGroupCount({
   className,
   ...props

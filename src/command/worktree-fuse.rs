@@ -1,3 +1,9 @@
+//! `libra worktree-fuse` command implementation for mounting worktree overlays.
+//!
+//! Boundary: this command is Unix-only and focuses on FUSE mount lifecycle; generic
+//! worktree management remains in `command::worktree`. Worktree-fuse command tests
+//! cover argument parsing and unsupported-platform behavior.
+
 use std::{
     collections::HashMap,
     fs, io,

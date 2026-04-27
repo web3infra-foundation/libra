@@ -11,7 +11,8 @@ use crate::internal::ai::{
     orchestrator::{
         types::TaskWorkspaceBackend,
         workspace::{
-            TaskWorktree, cleanup_task_worktree, prepare_task_worktree, sync_task_worktree_back,
+            FuseAttemptOutcome, FuseProvisionState, TaskWorktree, cleanup_task_worktree,
+            prepare_task_worktree, sync_task_worktree_back,
         },
     },
     workspace_snapshot::WorkspaceSnapshot,
@@ -22,6 +23,7 @@ pub struct ExecutionEnvironmentProvider;
 
 pub struct TaskExecutionEnvironment {
     worktree: TaskWorktree,
+    fuse_outcome: FuseAttemptOutcome,
 }
 
 impl TaskExecutionEnvironment {
@@ -35,6 +37,12 @@ impl TaskExecutionEnvironment {
 
     pub(crate) fn backend(&self) -> TaskWorkspaceBackend {
         self.worktree.backend()
+    }
+
+    /// Outcome of the FUSE mount attempt during provisioning. Callers use
+    /// `JustDisabled` to emit a one-time TUI hint after the first failure.
+    pub fn fuse_outcome(&self) -> FuseAttemptOutcome {
+        self.fuse_outcome
     }
 }
 
@@ -51,14 +59,17 @@ impl ExecutionEnvironmentProvider {
         &self,
         main_working_dir: PathBuf,
         task_id: Uuid,
+        fuse_state: FuseProvisionState,
     ) -> io::Result<TaskExecutionEnvironment> {
-        let worktree =
-            tokio::task::spawn_blocking(move || prepare_task_worktree(&main_working_dir, task_id))
-                .await
-                .map_err(|err| {
-                    io::Error::other(format!("failed to prepare task worktree: {err}"))
-                })??;
-        Ok(TaskExecutionEnvironment { worktree })
+        let (worktree, fuse_outcome) = tokio::task::spawn_blocking(move || {
+            prepare_task_worktree(&main_working_dir, task_id, &fuse_state)
+        })
+        .await
+        .map_err(|err| io::Error::other(format!("failed to prepare task worktree: {err}")))??;
+        Ok(TaskExecutionEnvironment {
+            worktree,
+            fuse_outcome,
+        })
     }
 
     pub async fn sync_back(
@@ -102,7 +113,11 @@ mod tests {
         let provider = ExecutionEnvironmentProvider;
 
         let environment = provider
-            .provision_task_worktree(main.path().to_path_buf(), Uuid::new_v4())
+            .provision_task_worktree(
+                main.path().to_path_buf(),
+                Uuid::new_v4(),
+                FuseProvisionState::default(),
+            )
             .await
             .expect("provision task worktree");
         assert!(environment.root().join("README.md").exists());

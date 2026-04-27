@@ -1,3 +1,10 @@
+/**
+ * Diff review fixture.
+ *
+ * Hand-authored unified-diff data shown by the Diff tab. Numbers in `n1`/`n2`
+ * are old/new line numbers respectively; lines without `n1` are pure
+ * additions and lines without `n2` are pure deletions.
+ */
 import type { ReviewState } from "./types";
 
 export const REVIEW: ReviewState = {

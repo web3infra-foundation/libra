@@ -43,6 +43,10 @@ pub struct Model {
 
 impl Model {
     /// Creates a new Anthropic completion model.
+    ///
+    /// Boundary conditions:
+    /// - The `model` string is forwarded verbatim to the API; unknown ids fail at
+    ///   request time with a 404 rather than being rejected here.
     pub fn new(client: Client, model: impl Into<String>) -> Self {
         Self {
             client,
@@ -50,7 +54,7 @@ impl Model {
         }
     }
 
-    /// Returns the model name.
+    /// Returns the model name as supplied at construction.
     pub fn model_name(&self) -> &str {
         &self.model
     }
@@ -255,9 +259,27 @@ impl CompletionModelTrait for Model {
 
     /// Sends a completion request to the Anthropic Messages API.
     ///
-    /// Converts the generic request into Anthropic's wire format, sends it
-    /// via the authenticated client, and parses the response back into
-    /// provider-agnostic types.
+    /// Functional scope:
+    /// - Converts the generic request into Anthropic's wire format, sends it
+    ///   via the authenticated client, and parses the response back into
+    ///   provider-agnostic types.
+    /// - Sets `tool_choice = Auto` whenever any tools are provided so the model
+    ///   may decide whether to call one — Anthropic rejects requests that omit
+    ///   `tool_choice` while supplying tools.
+    ///
+    /// Boundary conditions:
+    /// - Non-2xx responses are first attempted as `AnthropicErrorResponse` JSON
+    ///   to surface the human-readable `message` field; failing that, the raw
+    ///   body is returned in the error so the caller can still see what went wrong.
+    /// - JSON deserialisation errors of a successful response surface as
+    ///   `CompletionError::JsonError` so the upstream agent loop can retry or
+    ///   abort cleanly.
+    /// - `max_tokens` is computed from the model name via
+    ///   [`calculate_max_tokens`]; the API requires this field, so request-side
+    ///   defaults are non-optional.
+    ///
+    /// See: `tests::test_anthropic_request_serialization`,
+    /// `tests::test_anthropic_response_deserialization`.
     async fn completion(
         &self,
         request: CompletionRequest,
@@ -332,8 +354,13 @@ impl CompletionModelTrait for Model {
 }
 
 /// Converts generic [`ToolDefinition`]s into Anthropic-specific tool
-/// definitions. The only material change is renaming the `parameters`
-/// field to `input_schema` as required by the Messages API.
+/// definitions.
+///
+/// Functional scope: renames the `parameters` field to `input_schema` as
+/// required by the Messages API, leaving the JSON Schema body untouched.
+///
+/// Boundary conditions: clones every field so the caller's slice is unmodified;
+/// no schema validation is performed here.
 fn parse_tools(tools: &[ToolDefinition]) -> Vec<AnthropicToolDefinition> {
     tools
         .iter()
@@ -569,6 +596,9 @@ pub type CompletionModel = Model;
 mod tests {
     use super::*;
 
+    /// Scenario: serde must serialise `tool_choice` with the literal `type`
+    /// discriminant Anthropic expects — the API rejects payloads that put the
+    /// variant name elsewhere.
     #[test]
     fn test_anthropic_tool_choice_serialization() {
         let auto = serde_json::to_value(AnthropicToolChoice::Auto).unwrap();
@@ -582,6 +612,8 @@ mod tests {
         assert_eq!(tool["name"], "read_file");
     }
 
+    /// Scenario: pin the on-the-wire shape of a typical request so a future
+    /// rename of any serde field name breaks this test before reaching the API.
     #[test]
     fn test_anthropic_request_serialization() {
         let request = AnthropicRequest {
@@ -603,6 +635,8 @@ mod tests {
         assert!(json.contains("\"temperature\":0.7"));
     }
 
+    /// Scenario: a minimal text-only response should round-trip through serde
+    /// without losing usage stats; this is the canonical "happy path" decode.
     #[test]
     fn test_anthropic_response_deserialization() {
         let json = r#"
@@ -633,6 +667,9 @@ mod tests {
         assert_eq!(response.usage.output_tokens, 20);
     }
 
+    /// Scenario: a response containing both a text block and a `tool_use`
+    /// block must decode all fields, including the `tool_use` stop reason
+    /// that signals the agent loop to dispatch the call.
     #[test]
     fn test_anthropic_tool_use_response() {
         let json = r#"
@@ -667,6 +704,10 @@ mod tests {
         assert_eq!(response.stop_reason, Some("tool_use".to_string()));
     }
 
+    /// Scenario: the Messages API forbids "system" entries inside `messages`,
+    /// so this test guards the hoisting logic that merges the preamble plus
+    /// every `Message::System` into the top-level `system` field, joined by
+    /// blank lines.
     #[test]
     fn test_build_messages_consolidates_system_content() {
         let request = CompletionRequest {
@@ -700,6 +741,8 @@ mod tests {
         assert_eq!(messages[0].role, "user");
     }
 
+    /// Scenario: smoke-test that `Model::new` stores the model identifier
+    /// verbatim — used by callers to verify they bound the right model.
     #[test]
     fn test_model_new() {
         let client = Client::with_api_key("sk-ant-test-key".to_string());
@@ -707,6 +750,9 @@ mod tests {
         assert_eq!(model.model_name(), "claude-3-5-sonnet-latest");
     }
 
+    /// Scenario: max-tokens defaults differ across model families because
+    /// Anthropic's published output ceilings vary. This pins the lookup table
+    /// so a regression cannot silently truncate Opus or Sonnet 4 output.
     #[test]
     fn test_calculate_max_tokens() {
         assert_eq!(calculate_max_tokens("claude-opus-4-0"), 32000);
@@ -718,6 +764,9 @@ mod tests {
         assert_eq!(calculate_max_tokens("unknown-model"), 4096);
     }
 
+    /// Scenario: `CompletionClient::completion_model` is the canonical entry
+    /// point used by the agent runtime; verify it produces a `Model` bound to
+    /// the requested identifier.
     #[test]
     fn test_client_completion_model() {
         let client = Client::with_api_key("sk-ant-test-key".to_string());
@@ -725,6 +774,10 @@ mod tests {
         assert_eq!(model.model_name(), "claude-3-5-sonnet-latest");
     }
 
+    /// Scenario: tool definitions must round-trip with the schema preserved —
+    /// Anthropic uses `input_schema` rather than OpenAI's `parameters`, and
+    /// regressions in this rename are silently accepted by the API but cause
+    /// the model to ignore the tool.
     #[test]
     fn test_parse_tools_maps_tool_definition() {
         let tools = vec![crate::internal::ai::tools::ToolDefinition {
@@ -746,6 +799,9 @@ mod tests {
         assert_eq!(parsed[0].input_schema["type"], "object");
     }
 
+    /// Scenario: nested JSON Schema fields (`properties`, `required`) must be
+    /// preserved verbatim during conversion so the model sees an identical
+    /// tool contract on both wire formats.
     #[test]
     fn test_parse_tools_preserves_parameters() {
         let tools = vec![crate::internal::ai::tools::ToolDefinition {

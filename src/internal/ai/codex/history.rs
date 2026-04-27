@@ -1,3 +1,10 @@
+//! History conversion helpers for mapping Codex conversation events into Libra's AI
+//! runtime history.
+//!
+//! Boundary: conversion preserves message order and tool-call metadata but avoids
+//! provider-specific execution decisions. AI chat and mock-provider tests cover resumed
+//! sessions, tool outputs, and empty-history boundaries.
+
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},

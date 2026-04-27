@@ -1,3 +1,10 @@
+//! Shared orchestrator domain types for tasks, plans, evidence, and workspace backend
+//! choices.
+//!
+//! Boundary: these types form the internal API between planner, executor, verifier,
+//! persistence, and projection. Runtime contract tests cover default values and
+//! serialized compatibility for persisted run records.
+
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     path::PathBuf,

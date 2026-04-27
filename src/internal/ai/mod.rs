@@ -1,11 +1,38 @@
-//! AI Agent Infrastructure for Libra
+//! AI Agent Infrastructure for Libra.
 //!
-//! This module provides the foundational components for integrating AI capabilities
-//! into Libra's git workflows. The architecture consists of:
+//! This module is the root of every AI-related capability used by `libra code`,
+//! the MCP server, and the workflow orchestrator. It is organised as a small set
+//! of focused submodules that snap together at runtime:
 //!
-//! - **Agent Framework**: Core [`Agent`] struct with [`AgentBuilder`] for configuration
-//! - **Provider Abstractions**: [`CompletionModel`] trait for pluggable LLM backends
-//! - **DAG Integration**: [`AgentAction`] adapter for workflow composition
+//! - **Agent framework** ([`agent`]): the [`Agent`] / [`AgentBuilder`] /
+//!   [`ChatAgent`] types that wrap a provider's completion model with tools,
+//!   preamble injection, and message history.
+//! - **Providers** ([`providers`]): one submodule per LLM backend (`gemini`,
+//!   `openai`, `anthropic`, `deepseek`, `zhipu`, `ollama`, ...) — each implements
+//!   [`CompletionModel`] so the rest of the stack stays provider-agnostic.
+//! - **Completion contracts** ([`completion`]): the [`CompletionModel`], [`Chat`],
+//!   [`Prompt`], and [`Message`] traits/types that providers must satisfy.
+//! - **Tools** ([`tools`]): the registry and handlers (apply patch, shell, read
+//!   file, grep, ...) plus the [`tools::ToolOutput`] type returned to callers.
+//! - **Orchestrator** ([`orchestrator`]): the multi-phase IntentSpec / plan /
+//!   execute pipeline with DAG-aware task scheduling.
+//! - **Codex** ([`codex`]) and **MCP** ([`mcp`]): managed-runtime adapter and
+//!   Model Context Protocol server, respectively, both built on top of the
+//!   common [`Agent`] abstraction.
+//! - **Prompt engineering** ([`prompt`]) and **commands** ([`commands`]): YAML
+//!   slash-command parsing, prompt template rendering, and built-in agent
+//!   commands.
+//! - **Hooks** ([`hooks`]) and **sandbox** ([`sandbox`]): git-hook integration
+//!   plus filesystem/network sandboxing primitives shared by tool handlers.
+//! - **Session / history / projections** ([`session`], [`history`],
+//!   [`projection`]): durable state on disk, message history compaction, and
+//!   read-side projections for the TUI.
+//! - **Runtime / web / VCS adapters** ([`runtime`], [`web`], [`libra_vcs`],
+//!   [`node_adapter`]): glue that connects the agent to the surrounding
+//!   environment (process supervisor, web UI, Libra repo, workflow DAG nodes).
+//! - **IntentSpec types** ([`intent`], [`intentspec`], [`workflow_objects`],
+//!   [`workspace_snapshot`], [`generated_artifacts`]): structured plan/intent
+//!   specifications and their persisted representations.
 //!
 //! # Example
 //! ```no_run
@@ -22,32 +49,58 @@
 //! # }
 //! ```
 
+// Agent framework: Agent, AgentBuilder, ChatAgent and their builders.
 pub mod agent;
+// Generic LLM client helpers shared across providers.
 pub mod client;
+// Adapter for the managed Codex provider runtime.
 pub mod codex;
+// YAML-defined slash commands and dispatcher.
 pub mod commands;
+// Completion-model trait and request/response types every provider implements.
 pub mod completion;
+// Crate-private helpers for capturing artifacts produced by tool calls.
 pub(crate) mod generated_artifacts;
+// Conversation history datastructures (compaction, persistence, replay).
 pub mod history;
+// Git hooks integration that lets the agent observe commit events.
 pub mod hooks;
+// IntentSpec primitive types (Phase 0 / "what does the user want?").
 pub mod intent;
+// Structured IntentSpec schema, parsing, and review flow.
 pub mod intentspec;
+// VCS-side helpers used by tools that touch the repository.
 pub mod libra_vcs;
+// Model Context Protocol server exposing Libra to MCP-aware clients.
 pub mod mcp;
+// Adapter that lets agents participate as nodes in the workflow DAG.
 pub mod node_adapter;
+// Phase 0/1/2 orchestrator: intent -> plan -> execute pipeline.
 pub mod orchestrator;
+// Read-only projections of session state for UI consumers.
 pub mod projection;
+// Prompt templates and rendering helpers.
 pub mod prompt;
+// One submodule per LLM backend; each implements CompletionModel.
 pub mod providers;
+// Process-level runtime for long-running agents.
 pub mod runtime;
+// Filesystem/network sandbox shared by every tool handler.
 pub mod sandbox;
+// Per-session persistent state.
 pub mod session;
+// Tool registry + handlers (ApplyPatch, Shell, ReadFile, ...).
 pub mod tools;
+// Misc utilities used across the AI module.
 pub mod util;
+// Optional embedded web UI for collaboration.
 pub mod web;
+// Persisted workflow object types (plans, executions, results).
 pub mod workflow_objects;
+// Snapshot of the workspace consumed by tool calls and validators.
 pub mod workspace_snapshot;
 
+// Curated public surface: re-exports kept stable across patch releases.
 pub use agent::{Agent, AgentBuilder, ChatAgent};
 pub use completion::{Chat, CompletionModel, Message, Prompt};
 pub use node_adapter::{AgentAction, ToolLoopAction};

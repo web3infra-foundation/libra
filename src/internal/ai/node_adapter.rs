@@ -1,9 +1,10 @@
 //! DAG node adapters for AI agents.
 //!
-//! This module provides [`Action`] adapters that bridge the AI agent system with the
-//! `dagrs` DAG execution framework. These adapters allow AI agents to participate as
-//! nodes in a directed acyclic graph (DAG), enabling orchestration of multi-step
-//! AI workflows.
+//! This module is the bridge layer between the high-level AI agent runtime and the
+//! lower-level `dagrs` DAG executor. By implementing the `dagrs::Action` trait on
+//! agent-shaped wrappers, callers can drop an LLM-driven agent into any node of an
+//! orchestrated workflow alongside non-AI nodes (shell tasks, file operations,
+//! gates) without leaking AI concerns into the executor itself.
 //!
 //! # Adapters
 //!
@@ -19,6 +20,10 @@
 //!    with `"\n\n"` as a separator to form a single prompt.
 //! 2. **Execution**: Run the agent (or tool loop) with the assembled prompt.
 //! 3. **Output**: Broadcast the agent's response to all downstream nodes.
+//!
+//! Non-string upstream payloads are skipped with a warning: this keeps the adapter
+//! resilient when a sibling DAG node emits structured data, but it does mean callers
+//! must coerce structured outputs to `String` if they want the agent to see them.
 
 use std::sync::Arc;
 
@@ -31,6 +36,23 @@ use crate::internal::ai::{
     tools::ToolRegistry,
 };
 
+/// Drain every upstream channel and concatenate their string payloads into a
+/// single prompt fragment.
+///
+/// Functional scope:
+/// - Iterates over all senders connected to this node, awaits one message per
+///   sender, and joins the collected strings with `"\n\n"`.
+/// - Logs a warning when an upstream channel produces a non-string `Content`
+///   payload and silently drops that input (the agent receives the joined
+///   fragments without it).
+///
+/// Boundary conditions:
+/// - Returns `Err(String)` if any upstream `recv_from` fails — the caller must
+///   convert this into `Output::execution_failed` so the DAG executor sees the
+///   failure rather than letting the node silently emit an empty prompt.
+/// - When there are no upstream nodes, returns an empty string. The caller
+///   decides whether an empty prompt is acceptable (typically only the DAG
+///   entry node).
 async fn collect_upstream_prompt(in_channels: &mut InChannels) -> Result<String, String> {
     let ids = in_channels.get_sender_ids();
     let mut inputs = Vec::new();
@@ -41,6 +63,9 @@ async fn collect_upstream_prompt(in_channels: &mut InChannels) -> Result<String,
                 if let Some(text) = content.get::<String>() {
                     inputs.push(text.to_owned());
                 } else {
+                    // Non-string payloads are tolerated but skipped — agents only
+                    // understand text. A surrounding orchestrator that wants to
+                    // pipe structured data should convert it before broadcast.
                     tracing::warn!(
                         "Received content from upstream {:?} is not a String. Defaulting to empty.",
                         id
@@ -79,6 +104,17 @@ pub struct AgentAction<M: CompletionModel + 'static> {
 impl<M: CompletionModel> AgentAction<M> {
     /// Creates a new `AgentAction` adapter wrapping the given agent.
     ///
+    /// Functional scope:
+    /// - Takes ownership of the configured `Agent`. The adapter is the sole
+    ///   driver of the agent within the DAG; sharing the same agent across
+    ///   multiple nodes would require an `Arc` wrapper, which this constructor
+    ///   intentionally does not perform.
+    ///
+    /// Boundary conditions:
+    /// - No validation is performed on the agent — callers are responsible for
+    ///   ensuring its configuration (model, preamble, tools) is consistent with
+    ///   the role it will play in the DAG.
+    ///
     /// # Arguments
     ///
     /// * `agent` - The configured [`Agent`] instance to wrap.
@@ -97,6 +133,14 @@ impl<M: CompletionModel> Action for AgentAction<M> {
     /// 3. Sends the prompt to the wrapped agent.
     /// 4. On success, broadcasts the response to all downstream nodes via `out_channels`.
     /// 5. On failure, logs the error and returns `Output::Err`.
+    ///
+    /// Boundary conditions:
+    /// - Upstream collection failure short-circuits to `Output::execution_failed`
+    ///   without invoking the agent, so a broken predecessor does not consume
+    ///   model quota.
+    /// - Agent errors are logged at `error` level and converted into
+    ///   `Output::execution_failed`; the underlying error type is stringified to
+    ///   satisfy `dagrs`'s opaque error contract.
     ///
     /// # Arguments
     ///
@@ -117,7 +161,9 @@ impl<M: CompletionModel> Action for AgentAction<M> {
         // Step 2: Run the agent with the assembled prompt
         match self.agent.prompt(input).await {
             Ok(resp) => {
-                // Broadcast the successful response to all downstream nodes
+                // Broadcast the successful response to all downstream nodes —
+                // we clone so the same payload is also returned via `Output::Out`
+                // for the executor's bookkeeping.
                 let content = Content::new(resp);
                 out_channels.broadcast(content.clone()).await;
                 Output::Out(Some(content))
@@ -156,6 +202,18 @@ pub struct ToolLoopAction<M: CompletionModel + 'static> {
 
 impl<M: CompletionModel> ToolLoopAction<M> {
     /// Creates a new `ToolLoopAction` adapter.
+    ///
+    /// Functional scope:
+    /// - Builds a default [`ToolLoopConfig`] populated only with the supplied
+    ///   `preamble` and `temperature`. Every other knob (max turns, repeat
+    ///   detection, hooks, terminal tools, etc.) is left at its default —
+    ///   callers that need finer control should construct the config directly
+    ///   and bypass this convenience constructor.
+    ///
+    /// Boundary conditions:
+    /// - Passing `None` for either knob means the underlying loop falls back to
+    ///   the implementation's defaults; this method does not expose those
+    ///   defaults.
     ///
     /// # Arguments
     ///
@@ -203,6 +261,14 @@ where
     /// collects and concatenates upstream outputs, then runs the tool loop
     /// instead of a simple agent prompt.
     ///
+    /// Boundary conditions:
+    /// - The loop's `config` is cloned per invocation, so mutating
+    ///   `self.config` between runs is safe but does not retroactively affect
+    ///   in-flight loops.
+    /// - `run_tool_loop` may exit due to max-turn or repeat-detection limits;
+    ///   such terminations propagate as `Err` and are reported as
+    ///   `Output::execution_failed` to the executor.
+    ///
     /// # Arguments
     ///
     /// * `in_channels` - Channels for receiving input from upstream DAG nodes.
@@ -219,7 +285,9 @@ where
             Err(e) => return Output::execution_failed(e),
         };
 
-        // Run the iterative tool-calling loop with the assembled prompt
+        // Run the iterative tool-calling loop with the assembled prompt.
+        // The loop owns its own turn budget and repeat detection — this adapter
+        // simply forwards the final answer (or surfaces the loop's terminal error).
         match run_tool_loop(&self.model, prompt, &self.registry, self.config.clone()).await {
             Ok(resp) => {
                 // Broadcast the successful response to all downstream nodes

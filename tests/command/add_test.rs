@@ -1,14 +1,23 @@
-//! Tests add command behavior for staging files, refresh operations, and edge cases.
+//! Tests `libra add` behavior for staging files, refresh operations, and
+//! edge cases via the in-process API (`add::execute`).
 //!
 //! **Layer:** L1 — deterministic, no external dependencies.
+//!
+//! Fixture convention: every test creates a `tempdir()`, calls
+//! `test::setup_with_new_libra_in()` to bootstrap a fresh repo, holds a
+//! `ChangeDirGuard` (hence `#[serial]`), then operates on plain text files
+//! at the repo root or in nested subdirectories. Assertions inspect the
+//! index via `changes_to_be_committed()` (staged) or
+//! `changes_to_be_staged()` (working-tree-vs-index).
 
 use std::{fs, io::Write};
 
 use super::*;
 
+/// Scenario: smoke test for the simplest staging path — create one file,
+/// run `add`, and confirm the path appears in the staged "new" set.
 #[tokio::test]
 #[serial]
-/// Tests the basic functionality of add command by adding a single file
 async fn test_add_single_file() {
     let test_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(test_dir.path()).await;
@@ -39,9 +48,11 @@ async fn test_add_single_file() {
     assert!(changes.new.iter().any(|x| x.to_str().unwrap() == file_path));
 }
 
+/// Scenario: passing several pathspecs in one `add` call must stage every
+/// listed file. Guards against accidental short-circuiting after the first
+/// path.
 #[tokio::test]
 #[serial]
-/// Tests adding multiple files at once
 async fn test_add_multiple_files() {
     let test_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(test_dir.path()).await;
@@ -94,9 +105,11 @@ async fn test_add_multiple_files() {
     );
 }
 
+/// Scenario: `--all` walks the working tree and stages every untracked
+/// file even though no pathspec is supplied. Locks in the recursive
+/// scan behavior of `-A`.
 #[tokio::test]
 #[serial]
-/// Tests the --all flag which adds all files in the working tree
 async fn test_add_all_flag() {
     let test_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(test_dir.path()).await;
@@ -145,9 +158,12 @@ async fn test_add_all_flag() {
     );
 }
 
+/// Scenario: `--update` (`-u`) must update tracked files only and never
+/// promote untracked files to staged. Verifies that the previously-tracked
+/// file ceases to show as modified (it was restaged) while the untracked
+/// file remains in the "new" set.
 #[tokio::test]
 #[serial]
-/// Tests the --update flag which only updates files already in the index
 async fn test_add_update_flag() {
     let test_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(test_dir.path()).await;
@@ -223,9 +239,12 @@ async fn test_add_update_flag() {
     );
 }
 
+/// Scenario: `.libraignore` patterns must filter both globbed file names
+/// and entire directories. The non-ignored file must end up staged while
+/// `ignored_*.txt` and `ignore_dir/**` remain hidden in both staged and
+/// committed change lists. Pins ignore-glob semantics.
 #[tokio::test]
 #[serial]
-/// Tests adding files with respect to ignore patterns in .libraignore
 async fn test_add_with_ignore_patterns() {
     let test_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(test_dir.path()).await;
@@ -313,9 +332,11 @@ async fn test_add_with_ignore_patterns() {
     );
 }
 
+/// Scenario: `--force` lifts the ignore filter for a single path and once
+/// that path is tracked, subsequent edits flow through without `--force`.
+/// Validates the "force once, stay tracked" promise.
 #[tokio::test]
 #[serial]
-/// Ensures `add --force` stages ignored files and subsequent updates no longer require force.
 async fn test_add_force_tracks_ignored_file() {
     let repo = tempdir().unwrap();
     test::setup_with_new_libra_in(repo.path()).await;
@@ -416,9 +437,11 @@ async fn test_add_force_tracks_ignored_file() {
     );
 }
 
+/// Scenario: `add --force .` recursively includes the contents of an
+/// ignored directory. Path separators are normalized to forward slashes
+/// for cross-platform comparison. Pins the directory-level force semantic.
 #[tokio::test]
 #[serial]
-/// Ensures `add --force .` surfaces ignored directories and files recursively.
 async fn test_add_force_dot_includes_ignored_directory() {
     let repo = tempdir().unwrap();
     test::setup_with_new_libra_in(repo.path()).await;
@@ -481,9 +504,12 @@ async fn test_add_force_dot_includes_ignored_directory() {
     );
 }
 
+/// Scenario: `--dry-run` should leave the index unchanged. Note: this
+/// test asserts that the path appears in `changes_to_be_staged().new` —
+/// i.e. the file is detected as untracked in the working tree, confirming
+/// it was not staged.
 #[tokio::test]
 #[serial]
-/// Tests the dry-run flag which should not actually add files
 async fn test_add_dry_run() {
     let test_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(test_dir.path()).await;
@@ -512,9 +538,12 @@ async fn test_add_dry_run() {
     assert!(changes.new.iter().any(|x| x.to_str().unwrap() == file_path));
 }
 
+/// Scenario: in-process `add::execute` with no pathspec and no `--all`
+/// must not silently stage anything. The index should be empty after the
+/// call. Boundary condition: the in-process API does not surface CLI exit
+/// codes, so the assertion is on side effects only.
 #[tokio::test]
 #[serial]
-/// Tests that running add without specifying files or --all should not modify index
 async fn test_add_without_path_should_error() {
     let test_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(test_dir.path()).await;
@@ -546,9 +575,11 @@ async fn test_add_without_path_should_error() {
     );
 }
 
+/// Scenario: passing a path that doesn't exist must not stage anything.
+/// Pins the post-condition: the bogus path never appears in
+/// `changes_to_be_committed().new`.
 #[tokio::test]
 #[serial]
-/// Tests adding a file that does not exist should produce an error
 async fn test_add_nonexistent_file_should_error() {
     let test_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(test_dir.path()).await;
@@ -578,9 +609,11 @@ async fn test_add_nonexistent_file_should_error() {
     );
 }
 
+/// Scenario: invoking `add` twice on the same path must not produce
+/// duplicate index entries. Pins the idempotency invariant of the staging
+/// pipeline.
 #[tokio::test]
 #[serial]
-/// Tests adding the same file twice should not create duplicates in the index
 async fn test_add_duplicate_file_should_not_duplicate_index() {
     let test_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(test_dir.path()).await;
@@ -620,11 +653,10 @@ async fn test_add_duplicate_file_should_not_duplicate_index() {
     }
 }
 
+/// Scenario: zero-byte files must be stageable. Regression guard against
+/// "non-empty content required" assumptions in the blob hashing path.
 #[tokio::test]
 #[serial]
-/// Tests adding an empty file to the repository
-///
-/// Ensures that Libra can handle adding empty files without errors
 async fn test_add_empty_file() {
     let test_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(test_dir.path()).await;
@@ -655,11 +687,11 @@ async fn test_add_empty_file() {
     );
 }
 
+/// Scenario: deeply nested paths (`a/b/c/deep.txt`) must be staged with
+/// their full repository-relative path. Path separators are normalized to
+/// `/` so the test passes on Windows.
 #[tokio::test]
 #[serial]
-/// Tests adding a file in a nested subdirectory
-///
-/// Ensures that Libra correctly handles files in deep directory structures
 async fn test_add_sub_directory_file() {
     let test_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(test_dir.path()).await;

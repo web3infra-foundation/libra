@@ -1,3 +1,9 @@
+//! Final gate evaluation for orchestrated AI runs.
+//!
+//! Boundary: gates combine verifier output, policy violations, and timing metadata into
+//! a pass/fail result; they do not modify objects or worktrees. Validation-decision
+//! tests cover accepted, rejected, and incomplete evidence outcomes.
+
 use std::{path::Path, time::Instant};
 
 use serde_json::json;

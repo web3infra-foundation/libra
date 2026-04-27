@@ -1,3 +1,10 @@
+//! AI orchestrator subsystem.
+//!
+//! Boundary: this layer coordinates planning, workspace preparation, execution,
+//! verification, decisions, checkpointing, and persistence for formal AI runs. Provider
+//! adapters and raw completion APIs stay outside this module. End-to-end coverage lives
+//! in the AI runtime, scheduler, storage-flow, and validation-decision tests.
+
 pub mod acl;
 mod checkpoint_policy;
 pub mod decider;
@@ -269,6 +276,11 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
         let max_replans = replan::max_replans(&spec);
         let mut replan_count = 0_u32;
         let mut plan_revision_specs = Vec::new();
+        // Session-scoped FUSE provisioning gate. Created once and shared with
+        // every ExecutorConfig across replans so the first FUSE failure
+        // disables FUSE for the rest of this session and emits exactly one
+        // TUI note.
+        let fuse_state = workspace::FuseProvisionState::default();
         let downstream_observer = self.config.observer.clone();
         let persistence_session = if let Some(ref mcp_server) = self.config.mcp_server {
             Some(
@@ -335,6 +347,7 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
                 dagrs_resume_checkpoint_id: self.config.dagrs_resume_checkpoint_id.clone(),
                 observer: observer.clone(),
                 workspace_baseline: None,
+                fuse_state: fuse_state.clone(),
             };
 
             let provider_parallel_limit =

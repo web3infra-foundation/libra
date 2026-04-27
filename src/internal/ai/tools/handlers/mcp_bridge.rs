@@ -5,6 +5,12 @@
 //! Each tool is wrapped in its own [`McpBridgeHandler`] instance which
 //! deserialises JSON arguments, resolves the actor identity, and delegates
 //! to the corresponding `_impl` method on [`LibraMcpServer`].
+//!
+//! AI user story: these bridge handlers let the in-process TUI agent use the
+//! same workflow graph tools that external MCP clients use, so intent/task/run,
+//! evidence, provenance, and Libra VCS operations stay consistent across
+//! transports. Keep tool names and semantics aligned with
+//! `docs/agent/agent-workflow.md` and `docs/agent/intentspec_typical.yaml`.
 
 use std::sync::Arc;
 
@@ -124,6 +130,9 @@ fn schema_to_params<T: rmcp::schemars::JsonSchema>() -> FunctionParameters {
 /// A [`ToolHandler`] that delegates to a single MCP tool on
 /// [`LibraMcpServer`]. One instance is created per tool and registered in the
 /// TUI's [`ToolRegistry`](crate::internal::ai::tools::ToolRegistry).
+///
+/// AI user story: expose one durable Libra workflow operation to the agent while
+/// reusing the MCP server's validation, persistence, and response formatting.
 pub struct McpBridgeHandler {
     server: Arc<LibraMcpServer>,
     tool_name: String,
@@ -149,16 +158,25 @@ impl McpBridgeHandler {
     /// Build all MCP bridge handlers ready for bulk-registration in a
     /// [`ToolRegistryBuilder`](crate::internal::ai::tools::ToolRegistryBuilder).
     ///
+    /// AI user story: register the full workflow tool set needed for an agent to
+    /// record what it intends to do, what it actually ran, what evidence it saw,
+    /// and which decision closed the run.
+    ///
     /// Returns `(tool_name, handler)` pairs.
     pub fn all_handlers(server: Arc<LibraMcpServer>) -> Vec<(String, Arc<dyn ToolHandler>)> {
         let defs: Vec<(&str, &str, FunctionParameters)> = vec![
             // ---- Libra version-control tools ----
+            // AI task: mutate VCS state through Libra's allowlist instead of
+            // allowing raw `git` from shell.
             (
                 "run_libra_vcs",
                 "Run an allowlisted Libra version-control command without invoking git",
                 schema_to_params::<RunLibraVcsParams>(),
             ),
             // ---- create tools ----
+            // AI task: persist the planned and observed lifecycle of an agent
+            // run so later humans/agents can audit context, diffs, tests, and
+            // decisions.
             (
                 "create_intent",
                 "Create a new Intent (Prompt/Goal)",
@@ -210,12 +228,16 @@ impl McpBridgeHandler {
                 schema_to_params::<CreateDecisionParams>(),
             ),
             // ---- update tools ----
+            // AI task: close or annotate workflow records after execution
+            // changes their status or links them to a commit.
             (
                 "update_intent",
                 "Update an existing Intent (set commit_sha or status)",
                 schema_to_params::<UpdateIntentParams>(),
             ),
             // ---- list tools ----
+            // AI task: recover recent workflow context when resuming or
+            // reflecting on a task without reading raw database tables.
             (
                 "list_intents",
                 "List recent intents",

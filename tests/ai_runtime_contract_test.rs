@@ -1,4 +1,11 @@
 //! Wave 1A runtime contract tests.
+//!
+//! Pin the `TaskExecutor` trait contract so any provider that implements
+//! `CompletionModel` can be plugged into the runtime by wrapping it in a thin
+//! adapter. Verifies the runtime can build a task prompt, dispatch through a
+//! `TaskExecutor`, and surface the response back as a `TaskExecutionResult`.
+//!
+//! **Layer:** L1 — uses `MockCompletionModel`, no external dependencies.
 
 mod helpers;
 
@@ -18,6 +25,12 @@ use libra::internal::ai::{
 };
 use uuid::Uuid;
 
+/// Generic adapter that turns any `CompletionModel` into a `TaskExecutor`.
+///
+/// Demonstrates the wiring an integrator would write to plug a custom provider into
+/// the runtime: forward the prompt messages, capture the first text response as the
+/// summary, fabricate a `run_id` if one was not supplied, and report
+/// `TaskExecutionStatus::Completed`.
 #[derive(Clone)]
 struct CompletionBackedTaskExecutor<M> {
     model: M,
@@ -59,6 +72,12 @@ where
     }
 }
 
+/// Scenario: build the runtime's task prompt with a fixture provider/model pair,
+/// dispatch a single attempt through `CompletionBackedTaskExecutor` backed by
+/// `MockCompletionModel::text("attempt complete")`, and assert the result preserves
+/// the supplied `task_id`, marks the attempt completed, and surfaces the model's
+/// text as the summary. Acts as the contract pin proving the runtime actually
+/// integrates a generic provider via the `TaskExecutor` trait alone.
 #[tokio::test]
 async fn generic_provider_can_execute_through_task_executor_contract() {
     let runtime = Runtime::new(RuntimeConfig {

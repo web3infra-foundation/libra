@@ -1,3 +1,9 @@
+//! Code UI projection server helpers for exposing AI thread state to the local web UI.
+//!
+//! Boundary: this file translates internal projection records into HTTP/websocket
+//! views; it does not execute tools or mutate repository state. Projection resolver
+//! tests cover missing threads, event ordering, and replayed snapshots.
+
 use std::{
     collections::HashMap,
     sync::{
