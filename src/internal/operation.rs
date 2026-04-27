@@ -10,7 +10,9 @@ use sea_orm::{
 };
 use thiserror::Error;
 
-use crate::internal::model::{operation, operation_parent, operation_view, operation_view_ref};
+use crate::internal::model::{
+    operation, operation_parent, operation_view, operation_view_ref, operation_view_workspace,
+};
 
 /// Stable status of an operation record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +85,13 @@ pub struct OperationViewRefRecord {
     pub ref_name: String,
     pub ref_remote: Option<String>,
     pub target_oid: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationViewWorkspaceRecord {
+    pub view_id: String,
+    pub pointer_kind: String,
+    pub pointer_value: String,
 }
 
 /// Generic pagination request for operation list APIs.
@@ -564,6 +573,119 @@ impl OperationService {
             .collect::<Result<Vec<_>, _>>()
     }
 
+    fn view_workspace_from_model(
+        model: operation_view_workspace::Model,
+    ) -> Result<OperationViewWorkspaceRecord, OperationServiceError> {
+        let record = OperationViewWorkspaceRecord {
+            view_id: model.view_id,
+            pointer_kind: model.pointer_kind,
+            pointer_value: model.pointer_value,
+        };
+        Self::validate_view_workspace_record(&record)?;
+        Ok(record)
+    }
+
+    pub fn validate_view_workspace_record(
+        record: &OperationViewWorkspaceRecord,
+    ) -> Result<(), OperationServiceError> {
+        if record.view_id.trim().is_empty() {
+            return Err(OperationServiceError::InvalidArgument(
+                "view_id must not be empty".to_string(),
+            ));
+        }
+        if record.pointer_kind.trim().is_empty() {
+            return Err(OperationServiceError::InvalidArgument(
+                "pointer_kind must not be empty".to_string(),
+            ));
+        }
+        if record.pointer_value.trim().is_empty() {
+            return Err(OperationServiceError::InvalidArgument(
+                "pointer_value must not be empty".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Upsert one workspace pointer snapshot under one operation view.
+    pub async fn upsert_view_workspace_with_conn<C: ConnectionTrait>(
+        db: &C,
+        record: &OperationViewWorkspaceRecord,
+    ) -> Result<OperationViewWorkspaceRecord, OperationServiceError> {
+        Self::validate_view_workspace_record(record)?;
+
+        let existing = operation_view_workspace::Entity::find_by_id((
+            record.view_id.clone(),
+            record.pointer_kind.clone(),
+        ))
+        .one(db)
+        .await
+        .map_err(|err| {
+            OperationServiceError::Storage(format!(
+                "failed to query workspace pointer '{}:{}': {err}",
+                record.view_id, record.pointer_kind
+            ))
+        })?;
+
+        let saved = if let Some(existing) = existing {
+            let model = operation_view_workspace::ActiveModel {
+                view_id: Set(existing.view_id),
+                pointer_kind: Set(existing.pointer_kind),
+                pointer_value: Set(record.pointer_value.clone()),
+            };
+
+            model.update(db).await.map_err(|err| {
+                OperationServiceError::Storage(format!(
+                    "failed to update workspace pointer '{}:{}': {err}",
+                    record.view_id, record.pointer_kind
+                ))
+            })?
+        } else {
+            let model = operation_view_workspace::ActiveModel {
+                view_id: Set(record.view_id.clone()),
+                pointer_kind: Set(record.pointer_kind.clone()),
+                pointer_value: Set(record.pointer_value.clone()),
+            };
+
+            model.insert(db).await.map_err(|err| {
+                OperationServiceError::Storage(format!(
+                    "failed to insert workspace pointer '{}:{}': {err}",
+                    record.view_id, record.pointer_kind
+                ))
+            })?
+        };
+
+        Self::view_workspace_from_model(saved)
+    }
+
+    /// List all workspace pointer snapshots for one operation view.
+    pub async fn list_view_workspace_with_conn<C: ConnectionTrait>(
+        db: &C,
+        view_id: &str,
+    ) -> Result<Vec<OperationViewWorkspaceRecord>, OperationServiceError> {
+        if view_id.trim().is_empty() {
+            return Err(OperationServiceError::InvalidArgument(
+                "view_id must not be empty".to_string(),
+            ));
+        }
+
+        let models = operation_view_workspace::Entity::find()
+            .filter(operation_view_workspace::Column::ViewId.eq(view_id))
+            .order_by_asc(operation_view_workspace::Column::PointerKind)
+            .all(db)
+            .await
+            .map_err(|err| {
+                OperationServiceError::Storage(format!(
+                    "failed to list workspace pointers for view '{}': {err}",
+                    view_id
+                ))
+            })?;
+
+        models
+            .into_iter()
+            .map(Self::view_workspace_from_model)
+            .collect::<Result<Vec<_>, _>>()
+    }
+
     pub fn validate_record(record: &OperationRecord) -> Result<(), OperationServiceError> {
         if record.op_id.trim().is_empty() {
             return Err(OperationServiceError::InvalidArgument(
@@ -622,6 +744,7 @@ mod tests {
     use super::{
         OperationParentRecord, OperationQueryPage, OperationRecord, OperationService,
         OperationServiceError, OperationStatus, OperationViewRecord, OperationViewRefRecord,
+        OperationViewWorkspaceRecord,
     };
 
     fn sample_record() -> OperationRecord {
@@ -888,5 +1011,74 @@ mod tests {
         };
 
         OperationService::validate_view_ref_record(&record).unwrap();
+    }
+
+    #[tokio::test]
+    async fn commit6_view_workspace_validation_and_roundtrip() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+
+        let invalid_snapshot = OperationViewWorkspaceRecord {
+            view_id: "view_1".to_string(),
+            pointer_kind: "worktree".to_string(),
+            pointer_value: " ".to_string(),
+        };
+        let error = OperationService::upsert_view_workspace_with_conn(&db, &invalid_snapshot)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, OperationServiceError::InvalidArgument(_)));
+
+        let error = OperationService::list_view_workspace_with_conn(&db, " ")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, OperationServiceError::InvalidArgument(_)));
+
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            r#"
+            CREATE TABLE IF NOT EXISTS operation_view_workspace (
+                view_id TEXT NOT NULL,
+                pointer_kind TEXT NOT NULL,
+                pointer_value TEXT NOT NULL,
+                PRIMARY KEY (view_id, pointer_kind)
+            );
+            "#,
+        ))
+        .await
+        .unwrap();
+
+        let index_snapshot = OperationViewWorkspaceRecord {
+            view_id: "view_3".to_string(),
+            pointer_kind: "index".to_string(),
+            pointer_value: "oid-index-v1".to_string(),
+        };
+        let worktree_snapshot = OperationViewWorkspaceRecord {
+            view_id: "view_3".to_string(),
+            pointer_kind: "worktree".to_string(),
+            pointer_value: "oid-worktree-v1".to_string(),
+        };
+
+        OperationService::upsert_view_workspace_with_conn(&db, &index_snapshot)
+            .await
+            .unwrap();
+        OperationService::upsert_view_workspace_with_conn(&db, &worktree_snapshot)
+            .await
+            .unwrap();
+
+        let updated_index = OperationViewWorkspaceRecord {
+            pointer_value: "oid-index-v2".to_string(),
+            ..index_snapshot.clone()
+        };
+        OperationService::upsert_view_workspace_with_conn(&db, &updated_index)
+            .await
+            .unwrap();
+
+        let snapshots = OperationService::list_view_workspace_with_conn(&db, "view_3")
+            .await
+            .unwrap();
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[0].pointer_kind, "index");
+        assert_eq!(snapshots[0].pointer_value, "oid-index-v2");
+        assert_eq!(snapshots[1].pointer_kind, "worktree");
+        assert_eq!(snapshots[1].pointer_value, "oid-worktree-v1");
     }
 }

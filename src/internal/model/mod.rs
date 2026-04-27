@@ -25,6 +25,7 @@ pub mod operation;
 pub mod operation_parent;
 pub mod operation_view;
 pub mod operation_view_ref;
+pub mod operation_view_workspace;
 pub mod reference;
 pub mod reflog;
 
