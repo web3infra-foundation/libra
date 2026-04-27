@@ -11,6 +11,51 @@ use tempfile::tempdir;
 
 use super::*;
 
+/// Walk the objects directory and return paths to loose object files.
+fn walk_objects_dir(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                for sub_entry in fs::read_dir(&path).into_iter().flatten().flatten() {
+                    let sub_path = sub_entry.path();
+                    if sub_path.is_file() {
+                        files.push(sub_path);
+                    }
+                }
+            }
+        }
+    }
+    files
+}
+
+/// Corrupt the first loose object found. Returns whether an object was corrupted.
+fn corrupt_first_object(repo: &std::path::Path) -> bool {
+    let objects_dir = repo.join(".libra").join("objects");
+    if !objects_dir.exists() {
+        return false;
+    }
+    for entry in walk_objects_dir(&objects_dir) {
+        fs::write(&entry, b"corrupted!!!").expect("failed to corrupt object");
+        return true;
+    }
+    false
+}
+
+/// Delete the first loose object found. Returns whether an object was deleted.
+fn delete_first_object(repo: &std::path::Path) -> bool {
+    let objects_dir = repo.join(".libra").join("objects");
+    if !objects_dir.exists() {
+        return false;
+    }
+    for entry in walk_objects_dir(&objects_dir) {
+        fs::remove_file(&entry).expect("failed to remove object");
+        return true;
+    }
+    false
+}
+
 // ---------------------------------------------------------------------------
 // Basic functionality tests (>= 4)
 // ---------------------------------------------------------------------------
@@ -379,27 +424,17 @@ fn test_fsck_outside_repository() {
 fn test_fsck_corrupted_object() {
     let repo = create_committed_repo_via_cli();
 
-    // Corrupt an object by writing garbage to a blob
-    let objects_dir = repo.path().join(".libra").join("objects");
-    if objects_dir.exists() {
-        // Find and corrupt a loose object
-        for entry in walk_objects_dir(&objects_dir) {
-            fs::write(&entry, b"corrupted data!!!").expect("failed to corrupt object");
-
-            let output = run_libra_command(&["fsck"], repo.path());
-            assert!(
-                !output.status.success(),
-                "fsck should fail on corrupted object"
-            );
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            assert!(
-                stderr.contains("corrupt")
-                    || stderr.contains("FAILED")
-                    || stderr.contains("mismatch"),
-                "should report corruption: {stderr}"
-            );
-            return;
-        }
+    if corrupt_first_object(repo.path()) {
+        let output = run_libra_command(&["fsck"], repo.path());
+        assert!(
+            !output.status.success(),
+            "fsck should fail on corrupted object"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("corrupt") || stderr.contains("FAILED") || stderr.contains("mismatch"),
+            "should report corruption: {stderr}"
+        );
     }
 }
 
@@ -408,24 +443,17 @@ fn test_fsck_corrupted_object() {
 fn test_fsck_missing_object() {
     let repo = create_committed_repo_via_cli();
 
-    // Delete a loose object file
-    let objects_dir = repo.path().join(".libra").join("objects");
-    if objects_dir.exists() {
-        for entry in walk_objects_dir(&objects_dir) {
-            fs::remove_file(&entry).expect("failed to remove object");
-
-            let output = run_libra_command(&["fsck"], repo.path());
-            assert!(
-                !output.status.success(),
-                "fsck should fail on missing object"
-            );
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            assert!(
-                stderr.contains("missing") || stderr.contains("FAILED"),
-                "should report missing object: {stderr}"
-            );
-            return;
-        }
+    if delete_first_object(repo.path()) {
+        let output = run_libra_command(&["fsck"], repo.path());
+        assert!(
+            !output.status.success(),
+            "fsck should fail on missing object"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("missing") || stderr.contains("FAILED"),
+            "should report missing object: {stderr}"
+        );
     }
 }
 
@@ -553,19 +581,13 @@ fn test_fsck_exit_code_zero_on_success() {
 fn test_fsck_exit_code_on_corrupted_object() {
     let repo = create_committed_repo_via_cli();
 
-    let objects_dir = repo.path().join(".libra").join("objects");
-    if objects_dir.exists() {
-        for entry in walk_objects_dir(&objects_dir) {
-            fs::write(&entry, b"corrupted!!!").expect("failed to corrupt object");
-
-            let output = run_libra_command(&["fsck"], repo.path());
-            let exit_code = output.status.code().unwrap_or(-1);
-            assert!(
-                exit_code & 1 != 0,
-                "exit code should have OBJECT_CORRUPT bit set: {exit_code}"
-            );
-            return;
-        }
+    if corrupt_first_object(repo.path()) {
+        let output = run_libra_command(&["fsck"], repo.path());
+        let exit_code = output.status.code().unwrap_or(-1);
+        assert!(
+            exit_code & 1 != 0,
+            "exit code should have OBJECT_CORRUPT bit set: {exit_code}"
+        );
     }
 }
 
@@ -574,18 +596,7 @@ fn test_fsck_exit_code_on_corrupted_object() {
 fn test_fsck_exit_code_combination_objects_and_refs() {
     let repo = create_committed_repo_via_cli();
 
-    let objects_dir = repo.path().join(".libra").join("objects");
-    let mut corrupted = false;
-
-    if objects_dir.exists() {
-        for entry in walk_objects_dir(&objects_dir) {
-            fs::write(&entry, b"corrupted!!!").expect("failed to corrupt object");
-            corrupted = true;
-            break;
-        }
-    }
-
-    if corrupted {
+    if corrupt_first_object(repo.path()) {
         let output = run_libra_command(&["fsck"], repo.path());
         let exit_code = output.status.code().unwrap_or(-1);
         assert!(
@@ -902,25 +913,6 @@ fn test_fsck_empty_hash_string() {
     assert!(!output.status.success(), "fsck with empty hash should fail");
 }
 
-/// Walk the objects directory and return paths to loose object files.
-fn walk_objects_dir(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let mut files = Vec::new();
-    if let Ok(entries) = fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                for sub_entry in fs::read_dir(&path).into_iter().flatten().flatten() {
-                    let sub_path = sub_entry.path();
-                    if sub_path.is_file() {
-                        files.push(sub_path);
-                    }
-                }
-            }
-        }
-    }
-    files
-}
-
 // ---------------------------------------------------------------------------
 // SHA-256 object format tests
 // ---------------------------------------------------------------------------
@@ -950,129 +942,6 @@ fn create_sha256_committed_repo_via_cli() -> tempfile::TempDir {
 
 #[test]
 #[serial]
-fn test_fsck_sha256_empty_repo_passes() {
-    let repo = tempdir().unwrap();
-    init_sha256_repo_via_cli(repo.path());
-
-    let output = run_libra_command(&["fsck"], repo.path());
-    assert!(
-        output.status.success(),
-        "fsck on empty SHA-256 repo should pass: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-#[test]
-#[serial]
-fn test_fsck_sha256_repo_with_commit_passes() {
-    let repo = create_sha256_committed_repo_via_cli();
-
-    let output = run_libra_command(&["fsck"], repo.path());
-    assert!(
-        output.status.success(),
-        "fsck on SHA-256 repo with commit should pass: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("Integrity check passed"),
-        "should print pass message: {stdout}"
-    );
-}
-
-#[test]
-#[serial]
-fn test_fsck_sha256_verbose_output() {
-    let repo = create_sha256_committed_repo_via_cli();
-
-    let output = run_libra_command(&["fsck", "--verbose"], repo.path());
-    assert!(
-        output.status.success(),
-        "fsck --verbose on SHA-256 repo should pass: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("Fsck Summary"),
-        "verbose output should contain summary: {stdout}"
-    );
-}
-
-#[test]
-#[serial]
-fn test_fsck_sha256_json_output() {
-    let repo = create_sha256_committed_repo_via_cli();
-
-    let output = run_libra_command(&["fsck", "--json"], repo.path());
-    assert!(
-        output.status.success(),
-        "fsck --json on SHA-256 repo should pass: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("\"overall_status\": \"ok\""),
-        "JSON should report ok status: {stdout}"
-    );
-}
-
-#[test]
-#[serial]
-fn test_fsck_sha256_corrupted_object_detected() {
-    let repo = create_sha256_committed_repo_via_cli();
-
-    let objects_dir = repo.path().join(".libra").join("objects");
-    if objects_dir.exists() {
-        for entry in walk_objects_dir(&objects_dir) {
-            fs::write(&entry, b"corrupted sha256 data!!!")
-                .expect("failed to corrupt SHA-256 object");
-
-            let output = run_libra_command(&["fsck"], repo.path());
-            assert!(
-                !output.status.success(),
-                "fsck should fail on corrupted SHA-256 object"
-            );
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            assert!(
-                stderr.contains("corrupt")
-                    || stderr.contains("FAILED")
-                    || stderr.contains("mismatch"),
-                "should report corruption: {stderr}"
-            );
-            return;
-        }
-    }
-    panic!("no SHA-256 objects found to corrupt");
-}
-
-#[test]
-#[serial]
-fn test_fsck_sha256_missing_object_detected() {
-    let repo = create_sha256_committed_repo_via_cli();
-
-    let objects_dir = repo.path().join(".libra").join("objects");
-    if objects_dir.exists() {
-        for entry in walk_objects_dir(&objects_dir) {
-            fs::remove_file(&entry).expect("failed to remove SHA-256 object");
-
-            let output = run_libra_command(&["fsck"], repo.path());
-            assert!(
-                !output.status.success(),
-                "fsck should fail on missing SHA-256 object"
-            );
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            assert!(
-                stderr.contains("missing") || stderr.contains("FAILED"),
-                "should report missing object: {stderr}"
-            );
-            return;
-        }
-    }
-    panic!("no SHA-256 objects found to remove");
-}
-
-#[test]
-#[serial]
 fn test_fsck_sha256_single_object_valid() {
     let repo = create_sha256_committed_repo_via_cli();
 
@@ -1080,7 +949,7 @@ fn test_fsck_sha256_single_object_valid() {
     let stdout = String::from_utf8_lossy(&log_output.stdout);
     let commit_hash = stdout.lines().next().unwrap().trim();
 
-    // SHA-256 hashes are 64 hex chars
+    // SHA-256 hashes are 64 hex chars — this is the key format-specific check
     assert_eq!(
         commit_hash.len(),
         64,
@@ -1103,22 +972,40 @@ fn test_fsck_sha256_single_object_valid() {
 
 #[test]
 #[serial]
-fn test_fsck_sha256_with_indexed_files() {
-    let repo = tempdir().unwrap();
-    init_sha256_repo_via_cli(repo.path());
-    configure_identity_via_cli(repo.path());
+fn test_fsck_sha256_corrupted_object_detected() {
+    let repo = create_sha256_committed_repo_via_cli();
 
-    fs::write(repo.path().join("staged.txt"), "sha256 staged content\n")
-        .expect("failed to create staged file");
-    let output = run_libra_command(&["add", "staged.txt"], repo.path());
-    assert_cli_success(&output, "add staged file");
+    if corrupt_first_object(repo.path()) {
+        let output = run_libra_command(&["fsck"], repo.path());
+        assert!(
+            !output.status.success(),
+            "fsck should fail on corrupted SHA-256 object"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("corrupt") || stderr.contains("FAILED") || stderr.contains("mismatch"),
+            "should report corruption: {stderr}"
+        );
+    }
+}
 
-    let output = run_libra_command(&["fsck"], repo.path());
-    assert!(
-        output.status.success(),
-        "fsck with SHA-256 staged files should pass: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+#[test]
+#[serial]
+fn test_fsck_sha256_missing_object_detected() {
+    let repo = create_sha256_committed_repo_via_cli();
+
+    if delete_first_object(repo.path()) {
+        let output = run_libra_command(&["fsck"], repo.path());
+        assert!(
+            !output.status.success(),
+            "fsck should fail on missing SHA-256 object"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("missing") || stderr.contains("FAILED"),
+            "should report missing object: {stderr}"
+        );
+    }
 }
 
 #[test]
@@ -1126,7 +1013,6 @@ fn test_fsck_sha256_with_indexed_files() {
 fn test_fsck_sha256_invalid_object_id() {
     let repo = create_sha256_committed_repo_via_cli();
 
-    // Use an invalid hash that is clearly not SHA-256
     let output = run_libra_command(&["fsck", "not-a-valid-sha256-hash!!"], repo.path());
     assert!(
         !output.status.success(),

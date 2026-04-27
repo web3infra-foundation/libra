@@ -119,7 +119,6 @@ pub struct ObjectCheckResult {
 #[serde(rename_all = "lowercase")]
 pub enum CheckStatus {
     Ok,
-    Corrupted,
     Missing,
     InvalidFormat,
     HashMismatch,
@@ -168,7 +167,6 @@ pub struct IndexCheckResult {
     pub entries_checked: usize,
     pub entries_ok: usize,
     pub entries_corrupted: usize,
-    pub missing_objects: usize,
     pub issues: Vec<IssueReport>,
 }
 
@@ -289,39 +287,49 @@ fn list_all_objects_in_storage(storage: &ClientStorage) -> io::Result<Vec<Object
     Ok(hashes)
 }
 
-/// Build an IssueReport from a failed single-object check.
-fn issue_for_single_object_status(
+/// Build an IssueReport for a failed object check.
+/// `context` controls whether the report is for a single-object CLI check
+/// (`context == Single`) or a full-scan object (`context == FullScan`).
+enum IssueContext {
+    Single,
+    FullScan,
+}
+
+fn build_issue_report(
     check_result: &ObjectCheckResult,
     object_id: &str,
+    context: IssueContext,
 ) -> IssueReport {
-    match check_result.status {
-        CheckStatus::Corrupted | CheckStatus::HashMismatch => IssueReport {
-            issue_type: "object_corruption".to_string(),
-            severity: "error".to_string(),
-            object_id: Some(object_id.to_string()),
-            ref_name: None,
-            message: check_result.error_message.clone().unwrap_or_default(),
-            suggestion: Some(
-                "Object data is corrupted. Consider restoring from backup or remote.".to_string(),
-            ),
-        },
-        CheckStatus::InvalidFormat => IssueReport {
-            issue_type: "invalid_format".to_string(),
-            severity: "error".to_string(),
-            object_id: Some(object_id.to_string()),
-            ref_name: None,
-            message: check_result.error_message.clone().unwrap_or_default(),
-            suggestion: Some("Object has invalid format.".to_string()),
-        },
-        CheckStatus::Missing => IssueReport {
-            issue_type: "missing_object".to_string(),
-            severity: "error".to_string(),
-            object_id: Some(object_id.to_string()),
-            ref_name: None,
-            message: "Object not found in storage".to_string(),
-            suggestion: Some("Object may have been deleted or never created.".to_string()),
-        },
-        CheckStatus::Ok => unreachable!("should not build issue for Ok status"),
+    let (issue_type, suggestion) = match (&check_result.status, context) {
+        (CheckStatus::HashMismatch, IssueContext::Single) => (
+            "object_corruption".to_string(),
+            "Object data is corrupted. Consider restoring from backup or remote.".to_string(),
+        ),
+        (CheckStatus::HashMismatch, IssueContext::FullScan) => (
+            "hash_mismatch".to_string(),
+            "Consider restoring from backup or remote.".to_string(),
+        ),
+        (CheckStatus::InvalidFormat, _) => (
+            "invalid_format".to_string(),
+            "Object has invalid format.".to_string(),
+        ),
+        (CheckStatus::Missing, _) => (
+            "missing_object".to_string(),
+            "Object may have been deleted or never created.".to_string(),
+        ),
+        (CheckStatus::Ok, _) => unreachable!("should not build issue for Ok status"),
+    };
+
+    IssueReport {
+        issue_type,
+        severity: "error".to_string(),
+        object_id: Some(object_id.to_string()),
+        ref_name: None,
+        message: check_result
+            .error_message
+            .clone()
+            .unwrap_or_else(|| "Object verification failed".to_string()),
+        suggestion: Some(suggestion),
     }
 }
 
@@ -345,7 +353,7 @@ async fn check_single_object(object_id: &str, storage: &ClientStorage) -> CliRes
             (CheckStatus::Ok, Vec::new())
         }
         _ => {
-            let issue = issue_for_single_object_status(&check_result, object_id);
+            let issue = build_issue_report(&check_result, object_id, IssueContext::Single);
             (check_result.status, vec![issue])
         }
     };
@@ -440,31 +448,15 @@ async fn check_objects(
             _ => {
                 result.objects_corrupted += 1;
                 result.overall_status = check_result.status.clone();
-                result.issues.push(object_issue_report(hash, &check_result));
+                result.issues.push(build_issue_report(
+                    &check_result,
+                    &hash.to_string(),
+                    IssueContext::FullScan,
+                ));
             }
         }
     }
     Ok(())
-}
-
-/// Build an IssueReport for a corrupted object found during full scan.
-fn object_issue_report(hash: &ObjectHash, check_result: &ObjectCheckResult) -> IssueReport {
-    IssueReport {
-        issue_type: match check_result.status {
-            CheckStatus::Corrupted | CheckStatus::HashMismatch => "hash_mismatch".to_string(),
-            CheckStatus::InvalidFormat => "invalid_format".to_string(),
-            CheckStatus::Missing => "missing_object".to_string(),
-            _ => "unknown".to_string(),
-        },
-        severity: "error".to_string(),
-        object_id: Some(hash.to_string()),
-        ref_name: None,
-        message: check_result
-            .error_message
-            .clone()
-            .unwrap_or_else(|| "Object verification failed".to_string()),
-        suggestion: Some("Consider restoring from backup or remote.".to_string()),
-    }
 }
 
 /// Check refs and optionally fix broken ones.
@@ -521,7 +513,7 @@ async fn check_and_fix_index(
         if args.fix {
             apply_fix_corrupted_index(result).await?;
         } else {
-            result.overall_status = CheckStatus::Corrupted;
+            result.overall_status = CheckStatus::InvalidFormat;
         }
     }
     Ok(())
@@ -548,7 +540,7 @@ async fn check_cross_references(storage: &ClientStorage, result: &mut FsckResult
     result.issues.extend(cross_ref_issues);
 
     if issue_count > 0 {
-        result.overall_status = CheckStatus::Corrupted;
+        result.overall_status = CheckStatus::InvalidFormat;
     }
     Ok(())
 }
@@ -593,7 +585,7 @@ async fn verify_object(hash: &ObjectHash, storage: &ClientStorage) -> CliResult<
             return Ok(ObjectCheckResult {
                 object_id: hash.to_string(),
                 object_type: "unknown".to_string(),
-                status: CheckStatus::Corrupted,
+                status: CheckStatus::HashMismatch,
                 error_message: Some(format!("Failed to read object: {}", e)),
                 size: 0,
             });
@@ -792,7 +784,6 @@ fn check_index(storage: &ClientStorage) -> CliResult<IndexCheckResult> {
         entries_checked: 0,
         entries_ok: 0,
         entries_corrupted: 0,
-        missing_objects: 0,
         issues: Vec::new(),
     };
 
@@ -1048,31 +1039,17 @@ async fn validate_cross_references(storage: &ClientStorage) -> CliResult<Vec<Iss
                 }
                 // Verify the referenced object type matches the declaration
                 if let Ok(actual_type) = storage.get_object_type(&item.id) {
-                    let expected_is_tree = item.mode == TreeItemMode::Tree;
-                    if expected_is_tree && actual_type != ObjectType::Tree {
+                    let declared_is_tree = item.mode == TreeItemMode::Tree;
+                    if declared_is_tree != (actual_type == ObjectType::Tree) {
+                        let declared_kind = if declared_is_tree { "subtree" } else { "blob" };
                         issues.push(IssueReport {
                             issue_type: "tree_entry_type_mismatch".to_string(),
                             severity: "error".to_string(),
                             object_id: Some(item.id.to_string()),
                             ref_name: None,
                             message: format!(
-                                "Tree {} declares {} as a subtree but it is a {}",
+                                "Tree {} declares {} as a {declared_kind} but it is a {}",
                                 hash, item.name, actual_type
-                            ),
-                            suggestion: Some(
-                                "The tree entry type does not match the actual object type."
-                                    .to_string(),
-                            ),
-                        });
-                    } else if !expected_is_tree && actual_type == ObjectType::Tree {
-                        issues.push(IssueReport {
-                            issue_type: "tree_entry_type_mismatch".to_string(),
-                            severity: "error".to_string(),
-                            object_id: Some(item.id.to_string()),
-                            ref_name: None,
-                            message: format!(
-                                "Tree {} declares {} as a blob but it is a tree",
-                                hash, item.name
                             ),
                             suggestion: Some(
                                 "The tree entry type does not match the actual object type."
@@ -1293,9 +1270,9 @@ mod tests {
         let json = serde_json::to_string(&status).unwrap();
         assert_eq!(json, "\"ok\"");
 
-        let status = CheckStatus::Corrupted;
+        let status = CheckStatus::Missing;
         let json = serde_json::to_string(&status).unwrap();
-        assert_eq!(json, "\"corrupted\"");
+        assert_eq!(json, "\"missing\"");
     }
 
     #[test]
@@ -1638,7 +1615,6 @@ mod tests {
     fn test_check_status_all_variants() {
         let statuses = [
             CheckStatus::Ok,
-            CheckStatus::Corrupted,
             CheckStatus::Missing,
             CheckStatus::InvalidFormat,
             CheckStatus::HashMismatch,
@@ -1725,10 +1701,6 @@ mod tests {
     #[test]
     fn test_check_status_display() {
         assert_eq!(serde_json::to_string(&CheckStatus::Ok).unwrap(), "\"ok\"");
-        assert_eq!(
-            serde_json::to_string(&CheckStatus::Corrupted).unwrap(),
-            "\"corrupted\""
-        );
         assert_eq!(
             serde_json::to_string(&CheckStatus::Missing).unwrap(),
             "\"missing\""
@@ -1979,7 +1951,7 @@ mod tests {
             refs_broken: 0,
             index_valid: true,
             cross_ref_issues: 0,
-            overall_status: CheckStatus::Corrupted,
+            overall_status: CheckStatus::HashMismatch,
             issues: vec![],
             failure_mask: exit_code::OBJECT_CORRUPT,
             failure_categories: vec!["objects".to_string()],
@@ -2156,8 +2128,7 @@ mod tests {
         let result = verify_object(&blob.id, &storage).await.unwrap();
         assert!(
             result.status == CheckStatus::HashMismatch
-                || result.status == CheckStatus::InvalidFormat
-                || result.status == CheckStatus::Corrupted,
+                || result.status == CheckStatus::InvalidFormat,
             "corrupted blob should be detected: {:?}",
             result.status
         );
@@ -2472,7 +2443,7 @@ mod tests {
             refs_broken: 0,
             index_valid: true,
             cross_ref_issues: 0,
-            overall_status: CheckStatus::Corrupted,
+            overall_status: CheckStatus::HashMismatch,
             issues: vec![IssueReport {
                 issue_type: "hash_mismatch".to_string(),
                 severity: "error".to_string(),
