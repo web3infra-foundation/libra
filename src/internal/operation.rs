@@ -1,10 +1,16 @@
 //! Operation service skeleton for command-level audit persistence.
 //!
-//! This module defines stable public types for A-6 and intentionally keeps
-//! database access out of Commit 1. Later commits will add DAO methods with
-//! `*_with_conn` variants on top of these contracts.
+//! This module defines stable public types for A-6. Commit 2 introduces the
+//! operation main-table base DAO methods while keeping transaction ownership in
+//! callers through `*_with_conn` signatures.
 
+use sea_orm::{
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter,
+    QueryOrder, QuerySelect,
+};
 use thiserror::Error;
+
+use crate::internal::model::operation;
 
 /// Stable status of an operation record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,6 +19,29 @@ pub enum OperationStatus {
     Succeeded,
     Failed,
     Canceled,
+}
+
+impl OperationStatus {
+    fn as_db_value(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Canceled => "canceled",
+        }
+    }
+
+    fn from_db_value(value: &str) -> Result<Self, OperationServiceError> {
+        match value {
+            "running" => Ok(Self::Running),
+            "succeeded" => Ok(Self::Succeeded),
+            "failed" => Ok(Self::Failed),
+            "canceled" => Ok(Self::Canceled),
+            other => Err(OperationServiceError::Internal(format!(
+                "unknown operation status value in storage: {other}"
+            ))),
+        }
+    }
 }
 
 /// Immutable operation record payload used by DAO/service boundaries.
@@ -88,12 +117,119 @@ pub enum OperationServiceError {
 
 /// Operation service placeholder.
 ///
-/// Commit 1 only defines stable validation and paging helpers. Database-backed
-/// methods are added in later A-6 commits.
+/// Commit 2 adds operation main table base DAO methods. Higher-level graph
+/// persistence and wrapper orchestration are introduced in later commits.
 #[derive(Debug, Default)]
 pub struct OperationService;
 
 impl OperationService {
+    fn record_from_model(model: operation::Model) -> Result<OperationRecord, OperationServiceError> {
+        let status = OperationStatus::from_db_value(&model.status)?;
+        Ok(OperationRecord {
+            op_id: model.op_id,
+            repo_id: model.repo_id,
+            view_id: model.view_id,
+            command_name: model.command_name,
+            description: model.description,
+            actor: model.actor,
+            args_digest: model.args_digest,
+            start_ts: model.start_ts,
+            end_ts: model.end_ts,
+            status,
+        })
+    }
+
+    /// Insert one operation main record using an existing connection or transaction.
+    pub async fn insert_operation_with_conn<C: ConnectionTrait>(
+        db: &C,
+        record: &OperationRecord,
+    ) -> Result<OperationRecord, OperationServiceError> {
+        Self::validate_record(record)?;
+
+        let model = operation::ActiveModel {
+            op_id: Set(record.op_id.clone()),
+            repo_id: Set(record.repo_id.clone()),
+            view_id: Set(record.view_id.clone()),
+            command_name: Set(record.command_name.clone()),
+            description: Set(record.description.clone()),
+            actor: Set(record.actor.clone()),
+            args_digest: Set(record.args_digest.clone()),
+            start_ts: Set(record.start_ts),
+            end_ts: Set(record.end_ts),
+            status: Set(record.status.as_db_value().to_string()),
+        };
+
+        let inserted = model.insert(db).await.map_err(|err| {
+            OperationServiceError::Storage(format!(
+                "failed to insert operation '{}' for repository '{}': {err}",
+                record.op_id, record.repo_id
+            ))
+        })?;
+
+        Self::record_from_model(inserted)
+    }
+
+    /// Find one operation main record by operation id.
+    pub async fn find_operation_by_id_with_conn<C: ConnectionTrait>(
+        db: &C,
+        op_id: &str,
+    ) -> Result<Option<OperationRecord>, OperationServiceError> {
+        if op_id.trim().is_empty() {
+            return Err(OperationServiceError::InvalidArgument(
+                "op_id must not be empty".to_string(),
+            ));
+        }
+
+        let model = operation::Entity::find_by_id(op_id.to_string())
+            .one(db)
+            .await
+            .map_err(|err| {
+                OperationServiceError::Storage(format!(
+                    "failed to query operation '{}' from storage: {err}",
+                    op_id
+                ))
+            })?;
+
+        model.map(Self::record_from_model).transpose()
+    }
+
+    /// List latest operation main records for a repository.
+    pub async fn list_operations_by_repo_with_conn<C: ConnectionTrait>(
+        db: &C,
+        repo_id: &str,
+        limit: u64,
+    ) -> Result<Vec<OperationRecord>, OperationServiceError> {
+        if repo_id.trim().is_empty() {
+            return Err(OperationServiceError::InvalidArgument(
+                "repo_id must not be empty".to_string(),
+            ));
+        }
+        if limit == 0 {
+            return Err(OperationServiceError::InvalidArgument(
+                "limit must be greater than 0".to_string(),
+            ));
+        }
+
+        let models = operation::Entity::find()
+            .filter(operation::Column::RepoId.eq(repo_id))
+            .order_by_desc(operation::Column::EndTs)
+            .order_by_desc(operation::Column::StartTs)
+            .limit(limit)
+            .all(db)
+            .await
+            .map_err(|err| {
+                OperationServiceError::Storage(format!(
+                    "failed to list operations for repository '{}': {err}",
+                    repo_id
+                ))
+            })?;
+
+        models
+            .into_iter()
+            .map(Self::record_from_model)
+            .collect::<Result<Vec<_>, _>>()
+    }
+
     pub fn validate_record(record: &OperationRecord) -> Result<(), OperationServiceError> {
         if record.op_id.trim().is_empty() {
             return Err(OperationServiceError::InvalidArgument(
@@ -147,7 +283,12 @@ impl OperationService {
 
 #[cfg(test)]
 mod tests {
-    use super::{OperationQueryPage, OperationRecord, OperationService, OperationStatus};
+    use sea_orm::Database;
+
+    use super::{
+        OperationQueryPage, OperationRecord, OperationService, OperationServiceError,
+        OperationStatus,
+    };
 
     fn sample_record() -> OperationRecord {
         OperationRecord {
@@ -165,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_query_page_clamps_to_limits() {
+    fn commit1_normalize_query_page_clamps_to_limits() {
         let normalized = OperationService::normalize_query_page(OperationQueryPage {
             page: 0,
             per_page: 999,
@@ -182,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_record_rejects_invalid_timestamps() {
+    fn commit1_validate_record_rejects_invalid_timestamps() {
         let mut record = sample_record();
         record.end_ts = Some(99);
 
@@ -190,5 +331,54 @@ mod tests {
         assert!(error
             .to_string()
             .contains("end_ts must be greater than or equal to start_ts"));
+    }
+
+    #[tokio::test]
+    async fn commit2_insert_rejects_invalid_record() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let mut record = sample_record();
+        record.op_id = " ".to_string();
+
+        let error = OperationService::insert_operation_with_conn(&db, &record)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationServiceError::InvalidArgument(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn commit2_find_rejects_empty_op_id() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+
+        let error = OperationService::find_operation_by_id_with_conn(&db, " ")
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationServiceError::InvalidArgument(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn commit2_list_rejects_invalid_arguments() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+
+        let error = OperationService::list_operations_by_repo_with_conn(&db, "", 1)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationServiceError::InvalidArgument(_)
+        ));
+
+        let error = OperationService::list_operations_by_repo_with_conn(&db, "repo_1", 0)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationServiceError::InvalidArgument(_)
+        ));
     }
 }

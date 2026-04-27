@@ -21,6 +21,7 @@ pub mod ai_validation_report;
 pub mod config;
 pub mod config_kv;
 pub mod object_index;
+pub mod operation;
 pub mod reference;
 pub mod reflog;
 
