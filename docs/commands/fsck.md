@@ -201,7 +201,7 @@ Example (with issues):
     "refs_broken": 0,
     "index_valid": true,
     "cross_ref_issues": 1,
-    "overall_status": "corrupted",
+    "overall_status": "invalidformat",
     "failure_mask": 1,
     "failure_categories": ["objects"],
     "issues": [
@@ -220,7 +220,7 @@ Example (with issues):
 
 ### Schema Notes
 
-- `overall_status` is `"ok"`, `"corrupted"`, `"missing"`, `"invalid_format"`, or `"hash_mismatch"`
+- `overall_status` is `"ok"`, `"missing"`, `"invalidformat"`, or `"hashmismatch"`
 - `failure_mask` is a bitmask of failure categories (see [Exit Code Behavior](#exit-code-behavior)).
   A value of `0` means no failures; `7` means all three categories (objects, refs, index) have issues.
 - `failure_categories` is an array of human-readable category names corresponding to the set bits in `failure_mask`.

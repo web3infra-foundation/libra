@@ -447,7 +447,9 @@ async fn check_objects(
             }
             _ => {
                 result.objects_corrupted += 1;
-                result.overall_status = check_result.status.clone();
+                if result.overall_status == CheckStatus::Ok {
+                    result.overall_status = check_result.status.clone();
+                }
                 result.issues.push(build_issue_report(
                     &check_result,
                     &hash.to_string(),
@@ -472,10 +474,11 @@ async fn check_and_fix_refs(
     result.issues.extend(ref_result.issues.clone());
 
     if ref_result.broken > 0 {
+        if result.overall_status == CheckStatus::Ok {
+            result.overall_status = CheckStatus::Missing;
+        }
         if args.fix {
             apply_fix_broken_refs(&ref_result.broken_ref_names, result).await?;
-        } else {
-            result.overall_status = CheckStatus::Missing;
         }
     }
     Ok(())
@@ -510,10 +513,11 @@ async fn check_and_fix_index(
     result.issues.extend(index_result.issues);
 
     if !index_result.valid {
+        if result.overall_status == CheckStatus::Ok {
+            result.overall_status = CheckStatus::InvalidFormat;
+        }
         if args.fix {
             apply_fix_corrupted_index(result).await?;
-        } else {
-            result.overall_status = CheckStatus::InvalidFormat;
         }
     }
     Ok(())
@@ -539,9 +543,10 @@ async fn check_cross_references(storage: &ClientStorage, result: &mut FsckResult
     result.cross_ref_issues = issue_count;
     result.issues.extend(cross_ref_issues);
 
-    if issue_count > 0 {
+    if issue_count > 0 && result.overall_status == CheckStatus::Ok {
         result.overall_status = CheckStatus::InvalidFormat;
     }
+
     Ok(())
 }
 
@@ -563,6 +568,10 @@ fn compute_failure_mask(result: &mut FsckResult) {
     }
     result.failure_mask = mask;
     result.failure_categories = categories;
+    // After fixing, clear overall_status if all categories are clean
+    if mask == exit_code::OK {
+        result.overall_status = CheckStatus::Ok;
+    }
 }
 
 /// Verify a single object's integrity
@@ -728,12 +737,12 @@ async fn check_refs(storage: &ClientStorage) -> CliResult<RefCheckResult> {
                         Err(e) => {
                             result.broken += 1;
                             let ref_name = ref_entry.name.clone().unwrap_or_default();
-                            result.broken_ref_names.push(ref_name);
+                            result.broken_ref_names.push(ref_name.clone());
                             result.issues.push(IssueReport {
                                 issue_type: "ref_check_error".to_string(),
                                 severity: "error".to_string(),
                                 object_id: Some(hash.to_string()),
-                                ref_name: None,
+                                ref_name: Some(ref_name),
                                 message: format!("Failed to verify ref target: {}", e),
                                 suggestion: None,
                             });
