@@ -301,7 +301,7 @@ impl OperationService {
     }
 
     /// List operation log items by repository with pagination ordered by end_ts desc.
-    pub async fn list_operation_log_page_by_repo_with_conn<C: ConnectionTrait>(
+    pub async fn list_operations_by_repo_paginated_with_conn<C: ConnectionTrait>(
         db: &C,
         repo_id: &str,
         query: OperationQueryPage,
@@ -689,7 +689,7 @@ impl OperationService {
     }
 
     /// Upsert one workspace pointer snapshot under one operation view.
-    pub async fn upsert_view_workspace_with_conn<C: ConnectionTrait>(
+    pub async fn upsert_workspace_snapshot_with_conn<C: ConnectionTrait>(
         db: &C,
         record: &OperationViewWorkspaceRecord,
     ) -> Result<OperationViewWorkspaceRecord, OperationServiceError> {
@@ -740,7 +740,7 @@ impl OperationService {
     }
 
     /// List all workspace pointer snapshots for one operation view.
-    pub async fn list_view_workspace_with_conn<C: ConnectionTrait>(
+    pub async fn find_workspace_snapshot_with_conn<C: ConnectionTrait>(
         db: &C,
         view_id: &str,
     ) -> Result<Vec<OperationViewWorkspaceRecord>, OperationServiceError> {
@@ -827,12 +827,12 @@ impl OperationService {
         let view = Self::insert_view_with_conn(db, &graph.view).await?;
         Self::replace_view_refs_with_conn(db, &view.view_id, &graph.refs).await?;
         for snapshot in &graph.workspace {
-            Self::upsert_view_workspace_with_conn(db, snapshot).await?;
+            Self::upsert_workspace_snapshot_with_conn(db, snapshot).await?;
         }
 
         let parents = Self::list_parents_with_conn(db, &operation.op_id).await?;
         let refs = Self::list_view_refs_with_conn(db, &view.view_id).await?;
-        let workspace = Self::list_view_workspace_with_conn(db, &view.view_id).await?;
+        let workspace = Self::find_workspace_snapshot_with_conn(db, &view.view_id).await?;
 
         Ok(OperationGraphRecord {
             operation,
@@ -844,7 +844,7 @@ impl OperationService {
     }
 
     /// Read one full operation graph by operation id.
-    pub async fn find_operation_graph_by_id_with_conn<C: ConnectionTrait>(
+    pub async fn load_restore_view_by_operation_with_conn<C: ConnectionTrait>(
         db: &C,
         op_id: &str,
     ) -> Result<Option<OperationGraphRecord>, OperationServiceError> {
@@ -863,7 +863,7 @@ impl OperationService {
                 ))
             })?;
         let refs = Self::list_view_refs_with_conn(db, &view.view_id).await?;
-        let workspace = Self::list_view_workspace_with_conn(db, &view.view_id).await?;
+        let workspace = Self::find_workspace_snapshot_with_conn(db, &view.view_id).await?;
 
         Ok(Some(OperationGraphRecord {
             operation,
@@ -1210,12 +1210,12 @@ mod tests {
             pointer_kind: "worktree".to_string(),
             pointer_value: " ".to_string(),
         };
-        let error = OperationService::upsert_view_workspace_with_conn(&db, &invalid_snapshot)
+        let error = OperationService::upsert_workspace_snapshot_with_conn(&db, &invalid_snapshot)
             .await
             .unwrap_err();
         assert!(matches!(error, OperationServiceError::InvalidArgument(_)));
 
-        let error = OperationService::list_view_workspace_with_conn(&db, " ")
+        let error = OperationService::find_workspace_snapshot_with_conn(&db, " ")
             .await
             .unwrap_err();
         assert!(matches!(error, OperationServiceError::InvalidArgument(_)));
@@ -1245,10 +1245,10 @@ mod tests {
             pointer_value: "oid-worktree-v1".to_string(),
         };
 
-        OperationService::upsert_view_workspace_with_conn(&db, &index_snapshot)
+        OperationService::upsert_workspace_snapshot_with_conn(&db, &index_snapshot)
             .await
             .unwrap();
-        OperationService::upsert_view_workspace_with_conn(&db, &worktree_snapshot)
+        OperationService::upsert_workspace_snapshot_with_conn(&db, &worktree_snapshot)
             .await
             .unwrap();
 
@@ -1256,11 +1256,11 @@ mod tests {
             pointer_value: "oid-index-v2".to_string(),
             ..index_snapshot.clone()
         };
-        OperationService::upsert_view_workspace_with_conn(&db, &updated_index)
+        OperationService::upsert_workspace_snapshot_with_conn(&db, &updated_index)
             .await
             .unwrap();
 
-        let snapshots = OperationService::list_view_workspace_with_conn(&db, "view_3")
+        let snapshots = OperationService::find_workspace_snapshot_with_conn(&db, "view_3")
             .await
             .unwrap();
         assert_eq!(snapshots.len(), 2);
@@ -1325,7 +1325,7 @@ mod tests {
         let saved = OperationService::persist_operation_graph_with_conn(&db, &graph)
             .await
             .unwrap();
-        let loaded = OperationService::find_operation_graph_by_id_with_conn(&db, "op_7")
+        let loaded = OperationService::load_restore_view_by_operation_with_conn(&db, "op_7")
             .await
             .unwrap()
             .unwrap();
@@ -1345,7 +1345,7 @@ mod tests {
     #[tokio::test]
     async fn commit8_paginated_operation_log_query() {
         let db = Database::connect("sqlite::memory:").await.unwrap();
-        let error = OperationService::list_operation_log_page_by_repo_with_conn(
+        let error = OperationService::list_operations_by_repo_paginated_with_conn(
             &db,
             " ",
             OperationQueryPage::default(),
@@ -1379,7 +1379,7 @@ mod tests {
                 .unwrap();
         }
 
-        let page1 = OperationService::list_operation_log_page_by_repo_with_conn(
+        let page1 = OperationService::list_operations_by_repo_paginated_with_conn(
             &db,
             "repo_8",
             OperationQueryPage {
@@ -1394,7 +1394,7 @@ mod tests {
         assert_eq!(page1.items[0].op_id, "op_b");
         assert_eq!(page1.items[1].op_id, "op_c");
 
-        let page2 = OperationService::list_operation_log_page_by_repo_with_conn(
+        let page2 = OperationService::list_operations_by_repo_paginated_with_conn(
             &db,
             "repo_8",
             OperationQueryPage {
