@@ -94,6 +94,16 @@ pub struct OperationViewWorkspaceRecord {
     pub pointer_value: String,
 }
 
+/// Aggregated operation graph used by compose persistence/read APIs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationGraphRecord {
+    pub operation: OperationRecord,
+    pub parents: Vec<OperationParentRecord>,
+    pub view: OperationViewRecord,
+    pub refs: Vec<OperationViewRefRecord>,
+    pub workspace: Vec<OperationViewWorkspaceRecord>,
+}
+
 /// Generic pagination request for operation list APIs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OperationQueryPage {
@@ -686,6 +696,112 @@ impl OperationService {
             .collect::<Result<Vec<_>, _>>()
     }
 
+    fn validate_graph_record(graph: &OperationGraphRecord) -> Result<(), OperationServiceError> {
+        Self::validate_record(&graph.operation)?;
+        Self::validate_view_record(&graph.view)?;
+
+        if graph.operation.view_id != graph.view.view_id {
+            return Err(OperationServiceError::InvalidArgument(
+                "operation.view_id must equal view.view_id".to_string(),
+            ));
+        }
+        if graph.operation.repo_id != graph.view.repo_id {
+            return Err(OperationServiceError::InvalidArgument(
+                "operation.repo_id must equal view.repo_id".to_string(),
+            ));
+        }
+
+        for parent in &graph.parents {
+            Self::validate_parent_record(parent)?;
+            if parent.op_id != graph.operation.op_id {
+                return Err(OperationServiceError::InvalidArgument(
+                    "all parent edges must belong to operation.op_id".to_string(),
+                ));
+            }
+        }
+
+        for record in &graph.refs {
+            Self::validate_view_ref_record(record)?;
+            if record.view_id != graph.view.view_id {
+                return Err(OperationServiceError::InvalidArgument(
+                    "all view refs must belong to view.view_id".to_string(),
+                ));
+            }
+        }
+
+        for record in &graph.workspace {
+            Self::validate_view_workspace_record(record)?;
+            if record.view_id != graph.view.view_id {
+                return Err(OperationServiceError::InvalidArgument(
+                    "all workspace snapshots must belong to view.view_id".to_string(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Persist one full operation graph using a caller-owned connection/transaction.
+    pub async fn persist_operation_graph_with_conn<C: ConnectionTrait>(
+        db: &C,
+        graph: &OperationGraphRecord,
+    ) -> Result<OperationGraphRecord, OperationServiceError> {
+        Self::validate_graph_record(graph)?;
+
+        let operation = Self::insert_operation_with_conn(db, &graph.operation).await?;
+        for parent in &graph.parents {
+            Self::insert_parent_with_conn(db, parent).await?;
+        }
+        let view = Self::insert_view_with_conn(db, &graph.view).await?;
+        Self::replace_view_refs_with_conn(db, &view.view_id, &graph.refs).await?;
+        for snapshot in &graph.workspace {
+            Self::upsert_view_workspace_with_conn(db, snapshot).await?;
+        }
+
+        let parents = Self::list_parents_with_conn(db, &operation.op_id).await?;
+        let refs = Self::list_view_refs_with_conn(db, &view.view_id).await?;
+        let workspace = Self::list_view_workspace_with_conn(db, &view.view_id).await?;
+
+        Ok(OperationGraphRecord {
+            operation,
+            parents,
+            view,
+            refs,
+            workspace,
+        })
+    }
+
+    /// Read one full operation graph by operation id.
+    pub async fn find_operation_graph_by_id_with_conn<C: ConnectionTrait>(
+        db: &C,
+        op_id: &str,
+    ) -> Result<Option<OperationGraphRecord>, OperationServiceError> {
+        let operation = match Self::find_operation_by_id_with_conn(db, op_id).await? {
+            Some(record) => record,
+            None => return Ok(None),
+        };
+
+        let parents = Self::list_parents_with_conn(db, &operation.op_id).await?;
+        let view = Self::find_view_by_operation_with_conn(db, &operation.op_id)
+            .await?
+            .ok_or_else(|| {
+                OperationServiceError::Storage(format!(
+                    "operation '{}' references missing view '{}'",
+                    operation.op_id, operation.view_id
+                ))
+            })?;
+        let refs = Self::list_view_refs_with_conn(db, &view.view_id).await?;
+        let workspace = Self::list_view_workspace_with_conn(db, &view.view_id).await?;
+
+        Ok(Some(OperationGraphRecord {
+            operation,
+            parents,
+            view,
+            refs,
+            workspace,
+        }))
+    }
+
     pub fn validate_record(record: &OperationRecord) -> Result<(), OperationServiceError> {
         if record.op_id.trim().is_empty() {
             return Err(OperationServiceError::InvalidArgument(
@@ -742,9 +858,9 @@ mod tests {
     use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
 
     use super::{
-        OperationParentRecord, OperationQueryPage, OperationRecord, OperationService,
-        OperationServiceError, OperationStatus, OperationViewRecord, OperationViewRefRecord,
-        OperationViewWorkspaceRecord,
+        OperationGraphRecord, OperationParentRecord, OperationQueryPage, OperationRecord,
+        OperationService, OperationServiceError, OperationStatus, OperationViewRecord,
+        OperationViewRefRecord, OperationViewWorkspaceRecord,
     };
 
     fn sample_record() -> OperationRecord {
@@ -1080,5 +1196,77 @@ mod tests {
         assert_eq!(snapshots[0].pointer_value, "oid-index-v2");
         assert_eq!(snapshots[1].pointer_kind, "worktree");
         assert_eq!(snapshots[1].pointer_value, "oid-worktree-v1");
+    }
+
+    #[tokio::test]
+    async fn commit7_persist_and_find_operation_graph_roundtrip() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let ddl = concat!(
+            "CREATE TABLE IF NOT EXISTS operation(op_id TEXT PRIMARY KEY,repo_id TEXT NOT NULL,view_id TEXT NOT NULL,command_name TEXT NOT NULL,description TEXT NOT NULL,actor TEXT NOT NULL,args_digest TEXT,start_ts INTEGER NOT NULL,end_ts INTEGER,status TEXT NOT NULL);",
+            "CREATE TABLE IF NOT EXISTS operation_parent(op_id TEXT NOT NULL,parent_op_id TEXT NOT NULL,PRIMARY KEY (op_id,parent_op_id));",
+            "CREATE TABLE IF NOT EXISTS operation_view(view_id TEXT PRIMARY KEY,repo_id TEXT NOT NULL,head_kind TEXT NOT NULL,head_target TEXT NOT NULL,created_at INTEGER NOT NULL);",
+            "CREATE TABLE IF NOT EXISTS operation_view_ref(view_id TEXT NOT NULL,ref_kind TEXT NOT NULL,ref_name TEXT NOT NULL,ref_remote TEXT NOT NULL,target_oid TEXT NOT NULL,PRIMARY KEY (view_id,ref_kind,ref_name,ref_remote));",
+            "CREATE TABLE IF NOT EXISTS operation_view_workspace(view_id TEXT NOT NULL,pointer_kind TEXT NOT NULL,pointer_value TEXT NOT NULL,PRIMARY KEY (view_id,pointer_kind));"
+        );
+        db.execute(Statement::from_string(DbBackend::Sqlite, ddl))
+            .await
+            .unwrap();
+
+        let graph = OperationGraphRecord {
+            operation: OperationRecord {
+                op_id: "op_7".to_string(),
+                repo_id: "repo_7".to_string(),
+                view_id: "view_7".to_string(),
+                command_name: "merge".to_string(),
+                description: "merge feature into main".to_string(),
+                actor: "alice".to_string(),
+                args_digest: Some("sha256:commit7".to_string()),
+                start_ts: 200,
+                end_ts: Some(205),
+                status: OperationStatus::Succeeded,
+            },
+            parents: vec![OperationParentRecord {
+                op_id: "op_7".to_string(),
+                parent_op_id: "op_6".to_string(),
+            }],
+            view: OperationViewRecord {
+                view_id: "view_7".to_string(),
+                repo_id: "repo_7".to_string(),
+                head_kind: "branch".to_string(),
+                head_target: "main".to_string(),
+                created_at: 205,
+            },
+            refs: vec![OperationViewRefRecord {
+                view_id: "view_7".to_string(),
+                ref_kind: "branch".to_string(),
+                ref_name: "main".to_string(),
+                ref_remote: None,
+                target_oid: "oid-main".to_string(),
+            }],
+            workspace: vec![OperationViewWorkspaceRecord {
+                view_id: "view_7".to_string(),
+                pointer_kind: "index".to_string(),
+                pointer_value: "oid-index".to_string(),
+            }],
+        };
+
+        let saved = OperationService::persist_operation_graph_with_conn(&db, &graph)
+            .await
+            .unwrap();
+        let loaded = OperationService::find_operation_graph_by_id_with_conn(&db, "op_7")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.operation.op_id, "op_7");
+        assert_eq!(loaded.parents.len(), 1);
+        assert_eq!(loaded.refs.len(), 1);
+        assert_eq!(loaded.workspace.len(), 1);
+
+        let mut bad_graph = graph.clone();
+        bad_graph.view.view_id = "view_8".to_string();
+        let error = OperationService::persist_operation_graph_with_conn(&db, &bad_graph)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, OperationServiceError::InvalidArgument(_)));
     }
 }
