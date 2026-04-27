@@ -10,7 +10,7 @@ use sea_orm::{
 };
 use thiserror::Error;
 
-use crate::internal::model::{operation, operation_parent, operation_view};
+use crate::internal::model::{operation, operation_parent, operation_view, operation_view_ref};
 
 /// Stable status of an operation record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +74,15 @@ pub struct OperationViewRecord {
     pub head_kind: String,
     pub head_target: String,
     pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationViewRefRecord {
+    pub view_id: String,
+    pub ref_kind: String,
+    pub ref_name: String,
+    pub ref_remote: Option<String>,
+    pub target_oid: String,
 }
 
 /// Generic pagination request for operation list APIs.
@@ -434,6 +443,127 @@ impl OperationService {
         view_model.map(Self::view_from_model).transpose()
     }
 
+    fn view_ref_from_model(
+        model: operation_view_ref::Model,
+    ) -> Result<OperationViewRefRecord, OperationServiceError> {
+        let record = OperationViewRefRecord {
+            view_id: model.view_id,
+            ref_kind: model.ref_kind,
+            ref_name: model.ref_name,
+            ref_remote: if model.ref_remote.is_empty() {
+                None
+            } else {
+                Some(model.ref_remote)
+            },
+            target_oid: model.target_oid,
+        };
+        Self::validate_view_ref_record(&record)?;
+        Ok(record)
+    }
+
+    pub fn validate_view_ref_record(
+        record: &OperationViewRefRecord,
+    ) -> Result<(), OperationServiceError> {
+        if record.view_id.trim().is_empty() {
+            return Err(OperationServiceError::InvalidArgument(
+                "view_id must not be empty".to_string(),
+            ));
+        }
+        if record.ref_kind.trim().is_empty() {
+            return Err(OperationServiceError::InvalidArgument(
+                "ref_kind must not be empty".to_string(),
+            ));
+        }
+        if record.ref_name.trim().is_empty() {
+            return Err(OperationServiceError::InvalidArgument(
+                "ref_name must not be empty".to_string(),
+            ));
+        }
+        if record.target_oid.trim().is_empty() {
+            return Err(OperationServiceError::InvalidArgument(
+                "target_oid must not be empty".to_string(),
+            ));
+        }
+        Ok(())
+    }
+    pub async fn replace_view_refs_with_conn<C: ConnectionTrait>(
+        db: &C,
+        view_id: &str,
+        refs: &[OperationViewRefRecord],
+    ) -> Result<Vec<OperationViewRefRecord>, OperationServiceError> {
+        if view_id.trim().is_empty() {
+            return Err(OperationServiceError::InvalidArgument(
+                "view_id must not be empty".to_string(),
+            ));
+        }
+        for record in refs {
+            Self::validate_view_ref_record(record)?;
+            if record.view_id != view_id {
+                return Err(OperationServiceError::InvalidArgument(
+                    "all view refs must use the same view_id".to_string(),
+                ));
+            }
+        }
+        operation_view_ref::Entity::delete_many()
+            .filter(operation_view_ref::Column::ViewId.eq(view_id))
+            .exec(db)
+            .await
+            .map_err(|err| {
+                OperationServiceError::Storage(format!(
+                    "failed to clear view refs for view '{}': {err}",
+                    view_id
+                ))
+            })?;
+
+        let mut inserted = Vec::with_capacity(refs.len());
+        for record in refs {
+            let model = operation_view_ref::ActiveModel {
+                view_id: Set(record.view_id.clone()),
+                ref_kind: Set(record.ref_kind.clone()),
+                ref_name: Set(record.ref_name.clone()),
+                ref_remote: Set(record.ref_remote.clone().unwrap_or_default()),
+                target_oid: Set(record.target_oid.clone()),
+            };
+
+            let saved = model.insert(db).await.map_err(|err| {
+                OperationServiceError::Storage(format!(
+                    "failed to insert view ref '{}:{}' for view '{}': {err}",
+                    record.ref_kind, record.ref_name, view_id
+                ))
+            })?;
+            inserted.push(Self::view_ref_from_model(saved)?);
+        }
+        Ok(inserted)
+    }
+    pub async fn list_view_refs_with_conn<C: ConnectionTrait>(
+        db: &C,
+        view_id: &str,
+    ) -> Result<Vec<OperationViewRefRecord>, OperationServiceError> {
+        if view_id.trim().is_empty() {
+            return Err(OperationServiceError::InvalidArgument(
+                "view_id must not be empty".to_string(),
+            ));
+        }
+        let models = operation_view_ref::Entity::find()
+            .filter(operation_view_ref::Column::ViewId.eq(view_id))
+            .order_by_asc(operation_view_ref::Column::RefKind)
+            .order_by_asc(operation_view_ref::Column::RefName)
+            .order_by_asc(operation_view_ref::Column::RefRemote)
+            .all(db)
+            .await
+            .map_err(|err| {
+                OperationServiceError::Storage(format!(
+                    "failed to list view refs for view '{}': {err}",
+                    view_id
+                ))
+            })?;
+
+        models
+            .into_iter()
+            .map(Self::view_ref_from_model)
+            .collect::<Result<Vec<_>, _>>()
+    }
+
     pub fn validate_record(record: &OperationRecord) -> Result<(), OperationServiceError> {
         if record.op_id.trim().is_empty() {
             return Err(OperationServiceError::InvalidArgument(
@@ -491,7 +621,7 @@ mod tests {
 
     use super::{
         OperationParentRecord, OperationQueryPage, OperationRecord, OperationService,
-        OperationServiceError, OperationStatus, OperationViewRecord,
+        OperationServiceError, OperationStatus, OperationViewRecord, OperationViewRefRecord,
     };
 
     fn sample_record() -> OperationRecord {
@@ -712,5 +842,51 @@ mod tests {
         };
 
         OperationService::validate_view_record(&view).unwrap();
+    }
+
+    #[tokio::test]
+    async fn commit5_replace_view_refs_rejects_invalid_record() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+
+        let refs = vec![OperationViewRefRecord {
+            view_id: "view_1".to_string(),
+            ref_kind: "branch".to_string(),
+            ref_name: "main".to_string(),
+            ref_remote: None,
+            target_oid: " ".to_string(),
+        }];
+        let error = OperationService::replace_view_refs_with_conn(&db, "view_1", &refs)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationServiceError::InvalidArgument(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn commit5_list_view_refs_rejects_empty_view_id() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+
+        let error = OperationService::list_view_refs_with_conn(&db, " ")
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationServiceError::InvalidArgument(_)
+        ));
+    }
+
+    #[test]
+    fn commit5_validate_view_ref_accepts_valid_record() {
+        let record = OperationViewRefRecord {
+            view_id: "view_2".to_string(),
+            ref_kind: "branch".to_string(),
+            ref_name: "main".to_string(),
+            ref_remote: None,
+            target_oid: "oid-main".to_string(),
+        };
+
+        OperationService::validate_view_ref_record(&record).unwrap();
     }
 }
