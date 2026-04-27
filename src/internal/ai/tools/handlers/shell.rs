@@ -29,6 +29,11 @@ use crate::{
 };
 
 /// Handler for executing shell commands.
+///
+/// AI user story: let the agent run project-local verification commands
+/// (builds, tests, formatters, scripts) and return bounded stdout/stderr plus
+/// written-path metadata. Direct Git invocation is blocked so Libra-managed VCS
+/// state changes go through audited Libra tools instead.
 pub struct ShellHandler;
 
 /// Maximum bytes captured per stream (stdout or stderr) before truncation.

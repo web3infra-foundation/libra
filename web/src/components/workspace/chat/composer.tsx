@@ -1,3 +1,12 @@
+/**
+ * Bottom message composer for the chat pane.
+ *
+ * Controls a textarea draft with `Enter` to submit, `Shift+Enter` for newline.
+ * Includes static "Add context" / file chips (placeholders for future
+ * features) and a Plan/Build mode toggle. The actual model name and tool
+ * policy strings are static — the production backend will surface these
+ * through a session settings RPC.
+ */
 "use client";
 
 import { useState, type KeyboardEvent } from "react";
@@ -5,12 +14,21 @@ import { useState, type KeyboardEvent } from "react";
 import { IconAt, IconFile, IconSend } from "@/components/icons";
 import { cn } from "@/lib/utils";
 
+/** Composer mode discriminator. "Plan" is read-only, "Build" allows mutating tools. */
 type Mode = "Plan" | "Build";
 
+/** Props for {@link Composer}. */
 type Props = {
+  /** Submit handler; receives the trimmed draft and is responsible for delivering it. */
   onSubmit: (draft: string) => void;
 };
 
+/**
+ * Renders the composer input + toolbar.
+ *
+ * Boundary: an all-whitespace draft is treated as empty — the Send button is
+ * disabled and the keyboard shortcut is a no-op.
+ */
 export function Composer({ onSubmit }: Props) {
   const [draft, setDraft] = useState("");
   const [mode, setMode] = useState<Mode>("Plan");
@@ -21,6 +39,8 @@ export function Composer({ onSubmit }: Props) {
     setDraft("");
   }
 
+  // Enter submits, Shift+Enter inserts a newline (the textarea native default
+  // for Shift+Enter is preserved by not preventing default in that branch).
   function onKey(e: KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -83,6 +103,12 @@ export function Composer({ onSubmit }: Props) {
   );
 }
 
+/**
+ * Two-state segmented control for the composer mode.
+ *
+ * The selected mode renders with a paper background + tiny shadow; the other
+ * mode is muted text only.
+ */
 function ModeToggle({ mode, onChange }: { mode: Mode; onChange: (m: Mode) => void }) {
   const options: Mode[] = ["Plan", "Build"];
   return (

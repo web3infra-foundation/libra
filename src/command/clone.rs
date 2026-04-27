@@ -445,9 +445,19 @@ pub async fn execute(args: CloneArgs) {
 }
 
 /// Safe entry point that returns structured [`CliResult`] instead of printing
-/// errors and exiting. Fetches objects from a remote URL, writes refs/config,
-/// and checks out the working tree. Restores the original working directory on
-/// failure.
+/// errors and exiting.
+///
+/// # Side Effects
+/// - Creates the destination repository layout and object storage.
+/// - Fetches objects from the remote URL and writes refs/config.
+/// - Checks out the working tree for non-bare clones.
+/// - Restores the original process working directory after success or failure.
+/// - May remove the partially created destination when clone cleanup is needed.
+///
+/// # Errors
+/// Returns [`CliError`] when destination validation fails, remote negotiation or
+/// object transfer fails, refs/config cannot be written, checkout fails, cleanup
+/// fails, or the original working directory cannot be restored.
 ///
 /// This is the **rendering layer**: it calls `execute_clone()` to get a
 /// `CloneOutput` and then renders it according to the `OutputConfig`.

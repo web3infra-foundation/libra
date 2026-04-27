@@ -1,3 +1,9 @@
+/**
+ * Initial scrollback for the embedded terminal.
+ *
+ * Each entry's `kind` controls coloring and the leading marker — see
+ * `terminal.tsx::lineMark` and `lineTone` for the visual mapping.
+ */
 import type { TerminalLine } from "./types";
 
 export const TERMINAL_LINES: TerminalLine[] = [

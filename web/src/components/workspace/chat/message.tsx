@@ -1,3 +1,15 @@
+/**
+ * Chat message renderers.
+ *
+ * Two visual variants:
+ *  - **User**: right-aligned dark bubble with hover-revealed Copy button.
+ *  - **Assistant**: left-aligned, full width, with the Libra brand mark and
+ *    optional streaming caret/badge while text is being typed in.
+ *
+ * The Copy button uses the async clipboard API when available and falls
+ * back to the legacy `document.execCommand("copy")` flow for older browsers
+ * and sandboxed contexts where the secure API is unavailable.
+ */
 "use client";
 
 import { useState } from "react";
@@ -7,10 +19,15 @@ import { BrandMark } from "@/components/workspace/brand-mark";
 import type { ChatMessage } from "@/lib/mock";
 import { cn } from "@/lib/utils";
 
+/** Props shared by both message variants. */
 type Props = {
   message: ChatMessage;
 };
 
+/**
+ * Top-level message dispatcher — renders user or assistant variant based on
+ * the message role.
+ */
 export function Message({ message }: Props) {
   if (message.role === "user") {
     return <UserMessage message={message} />;
@@ -18,6 +35,12 @@ export function Message({ message }: Props) {
   return <AssistantMessage message={message} />;
 }
 
+/**
+ * User message bubble.
+ *
+ * Hover reveals a Copy affordance. After a successful copy the button shows
+ * a "Copied" confirmation for ~1.4 s before reverting.
+ */
 function UserMessage({ message }: Props) {
   const [hover, setHover] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -25,8 +48,13 @@ function UserMessage({ message }: Props) {
   function copy() {
     const done = () => {
       setCopied(true);
+      // Auto-revert the "Copied" badge after a beat so the affordance reads
+      // as confirmation rather than a permanent state change.
       setTimeout(() => setCopied(false), 1400);
     };
+    // Prefer the async clipboard API; if it rejects (permissions, insecure
+    // context) or is unavailable, fall back to the textarea + execCommand
+    // approach which works in more environments.
     if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
       navigator.clipboard.writeText(message.body).then(done, () => fallbackCopy(message.body, done));
     } else {

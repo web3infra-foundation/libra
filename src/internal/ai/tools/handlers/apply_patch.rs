@@ -19,6 +19,11 @@ use crate::internal::ai::{
 };
 
 /// Handler for applying patches to files.
+///
+/// AI user story: let the agent make small, reviewable source edits using a
+/// structured patch format. Paths are parsed and validated before filesystem
+/// writes, and approval is requested when the patch crosses the configured
+/// workspace boundary.
 pub struct ApplyPatchHandler;
 
 #[async_trait]

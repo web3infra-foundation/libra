@@ -1,4 +1,12 @@
-//! Command module hub exporting all subcommands plus shared helpers for loading/saving objects and prompting for authentication.
+//! Command module hub exporting all subcommands plus shared helpers for
+//! loading/saving objects and prompting for authentication.
+//!
+//! Commenting convention for AI-maintained command code: public command entry
+//! points should document their externally visible side effects and error
+//! mapping intent. Prefer `# Side Effects` and `# Errors` sections on
+//! `execute_safe`/equivalent structured handlers so future agents can modify
+//! command flows without missing repository, index, worktree, network, or
+//! rendering consequences.
 
 pub mod add;
 pub mod bisect;

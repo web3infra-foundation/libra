@@ -82,12 +82,69 @@ pub fn init() -> Result<TerminalType> {
         return Err(io::Error::other("stdout is not a terminal"));
     }
 
+    // Once-per-process: redirect fd 2 (stderr) to either the libra log file
+    // or /dev/null so external child processes (e.g. `mount_macfuse` from
+    // rfuse3) cannot scribble error text onto the alternate-screen TUI.
+    // Tracing-subscriber configured by main.rs writes through its own
+    // file/non-stderr path when LIBRA_LOG_FILE is set, so this redirect does
+    // not lose libra's own diagnostics.
+    let _ = redirect_stderr_for_tui();
+
     set_modes()?;
     set_panic_hook();
 
     let backend = CrosstermBackend::new(stdout());
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
+}
+
+/// Redirect process-wide fd 2 to a sink that the TUI does not render.
+///
+/// Functional scope: the TUI runs in alternate-screen mode, but fd 2
+/// belongs to the controlling tty regardless. External child processes
+/// (e.g. `mount_macfuse` invoked deep inside rfuse3) write diagnostic text
+/// directly to fd 2, which then bleeds through the alternate-screen and
+/// corrupts the rendered frame. We pick a destination once at TUI startup:
+/// the `LIBRA_LOG_FILE` path if the user set it, otherwise `/dev/null`. The
+/// redirect is best-effort — any failure is logged via tracing and the TUI
+/// proceeds with the original stderr.
+///
+/// Boundary conditions:
+/// - Idempotent across repeated calls; subsequent calls are cheap dups.
+/// - We deliberately leave the saved fd dangling because TUI mode runs
+///   until process exit; restoring stderr on `tui_restore` would mean
+///   plumbing a global guard through every panic path with no real benefit.
+#[cfg(unix)]
+fn redirect_stderr_for_tui() -> io::Result<()> {
+    use std::{fs::OpenOptions, os::fd::AsRawFd};
+
+    let target_path = std::env::var_os("LIBRA_LOG_FILE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/dev/null"));
+
+    let target = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&target_path)?;
+
+    // SAFETY: libc::dup2 is FFI; we pass valid file descriptors and ignore
+    // EINTR-like transient errors via the syscall-loop convention.
+    let rc = unsafe { libc::dup2(target.as_raw_fd(), libc::STDERR_FILENO) };
+    if rc < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // Intentionally leak the file handle — the kernel keeps fd 2 alive
+    // referencing the same inode until process exit.
+    std::mem::forget(target);
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn redirect_stderr_for_tui() -> io::Result<()> {
+    // Windows-side TUI does not face the same FUSE child-process leak; if
+    // a future Windows backend needs equivalent protection, reuse the
+    // same `LIBRA_LOG_FILE` convention here.
+    Ok(())
 }
 
 /// Set up terminal modes for TUI.

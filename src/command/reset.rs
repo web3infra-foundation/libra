@@ -120,8 +120,18 @@ pub async fn execute(args: ResetArgs) {
 }
 
 /// Safe entry point that returns structured [`CliResult`] instead of printing
-/// errors and exiting. Moves HEAD (and optionally the index/worktree) to a
-/// target commit using soft, mixed, or hard mode.
+/// errors and exiting.
+///
+/// # Side Effects
+/// - Moves HEAD/current branch to the resolved target commit.
+/// - In mixed mode, rewrites the index from the target tree or pathspecs.
+/// - In hard mode, rewrites both the index and working tree.
+/// - Emits warnings for recoverable filesystem cleanup issues.
+///
+/// # Errors
+/// Returns [`CliError`] when the repository is missing, the revision or
+/// pathspecs cannot be resolved, object reads fail, or HEAD/index/worktree
+/// updates fail.
 pub async fn execute_safe(args: ResetArgs, output: &OutputConfig) -> CliResult<()> {
     let result = run_reset(args).await.map_err(CliError::from)?;
     render_reset_output(&result.output, output)?;
@@ -445,6 +455,9 @@ async fn perform_reset(
     } else {
         HashSet::new()
     };
+    // INVARIANT: apply index/worktree changes before moving HEAD. If a
+    // filesystem write fails, rollback can still restore the old index/worktree
+    // while refs continue to point at the previous commit.
     let stats =
         match apply_reset_side_effects(mode, &target_commit_id, &previously_tracked_paths).await {
             Ok(stats) => stats,
@@ -463,6 +476,9 @@ async fn perform_reset(
         )
         .await
     {
+        // INVARIANT: if the final ref move fails after side effects, restore the
+        // index/worktree to match the old commit so the visible checkout does
+        // not diverge from HEAD.
         let rollback = rollback_reset_side_effects(mode, &old_oid, &target_commit_id).await;
         return Err(merge_reset_failure(error, rollback));
     }

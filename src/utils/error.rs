@@ -5,6 +5,10 @@
 //! [`CliError`] with an explicit stable code, exit code, and hint set instead
 //! of printing raw internal causes to stderr.
 //!
+//! Contract references for maintainers and AI agents:
+//! - Stable rendering and JSON envelope: `docs/development/cli-error-contract-design.md`
+//! - Public stable-code catalogue: `docs/error-codes.md`
+//!
 //! ## Anatomy of a CliError
 //!
 //! Each error carries five pieces of metadata that drive rendering:
@@ -167,6 +171,8 @@ impl CliErrorCategory {
 /// 2. Adding the variant -> `CliErrorCategory` mapping in `category`.
 /// 3. Adding a human-readable description in `description` (rendered by
 ///    `libra help error-codes`).
+/// 4. Updating `docs/error-codes.md` and checking
+///    `docs/development/cli-error-contract-design.md` for contract impact.
 ///
 /// Removing or renaming an existing code is a breaking change for downstream
 /// agents and CI scripts.
@@ -577,6 +583,13 @@ impl CliError {
     }
 
     /// Override the stable code that was inferred from the message.
+    ///
+    /// When this is called from a `From<DomainError> for CliError` mapping,
+    /// prefer adding a short nearby comment explaining why the selected code
+    /// represents the recovery intent. For example, a partially initialized
+    /// repository should usually map to [`StableErrorCode::RepoStateInvalid`],
+    /// while a missing input path should usually map to
+    /// [`StableErrorCode::IoReadFailed`].
     pub fn with_stable_code(mut self, stable_code: StableErrorCode) -> Self {
         self.stable_code = stable_code;
         self

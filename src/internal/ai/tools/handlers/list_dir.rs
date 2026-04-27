@@ -29,6 +29,11 @@ use crate::internal::ai::tools::{
     },
 };
 
+/// Handler for exploring directory structure.
+///
+/// AI user story: give the agent a cheap first pass over repository shape so it
+/// can choose focused file reads instead of scanning the whole tree. The output
+/// is paginated and generated build artifacts are hidden to keep context small.
 pub struct ListDirHandler;
 
 const MAX_ENTRY_LENGTH: usize = 500;

@@ -1,16 +1,31 @@
+/**
+ * Account / settings popover anchored above the sidebar avatar button.
+ *
+ * Layout-only component — the items don't yet wire to real actions; clicks
+ * inside the popover are stopped from propagating so the parent's
+ * outside-click listener (in `sidebar.tsx`) doesn't immediately close it.
+ */
 "use client";
 
 import { cn } from "@/lib/utils";
 
+/** Props for a single row inside the settings menu. */
 type ItemProps = {
+  /** Primary text. */
   label: string;
+  /** Right-aligned secondary text (e.g. account email or rate-limit %). */
   meta?: string;
+  /** Right-aligned keyboard shortcut chip. */
   shortcut?: string;
+  /** Highlights the row as the currently selected option. */
   active?: boolean;
+  /** Tints the row as a destructive action. */
   danger?: boolean;
+  /** Renders `meta` in monospace (used for percentages and short codes). */
   mono?: boolean;
 };
 
+/** Single row inside the settings menu. */
 function MenuItem({ label, meta, shortcut, active, danger, mono }: ItemProps) {
   return (
     <button
@@ -41,6 +56,13 @@ function MenuItem({ label, meta, shortcut, active, danger, mono }: ItemProps) {
   );
 }
 
+/**
+ * Floating panel showing account info, account switcher, and quick links.
+ *
+ * Positioned absolutely above the avatar button in the sidebar footer. The
+ * outer click handler stops bubbling so the sidebar's outside-click guard
+ * does not dismiss the menu when the user clicks inside it.
+ */
 export function SettingsMenu() {
   return (
     <div

@@ -76,6 +76,7 @@ impl ToolBoundaryPolicy {
                 "update_plan",
                 "submit_intent_draft",
                 "submit_plan_draft",
+                "submit_task_complete",
                 "mcp_write",
             ]
             .into_iter()

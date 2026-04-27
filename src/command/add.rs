@@ -308,6 +308,18 @@ pub async fn execute(args: AddArgs) {
 
 /// Structured entry point used by `cli::parse` and integration tests.
 ///
+/// # Side Effects
+/// - Runs the staging pipeline via [`run_add`].
+/// - Persists index updates unless `--dry-run` or `--refresh` short-circuits the
+///   write path.
+/// - Renders success output and records process-level warnings for ignored or
+///   partially failed pathspecs.
+///
+/// # Errors
+/// Returns [`CliError`] when repository discovery fails, pathspec validation
+/// fails, ignored paths block staging, object/index I/O fails, or output
+/// rendering fails.
+///
 /// Functional scope:
 /// - Runs the full staging pipeline via [`run_add`].
 /// - Renders the [`AddOutput`] in the format the user requested

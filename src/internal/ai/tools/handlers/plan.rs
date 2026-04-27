@@ -16,6 +16,10 @@ use crate::internal::ai::tools::{
 /// The handler itself simply validates the arguments and returns "Plan updated".
 /// The TUI intercepts the `ToolCallBegin` event and renders a specialised
 /// `PlanUpdateHistoryCell` with checkbox UI.
+///
+/// AI user story: let the agent expose its current multi-step plan to the human
+/// and keep progress synchronized during longer tasks without mutating project
+/// files or workflow history.
 pub struct PlanHandler;
 
 #[async_trait]

@@ -1,4 +1,8 @@
-//! Initializes a repository by creating .libra storage, seeding HEAD and default refs/config, and preparing the backing database.
+//! Initializes a repository by creating .libra storage, seeding HEAD and
+//! default refs/config, and preparing the backing database.
+//!
+//! Error rendering and stable-code expectations are part of the CLI contract:
+//! see `docs/development/cli-error-contract-design.md`.
 
 use std::{
     env, fs,
@@ -113,6 +117,8 @@ impl From<InitError> for CliError {
     fn from(error: InitError) -> Self {
         match error {
             InitError::InvalidArgument { message, hint } => {
+                // Intent: invalid init flags are user-correctable CLI usage
+                // errors, not repository or filesystem failures.
                 let mut cli = CliError::command_usage(message)
                     .with_stable_code(StableErrorCode::CliInvalidArguments);
                 if let Some(hint) = hint {
@@ -121,6 +127,9 @@ impl From<InitError> for CliError {
                 cli
             }
             InitError::AlreadyInitialized { path } => {
+                // Intent: this is an invalid repository state, not an I/O
+                // failure. The recovery is to remove the existing Libra state
+                // before retrying.
                 let remove_target = if path.file_name() == Some(std::ffi::OsStr::new(ROOT_DIR)) {
                     ".libra/".to_string()
                 } else {
@@ -133,22 +142,30 @@ impl From<InitError> for CliError {
                 .with_stable_code(StableErrorCode::RepoStateInvalid)
                 .with_hint(format!("remove {remove_target} to reinitialize."))
             }
-            InitError::SourcePathNotFound { path } => CliError::fatal(format!(
-                "source git repository '{}' does not exist",
-                path.display()
-            ))
-            .with_stable_code(StableErrorCode::IoReadFailed),
+            InitError::SourcePathNotFound { path } => {
+                // Intent: conversion cannot read the requested source path; the
+                // repository state is unchanged, so classify as a read failure.
+                CliError::fatal(format!(
+                    "source git repository '{}' does not exist",
+                    path.display()
+                ))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+            }
             InitError::InvalidGitRepository { path } => CliError::command_usage(format!(
                 "'{}' is not a valid Git repository",
                 path.display()
             ))
             .with_stable_code(StableErrorCode::CliInvalidTarget)
             .with_hint("a valid Git repository must contain HEAD, config, and objects."),
-            InitError::TemplateNotFound { path } => CliError::fatal(format!(
-                "template directory '{}' does not exist",
-                path.display()
-            ))
-            .with_stable_code(StableErrorCode::IoReadFailed),
+            InitError::TemplateNotFound { path } => {
+                // Intent: `--template` points at a filesystem resource that
+                // could not be read; keep the user hint focused on the path.
+                CliError::fatal(format!(
+                    "template directory '{}' does not exist",
+                    path.display()
+                ))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+            }
             InitError::InvalidUtf8Path { path } => {
                 CliError::fatal(format!("path '{}' is not valid UTF-8", path.display()))
                     .with_stable_code(StableErrorCode::IoReadFailed)
@@ -157,12 +174,20 @@ impl From<InitError> for CliError {
                 repo,
                 stage,
                 message,
-            } => CliError::fatal(format!(
-                "conversion from git repository '{}' failed during {stage}: {message}",
-                repo.display()
-            ))
-            .with_stable_code(StableErrorCode::RepoStateInvalid),
+            } => {
+                // Intent: conversion failures may leave partially initialized
+                // repository state, so route agents toward cleanup/retry rather
+                // than treating the source Git repository as merely unreadable.
+                CliError::fatal(format!(
+                    "conversion from git repository '{}' failed during {stage}: {message}",
+                    repo.display()
+                ))
+                .with_stable_code(StableErrorCode::RepoStateInvalid)
+            }
             InitError::VaultInitializationFailed { message } => {
+                // Intent: vault setup runs after repository metadata exists;
+                // failure here means an internal initialization invariant broke
+                // and should be reported with enough context for maintainers.
                 CliError::fatal(format!("vault initialization failed: {message}"))
                     .with_stable_code(StableErrorCode::InternalInvariant)
                     .with_hint(format!("please report this issue at: {ISSUE_URL}"))
@@ -184,6 +209,8 @@ impl From<InitError> for CliError {
                     .with_stable_code(StableErrorCode::IoReadFailed),
             },
             InitError::Database(error) => {
+                // Intent: schema/bootstrap failures violate the init contract
+                // because a newly created repo must always have a usable DB.
                 CliError::fatal(format!("database initialization failed: {error}"))
                     .with_stable_code(StableErrorCode::InternalInvariant)
                     .with_hint(format!("please report this issue at: {ISSUE_URL}"))
@@ -293,12 +320,40 @@ impl Drop for CurrentDirGuard {
     }
 }
 
+/// Fire-and-forget CLI dispatcher entry for `libra init`.
+///
+/// # Side Effects
+/// - Delegates to [`execute_safe`] with the default [`OutputConfig`].
+/// - Prints any rendered [`CliError`] to stderr.
+///
+/// # Errors
+/// This compatibility entry does not return errors. Call [`execute_safe`] when
+/// the caller must observe failure details or stable error codes.
 pub async fn execute(args: InitArgs) {
     if let Err(error) = execute_safe(args, &OutputConfig::default()).await {
         error.print_stderr();
     }
 }
 
+/// Executes repository initialization and renders the requested output format.
+///
+/// # Side Effects
+/// - Creates the target repository storage layout (`.libra/` for non-bare
+///   repositories, or the target directory for `--bare`).
+/// - Initializes the SQLite database and writes core config plus HEAD/branch
+///   reference rows.
+/// - Installs default hook and exclude templates unless `--template` supplies
+///   replacements.
+/// - Creates or updates the root `.libraignore` for non-bare repositories.
+/// - Optionally converts objects/refs from an existing Git repository.
+/// - Initializes vault credentials and a PGP signing key unless `--vault false`.
+/// - Emits human or JSON output according to [`OutputConfig`].
+///
+/// # Errors
+/// Returns a structured [`CliError`] when validation fails, the repository is
+/// already initialized, layout/database creation fails, Git conversion fails, or
+/// vault/signing setup cannot complete. Stable error-code mapping follows
+/// `docs/development/cli-error-contract-design.md`.
 pub async fn execute_safe(args: InitArgs, output: &OutputConfig) -> CliResult<()> {
     let mut effective_output = output.clone();
     if args.quiet {
@@ -380,11 +435,27 @@ fn display_home_relative(path: &str) -> String {
     path.to_string()
 }
 
+/// Runs initialization without rendering.
+///
+/// # Side Effects
+/// Same repository, database, refs, conversion, ignore-file, and vault writes as
+/// [`execute_safe`], but no human/JSON success output is emitted.
+///
+/// # Errors
+/// Returns [`InitError`] directly so tests and higher-level commands can assert
+/// the domain failure before CLI error mapping.
 pub(crate) async fn run_init(args: InitArgs) -> Result<InitOutput, InitError> {
     run_init_internal(args, &InitProgress::disabled()).await
 }
 
 #[allow(dead_code)]
+/// Legacy initialization helper retained for tests and older call sites.
+///
+/// # Side Effects
+/// Performs the same repository initialization writes as [`run_init`].
+///
+/// # Errors
+/// Returns the underlying [`InitError`] and discards the success metadata.
 pub async fn init(args: InitArgs) -> Result<(), InitError> {
     run_init(args).await.map(|_| ())
 }
@@ -432,10 +503,16 @@ async fn run_init_internal(
 
     progress.emit("Initializing database ...");
     let database_path = root_dir.join(DATABASE);
+    // INVARIANT: the database must exist before refs, config, conversion, or
+    // vault setup run; those later stages persist their durable state through
+    // this connection/path and assume schema bootstrap has completed.
     let conn = create_database_connection(&database_path).await?;
     let repo_id = init_config(&conn, args.bare, &object_format, &ref_format).await?;
 
     progress.emit("Setting up refs ...");
+    // INVARIANT: refs are initialized after core config so HEAD/branch rows are
+    // tied to the repository identity and hash/ref-format choices already stored
+    // in config.
     initialize_refs(&conn, &initial_branch_name).await?;
 
     set_dir_hidden(&root_dir)?;
@@ -458,6 +535,9 @@ async fn run_init_internal(
             "Converting from Git repository at {} ...",
             source_git_dir.display()
         ));
+        // INVARIANT: conversion helpers read/write paths relative to the target
+        // worktree, so the temporary cwd switch must be active for the full
+        // conversion call and must be dropped before later stages continue.
         let _guard = CurrentDirGuard::change_to(&target_guard_path)?;
         let report = convert::convert_from_git_repository(&source, args.bare).await?;
         warnings.extend(report.warnings);
@@ -468,6 +548,9 @@ async fn run_init_internal(
 
     if args.vault {
         progress.emit("Generating PGP signing key ...");
+        // INVARIANT: vault bootstrap runs after DB/config/ref initialization
+        // because it records signing state in the repo DB and must roll back its
+        // own vault files if credential or key generation fails.
         let _guard = CurrentDirGuard::change_to(&target_guard_path)?;
         init_vault_for_repo(&root_dir, &database_path).await?;
     } else {

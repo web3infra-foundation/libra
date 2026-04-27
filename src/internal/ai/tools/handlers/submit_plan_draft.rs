@@ -15,6 +15,10 @@ use crate::internal::ai::tools::{
 ///
 /// The TUI captures this tool as internal planning data. It is intentionally
 /// not rendered as the generic checkbox `update_plan` transcript.
+///
+/// AI user story: let a provider propose ordered step titles before Libra's
+/// local planner converts them into formal task records. This tool captures
+/// planning intent only and must not imply that execution has started.
 pub struct SubmitPlanDraftHandler;
 
 #[async_trait]

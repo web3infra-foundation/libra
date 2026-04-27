@@ -1,8 +1,18 @@
+/**
+ * Themed text input wrapping Base UI's Input primitive.
+ *
+ * Mirrors `<input>` props (type, value, onChange, placeholder, etc.) and
+ * applies the workspace's focus / disabled / aria-invalid styling.
+ */
 import * as React from "react"
 import { Input as InputPrimitive } from "@base-ui/react/input"
 
 import { cn } from "@/lib/utils"
 
+/**
+ * Renders a styled text input. The `type` attribute is forwarded explicitly
+ * so callers can opt into HTML5 input modes (`email`, `number`, `search`, …).
+ */
 function Input({ className, type, ...props }: React.ComponentProps<"input">) {
   return (
     <InputPrimitive

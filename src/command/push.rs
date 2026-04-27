@@ -346,8 +346,18 @@ pub async fn execute(args: PushArgs) {
 }
 
 /// Safe entry point that returns structured [`CliResult`] instead of printing
-/// errors and exiting. Validates arguments, reads remote configuration,
-/// negotiates with the server, and sends local refs and pack data.
+/// errors and exiting.
+///
+/// # Side Effects
+/// - Reads current branch and remote configuration.
+/// - Negotiates with the remote server and uploads pack data/ref updates.
+/// - May update upstream tracking configuration when `--set-upstream` is used.
+/// - Renders push status in human or JSON form.
+///
+/// # Errors
+/// Returns [`CliError`] when arguments are incomplete, HEAD is detached, remote
+/// configuration is missing, authentication/network negotiation fails, pack data
+/// cannot be read, or upstream config cannot be written.
 pub async fn execute_safe(args: PushArgs, output: &OutputConfig) -> CliResult<()> {
     if args.repository.is_some() ^ args.refspec.is_some() {
         return Err(CliError::command_usage(

@@ -1,3 +1,14 @@
+/**
+ * Left-hand sidebar: brand mark, "New thread" CTA, search box, scrollable
+ * thread list, and the account/settings popover trigger at the bottom.
+ *
+ * Holds local UI state for: search query, settings popover visibility, and
+ * the currently selected thread id (initialised to the thread flagged
+ * `active` in the mock data, falling back to the first row).
+ *
+ * Width is provided by the parent so the surrounding {@link Splitter} can
+ * resize the sidebar without re-mounting the tree.
+ */
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -10,24 +21,43 @@ import { cn } from "@/lib/utils";
 import { SettingsMenu } from "./settings-menu";
 import { ThreadItem } from "./thread-item";
 
+/** Sidebar props. */
 type Props = {
+  /** Pixel width controlled by the parent {@link Workspace}. */
   width: number;
 };
 
+/**
+ * Sidebar component.
+ *
+ * Effects:
+ * - When the settings popover is open, listens for `mousedown` outside the
+ *   anchor element and `Escape` to close it. Listeners are removed when the
+ *   popover closes or the component unmounts.
+ *
+ * Boundary: an empty filter result renders an italic "No threads match." line
+ * rather than collapsing the list area, so the empty state is visible.
+ */
 export function Sidebar({ width }: Props) {
   const [query, setQuery] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
   const [activeId, setActiveId] = useState(
     () => THREADS.find((t) => t.active)?.id ?? THREADS[0]?.id,
   );
+  // Anchor element for outside-click detection on the popover.
   const avatarRef = useRef<HTMLDivElement | null>(null);
 
+  // Case-insensitive substring filter against thread titles. Empty query
+  // returns the full list unchanged.
   const filtered: Thread[] = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return THREADS;
     return THREADS.filter((t) => t.title.toLowerCase().includes(q));
   }, [query]);
 
+  // Outside-click + Escape dismissal for the settings popover. Only mounts
+  // its global listeners while the popover is open to avoid background work
+  // when it is dismissed.
   useEffect(() => {
     if (!menuOpen) return;
     function onDown(e: MouseEvent) {

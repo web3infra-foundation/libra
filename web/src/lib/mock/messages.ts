@@ -1,3 +1,10 @@
+/**
+ * Seed conversation rendered in the chat pane on first load.
+ *
+ * The trailing message is flagged `streaming: true` so the chat pane runs its
+ * synthetic typing animation on mount — see `chat.tsx` for the streaming
+ * playback effect.
+ */
 import type { ChatMessage } from "./types";
 
 export const MESSAGES: ChatMessage[] = [

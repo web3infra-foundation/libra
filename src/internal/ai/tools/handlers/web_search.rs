@@ -24,6 +24,11 @@ const MAX_WEB_SEARCH_RESULTS: usize = 10;
 const MAX_SNIPPET_CHARS: usize = 320;
 
 /// Handler for public web search.
+///
+/// AI user story: let the agent verify current external facts before making
+/// time-sensitive claims about APIs, package versions, standards, or vendor
+/// behavior. The tool returns compact metadata only; deeper page reads should be
+/// a separately reviewed capability.
 pub struct WebSearchHandler;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

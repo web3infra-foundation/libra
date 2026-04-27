@@ -61,7 +61,17 @@ pub async fn execute(args: CleanArgs) {
 }
 
 /// Safe entry point that returns structured [`CliResult`] instead of printing
-/// errors and exiting. Removes untracked files from the working tree.
+/// errors and exiting.
+///
+/// # Side Effects
+/// - Scans the working tree for untracked files.
+/// - Removes matching files unless `--dry-run` is active.
+/// - Renders removed or would-remove paths in human or JSON form.
+///
+/// # Errors
+/// Returns [`CliError`] when the command is run outside a repository, candidate
+/// paths cannot be resolved safely, a path escapes the worktree, or removal
+/// fails.
 pub async fn execute_safe(args: CleanArgs, output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
     let clean_output = run_clean(args).map_err(clean_cli_error)?;

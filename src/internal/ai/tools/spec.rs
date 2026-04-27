@@ -237,6 +237,73 @@ impl ToolSpec {
         }
     }
 
+    /// Create a ToolSpec for submit_task_complete.
+    pub fn submit_task_complete() -> Self {
+        Self {
+            spec_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: "submit_task_complete".to_string(),
+                description:
+                    "Declare this task complete with a structured outcome. Calling this tool \
+                    successfully ends the task immediately — the loop will not invoke any \
+                    further tools. Use it once you have collected enough evidence for the \
+                    task's acceptance criteria; do not re-run shell commands you have \
+                    already executed in this task."
+                        .to_string(),
+                parameters: FunctionParameters::Object {
+                    param_type: "object".to_string(),
+                    properties: {
+                        let mut props = Map::new();
+                        props.insert(
+                            "result".to_string(),
+                            json!({
+                                "type": "string",
+                                "enum": ["pass", "fail", "no_changes_needed"],
+                                "description": "Final outcome of the task. 'pass' when all acceptance criteria are verified; 'fail' when the task is blocked or a criterion is not met; 'no_changes_needed' when current workspace state already satisfies the criteria without further edits."
+                            }),
+                        );
+                        props.insert(
+                            "summary".to_string(),
+                            json!({
+                                "type": "string",
+                                "minLength": 1,
+                                "description": "One-paragraph summary of what was done (or why nothing was needed) and what evidence supports the result."
+                            }),
+                        );
+                        props.insert(
+                            "evidence".to_string(),
+                            json!({
+                                "type": "array",
+                                "description": "Optional list of acceptance-check evidence. Provide one entry per shell command you ran to verify the task. Empty array is acceptable for 'no_changes_needed' or analysis-only tasks.",
+                                "items": {
+                                    "type": "object",
+                                    "required": ["command", "exit_code"],
+                                    "properties": {
+                                        "command": {
+                                            "type": "string",
+                                            "description": "The exact shell command that was executed."
+                                        },
+                                        "exit_code": {
+                                            "type": "integer",
+                                            "description": "Exit code of the command."
+                                        },
+                                        "output_excerpt": {
+                                            "type": "string",
+                                            "description": "Short excerpt of stdout/stderr that supports the result. Truncate to a few hundred characters."
+                                        }
+                                    }
+                                }
+                            }),
+                        );
+                        props
+                    },
+                    required: vec!["result".to_string(), "summary".to_string()],
+                    definitions: None,
+                },
+            },
+        }
+    }
+
     /// Create a ToolSpec for submit_intent_draft.
     pub fn submit_intent_draft() -> Self {
         Self {

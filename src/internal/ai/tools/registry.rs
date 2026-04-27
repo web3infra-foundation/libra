@@ -19,6 +19,10 @@ use crate::internal::ai::runtime::{ToolBoundaryRuntime, ToolOperation};
 ///
 /// This trait defines the interface for tools that can be invoked by an AI agent.
 /// Tools are registered in the ToolRegistry and dispatched based on their name.
+///
+/// AI user story: each handler should make one capability available to the
+/// model with explicit mutability/network classification so the runtime can
+/// decide whether the call is safe, needs approval, or must be blocked.
 #[async_trait]
 pub trait ToolHandler: Send + Sync {
     /// Returns the kind of tool (Function, Mcp, or Custom).
@@ -58,6 +62,11 @@ pub trait ToolHandler: Send + Sync {
 ///
 /// The ToolRegistry maintains a mapping of tool names to their handlers
 /// and provides methods to register, retrieve, and dispatch tools.
+///
+/// AI user story: the registry is the agent's capability boundary. Adding a
+/// handler here changes what an AI can do in `libra code`, so new tools should
+/// document the task they enable, whether they mutate state, and what evidence
+/// they return to the model.
 #[derive(Clone)]
 pub struct ToolRegistry {
     /// Map of tool name to handler implementation.

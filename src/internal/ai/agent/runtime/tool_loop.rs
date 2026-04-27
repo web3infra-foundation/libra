@@ -666,7 +666,7 @@ fn record_executed_tool_signature(
         .unwrap_or_default();
     let warning = if threshold > 0 && count >= threshold {
         Some(format!(
-            "[system warning: repeated tool call] You have called `{tool_name}` with the same arguments {count} times in the last {window} executed tool calls. Do not repeat the same call again unless new information changed the target; switch strategy or finish with a final response if the task is complete."
+            "[system warning: repeated tool call] You have called `{tool_name}` with the same arguments {count} times in the last {window} executed tool calls. The prior result is in history above — read it instead of re-running the call. Either explore something new, or, if you have enough evidence, call `submit_task_complete` to end the task with a structured verdict."
         ))
     } else {
         None

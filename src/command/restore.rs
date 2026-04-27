@@ -150,8 +150,18 @@ pub async fn execute(args: RestoreArgs) {
 }
 
 /// Safe entry point that returns structured [`CliResult`] instead of printing
-/// errors and exiting. Resets files or entire trees from a commit or the
-/// index, respecting pathspecs and staged-vs-worktree targets.
+/// errors and exiting.
+///
+/// # Side Effects
+/// - Restores selected paths from the index or a commit tree.
+/// - May rewrite index entries when `--staged` is set.
+/// - May overwrite working-tree files when the worktree target is active.
+/// - Renders human or JSON output for restored paths.
+///
+/// # Errors
+/// Returns [`CliError`] when the repository is missing, the source revision or
+/// pathspecs cannot be resolved, object reads fail, or index/worktree writes
+/// fail.
 pub async fn execute_safe(args: RestoreArgs, output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
     let result = run_restore(args).await.map_err(CliError::from)?;

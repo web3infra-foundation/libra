@@ -401,6 +401,44 @@ pub struct SubmitIntentDraftArgs {
     pub draft: IntentDraft,
 }
 
+// ── submit_task_complete types ────────────────────────────────────────
+
+/// Final outcome of a task declared via `submit_task_complete`.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskCompleteResult {
+    /// All acceptance criteria are verified to pass.
+    Pass,
+    /// Task is blocked or at least one required criterion failed.
+    Fail,
+    /// Existing workspace state already satisfies the criteria; no edits applied.
+    NoChangesNeeded,
+}
+
+/// One acceptance-check evidence entry attached to `submit_task_complete`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TaskCompleteEvidence {
+    /// The exact shell command that was executed for verification.
+    pub command: String,
+    /// Exit code returned by the command.
+    pub exit_code: i32,
+    /// Short excerpt of stdout/stderr supporting the verdict.
+    #[serde(default)]
+    pub output_excerpt: Option<String>,
+}
+
+/// Arguments for the `submit_task_complete` tool.
+#[derive(Clone, Debug, Deserialize)]
+pub struct SubmitTaskCompleteArgs {
+    /// Final outcome of the task.
+    pub result: TaskCompleteResult,
+    /// Human-readable summary of what was done and what evidence supports `result`.
+    pub summary: String,
+    /// Optional acceptance-check evidence. Empty for `no_changes_needed`/analysis tasks.
+    #[serde(default)]
+    pub evidence: Vec<TaskCompleteEvidence>,
+}
+
 // ── request_user_input types ───────────────────────────────────────────
 
 /// A selectable option presented to the user.

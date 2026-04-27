@@ -1186,13 +1186,13 @@ impl BottomPane {
             }
             AgentStatus::AwaitingApproval => "[Up/Down: Select] [Enter: Confirm] [Esc: Deny]",
             AgentStatus::AwaitingPostPlanChoice => {
-                "[Up/Down: Select] [Enter: Confirm] [Esc: Cancel]"
+                "[Up/Down: Select] [j/l: Scroll] [Enter: Confirm] [Esc: Cancel]"
             }
             AgentStatus::AwaitingNetworkPolicyChoice => {
-                "[Up/Down: Select] [Enter: Confirm] [Esc: Back]"
+                "[Up/Down: Select] [j/l: Scroll] [Enter: Confirm] [Esc: Back]"
             }
             AgentStatus::AwaitingIntentReviewChoice => {
-                "[Up/Down: Select] [Enter: Confirm] [Esc: Cancel]"
+                "[Up/Down: Select] [j/l: Scroll] [Enter: Confirm] [Esc: Cancel]"
             }
         };
 
