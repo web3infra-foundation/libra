@@ -73,6 +73,99 @@ fn sample_operation(op_id: &str, repo_id: &str, view_id: &str, end_ts: i64) -> O
 }
 
 #[tokio::test]
+async fn invalid_arguments_are_rejected() {
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+
+    let error = OperationService::insert_operation_with_conn(
+        &db,
+        &OperationRecord {
+            op_id: "op_invalid".to_string(),
+            repo_id: " ".to_string(),
+            view_id: "view_invalid".to_string(),
+            command_name: "commit".to_string(),
+            description: "desc".to_string(),
+            actor: "alice".to_string(),
+            args_digest: None,
+            start_ts: 10,
+            end_ts: Some(20),
+            status: OperationStatus::Succeeded,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, OperationServiceError::InvalidArgument(_)));
+
+    let error = OperationService::find_operation_by_id_with_conn(&db, " ")
+        .await
+        .unwrap_err();
+    assert!(matches!(error, OperationServiceError::InvalidArgument(_)));
+
+    let error = OperationService::list_operations_by_repo_with_conn(&db, " ", 1)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, OperationServiceError::InvalidArgument(_)));
+
+    let error = OperationService::replace_view_refs_with_conn(&db, " ", &[])
+        .await
+        .unwrap_err();
+    assert!(matches!(error, OperationServiceError::InvalidArgument(_)));
+
+    let error = OperationService::find_workspace_snapshot_with_conn(&db, " ")
+        .await
+        .unwrap_err();
+    assert!(matches!(error, OperationServiceError::InvalidArgument(_)));
+}
+
+#[tokio::test]
+async fn duplicate_constraints_are_enforced_for_view_refs_and_workspace() {
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    create_operation_schema(&db).await;
+
+    let ref_insert = Statement::from_string(
+        DbBackend::Sqlite,
+        "INSERT INTO operation_view_ref(view_id, ref_kind, ref_name, ref_remote, target_oid) VALUES ('view_dup', 'branch', 'main', '', 'oid-1');",
+    );
+    db.execute(ref_insert).await.unwrap();
+    let duplicate_ref = Statement::from_string(
+        DbBackend::Sqlite,
+        "INSERT INTO operation_view_ref(view_id, ref_kind, ref_name, ref_remote, target_oid) VALUES ('view_dup', 'branch', 'main', '', 'oid-2');",
+    );
+    assert!(db.execute(duplicate_ref).await.is_err());
+
+    let workspace_insert = Statement::from_string(
+        DbBackend::Sqlite,
+        "INSERT INTO operation_view_workspace(view_id, pointer_kind, pointer_value) VALUES ('view_dup', 'index', 'oid-1');",
+    );
+    db.execute(workspace_insert).await.unwrap();
+    let duplicate_workspace = Statement::from_string(
+        DbBackend::Sqlite,
+        "INSERT INTO operation_view_workspace(view_id, pointer_kind, pointer_value) VALUES ('view_dup', 'index', 'oid-2');",
+    );
+    assert!(db.execute(duplicate_workspace).await.is_err());
+}
+
+#[tokio::test]
+async fn graph_load_handles_missing_operation_and_missing_view() {
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    create_operation_schema(&db).await;
+
+    let missing = OperationService::load_restore_view_by_operation_with_conn(&db, "op_missing")
+        .await
+        .unwrap();
+    assert!(missing.is_none());
+
+    let op_only = sample_operation("op_only", "repo_only", "view_only", 100);
+    OperationService::insert_operation_with_conn(&db, &op_only)
+        .await
+        .unwrap();
+
+    let error = OperationService::load_restore_view_by_operation_with_conn(&db, "op_only")
+        .await
+        .unwrap_err();
+    assert!(matches!(error, OperationServiceError::Storage(_)));
+}
+
+#[tokio::test]
 async fn operation_main_record_write_read_roundtrip() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     create_operation_schema(&db).await;
