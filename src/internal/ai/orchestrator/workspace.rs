@@ -87,9 +87,17 @@ struct TaskWorktreePaths {
 /// NOT serialize the mount calls themselves — doing so would let one
 /// task's sync-back land before another task's worktree materialization,
 /// poisoning the later task's baseline view of the workspace.
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Debug)]
 pub struct FuseProvisionState {
     disabled: Arc<AtomicBool>,
+}
+
+impl Default for FuseProvisionState {
+    fn default() -> Self {
+        Self {
+            disabled: Arc::new(AtomicBool::new(fuse_disabled_by_default())),
+        }
+    }
 }
 
 impl FuseProvisionState {
@@ -104,6 +112,17 @@ impl FuseProvisionState {
 
     pub fn is_disabled(&self) -> bool {
         self.disabled.load(Ordering::Acquire)
+    }
+}
+
+fn fuse_disabled_by_default() -> bool {
+    #[cfg(test)]
+    {
+        true
+    }
+    #[cfg(not(test))]
+    {
+        std::env::var_os(crate::utils::pager::LIBRA_TEST_ENV).is_some()
     }
 }
 
@@ -1030,6 +1049,11 @@ mod tests {
         assert!(!task_worktree.root.join("target").exists());
 
         cleanup_task_worktree(task_worktree).unwrap();
+    }
+
+    #[test]
+    fn fuse_provision_state_defaults_disabled_in_unit_tests() {
+        assert!(FuseProvisionState::default().is_disabled());
     }
 
     #[test]
