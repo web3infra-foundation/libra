@@ -8,6 +8,7 @@ pub mod head;
 pub mod log;
 pub mod model;
 pub mod operation;
+pub mod operation_wrapper;
 pub mod protocol;
 pub mod reflog;
 pub mod tag;
