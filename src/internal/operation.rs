@@ -10,7 +10,7 @@ use sea_orm::{
 };
 use thiserror::Error;
 
-use crate::internal::model::operation;
+use crate::internal::model::{operation, operation_parent};
 
 /// Stable status of an operation record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +57,13 @@ pub struct OperationRecord {
     pub start_ts: i64,
     pub end_ts: Option<i64>,
     pub status: OperationStatus,
+}
+
+/// Parent edge for operation lineage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationParentRecord {
+    pub op_id: String,
+    pub parent_op_id: String,
 }
 
 /// Generic pagination request for operation list APIs.
@@ -230,6 +237,89 @@ impl OperationService {
             .collect::<Result<Vec<_>, _>>()
     }
 
+    fn parent_from_model(
+        model: operation_parent::Model,
+    ) -> Result<OperationParentRecord, OperationServiceError> {
+        let parent = OperationParentRecord {
+            op_id: model.op_id,
+            parent_op_id: model.parent_op_id,
+        };
+        Self::validate_parent_record(&parent)?;
+        Ok(parent)
+    }
+
+    pub fn validate_parent_record(
+        record: &OperationParentRecord,
+    ) -> Result<(), OperationServiceError> {
+        if record.op_id.trim().is_empty() {
+            return Err(OperationServiceError::InvalidArgument(
+                "op_id must not be empty".to_string(),
+            ));
+        }
+        if record.parent_op_id.trim().is_empty() {
+            return Err(OperationServiceError::InvalidArgument(
+                "parent_op_id must not be empty".to_string(),
+            ));
+        }
+        if record.op_id == record.parent_op_id {
+            return Err(OperationServiceError::InvalidArgument(
+                "op_id must not equal parent_op_id".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Insert one operation parent edge.
+    pub async fn insert_parent_with_conn<C: ConnectionTrait>(
+        db: &C,
+        record: &OperationParentRecord,
+    ) -> Result<OperationParentRecord, OperationServiceError> {
+        Self::validate_parent_record(record)?;
+
+        let model = operation_parent::ActiveModel {
+            op_id: Set(record.op_id.clone()),
+            parent_op_id: Set(record.parent_op_id.clone()),
+        };
+
+        let inserted = model.insert(db).await.map_err(|err| {
+            OperationServiceError::Storage(format!(
+                "failed to insert operation parent edge ('{}' -> '{}'): {err}",
+                record.op_id, record.parent_op_id
+            ))
+        })?;
+
+        Self::parent_from_model(inserted)
+    }
+
+    /// List parent edges of one operation, ordered by parent operation id.
+    pub async fn list_parents_with_conn<C: ConnectionTrait>(
+        db: &C,
+        op_id: &str,
+    ) -> Result<Vec<OperationParentRecord>, OperationServiceError> {
+        if op_id.trim().is_empty() {
+            return Err(OperationServiceError::InvalidArgument(
+                "op_id must not be empty".to_string(),
+            ));
+        }
+
+        let models = operation_parent::Entity::find()
+            .filter(operation_parent::Column::OpId.eq(op_id))
+            .order_by_asc(operation_parent::Column::ParentOpId)
+            .all(db)
+            .await
+            .map_err(|err| {
+                OperationServiceError::Storage(format!(
+                    "failed to list parent edges for operation '{}': {err}",
+                    op_id
+                ))
+            })?;
+
+        models
+            .into_iter()
+            .map(Self::parent_from_model)
+            .collect::<Result<Vec<_>, _>>()
+    }
+
     pub fn validate_record(record: &OperationRecord) -> Result<(), OperationServiceError> {
         if record.op_id.trim().is_empty() {
             return Err(OperationServiceError::InvalidArgument(
@@ -283,11 +373,11 @@ impl OperationService {
 
 #[cfg(test)]
 mod tests {
-    use sea_orm::Database;
+    use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
 
     use super::{
-        OperationQueryPage, OperationRecord, OperationService, OperationServiceError,
-        OperationStatus,
+        OperationParentRecord, OperationQueryPage, OperationRecord, OperationService,
+        OperationServiceError, OperationStatus,
     };
 
     fn sample_record() -> OperationRecord {
@@ -380,5 +470,87 @@ mod tests {
             error,
             OperationServiceError::InvalidArgument(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn commit3_insert_parent_rejects_invalid_edge() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+
+        let edge = OperationParentRecord {
+            op_id: " ".to_string(),
+            parent_op_id: "op_0".to_string(),
+        };
+        let error = OperationService::insert_parent_with_conn(&db, &edge)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationServiceError::InvalidArgument(_)
+        ));
+
+        let edge = OperationParentRecord {
+            op_id: "op_1".to_string(),
+            parent_op_id: "op_1".to_string(),
+        };
+        let error = OperationService::insert_parent_with_conn(&db, &edge)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationServiceError::InvalidArgument(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn commit3_list_parents_rejects_empty_op_id() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+
+        let error = OperationService::list_parents_with_conn(&db, " ")
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationServiceError::InvalidArgument(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn commit3_insert_and_list_parents_roundtrip() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            r#"
+            CREATE TABLE IF NOT EXISTS operation_parent (
+                op_id TEXT NOT NULL,
+                parent_op_id TEXT NOT NULL,
+                PRIMARY KEY (op_id, parent_op_id)
+            );
+            "#,
+        ))
+        .await
+        .unwrap();
+
+        let p1 = OperationParentRecord {
+            op_id: "op_2".to_string(),
+            parent_op_id: "op_0".to_string(),
+        };
+        let p2 = OperationParentRecord {
+            op_id: "op_2".to_string(),
+            parent_op_id: "op_1".to_string(),
+        };
+        OperationService::insert_parent_with_conn(&db, &p1)
+            .await
+            .unwrap();
+        OperationService::insert_parent_with_conn(&db, &p2)
+            .await
+            .unwrap();
+
+        let parents = OperationService::list_parents_with_conn(&db, "op_2")
+            .await
+            .unwrap();
+        assert_eq!(parents.len(), 2);
+        assert_eq!(parents[0].parent_op_id, "op_0");
+        assert_eq!(parents[1].parent_op_id, "op_1");
     }
 }

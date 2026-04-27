@@ -22,6 +22,7 @@ pub mod config;
 pub mod config_kv;
 pub mod object_index;
 pub mod operation;
+pub mod operation_parent;
 pub mod reference;
 pub mod reflog;
 
