@@ -5,8 +5,8 @@
 //! callers through `*_with_conn` signatures.
 
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter,
-    QueryOrder, QuerySelect,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, EntityTrait,
+    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
 };
 use thiserror::Error;
 
@@ -104,6 +104,17 @@ pub struct OperationGraphRecord {
     pub workspace: Vec<OperationViewWorkspaceRecord>,
 }
 
+/// Lightweight operation list item for op log pagination APIs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationLogListItem {
+    pub op_id: String,
+    pub command_name: String,
+    pub description: String,
+    pub actor: String,
+    pub end_ts: Option<i64>,
+    pub status: OperationStatus,
+}
+
 /// Generic pagination request for operation list APIs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OperationQueryPage {
@@ -168,6 +179,20 @@ pub enum OperationServiceError {
 pub struct OperationService;
 
 impl OperationService {
+    fn log_list_item_from_model(
+        model: operation::Model,
+    ) -> Result<OperationLogListItem, OperationServiceError> {
+        let status = OperationStatus::from_db_value(&model.status)?;
+        Ok(OperationLogListItem {
+            op_id: model.op_id,
+            command_name: model.command_name,
+            description: model.description,
+            actor: model.actor,
+            end_ts: model.end_ts,
+            status,
+        })
+    }
+
     fn record_from_model(model: operation::Model) -> Result<OperationRecord, OperationServiceError> {
         let status = OperationStatus::from_db_value(&model.status)?;
         Ok(OperationRecord {
@@ -273,6 +298,53 @@ impl OperationService {
             .into_iter()
             .map(Self::record_from_model)
             .collect::<Result<Vec<_>, _>>()
+    }
+
+    /// List operation log items by repository with pagination ordered by end_ts desc.
+    pub async fn list_operation_log_page_by_repo_with_conn<C: ConnectionTrait>(
+        db: &C,
+        repo_id: &str,
+        query: OperationQueryPage,
+    ) -> Result<OperationPage<OperationLogListItem>, OperationServiceError> {
+        if repo_id.trim().is_empty() {
+            return Err(OperationServiceError::InvalidArgument(
+                "repo_id must not be empty".to_string(),
+            ));
+        }
+
+        let query = query.normalized();
+        let total = operation::Entity::find()
+            .filter(operation::Column::RepoId.eq(repo_id))
+            .count(db)
+            .await
+            .map_err(|err| {
+                OperationServiceError::Storage(format!(
+                    "failed to count operation logs for repository '{}': {err}",
+                    repo_id
+                ))
+            })?;
+
+        let models = operation::Entity::find()
+            .filter(operation::Column::RepoId.eq(repo_id))
+            .order_by_desc(operation::Column::EndTs)
+            .order_by_desc(operation::Column::StartTs)
+            .offset(query.offset())
+            .limit(query.per_page)
+            .all(db)
+            .await
+            .map_err(|err| {
+                OperationServiceError::Storage(format!(
+                    "failed to list operation logs for repository '{}': {err}",
+                    repo_id
+                ))
+            })?;
+
+        let items = models
+            .into_iter()
+            .map(Self::log_list_item_from_model)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Self::new_page(items, query, total))
     }
 
     fn parent_from_model(
@@ -1268,5 +1340,72 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, OperationServiceError::InvalidArgument(_)));
+    }
+
+    #[tokio::test]
+    async fn commit8_paginated_operation_log_query() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let error = OperationService::list_operation_log_page_by_repo_with_conn(
+            &db,
+            " ",
+            OperationQueryPage::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, OperationServiceError::InvalidArgument(_)));
+
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            "CREATE TABLE IF NOT EXISTS operation(op_id TEXT PRIMARY KEY,repo_id TEXT NOT NULL,view_id TEXT NOT NULL,command_name TEXT NOT NULL,description TEXT NOT NULL,actor TEXT NOT NULL,args_digest TEXT,start_ts INTEGER NOT NULL,end_ts INTEGER,status TEXT NOT NULL);",
+        ))
+        .await
+        .unwrap();
+
+        for (op_id, end_ts) in [("op_a", 120), ("op_b", 220), ("op_c", 180)] {
+            let record = OperationRecord {
+                op_id: op_id.to_string(),
+                repo_id: "repo_8".to_string(),
+                view_id: format!("view_{op_id}"),
+                command_name: "commit".to_string(),
+                description: format!("desc_{op_id}"),
+                actor: "alice".to_string(),
+                args_digest: None,
+                start_ts: end_ts - 10,
+                end_ts: Some(end_ts),
+                status: OperationStatus::Succeeded,
+            };
+            OperationService::insert_operation_with_conn(&db, &record)
+                .await
+                .unwrap();
+        }
+
+        let page1 = OperationService::list_operation_log_page_by_repo_with_conn(
+            &db,
+            "repo_8",
+            OperationQueryPage {
+                page: 1,
+                per_page: 2,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(page1.total, 3);
+        assert_eq!(page1.items.len(), 2);
+        assert_eq!(page1.items[0].op_id, "op_b");
+        assert_eq!(page1.items[1].op_id, "op_c");
+
+        let page2 = OperationService::list_operation_log_page_by_repo_with_conn(
+            &db,
+            "repo_8",
+            OperationQueryPage {
+                page: 2,
+                per_page: 2,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(page2.total, 3);
+        assert_eq!(page2.items.len(), 1);
+        assert_eq!(page2.items[0].op_id, "op_a");
     }
 }
