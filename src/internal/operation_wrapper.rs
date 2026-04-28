@@ -17,7 +17,12 @@ use sea_orm::{
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::internal::db::get_db_conn_instance;
+use crate::internal::{
+    db::get_db_conn_instance,
+    operation::{OperationService, OperationStatus},
+};
+
+const PARENT_RESOLUTION_LIMIT: u64 = 200;
 
 /// Required command metadata captured by `with_operation_log`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,6 +175,7 @@ where
 
     let op_id = Uuid::now_v7().to_string();
     let view_id = Uuid::now_v7().to_string();
+    let _parent_op_id = resolve_parent_operation_id_with_conn(db, &meta.repo_id).await?;
 
     let txn = db.begin().await.map_err(|err| {
         OperationError::begin(format!(
@@ -208,6 +214,37 @@ where
     })
 }
 
+/// Resolve the most recent successful operation in a repository for v1 parent strategy.
+///
+/// The resolver scans recent operations in reverse chronological order and returns the
+/// first successful operation id, or `None` when no successful parent exists.
+pub async fn resolve_parent_operation_id_with_conn<C: sea_orm::ConnectionTrait>(
+    db: &C,
+    repo_id: &str,
+) -> Result<Option<String>, OperationError> {
+    if repo_id.trim().is_empty() {
+        return Err(OperationError::validation("repo_id must not be empty"));
+    }
+
+    let records = OperationService::list_operations_by_repo_with_conn(
+        db,
+        repo_id,
+        PARENT_RESOLUTION_LIMIT,
+    )
+    .await
+    .map_err(|err| {
+        OperationError::begin(format!(
+            "failed to resolve parent operation for repository '{}': {err}",
+            repo_id
+        ))
+    })?;
+
+    Ok(records
+        .into_iter()
+        .find(|record| record.status == OperationStatus::Succeeded)
+        .map(|record| record.op_id))
+}
+
 #[cfg(test)]
 mod tests {
     use sea_orm::{
@@ -215,8 +252,10 @@ mod tests {
     };
 
     use super::{
-        OperationError, OperationMeta, OperationScope, with_operation_log_with_conn,
+        resolve_parent_operation_id_with_conn, OperationError, OperationMeta, OperationScope,
+        with_operation_log_with_conn,
     };
+    use crate::internal::operation::{OperationRecord, OperationService, OperationStatus};
 
     fn valid_meta() -> OperationMeta {
         OperationMeta {
@@ -247,9 +286,113 @@ mod tests {
         assert!(!scope.include_remote_tracking);
     }
 
+    fn sample_record(op_id: &str, status: OperationStatus, end_ts: i64) -> OperationRecord {
+        OperationRecord {
+            op_id: op_id.to_string(),
+            repo_id: "repo_1".to_string(),
+            view_id: format!("view_{op_id}"),
+            command_name: "commit".to_string(),
+            description: format!("desc_{op_id}"),
+            actor: "alice".to_string(),
+            args_digest: Some("sha256:abcd".to_string()),
+            start_ts: end_ts - 5,
+            end_ts: Some(end_ts),
+            status,
+        }
+    }
+
+    async fn create_operation_table(db: &sea_orm::DatabaseConnection) {
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            r#"
+            CREATE TABLE operation (
+                op_id TEXT PRIMARY KEY,
+                repo_id TEXT NOT NULL,
+                view_id TEXT NOT NULL,
+                command_name TEXT NOT NULL,
+                description TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                args_digest TEXT,
+                start_ts INTEGER NOT NULL,
+                end_ts INTEGER,
+                status TEXT NOT NULL
+            )
+            "#
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn resolve_parent_operation_picks_latest_successful_record() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        create_operation_table(&db).await;
+
+        OperationService::insert_operation_with_conn(
+            &db,
+            &sample_record("op_old_success", OperationStatus::Succeeded, 10),
+        )
+        .await
+        .unwrap();
+        OperationService::insert_operation_with_conn(
+            &db,
+            &sample_record("op_new_failed", OperationStatus::Failed, 30),
+        )
+        .await
+        .unwrap();
+        OperationService::insert_operation_with_conn(
+            &db,
+            &sample_record("op_latest_success", OperationStatus::Succeeded, 40),
+        )
+        .await
+        .unwrap();
+
+        let parent = resolve_parent_operation_id_with_conn(&db, "repo_1")
+            .await
+            .unwrap();
+
+        assert_eq!(parent.as_deref(), Some("op_latest_success"));
+    }
+
+    #[tokio::test]
+    async fn resolve_parent_operation_returns_none_when_no_success_exists() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        create_operation_table(&db).await;
+
+        OperationService::insert_operation_with_conn(
+            &db,
+            &sample_record("op_failed", OperationStatus::Failed, 10),
+        )
+        .await
+        .unwrap();
+        OperationService::insert_operation_with_conn(
+            &db,
+            &sample_record("op_running", OperationStatus::Running, 20),
+        )
+        .await
+        .unwrap();
+
+        let parent = resolve_parent_operation_id_with_conn(&db, "repo_1")
+            .await
+            .unwrap();
+
+        assert!(parent.is_none());
+    }
+
+    async fn create_tx_probe_table(db: &sea_orm::DatabaseConnection) {
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            "CREATE TABLE tx_probe (id INTEGER PRIMARY KEY)".to_string(),
+        ))
+        .await
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn with_operation_log_returns_payload_and_ids_on_success() {
         let db = Database::connect("sqlite::memory:").await.unwrap();
+        create_operation_table(&db).await;
 
         let result = with_operation_log_with_conn(
             &db,
@@ -269,12 +412,8 @@ mod tests {
     #[tokio::test]
     async fn with_operation_log_rolls_back_on_business_failure() {
         let db = Database::connect("sqlite::memory:").await.unwrap();
-        db.execute(Statement::from_string(
-            DbBackend::Sqlite,
-            "CREATE TABLE tx_probe (id INTEGER PRIMARY KEY)".to_string(),
-        ))
-        .await
-        .unwrap();
+        create_operation_table(&db).await;
+        create_tx_probe_table(&db).await;
 
         let error = with_operation_log_with_conn(
             &db,
