@@ -18,7 +18,7 @@ use crate::{
             error::{ToolError, ToolResult},
             registry::ToolHandler,
             spec::ToolSpec,
-            utils::{command_invokes_git_version_control, validate_path},
+            utils::{command_invokes_git_version_control, resolve_path},
         },
         workspace_snapshot::{
             WorkspaceSnapshot, changed_paths_since_baseline as changed_workspace_paths,
@@ -203,9 +203,9 @@ fn resolve_workdir(requested_workdir: Option<&str>, working_dir: &Path) -> ToolR
     };
 
     let requested = Path::new(workdir);
-    validate_path(requested, working_dir)?;
+    let resolved = resolve_path(requested, working_dir)?;
 
-    let requested_canon = std::fs::canonicalize(requested).map_err(|e| {
+    let requested_canon = std::fs::canonicalize(&resolved).map_err(|e| {
         ToolError::ExecutionFailed(format!(
             "failed to canonicalize workdir '{}': {e}",
             requested.display()
@@ -219,7 +219,7 @@ fn resolve_workdir(requested_workdir: Option<&str>, working_dir: &Path) -> ToolR
     })?;
 
     if !is_sub_path(&requested_canon, &working_dir_canon) {
-        return Err(ToolError::PathOutsideWorkingDir(requested.to_path_buf()));
+        return Err(ToolError::PathOutsideWorkingDir(resolved));
     }
 
     Ok(requested_canon)
@@ -440,8 +440,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_shell_workdir_relative_path_fails() {
+    async fn test_shell_workdir_relative_path_is_resolved_inside_sandbox() {
         let temp = TempDir::new().unwrap();
+        let inner_path = temp.path().join("relative").join("path");
+        std::fs::create_dir_all(&inner_path).unwrap();
+
         let inv = make_invocation(
             serde_json::json!({
                 "command": "pwd",
@@ -449,10 +452,30 @@ mod tests {
             }),
             temp.path().to_path_buf(),
         );
-        let result = ShellHandler.handle(inv).await;
+        let result = ShellHandler.handle(inv).await.unwrap();
+        let text = result.as_text().unwrap();
         assert!(
-            matches!(result, Err(ToolError::PathNotAbsolute(_))),
-            "expected PathNotAbsolute, got: {result:?}"
+            text.contains("relative/path") || text.contains("relative\\path"),
+            "expected resolved relative/path in output:\n{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shell_workdir_dot_uses_sandbox_root() {
+        let temp = TempDir::new().unwrap();
+        let inv = make_invocation(
+            serde_json::json!({
+                "command": "pwd",
+                "workdir": "."
+            }),
+            temp.path().to_path_buf(),
+        );
+        let result = ShellHandler.handle(inv).await.unwrap();
+        let text = result.as_text().unwrap();
+        let dir_name = temp.path().file_name().unwrap().to_str().unwrap();
+        assert!(
+            text.contains(dir_name),
+            "expected sandbox root in output:\n{text}"
         );
     }
 
@@ -556,6 +579,15 @@ mod tests {
         assert!(
             required.iter().any(|v| v == "command"),
             "command should be required"
+        );
+
+        let timeout_description =
+            json["function"]["parameters"]["properties"]["timeout_ms"]["description"]
+                .as_str()
+                .unwrap();
+        assert!(
+            timeout_description.contains("default: 60000"),
+            "timeout default should match shell runtime default: {timeout_description}"
         );
     }
 

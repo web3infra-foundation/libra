@@ -48,6 +48,11 @@ pub struct Orchestrator<M: CompletionModel> {
     model: M,
     registry: Arc<ToolRegistry>,
     config: OrchestratorConfig,
+    /// Process-scoped FUSE provisioning gate. Persisted across `run()` calls so
+    /// that once a task fails to mount FUSE, every subsequent orchestrator
+    /// invocation in the same process skips FUSE without re-paying the
+    /// mount-and-fail cost or emitting another fallback warning.
+    fuse_state: workspace::FuseProvisionState,
 }
 
 struct FanoutObserver {
@@ -245,6 +250,7 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
             model,
             registry,
             config,
+            fuse_state: workspace::FuseProvisionState::default(),
         }
     }
 
@@ -276,11 +282,10 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
         let max_replans = replan::max_replans(&spec);
         let mut replan_count = 0_u32;
         let mut plan_revision_specs = Vec::new();
-        // Session-scoped FUSE provisioning gate. Created once and shared with
-        // every ExecutorConfig across replans so the first FUSE failure
-        // disables FUSE for the rest of this session and emits exactly one
-        // TUI note.
-        let fuse_state = workspace::FuseProvisionState::default();
+        // FUSE provisioning gate. Reused across orchestrator runs in the same
+        // process so the first failure disables FUSE for every subsequent task,
+        // not just for the current run's replans.
+        let fuse_state = self.fuse_state.clone();
         let downstream_observer = self.config.observer.clone();
         let persistence_session = if let Some(ref mcp_server) = self.config.mcp_server {
             Some(

@@ -13,11 +13,12 @@ use std::{
 use git_internal::{hash::ObjectHash, internal::object::blob::Blob};
 use ignore::WalkBuilder;
 
-use crate::{internal::ai::generated_artifacts, utils::object_ext::BlobExt};
+use crate::internal::ai::generated_artifacts;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct WorkspaceSnapshot {
     pub(crate) entries: BTreeMap<PathBuf, WorkspaceEntry>,
+    pub(crate) file_contents: BTreeMap<PathBuf, Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -27,6 +28,17 @@ pub(crate) enum WorkspaceEntry {
 }
 
 pub(crate) fn snapshot_workspace(root: &Path) -> io::Result<WorkspaceSnapshot> {
+    snapshot_workspace_inner(root, false)
+}
+
+pub(crate) fn snapshot_workspace_with_contents(root: &Path) -> io::Result<WorkspaceSnapshot> {
+    snapshot_workspace_inner(root, true)
+}
+
+fn snapshot_workspace_inner(
+    root: &Path,
+    capture_file_contents: bool,
+) -> io::Result<WorkspaceSnapshot> {
     let mut builder = WalkBuilder::new(root);
     builder
         .hidden(false)
@@ -46,6 +58,7 @@ pub(crate) fn snapshot_workspace(root: &Path) -> io::Result<WorkspaceSnapshot> {
         });
 
     let mut entries = BTreeMap::new();
+    let mut file_contents = BTreeMap::new();
     for entry in builder.build() {
         let entry = entry.map_err(ignore_error_to_io)?;
         let path = entry.path();
@@ -66,10 +79,17 @@ pub(crate) fn snapshot_workspace(root: &Path) -> io::Result<WorkspaceSnapshot> {
             .strip_prefix(root)
             .map_err(|err| io::Error::other(err.to_string()))?
             .to_path_buf();
-        entries.insert(rel, snapshot_entry(path, &file_type)?);
+        let (snapshot_entry, contents) = snapshot_entry(path, &file_type, capture_file_contents)?;
+        if let Some(contents) = contents {
+            file_contents.insert(rel.clone(), contents);
+        }
+        entries.insert(rel, snapshot_entry);
     }
 
-    Ok(WorkspaceSnapshot { entries })
+    Ok(WorkspaceSnapshot {
+        entries,
+        file_contents,
+    })
 }
 
 pub(crate) fn changed_paths_since_baseline(
@@ -91,7 +111,9 @@ pub(crate) fn changed_paths_since_baseline(
 
 pub(crate) fn workspace_entry_if_exists(path: &Path) -> io::Result<Option<WorkspaceEntry>> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) => snapshot_entry(path, &metadata.file_type()).map(Some),
+        Ok(metadata) => {
+            snapshot_entry(path, &metadata.file_type(), false).map(|(entry, _)| Some(entry))
+        }
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(err),
     }
@@ -108,16 +130,23 @@ fn protected_workspace_entry(path: &Path) -> bool {
         .is_some_and(|name| matches!(name, ".git" | ".libra" | ".codex" | ".agents"))
 }
 
-fn snapshot_entry(path: &Path, file_type: &fs::FileType) -> io::Result<WorkspaceEntry> {
+fn snapshot_entry(
+    path: &Path,
+    file_type: &fs::FileType,
+    capture_file_contents: bool,
+) -> io::Result<(WorkspaceEntry, Option<Vec<u8>>)> {
     if file_type.is_symlink() {
-        return Ok(WorkspaceEntry::Symlink(fs::read_link(path)?));
+        return Ok((WorkspaceEntry::Symlink(fs::read_link(path)?), None));
     }
 
     // Workspace snapshots are used only for change detection between two local
     // filesystem states. They should not depend on repository-scoped LFS or
     // attribute resolution, because isolated task workspaces and tests may run
     // outside a Libra repository context.
-    Ok(WorkspaceEntry::File(Blob::from_file(path).id))
+    let contents = fs::read(path)?;
+    let entry = WorkspaceEntry::File(Blob::from_content_bytes(contents.clone()).id);
+    let captured = capture_file_contents.then_some(contents);
+    Ok((entry, captured))
 }
 
 fn ignore_error_to_io(err: ignore::Error) -> io::Error {

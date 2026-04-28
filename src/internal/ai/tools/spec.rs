@@ -111,12 +111,12 @@ impl ToolSpec {
                 (
                     "workdir",
                     "string",
-                    "Working directory (must be absolute and within the sandbox)",
+                    "Working directory (absolute or sandbox-relative, and within the sandbox)",
                 ),
                 (
                     "timeout_ms",
                     "number",
-                    "Timeout in milliseconds (default: 10000)",
+                    "Timeout in milliseconds (default: 60000)",
                 ),
                 (
                     "sandbox_permissions",

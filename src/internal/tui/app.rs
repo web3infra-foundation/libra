@@ -172,6 +172,30 @@ fn session_graph_thread_id(session: &SessionState) -> Option<String> {
         })
 }
 
+fn graph_thread_id_from_orchestrator_result(result: &OrchestratorResult) -> Option<String> {
+    result
+        .persistence
+        .as_ref()
+        .and_then(|persistence| persistence.thread_id.as_deref())
+        .filter(|thread_id| uuid::Uuid::parse_str(thread_id).is_ok())
+        .map(str::to_string)
+}
+
+fn graph_command_from_thread_id(thread_id: &str) -> Option<String> {
+    uuid::Uuid::parse_str(thread_id)
+        .ok()
+        .map(|_| format!("libra graph {thread_id}"))
+}
+
+fn record_orchestrator_thread_metadata(session: &mut SessionState, result: &OrchestratorResult) {
+    if let Some(thread_id) = graph_thread_id_from_orchestrator_result(result) {
+        session.metadata.insert(
+            "thread_id".to_string(),
+            serde_json::Value::String(thread_id),
+        );
+    }
+}
+
 fn summarize_mcp_content(content: &[rmcp::model::Content]) -> Option<String> {
     let mut parts = Vec::new();
     for item in content {
@@ -3260,6 +3284,7 @@ where
                     )
                 });
                 if let Some(result) = result {
+                    record_orchestrator_thread_metadata(&mut self.session, &result);
                     self.replace_streaming_assistant_cell(Box::new(
                         OrchestratorResultHistoryCell::new(*result),
                     ));
@@ -6319,6 +6344,13 @@ fn format_orchestrator_result(result: &OrchestratorResult) -> String {
         short_markdown_id(&result.intent_spec_id)
     ));
     if let Some(persistence) = &result.persistence {
+        if let Some(command) = persistence
+            .thread_id
+            .as_deref()
+            .and_then(graph_command_from_thread_id)
+        {
+            lines.push(format!("| Graph | `{command}` |"));
+        }
         lines.push(format!(
             "| Run | `{}` |",
             short_markdown_id(&persistence.run_id)
@@ -6576,13 +6608,14 @@ mod tests {
         format_intentspec_target_mismatch, format_orchestrator_result,
         format_plan_compiled_stage_note, format_plan_execution_stage_note,
         format_replan_stage_note, format_system_verification_stage_note,
-        intentspec_failure_revision_message_from_report, intentspec_with_plan_draft_objectives,
-        is_default_chat_tool, is_global_quit_command_input, is_phase1_plan_draft_tool,
-        mark_visible_tool_call_running, newest_managed_assistant_text,
+        graph_thread_id_from_orchestrator_result, intentspec_failure_revision_message_from_report,
+        intentspec_with_plan_draft_objectives, is_default_chat_tool, is_global_quit_command_input,
+        is_phase1_plan_draft_tool, mark_visible_tool_call_running, newest_managed_assistant_text,
         normalize_terminal_paste_text, parse_pending_plan_revision_command,
         pending_execution_plan_revision_help_message, pending_plan_revision_help_message,
         phase0_plan_tool_loop_config, phase1_plan_tool_loop_config, provider_plan_draft_from_args,
-        provider_plan_draft_from_plan, review_scroll_action, should_auto_repair_execution_failure,
+        provider_plan_draft_from_plan, record_orchestrator_thread_metadata, review_scroll_action,
+        session_graph_thread_id, should_auto_repair_execution_failure,
         should_forward_phase0_model_text_delta, should_forward_phase1_model_text_delta,
         should_route_plain_message_to_plan,
     };
@@ -6600,10 +6633,11 @@ mod tests {
             },
             orchestrator::types::{
                 DecisionOutcome, ExecutionPlanSpec, GateReport, GateResult, OrchestratorResult,
-                PolicyViolation, SystemReport, TaskContract, TaskKind, TaskNodeStatus, TaskResult,
-                TaskSpec, ToolCallRecord,
+                PersistedExecution, PolicyViolation, SystemReport, TaskContract, TaskKind,
+                TaskNodeStatus, TaskResult, TaskSpec, ToolCallRecord,
             },
             sandbox::ReviewDecision,
+            session::SessionState,
             tools::context::{PlanDraftStep, SubmitPlanDraftArgs},
             web::code_ui::{
                 CodeUiApplyToFuture, CodeUiCapabilities, CodeUiInteractionKind,
@@ -7361,6 +7395,44 @@ mod tests {
     }
 
     #[test]
+    fn orchestrator_result_includes_graph_command_for_persisted_thread() {
+        let thread_id = "11111111-1111-4111-8111-111111111111";
+        let mut result = orchestrator_fixture();
+        result.persistence = Some(PersistedExecution {
+            thread_id: Some(thread_id.to_string()),
+            run_id: "run-1".into(),
+            ..PersistedExecution::default()
+        });
+
+        let rendered = format_orchestrator_result(&result);
+
+        assert!(rendered.contains(&format!("| Graph | `libra graph {thread_id}` |")));
+        assert_eq!(
+            graph_thread_id_from_orchestrator_result(&result).as_deref(),
+            Some(thread_id)
+        );
+    }
+
+    #[test]
+    fn orchestrator_result_thread_id_updates_session_graph_hint() {
+        let thread_id = "11111111-1111-4111-8111-111111111111";
+        let mut session = SessionState::new("/tmp/workspace");
+        let mut result = orchestrator_fixture();
+        result.persistence = Some(PersistedExecution {
+            thread_id: Some(thread_id.to_string()),
+            run_id: "run-1".into(),
+            ..PersistedExecution::default()
+        });
+
+        record_orchestrator_thread_metadata(&mut session, &result);
+
+        assert_eq!(
+            session_graph_thread_id(&session).as_deref(),
+            Some(thread_id)
+        );
+    }
+
+    #[test]
     fn orchestrator_stage_notes_surface_later_phases() {
         let result = orchestrator_fixture();
         let plan = &result.execution_plan_spec;
@@ -7830,7 +7902,7 @@ fn build_plan_prompt(request: &str) -> String {
 First, you MUST call request_user_input with exactly one question id=risk_profile, header=Risk, and options Low/Medium/High.\n\
 After receiving user choice, analyze the repository and then call submit_intent_draft exactly once.\n\
 Use web_search when available before making version-sensitive external claims. Rust edition 2024 is stable in current Rust; do not reject Cargo.toml edition=\"2024\" unless local toolchain evidence proves it unsupported.\n\
-Default execution uses dependency-policy:no-new. Do not introduce third-party dependencies unless the user explicitly asks for that package or the repository already declares it; for simple Rust CLI argument handling, prefer std::env over crates such as clap.\n\
+Default execution uses dependency-policy:no-new. If the user explicitly asks to add a new third-party dependency, make that intent unambiguous in the IntentDraft; Libra will derive dependency-policy:allow-with-review for that request. For simple Rust CLI argument handling without an explicit dependency request, prefer std::env over crates such as clap.\n\
 If required information is missing, call request_user_input again for focused follow-up questions.\n\
 Do not output a plain-text plan; finalize by submitting the draft tool call.\n\n\
 User request:\n{request}"
@@ -7843,7 +7915,7 @@ fn build_plan_revision_prompt(spec_json: &str, request: &str) -> String {
 First, you MUST call request_user_input with exactly one question id=risk_profile, header=Risk, and options Low/Medium/High.\n\
 Use the current IntentSpec as the baseline, apply only the user's requested changes, and then call submit_intent_draft exactly once.\n\
 Use web_search when available before making version-sensitive external claims. Rust edition 2024 is stable in current Rust; do not reject Cargo.toml edition=\"2024\" unless local toolchain evidence proves it unsupported.\n\
-Default execution uses dependency-policy:no-new. Do not introduce third-party dependencies unless the user explicitly asks for that package or the repository already declares it; for simple Rust CLI argument handling, prefer std::env over crates such as clap.\n\
+Default execution uses dependency-policy:no-new. If the user explicitly asks to add a new third-party dependency, make that intent unambiguous in the IntentDraft; Libra will derive dependency-policy:allow-with-review for that request. For simple Rust CLI argument handling without an explicit dependency request, prefer std::env over crates such as clap.\n\
 If required information is missing, call request_user_input again for focused follow-up questions.\n\
 Do not output a plain-text plan; finalize by submitting the draft tool call.\n\n\
 Current IntentSpec:\n```json\n{spec_json}\n```\n\n\

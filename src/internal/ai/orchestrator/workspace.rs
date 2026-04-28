@@ -4,13 +4,21 @@
 //! then allowed changes are synced back after scope checks. Tests in this module cover
 //! file copy, symlink handling, deletion, contract violations, and cleanup behavior.
 
+#[cfg(target_os = "macos")]
+use std::sync::Mutex;
 use std::{
+    collections::BTreeSet,
     fs, io,
     path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+};
+#[cfg(unix)]
+use std::{
+    thread,
+    time::{Duration, Instant},
 };
 
 #[cfg(unix)]
@@ -32,8 +40,8 @@ use super::{
 };
 use crate::{
     internal::ai::workspace_snapshot::{
-        WorkspaceSnapshot, changed_paths_since_baseline, snapshot_workspace,
-        workspace_entry_if_exists,
+        WorkspaceEntry, WorkspaceSnapshot, changed_paths_since_baseline, snapshot_workspace,
+        snapshot_workspace_with_contents, workspace_entry_if_exists,
     },
     utils::util,
 };
@@ -75,18 +83,35 @@ struct TaskWorktreePaths {
     upper_root: PathBuf,
 }
 
-/// Session-scoped FUSE provisioning gate. Once `disabled` flips to `true`,
-/// `prepare_task_worktree` skips FUSE entirely for the rest of the session
-/// and goes directly to the copy backend.
+#[cfg(target_os = "macos")]
+static MACOS_FUSE_MOUNT_HANDSHAKE_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(all(unix, test))]
+const FUSE_HEALTH_CHECK_TIMEOUT: Duration = Duration::from_millis(10);
+#[cfg(all(unix, not(test)))]
+const FUSE_HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
+#[cfg(all(unix, test))]
+const FUSE_HEALTH_CHECK_INTERVAL: Duration = Duration::from_millis(1);
+#[cfg(all(unix, not(test)))]
+const FUSE_HEALTH_CHECK_INTERVAL: Duration = Duration::from_millis(50);
+
+/// FUSE provisioning gate. Once `disabled` flips to `true`,
+/// `prepare_task_worktree` skips FUSE entirely and goes directly to the copy
+/// backend.
 ///
 /// The flag is shared via a single `Arc<AtomicBool>` so concurrent task
 /// provisioning sees consistent state. Tasks that race into the *first*
-/// FUSE attempt all run their mounts in parallel (matching the existing
-/// timing); whichever attempts finish first set the flag, and every
-/// subsequent task short-circuits past the FUSE path. We deliberately do
-/// NOT serialize the mount calls themselves — doing so would let one
-/// task's sync-back land before another task's worktree materialization,
-/// poisoning the later task's baseline view of the workspace.
+/// FUSE attempt still snapshot and materialize their lower/upper directories
+/// independently; whichever attempts finish first set the flag, and every
+/// subsequent task short-circuits past the FUSE path. On macOS only the
+/// `mount_macfuse` handshake is serialized after materialization, avoiding
+/// device allocation races without delaying baseline capture.
+///
+/// The orchestrator owns one `FuseProvisionState` for its entire lifetime so
+/// the disable signal persists across orchestrator runs in the same process —
+/// not just across replans within a single run. Without this persistence the
+/// orchestrator would re-attempt (and re-fail) FUSE on every new intent the
+/// user submits in the same TUI session.
 #[derive(Clone, Debug)]
 pub struct FuseProvisionState {
     disabled: Arc<AtomicBool>,
@@ -129,7 +154,7 @@ fn fuse_disabled_by_default() -> bool {
 /// Outcome of a FUSE provisioning attempt during `prepare_task_worktree`.
 /// Reported back to the caller so the orchestrator can emit a single
 /// user-visible note when FUSE flips from "available" to "disabled".
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FuseAttemptOutcome {
     /// FUSE overlay mounted successfully and is the active backend.
     Mounted,
@@ -139,9 +164,24 @@ pub enum FuseAttemptOutcome {
     AlreadyDisabled,
     /// This task was the first to fail FUSE — it triggered the session disable.
     /// The caller must emit the one-time "FUSE disabled" TUI note.
-    JustDisabled,
+    JustDisabled { reason: String },
     /// Platform without FUSE support (non-unix); copy backend used.
     Unsupported,
+}
+
+impl FuseAttemptOutcome {
+    pub fn disabled_reason(&self) -> Option<&str> {
+        match self {
+            Self::JustDisabled { reason } => Some(reason.as_str()),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(unix)]
+enum FuseTaskWorktreeProvision {
+    Mounted(TaskWorktreeBackend),
+    Fallback { reason: String },
 }
 
 pub(crate) fn prepare_task_worktree(
@@ -149,14 +189,14 @@ pub(crate) fn prepare_task_worktree(
     task_id: Uuid,
     fuse_state: &FuseProvisionState,
 ) -> io::Result<(TaskWorktree, FuseAttemptOutcome)> {
-    let baseline = snapshot_workspace(main_working_dir)?;
+    let baseline = snapshot_workspace_with_contents(main_working_dir)?;
 
     #[cfg(unix)]
     {
         if !fuse_state.is_disabled() {
             let fuse_paths = task_worktree_paths(task_id, "fuse");
             match prepare_fuse_task_worktree(main_working_dir, &fuse_paths, &baseline)? {
-                Some(backend) => {
+                FuseTaskWorktreeProvision::Mounted(backend) => {
                     return Ok((
                         TaskWorktree {
                             root: fuse_paths.workspace_root,
@@ -166,10 +206,10 @@ pub(crate) fn prepare_task_worktree(
                         FuseAttemptOutcome::Mounted,
                     ));
                 }
-                None => {
+                FuseTaskWorktreeProvision::Fallback { reason } => {
                     // Mount or health check failed; flip the session-wide flag.
                     let outcome = if fuse_state.disable_first_time() {
-                        FuseAttemptOutcome::JustDisabled
+                        FuseAttemptOutcome::JustDisabled { reason }
                     } else {
                         FuseAttemptOutcome::AlreadyDisabled
                     };
@@ -213,7 +253,7 @@ fn prepare_task_worktree_copy_fallback(
 }
 
 fn task_worktree_paths(task_id: Uuid, backend: &str) -> TaskWorktreePaths {
-    let cleanup_root = std::env::temp_dir().join(format!(
+    let cleanup_root = task_worktree_temp_dir().join(format!(
         "libra-task-worktree-{}-{}-{}",
         backend,
         std::process::id(),
@@ -224,6 +264,18 @@ fn task_worktree_paths(task_id: Uuid, backend: &str) -> TaskWorktreePaths {
         lower_root: cleanup_root.join("lower"),
         upper_root: cleanup_root.join("upper"),
         cleanup_root,
+    }
+}
+
+fn task_worktree_temp_dir() -> PathBuf {
+    let temp_dir = std::env::temp_dir();
+    #[cfg(target_os = "macos")]
+    {
+        fs::canonicalize(&temp_dir).unwrap_or(temp_dir)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        temp_dir
     }
 }
 
@@ -260,9 +312,11 @@ fn prepare_fuse_task_worktree(
     main_working_dir: &Path,
     paths: &TaskWorktreePaths,
     baseline: &WorkspaceSnapshot,
-) -> io::Result<Option<TaskWorktreeBackend>> {
+) -> io::Result<FuseTaskWorktreeProvision> {
     let Ok(runtime) = Handle::try_current() else {
-        return Ok(None);
+        return Ok(FuseTaskWorktreeProvision::Fallback {
+            reason: "tokio runtime unavailable for FUSE provisioning".to_string(),
+        });
     };
 
     prepare_task_worktree_root(&paths.cleanup_root)?;
@@ -271,27 +325,32 @@ fn prepare_fuse_task_worktree(
     fs::create_dir_all(&paths.upper_root)?;
     materialize_workspace(main_working_dir, &paths.lower_root, baseline)?;
 
-    match util::try_get_storage_path(Some(main_working_dir.to_path_buf())) {
-        Ok(storage) => {
-            link_repo_storage(
-                &storage,
-                &paths.upper_root.join(util::ROOT_DIR),
-                "FUSE upper layer",
-            )?;
-        }
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-        Err(err) => return Err(err),
-    }
+    let expect_repo_storage_link =
+        match util::try_get_storage_path(Some(main_working_dir.to_path_buf())) {
+            Ok(storage) => {
+                link_repo_storage(
+                    &storage,
+                    &paths.upper_root.join(util::ROOT_DIR),
+                    "FUSE upper layer",
+                )?;
+                true
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => false,
+            Err(err) => return Err(err),
+        };
 
-    let mount_result = runtime.block_on(mount_fuse_task_worktree(
+    let mount_result = mount_fuse_task_worktree_on_runtime(
+        &runtime,
         &paths.lower_root,
         &paths.workspace_root,
         &paths.upper_root,
-    ));
+    );
 
     match mount_result {
         Ok(mount_handle) => {
-            if let Err(err) = verify_fuse_task_worktree_mount(&paths.workspace_root) {
+            if let Err(err) =
+                verify_fuse_task_worktree_mount(&paths.workspace_root, expect_repo_storage_link)
+            {
                 if let Err(unmount_err) = runtime.block_on(mount_handle.unmount()) {
                     warn!(
                         mount = %paths.workspace_root.display(),
@@ -300,37 +359,126 @@ fn prepare_fuse_task_worktree(
                     );
                 }
                 warn_cleanup_root_failure(&paths.cleanup_root);
+                let reason = err.to_string();
                 warn!(
                     path = %main_working_dir.display(),
                     mount = %paths.workspace_root.display(),
                     "mounted FUSE task worktree failed health check, falling back to copy backend: {}",
-                    err
+                    reason
                 );
-                return Ok(None);
+                return Ok(FuseTaskWorktreeProvision::Fallback { reason });
             }
 
-            Ok(Some(TaskWorktreeBackend::Fuse(FuseTaskWorktreeBackend {
-                cleanup_root: paths.cleanup_root.clone(),
-                mount_handle,
-            })))
+            Ok(FuseTaskWorktreeProvision::Mounted(
+                TaskWorktreeBackend::Fuse(FuseTaskWorktreeBackend {
+                    cleanup_root: paths.cleanup_root.clone(),
+                    mount_handle,
+                }),
+            ))
         }
         Err(err) => {
             warn_cleanup_root_failure(&paths.cleanup_root);
+            let reason = err.to_string();
             warn!(
                 path = %main_working_dir.display(),
                 mount = %paths.workspace_root.display(),
                 "failed to mount FUSE task worktree, falling back to copy backend: {}",
-                err
+                reason
             );
-            Ok(None)
+            Ok(FuseTaskWorktreeProvision::Fallback { reason })
         }
     }
 }
 
 #[cfg(unix)]
-fn verify_fuse_task_worktree_mount(workspace_root: &Path) -> io::Result<()> {
-    fs::read_dir(workspace_root)?;
-    fs::symlink_metadata(workspace_root.join(util::ROOT_DIR))?;
+fn mount_fuse_task_worktree_on_runtime(
+    runtime: &Handle,
+    lower_root: &Path,
+    workspace_root: &Path,
+    upper_root: &Path,
+) -> io::Result<rfuse3::raw::MountHandle> {
+    #[cfg(target_os = "macos")]
+    {
+        let _guard = MACOS_FUSE_MOUNT_HANDSHAKE_LOCK
+            .lock()
+            .map_err(|_| io::Error::other("macOS FUSE mount handshake lock poisoned"))?;
+        runtime.block_on(mount_fuse_task_worktree(
+            lower_root,
+            workspace_root,
+            upper_root,
+        ))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        runtime.block_on(mount_fuse_task_worktree(
+            lower_root,
+            workspace_root,
+            upper_root,
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn verify_fuse_task_worktree_mount(
+    workspace_root: &Path,
+    expect_repo_storage_link: bool,
+) -> io::Result<()> {
+    let started = Instant::now();
+    let mut attempts = 0_u32;
+
+    loop {
+        attempts += 1;
+        match verify_fuse_task_worktree_mount_once(workspace_root, expect_repo_storage_link) {
+            Ok(()) => return Ok(()),
+            Err(err) if started.elapsed() >= FUSE_HEALTH_CHECK_TIMEOUT => {
+                return Err(io::Error::new(
+                    err.kind(),
+                    format!(
+                        "FUSE mount health check failed after {} attempts over {:?}: workspace={}, expected_repo_storage_link={}: {}",
+                        attempts,
+                        started.elapsed(),
+                        workspace_root.display(),
+                        expect_repo_storage_link,
+                        err
+                    ),
+                ));
+            }
+            Err(_) => thread::sleep(FUSE_HEALTH_CHECK_INTERVAL),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn verify_fuse_task_worktree_mount_once(
+    workspace_root: &Path,
+    expect_repo_storage_link: bool,
+) -> io::Result<()> {
+    fs::read_dir(workspace_root).map_err(|err| {
+        io::Error::new(
+            err.kind(),
+            format!(
+                "mounted workspace root is not readable at '{}': {}",
+                workspace_root.display(),
+                err
+            ),
+        )
+    })?;
+
+    if expect_repo_storage_link {
+        let storage_link = workspace_root.join(util::ROOT_DIR);
+        fs::symlink_metadata(&storage_link).map_err(|err| {
+            io::Error::new(
+                err.kind(),
+                format!(
+                    "expected .libra repository storage link is not visible at '{}': {}",
+                    storage_link.display(),
+                    err
+                ),
+            )
+        })?;
+    }
+
     Ok(())
 }
 
@@ -345,14 +493,32 @@ async fn mount_fuse_task_worktree(
             root_dir: lower_root,
             mapping: None::<&str>,
         })
-        .await?,
+        .await
+        .map_err(|err| {
+            fuse_mount_step_error(
+                format!(
+                    "failed to create FUSE lower passthrough layer at {}",
+                    lower_root.display()
+                ),
+                err,
+            )
+        })?,
     );
     let upper_layer = Arc::new(
         new_passthroughfs_layer(PassthroughArgs {
             root_dir: upper_root,
             mapping: None::<&str>,
         })
-        .await?,
+        .await
+        .map_err(|err| {
+            fuse_mount_step_error(
+                format!(
+                    "failed to create FUSE upper passthrough layer at {}",
+                    upper_root.display()
+                ),
+                err,
+            )
+        })?,
     );
 
     let overlay = OverlayFs::new(
@@ -364,7 +530,16 @@ async fn mount_fuse_task_worktree(
             ..Default::default()
         },
         1,
-    )?;
+    )
+    .map_err(|err| {
+        fuse_mount_step_error(
+            format!(
+                "failed to create FUSE overlay for mount {}",
+                workspace_root.display()
+            ),
+            err,
+        )
+    })?;
 
     let uid = unsafe { libc::getuid() };
     let gid = unsafe { libc::getgid() };
@@ -379,6 +554,20 @@ async fn mount_fuse_task_worktree(
     Session::new(mount_options)
         .mount_with_unprivileged(overlay, workspace_root.as_os_str())
         .await
+        .map_err(|err| {
+            fuse_mount_step_error(
+                format!(
+                    "failed to mount FUSE overlay at {}",
+                    workspace_root.display()
+                ),
+                err,
+            )
+        })
+}
+
+#[cfg(unix)]
+fn fuse_mount_step_error(context: String, err: io::Error) -> io::Error {
+    io::Error::new(err.kind(), format!("{context}: {err}"))
 }
 
 pub(crate) fn cleanup_task_worktree(worktree: TaskWorktree) -> io::Result<()> {
@@ -423,38 +612,246 @@ pub(crate) fn sync_task_worktree_back(
     touch_files: &[String],
     in_scope: &[String],
     out_of_scope: &[String],
-) -> io::Result<()> {
-    let task_snapshot = snapshot_workspace(task_worktree_dir)?;
+) -> Result<SyncBackReport, WorkspaceSyncError> {
+    let task_snapshot = snapshot_workspace(task_worktree_dir)
+        .map_err(|err| workspace_sync_io_error("snapshot task worktree", task_worktree_dir, err))?;
     let changed_paths = changed_paths_since_baseline(baseline, &task_snapshot);
+    let changed_path_set = changed_paths.iter().cloned().collect::<BTreeSet<_>>();
 
     let violations =
         collect_contract_violations(&changed_paths, touch_files, in_scope, out_of_scope);
     if !violations.is_empty() {
-        return Err(io::Error::other(format_contract_violation_message(
-            &violations,
-        )));
+        return Err(WorkspaceSyncError::ContractViolation(
+            format_contract_violation_message(&violations),
+        ));
     }
 
-    for rel_path in &changed_paths {
-        let expected = baseline.entries.get(rel_path).cloned();
-        let actual = workspace_entry_if_exists(&main_working_dir.join(rel_path))?;
-        if actual != expected {
-            return Err(io::Error::other(format!(
-                "main workspace changed concurrently at '{}'",
-                rel_path.display()
-            )));
-        }
-    }
-
+    let mut report = SyncBackReport::default();
     for rel_path in changed_paths {
-        if task_snapshot.entries.contains_key(&rel_path) {
-            copy_workspace_entry(task_worktree_dir, main_working_dir, &rel_path)?;
-        } else {
-            remove_workspace_entry(main_working_dir, &rel_path)?;
+        let baseline_entry = baseline.entries.get(&rel_path).cloned();
+        let task_entry = task_snapshot.entries.get(&rel_path).cloned();
+        let main_path = main_working_dir.join(&rel_path);
+        let current_entry = workspace_entry_if_exists(&main_path)
+            .map_err(|err| workspace_sync_io_error("inspect main workspace", &main_path, err))?;
+
+        if current_entry == task_entry {
+            report.already_applied.push(rel_path);
+            continue;
         }
+
+        if stale_cargo_lock_companion(&rel_path, &changed_path_set) {
+            report.skipped.push(SkippedSyncPath {
+                path: rel_path,
+                reason: "Cargo.lock changed without a matching Cargo.toml change; treating it as a stale verification side effect".to_string(),
+            });
+            continue;
+        }
+
+        if current_entry == baseline_entry {
+            apply_task_change(
+                task_worktree_dir,
+                main_working_dir,
+                &rel_path,
+                &task_snapshot,
+            )?;
+            report.applied.push(rel_path);
+            continue;
+        }
+
+        if is_cargo_lock_path(&rel_path)
+            && cargo_manifest_changed_for_lock(&rel_path, &changed_path_set)
+        {
+            return Err(WorkspaceSyncError::RetryableConflict {
+                path: rel_path,
+                reason: "Cargo.toml and Cargo.lock both changed, but the main workspace lockfile diverged from this task's lockfile".to_string(),
+            });
+        }
+
+        if try_merge_text_change(
+            main_working_dir,
+            task_worktree_dir,
+            baseline,
+            &rel_path,
+            baseline_entry.as_ref(),
+            current_entry.as_ref(),
+            task_entry.as_ref(),
+        )? {
+            report.merged.push(rel_path);
+            continue;
+        }
+
+        return Err(WorkspaceSyncError::RetryableConflict {
+            path: rel_path,
+            reason:
+                "main workspace changed concurrently and the task change could not be merged safely"
+                    .to_string(),
+        });
     }
 
+    Ok(report)
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SyncBackReport {
+    pub(crate) applied: Vec<PathBuf>,
+    pub(crate) already_applied: Vec<PathBuf>,
+    pub(crate) merged: Vec<PathBuf>,
+    pub(crate) skipped: Vec<SkippedSyncPath>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SkippedSyncPath {
+    pub(crate) path: PathBuf,
+    pub(crate) reason: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum WorkspaceSyncError {
+    #[error("{0}")]
+    ContractViolation(String),
+    #[error("retryable sync conflict at '{path}': {reason}")]
+    RetryableConflict { path: PathBuf, reason: String },
+    #[error("hard sync conflict: {reason}")]
+    HardConflict {
+        path: Option<PathBuf>,
+        reason: String,
+    },
+    #[error("FUSE infrastructure failure while {stage} at '{path}': {message}")]
+    FuseInfrastructure {
+        stage: &'static str,
+        path: PathBuf,
+        message: String,
+    },
+    #[error("workspace sync failed while {stage} at '{path}': {source}")]
+    Io {
+        stage: &'static str,
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+}
+
+impl WorkspaceSyncError {
+    pub(crate) fn is_retryable_conflict(&self) -> bool {
+        matches!(self, Self::RetryableConflict { .. })
+    }
+
+    pub(crate) fn is_fuse_infrastructure(&self) -> bool {
+        matches!(self, Self::FuseInfrastructure { .. })
+    }
+}
+
+fn apply_task_change(
+    task_worktree_dir: &Path,
+    main_working_dir: &Path,
+    rel_path: &Path,
+    task_snapshot: &WorkspaceSnapshot,
+) -> Result<(), WorkspaceSyncError> {
+    if task_snapshot.entries.contains_key(rel_path) {
+        copy_workspace_entry(task_worktree_dir, main_working_dir, rel_path).map_err(|err| {
+            workspace_sync_io_error("apply task change", &task_worktree_dir.join(rel_path), err)
+        })?;
+    } else {
+        remove_workspace_entry(main_working_dir, rel_path).map_err(|err| {
+            workspace_sync_io_error(
+                "remove task-deleted path",
+                &main_working_dir.join(rel_path),
+                err,
+            )
+        })?;
+    }
     Ok(())
+}
+
+fn stale_cargo_lock_companion(rel_path: &Path, changed_paths: &BTreeSet<PathBuf>) -> bool {
+    is_cargo_lock_path(rel_path) && !cargo_manifest_changed_for_lock(rel_path, changed_paths)
+}
+
+fn is_cargo_lock_path(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| name == "Cargo.lock")
+}
+
+fn cargo_manifest_changed_for_lock(lock_path: &Path, changed_paths: &BTreeSet<PathBuf>) -> bool {
+    cargo_manifest_for_lock(lock_path)
+        .as_ref()
+        .is_some_and(|manifest| changed_paths.contains(manifest))
+}
+
+fn cargo_manifest_for_lock(lock_path: &Path) -> Option<PathBuf> {
+    if !is_cargo_lock_path(lock_path) {
+        return None;
+    }
+    let mut manifest = lock_path.to_path_buf();
+    manifest.set_file_name("Cargo.toml");
+    Some(manifest)
+}
+
+fn try_merge_text_change(
+    main_working_dir: &Path,
+    task_worktree_dir: &Path,
+    baseline: &WorkspaceSnapshot,
+    rel_path: &Path,
+    baseline_entry: Option<&WorkspaceEntry>,
+    current_entry: Option<&WorkspaceEntry>,
+    task_entry: Option<&WorkspaceEntry>,
+) -> Result<bool, WorkspaceSyncError> {
+    if !matches!(
+        (baseline_entry, current_entry, task_entry),
+        (
+            Some(WorkspaceEntry::File(_)),
+            Some(WorkspaceEntry::File(_)),
+            Some(WorkspaceEntry::File(_))
+        )
+    ) {
+        return Ok(false);
+    }
+
+    let Some(baseline_bytes) = baseline.file_contents.get(rel_path) else {
+        return Err(WorkspaceSyncError::HardConflict {
+            path: Some(rel_path.to_path_buf()),
+            reason: "baseline content is unavailable for three-way merge".to_string(),
+        });
+    };
+    let main_path = main_working_dir.join(rel_path);
+    let task_path = task_worktree_dir.join(rel_path);
+    let current_bytes = fs::read(&main_path)
+        .map_err(|err| workspace_sync_io_error("read main file for merge", &main_path, err))?;
+    let task_bytes = fs::read(&task_path)
+        .map_err(|err| workspace_sync_io_error("read task file for merge", &task_path, err))?;
+
+    match diffy::merge_bytes(baseline_bytes, &current_bytes, &task_bytes) {
+        Ok(merged) => {
+            fs::write(&main_path, merged)
+                .map_err(|err| workspace_sync_io_error("write merged file", &main_path, err))?;
+            Ok(true)
+        }
+        Err(_) => Ok(false),
+    }
+}
+
+fn workspace_sync_io_error(stage: &'static str, path: &Path, err: io::Error) -> WorkspaceSyncError {
+    if is_fuse_infrastructure_io_error(&err) {
+        return WorkspaceSyncError::FuseInfrastructure {
+            stage,
+            path: path.to_path_buf(),
+            message: err.to_string(),
+        };
+    }
+
+    WorkspaceSyncError::Io {
+        stage,
+        path: path.to_path_buf(),
+        source: err,
+    }
+}
+
+fn is_fuse_infrastructure_io_error(err: &io::Error) -> bool {
+    err.raw_os_error() == Some(6) || is_fuse_infrastructure_error_message(&err.to_string())
+}
+
+pub(crate) fn is_fuse_infrastructure_error_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("device not configured") || lower.contains("os error 6")
 }
 
 /// Snapshot the worktree at `task_worktree_dir` and report every changed path
@@ -756,12 +1153,15 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        FuseProvisionState, cleanup_task_worktree, clone_or_copy_file, detect_contract_violations,
-        materialize_workspace, prepare_copy_task_worktree, prepare_task_worktree,
-        prepare_task_worktree_root, sync_task_worktree_back, task_worktree_paths,
+        FuseProvisionState, WorkspaceSyncError, cleanup_task_worktree, clone_or_copy_file,
+        detect_contract_violations, materialize_workspace, prepare_copy_task_worktree,
+        prepare_task_worktree, prepare_task_worktree_root, sync_task_worktree_back,
+        task_worktree_paths,
     };
     use crate::{
-        internal::ai::workspace_snapshot::{WorkspaceEntry, snapshot_workspace},
+        internal::ai::workspace_snapshot::{
+            WorkspaceEntry, snapshot_workspace, snapshot_workspace_with_contents,
+        },
         utils::{test, util},
     };
 
@@ -776,6 +1176,37 @@ mod tests {
             Ok(metadata) if metadata.is_dir() => std::os::windows::fs::symlink_dir(target, link),
             _ => std::os::windows::fs::symlink_file(target, link),
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn fuse_passthrough_lookup_handles_symlink_entries_on_macos() {
+        use std::ffi::OsStr;
+
+        use libfuse_fs::passthrough::{PassthroughArgs, new_passthroughfs_layer};
+        use rfuse3::raw::{Filesystem, Request};
+
+        let root = tempdir().unwrap();
+        std::fs::write(root.path().join("target.txt"), "target").unwrap();
+        symlink_path(
+            std::path::Path::new("target.txt"),
+            &root.path().join("link.txt"),
+        )
+        .unwrap();
+
+        let fs = new_passthroughfs_layer(PassthroughArgs {
+            root_dir: root.path(),
+            mapping: None::<&str>,
+        })
+        .await
+        .unwrap();
+
+        let entry = fs
+            .lookup(Request::default(), 1, OsStr::new("link.txt"))
+            .await
+            .unwrap();
+
+        assert_eq!(entry.attr.kind, rfuse3::FileType::Symlink);
     }
 
     #[test]
@@ -883,7 +1314,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_allows_cargo_lock_companion_and_ignores_target_outputs() {
+    fn workspace_sync_skips_stale_cargo_lock_companion_and_ignores_target_outputs() {
         let temp = tempdir().unwrap();
         let main = temp.path().join("main");
         let task = temp.path().join("task");
@@ -902,7 +1333,7 @@ mod tests {
         std::fs::create_dir_all(task.join("libra/target")).unwrap();
         std::fs::write(task.join("libra/target/.rustc_info.json"), "{}\n").unwrap();
 
-        sync_task_worktree_back(
+        let report = sync_task_worktree_back(
             &main,
             &task,
             &baseline,
@@ -915,11 +1346,177 @@ mod tests {
         )
         .unwrap();
 
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].path, PathBuf::from("libra/Cargo.lock"));
+        assert!(!main.join("libra/Cargo.lock").exists());
+        assert!(!main.join("libra/target/.rustc_info.json").exists());
+    }
+
+    #[test]
+    fn workspace_sync_applies_cargo_lock_when_manifest_changed_from_baseline() {
+        let temp = tempdir().unwrap();
+        let main = temp.path().join("main");
+        let task = temp.path().join("task");
+        std::fs::create_dir_all(main.join("libra")).unwrap();
+        std::fs::write(
+            main.join("libra/Cargo.toml"),
+            "[package]\nname = \"libra\"\n\n[dependencies]\n",
+        )
+        .unwrap();
+        std::fs::write(main.join("libra/Cargo.lock"), "# base lockfile\n").unwrap();
+
+        let baseline = snapshot_workspace(&main).unwrap();
+        std::fs::create_dir_all(&task).unwrap();
+        materialize_workspace(&main, &task, &baseline).unwrap();
+        std::fs::write(
+            task.join("libra/Cargo.toml"),
+            "[package]\nname = \"libra\"\n\n[dependencies]\nserde = \"1\"\n",
+        )
+        .unwrap();
+        std::fs::write(task.join("libra/Cargo.lock"), "# updated lockfile\n").unwrap();
+
+        let report = sync_task_worktree_back(
+            &main,
+            &task,
+            &baseline,
+            &["libra/Cargo.toml".to_string()],
+            &["libra/".to_string()],
+            &[],
+        )
+        .unwrap();
+
+        assert!(report.applied.contains(&PathBuf::from("libra/Cargo.lock")));
         assert_eq!(
             std::fs::read_to_string(main.join("libra/Cargo.lock")).unwrap(),
-            "# generated lockfile\n"
+            "# updated lockfile\n"
         );
-        assert!(!main.join("libra/target/.rustc_info.json").exists());
+    }
+
+    #[test]
+    fn workspace_sync_skips_already_applied_path() {
+        let temp = tempdir().unwrap();
+        let main = temp.path().join("main");
+        let task = temp.path().join("task");
+        std::fs::create_dir_all(main.join("src")).unwrap();
+        std::fs::write(main.join("src/lib.rs"), "base\n").unwrap();
+
+        let baseline = snapshot_workspace(&main).unwrap();
+        std::fs::create_dir_all(&task).unwrap();
+        materialize_workspace(&main, &task, &baseline).unwrap();
+        std::fs::write(task.join("src/lib.rs"), "updated\n").unwrap();
+        std::fs::write(main.join("src/lib.rs"), "updated\n").unwrap();
+
+        let report = sync_task_worktree_back(
+            &main,
+            &task,
+            &baseline,
+            &["src/lib.rs".to_string()],
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(report.already_applied, vec![PathBuf::from("src/lib.rs")]);
+        assert!(report.applied.is_empty());
+    }
+
+    #[test]
+    fn workspace_sync_three_way_merges_non_overlapping_text_edits() {
+        let temp = tempdir().unwrap();
+        let main = temp.path().join("main");
+        let task = temp.path().join("task");
+        std::fs::create_dir_all(main.join("src")).unwrap();
+        std::fs::write(main.join("src/lib.rs"), "one\ntwo\nthree\n").unwrap();
+
+        let baseline = snapshot_workspace_with_contents(&main).unwrap();
+        std::fs::create_dir_all(&task).unwrap();
+        materialize_workspace(&main, &task, &baseline).unwrap();
+        std::fs::write(task.join("src/lib.rs"), "ONE\ntwo\nthree\n").unwrap();
+        std::fs::write(main.join("src/lib.rs"), "one\ntwo\nTHREE\n").unwrap();
+
+        let report = sync_task_worktree_back(
+            &main,
+            &task,
+            &baseline,
+            &["src/lib.rs".to_string()],
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(report.merged, vec![PathBuf::from("src/lib.rs")]);
+        assert_eq!(
+            std::fs::read_to_string(main.join("src/lib.rs")).unwrap(),
+            "ONE\ntwo\nTHREE\n"
+        );
+    }
+
+    #[test]
+    fn workspace_sync_three_way_conflict_does_not_overwrite_main_workspace() {
+        let temp = tempdir().unwrap();
+        let main = temp.path().join("main");
+        let task = temp.path().join("task");
+        std::fs::create_dir_all(main.join("src")).unwrap();
+        std::fs::write(main.join("src/lib.rs"), "one\ntwo\nthree\n").unwrap();
+
+        let baseline = snapshot_workspace_with_contents(&main).unwrap();
+        std::fs::create_dir_all(&task).unwrap();
+        materialize_workspace(&main, &task, &baseline).unwrap();
+        std::fs::write(task.join("src/lib.rs"), "one\nTASK\nthree\n").unwrap();
+        std::fs::write(main.join("src/lib.rs"), "one\nMAIN\nthree\n").unwrap();
+
+        let err = sync_task_worktree_back(
+            &main,
+            &task,
+            &baseline,
+            &["src/lib.rs".to_string()],
+            &[],
+            &[],
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, WorkspaceSyncError::RetryableConflict { .. }));
+        assert_eq!(
+            std::fs::read_to_string(main.join("src/lib.rs")).unwrap(),
+            "one\nMAIN\nthree\n"
+        );
+    }
+
+    #[test]
+    fn workspace_sync_manifest_and_lock_divergence_returns_retryable_conflict() {
+        let temp = tempdir().unwrap();
+        let main = temp.path().join("main");
+        let task = temp.path().join("task");
+        std::fs::create_dir_all(&main).unwrap();
+        std::fs::write(main.join("Cargo.toml"), "[dependencies]\n").unwrap();
+        std::fs::write(main.join("Cargo.lock"), "# base\n").unwrap();
+
+        let baseline = snapshot_workspace(&main).unwrap();
+        std::fs::create_dir_all(&task).unwrap();
+        materialize_workspace(&main, &task, &baseline).unwrap();
+        std::fs::write(task.join("Cargo.toml"), "[dependencies]\nserde = \"1\"\n").unwrap();
+        std::fs::write(task.join("Cargo.lock"), "# task lock\n").unwrap();
+        std::fs::write(main.join("Cargo.lock"), "# concurrent lock\n").unwrap();
+
+        let err = sync_task_worktree_back(
+            &main,
+            &task,
+            &baseline,
+            &["Cargo.toml".to_string()],
+            &[],
+            &[],
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            WorkspaceSyncError::RetryableConflict { path, .. }
+                if path == std::path::Path::new("Cargo.lock")
+        ));
+        assert_eq!(
+            std::fs::read_to_string(main.join("Cargo.lock")).unwrap(),
+            "# concurrent lock\n"
+        );
     }
 
     #[test]
@@ -1054,6 +1651,41 @@ mod tests {
     #[test]
     fn fuse_provision_state_defaults_disabled_in_unit_tests() {
         assert!(FuseProvisionState::default().is_disabled());
+    }
+
+    #[test]
+    fn device_not_configured_is_classified_as_fuse_infrastructure_error() {
+        assert!(super::is_fuse_infrastructure_error_message(
+            "Tool 'read_file' failed: Device not configured (os error 6)"
+        ));
+        assert!(super::is_fuse_infrastructure_error_message(
+            "failed to snapshot worktree: os error 6"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fuse_health_check_allows_plain_workspace_without_repo_storage() {
+        let temp = tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        super::verify_fuse_task_worktree_mount(&workspace, false).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fuse_health_check_reports_missing_repo_storage_context() {
+        let temp = tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let err = super::verify_fuse_task_worktree_mount(&workspace, true).unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("FUSE mount health check failed after"));
+        assert!(message.contains("expected .libra repository storage link is not visible"));
+        assert!(message.contains(workspace.to_string_lossy().as_ref()));
     }
 
     #[test]

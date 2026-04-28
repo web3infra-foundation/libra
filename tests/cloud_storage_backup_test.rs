@@ -75,13 +75,17 @@ fn init_repo() -> tempfile::TempDir {
     let dir = tempdir().unwrap();
     let home = dir.path().join(".home");
     let config_home = home.join(".config");
+    let global_config_db = home.join(".libra-global-config.db");
     std::fs::create_dir_all(&config_home).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(dir.path())
         .args(["init"])
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", &config_home)
         .env("USERPROFILE", &home)
+        .env("LIBRA_CONFIG_GLOBAL_DB", &global_config_db)
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -198,6 +202,7 @@ fn cloud_sync_fails_without_r2_env() {
     let dir = init_repo();
     let home = dir.path().join(".home");
     let config_home = home.join(".config");
+    let global_config_db = home.join(".libra-global-config.db");
     let output = Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(dir.path())
         .args(["cloud", "sync"])
@@ -206,6 +211,7 @@ fn cloud_sync_fails_without_r2_env() {
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", &config_home)
         .env("USERPROFILE", &home)
+        .env("LIBRA_CONFIG_GLOBAL_DB", &global_config_db)
         .env("LIBRA_D1_ACCOUNT_ID", "test-account")
         .env("LIBRA_D1_API_TOKEN", "test-token")
         .env("LIBRA_D1_DATABASE_ID", "test-db")
@@ -226,6 +232,7 @@ fn cloud_restore_fails_without_r2_env() {
     let dir = init_repo();
     let home = dir.path().join(".home");
     let config_home = home.join(".config");
+    let global_config_db = home.join(".libra-global-config.db");
     let output = Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(dir.path())
         .args(["cloud", "restore", "--repo-id", "test-repo"])
@@ -234,6 +241,7 @@ fn cloud_restore_fails_without_r2_env() {
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", &config_home)
         .env("USERPROFILE", &home)
+        .env("LIBRA_CONFIG_GLOBAL_DB", &global_config_db)
         .env("LIBRA_D1_ACCOUNT_ID", "test-account")
         .env("LIBRA_D1_API_TOKEN", "test-token")
         .env("LIBRA_D1_DATABASE_ID", "test-db")
@@ -254,6 +262,7 @@ fn cloud_sync_fails_without_d1_env() {
     let dir = init_repo();
     let home = dir.path().join(".home");
     let config_home = home.join(".config");
+    let global_config_db = home.join(".libra-global-config.db");
     let output = Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(dir.path())
         .args(["cloud", "sync"])
@@ -262,6 +271,7 @@ fn cloud_sync_fails_without_d1_env() {
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", &config_home)
         .env("USERPROFILE", &home)
+        .env("LIBRA_CONFIG_GLOBAL_DB", &global_config_db)
         .env("LIBRA_STORAGE_ENDPOINT", "https://example.invalid")
         .env("LIBRA_STORAGE_BUCKET", "test-bucket")
         .env("LIBRA_STORAGE_ACCESS_KEY", "test-access")

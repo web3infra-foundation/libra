@@ -18,9 +18,9 @@ use super::{
     profiles,
     types::{
         Acceptance, ArtifactName, ArtifactReq, ArtifactStage, Artifacts, ChangeType, Check,
-        Constraints, CreatedBy, CreatorType, Intent, IntentSpec, Lifecycle, LifecycleStatus,
-        Metadata, QualityGates, RepoTarget, RepoType, RiskLevel, Target, ToolRule, TouchHints,
-        VerificationPlan,
+        Constraints, CreatedBy, CreatorType, DependencyPolicy, Intent, IntentSpec, Lifecycle,
+        LifecycleStatus, Metadata, QualityGates, RepoTarget, RepoType, RiskLevel, Target, ToolRule,
+        TouchHints, VerificationPlan,
     },
 };
 
@@ -40,10 +40,16 @@ pub fn resolve_intentspec(
     risk_level: RiskLevel,
     ctx: ResolveContext,
 ) -> IntentSpec {
-    let constraints = profiles::default_constraints(risk_level.clone());
+    let mut constraints = profiles::default_constraints(risk_level.clone());
     let has_implementation_work = draft.intent.has_implementation_objectives();
     let mut artifacts = profiles::default_artifacts(risk_level.clone(), has_implementation_work);
     let needs_shell_access = draft_needs_shell_access(&draft);
+    let dependency_derivation = explicit_new_dependency_request(&draft);
+    if constraints.security.dependency_policy == DependencyPolicy::NoNew
+        && dependency_derivation.is_some()
+    {
+        constraints.security.dependency_policy = DependencyPolicy::AllowWithReview;
+    }
     let mut security = profiles::default_security();
     if needs_shell_access {
         ensure_tool_rule(&mut security.tool_acl.allow, "shell", &["execute"]);
@@ -87,6 +93,21 @@ pub fn resolve_intentspec(
         },
         max_allowed_regression: None,
     };
+
+    let mut extensions = BTreeMap::new();
+    if let Some(derivation) = dependency_derivation
+        && constraints.security.dependency_policy == DependencyPolicy::AllowWithReview
+    {
+        extensions.insert(
+            "libra.ai.dependencyPolicyDerivation".to_string(),
+            serde_json::json!({
+                "source": "explicit-new-dependency-request",
+                "policy": "allow-with-review",
+                "reason": derivation.reason,
+                "detectedDependencies": derivation.dependencies,
+            }),
+        );
+    }
 
     IntentSpec {
         api_version: "intentspec.io/v1alpha1".to_string(),
@@ -144,7 +165,7 @@ pub fn resolve_intentspec(
             change_log: Vec::new(),
         },
         libra: None,
-        extensions: BTreeMap::new(),
+        extensions,
     }
 }
 
@@ -199,6 +220,232 @@ fn draft_needs_shell_access(draft: &IntentDraft) -> bool {
                     .iter()
                     .any(|api| mentions_shell_command(api))
             })
+}
+
+#[derive(Clone, Debug)]
+struct DependencyPolicyDerivation {
+    reason: String,
+    dependencies: Vec<String>,
+}
+
+fn explicit_new_dependency_request(draft: &IntentDraft) -> Option<DependencyPolicyDerivation> {
+    let mut dependencies = HashSet::new();
+    let mut matched_reason = None;
+
+    for text in dependency_request_texts(draft) {
+        if negates_new_dependency_request(text) {
+            continue;
+        }
+        let command_dependencies = dependency_names_from_package_manager_command(text);
+        dependencies.extend(command_dependencies);
+
+        if text_explicitly_requests_new_dependency(text) {
+            dependencies.extend(dependency_names_from_natural_language(text));
+            if matched_reason.is_none() {
+                matched_reason = Some(format!(
+                    "draft explicitly requests adding or using a new dependency: {}",
+                    truncate_dependency_reason(text)
+                ));
+            }
+        }
+    }
+
+    matched_reason.map(|reason| {
+        let mut dependencies = dependencies.into_iter().collect::<Vec<_>>();
+        dependencies.sort();
+        DependencyPolicyDerivation {
+            reason,
+            dependencies,
+        }
+    })
+}
+
+fn dependency_request_texts(draft: &IntentDraft) -> Vec<&str> {
+    let mut texts = vec![
+        draft.intent.summary.as_str(),
+        draft.intent.problem_statement.as_str(),
+        draft.risk.rationale.as_str(),
+    ];
+    texts.extend(
+        draft
+            .intent
+            .objectives
+            .iter()
+            .map(|objective| objective.title.as_str()),
+    );
+    texts.extend(draft.intent.in_scope.iter().map(String::as_str));
+    texts.extend(draft.intent.out_of_scope.iter().map(String::as_str));
+    texts.extend(draft.acceptance.success_criteria.iter().map(String::as_str));
+    texts.extend(
+        draft
+            .acceptance
+            .fast_checks
+            .iter()
+            .chain(draft.acceptance.integration_checks.iter())
+            .chain(draft.acceptance.security_checks.iter())
+            .chain(draft.acceptance.release_checks.iter())
+            .filter_map(|check| check.command.as_deref()),
+    );
+    if let Some(touch_hints) = &draft.intent.touch_hints {
+        texts.extend(touch_hints.files.iter().map(String::as_str));
+        texts.extend(touch_hints.symbols.iter().map(String::as_str));
+        texts.extend(touch_hints.apis.iter().map(String::as_str));
+    }
+    texts
+}
+
+fn negates_new_dependency_request(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    [
+        "no new dependencies",
+        "no new dependency",
+        "without adding dependencies",
+        "without adding any dependencies",
+        "do not add dependencies",
+        "don't add dependencies",
+        "avoid adding dependencies",
+        "avoid new dependencies",
+        "prefer std",
+        "std-only",
+        "不新增依赖",
+        "不要新增依赖",
+        "避免新增依赖",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
+fn text_explicitly_requests_new_dependency(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("cargo add ")
+        || lower.contains("npm install ")
+        || lower.contains("pnpm add ")
+        || lower.contains("yarn add ")
+    {
+        return true;
+    }
+
+    let has_dependency_noun = [
+        "dependency",
+        "dependencies",
+        "crate",
+        "package",
+        "third-party",
+        "3rd-party",
+        "依赖",
+        "第三方",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker));
+    let has_add_verb = [
+        "add ",
+        "adding ",
+        "introduce ",
+        "install ",
+        "use ",
+        "using ",
+        "新增",
+        "添加",
+        "引入",
+        "使用",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker));
+
+    has_dependency_noun && has_add_verb
+}
+
+fn dependency_names_from_package_manager_command(text: &str) -> Vec<String> {
+    let tokens = shell_like_tokens(text);
+    let mut names = Vec::new();
+    for window in tokens.windows(3) {
+        match [window[0].as_str(), window[1].as_str()] {
+            ["cargo", "add"] | ["pnpm", "add"] | ["yarn", "add"] => {
+                push_dependency_token(&mut names, &window[2]);
+            }
+            ["npm", "install"] => {
+                push_dependency_token(&mut names, &window[2]);
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+fn dependency_names_from_natural_language(text: &str) -> Vec<String> {
+    let tokens = shell_like_tokens(text);
+    let mut names = Vec::new();
+    for (index, token) in tokens.iter().enumerate() {
+        let lower = token.to_ascii_lowercase();
+        if matches!(
+            lower.as_str(),
+            "crate" | "crates" | "package" | "packages" | "dependency" | "dependencies" | "依赖"
+        ) && index > 0
+        {
+            push_dependency_token(&mut names, &tokens[index - 1]);
+        }
+    }
+    names
+}
+
+fn shell_like_tokens(text: &str) -> Vec<String> {
+    text.split(|ch: char| {
+        ch.is_whitespace()
+            || matches!(
+                ch,
+                '`' | '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | ':' | ',' | ';'
+            )
+    })
+    .filter_map(|token| {
+        let token = token
+            .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-')
+            .trim();
+        (!token.is_empty()).then(|| token.to_string())
+    })
+    .collect()
+}
+
+fn push_dependency_token(names: &mut Vec<String>, token: &str) {
+    let token = token
+        .trim_start_matches('@')
+        .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-');
+    if token.is_empty() || token.starts_with('-') {
+        return;
+    }
+    let lower = token.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "a" | "an"
+            | "the"
+            | "new"
+            | "dependency"
+            | "dependencies"
+            | "crate"
+            | "crates"
+            | "package"
+            | "packages"
+            | "third-party"
+            | "use"
+            | "using"
+            | "add"
+            | "adding"
+            | "install"
+            | "introduce"
+    ) {
+        return;
+    }
+    names.push(token.to_string());
+}
+
+fn truncate_dependency_reason(text: &str) -> String {
+    const MAX_LEN: usize = 180;
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= MAX_LEN {
+        return trimmed.to_string();
+    }
+    let mut truncated = trimmed.chars().take(MAX_LEN).collect::<String>();
+    truncated.push_str("...");
+    truncated
 }
 
 fn mentions_shell_command(text: &str) -> bool {
@@ -550,6 +797,112 @@ mod tests {
                 .allow
                 .iter()
                 .any(|rule| rule.tool == "shell")
+        );
+    }
+
+    #[test]
+    fn resolve_low_risk_explicit_new_dependency_uses_allow_with_review() {
+        let draft = IntentDraft {
+            intent: DraftIntent {
+                summary: "Add clap crate support".to_string(),
+                problem_statement: "The CLI should use the clap crate for argument parsing"
+                    .to_string(),
+                change_type: ChangeType::Feature,
+                objectives: vec![Objective {
+                    title: "Add the clap crate and wire parser setup".to_string(),
+                    kind: ObjectiveKind::Implementation,
+                }],
+                in_scope: vec!["Cargo.toml".to_string(), "src/main.rs".to_string()],
+                out_of_scope: vec![],
+                touch_hints: None,
+            },
+            acceptance: DraftAcceptance {
+                success_criteria: vec!["cargo test passes".to_string()],
+                fast_checks: vec![],
+                integration_checks: vec![],
+                security_checks: vec![],
+                release_checks: vec![],
+            },
+            risk: DraftRisk {
+                rationale: "small CLI change".to_string(),
+                factors: vec![],
+                level: Some(RiskLevel::Low),
+            },
+        };
+
+        let spec = resolve_intentspec(
+            draft,
+            RiskLevel::Low,
+            ResolveContext {
+                working_dir: ".".to_string(),
+                base_ref: "HEAD".to_string(),
+                created_by_id: "tester".to_string(),
+            },
+        );
+
+        assert_eq!(
+            spec.constraints.security.dependency_policy,
+            DependencyPolicy::AllowWithReview
+        );
+        let derivation = spec
+            .extensions
+            .get("libra.ai.dependencyPolicyDerivation")
+            .expect("dependency policy derivation extension");
+        assert_eq!(derivation["policy"], "allow-with-review");
+        assert!(
+            derivation["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("clap"))
+        );
+    }
+
+    #[test]
+    fn resolve_low_risk_without_explicit_new_dependency_keeps_no_new_policy() {
+        let draft = IntentDraft {
+            intent: DraftIntent {
+                summary: "Improve CLI parser".to_string(),
+                problem_statement: "Use the existing parser code to handle flags".to_string(),
+                change_type: ChangeType::Feature,
+                objectives: vec![Objective {
+                    title: "Handle --verbose with existing code".to_string(),
+                    kind: ObjectiveKind::Implementation,
+                }],
+                in_scope: vec!["src/main.rs".to_string()],
+                out_of_scope: vec![],
+                touch_hints: None,
+            },
+            acceptance: DraftAcceptance {
+                success_criteria: vec!["cargo test passes".to_string()],
+                fast_checks: vec![],
+                integration_checks: vec![],
+                security_checks: vec![],
+                release_checks: vec![],
+            },
+            risk: DraftRisk {
+                rationale: "small CLI change".to_string(),
+                factors: vec![],
+                level: Some(RiskLevel::Low),
+            },
+        };
+
+        let spec = resolve_intentspec(
+            draft,
+            RiskLevel::Low,
+            ResolveContext {
+                working_dir: ".".to_string(),
+                base_ref: "HEAD".to_string(),
+                created_by_id: "tester".to_string(),
+            },
+        );
+
+        assert_eq!(
+            spec.constraints.security.dependency_policy,
+            DependencyPolicy::NoNew
+        );
+        assert!(
+            !spec
+                .extensions
+                .contains_key("libra.ai.dependencyPolicyDerivation")
         );
     }
 

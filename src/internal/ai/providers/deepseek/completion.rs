@@ -474,12 +474,13 @@ impl DeepSeekStreamToolCallBuilder {
     ///
     /// Functional scope:
     /// - Requires a non-empty function name.
-    /// - Either the arguments buffer is empty (a zero-argument call), or it parses
-    ///   as valid JSON. Anything in between is treated as a partial fragment.
+    /// - Requires the arguments buffer to parse as valid JSON. An empty buffer is
+    ///   ambiguous during streaming and is treated as a partial fragment for
+    ///   body-error recovery.
     fn is_complete(&self) -> bool {
         !self.name.is_empty()
-            && (self.arguments.trim().is_empty()
-                || serde_json::from_str::<Value>(&self.arguments).is_ok())
+            && !self.arguments.trim().is_empty()
+            && serde_json::from_str::<Value>(&self.arguments).is_ok()
     }
 }
 
@@ -490,11 +491,14 @@ impl DeepSeekStreamAccumulator {
     /// success ("we got a usable response, log a warning and continue") versus
     /// surfaced to the caller as a hard failure.
     fn has_salvageable_response(&self) -> bool {
-        !self.content.trim().is_empty()
-            || self
-                .tool_calls
-                .values()
-                .any(DeepSeekStreamToolCallBuilder::is_complete)
+        !self.has_incomplete_tool_calls()
+            && (!self.content.trim().is_empty() || !self.tool_calls.is_empty())
+    }
+
+    fn has_incomplete_tool_calls(&self) -> bool {
+        self.tool_calls
+            .values()
+            .any(|builder| !builder.is_complete())
     }
 
     /// Has the stream emitted *any* fragment, even if it is not yet usable?
@@ -1411,6 +1415,23 @@ mod tests {
         )
         .unwrap();
         assert!(with_tool_call.has_salvageable_response());
+    }
+
+    /// Scenario: a stream body error after only a tool name must not be treated
+    /// as a usable response; otherwise an incomplete call like `shell {}` can
+    /// reach the dispatcher and fail as a malformed tool invocation.
+    #[test]
+    fn test_deepseek_stream_name_only_tool_call_not_salvageable() {
+        let mut accumulator = DeepSeekStreamAccumulator::default();
+        process_deepseek_stream_line(
+            br#"data: {"id":"chunk_6","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"shell"}}]},"finish_reason":null}],"created":1718345018,"model":"deepseek-v4-pro","object":"chat.completion.chunk"}"#,
+            &mut accumulator,
+            None,
+        )
+        .unwrap();
+
+        assert!(accumulator.has_partial_output());
+        assert!(!accumulator.has_salvageable_response());
     }
 
     /// Scenario: the descriptive `ResponseError` produced when a stream ends
