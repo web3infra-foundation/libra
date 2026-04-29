@@ -373,6 +373,20 @@ fn test_rev_parse_invalid_target_returns_cli_error_code() {
 }
 
 #[test]
+fn test_rev_parse_rejects_tag_object_that_points_to_tree() {
+    let repo = create_committed_repo_via_cli();
+    let tag_id = create_non_commit_tag_object(repo.path());
+
+    let output = run_libra_command(&["rev-parse", tag_id.as_str()], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert!(stderr.contains("not a valid object name"));
+    assert!(stderr.contains("tag points to tree"));
+    assert_eq!(report.error_code, "LBR-CLI-003");
+}
+
+#[test]
 fn test_rev_parse_json_returns_envelope() {
     let repo = create_committed_repo_via_cli();
 

@@ -65,8 +65,18 @@ pub async fn execute_safe(args: RevParseArgs, output: &OutputConfig) -> CliResul
     } else {
         let stdout = std::io::stdout();
         let mut writer = stdout.lock();
-        writeln!(writer, "{}", result.value)
-            .map_err(|e| CliError::io(format!("failed to write rev-parse output: {e}")))
+        write_rev_parse_output(&mut writer, &result.value)
+    }
+}
+
+fn write_rev_parse_output<W: Write>(writer: &mut W, value: &str) -> CliResult<()> {
+    match writeln!(writer, "{value}") {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(error) => Err(
+            CliError::fatal(format!("failed to write rev-parse output: {error}"))
+                .with_stable_code(StableErrorCode::IoWriteFailed),
+        ),
     }
 }
 
@@ -304,9 +314,26 @@ fn rev_parse_target_error(spec: &str, error: CommitBaseError) -> CliError {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{self, Write};
+
     use clap::Parser;
 
-    use super::RevParseArgs;
+    use super::{RevParseArgs, write_rev_parse_output};
+    use crate::utils::error::StableErrorCode;
+
+    struct FailingWriter {
+        kind: io::ErrorKind,
+    }
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(self.kind, "test write failure"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn test_rev_parse_args_default() {
@@ -368,5 +395,25 @@ mod tests {
             rendered.contains("cannot be used with"),
             "unexpected clap error: {rendered}"
         );
+    }
+
+    #[test]
+    fn test_write_rev_parse_output_maps_write_failure_to_write_code() {
+        let mut writer = FailingWriter {
+            kind: io::ErrorKind::PermissionDenied,
+        };
+
+        let error = write_rev_parse_output(&mut writer, "abc123").expect_err("write should fail");
+
+        assert_eq!(error.stable_code(), StableErrorCode::IoWriteFailed);
+    }
+
+    #[test]
+    fn test_write_rev_parse_output_ignores_broken_pipe() {
+        let mut writer = FailingWriter {
+            kind: io::ErrorKind::BrokenPipe,
+        };
+
+        write_rev_parse_output(&mut writer, "abc123").expect("broken pipe should be ignored");
     }
 }
