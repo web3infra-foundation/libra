@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
+use diffy::create_patch;
 
 // SAFETY: The unwrap() and expect() calls in test code are acceptable as test
 // failures are expected to panic on assertion failures.
@@ -22,7 +23,7 @@ use crate::{
         },
         workspace_snapshot::{
             WorkspaceSnapshot, changed_paths_since_baseline as changed_workspace_paths,
-            snapshot_workspace,
+            snapshot_workspace_with_contents,
         },
     },
     utils::util::is_sub_path,
@@ -98,7 +99,7 @@ impl ToolHandler for ShellHandler {
                 sandbox
             })
         });
-        let baseline_snapshot = snapshot_workspace(&working_dir).map_err(|err| {
+        let baseline_snapshot = snapshot_workspace_with_contents(&working_dir).map_err(|err| {
             ToolError::ExecutionFailed(format!("failed to snapshot workspace: {err}"))
         })?;
 
@@ -126,7 +127,7 @@ impl ToolHandler for ShellHandler {
                 command_for_error
             ))
         })?;
-        let final_snapshot = snapshot_workspace(&working_dir).map_err(|err| {
+        let final_snapshot = snapshot_workspace_with_contents(&working_dir).map_err(|err| {
             ToolError::ExecutionFailed(format!(
                 "failed to inspect workspace changes after shell command: {err}"
             ))
@@ -136,6 +137,10 @@ impl ToolHandler for ShellHandler {
                 &baseline_snapshot,
                 &final_snapshot,
                 &working_dir,
+            ),
+            "diffs": changed_file_diffs_since_baseline(
+                &baseline_snapshot,
+                &final_snapshot,
             ),
         });
 
@@ -234,6 +239,40 @@ fn changed_paths_since_baseline(
         .into_iter()
         .map(|path| path.to_string_lossy().to_string())
         .collect()
+}
+
+fn changed_file_diffs_since_baseline(
+    baseline: &WorkspaceSnapshot,
+    current: &WorkspaceSnapshot,
+) -> Vec<serde_json::Value> {
+    changed_workspace_paths(baseline, current)
+        .into_iter()
+        .filter_map(|path| {
+            let old_content = text_snapshot_content(baseline, &path)?;
+            let new_content = text_snapshot_content(current, &path)?;
+            let change_type = match (
+                baseline.entries.contains_key(&path),
+                current.entries.contains_key(&path),
+            ) {
+                (false, true) => "add",
+                (true, false) => "delete",
+                _ => "update",
+            };
+            Some(serde_json::json!({
+                "path": path.to_string_lossy().to_string(),
+                "diff": create_patch(&old_content, &new_content).to_string(),
+                "type": change_type,
+            }))
+        })
+        .collect()
+}
+
+fn text_snapshot_content(snapshot: &WorkspaceSnapshot, path: &Path) -> Option<String> {
+    match snapshot.file_contents.get(path) {
+        Some(bytes) => String::from_utf8(bytes.clone()).ok(),
+        None if !snapshot.entries.contains_key(path) => Some(String::new()),
+        None => None,
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -554,6 +593,37 @@ mod tests {
         assert_eq!(
             metadata["paths_written"],
             serde_json::json!(["touched.txt"])
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_shell_metadata_includes_text_file_diffs() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("Cargo.toml"), "[dependencies]\n").unwrap();
+        let outside_repo = TempDir::new().unwrap();
+        let _cwd = crate::utils::test::ChangeDirGuard::new(outside_repo.path());
+        let inv = make_invocation(
+            serde_json::json!({ "command": "printf 'serde = \"1\"\\n' >> Cargo.toml" }),
+            temp.path().to_path_buf(),
+        );
+        let result = ShellHandler.handle(inv).await.unwrap();
+
+        let metadata = result
+            .metadata()
+            .expect("shell results should include metadata");
+        assert_eq!(metadata["paths_written"], serde_json::json!(["Cargo.toml"]));
+        let diffs = metadata["diffs"]
+            .as_array()
+            .expect("shell metadata should include diffs");
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0]["path"], "Cargo.toml");
+        assert_eq!(diffs[0]["type"], "update");
+        assert!(
+            diffs[0]["diff"]
+                .as_str()
+                .is_some_and(|diff| diff.contains("+serde = \"1\"")),
+            "{diffs:?}"
         );
     }
 

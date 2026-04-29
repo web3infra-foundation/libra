@@ -149,7 +149,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1107,7 +1107,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3277,6 +3277,7 @@ checksum = "b5b646652bf6661599e1da8901b3b9522896f01e736bad5f723fe7a3a27f899d"
 [[package]]
 name = "libfuse-fs"
 version = "0.1.12"
+source = "git+https://github.com/rk8s-dev/rk8s?branch=main#350c530ab4f3ffd75fd050e9f0f134842f8e6ed7"
 dependencies = [
  "async-trait",
  "bitflags 2.11.0",
@@ -4370,7 +4371,7 @@ dependencies = [
  "aes-gcm",
  "aes-kw",
  "argon2",
- "base64 0.21.7",
+ "base64 0.22.1",
  "bitfields",
  "block-padding",
  "blowfish",
@@ -4741,7 +4742,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -5318,6 +5319,7 @@ dependencies = [
 [[package]]
 name = "rfuse3"
 version = "0.0.7"
+source = "git+https://github.com/rk8s-dev/rk8s?branch=main#350c530ab4f3ffd75fd050e9f0f134842f8e6ed7"
 dependencies = [
  "aligned_box",
  "async-notify",

@@ -342,17 +342,17 @@ fn text_explicitly_requests_new_dependency(text: &str) -> bool {
         "adding ",
         "introduce ",
         "install ",
-        "use ",
-        "using ",
         "新增",
         "添加",
         "引入",
-        "使用",
     ]
     .iter()
     .any(|marker| lower.contains(marker));
+    if has_dependency_noun && has_add_verb {
+        return true;
+    }
 
-    has_dependency_noun && has_add_verb
+    dependency_use_verb_is_explicit(&lower) && text_uses_named_or_new_dependency(text)
 }
 
 fn dependency_names_from_package_manager_command(text: &str) -> Vec<String> {
@@ -382,10 +382,88 @@ fn dependency_names_from_natural_language(text: &str) -> Vec<String> {
             "crate" | "crates" | "package" | "packages" | "dependency" | "dependencies" | "依赖"
         ) && index > 0
         {
-            push_dependency_token(&mut names, &tokens[index - 1]);
+            if let Some(name) = tokens[..index]
+                .iter()
+                .rev()
+                .find(|candidate| dependency_name_candidate(candidate.as_str()))
+            {
+                push_dependency_token(&mut names, name.as_str());
+            }
         }
     }
     names
+}
+
+fn dependency_use_verb_is_explicit(lower: &str) -> bool {
+    ["use ", "using ", "使用"]
+        .iter()
+        .any(|marker| lower.contains(marker))
+}
+
+fn text_uses_named_or_new_dependency(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    if [
+        "new dependency",
+        "new dependencies",
+        "new crate",
+        "new package",
+        "third-party dependency",
+        "third-party crate",
+        "third-party package",
+        "3rd-party dependency",
+        "3rd-party crate",
+        "3rd-party package",
+        "新依赖",
+        "新增依赖",
+        "第三方依赖",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+    {
+        return true;
+    }
+
+    !dependency_names_from_natural_language(text).is_empty()
+}
+
+fn dependency_name_candidate(token: &str) -> bool {
+    let lower = token.to_ascii_lowercase();
+    !matches!(
+        lower.as_str(),
+        "a" | "an"
+            | "the"
+            | "as"
+            | "for"
+            | "from"
+            | "in"
+            | "into"
+            | "of"
+            | "on"
+            | "to"
+            | "via"
+            | "with"
+            | "new"
+            | "existing"
+            | "current"
+            | "local"
+            | "project"
+            | "workspace"
+            | "metadata"
+            | "cache"
+            | "dependency"
+            | "dependencies"
+            | "crate"
+            | "crates"
+            | "package"
+            | "packages"
+            | "third-party"
+            | "use"
+            | "using"
+            | "add"
+            | "adding"
+            | "install"
+            | "introduce"
+    )
 }
 
 fn shell_like_tokens(text: &str) -> Vec<String> {
@@ -857,6 +935,52 @@ mod tests {
     }
 
     #[test]
+    fn resolve_low_risk_use_named_crate_uses_allow_with_review() {
+        let draft = IntentDraft {
+            intent: DraftIntent {
+                summary: "Use the clap crate for parsing".to_string(),
+                problem_statement: "The CLI should use clap as a dependency for argument parsing"
+                    .to_string(),
+                change_type: ChangeType::Feature,
+                objectives: vec![Objective {
+                    title: "Wire parser setup through the clap crate".to_string(),
+                    kind: ObjectiveKind::Implementation,
+                }],
+                in_scope: vec!["Cargo.toml".to_string(), "src/main.rs".to_string()],
+                out_of_scope: vec![],
+                touch_hints: None,
+            },
+            acceptance: DraftAcceptance {
+                success_criteria: vec!["cargo test passes".to_string()],
+                fast_checks: vec![],
+                integration_checks: vec![],
+                security_checks: vec![],
+                release_checks: vec![],
+            },
+            risk: DraftRisk {
+                rationale: "small CLI change".to_string(),
+                factors: vec![],
+                level: Some(RiskLevel::Low),
+            },
+        };
+
+        let spec = resolve_intentspec(
+            draft,
+            RiskLevel::Low,
+            ResolveContext {
+                working_dir: ".".to_string(),
+                base_ref: "HEAD".to_string(),
+                created_by_id: "tester".to_string(),
+            },
+        );
+
+        assert_eq!(
+            spec.constraints.security.dependency_policy,
+            DependencyPolicy::AllowWithReview
+        );
+    }
+
+    #[test]
     fn resolve_low_risk_without_explicit_new_dependency_keeps_no_new_policy() {
         let draft = IntentDraft {
             intent: DraftIntent {
@@ -880,6 +1004,57 @@ mod tests {
             },
             risk: DraftRisk {
                 rationale: "small CLI change".to_string(),
+                factors: vec![],
+                level: Some(RiskLevel::Low),
+            },
+        };
+
+        let spec = resolve_intentspec(
+            draft,
+            RiskLevel::Low,
+            ResolveContext {
+                working_dir: ".".to_string(),
+                base_ref: "HEAD".to_string(),
+                created_by_id: "tester".to_string(),
+            },
+        );
+
+        assert_eq!(
+            spec.constraints.security.dependency_policy,
+            DependencyPolicy::NoNew
+        );
+        assert!(
+            !spec
+                .extensions
+                .contains_key("libra.ai.dependencyPolicyDerivation")
+        );
+    }
+
+    #[test]
+    fn resolve_low_risk_package_metadata_wording_keeps_no_new_policy() {
+        let draft = IntentDraft {
+            intent: DraftIntent {
+                summary: "Use package metadata cache".to_string(),
+                problem_statement: "Use package metadata to avoid recomputing local cache keys"
+                    .to_string(),
+                change_type: ChangeType::Feature,
+                objectives: vec![Objective {
+                    title: "Read package metadata from the existing cache".to_string(),
+                    kind: ObjectiveKind::Implementation,
+                }],
+                in_scope: vec!["src/internal/cache.rs".to_string()],
+                out_of_scope: vec![],
+                touch_hints: None,
+            },
+            acceptance: DraftAcceptance {
+                success_criteria: vec!["cargo test passes".to_string()],
+                fast_checks: vec![],
+                integration_checks: vec![],
+                security_checks: vec![],
+                release_checks: vec![],
+            },
+            risk: DraftRisk {
+                rationale: "small cache change".to_string(),
                 factors: vec![],
                 level: Some(RiskLevel::Low),
             },

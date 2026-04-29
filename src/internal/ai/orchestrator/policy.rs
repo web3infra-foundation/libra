@@ -4,7 +4,10 @@
 //! concrete process execution and object persistence live in sibling modules. ACL and
 //! hardening tests cover traversal, cargo-lock companion, and denied command cases.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
+};
 
 use serde_json::Value;
 
@@ -244,25 +247,65 @@ fn cargo_manifest_diff_adds_dependency(diff: &ToolDiffRecord) -> bool {
         return false;
     }
 
-    let mut in_dependency_collection = false;
+    let mut current_dependency_collection = None;
+    let mut added_dependency_tables = BTreeSet::new();
+    let mut removed_dependency_tables = BTreeSet::new();
+    let mut added_keys_by_table: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut removed_keys_by_table: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+
     for raw_line in diff.diff.lines() {
-        let (is_added, line) = match raw_line.as_bytes().first() {
-            Some(b'+') => (true, &raw_line[1..]),
-            Some(b'-') => (false, &raw_line[1..]),
-            Some(b' ') => (false, &raw_line[1..]),
-            _ => (false, raw_line),
+        let (is_added, is_removed, line) = match raw_line.as_bytes().first() {
+            Some(b'+') => (true, false, &raw_line[1..]),
+            Some(b'-') => (false, true, &raw_line[1..]),
+            Some(b' ') => (false, false, &raw_line[1..]),
+            _ => (false, false, raw_line),
         };
         let trimmed = line.trim();
 
         if let Some(table) = toml_table_header(trimmed) {
-            if is_added && is_dependency_declaration_table(table) {
-                return true;
+            let normalized_table = normalize_toml_table_name(table);
+            if is_dependency_declaration_table_name(&normalized_table) {
+                if is_added {
+                    added_dependency_tables.insert(normalized_table.clone());
+                } else if is_removed {
+                    removed_dependency_tables.insert(normalized_table.clone());
+                }
             }
-            in_dependency_collection = is_dependency_collection_table(table);
+            current_dependency_collection =
+                is_dependency_collection_table_name(&normalized_table).then_some(normalized_table);
             continue;
         }
 
-        if is_added && in_dependency_collection && toml_line_adds_key(trimmed) {
+        if let Some(table) = current_dependency_collection.as_ref()
+            && let Some(key) = toml_dependency_key(trimmed)
+        {
+            if is_added {
+                added_keys_by_table
+                    .entry(table.clone())
+                    .or_default()
+                    .insert(key);
+            } else if is_removed {
+                removed_keys_by_table
+                    .entry(table.clone())
+                    .or_default()
+                    .insert(key);
+            }
+        }
+    }
+
+    if added_dependency_tables
+        .iter()
+        .any(|table| !removed_dependency_tables.contains(table))
+    {
+        return true;
+    }
+
+    for (table, added_keys) in added_keys_by_table {
+        let removed_keys = removed_keys_by_table.get(&table);
+        if added_keys
+            .iter()
+            .any(|key| removed_keys.is_none_or(|removed| !removed.contains(key)))
+        {
             return true;
         }
     }
@@ -284,10 +327,9 @@ fn toml_table_header(line: &str) -> Option<&str> {
     Some(inner)
 }
 
-fn is_dependency_collection_table(table: &str) -> bool {
-    let normalized = normalize_toml_table_name(table);
+fn is_dependency_collection_table_name(normalized: &str) -> bool {
     matches!(
-        normalized.as_str(),
+        normalized,
         "dependencies"
             | "dev-dependencies"
             | "build-dependencies"
@@ -300,8 +342,7 @@ fn is_dependency_collection_table(table: &str) -> bool {
             || normalized.ends_with(".build-dependencies")))
 }
 
-fn is_dependency_declaration_table(table: &str) -> bool {
-    let normalized = normalize_toml_table_name(table);
+fn is_dependency_declaration_table_name(normalized: &str) -> bool {
     normalized.starts_with("dependencies.")
         || normalized.starts_with("dev-dependencies.")
         || normalized.starts_with("build-dependencies.")
@@ -323,6 +364,21 @@ fn normalize_toml_table_name(table: &str) -> String {
 
 fn toml_line_adds_key(line: &str) -> bool {
     !line.is_empty() && !line.starts_with('#') && !line.starts_with('[') && line.contains('=')
+}
+
+fn toml_dependency_key(line: &str) -> Option<String> {
+    if !toml_line_adds_key(line) {
+        return None;
+    }
+    let key = line.split_once('=')?.0.trim();
+    let normalized = normalize_toml_key_name(key);
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn normalize_toml_key_name(key: &str) -> String {
+    key.chars()
+        .filter(|ch| !matches!(*ch, '"' | '\'') && !ch.is_whitespace())
+        .collect::<String>()
 }
 
 fn acl_tool_alias(tool_name: &str) -> &str {
@@ -1292,6 +1348,24 @@ mod tests {
 
         assert_eq!(violation.code, "dependency-policy-no-new");
         assert_eq!(violation.path.as_deref(), Some("Cargo.toml"));
+    }
+
+    #[test]
+    fn test_dependency_policy_no_new_allows_cargo_toml_dependency_version_update() {
+        let output = ToolOutput::success("Applied patch").with_metadata(serde_json::json!({
+            "diffs": [{
+                "path": "Cargo.toml",
+                "type": "update",
+                "diff": "@@\n [dependencies]\n-serde = \"1.0.0\"\n+serde = \"1.0.1\"\n"
+            }]
+        }));
+        let mut record = ToolCallRecord {
+            tool_name: "apply_patch".into(),
+            action: "write".into(),
+            ..ToolCallRecord::default()
+        };
+
+        evaluate_tool_result(&spec(), &task(), "apply_patch", &output, &mut record).unwrap();
     }
 
     #[test]
