@@ -41,7 +41,7 @@ use super::{
 use crate::{
     internal::ai::workspace_snapshot::{
         WorkspaceEntry, WorkspaceSnapshot, changed_paths_since_baseline, snapshot_workspace,
-        snapshot_workspace_with_contents, workspace_entry_if_exists,
+        workspace_entry_if_exists,
     },
     utils::util,
 };
@@ -189,7 +189,7 @@ pub(crate) fn prepare_task_worktree(
     task_id: Uuid,
     fuse_state: &FuseProvisionState,
 ) -> io::Result<(TaskWorktree, FuseAttemptOutcome)> {
-    let baseline = snapshot_workspace_with_contents(main_working_dir)?;
+    let baseline = snapshot_workspace(main_working_dir)?;
 
     #[cfg(unix)]
     {
@@ -772,18 +772,13 @@ fn is_cargo_lock_path(path: &Path) -> bool {
 }
 
 fn cargo_manifest_changed_for_lock(lock_path: &Path, changed_paths: &BTreeSet<PathBuf>) -> bool {
-    cargo_manifest_for_lock(lock_path)
-        .as_ref()
-        .is_some_and(|manifest| changed_paths.contains(manifest))
-}
-
-fn cargo_manifest_for_lock(lock_path: &Path) -> Option<PathBuf> {
     if !is_cargo_lock_path(lock_path) {
-        return None;
+        return false;
     }
-    let mut manifest = lock_path.to_path_buf();
-    manifest.set_file_name("Cargo.toml");
-    Some(manifest)
+    let lock_dir = lock_path.parent().unwrap_or_else(|| Path::new(""));
+    changed_paths.iter().any(|path| {
+        path.file_name().is_some_and(|name| name == "Cargo.toml") && path.starts_with(lock_dir)
+    })
 }
 
 fn try_merge_text_change(
@@ -807,10 +802,7 @@ fn try_merge_text_change(
     }
 
     let Some(baseline_bytes) = baseline.file_contents.get(rel_path) else {
-        return Err(WorkspaceSyncError::HardConflict {
-            path: Some(rel_path.to_path_buf()),
-            reason: "baseline content is unavailable for three-way merge".to_string(),
-        });
+        return Ok(false);
     };
     let main_path = main_working_dir.join(rel_path);
     let task_path = task_worktree_dir.join(rel_path);
@@ -1389,6 +1381,51 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(main.join("libra/Cargo.lock")).unwrap(),
             "# updated lockfile\n"
+        );
+    }
+
+    #[test]
+    fn workspace_sync_applies_root_cargo_lock_when_member_manifest_changed() {
+        let temp = tempdir().unwrap();
+        let main = temp.path().join("main");
+        let task = temp.path().join("task");
+        std::fs::create_dir_all(main.join("crates/app")).unwrap();
+        std::fs::write(
+            main.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/app\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            main.join("crates/app/Cargo.toml"),
+            "[package]\nname = \"app\"\n\n[dependencies]\n",
+        )
+        .unwrap();
+        std::fs::write(main.join("Cargo.lock"), "# base lockfile\n").unwrap();
+
+        let baseline = snapshot_workspace(&main).unwrap();
+        std::fs::create_dir_all(&task).unwrap();
+        materialize_workspace(&main, &task, &baseline).unwrap();
+        std::fs::write(
+            task.join("crates/app/Cargo.toml"),
+            "[package]\nname = \"app\"\n\n[dependencies]\nserde = \"1\"\n",
+        )
+        .unwrap();
+        std::fs::write(task.join("Cargo.lock"), "# updated workspace lockfile\n").unwrap();
+
+        let report = sync_task_worktree_back(
+            &main,
+            &task,
+            &baseline,
+            &["crates/app/Cargo.toml".to_string()],
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        assert!(report.applied.contains(&PathBuf::from("Cargo.lock")));
+        assert_eq!(
+            std::fs::read_to_string(main.join("Cargo.lock")).unwrap(),
+            "# updated workspace lockfile\n"
         );
     }
 

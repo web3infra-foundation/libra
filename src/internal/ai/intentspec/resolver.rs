@@ -381,14 +381,12 @@ fn dependency_names_from_natural_language(text: &str) -> Vec<String> {
             lower.as_str(),
             "crate" | "crates" | "package" | "packages" | "dependency" | "dependencies" | "依赖"
         ) && index > 0
-        {
-            if let Some(name) = tokens[..index]
+            && let Some(name) = tokens[..index]
                 .iter()
                 .rev()
                 .find(|candidate| dependency_name_candidate(candidate.as_str()))
-            {
-                push_dependency_token(&mut names, name.as_str());
-            }
+        {
+            push_dependency_token(&mut names, name.as_str());
         }
     }
     names

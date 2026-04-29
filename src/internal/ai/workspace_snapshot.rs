@@ -15,6 +15,9 @@ use ignore::WalkBuilder;
 
 use crate::internal::ai::generated_artifacts;
 
+pub(crate) const SNAPSHOT_CONTENT_MAX_FILE_BYTES: usize = 1024 * 1024;
+pub(crate) const SNAPSHOT_CONTENT_MAX_TOTAL_BYTES: usize = 32 * 1024 * 1024;
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct WorkspaceSnapshot {
     pub(crate) entries: BTreeMap<PathBuf, WorkspaceEntry>,
@@ -31,6 +34,7 @@ pub(crate) fn snapshot_workspace(root: &Path) -> io::Result<WorkspaceSnapshot> {
     snapshot_workspace_inner(root, false)
 }
 
+#[cfg(test)]
 pub(crate) fn snapshot_workspace_with_contents(root: &Path) -> io::Result<WorkspaceSnapshot> {
     snapshot_workspace_inner(root, true)
 }
@@ -59,6 +63,7 @@ fn snapshot_workspace_inner(
 
     let mut entries = BTreeMap::new();
     let mut file_contents = BTreeMap::new();
+    let mut captured_content_bytes = 0usize;
     for entry in builder.build() {
         let entry = entry.map_err(ignore_error_to_io)?;
         let path = entry.path();
@@ -81,7 +86,11 @@ fn snapshot_workspace_inner(
             .to_path_buf();
         let (snapshot_entry, contents) = snapshot_entry(path, &file_type, capture_file_contents)?;
         if let Some(contents) = contents {
-            file_contents.insert(rel.clone(), contents);
+            let next_total = captured_content_bytes.saturating_add(contents.len());
+            if next_total <= SNAPSHOT_CONTENT_MAX_TOTAL_BYTES {
+                captured_content_bytes = next_total;
+                file_contents.insert(rel.clone(), contents);
+            }
         }
         entries.insert(rel, snapshot_entry);
     }
@@ -144,9 +153,16 @@ fn snapshot_entry(
     // attribute resolution, because isolated task workspaces and tests may run
     // outside a Libra repository context.
     let contents = fs::read(path)?;
-    let entry = WorkspaceEntry::File(Blob::from_content_bytes(contents.clone()).id);
-    let captured = capture_file_contents.then_some(contents);
+    let captured = should_capture_snapshot_file_contents(capture_file_contents, &contents)
+        .then(|| contents.clone());
+    let entry = WorkspaceEntry::File(Blob::from_content_bytes(contents).id);
     Ok((entry, captured))
+}
+
+fn should_capture_snapshot_file_contents(capture_file_contents: bool, contents: &[u8]) -> bool {
+    capture_file_contents
+        && contents.len() <= SNAPSHOT_CONTENT_MAX_FILE_BYTES
+        && std::str::from_utf8(contents).is_ok()
 }
 
 fn ignore_error_to_io(err: ignore::Error) -> io::Error {
@@ -164,7 +180,10 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{WorkspaceEntry, snapshot_workspace};
+    use super::{
+        SNAPSHOT_CONTENT_MAX_FILE_BYTES, WorkspaceEntry, snapshot_workspace,
+        snapshot_workspace_with_contents,
+    };
 
     #[cfg(unix)]
     fn symlink_path(target: &Path, link: &Path) -> io::Result<()> {
@@ -206,6 +225,51 @@ mod tests {
                 .entries
                 .contains_key(Path::new("web/node_modules/pkg/index.js"))
         );
+    }
+
+    #[test]
+    fn snapshot_with_contents_captures_small_text_files() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("Cargo.toml"), "[dependencies]\n").unwrap();
+
+        let snapshot = snapshot_workspace_with_contents(&root).unwrap();
+
+        assert_eq!(
+            snapshot.file_contents.get(Path::new("Cargo.toml")),
+            Some(&b"[dependencies]\n".to_vec())
+        );
+    }
+
+    #[test]
+    fn snapshot_with_contents_skips_binary_files() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("image.bin"), [0xff, 0xfe, 0xfd]).unwrap();
+
+        let snapshot = snapshot_workspace_with_contents(&root).unwrap();
+
+        assert!(snapshot.entries.contains_key(Path::new("image.bin")));
+        assert!(!snapshot.file_contents.contains_key(Path::new("image.bin")));
+    }
+
+    #[test]
+    fn snapshot_with_contents_skips_large_files() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("large.txt"),
+            vec![b'a'; SNAPSHOT_CONTENT_MAX_FILE_BYTES + 1],
+        )
+        .unwrap();
+
+        let snapshot = snapshot_workspace_with_contents(&root).unwrap();
+
+        assert!(snapshot.entries.contains_key(Path::new("large.txt")));
+        assert!(!snapshot.file_contents.contains_key(Path::new("large.txt")));
     }
 
     #[test]

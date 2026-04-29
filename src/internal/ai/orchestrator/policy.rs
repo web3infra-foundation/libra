@@ -179,9 +179,7 @@ pub fn evaluate_tool_result(
         validate_recorded_writes(spec, task, record)?;
     }
 
-    if output.is_success() {
-        validate_dependency_policy(spec, tool_name, record)?;
-    }
+    validate_dependency_policy(spec, tool_name, record)?;
 
     if spec.security.output_handling.no_direct_eval
         && tool_name == "apply_patch"
@@ -237,6 +235,30 @@ fn validate_dependency_policy(
                 path: Some(diff.path.clone()),
             });
         }
+    }
+
+    let manifest_write_without_diff = record
+        .paths_written
+        .iter()
+        .find(|path| {
+            is_cargo_manifest_path(path.as_str())
+                && !record
+                    .diffs
+                    .iter()
+                    .any(|diff| diff.path == path.as_str() && is_cargo_manifest_path(&diff.path))
+        })
+        .cloned();
+    if tool_name == "shell"
+        && let Some(path) = manifest_write_without_diff
+    {
+        return Err(PolicyViolation {
+            code: "dependency-policy-no-new".into(),
+            message:
+                "dependency-policy:no-new cannot verify shell Cargo.toml changes without a captured manifest diff"
+                    .into(),
+            tool_name: Some(tool_name.to_string()),
+            path: Some(path),
+        });
     }
 
     Ok(())
@@ -1345,6 +1367,58 @@ mod tests {
 
         let violation = evaluate_tool_result(&spec(), &task(), "apply_patch", &output, &mut record)
             .expect_err("dependency-policy:no-new must reject newly added Cargo dependencies");
+
+        assert_eq!(violation.code, "dependency-policy-no-new");
+        assert_eq!(violation.path.as_deref(), Some("Cargo.toml"));
+    }
+
+    #[test]
+    fn test_dependency_policy_no_new_rejects_failed_shell_dependency_addition() {
+        let mut task = task();
+        task.scope_in = vec!["Cargo.toml".into()];
+        let output = ToolOutput::failure("Exit code: 1").with_metadata(serde_json::json!({
+            "paths_written": ["Cargo.toml"],
+            "diffs": [{
+                "path": "Cargo.toml",
+                "type": "update",
+                "diff": "@@\n [dependencies]\n+clap = \"4\"\n"
+            }]
+        }));
+        let mut record = ToolCallRecord {
+            tool_name: "shell".into(),
+            action: "execute".into(),
+            arguments_json: Some(
+                serde_json::json!({ "command": "printf 'clap = \"4\"\\n' >> Cargo.toml; false" }),
+            ),
+            ..ToolCallRecord::default()
+        };
+
+        let violation = evaluate_tool_result(&spec(), &task, "shell", &output, &mut record)
+            .expect_err("failed shell calls that add dependencies must still be rejected");
+
+        assert_eq!(violation.code, "dependency-policy-no-new");
+        assert_eq!(violation.path.as_deref(), Some("Cargo.toml"));
+    }
+
+    #[test]
+    fn test_dependency_policy_no_new_rejects_unverifiable_shell_manifest_edit() {
+        let mut task = task();
+        task.scope_in = vec!["Cargo.toml".into()];
+        let output = ToolOutput::success("Exit code: 0").with_metadata(serde_json::json!({
+            "paths_written": ["Cargo.toml"],
+            "diffs": []
+        }));
+        let mut record = ToolCallRecord {
+            tool_name: "shell".into(),
+            action: "execute".into(),
+            arguments_json: Some(
+                serde_json::json!({ "command": "perl -0pi -e 's/$/clap = \"4\"/' Cargo.toml" }),
+            ),
+            ..ToolCallRecord::default()
+        };
+
+        let violation = evaluate_tool_result(&spec(), &task, "shell", &output, &mut record)
+            .expect_err("Cargo.toml shell writes without captured diffs must fail closed");
 
         assert_eq!(violation.code, "dependency-policy-no-new");
         assert_eq!(violation.path.as_deref(), Some("Cargo.toml"));

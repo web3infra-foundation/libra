@@ -335,6 +335,15 @@ pub(crate) fn cargo_lock_companion_allowed(scope: &[String], path: &str) -> bool
         if normalized_pattern == cargo_toml_basename {
             return true;
         }
+        if normalized_pattern.ends_with(cargo_toml_basename)
+            && (prefix.is_empty()
+                || normalized_pattern.strip_prefix(prefix).is_some_and(|rest| {
+                    rest == cargo_toml_basename || rest.ends_with(cargo_toml_basename)
+                })
+                || normalized_pattern.contains(&format!("/{prefix}")))
+        {
+            return true;
+        }
         normalized_pattern == cargo_toml
             || normalized_pattern
                 .strip_suffix(cargo_toml.as_str())
@@ -412,9 +421,21 @@ mod tests {
             &["crates/app/**".to_string()],
             "crates/app/Cargo.lock"
         ));
+        assert!(cargo_lock_companion_allowed(
+            &["crates/app/Cargo.toml".to_string()],
+            "Cargo.lock"
+        ));
+        assert!(cargo_lock_companion_allowed(
+            &["libra/crates/app/Cargo.toml".to_string()],
+            "libra/Cargo.lock"
+        ));
         assert!(!cargo_lock_companion_allowed(
             &["src/main.rs".to_string()],
             "Cargo.lock"
+        ));
+        assert!(!cargo_lock_companion_allowed(
+            &["other/crates/app/Cargo.toml".to_string()],
+            "libra/Cargo.lock"
         ));
     }
 
