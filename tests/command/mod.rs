@@ -9,7 +9,13 @@ use std::{
 
 use git_internal::{
     hash::ObjectHash,
-    internal::object::{commit::Commit, tree::Tree},
+    internal::object::{
+        commit::Commit,
+        signature::{Signature, SignatureType},
+        tag::Tag as GitTag,
+        tree::Tree,
+        types::ObjectType,
+    },
 };
 use libra::{
     command::{
@@ -162,6 +168,30 @@ fn parse_cli_error_stderr(stderr: &[u8]) -> (String, CliErrorReport) {
 
 fn parse_json_stdout(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).expect("expected stdout to be valid JSON")
+}
+
+fn create_non_commit_tag_object(repo: &Path) -> String {
+    let _guard = ChangeDirGuard::new(repo);
+    let runtime = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+    let head = runtime
+        .block_on(Head::current_commit())
+        .expect("expected HEAD commit");
+    let commit: Commit = load_object(&head).expect("failed to load HEAD commit");
+    let tag = GitTag::new(
+        commit.tree_id,
+        ObjectType::Tree,
+        "tree-tag".to_string(),
+        Signature {
+            signature_type: SignatureType::Tagger,
+            name: "tester".to_string(),
+            email: "tester@example.com".to_string(),
+            timestamp: 1,
+            timezone: "+0000".to_string(),
+        },
+        "tag points to a tree".to_string(),
+    );
+    save_object(&tag, &tag.id).expect("failed to save tree tag object");
+    tag.id.to_string()
 }
 
 /// Build the on-disk path to a loose object given the repository root and full

@@ -2,22 +2,25 @@
 //!
 //! **Layer:** L1 — deterministic, no external dependencies.
 
-use std::{fs, thread, time::Duration};
-
 use super::*;
 
 fn create_two_commit_repo_via_cli() -> tempfile::TempDir {
     let repo = create_committed_repo_via_cli();
-
-    thread::sleep(Duration::from_secs(1));
-    fs::write(repo.path().join("tracked.txt"), "tracked\nsecond\n")
-        .expect("failed to update tracked file");
-
-    let output = run_libra_command(&["add", "tracked.txt"], repo.path());
-    assert_cli_success(&output, "failed to add second commit changes");
-
-    let output = run_libra_command(&["commit", "-m", "second", "--no-verify"], repo.path());
-    assert_cli_success(&output, "failed to create second commit");
+    let runtime = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+    runtime.block_on(async {
+        let _guard = ChangeDirGuard::new(repo.path());
+        let parent_id = Head::current_commit().await.expect("expected HEAD commit");
+        let parent: Commit = load_object(&parent_id).expect("failed to load parent commit");
+        let mut author = parent.author.clone();
+        let mut committer = parent.committer.clone();
+        author.timestamp = parent.committer.timestamp + 1;
+        committer.timestamp = parent.committer.timestamp + 1;
+        let commit = Commit::new(author, committer, parent.tree_id, vec![parent_id], "second");
+        save_object(&commit, &commit.id).expect("failed to save second commit");
+        Branch::update_branch("main", &commit.id.to_string(), None)
+            .await
+            .expect("failed to update main branch");
+    });
 
     repo
 }
@@ -78,6 +81,20 @@ fn test_rev_list_invalid_target_returns_cli_error_code() {
 
     assert_eq!(output.status.code(), Some(129));
     assert!(stderr.contains("not a valid object name: 'badref'"));
+    assert_eq!(report.error_code, "LBR-CLI-003");
+}
+
+#[test]
+fn test_rev_list_rejects_tag_object_that_points_to_tree() {
+    let repo = create_committed_repo_via_cli();
+    let tag_id = create_non_commit_tag_object(repo.path());
+
+    let output = run_libra_command(&["rev-list", tag_id.as_str()], repo.path());
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(129));
+    assert!(stderr.contains("not a valid object name"));
+    assert!(stderr.contains("tag points to tree"));
     assert_eq!(report.error_code, "LBR-CLI-003");
 }
 

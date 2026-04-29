@@ -866,19 +866,51 @@ async fn resolve_commit_base_atom_typed(name: &str) -> Result<ObjectHash, Commit
 
     match object_type {
         ObjectType::Commit => Ok(object_id),
-        ObjectType::Tag => {
-            // Manually dereference tag if search returned a tag object directly
-            let tag_obj: git_internal::internal::object::tag::Tag = load_object(&object_id)
-                .map_err(|e| {
-                    CommitBaseError::classify_storage_failure(format!(
-                        "failed to load tag object: {e}"
-                    ))
-                })?;
-            Ok(tag_obj.object_hash)
-        }
+        ObjectType::Tag => peel_tag_hash_to_commit(&storage, object_id, name),
         _ => Err(CommitBaseError::InvalidReference(format!(
             "reference is not a commit: {name}, is {object_type}"
         ))),
+    }
+}
+
+fn peel_tag_hash_to_commit(
+    storage: &ClientStorage,
+    object_id: ObjectHash,
+    display_name: &str,
+) -> Result<ObjectHash, CommitBaseError> {
+    let mut current = object_id;
+    let mut seen = HashSet::new();
+
+    loop {
+        if !seen.insert(current) {
+            return Err(CommitBaseError::CorruptReference(format!(
+                "tag cycle detected while resolving '{display_name}'"
+            )));
+        }
+
+        let tag_obj: git_internal::internal::object::tag::Tag =
+            load_object(&current).map_err(|error| {
+                CommitBaseError::classify_storage_failure(format!(
+                    "failed to load tag object while resolving '{display_name}': {error}"
+                ))
+            })?;
+        let target_type = storage
+            .get_object_type(&tag_obj.object_hash)
+            .map_err(|error| {
+                CommitBaseError::classify_storage_failure(format!(
+                    "could not read tag target type while resolving '{display_name}': {error}"
+                ))
+            })?;
+
+        match target_type {
+            ObjectType::Commit => return Ok(tag_obj.object_hash),
+            ObjectType::Tag => current = tag_obj.object_hash,
+            _ => {
+                return Err(CommitBaseError::InvalidReference(format!(
+                    "reference is not a commit: {display_name}, tag points to {target_type}"
+                )));
+            }
+        }
     }
 }
 
