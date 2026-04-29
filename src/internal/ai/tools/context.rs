@@ -292,11 +292,11 @@ fn default_depth() -> usize {
 pub struct ShellArgs {
     /// Shell command or script to execute (runs in the user's default shell).
     pub command: String,
-    /// Working directory for the command. Must be an absolute path within the
-    /// sandbox working directory. Defaults to the registry's working directory.
+    /// Working directory for the command. May be absolute or sandbox-relative,
+    /// and must remain within the sandbox working directory.
     #[serde(default)]
     pub workdir: Option<String>,
-    /// Timeout in milliseconds. Defaults to 10,000 ms (10 seconds).
+    /// Timeout in milliseconds. Defaults to 60,000 ms (60 seconds).
     #[serde(default)]
     pub timeout_ms: Option<u64>,
     /// Controls whether the command uses sandbox defaults or requests escalation.

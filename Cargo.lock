@@ -149,7 +149,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3277,8 +3277,7 @@ checksum = "b5b646652bf6661599e1da8901b3b9522896f01e736bad5f723fe7a3a27f899d"
 [[package]]
 name = "libfuse-fs"
 version = "0.1.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c5aa54193dd60028e43274b0e43fd2b68629af72714589820d1f50b97f0a8f85"
+source = "git+https://github.com/rk8s-dev/rk8s?branch=main#350c530ab4f3ffd75fd050e9f0f134842f8e6ed7"
 dependencies = [
  "async-trait",
  "bitflags 2.11.0",
@@ -3322,7 +3321,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libra"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -5320,8 +5319,7 @@ dependencies = [
 [[package]]
 name = "rfuse3"
 version = "0.0.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "854bcb0ce09254f1e597c2c810b297576b7372b55b6dc7407bfdf79d91ec7f3f"
+source = "git+https://github.com/rk8s-dev/rk8s?branch=main#350c530ab4f3ffd75fd050e9f0f134842f8e6ed7"
 dependencies = [
  "aligned_box",
  "async-notify",
@@ -6263,7 +6261,7 @@ version = "1.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
 dependencies = [
- "errno 0.3.14",
+ "errno 0.2.8",
  "libc",
 ]
 
@@ -6331,7 +6329,7 @@ version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c1c97747dbf44bb1ca44a561ece23508e99cb592e862f22222dcf42f51d1e451"
 dependencies = [
- "heck 0.5.0",
+ "heck 0.4.1",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -8152,7 +8150,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

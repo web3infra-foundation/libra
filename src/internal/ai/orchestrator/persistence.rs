@@ -754,7 +754,13 @@ impl ExecutionAuditSession {
         let _ = self.worker.await;
         projection_rebuild?;
 
+        let thread_id = {
+            let state = self.state.lock().await;
+            state.thread_id.clone()
+        };
+
         Ok(PersistedExecution {
+            thread_id: Some(thread_id),
             run_id,
             initial_snapshot_id,
             provenance_id,
@@ -2306,6 +2312,7 @@ pub async fn persist_execution(
     rebuild_thread_projection(request.mcp_server, &intent_id).await?;
 
     Ok(PersistedExecution {
+        thread_id: Some(intent_id),
         run_id,
         initial_snapshot_id,
         provenance_id,

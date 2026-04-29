@@ -510,6 +510,8 @@ pub struct PersistedDerivedRecords {
 /// Persisted execution object chain for an orchestrator run.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PersistedExecution {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
     pub run_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_snapshot_id: Option<String>,
@@ -845,6 +847,7 @@ mod tests {
             lifecycle_change_log: vec![],
             replan_count: 1,
             persistence: Some(PersistedExecution {
+                thread_id: Some("019ce515-077c-7c12-8e90-755533e512e3".into()),
                 run_id: "run-1".into(),
                 initial_snapshot_id: Some("snapshot-1".into()),
                 provenance_id: Some("prov-1".into()),

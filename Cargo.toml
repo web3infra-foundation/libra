@@ -1,6 +1,6 @@
 [package]
 name = "libra"
-version = "0.16.0"
+version = "0.16.1"
 edition = "2024"
 
 [features]
@@ -113,6 +113,10 @@ libfuse-fs = "0.1.12"
 pager = "0.16.1"
 libc = "0.2"
 rfuse3 = { version = "0.0.7", features = ["tokio-runtime", "unprivileged"] }
+
+[patch.crates-io]
+libfuse-fs = { git = "https://github.com/rk8s-dev/rk8s", branch = "main" }
+rfuse3 = { git = "https://github.com/rk8s-dev/rk8s", branch = "main" }
 
 [dev-dependencies]
 serial_test = { version = "3.4.0", default-features = false, features = ["async"] }

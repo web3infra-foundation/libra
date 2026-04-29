@@ -217,7 +217,7 @@ struct StreamState {
     truncated: bool,
 }
 
-const DEFAULT_TIMEOUT_MS: u64 = 10_000;
+const DEFAULT_TIMEOUT_MS: u64 = 60_000;
 const TIMEOUT_EXIT_CODE: i32 = 124;
 const STREAM_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 const SANDBOX_DENIED_KEYWORDS: [&str; 7] = [
@@ -854,6 +854,11 @@ mod tests {
             timed_out: false,
         };
         assert!(is_likely_sandbox_denied(&output));
+    }
+
+    #[test]
+    fn default_timeout_allows_typical_build_commands() {
+        assert_eq!(DEFAULT_TIMEOUT_MS, 60_000);
     }
 
     #[test]

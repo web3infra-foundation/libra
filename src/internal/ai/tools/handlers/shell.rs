@@ -3,9 +3,14 @@
 //! Executes shell commands in the user's default shell with configurable
 //! working directory and timeout. Output is capped to prevent memory issues.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use async_trait::async_trait;
+use diffy::create_patch;
 
 // SAFETY: The unwrap() and expect() calls in test code are acceptable as test
 // failures are expected to panic on assertion failures.
@@ -18,7 +23,7 @@ use crate::{
             error::{ToolError, ToolResult},
             registry::ToolHandler,
             spec::ToolSpec,
-            utils::{command_invokes_git_version_control, validate_path},
+            utils::{command_invokes_git_version_control, resolve_path},
         },
         workspace_snapshot::{
             WorkspaceSnapshot, changed_paths_since_baseline as changed_workspace_paths,
@@ -38,6 +43,8 @@ pub struct ShellHandler;
 
 /// Maximum bytes captured per stream (stdout or stderr) before truncation.
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 100 * 1024; // 100 KiB
+/// Maximum bytes captured from a Cargo.toml for policy diff metadata.
+const SHELL_DIFF_MAX_FILE_BYTES: u64 = 256 * 1024;
 /// Exit code emitted when a command is killed due to timeout (matches GNU timeout).
 #[cfg(test)]
 const TIMEOUT_EXIT_CODE: i32 = 124;
@@ -101,6 +108,8 @@ impl ToolHandler for ShellHandler {
         let baseline_snapshot = snapshot_workspace(&working_dir).map_err(|err| {
             ToolError::ExecutionFailed(format!("failed to snapshot workspace: {err}"))
         })?;
+        let baseline_manifest_contents =
+            capture_cargo_manifest_contents(&working_dir, &baseline_snapshot)?;
 
         let command_for_error = args.command.clone();
         let output = run_shell_command_with_approval(ShellCommandRequest {
@@ -131,12 +140,16 @@ impl ToolHandler for ShellHandler {
                 "failed to inspect workspace changes after shell command: {err}"
             ))
         })?;
+        let changed_paths = changed_workspace_paths(&baseline_snapshot, &final_snapshot);
         let metadata = serde_json::json!({
-            "paths_written": changed_paths_since_baseline(
+            "paths_written": changed_paths_to_strings(&changed_paths),
+            "diffs": changed_cargo_manifest_diffs_since_baseline(
+                &working_dir,
+                &changed_paths,
                 &baseline_snapshot,
                 &final_snapshot,
-                &working_dir,
-            ),
+                &baseline_manifest_contents,
+            )?,
         });
 
         let formatted = format_output(
@@ -203,9 +216,9 @@ fn resolve_workdir(requested_workdir: Option<&str>, working_dir: &Path) -> ToolR
     };
 
     let requested = Path::new(workdir);
-    validate_path(requested, working_dir)?;
+    let resolved = resolve_path(requested, working_dir)?;
 
-    let requested_canon = std::fs::canonicalize(requested).map_err(|e| {
+    let requested_canon = std::fs::canonicalize(&resolved).map_err(|e| {
         ToolError::ExecutionFailed(format!(
             "failed to canonicalize workdir '{}': {e}",
             requested.display()
@@ -219,21 +232,111 @@ fn resolve_workdir(requested_workdir: Option<&str>, working_dir: &Path) -> ToolR
     })?;
 
     if !is_sub_path(&requested_canon, &working_dir_canon) {
-        return Err(ToolError::PathOutsideWorkingDir(requested.to_path_buf()));
+        return Err(ToolError::PathOutsideWorkingDir(resolved));
     }
 
     Ok(requested_canon)
 }
 
-fn changed_paths_since_baseline(
-    baseline: &WorkspaceSnapshot,
-    current: &WorkspaceSnapshot,
-    _root: &Path,
-) -> Vec<String> {
-    changed_workspace_paths(baseline, current)
-        .into_iter()
+fn changed_paths_to_strings(changed_paths: &[PathBuf]) -> Vec<String> {
+    changed_paths
+        .iter()
         .map(|path| path.to_string_lossy().to_string())
         .collect()
+}
+
+fn changed_cargo_manifest_diffs_since_baseline(
+    root: &Path,
+    changed_paths: &[PathBuf],
+    baseline: &WorkspaceSnapshot,
+    current: &WorkspaceSnapshot,
+    baseline_manifest_contents: &BTreeMap<PathBuf, String>,
+) -> ToolResult<Vec<serde_json::Value>> {
+    changed_paths
+        .iter()
+        .filter_map(|path| {
+            if !is_cargo_manifest_path(path) {
+                return None;
+            }
+            let change_type = match (
+                baseline.entries.contains_key(path),
+                current.entries.contains_key(path),
+            ) {
+                (false, true) => "add",
+                (true, false) => "delete",
+                _ => "update",
+            };
+            Some((path, change_type))
+        })
+        .map(|(path, change_type)| {
+            let old_content = if baseline.entries.contains_key(path) {
+                match baseline_manifest_contents.get(path) {
+                    Some(content) => content.clone(),
+                    None => return Ok(None),
+                }
+            } else {
+                String::new()
+            };
+            let new_content = if current.entries.contains_key(path) {
+                match read_capped_utf8_file(&root.join(path))? {
+                    Some(content) => content,
+                    None => return Ok(None),
+                }
+            } else {
+                String::new()
+            };
+            Ok(Some(serde_json::json!({
+                "path": path.to_string_lossy().to_string(),
+                "diff": create_patch(&old_content, &new_content).to_string(),
+                "type": change_type,
+            })))
+        })
+        .filter_map(Result::transpose)
+        .collect()
+}
+
+fn capture_cargo_manifest_contents(
+    root: &Path,
+    snapshot: &WorkspaceSnapshot,
+) -> ToolResult<BTreeMap<PathBuf, String>> {
+    let mut contents = BTreeMap::new();
+    for path in snapshot
+        .entries
+        .keys()
+        .filter(|path| is_cargo_manifest_path(path))
+    {
+        if let Some(content) = read_capped_utf8_file(&root.join(path))? {
+            contents.insert(path.clone(), content);
+        }
+    }
+    Ok(contents)
+}
+
+fn read_capped_utf8_file(path: &Path) -> ToolResult<Option<String>> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(ToolError::ExecutionFailed(format!(
+                "failed to inspect '{}': {err}",
+                path.display()
+            )));
+        }
+    };
+    if !metadata.is_file() || metadata.len() > SHELL_DIFF_MAX_FILE_BYTES {
+        return Ok(None);
+    }
+    let bytes = fs::read(path).map_err(|err| {
+        ToolError::ExecutionFailed(format!("failed to read '{}': {err}", path.display()))
+    })?;
+    match String::from_utf8(bytes) {
+        Ok(content) => Ok(Some(content)),
+        Err(_) => Ok(None),
+    }
+}
+
+fn is_cargo_manifest_path(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| name == "Cargo.toml")
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -440,8 +543,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_shell_workdir_relative_path_fails() {
+    async fn test_shell_workdir_relative_path_is_resolved_inside_sandbox() {
         let temp = TempDir::new().unwrap();
+        let inner_path = temp.path().join("relative").join("path");
+        std::fs::create_dir_all(&inner_path).unwrap();
+
         let inv = make_invocation(
             serde_json::json!({
                 "command": "pwd",
@@ -449,10 +555,30 @@ mod tests {
             }),
             temp.path().to_path_buf(),
         );
-        let result = ShellHandler.handle(inv).await;
+        let result = ShellHandler.handle(inv).await.unwrap();
+        let text = result.as_text().unwrap();
         assert!(
-            matches!(result, Err(ToolError::PathNotAbsolute(_))),
-            "expected PathNotAbsolute, got: {result:?}"
+            text.contains("relative/path") || text.contains("relative\\path"),
+            "expected resolved relative/path in output:\n{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shell_workdir_dot_uses_sandbox_root() {
+        let temp = TempDir::new().unwrap();
+        let inv = make_invocation(
+            serde_json::json!({
+                "command": "pwd",
+                "workdir": "."
+            }),
+            temp.path().to_path_buf(),
+        );
+        let result = ShellHandler.handle(inv).await.unwrap();
+        let text = result.as_text().unwrap();
+        let dir_name = temp.path().file_name().unwrap().to_str().unwrap();
+        assert!(
+            text.contains(dir_name),
+            "expected sandbox root in output:\n{text}"
         );
     }
 
@@ -534,6 +660,58 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    #[serial]
+    async fn test_shell_metadata_includes_text_file_diffs() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("Cargo.toml"), "[dependencies]\n").unwrap();
+        let outside_repo = TempDir::new().unwrap();
+        let _cwd = crate::utils::test::ChangeDirGuard::new(outside_repo.path());
+        let inv = make_invocation(
+            serde_json::json!({ "command": "printf 'serde = \"1\"\\n' >> Cargo.toml" }),
+            temp.path().to_path_buf(),
+        );
+        let result = ShellHandler.handle(inv).await.unwrap();
+
+        let metadata = result
+            .metadata()
+            .expect("shell results should include metadata");
+        assert_eq!(metadata["paths_written"], serde_json::json!(["Cargo.toml"]));
+        let diffs = metadata["diffs"]
+            .as_array()
+            .expect("shell metadata should include diffs");
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0]["path"], "Cargo.toml");
+        assert_eq!(diffs[0]["type"], "update");
+        assert!(
+            diffs[0]["diff"]
+                .as_str()
+                .is_some_and(|diff| diff.contains("+serde = \"1\"")),
+            "{diffs:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_shell_metadata_omits_non_manifest_diffs() {
+        let temp = TempDir::new().unwrap();
+        std::fs::create_dir(temp.path().join("src")).unwrap();
+        std::fs::write(temp.path().join("src/lib.rs"), "pub fn base() {}\n").unwrap();
+        let outside_repo = TempDir::new().unwrap();
+        let _cwd = crate::utils::test::ChangeDirGuard::new(outside_repo.path());
+        let inv = make_invocation(
+            serde_json::json!({ "command": "printf 'pub fn changed() {}\\n' > src/lib.rs" }),
+            temp.path().to_path_buf(),
+        );
+        let result = ShellHandler.handle(inv).await.unwrap();
+
+        let metadata = result
+            .metadata()
+            .expect("shell results should include metadata");
+        assert_eq!(metadata["paths_written"], serde_json::json!(["src/lib.rs"]));
+        assert_eq!(metadata["diffs"], serde_json::json!([]));
+    }
+
     // ── Handler metadata ──────────────────────────────────────────────────────
 
     #[tokio::test]
@@ -556,6 +734,15 @@ mod tests {
         assert!(
             required.iter().any(|v| v == "command"),
             "command should be required"
+        );
+
+        let timeout_description =
+            json["function"]["parameters"]["properties"]["timeout_ms"]["description"]
+                .as_str()
+                .unwrap();
+        assert!(
+            timeout_description.contains("default: 60000"),
+            "timeout default should match shell runtime default: {timeout_description}"
         );
     }
 

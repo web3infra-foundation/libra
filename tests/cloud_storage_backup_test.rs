@@ -14,7 +14,7 @@
 //! unset. Live tests use `#[serial(cloud_live)]` to avoid trampling each other
 //! on shared D1/R2 resources.
 
-use std::{process::Command, str::FromStr, sync::Arc};
+use std::{path::Path, process::Command, str::FromStr, sync::Arc};
 
 use git_internal::internal::object::{ObjectTrait, blob::Blob};
 use libra::utils::{
@@ -68,20 +68,44 @@ fn r2_storage_from_env(repo_id: &str) -> RemoteStorage {
     RemoteStorage::new_with_prefix(Arc::new(s3), repo_id.to_string())
 }
 
+fn isolated_libra_command(current_dir: &Path, home: &Path) -> Command {
+    let config_home = home.join(".config");
+    let global_config_db = home.join(".libra-global-config.db");
+    std::fs::create_dir_all(&config_home).unwrap();
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_libra"));
+    command
+        .current_dir(current_dir)
+        .env_clear()
+        .env(
+            "PATH",
+            std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin:/usr/sbin:/sbin".to_string()),
+        )
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("USERPROFILE", home)
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
+        .env("LIBRA_TEST", "1")
+        .env("LIBRA_TEST_ENV", "1")
+        .env("LIBRA_CONFIG_GLOBAL_DB", &global_config_db);
+    if let Some(systemroot) = std::env::var_os("SYSTEMROOT") {
+        command.env("SYSTEMROOT", systemroot);
+    }
+    if let Some(windir) = std::env::var_os("WINDIR") {
+        command.env("WINDIR", windir);
+    }
+    command
+}
+
 /// Initialize a new Libra repo in a temp dir using the actual binary, with a fully
 /// isolated HOME / XDG_CONFIG_HOME / USERPROFILE so global user config cannot leak
 /// in. Returns the `TempDir` (must stay alive — drop removes the on-disk repo).
 fn init_repo() -> tempfile::TempDir {
     let dir = tempdir().unwrap();
     let home = dir.path().join(".home");
-    let config_home = home.join(".config");
-    std::fs::create_dir_all(&config_home).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(dir.path())
+    let output = isolated_libra_command(dir.path(), &home)
         .args(["init"])
-        .env("HOME", &home)
-        .env("XDG_CONFIG_HOME", &config_home)
-        .env("USERPROFILE", &home)
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -197,15 +221,8 @@ async fn mock_remote_search() {
 fn cloud_sync_fails_without_r2_env() {
     let dir = init_repo();
     let home = dir.path().join(".home");
-    let config_home = home.join(".config");
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(dir.path())
+    let output = isolated_libra_command(dir.path(), &home)
         .args(["cloud", "sync"])
-        .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("HOME", &home)
-        .env("XDG_CONFIG_HOME", &config_home)
-        .env("USERPROFILE", &home)
         .env("LIBRA_D1_ACCOUNT_ID", "test-account")
         .env("LIBRA_D1_API_TOKEN", "test-token")
         .env("LIBRA_D1_DATABASE_ID", "test-db")
@@ -225,15 +242,8 @@ fn cloud_sync_fails_without_r2_env() {
 fn cloud_restore_fails_without_r2_env() {
     let dir = init_repo();
     let home = dir.path().join(".home");
-    let config_home = home.join(".config");
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(dir.path())
+    let output = isolated_libra_command(dir.path(), &home)
         .args(["cloud", "restore", "--repo-id", "test-repo"])
-        .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("HOME", &home)
-        .env("XDG_CONFIG_HOME", &config_home)
-        .env("USERPROFILE", &home)
         .env("LIBRA_D1_ACCOUNT_ID", "test-account")
         .env("LIBRA_D1_API_TOKEN", "test-token")
         .env("LIBRA_D1_DATABASE_ID", "test-db")
@@ -253,15 +263,8 @@ fn cloud_restore_fails_without_r2_env() {
 fn cloud_sync_fails_without_d1_env() {
     let dir = init_repo();
     let home = dir.path().join(".home");
-    let config_home = home.join(".config");
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(dir.path())
+    let output = isolated_libra_command(dir.path(), &home)
         .args(["cloud", "sync"])
-        .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("HOME", &home)
-        .env("XDG_CONFIG_HOME", &config_home)
-        .env("USERPROFILE", &home)
         .env("LIBRA_STORAGE_ENDPOINT", "https://example.invalid")
         .env("LIBRA_STORAGE_BUCKET", "test-bucket")
         .env("LIBRA_STORAGE_ACCESS_KEY", "test-access")
