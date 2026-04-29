@@ -8,7 +8,7 @@ use std::{
 };
 
 use git_internal::{
-    hash::ObjectHash,
+    hash::{HashKind, ObjectHash, set_hash_kind_for_test},
     internal::object::{
         commit::Commit,
         signature::{Signature, SignatureType},
@@ -171,6 +171,7 @@ fn parse_json_stdout(output: &Output) -> Value {
 }
 
 fn create_non_commit_tag_object(repo: &Path) -> String {
+    let _hash_guard = set_hash_kind_for_test(HashKind::Sha1);
     let _guard = ChangeDirGuard::new(repo);
     let runtime = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
     let head = runtime

@@ -91,7 +91,7 @@ fn sort_rev_list_commits(commits: &mut [git_internal::internal::object::commit::
         b.committer
             .timestamp
             .cmp(&a.committer.timestamp)
-            .then_with(|| a.id.to_string().cmp(&b.id.to_string()))
+            .then_with(|| a.id.cmp(&b.id))
     });
 }
 
@@ -119,14 +119,11 @@ fn rev_list_target_error(spec: &str, error: CommitBaseError) -> CliError {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        io::{self, Write},
-        str::FromStr,
-    };
+    use std::io::{self, Write};
 
     use clap::Parser;
     use git_internal::{
-        hash::ObjectHash,
+        hash::{ObjectHash, get_hash_kind},
         internal::object::{
             commit::Commit,
             signature::{Signature, SignatureType},
@@ -160,8 +157,12 @@ mod tests {
         }
     }
 
-    fn test_commit(id_hex: &str, timestamp: usize) -> Commit {
-        let id = ObjectHash::from_str(id_hex).expect("test hash should be valid");
+    fn test_hash(byte: u8) -> ObjectHash {
+        ObjectHash::from_bytes(&vec![byte; get_hash_kind().size()])
+            .expect("test hash bytes should match active hash kind")
+    }
+
+    fn test_commit(id: ObjectHash, timestamp: usize) -> Commit {
         Commit {
             id,
             tree_id: id,
@@ -186,26 +187,26 @@ mod tests {
 
     #[test]
     fn test_sort_rev_list_commits_uses_commit_id_tie_breaker() {
-        let high = "ffffffffffffffffffffffffffffffffffffffff";
-        let low = "0000000000000000000000000000000000000001";
+        let high = test_hash(0xff);
+        let low = test_hash(0x01);
         let mut commits = vec![test_commit(high, 1), test_commit(low, 1)];
 
         sort_rev_list_commits(&mut commits);
 
-        assert_eq!(commits[0].id.to_string(), low);
-        assert_eq!(commits[1].id.to_string(), high);
+        assert_eq!(commits[0].id, low);
+        assert_eq!(commits[1].id, high);
     }
 
     #[test]
     fn test_sort_rev_list_commits_orders_newest_first() {
-        let old = "0000000000000000000000000000000000000001";
-        let new = "ffffffffffffffffffffffffffffffffffffffff";
+        let old = test_hash(0x01);
+        let new = test_hash(0xff);
         let mut commits = vec![test_commit(old, 1), test_commit(new, 2)];
 
         sort_rev_list_commits(&mut commits);
 
-        assert_eq!(commits[0].id.to_string(), new);
-        assert_eq!(commits[1].id.to_string(), old);
+        assert_eq!(commits[0].id, new);
+        assert_eq!(commits[1].id, old);
     }
 
     #[test]

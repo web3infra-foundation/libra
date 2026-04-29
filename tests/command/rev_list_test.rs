@@ -2,9 +2,12 @@
 //!
 //! **Layer:** L1 — deterministic, no external dependencies.
 
+use git_internal::hash::{HashKind, set_hash_kind_for_test};
+
 use super::*;
 
-fn create_two_commit_repo_via_cli() -> tempfile::TempDir {
+fn create_two_commit_repo_with_direct_tip_update() -> tempfile::TempDir {
+    let _hash_guard = set_hash_kind_for_test(HashKind::Sha1);
     let repo = create_committed_repo_via_cli();
     let runtime = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
     runtime.block_on(async {
@@ -40,7 +43,7 @@ fn test_rev_list_defaults_to_head() {
 
 #[test]
 fn test_rev_list_head_lists_reachable_commits_newest_first() {
-    let repo = create_two_commit_repo_via_cli();
+    let repo = create_two_commit_repo_with_direct_tip_update();
 
     let head = run_libra_command(&["rev-parse", "HEAD"], repo.path());
     assert_cli_success(&head, "rev-parse HEAD");
@@ -60,7 +63,7 @@ fn test_rev_list_head_lists_reachable_commits_newest_first() {
 
 #[test]
 fn test_rev_list_supports_revision_navigation() {
-    let repo = create_two_commit_repo_via_cli();
+    let repo = create_two_commit_repo_with_direct_tip_update();
 
     let parent = run_libra_command(&["rev-parse", "HEAD~1"], repo.path());
     assert_cli_success(&parent, "rev-parse HEAD~1");
@@ -133,7 +136,7 @@ async fn test_rev_list_accepts_fully_qualified_remote_tracking_ref() {
 
 #[test]
 fn test_rev_list_json_returns_envelope() {
-    let repo = create_two_commit_repo_via_cli();
+    let repo = create_two_commit_repo_with_direct_tip_update();
 
     let output = run_libra_command(&["--json", "rev-list", "HEAD"], repo.path());
     assert_cli_success(&output, "json rev-list HEAD");
