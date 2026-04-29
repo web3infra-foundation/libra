@@ -120,8 +120,7 @@ use crate::{
         db,
     },
     utils::{
-        storage::{Storage, local::LocalStorage},
-        storage_ext::StorageExt,
+        client_storage::ClientStorage, storage::Storage, storage_ext::StorageExt,
         util::try_get_storage_path,
     },
 };
@@ -984,7 +983,7 @@ pub async fn init_mcp_server(working_dir: &Path) -> Arc<LibraMcpServer> {
     };
 
     // Initialize storage
-    let storage: Arc<dyn Storage + Send + Sync> = Arc::new(LocalStorage::new(objects_dir));
+    let storage: Arc<dyn Storage + Send + Sync> = Arc::new(ClientStorage::init(objects_dir));
 
     let intent_history_manager = Arc::new(HistoryManager::new(
         storage.clone(),

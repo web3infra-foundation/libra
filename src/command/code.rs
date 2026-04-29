@@ -141,6 +141,7 @@ use crate::{
         tui::{App, AppConfig, ExitReason, Tui, tui_init, tui_restore},
     },
     utils::{
+        client_storage::ClientStorage,
         error::{CliError, CliResult, StableErrorCode},
         output::OutputConfig,
         storage::local::LocalStorage,
@@ -2034,7 +2035,7 @@ async fn init_mcp_server(working_dir: &std::path::Path) -> Arc<LibraMcpServer> {
         }
     };
 
-    let storage = Arc::new(LocalStorage::new(objects_dir));
+    let storage = Arc::new(ClientStorage::init(objects_dir));
     let intent_history_manager = Arc::new(HistoryManager::new(storage.clone(), dot_libra, db_conn));
     Arc::new(LibraMcpServer::new_with_working_dir(
         Some(intent_history_manager),
