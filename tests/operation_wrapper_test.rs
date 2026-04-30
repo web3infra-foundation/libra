@@ -3,6 +3,7 @@ use libra::internal::operation::{
 };
 use libra::internal::operation_wrapper::{
     with_operation_log_with_conn, OperationError, OperationMeta, OperationScope,
+    ParentSelectionMode, resolve_parent_selection_with_conn,
 };
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbBackend, DbErr, Statement};
 
@@ -83,6 +84,44 @@ async fn create_tx_probe_table(db: &DatabaseConnection) {
     ))
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn resolve_parent_selection_returns_mode_and_scan_stats() {
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    create_operation_schema(&db).await;
+
+    OperationService::insert_operation_with_conn(
+        &db,
+        &sample_record("op_old_success", OperationStatus::Succeeded, 10),
+    )
+    .await
+    .unwrap();
+    OperationService::insert_operation_with_conn(
+        &db,
+        &sample_record("op_new_failed", OperationStatus::Failed, 30),
+    )
+    .await
+    .unwrap();
+    OperationService::insert_operation_with_conn(
+        &db,
+        &sample_record("op_latest_success", OperationStatus::Succeeded, 40),
+    )
+    .await
+    .unwrap();
+
+    let result = resolve_parent_selection_with_conn(
+        &db,
+        "repo_1",
+        ParentSelectionMode::SingleLatestSuccess,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.mode, ParentSelectionMode::SingleLatestSuccess);
+    assert_eq!(result.selected, vec!["op_latest_success".to_string()]);
+    assert_eq!(result.scanned_pages, 1);
+    assert_eq!(result.scanned_items, 3);
 }
 
 #[tokio::test]

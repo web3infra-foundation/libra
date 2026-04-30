@@ -32,6 +32,19 @@ use crate::internal::{
 
 const PARENT_RESOLUTION_PAGE_SIZE: u64 = 200;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParentSelectionMode {
+    SingleLatestSuccess,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParentSelectionResult {
+    pub selected: Vec<String>,
+    pub scanned_pages: u64,
+    pub scanned_items: u64,
+    pub mode: ParentSelectionMode,
+}
+
 /// Required command metadata captured by `with_operation_log`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OperationMeta {
@@ -201,7 +214,10 @@ where
         ))
     })?;
 
-    let parent_op_id = resolve_parent_operation_id_with_conn(&txn, &meta.repo_id).await?;
+    let parent_selection =
+        resolve_parent_selection_with_conn(&txn, &meta.repo_id, ParentSelectionMode::SingleLatestSuccess)
+            .await?;
+    let parent_op_id = parent_selection.selected.first().cloned();
 
     let payload = match operation(&txn).await {
         Ok(payload) => payload,
@@ -295,19 +311,23 @@ where
     })
 }
 
-/// Resolve the most recent successful operation in a repository for v1 parent strategy.
+/// Resolve parent operations using a stable strategy entrypoint.
 ///
-/// The resolver scans recent operations in reverse chronological order and returns the
-/// first successful operation id, or `None` when no successful parent exists.
-pub async fn resolve_parent_operation_id_with_conn<C: sea_orm::ConnectionTrait>(
+/// v1 uses single-parent latest-success strategy. The result keeps a vector
+/// shape to reserve forward-compatible multi-parent extension.
+pub async fn resolve_parent_selection_with_conn<C: sea_orm::ConnectionTrait>(
     db: &C,
     repo_id: &str,
-) -> Result<Option<String>, OperationError> {
+    mode: ParentSelectionMode,
+) -> Result<ParentSelectionResult, OperationError> {
     if repo_id.trim().is_empty() {
         return Err(OperationError::validation("repo_id must not be empty"));
     }
 
     let mut page: u64 = 1;
+    let mut scanned_pages = 0;
+    let mut scanned_items = 0;
+
     loop {
         let records = OperationService::list_operations_by_repo_paginated_with_conn(
             db,
@@ -325,22 +345,49 @@ pub async fn resolve_parent_operation_id_with_conn<C: sea_orm::ConnectionTrait>(
             ))
         })?;
 
+        scanned_pages += 1;
         let items_len = records.items.len() as u64;
+        scanned_items += items_len;
+
         if let Some(parent) = records
             .items
             .into_iter()
             .find(|record| record.status == OperationStatus::Succeeded)
             .map(|record| record.op_id)
         {
-            return Ok(Some(parent));
+            return Ok(ParentSelectionResult {
+                selected: vec![parent],
+                scanned_pages,
+                scanned_items,
+                mode,
+            });
         }
 
         if items_len < records.per_page {
-            return Ok(None);
+            return Ok(ParentSelectionResult {
+                selected: Vec::new(),
+                scanned_pages,
+                scanned_items,
+                mode,
+            });
         }
 
         page += 1;
     }
+}
+
+/// Resolve the most recent successful operation in a repository for v1 parent strategy.
+///
+/// The resolver scans recent operations in reverse chronological order and returns the
+/// first successful operation id, or `None` when no successful parent exists.
+pub async fn resolve_parent_operation_id_with_conn<C: sea_orm::ConnectionTrait>(
+    db: &C,
+    repo_id: &str,
+) -> Result<Option<String>, OperationError> {
+    let selection =
+        resolve_parent_selection_with_conn(db, repo_id, ParentSelectionMode::SingleLatestSuccess)
+            .await?;
+    Ok(selection.selected.first().cloned())
 }
 
 async fn collect_final_view_with_conn<C: sea_orm::ConnectionTrait>(
