@@ -6,7 +6,7 @@
 
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, EntityTrait,
-    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
+    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Select,
 };
 use thiserror::Error;
 
@@ -179,6 +179,15 @@ pub enum OperationServiceError {
 pub struct OperationService;
 
 impl OperationService {
+    fn apply_repo_operation_order(
+        query: Select<operation::Entity>,
+    ) -> Select<operation::Entity> {
+        query
+            .order_by_desc(operation::Column::EndTs)
+            .order_by_desc(operation::Column::StartTs)
+            .order_by_desc(operation::Column::OpId)
+    }
+
     fn log_list_item_from_model(
         model: operation::Model,
     ) -> Result<OperationLogListItem, OperationServiceError> {
@@ -280,11 +289,9 @@ impl OperationService {
             ));
         }
 
-        let models = operation::Entity::find()
-            .filter(operation::Column::RepoId.eq(repo_id))
-            .order_by_desc(operation::Column::EndTs)
-            .order_by_desc(operation::Column::StartTs)
-            .order_by_desc(operation::Column::OpId)
+        let models = Self::apply_repo_operation_order(
+            operation::Entity::find().filter(operation::Column::RepoId.eq(repo_id)),
+        )
             .limit(limit)
             .all(db)
             .await
@@ -325,11 +332,9 @@ impl OperationService {
                 ))
             })?;
 
-        let models = operation::Entity::find()
-            .filter(operation::Column::RepoId.eq(repo_id))
-            .order_by_desc(operation::Column::EndTs)
-            .order_by_desc(operation::Column::StartTs)
-            .order_by_desc(operation::Column::OpId)
+        let models = Self::apply_repo_operation_order(
+            operation::Entity::find().filter(operation::Column::RepoId.eq(repo_id)),
+        )
             .offset(query.offset())
             .limit(query.per_page)
             .all(db)

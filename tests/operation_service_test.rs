@@ -422,6 +422,37 @@ async fn paginated_log_query_order_and_boundary() {
 }
 
 #[tokio::test]
+async fn paginated_log_query_is_deterministic_when_timestamps_tie() {
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    create_operation_schema(&db).await;
+
+    let same_end = 500;
+    let mut op_a = sample_operation("op_a", "repo_tie", "view_a", same_end);
+    op_a.start_ts = 450;
+    let mut op_b = sample_operation("op_b", "repo_tie", "view_b", same_end);
+    op_b.start_ts = 450;
+    let mut op_c = sample_operation("op_c", "repo_tie", "view_c", same_end);
+    op_c.start_ts = 450;
+
+    for record in [op_a, op_b, op_c] {
+        OperationService::insert_operation_with_conn(&db, &record)
+            .await
+            .unwrap();
+    }
+
+    let page = OperationService::list_operations_by_repo_paginated_with_conn(
+        &db,
+        "repo_tie",
+        OperationQueryPage { page: 1, per_page: 10 },
+    )
+    .await
+    .unwrap();
+
+    let ordered: Vec<String> = page.items.into_iter().map(|item| item.op_id).collect();
+    assert_eq!(ordered, vec!["op_c", "op_b", "op_a"]);
+}
+
+#[tokio::test]
 async fn graph_roundtrip_and_duplicate_constraint_failure() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     create_operation_schema(&db).await;
