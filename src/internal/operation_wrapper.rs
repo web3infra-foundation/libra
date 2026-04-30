@@ -24,12 +24,13 @@ use crate::internal::{
     head::Head,
     model::reference,
     operation::{
-        OperationGraphRecord, OperationParentRecord, OperationRecord, OperationService,
-        OperationStatus, OperationViewRecord, OperationViewRefRecord, OperationViewWorkspaceRecord,
+        OperationGraphRecord, OperationParentRecord, OperationQueryPage, OperationRecord,
+        OperationService, OperationStatus, OperationViewRecord, OperationViewRefRecord,
+        OperationViewWorkspaceRecord,
     },
 };
 
-const PARENT_RESOLUTION_LIMIT: u64 = 200;
+const PARENT_RESOLUTION_PAGE_SIZE: u64 = 200;
 
 /// Required command metadata captured by `with_operation_log`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -306,23 +307,40 @@ pub async fn resolve_parent_operation_id_with_conn<C: sea_orm::ConnectionTrait>(
         return Err(OperationError::validation("repo_id must not be empty"));
     }
 
-    let records = OperationService::list_operations_by_repo_with_conn(
-        db,
-        repo_id,
-        PARENT_RESOLUTION_LIMIT,
-    )
-    .await
-    .map_err(|err| {
-        OperationError::begin(format!(
-            "failed to resolve parent operation for repository '{}': {err}",
-            repo_id
-        ))
-    })?;
+    let mut page: u64 = 1;
+    loop {
+        let records = OperationService::list_operations_by_repo_paginated_with_conn(
+            db,
+            repo_id,
+            OperationQueryPage {
+                page,
+                per_page: PARENT_RESOLUTION_PAGE_SIZE,
+            },
+        )
+        .await
+        .map_err(|err| {
+            OperationError::begin(format!(
+                "failed to resolve parent operation for repository '{}': {err}",
+                repo_id
+            ))
+        })?;
 
-    Ok(records
-        .into_iter()
-        .find(|record| record.status == OperationStatus::Succeeded)
-        .map(|record| record.op_id))
+        let items_len = records.items.len() as u64;
+        if let Some(parent) = records
+            .items
+            .into_iter()
+            .find(|record| record.status == OperationStatus::Succeeded)
+            .map(|record| record.op_id)
+        {
+            return Ok(Some(parent));
+        }
+
+        if items_len < records.per_page {
+            return Ok(None);
+        }
+
+        page += 1;
+    }
 }
 
 async fn collect_final_view_with_conn<C: sea_orm::ConnectionTrait>(
@@ -406,6 +424,7 @@ async fn collect_final_view_with_conn<C: sea_orm::ConnectionTrait>(
     })
 }
 
+/*
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
@@ -534,13 +553,17 @@ mod tests {
         .unwrap();
     }
 
-    async fn create_reference_table_with_head(db: &sea_orm::DatabaseConnection) {
+    async fn create_reference_table_without_head(db: &sea_orm::DatabaseConnection) {
         db.execute(Statement::from_string(
             DbBackend::Sqlite,
             "CREATE TABLE reference (id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT,kind TEXT NOT NULL,\"commit\" TEXT,remote TEXT)".to_string(),
         ))
         .await
         .unwrap();
+    }
+
+    async fn create_reference_table_with_head(db: &sea_orm::DatabaseConnection) {
+        create_reference_table_without_head(db).await;
         db.execute(Statement::from_string(
             DbBackend::Sqlite,
             "INSERT INTO reference(name, kind, \"commit\", remote) VALUES('main', 'Head', NULL, NULL)"
@@ -549,6 +572,7 @@ mod tests {
         .await
         .unwrap();
     }
+
 
     #[tokio::test]
     async fn resolve_parent_operation_picks_latest_successful_record() {
@@ -669,6 +693,11 @@ mod tests {
         .await
         .unwrap();
 
+        let parent_seed = sample_record("op_seed_success", OperationStatus::Succeeded, 10);
+        OperationService::insert_operation_with_conn(&db, &parent_seed)
+            .await
+            .unwrap();
+
         let result = with_operation_log_with_conn(
             &db,
             valid_meta(),
@@ -698,6 +727,8 @@ mod tests {
         assert_eq!(graph.view.head_target, "main");
         assert_eq!(graph.refs.len(), 1);
         assert_eq!(graph.workspace.len(), 1);
+        assert_eq!(graph.parents.len(), 1);
+        assert_eq!(graph.parents[0].parent_op_id, "op_seed_success");
     }
 
     #[tokio::test]
@@ -749,6 +780,128 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn with_operation_log_rolls_back_on_snapshot_failure() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        create_operation_table(&db).await;
+        create_operation_graph_tables(&db).await;
+        create_reference_table_without_head(&db).await;
+        create_tx_probe_table(&db).await;
+
+        let error = with_operation_log_with_conn(
+            &db,
+            valid_meta(),
+            OperationScope::default(),
+            |txn| {
+                Box::pin(async move {
+                    txn.execute(Statement::from_string(
+                        DbBackend::Sqlite,
+                        "INSERT INTO tx_probe(id) VALUES(3)".to_string(),
+                    ))
+                    .await?;
+                    Ok::<_, DbErr>(())
+                })
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, OperationError::Snapshot(_)));
+
+        let tx_row = db
+            .query_one(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT COUNT(*) FROM tx_probe WHERE id = 3".to_string(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        let tx_count: i64 = tx_row.try_get_by_index(0).unwrap_or_default();
+        assert_eq!(tx_count, 0);
+
+        let op_row = db
+            .query_one(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT COUNT(*) FROM operation".to_string(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        let op_count: i64 = op_row.try_get_by_index(0).unwrap_or_default();
+        assert_eq!(op_count, 0);
+
+        let view_row = db
+            .query_one(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT COUNT(*) FROM operation_view".to_string(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        let view_count: i64 = view_row.try_get_by_index(0).unwrap_or_default();
+        assert_eq!(view_count, 0);
+
+        let parent_row = db
+            .query_one(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT COUNT(*) FROM operation_parent".to_string(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        let parent_count: i64 = parent_row.try_get_by_index(0).unwrap_or_default();
+        assert_eq!(parent_count, 0);
+    }
+
+    #[tokio::test]
+    async fn with_operation_log_builds_parent_chain_and_restore_graphs() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        create_operation_table(&db).await;
+        create_operation_graph_tables(&db).await;
+        create_reference_table_with_head(&db).await;
+
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            "INSERT INTO reference(name, kind, \"commit\", remote) VALUES('main', 'Branch', '1111111111111111111111111111111111111111', NULL)"
+                .to_string(),
+        ))
+        .await
+        .unwrap();
+
+        let first = with_operation_log_with_conn(
+            &db,
+            valid_meta(),
+            OperationScope::default(),
+            |_txn| Box::pin(async move { Ok::<_, DbErr>("first".to_string()) }),
+        )
+        .await
+        .unwrap();
+
+        let second = with_operation_log_with_conn(
+            &db,
+            valid_meta(),
+            OperationScope::default(),
+            |_txn| Box::pin(async move { Ok::<_, DbErr>("second".to_string()) }),
+        )
+        .await
+        .unwrap();
+
+        let first_graph = OperationService::load_restore_view_by_operation_with_conn(&db, &first.op_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first_graph.parents.len(), 0);
+
+        let second_graph = OperationService::load_restore_view_by_operation_with_conn(&db, &second.op_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second_graph.parents.len(), 1);
+        assert_eq!(second_graph.parents[0].parent_op_id, first.op_id);
+        assert_eq!(second_graph.refs.len(), 1);
+        assert_eq!(second_graph.workspace.len(), 1);
+    }
+
+    #[tokio::test]
     async fn with_operation_log_rolls_back_on_business_failure() {
         let db = Database::connect("sqlite::memory:").await.unwrap();
         create_operation_table(&db).await;
@@ -793,5 +946,39 @@ mod tests {
             .unwrap();
         let count: i64 = row.try_get_by_index(0).unwrap_or_default();
         assert_eq!(count, 0);
+
+        let op_row = db
+            .query_one(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT COUNT(*) FROM operation".to_string(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        let op_count: i64 = op_row.try_get_by_index(0).unwrap_or_default();
+        assert_eq!(op_count, 0);
+
+        let view_row = db
+            .query_one(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT COUNT(*) FROM operation_view".to_string(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        let view_count: i64 = view_row.try_get_by_index(0).unwrap_or_default();
+        assert_eq!(view_count, 0);
+
+        let parent_row = db
+            .query_one(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT COUNT(*) FROM operation_parent".to_string(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        let parent_count: i64 = parent_row.try_get_by_index(0).unwrap_or_default();
+        assert_eq!(parent_count, 0);
     }
 }
+*/

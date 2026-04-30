@@ -284,6 +284,7 @@ impl OperationService {
             .filter(operation::Column::RepoId.eq(repo_id))
             .order_by_desc(operation::Column::EndTs)
             .order_by_desc(operation::Column::StartTs)
+            .order_by_desc(operation::Column::OpId)
             .limit(limit)
             .all(db)
             .await
@@ -328,6 +329,7 @@ impl OperationService {
             .filter(operation::Column::RepoId.eq(repo_id))
             .order_by_desc(operation::Column::EndTs)
             .order_by_desc(operation::Column::StartTs)
+            .order_by_desc(operation::Column::OpId)
             .offset(query.offset())
             .limit(query.per_page)
             .all(db)
