@@ -481,6 +481,7 @@ Supported subcommands:
 - `libra worktree move <src> <dest>` – move a worktree directory to a new location
 - `libra worktree prune` – prune missing or non-existent worktrees from the registry
 - `libra worktree remove <path>` – remove a worktree from the registry without deleting its directory on disk (the main worktree cannot be removed)
+- `libra worktree umount <path> [--cleanup]` – unmount a FUSE worktree or stale Agent task worktree mountpoint
 - `libra worktree repair` – repair inconsistent worktree state if the registry and directories get out of sync
 
 ---

@@ -474,6 +474,10 @@ pub struct CodeArgs {
     #[arg(long = "kimi-thinking", value_enum)]
     pub kimi_thinking: Option<KimiThinkingArg>,
 
+    /// Kimi stream mode: true or false. Defaults to true for Kimi.
+    #[arg(long = "kimi-stream", value_name = "BOOL")]
+    pub kimi_stream: Option<bool>,
+
     /// Test-only fake provider fixture.
     #[cfg(feature = "test-provider")]
     #[arg(long = "fake-fixture", hide = true, value_name = "PATH")]
@@ -1178,6 +1182,7 @@ fn completion_reasoning_effort_for_args(args: &CodeArgs) -> Option<CompletionRea
 fn completion_stream_for_args(args: &CodeArgs) -> Option<bool> {
     match args.provider {
         CodeProvider::Deepseek => args.deepseek_stream,
+        CodeProvider::Kimi => Some(args.kimi_stream.unwrap_or(true)),
         _ => None,
     }
 }
@@ -2555,6 +2560,10 @@ fn validate_mode_args(args: &CodeArgs, _output: &OutputConfig) -> Result<(), Str
         return Err("--kimi-thinking is only supported with --provider=kimi".to_string());
     }
 
+    if args.provider != CodeProvider::Kimi && args.kimi_stream.is_some() {
+        return Err("--kimi-stream is only supported with --provider=kimi".to_string());
+    }
+
     #[cfg(feature = "test-provider")]
     {
         if args.provider == CodeProvider::Fake {
@@ -2620,6 +2629,7 @@ fn reject_non_tui_flags(args: &CodeArgs, mode: &str) -> Result<(), String> {
     )?;
     reject_mode_flag(args.deepseek_stream.is_some(), "--deepseek-stream", mode)?;
     reject_mode_flag(args.kimi_thinking.is_some(), "--kimi-thinking", mode)?;
+    reject_mode_flag(args.kimi_stream.is_some(), "--kimi-stream", mode)?;
     reject_mode_flag(args.context.is_some(), "--context", mode)?;
     reject_mode_flag(args.resume.is_some(), "--resume", mode)?;
     reject_mode_flag(
@@ -2668,6 +2678,7 @@ mod tests {
             deepseek_reasoning_effort: None,
             deepseek_stream: None,
             kimi_thinking: None,
+            kimi_stream: None,
             #[cfg(feature = "test-provider")]
             fake_fixture: None,
             context: None,
@@ -2969,12 +2980,43 @@ mod tests {
     }
 
     #[test]
+    fn defaults_kimi_stream_for_kimi_provider() {
+        let args = CodeArgs::try_parse_from(["libra", "--provider", "kimi"]).unwrap();
+
+        assert_eq!(args.provider, CodeProvider::Kimi);
+        assert_eq!(args.kimi_stream, None);
+        assert_eq!(completion_stream_for_args(&args), Some(true));
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn accepts_kimi_stream_override_for_kimi_provider() {
+        let args =
+            CodeArgs::try_parse_from(["libra", "--provider", "kimi", "--kimi-stream", "false"])
+                .unwrap();
+
+        assert_eq!(args.provider, CodeProvider::Kimi);
+        assert_eq!(args.kimi_stream, Some(false));
+        assert_eq!(completion_stream_for_args(&args), Some(false));
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
     fn rejects_kimi_thinking_for_non_kimi_provider() {
         let mut args = base_args();
         args.kimi_thinking = Some(KimiThinkingArg::Enabled);
 
         let err = validate_mode_args(&args, &OutputConfig::default()).unwrap_err();
         assert!(err.contains("--kimi-thinking"));
+    }
+
+    #[test]
+    fn rejects_kimi_stream_for_non_kimi_provider() {
+        let mut args = base_args();
+        args.kimi_stream = Some(true);
+
+        let err = validate_mode_args(&args, &OutputConfig::default()).unwrap_err();
+        assert!(err.contains("--kimi-stream"));
     }
 
     #[test]

@@ -637,6 +637,10 @@ fn command_preflight_storage(command: &Commands) -> CliResult<Option<std::path::
         Commands::Init(_) | Commands::Clone(_) | Commands::Open(_) | Commands::CodeControl(_) => {
             Ok(None)
         }
+        #[cfg(unix)]
+        Commands::Worktree(command::worktree::WorktreeArgs {
+            command: command::worktree::WorktreeSubcommand::Umount { .. },
+        }) => Ok(None),
         // Config global/system scopes don't require a repository.
         Commands::Config(cfg) if cfg.global || cfg.system => Ok(None),
         Commands::Code(code_args) => {
@@ -947,6 +951,14 @@ mod tests {
             matches!(cli.command, Commands::Config(_)),
             "`cfg` should parse as the config subcommand"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worktree_umount_preflight_does_not_require_repo() {
+        let cli = Cli::try_parse_from(["libra", "worktree", "umount", "/tmp/libra-task"]).unwrap();
+
+        assert!(matches!(command_preflight_storage(&cli.command), Ok(None)));
     }
 
     /// Scenario: clap's built-in Levenshtein matcher should suggest `init` for the

@@ -14,6 +14,7 @@ libra worktree unlock <path>
 libra worktree move <src> <dest>
 libra worktree prune
 libra worktree remove <path>
+libra worktree umount <path> [--cleanup]
 libra worktree repair
 ```
 
@@ -113,6 +114,24 @@ Unregister a worktree from the state file. The directory on disk is intentionall
 
 ```bash
 libra worktree remove ../my-feature
+```
+
+### Subcommand: `umount`
+
+Unmount a FUSE worktree mountpoint. This is primarily useful for cleaning up
+stale Agent task worktrees when the operating system reports a path as busy.
+The command also accepts a Libra task worktree root and resolves its
+`workspace` mountpoint automatically.
+
+Alias: `unmount`
+
+| Argument / Flag | Description |
+|-----------------|-------------|
+| `<path>` | FUSE mountpoint path, or a Libra task worktree root containing a `workspace` mountpoint. |
+| `--cleanup` | After unmounting, remove the Libra task worktree root. Only task FUSE worktree paths are accepted. |
+
+```bash
+libra worktree umount /repo/.libra/worktrees/tasks/libra-task-worktree-fuse-29353-id/workspace --cleanup
 ```
 
 ### Subcommand: `repair`

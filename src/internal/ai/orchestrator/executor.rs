@@ -28,9 +28,9 @@ use super::{
     gate, policy,
     run_state::{RunStateSnapshot, RunStateStore},
     types::{
-        ExecutionPlanSpec, GateReport, OrchestratorError, OrchestratorObserver, ReviewOutcome,
-        TaskKind, TaskNodeStatus, TaskResult, TaskRuntimeEvent, TaskRuntimeNoteLevel,
-        TaskRuntimePhase, TaskSpec, TaskWorkspaceBackend, ToolCallRecord,
+        ExecutionPlanSpec, GateReport, OrchestratorError, OrchestratorObserver, PolicyViolation,
+        ReviewOutcome, TaskKind, TaskNodeStatus, TaskResult, TaskRuntimeEvent,
+        TaskRuntimeNoteLevel, TaskRuntimePhase, TaskSpec, TaskWorkspaceBackend, ToolCallRecord,
     },
     workspace::{
         FuseAttemptOutcome, FuseProvisionState, detect_contract_violations,
@@ -79,6 +79,7 @@ pub struct ExecutorConfig {
 
 const NO_CHANGES_NEEDED_TOKEN: &str = "[NO_CHANGES_NEEDED]";
 const MAX_STORED_THINKING_CHARS: usize = 64_000;
+const MAX_GATE_FAILURE_OUTPUT_CHARS: usize = 2_000;
 
 struct TaskExecutionArtifacts {
     tool_calls: Vec<ToolCallRecord>,
@@ -398,7 +399,9 @@ where
         }
 
         let retryable_failure = match agent_result {
-            Ok(turn) if policy_violations.is_empty() => {
+            Ok(turn)
+                if task_completion_allows_blocked_escalation(&policy_violations, &tool_calls) =>
+            {
                 if let Some(observer) = &config.observer
                     && !turn.final_text.trim().is_empty()
                 {
@@ -685,6 +688,17 @@ fn submit_task_complete_result(tool_calls: &[ToolCallRecord]) -> Option<&str> {
         .and_then(|value| value.as_str())
 }
 
+fn task_completion_allows_blocked_escalation(
+    policy_violations: &[PolicyViolation],
+    tool_calls: &[ToolCallRecord],
+) -> bool {
+    policy_violations.is_empty()
+        || (latest_successful_submit_task_complete(tool_calls).is_some()
+            && policy_violations
+                .iter()
+                .all(|violation| violation.code == "sandbox-escalation-deny"))
+}
+
 fn latest_successful_submit_task_complete(
     tool_calls: &[ToolCallRecord],
 ) -> Option<&ToolCallRecord> {
@@ -789,15 +803,18 @@ async fn execute_gate_task(
         }
     };
 
+    let status = if gate_report.all_required_passed {
+        TaskNodeStatus::Completed
+    } else {
+        TaskNodeStatus::Failed
+    };
+    let agent_output = failed_gate_report_output(&gate_report);
+
     TaskResult {
         task_id: task.id(),
-        status: if gate_report.all_required_passed {
-            TaskNodeStatus::Completed
-        } else {
-            TaskNodeStatus::Failed
-        },
+        status,
         gate_report: Some(gate_report),
-        agent_output: None,
+        agent_output,
         retry_count: 0,
         tool_calls: Vec::new(),
         policy_violations: Vec::new(),
@@ -805,6 +822,72 @@ async fn execute_gate_task(
         review: None,
         thinking: None,
     }
+}
+
+fn failed_gate_report_output(report: &GateReport) -> Option<String> {
+    if report.all_required_passed {
+        return None;
+    }
+
+    let failures = report
+        .results
+        .iter()
+        .filter(|result| !result.passed)
+        .map(|result| {
+            let mut summary = format!(
+                "- {} ({}) failed with exit {}{}",
+                result.check_id,
+                result.kind,
+                result.exit_code,
+                if result.timed_out {
+                    " after timeout"
+                } else {
+                    ""
+                }
+            );
+            if let Some(stderr) = gate_output_excerpt("stderr", &result.stderr) {
+                summary.push('\n');
+                summary.push_str(&stderr);
+            }
+            if let Some(stdout) = gate_output_excerpt("stdout", &result.stdout) {
+                summary.push('\n');
+                summary.push_str(&stdout);
+            }
+            summary
+        })
+        .collect::<Vec<_>>();
+
+    if failures.is_empty() {
+        Some("required gate checks failed without per-check output".to_string())
+    } else {
+        Some(format!(
+            "required gate checks failed:\n{}",
+            failures.join("\n")
+        ))
+    }
+}
+
+fn gate_output_excerpt(label: &str, output: &str) -> Option<String> {
+    let output = output.trim();
+    if output.is_empty() {
+        return None;
+    }
+
+    let mut excerpt = output
+        .chars()
+        .take(MAX_GATE_FAILURE_OUTPUT_CHARS)
+        .collect::<String>();
+    if output.chars().count() > MAX_GATE_FAILURE_OUTPUT_CHARS {
+        excerpt.push_str("\n...<truncated>");
+    }
+    Some(format!("{label}:\n{}", indent_lines(&excerpt, "  ")))
+}
+
+fn indent_lines(text: &str, indent: &str) -> String {
+    text.lines()
+        .map(|line| format!("{indent}{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 async fn execute_gate_task_in_task_worktree(
@@ -3628,6 +3711,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_gate_task_reports_failed_check_details() {
+        let task = TaskSpec {
+            kind: TaskKind::Gate,
+            gate_stage: Some(super::super::types::GateStage::Fast),
+            checks: vec![Check {
+                id: "fmt".into(),
+                kind: CheckKind::Command,
+                command: Some("printf 'formatting failed\\n' >&2; exit 1".into()),
+                timeout_seconds: Some(10),
+                expected_exit_code: Some(0),
+                required: true,
+                artifacts_produced: vec![],
+            }],
+            ..implementation_task()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let result = execute_gate_task(&task, dir.path(), &spec(), None, None).await;
+
+        assert_eq!(result.status, TaskNodeStatus::Failed);
+        let agent_output = result.agent_output.unwrap();
+        assert!(agent_output.contains("required gate checks failed"));
+        assert!(agent_output.contains("fmt"));
+        assert!(agent_output.contains("exit 1"));
+        assert!(agent_output.contains("formatting failed"));
+    }
+
+    #[tokio::test]
     async fn test_execute_gate_task_emits_check_progress_events() {
         let task = TaskSpec {
             kind: TaskKind::Gate,
@@ -4403,6 +4513,53 @@ mod tests {
                 .unwrap();
 
         assert!(reason.contains("without writing any files"));
+    }
+
+    #[test]
+    fn task_completion_allows_only_blocked_shell_escalation_after_terminal_submit() {
+        let submit_call = ToolCallRecord {
+            tool_name: "submit_task_complete".into(),
+            action: "execute".into(),
+            arguments_json: Some(serde_json::json!({
+                "result": "no_changes_needed",
+                "summary": "workspace already satisfies acceptance criteria",
+                "evidence": [],
+            })),
+            success: true,
+            ..ToolCallRecord::default()
+        };
+        let violations = vec![PolicyViolation {
+            code: "sandbox-escalation-deny".into(),
+            message: "shell escalation is not allowed for orchestrator-managed tasks".into(),
+            tool_name: Some("shell".into()),
+            path: None,
+        }];
+
+        assert!(task_completion_allows_blocked_escalation(
+            &violations,
+            &[submit_call]
+        ));
+    }
+
+    #[test]
+    fn task_completion_keeps_other_policy_violations_blocking() {
+        let submit_call = ToolCallRecord {
+            tool_name: "submit_task_complete".into(),
+            action: "execute".into(),
+            success: true,
+            ..ToolCallRecord::default()
+        };
+        let violations = vec![PolicyViolation {
+            code: "scope-creep".into(),
+            message: "write escaped declared scope".into(),
+            tool_name: Some("apply_patch".into()),
+            path: Some("outside.txt".into()),
+        }];
+
+        assert!(!task_completion_allows_blocked_escalation(
+            &violations,
+            &[submit_call]
+        ));
     }
 
     #[test]

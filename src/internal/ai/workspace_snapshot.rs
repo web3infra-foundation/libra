@@ -128,9 +128,8 @@ pub(crate) fn workspace_entry_if_exists(path: &Path) -> io::Result<Option<Worksp
     }
 }
 
-fn ignored_workspace_entry(path: &Path, is_dir: bool) -> bool {
-    protected_workspace_entry(path)
-        || (is_dir && generated_artifacts::is_generated_build_dir_path(path))
+fn ignored_workspace_entry(path: &Path, _is_dir: bool) -> bool {
+    protected_workspace_entry(path) || generated_artifacts::is_generated_build_dir_path(path)
 }
 
 fn protected_workspace_entry(path: &Path) -> bool {
@@ -290,6 +289,30 @@ mod tests {
                 .contains_key(Path::new("target/.rustc_info.json"))
         );
         assert!(!snapshot.entries.contains_key(Path::new("target/debug/app")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_skips_generated_build_symlinks_without_gitignore() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("Cargo.lock"), "# lock\n").unwrap();
+        for name in ["target", "build", ".gradle", "bazel-bin"] {
+            let external = temp.path().join(format!("external-{name}"));
+            fs::create_dir_all(&external).unwrap();
+            symlink_path(&external, &root.join(name)).unwrap();
+        }
+
+        let snapshot = snapshot_workspace(&root).unwrap();
+
+        assert!(snapshot.entries.contains_key(Path::new("Cargo.lock")));
+        for name in ["target", "build", ".gradle", "bazel-bin"] {
+            assert!(
+                !snapshot.entries.contains_key(Path::new(name)),
+                "{name} symlink should be ignored"
+            );
+        }
     }
 
     #[test]

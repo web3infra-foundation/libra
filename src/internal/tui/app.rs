@@ -40,6 +40,8 @@ use super::{
     terminal::{TARGET_FRAME_INTERVAL, Tui, TuiEvent},
     welcome_shader::{self, WelcomeView},
 };
+#[cfg(unix)]
+use crate::utils::fuse as fuse_utils;
 use crate::{
     cli_error,
     internal::ai::{
@@ -621,7 +623,9 @@ where
         // Enter alternate screen
         self.tui.enter_alt_screen()?;
         let run_result = self.run_in_alt_screen().await;
+        self.interrupt_agent_task();
         let leave_result = self.tui.leave_alt_screen();
+        self.sweep_fuse_task_worktrees_on_shutdown().await;
 
         // Save session on exit (best-effort)
         if self.session.message_count() > 0
@@ -637,6 +641,55 @@ where
             (Err(run_err), Err(_leave_err)) => Err(run_err),
         }
     }
+
+    #[cfg(unix)]
+    async fn sweep_fuse_task_worktrees_on_shutdown(&self) {
+        let repo_working_dir = self.registry.working_dir().to_path_buf();
+        let display_repo = repo_working_dir.display().to_string();
+        let sweep_result = tokio::task::spawn_blocking(move || {
+            fuse_utils::sweep_repo_fuse_task_worktrees(&repo_working_dir)
+        })
+        .await;
+
+        match sweep_result {
+            Ok(Ok(report)) => {
+                if !report.is_empty() {
+                    tracing::info!(
+                        repo = %display_repo,
+                        scanned = report.scanned,
+                        cleaned = report.cleaned,
+                        skipped_live_owner = report.skipped_live_owner,
+                        failures = report.failures.len(),
+                        "swept repo-local FUSE task worktrees during TUI shutdown"
+                    );
+                }
+                for failure in report.failures {
+                    tracing::warn!(
+                        path = %failure.path.display(),
+                        error = %failure.message,
+                        "failed to clean repo-local FUSE task worktree during TUI shutdown"
+                    );
+                }
+            }
+            Ok(Err(err)) => {
+                tracing::warn!(
+                    repo = %display_repo,
+                    error = %err,
+                    "failed to sweep repo-local FUSE task worktrees during TUI shutdown"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    repo = %display_repo,
+                    error = %err,
+                    "repo-local FUSE task worktree shutdown sweep task failed"
+                );
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    async fn sweep_fuse_task_worktrees_on_shutdown(&self) {}
 
     async fn run_in_alt_screen(&mut self) -> anyhow::Result<AppExitInfo> {
         self.tui.clear()?;
@@ -5428,20 +5481,21 @@ where
                     let _ = self.tx.send(AppEvent::DagTaskMuxClear {
                         turn_id: self.turn_id,
                     });
+                    // The right-side workflow graph tracks whether Phase 3 ran.
+                    // Pass/fail details remain in the verification summary.
                     let _ = self.tx.send(AppEvent::DagValidationStatus {
                         turn_id: self.turn_id,
-                        passed: report.overall_passed,
+                        passed: true,
                     });
                     self.send_note(format_system_verification_stage_note(plan, report));
                 }
 
                 fn on_decision(&self, plan: &ExecutionPlanSpec, decision: &DecisionOutcome) {
+                    // The release row represents Phase 4 completion, not whether
+                    // the decision was Commit, HumanReviewRequired, or Abandon.
                     let _ = self.tx.send(AppEvent::DagReleaseStatus {
                         turn_id: self.turn_id,
-                        passed: matches!(
-                            decision,
-                            DecisionOutcome::Commit | DecisionOutcome::HumanReviewRequired
-                        ),
+                        passed: true,
                     });
                     self.send_note(format_decision_stage_note(plan, decision));
                 }

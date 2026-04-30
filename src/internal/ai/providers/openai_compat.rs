@@ -35,9 +35,10 @@ pub enum ChatMessage {
     User { content: String },
     /// An assistant response, which may include both text and tool calls.
     ///
-    /// `reasoning_content` is only populated for providers that surface chain-of-thought
-    /// (currently DeepSeek's `reasoner` models). It is intentionally skipped during
-    /// serialisation when `None` so providers that reject the field do not see it.
+    /// `reasoning_content` is only populated for providers that surface
+    /// chain-of-thought, such as DeepSeek and Kimi thinking models. It is
+    /// intentionally skipped during serialisation when `None` so providers that
+    /// reject the field do not see it.
     Assistant {
         content: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -206,9 +207,9 @@ pub fn build_messages(request: &CompletionRequest) -> Result<Vec<ChatMessage>, C
 /// Builds messages while preserving assistant `reasoning_content`.
 ///
 /// Functional scope:
-/// - Provider-specific helper for DeepSeek's thinking mode where the chain-of-thought
-///   tokens emitted by the previous turn must be echoed back to keep the model
-///   "thinking" coherent across turns.
+/// - Provider-specific helper for thinking modes where chain-of-thought tokens
+///   emitted by the previous turn must be echoed back to keep the model's
+///   reasoning coherent across turns.
 ///
 /// Boundary conditions:
 /// - Other OpenAI-compatible providers should use [`build_messages`] so they do not
@@ -380,7 +381,7 @@ pub fn parse_choice_content(choice: &ChatChoice) -> Result<Vec<AssistantContent>
 /// Extracts provider-specific reasoning content from an assistant choice.
 ///
 /// Functional scope:
-/// - Currently only DeepSeek's `reasoner` models populate this field.
+/// - DeepSeek and Kimi thinking models populate this field.
 ///
 /// Boundary conditions:
 /// - Whitespace-only `reasoning_content` is treated as absent so downstream code

@@ -38,6 +38,8 @@ use super::{
     acl::{ScopeVerdict, cargo_lock_companion_allowed, check_scope},
     types::TaskWorkspaceBackend,
 };
+#[cfg(unix)]
+use crate::utils::fuse as fuse_utils;
 use crate::{
     internal::ai::workspace_snapshot::{
         WorkspaceEntry, WorkspaceSnapshot, changed_paths_since_baseline, snapshot_workspace,
@@ -194,7 +196,7 @@ pub(crate) fn prepare_task_worktree(
     #[cfg(unix)]
     {
         if !fuse_state.is_disabled() {
-            let fuse_paths = task_worktree_paths(task_id, "fuse");
+            let fuse_paths = task_worktree_paths(main_working_dir, task_id, "fuse");
             match prepare_fuse_task_worktree(main_working_dir, &fuse_paths, &baseline)? {
                 FuseTaskWorktreeProvision::Mounted(backend) => {
                     return Ok((
@@ -238,7 +240,7 @@ fn prepare_task_worktree_copy_fallback(
     baseline: WorkspaceSnapshot,
     outcome: FuseAttemptOutcome,
 ) -> io::Result<(TaskWorktree, FuseAttemptOutcome)> {
-    let copy_paths = task_worktree_paths(task_id, "copy");
+    let copy_paths = task_worktree_paths(main_working_dir, task_id, "copy");
     prepare_task_worktree_root(&copy_paths.cleanup_root)?;
     let backend = prepare_copy_task_worktree(main_working_dir, &copy_paths, &baseline)?;
 
@@ -252,8 +254,8 @@ fn prepare_task_worktree_copy_fallback(
     ))
 }
 
-fn task_worktree_paths(task_id: Uuid, backend: &str) -> TaskWorktreePaths {
-    let cleanup_root = task_worktree_temp_dir().join(format!(
+fn task_worktree_paths(main_working_dir: &Path, task_id: Uuid, backend: &str) -> TaskWorktreePaths {
+    let cleanup_root = task_worktree_base_dir(main_working_dir).join(format!(
         "libra-task-worktree-{}-{}-{}",
         backend,
         std::process::id(),
@@ -264,6 +266,21 @@ fn task_worktree_paths(task_id: Uuid, backend: &str) -> TaskWorktreePaths {
         lower_root: cleanup_root.join("lower"),
         upper_root: cleanup_root.join("upper"),
         cleanup_root,
+    }
+}
+
+fn task_worktree_base_dir(main_working_dir: &Path) -> PathBuf {
+    match util::try_get_storage_path(Some(main_working_dir.to_path_buf())) {
+        Ok(storage) => storage.join("worktrees").join("tasks"),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => task_worktree_temp_dir(),
+        Err(err) => {
+            tracing::warn!(
+                path = %main_working_dir.display(),
+                "failed to resolve Libra storage for task worktree; using temporary directory: {}",
+                err
+            );
+            task_worktree_temp_dir()
+        }
     }
 }
 
@@ -320,24 +337,8 @@ fn prepare_fuse_task_worktree(
     };
 
     prepare_task_worktree_root(&paths.cleanup_root)?;
-    fs::create_dir_all(&paths.workspace_root)?;
-    fs::create_dir_all(&paths.lower_root)?;
-    fs::create_dir_all(&paths.upper_root)?;
-    materialize_workspace(main_working_dir, &paths.lower_root, baseline)?;
-
     let expect_repo_storage_link =
-        match util::try_get_storage_path(Some(main_working_dir.to_path_buf())) {
-            Ok(storage) => {
-                link_repo_storage(
-                    &storage,
-                    &paths.upper_root.join(util::ROOT_DIR),
-                    "FUSE upper layer",
-                )?;
-                true
-            }
-            Err(err) if err.kind() == io::ErrorKind::NotFound => false,
-            Err(err) => return Err(err),
-        };
+        prepare_fuse_task_worktree_layers(main_working_dir, paths, baseline)?;
 
     let mount_result = mount_fuse_task_worktree_on_runtime(
         &runtime,
@@ -387,6 +388,36 @@ fn prepare_fuse_task_worktree(
             );
             Ok(FuseTaskWorktreeProvision::Fallback { reason })
         }
+    }
+}
+
+#[cfg(unix)]
+fn prepare_fuse_task_worktree_layers(
+    main_working_dir: &Path,
+    paths: &TaskWorktreePaths,
+    baseline: &WorkspaceSnapshot,
+) -> io::Result<bool> {
+    fs::create_dir_all(&paths.workspace_root)?;
+    fs::create_dir_all(&paths.lower_root)?;
+    fs::create_dir_all(&paths.upper_root)?;
+
+    // Keep the upper layer as a complete writable workspace. Build tools in
+    // different ecosystems create and rename arbitrary generated directories;
+    // relying on per-directory copy-up makes that path filesystem-specific and
+    // can reject otherwise valid writes.
+    materialize_workspace(main_working_dir, &paths.upper_root, baseline)?;
+
+    match util::try_get_storage_path(Some(main_working_dir.to_path_buf())) {
+        Ok(storage) => {
+            link_repo_storage(
+                &storage,
+                &paths.upper_root.join(util::ROOT_DIR),
+                "FUSE upper layer",
+            )?;
+            Ok(true)
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err),
     }
 }
 
@@ -479,7 +510,69 @@ fn verify_fuse_task_worktree_mount_once(
         })?;
     }
 
+    verify_fuse_task_worktree_write_probe(workspace_root)?;
+
     Ok(())
+}
+
+#[cfg(unix)]
+fn verify_fuse_task_worktree_write_probe(workspace_root: &Path) -> io::Result<()> {
+    let probe_name = format!(".libra-fuse-write-probe-{}", std::process::id());
+    let probe_tmp = workspace_root.join(format!("{probe_name}.tmp"));
+    let probe_final = workspace_root.join(probe_name);
+    let _ = fs::remove_dir_all(&probe_tmp);
+    let _ = fs::remove_dir_all(&probe_final);
+
+    let result = (|| {
+        fs::create_dir(&probe_tmp).map_err(|err| {
+            io::Error::new(
+                err.kind(),
+                format!(
+                    "mounted workspace root is not writable; failed to create probe directory '{}': {}",
+                    probe_tmp.display(),
+                    err
+                ),
+            )
+        })?;
+        fs::write(probe_tmp.join("probe.txt"), b"ok\n").map_err(|err| {
+            io::Error::new(
+                err.kind(),
+                format!(
+                    "mounted workspace root is not writable; failed to write probe file under '{}': {}",
+                    probe_tmp.display(),
+                    err
+                ),
+            )
+        })?;
+        fs::rename(&probe_tmp, &probe_final).map_err(|err| {
+            io::Error::new(
+                err.kind(),
+                format!(
+                    "mounted workspace root does not support generated directory rename from '{}' to '{}': {}",
+                    probe_tmp.display(),
+                    probe_final.display(),
+                    err
+                ),
+            )
+        })?;
+        fs::remove_dir_all(&probe_final).map_err(|err| {
+            io::Error::new(
+                err.kind(),
+                format!(
+                    "mounted workspace root is not cleanup-writable; failed to remove probe directory '{}': {}",
+                    probe_final.display(),
+                    err
+                ),
+            )
+        })
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&probe_tmp);
+        let _ = fs::remove_dir_all(&probe_final);
+    }
+
+    result
 }
 
 #[cfg(unix)]
@@ -527,6 +620,7 @@ async fn mount_fuse_task_worktree(
         FuseOverlayConfig {
             mountpoint: workspace_root.to_path_buf(),
             do_import: true,
+            writeback: true,
             ..Default::default()
         },
         1,
@@ -580,6 +674,7 @@ pub(crate) fn cleanup_task_worktree(worktree: TaskWorktree) -> io::Result<()> {
 
 #[cfg(unix)]
 fn cleanup_fuse_task_worktree(worktree: FuseTaskWorktreeBackend) -> io::Result<()> {
+    let workspace_root = worktree.cleanup_root.join("workspace");
     let runtime = Handle::try_current().map_err(|err| {
         io::Error::other(format!("tokio runtime unavailable for FUSE cleanup: {err}"))
     })?;
@@ -591,15 +686,52 @@ fn cleanup_fuse_task_worktree(worktree: FuseTaskWorktreeBackend) -> io::Result<(
                 err
             );
         } else {
-            return Err(err);
+            fuse_utils::force_unmount_path(&workspace_root).map_err(|fallback_err| {
+                io::Error::new(
+                    fallback_err.kind(),
+                    format!(
+                        "failed to unmount FUSE task worktree at {} after mount handle error ({}): {}",
+                        workspace_root.display(),
+                        err,
+                        fallback_err
+                    ),
+                )
+            })?;
         }
     }
-    remove_cleanup_root(&worktree.cleanup_root)
+
+    match remove_cleanup_root(&worktree.cleanup_root) {
+        Ok(()) => Ok(()),
+        Err(err)
+            if is_fuse_cleanup_busy_error(&err) || fuse_utils::is_mount_active(&workspace_root) =>
+        {
+            fuse_utils::force_unmount_path(&workspace_root).map_err(|unmount_err| {
+                io::Error::new(
+                    unmount_err.kind(),
+                    format!(
+                        "failed to unmount busy FUSE task worktree at {} before cleanup retry: {}",
+                        workspace_root.display(),
+                        unmount_err
+                    ),
+                )
+            })?;
+            remove_cleanup_root(&worktree.cleanup_root)
+        }
+        Err(err) => Err(err),
+    }
 }
 
 #[cfg(unix)]
 fn is_fuse_unmount_already_inactive_error(err: &io::Error) -> bool {
-    matches!(err.raw_os_error(), Some(libc::EINVAL) | Some(libc::ENOENT))
+    matches!(
+        err.raw_os_error(),
+        Some(libc::EINVAL) | Some(libc::ENOENT) | Some(libc::ENOTCONN)
+    )
+}
+
+#[cfg(unix)]
+fn is_fuse_cleanup_busy_error(err: &io::Error) -> bool {
+    matches!(err.raw_os_error(), Some(libc::EBUSY))
 }
 
 fn remove_cleanup_root(cleanup_root: &Path) -> io::Result<()> {
@@ -1681,6 +1813,60 @@ mod tests {
         cleanup_task_worktree(task_worktree).unwrap();
     }
 
+    #[tokio::test]
+    async fn task_worktree_paths_use_repo_storage_when_available() {
+        let temp = tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        test::setup_with_new_libra_in(&repo).await;
+
+        let storage = util::try_get_storage_path(Some(repo.clone())).unwrap();
+        let expected_base = storage.join("worktrees").join("tasks");
+        let task_id = Uuid::new_v4();
+        let paths = task_worktree_paths(&repo, task_id, "fuse");
+
+        assert_eq!(paths.cleanup_root.parent(), Some(expected_base.as_path()));
+        assert_eq!(paths.workspace_root, paths.cleanup_root.join("workspace"));
+        assert_eq!(paths.lower_root, paths.cleanup_root.join("lower"));
+        assert_eq!(paths.upper_root, paths.cleanup_root.join("upper"));
+
+        let cleanup_name = paths.cleanup_root.file_name().unwrap().to_string_lossy();
+        assert!(cleanup_name.starts_with("libra-task-worktree-fuse-"));
+        assert!(cleanup_name.ends_with(&task_id.to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fuse_task_worktree_materializes_workspace_into_upper_layer() {
+        let temp = tempdir().unwrap();
+        let main = temp.path().join("workspace");
+        std::fs::create_dir_all(main.join("src")).unwrap();
+        std::fs::create_dir_all(main.join("target/debug")).unwrap();
+        std::fs::write(main.join("src/lib.rs"), "pub fn upper() {}\n").unwrap();
+        std::fs::write(main.join("target/debug/app"), "compiled\n").unwrap();
+        let baseline = snapshot_workspace(&main).unwrap();
+        let paths = task_worktree_paths(&main, Uuid::new_v4(), "fuse-test");
+
+        let has_repo_storage = super::prepare_fuse_task_worktree_layers(&main, &paths, &baseline)
+            .expect("prepare FUSE layer roots");
+
+        assert!(!has_repo_storage);
+        assert_eq!(
+            std::fs::read_to_string(paths.upper_root.join("src/lib.rs")).unwrap(),
+            "pub fn upper() {}\n"
+        );
+        assert!(
+            !paths.lower_root.join("src/lib.rs").exists(),
+            "baseline files must not require lower-layer copy-up"
+        );
+        assert!(
+            !paths.upper_root.join("target/debug/app").exists(),
+            "generated build outputs should stay out of the task baseline"
+        );
+
+        super::remove_cleanup_root(&paths.cleanup_root).unwrap();
+    }
+
     #[test]
     fn prepare_task_worktree_skips_gitignored_build_outputs() {
         let temp = tempdir().unwrap();
@@ -1724,8 +1910,22 @@ mod tests {
         assert!(super::is_fuse_unmount_already_inactive_error(
             &io::Error::from_raw_os_error(libc::ENOENT)
         ));
+        assert!(super::is_fuse_unmount_already_inactive_error(
+            &io::Error::from_raw_os_error(libc::ENOTCONN)
+        ));
         assert!(!super::is_fuse_unmount_already_inactive_error(
             &io::Error::from_raw_os_error(libc::EIO)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fuse_cleanup_detects_resource_busy_errors() {
+        assert!(super::is_fuse_cleanup_busy_error(
+            &io::Error::from_raw_os_error(libc::EBUSY)
+        ));
+        assert!(!super::is_fuse_cleanup_busy_error(
+            &io::Error::from_raw_os_error(libc::ENOENT)
         ));
     }
 
@@ -1737,6 +1937,24 @@ mod tests {
         std::fs::create_dir_all(&workspace).unwrap();
 
         super::verify_fuse_task_worktree_mount(&workspace, false).unwrap();
+        assert!(
+            std::fs::read_dir(&workspace).unwrap().next().is_none(),
+            "health-check write probe should clean up after itself"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fuse_health_check_rejects_non_writable_workspace() {
+        let temp = tempdir().unwrap();
+        let workspace = temp.path().join("not-a-directory");
+        std::fs::write(&workspace, "not writable\n").unwrap();
+
+        let err = super::verify_fuse_task_worktree_mount(&workspace, false).unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("mounted workspace root is not readable"));
+        assert!(message.contains(workspace.to_string_lossy().as_ref()));
     }
 
     #[cfg(unix)]
@@ -1764,7 +1982,7 @@ mod tests {
         std::fs::write(main.join("task_b.txt"), "base\n").unwrap();
 
         let baseline = snapshot_workspace(&main).unwrap();
-        let paths = task_worktree_paths(Uuid::new_v4(), "copy-test");
+        let paths = task_worktree_paths(&main, Uuid::new_v4(), "copy-test");
         prepare_task_worktree_root(&paths.cleanup_root).unwrap();
 
         let backend = prepare_copy_task_worktree(&main, &paths, &baseline).unwrap();

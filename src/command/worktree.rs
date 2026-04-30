@@ -13,6 +13,8 @@ use std::{
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 
+#[cfg(unix)]
+use crate::utils::fuse as fuse_utils;
 use crate::{
     command::restore::{self, RestoreArgs},
     internal::head::Head,
@@ -72,6 +74,16 @@ pub enum WorktreeSubcommand {
     Remove {
         /// Filesystem path of the worktree to unregister.
         path: String,
+    },
+    /// Unmount a FUSE task worktree mountpoint.
+    #[cfg(unix)]
+    #[clap(alias = "unmount", about = "Unmount a FUSE worktree mountpoint")]
+    Umount {
+        /// Filesystem path of the FUSE mountpoint or its task worktree root.
+        path: String,
+        /// Remove the Libra task worktree root after unmounting its workspace mountpoint.
+        #[clap(long)]
+        cleanup: bool,
     },
     /// Repair worktree metadata, attempting to recover from inconsistencies.
     Repair,
@@ -133,11 +145,19 @@ pub async fn execute(args: WorktreeArgs) {
 
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Dispatches to the appropriate worktree sub-command
-/// (add, list, lock, unlock, move, prune, remove, repair).
+/// (add, list, lock, unlock, move, prune, remove, repair, and Unix umount).
 pub async fn execute_safe(args: WorktreeArgs, _output: &OutputConfig) -> CliResult<()> {
-    util::require_repo().map_err(|_| CliError::repo_not_found())?;
+    let command = args.command;
+    #[cfg(unix)]
+    let needs_repo = !matches!(&command, WorktreeSubcommand::Umount { .. });
+    #[cfg(not(unix))]
+    let needs_repo = true;
 
-    match args.command {
+    if needs_repo {
+        util::require_repo().map_err(|_| CliError::repo_not_found())?;
+    }
+
+    match command {
         WorktreeSubcommand::Add { path } => add_worktree(path).await,
         WorktreeSubcommand::List => list_worktrees(),
         WorktreeSubcommand::Lock { path, reason } => lock_worktree(path, reason),
@@ -145,6 +165,8 @@ pub async fn execute_safe(args: WorktreeArgs, _output: &OutputConfig) -> CliResu
         WorktreeSubcommand::Move { src, dest } => move_worktree(src, dest),
         WorktreeSubcommand::Prune => prune_worktrees(),
         WorktreeSubcommand::Remove { path } => remove_worktree(path),
+        #[cfg(unix)]
+        WorktreeSubcommand::Umount { path, cleanup } => umount_fuse_path(path, cleanup),
         WorktreeSubcommand::Repair => repair_worktrees(),
     }
     .map_err(|e| CliError::fatal(e.to_string()))
@@ -719,6 +741,39 @@ fn remove_worktree(path: String) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+fn umount_fuse_path(path: String, cleanup: bool) -> io::Result<()> {
+    let target = canonicalize(path)?;
+    let mountpoint = fuse_utils::resolve_task_worktree_mountpoint_arg(&target);
+    fuse_utils::force_unmount_path(&mountpoint).map_err(|err| {
+        io::Error::new(
+            err.kind(),
+            format!(
+                "failed to unmount FUSE path {}: {}",
+                mountpoint.display(),
+                err
+            ),
+        )
+    })?;
+    println!("unmounted {}", mountpoint.display());
+
+    if cleanup {
+        let cleanup_root =
+            fuse_utils::fuse_task_worktree_cleanup_root(&mountpoint).ok_or_else(|| {
+                io::Error::other(format!(
+                    "--cleanup only supports Libra task FUSE worktree paths ending in '/workspace': {}",
+                    mountpoint.display()
+                ))
+            })?;
+        if cleanup_root.exists() {
+            fs::remove_dir_all(&cleanup_root)?;
+        }
+        println!("removed {}", cleanup_root.display());
+    }
+
+    Ok(())
+}
+
 /// Implements `worktree repair`.
 ///
 /// This command removes duplicate worktree entries that point to the same
@@ -749,4 +804,27 @@ fn repair_worktrees() -> io::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn umount_fuse_path_cleans_task_worktree_root_without_repo() {
+        let temp = tempdir().expect("create temp dir");
+        let cleanup_root = temp
+            .path()
+            .join("libra-task-worktree-fuse-29353-019ddec6-de60-7383");
+        let workspace = cleanup_root.join("workspace");
+        fs::create_dir_all(&workspace).expect("create task workspace");
+
+        umount_fuse_path(cleanup_root.to_string_lossy().to_string(), true)
+            .expect("umount cleanup should succeed for inactive task workspace");
+
+        assert!(!cleanup_root.exists());
+    }
 }
