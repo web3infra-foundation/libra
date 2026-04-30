@@ -12,14 +12,21 @@ use std::{
 
 use chrono::Utc;
 use sea_orm::{
-    DatabaseConnection, DatabaseTransaction, DbErr, TransactionTrait,
+    ColumnTrait, DatabaseConnection, DatabaseTransaction, DbErr, EntityTrait, QueryFilter,
+    TransactionTrait,
 };
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::internal::{
+    branch::Branch,
     db::get_db_conn_instance,
-    operation::{OperationService, OperationStatus},
+    head::Head,
+    model::reference,
+    operation::{
+        OperationGraphRecord, OperationParentRecord, OperationRecord, OperationService,
+        OperationStatus, OperationViewRecord, OperationViewRefRecord, OperationViewWorkspaceRecord,
+    },
 };
 
 const PARENT_RESOLUTION_LIMIT: u64 = 200;
@@ -81,6 +88,15 @@ pub struct OperationResult<T> {
     pub op_id: String,
     pub view_id: String,
     pub end_ts: i64,
+    pub view: OperationViewSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationViewSnapshot {
+    pub head_kind: String,
+    pub head_target: String,
+    pub refs: Vec<OperationViewRefRecord>,
+    pub workspace: Vec<OperationViewWorkspaceRecord>,
 }
 
 /// Stage-specific failures for with_operation_log.
@@ -175,7 +191,6 @@ where
 
     let op_id = Uuid::now_v7().to_string();
     let view_id = Uuid::now_v7().to_string();
-    let _parent_op_id = resolve_parent_operation_id_with_conn(db, &meta.repo_id).await?;
 
     let txn = db.begin().await.map_err(|err| {
         OperationError::begin(format!(
@@ -183,6 +198,8 @@ where
             meta.command_name
         ))
     })?;
+
+    let parent_op_id = resolve_parent_operation_id_with_conn(&txn, &meta.repo_id).await?;
 
     let payload = match operation(&txn).await {
         Ok(payload) => payload,
@@ -199,6 +216,59 @@ where
         }
     };
 
+    let end_ts = Utc::now().timestamp();
+    let view = collect_final_view_with_conn(&txn, &meta.repo_id, &view_id, _scope)
+        .await
+        .map_err(|err| {
+            OperationError::snapshot(format!(
+                "failed to collect final transactional view for command '{}': {err}",
+                meta.command_name
+            ))
+        })?;
+
+    let operation_record = OperationRecord {
+        op_id: op_id.clone(),
+        repo_id: meta.repo_id.clone(),
+        view_id: view_id.clone(),
+        command_name: meta.command_name.clone(),
+        description: meta.description.clone(),
+        actor: meta.actor.clone(),
+        args_digest: meta.args_digest.clone(),
+        start_ts: end_ts,
+        end_ts: Some(end_ts),
+        status: OperationStatus::Succeeded,
+    };
+    let parents = parent_op_id
+        .as_ref()
+        .map(|parent| OperationParentRecord {
+            op_id: op_id.clone(),
+            parent_op_id: parent.clone(),
+        })
+        .into_iter()
+        .collect::<Vec<_>>();
+    let graph = OperationGraphRecord {
+        operation: operation_record,
+        parents,
+        view: OperationViewRecord {
+            view_id: view_id.clone(),
+            repo_id: meta.repo_id.clone(),
+            head_kind: view.head_kind.clone(),
+            head_target: view.head_target.clone(),
+            created_at: end_ts,
+        },
+        refs: view.refs.clone(),
+        workspace: view.workspace.clone(),
+    };
+
+    OperationService::persist_operation_graph_with_conn(&txn, &graph)
+        .await
+        .map_err(|err| {
+            OperationError::persist(format!(
+                "failed to persist operation graph for command '{}': {err}",
+                meta.command_name
+            ))
+        })?;
+
     txn.commit().await.map_err(|err| {
         OperationError::commit(format!(
             "failed to commit operation transaction for command '{}': {err}",
@@ -210,7 +280,8 @@ where
         payload,
         op_id,
         view_id,
-        end_ts: Utc::now().timestamp(),
+        end_ts,
+        view,
     })
 }
 
@@ -243,6 +314,87 @@ pub async fn resolve_parent_operation_id_with_conn<C: sea_orm::ConnectionTrait>(
         .into_iter()
         .find(|record| record.status == OperationStatus::Succeeded)
         .map(|record| record.op_id))
+}
+
+async fn collect_final_view_with_conn<C: sea_orm::ConnectionTrait>(
+    db: &C,
+    repo_id: &str,
+    view_id: &str,
+    scope: OperationScope,
+) -> Result<OperationViewSnapshot, DbErr> {
+    let head = Head::current_result_with_conn(db).await.map_err(|err| {
+        DbErr::Custom(format!(
+            "failed to resolve head while collecting operation view: {err}"
+        ))
+    })?;
+
+    let (head_kind, head_target) = match head {
+        Head::Branch(name) => ("branch".to_string(), name),
+        Head::Detached(hash) => ("detached".to_string(), hash.to_string()),
+    };
+
+    let refs = if scope.include_refs {
+        let mut records = Vec::new();
+
+        let local_branches = Branch::list_branches_result_with_conn(db, None)
+            .await
+            .map_err(|err| DbErr::Custom(format!("failed to list local branches: {err}")))?;
+        for branch in local_branches {
+            records.push(OperationViewRefRecord {
+                view_id: view_id.to_string(),
+                ref_kind: "branch".to_string(),
+                ref_name: branch.name,
+                ref_remote: None,
+                target_oid: branch.commit.to_string(),
+            });
+        }
+
+        if scope.include_remote_tracking {
+            let remote_refs = reference::Entity::find()
+                .filter(reference::Column::Kind.eq(reference::ConfigKind::Branch))
+                .filter(reference::Column::Remote.is_not_null())
+                .all(db)
+                .await?;
+            for remote_ref in remote_refs {
+                let Some(name) = remote_ref.name else {
+                    continue;
+                };
+                let Some(commit) = remote_ref.commit else {
+                    continue;
+                };
+                records.push(OperationViewRefRecord {
+                    view_id: view_id.to_string(),
+                    ref_kind: "remote_branch".to_string(),
+                    ref_name: name,
+                    ref_remote: remote_ref.remote,
+                    target_oid: commit,
+                });
+            }
+        }
+
+        records
+    } else {
+        Vec::new()
+    };
+
+    let workspace = if scope.include_workspace {
+        vec![OperationViewWorkspaceRecord {
+            view_id: view_id.to_string(),
+            pointer_kind: "head".to_string(),
+            pointer_value: head_target.clone(),
+        }]
+    } else {
+        Vec::new()
+    };
+
+    let _ = repo_id;
+
+    Ok(OperationViewSnapshot {
+        head_kind,
+        head_target,
+        refs,
+        workspace,
+    })
 }
 
 #[cfg(test)]
@@ -324,6 +476,49 @@ mod tests {
         .unwrap();
     }
 
+    async fn create_operation_graph_tables(db: &sea_orm::DatabaseConnection) {
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            "CREATE TABLE operation_parent (op_id TEXT NOT NULL,parent_op_id TEXT NOT NULL,PRIMARY KEY (op_id,parent_op_id))".to_string(),
+        ))
+        .await
+        .unwrap();
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            "CREATE TABLE operation_view (view_id TEXT PRIMARY KEY,repo_id TEXT NOT NULL,head_kind TEXT NOT NULL,head_target TEXT NOT NULL,created_at INTEGER NOT NULL)".to_string(),
+        ))
+        .await
+        .unwrap();
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            "CREATE TABLE operation_view_ref (view_id TEXT NOT NULL,ref_kind TEXT NOT NULL,ref_name TEXT NOT NULL,ref_remote TEXT NOT NULL,target_oid TEXT NOT NULL,PRIMARY KEY (view_id,ref_kind,ref_name,ref_remote))".to_string(),
+        ))
+        .await
+        .unwrap();
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            "CREATE TABLE operation_view_workspace (view_id TEXT NOT NULL,pointer_kind TEXT NOT NULL,pointer_value TEXT NOT NULL,PRIMARY KEY (view_id,pointer_kind))".to_string(),
+        ))
+        .await
+        .unwrap();
+    }
+
+    async fn create_reference_table_with_head(db: &sea_orm::DatabaseConnection) {
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            "CREATE TABLE reference (id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT,kind TEXT NOT NULL,\"commit\" TEXT,remote TEXT)".to_string(),
+        ))
+        .await
+        .unwrap();
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            "INSERT INTO reference(name, kind, \"commit\", remote) VALUES('main', 'Head', NULL, NULL)"
+                .to_string(),
+        ))
+        .await
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn resolve_parent_operation_picks_latest_successful_record() {
         let db = Database::connect("sqlite::memory:").await.unwrap();
@@ -393,7 +588,16 @@ mod tests {
     async fn with_operation_log_returns_payload_and_ids_on_success() {
         let db = Database::connect("sqlite::memory:").await.unwrap();
         create_operation_table(&db).await;
+        create_operation_graph_tables(&db).await;
+        create_reference_table_with_head(&db).await;
 
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            "INSERT INTO reference(name, kind, \"commit\", remote) VALUES('main', 'Branch', '1111111111111111111111111111111111111111', NULL)"
+                .to_string(),
+        ))
+        .await
+        .unwrap();
         let result = with_operation_log_with_conn(
             &db,
             valid_meta(),
@@ -410,11 +614,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn with_operation_log_captures_final_view_and_persists_graph() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        create_operation_table(&db).await;
+        create_operation_graph_tables(&db).await;
+        create_reference_table_with_head(&db).await;
+
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            "INSERT INTO reference(name, kind, \"commit\", remote) VALUES('main', 'Branch', '1111111111111111111111111111111111111111', NULL)"
+                .to_string(),
+        ))
+        .await
+        .unwrap();
+
+        let result = with_operation_log_with_conn(
+            &db,
+            valid_meta(),
+            OperationScope::default(),
+            |_txn| Box::pin(async move { Ok::<_, DbErr>("ok".to_string()) }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.payload, "ok");
+        assert_eq!(result.view.head_kind, "branch");
+        assert_eq!(result.view.head_target, "main");
+        assert_eq!(result.view.workspace.len(), 1);
+        assert_eq!(result.view.workspace[0].pointer_kind, "head");
+        assert_eq!(result.view.workspace[0].pointer_value, "main");
+        assert_eq!(result.view.refs.len(), 1);
+        assert_eq!(result.view.refs[0].ref_kind, "branch");
+        assert_eq!(result.view.refs[0].ref_name, "main");
+        assert_eq!(result.view.refs[0].target_oid, "1111111111111111111111111111111111111111");
+
+        let graph = OperationService::load_restore_view_by_operation_with_conn(&db, &result.op_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(graph.operation.view_id, result.view_id);
+        assert_eq!(graph.view.head_kind, "branch");
+        assert_eq!(graph.view.head_target, "main");
+        assert_eq!(graph.refs.len(), 1);
+        assert_eq!(graph.workspace.len(), 1);
+    }
+
+    #[tokio::test]
     async fn with_operation_log_rolls_back_on_business_failure() {
         let db = Database::connect("sqlite::memory:").await.unwrap();
         create_operation_table(&db).await;
+        create_operation_graph_tables(&db).await;
+        create_reference_table_with_head(&db).await;
         create_tx_probe_table(&db).await;
 
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            "INSERT INTO reference(name, kind, \"commit\", remote) VALUES('main', 'Branch', '1111111111111111111111111111111111111111', NULL)"
+                .to_string(),
+        ))
+        .await
+        .unwrap();
         let error = with_operation_log_with_conn(
             &db,
             valid_meta(),
