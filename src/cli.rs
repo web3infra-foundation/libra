@@ -179,6 +179,8 @@ enum Commands {
     Clone(command::clone::CloneArgs),
     #[command(about = "Start Libra Code interactive TUI (with background web server)")]
     Code(command::code::CodeArgs),
+    #[command(about = "Drive a local Libra Code TUI automation control session")]
+    CodeControl(command::code_control::CodeControlArgs),
     #[command(about = "Inspect an AI thread version graph in a TUI")]
     Graph(command::graph::GraphArgs),
     // The rest of the commands require a repository to be present
@@ -632,7 +634,9 @@ fn repo_not_found_error(path: Option<&Path>) -> CliError {
 
 fn command_preflight_storage(command: &Commands) -> CliResult<Option<std::path::PathBuf>> {
     match command {
-        Commands::Init(_) | Commands::Clone(_) | Commands::Open(_) => Ok(None),
+        Commands::Init(_) | Commands::Clone(_) | Commands::Open(_) | Commands::CodeControl(_) => {
+            Ok(None)
+        }
         // Config global/system scopes don't require a repository.
         Commands::Config(cfg) if cfg.global || cfg.system => Ok(None),
         Commands::Code(code_args) => {
@@ -824,6 +828,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         }
         Commands::Clone(cmd_args) => command::clone::execute_safe(cmd_args, &output).await?,
         Commands::Code(cmd_args) => command::code::execute(cmd_args, &output).await?,
+        Commands::CodeControl(cmd_args) => command::code_control::execute(cmd_args).await?,
         Commands::Graph(cmd_args) => command::graph::execute_safe(cmd_args, &output).await?,
         Commands::Add(cmd_args) => command::add::execute_safe(cmd_args, &output).await?,
         Commands::Rm(cmd_args) => command::remove::execute_safe(cmd_args, &output).await?,

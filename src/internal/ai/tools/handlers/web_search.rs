@@ -4,24 +4,35 @@
 //! fetching arbitrary pages. Page retrieval can be added as a separate tool with
 //! its own trust and output-size controls.
 
-use std::time::Duration;
+use std::{path::Path, time::Duration};
 
 use async_trait::async_trait;
 use regex::Regex;
+use reqwest::header::ACCEPT;
+use serde::Deserialize;
 use url::Url;
 
 use super::parse_arguments;
-use crate::internal::ai::tools::{
-    context::{ToolInvocation, ToolKind, ToolOutput, ToolPayload, WebSearchArgs},
-    error::{ToolError, ToolResult},
-    registry::ToolHandler,
-    spec::ToolSpec,
+use crate::{
+    internal::{
+        ai::tools::{
+            context::{ToolInvocation, ToolKind, ToolOutput, ToolPayload, WebSearchArgs},
+            error::{ToolError, ToolResult},
+            registry::ToolHandler,
+            spec::ToolSpec,
+        },
+        config::{LocalIdentityTarget, resolve_env_for_target},
+    },
+    utils::util::{DATABASE, try_get_storage_path},
 };
 
+const BRAVE_SEARCH_API_KEY_ENV: &str = "BRAVE_SEARCH_API_KEY";
+const BRAVE_WEB_SEARCH_URL: &str = "https://api.search.brave.com/res/v1/web/search";
 const DUCKDUCKGO_HTML_SEARCH_URL: &str = "https://html.duckduckgo.com/html/";
 const WEB_SEARCH_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_WEB_SEARCH_RESULTS: usize = 10;
 const MAX_SNIPPET_CHARS: usize = 320;
+const HTTP_ERROR_PREVIEW_CHARS: usize = 160;
 
 /// Handler for public web search.
 ///
@@ -44,6 +55,24 @@ struct RawSearchResult {
     end: usize,
     title_html: String,
     href: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct BraveSearchResponse {
+    web: Option<BraveWebResults>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BraveWebResults {
+    #[serde(default)]
+    results: Vec<BraveResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BraveResult {
+    title: String,
+    url: String,
+    description: Option<String>,
 }
 
 #[async_trait]
@@ -73,8 +102,7 @@ impl ToolHandler for WebSearchHandler {
         }
 
         let limit = args.limit.clamp(1, MAX_WEB_SEARCH_RESULTS);
-        let html = fetch_duckduckgo_html(query).await?;
-        let results = parse_duckduckgo_results(&html, limit)?;
+        let results = run_web_search(query, limit, &invocation.working_dir).await?;
 
         Ok(ToolOutput::success(format_web_search_results(
             query, &results,
@@ -83,6 +111,33 @@ impl ToolHandler for WebSearchHandler {
 
     fn schema(&self) -> ToolSpec {
         ToolSpec::web_search()
+    }
+}
+
+async fn run_web_search(
+    query: &str,
+    limit: usize,
+    working_dir: &Path,
+) -> ToolResult<Vec<WebSearchResult>> {
+    let client = build_web_search_client()?;
+    let mut provider_failures = Vec::new();
+
+    if let Some(api_key) = brave_search_api_key(working_dir).await? {
+        match fetch_brave_results(&client, query, limit, &api_key).await {
+            Ok(results) => return Ok(results),
+            Err(error) => provider_failures.push(provider_failure("Brave Search API", error)),
+        }
+    }
+
+    match fetch_duckduckgo_results(&client, query, limit).await {
+        Ok(results) => Ok(results),
+        Err(error) => {
+            provider_failures.push(provider_failure("DuckDuckGo HTML", error));
+            Err(ToolError::ExecutionFailed(format!(
+                "web_search failed: {}",
+                provider_failures.join("; ")
+            )))
+        }
     }
 }
 
@@ -104,18 +159,123 @@ fn ensure_network_allowed(invocation: &ToolInvocation) -> ToolResult<()> {
     }
 }
 
-async fn fetch_duckduckgo_html(query: &str) -> ToolResult<String> {
-    let mut url = Url::parse(DUCKDUCKGO_HTML_SEARCH_URL)
-        .map_err(|error| ToolError::ExecutionFailed(format!("invalid web search URL: {error}")))?;
-    url.query_pairs_mut().append_pair("q", query);
-
-    let client = reqwest::Client::builder()
+fn build_web_search_client() -> ToolResult<reqwest::Client> {
+    reqwest::Client::builder()
         .timeout(WEB_SEARCH_TIMEOUT)
         .user_agent("libra-code/0.1 (+https://github.com/web3infra-foundation/mega)")
         .build()
         .map_err(|error| {
             ToolError::ExecutionFailed(format!("failed to initialize web search client: {error}"))
+        })
+}
+
+async fn brave_search_api_key(working_dir: &Path) -> ToolResult<Option<String>> {
+    let db_path = try_get_storage_path(Some(working_dir.to_path_buf()))
+        .ok()
+        .map(|storage| storage.join(DATABASE));
+    let local_target = db_path
+        .as_deref()
+        .map(LocalIdentityTarget::ExplicitDb)
+        .unwrap_or(LocalIdentityTarget::None);
+    let value = resolve_env_for_target(BRAVE_SEARCH_API_KEY_ENV, local_target)
+        .await
+        .map_err(|error| {
+            ToolError::ExecutionFailed(format!(
+                "failed to resolve {BRAVE_SEARCH_API_KEY_ENV} for web_search: {error}"
+            ))
         })?;
+    Ok(value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty()))
+}
+
+async fn fetch_brave_results(
+    client: &reqwest::Client,
+    query: &str,
+    limit: usize,
+    api_key: &str,
+) -> ToolResult<Vec<WebSearchResult>> {
+    let mut url = Url::parse(BRAVE_WEB_SEARCH_URL).map_err(|error| {
+        ToolError::ExecutionFailed(format!("invalid Brave Search API URL: {error}"))
+    })?;
+    url.query_pairs_mut()
+        .append_pair("q", query)
+        .append_pair("count", &limit.to_string());
+
+    let response = client
+        .get(url)
+        .header("X-Subscription-Token", api_key)
+        .header(ACCEPT, "application/json")
+        .send()
+        .await
+        .map_err(|error| {
+            ToolError::ExecutionFailed(format!("failed to run Brave Search API request: {error}"))
+        })?;
+    let status = response.status();
+    let body = response.text().await.map_err(|error| {
+        ToolError::ExecutionFailed(format!("failed to read Brave Search API response: {error}"))
+    })?;
+
+    if !status.is_success() {
+        return Err(ToolError::ExecutionFailed(format!(
+            "Brave Search API returned HTTP {}: {}",
+            status.as_u16(),
+            response_preview(&body)
+        )));
+    }
+
+    parse_brave_results(&body, limit)
+}
+
+fn parse_brave_results(body: &str, limit: usize) -> ToolResult<Vec<WebSearchResult>> {
+    let response: BraveSearchResponse = serde_json::from_str(body).map_err(|error| {
+        ToolError::ExecutionFailed(format!(
+            "failed to parse Brave Search API response: {error}"
+        ))
+    })?;
+    let Some(web) = response.web else {
+        return Ok(Vec::new());
+    };
+
+    Ok(web
+        .results
+        .into_iter()
+        .filter_map(|result| {
+            let title = clean_html_text(&result.title);
+            let url = result.url.trim().to_string();
+            if title.is_empty() || url.is_empty() {
+                return None;
+            }
+
+            let snippet = result
+                .description
+                .map(|description| clean_html_text(&description))
+                .filter(|description| !description.is_empty())
+                .map(|description| truncate_chars(&description, MAX_SNIPPET_CHARS));
+
+            Some(WebSearchResult {
+                title,
+                url,
+                snippet,
+            })
+        })
+        .take(limit)
+        .collect())
+}
+
+async fn fetch_duckduckgo_results(
+    client: &reqwest::Client,
+    query: &str,
+    limit: usize,
+) -> ToolResult<Vec<WebSearchResult>> {
+    let html = fetch_duckduckgo_html(client, query).await?;
+    parse_duckduckgo_results(&html, limit)
+}
+
+async fn fetch_duckduckgo_html(client: &reqwest::Client, query: &str) -> ToolResult<String> {
+    let mut url = Url::parse(DUCKDUCKGO_HTML_SEARCH_URL)
+        .map_err(|error| ToolError::ExecutionFailed(format!("invalid web search URL: {error}")))?;
+    url.query_pairs_mut().append_pair("q", query);
 
     let response = client.get(url).send().await.map_err(|error| {
         ToolError::ExecutionFailed(format!("failed to run web search request: {error}"))
@@ -129,11 +289,28 @@ async fn fetch_duckduckgo_html(query: &str) -> ToolResult<String> {
         return Err(ToolError::ExecutionFailed(format!(
             "web search provider returned HTTP {}: {}",
             status.as_u16(),
-            body.lines().next().unwrap_or_default()
+            response_preview(&body)
         )));
     }
 
     Ok(body)
+}
+
+fn provider_failure(provider: &str, error: ToolError) -> String {
+    match error {
+        ToolError::ExecutionFailed(message) => format!("{provider}: {message}"),
+        other => format!("{provider}: {other}"),
+    }
+}
+
+fn response_preview(body: &str) -> String {
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            return truncate_chars(trimmed, HTTP_ERROR_PREVIEW_CHARS);
+        }
+    }
+    "<empty response>".to_string()
 }
 
 fn parse_duckduckgo_results(html: &str, limit: usize) -> ToolResult<Vec<WebSearchResult>> {
@@ -336,6 +513,55 @@ mod tests {
     use crate::internal::ai::sandbox::{
         SandboxPermissions, SandboxPolicy, ToolRuntimeContext, ToolSandboxContext,
     };
+
+    #[test]
+    fn parses_brave_api_results() {
+        let body = r#"
+        {
+            "web": {
+                "results": [
+                    {
+                        "title": "Announcing <b>Rust</b> 1.85.0 and Rust 2024",
+                        "url": "https://blog.rust-lang.org/2025/02/20/Rust-1.85.0/",
+                        "description": "This stabilizes the <b>2024</b> edition &amp; related changes."
+                    },
+                    {
+                        "title": "",
+                        "url": "https://example.com/empty-title",
+                        "description": "Skipped because the title is empty."
+                    },
+                    {
+                        "title": "Plain &amp; Simple",
+                        "url": "https://example.com/plain",
+                        "description": null
+                    }
+                ]
+            }
+        }
+        "#;
+
+        let results = parse_brave_results(body, 5).unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0].url,
+            "https://blog.rust-lang.org/2025/02/20/Rust-1.85.0/"
+        );
+        assert_eq!(results[0].title, "Announcing Rust 1.85.0 and Rust 2024");
+        assert_eq!(
+            results[0].snippet.as_deref(),
+            Some("This stabilizes the 2024 edition & related changes.")
+        );
+        assert_eq!(results[1].title, "Plain & Simple");
+        assert_eq!(results[1].snippet, None);
+    }
+
+    #[test]
+    fn parses_brave_api_response_without_web_as_empty() {
+        let results = parse_brave_results(r#"{"query":{"original":"rust"}}"#, 5).unwrap();
+
+        assert!(results.is_empty());
+    }
 
     #[test]
     fn parses_duckduckgo_html_results() {

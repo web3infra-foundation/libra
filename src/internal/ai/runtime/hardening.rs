@@ -154,10 +154,18 @@ impl SecretRedactor {
                 "api_key:",
                 "api_key=",
                 "authorization: bearer ",
+                "control_token:",
+                "control_token=",
+                "control-token:",
+                "control-token=",
                 "password:",
                 "password=",
                 "token:",
                 "token=",
+                "x-code-controller-token:",
+                "x-code-controller-token=",
+                "x-libra-control-token:",
+                "x-libra-control-token=",
             ]
             .into_iter()
             .map(str::to_string)
@@ -333,4 +341,24 @@ fn redact_marker(input: &str, marker: &str) -> String {
 
     output.push_str(&input[cursor..]);
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_redactor_masks_local_control_tokens() {
+        let redactor = SecretRedactor::default_runtime();
+        let input =
+            "X-Libra-Control-Token: process-secret X-Code-Controller-Token=lease-secret token: raw";
+
+        let output = redactor.redact(input);
+
+        assert!(!output.contains("process-secret"));
+        assert!(!output.contains("lease-secret"));
+        assert!(!output.contains(" raw"));
+        assert!(output.contains("X-Libra-Control-Token: [REDACTED]"));
+        assert!(output.contains("X-Code-Controller-Token=[REDACTED]"));
+    }
 }

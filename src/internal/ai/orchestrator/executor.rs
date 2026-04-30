@@ -381,6 +381,22 @@ where
         }
         append_optional_text(&mut accumulated_thinking, thinking);
 
+        if let Some(reason) = tool_calls_fuse_infrastructure_failure(&accumulated_tool_calls) {
+            return TaskResult {
+                task_id: task.id(),
+                status: TaskNodeStatus::Failed,
+                gate_report: None,
+                agent_output: Some(reason),
+                retry_count,
+                tool_calls: accumulated_tool_calls,
+                policy_violations: accumulated_policy_violations,
+                model_usage: (!accumulated_model_usage.is_zero())
+                    .then_some(accumulated_model_usage),
+                review: last_review,
+                thinking: non_empty_text(accumulated_thinking),
+            };
+        }
+
         let retryable_failure = match agent_result {
             Ok(turn) if policy_violations.is_empty() => {
                 if let Some(observer) = &config.observer
@@ -391,7 +407,15 @@ where
                         TaskRuntimeEvent::AssistantMessage(turn.final_text.clone()),
                     );
                 }
-                if let Some(reason) = implementation_missing_write_output(
+                if let Some(reason) = submit_task_complete_fail_reason(&accumulated_tool_calls) {
+                    (
+                        Some(reason.clone()),
+                        tool_calls,
+                        policy_violations,
+                        reason,
+                        None,
+                    )
+                } else if let Some(reason) = implementation_missing_write_output(
                     task,
                     &accumulated_tool_calls,
                     turn.final_text.as_str(),
@@ -624,15 +648,50 @@ fn agent_declared_no_changes_needed(agent_output: &str) -> bool {
 /// signal — otherwise the convergence check forces an infinite retry loop on
 /// tasks whose worktree already satisfies acceptance criteria.
 fn submit_task_complete_no_changes_needed(tool_calls: &[ToolCallRecord]) -> bool {
+    submit_task_complete_result(tool_calls)
+        .map(|result| result == "no_changes_needed")
+        .unwrap_or(false)
+}
+
+fn submit_task_complete_fail_reason(tool_calls: &[ToolCallRecord]) -> Option<String> {
+    let call = latest_successful_submit_task_complete(tool_calls)?;
+    let result = call
+        .arguments_json
+        .as_ref()
+        .and_then(|args| args.get("result"))
+        .and_then(|value| value.as_str())?;
+    if result != "fail" {
+        return None;
+    }
+
+    let summary = call
+        .arguments_json
+        .as_ref()
+        .and_then(|args| args.get("summary"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|summary| !summary.is_empty())
+        .unwrap_or("task reported failure without a summary");
+
+    Some(format!(
+        "task reported failure via submit_task_complete: {summary}"
+    ))
+}
+
+fn submit_task_complete_result(tool_calls: &[ToolCallRecord]) -> Option<&str> {
+    latest_successful_submit_task_complete(tool_calls)
+        .and_then(|call| call.arguments_json.as_ref())
+        .and_then(|args| args.get("result"))
+        .and_then(|value| value.as_str())
+}
+
+fn latest_successful_submit_task_complete(
+    tool_calls: &[ToolCallRecord],
+) -> Option<&ToolCallRecord> {
     tool_calls
         .iter()
         .rev()
         .find(|call| call.success && call.tool_name == "submit_task_complete")
-        .and_then(|call| call.arguments_json.as_ref())
-        .and_then(|args| args.get("result"))
-        .and_then(|value| value.as_str())
-        .map(|result| result == "no_changes_needed")
-        .unwrap_or(false)
 }
 
 fn reviewer_infrastructure_failure_outcome(message: &str) -> ReviewOutcome {
@@ -757,40 +816,68 @@ async fn execute_gate_task_in_task_worktree(
     fuse_state: &FuseProvisionState,
 ) -> TaskResult {
     let environment_provider = ExecutionEnvironmentProvider;
-    let environment = match environment_provider
-        .provision_task_worktree(working_dir.to_path_buf(), task.id(), fuse_state.clone())
-        .await
-    {
-        Ok(environment) => environment,
-        Err(err) => return task_workspace_failure(task, err),
-    };
-    let task_worktree_root = environment.root().to_path_buf();
+    let mut retried_after_fuse_failure = false;
 
-    if let Some(observer) = observer {
-        emit_fuse_disabled_note_if_needed(task, environment.fuse_outcome(), Some(observer));
-        observer.on_task_runtime_event(
-            task,
-            TaskRuntimeEvent::WorkspaceReady {
-                working_dir: task_worktree_root.clone(),
-                isolated: true,
-                backend: environment.backend(),
-                main_working_dir: Some(working_dir.to_path_buf()),
-            },
-        );
+    loop {
+        let environment = match environment_provider
+            .provision_task_worktree(working_dir.to_path_buf(), task.id(), fuse_state.clone())
+            .await
+        {
+            Ok(environment) => environment,
+            Err(err) => return task_workspace_failure(task, err),
+        };
+        let task_worktree_root = environment.root().to_path_buf();
+        let backend = environment.backend();
+
+        if let Some(observer) = observer {
+            emit_fuse_disabled_note_if_needed(task, environment.fuse_outcome(), Some(observer));
+            observer.on_task_runtime_event(
+                task,
+                TaskRuntimeEvent::WorkspaceReady {
+                    working_dir: task_worktree_root.clone(),
+                    isolated: true,
+                    backend,
+                    main_working_dir: Some(working_dir.to_path_buf()),
+                },
+            );
+        }
+
+        let result =
+            execute_gate_task(task, &task_worktree_root, spec, inherited_runtime, observer).await;
+        let gate_fuse_failure =
+            if backend == TaskWorkspaceBackend::Fuse && result.status == TaskNodeStatus::Failed {
+                gate_result_fuse_infrastructure_failure(&result)
+            } else {
+                None
+            };
+
+        let cleanup_result = environment_provider.cleanup(environment).await;
+        let cleanup_fuse_failure = cleanup_result.as_ref().err().and_then(|err| {
+            if backend == TaskWorkspaceBackend::Fuse && result.status == TaskNodeStatus::Failed {
+                fuse_cleanup_failure_reason(err)
+            } else {
+                None
+            }
+        });
+        if let Err(err) = cleanup_result {
+            tracing::warn!(
+                path = %task_worktree_root.display(),
+                "failed to clean up gate worktree: {}",
+                err
+            );
+        }
+
+        if backend == TaskWorkspaceBackend::Fuse
+            && !retried_after_fuse_failure
+            && let Some(reason) = gate_fuse_failure.or(cleanup_fuse_failure)
+        {
+            disable_fuse_after_runtime_failure(task, fuse_state, observer, &reason);
+            retried_after_fuse_failure = true;
+            continue;
+        }
+
+        return result;
     }
-
-    let result =
-        execute_gate_task(task, &task_worktree_root, spec, inherited_runtime, observer).await;
-
-    if let Err(err) = environment_provider.cleanup(environment).await {
-        tracing::warn!(
-            path = %task_worktree_root.display(),
-            "failed to clean up gate worktree: {}",
-            err
-        );
-    }
-
-    result
 }
 
 async fn run_reviewer_pass<M: CompletionModel>(
@@ -991,7 +1078,12 @@ where
             && !retried_after_fuse_failure
             && let Some(reason) = task_result_fuse_infrastructure_failure(&result)
         {
-            disable_fuse_after_runtime_failure(task, config, &reason);
+            disable_fuse_after_runtime_failure(
+                task,
+                &config.fuse_state,
+                config.observer.as_ref(),
+                &reason,
+            );
             cleanup_task_environment(
                 &environment_provider,
                 environment,
@@ -1032,7 +1124,12 @@ where
                         && !retried_after_fuse_failure =>
                 {
                     let reason = err.to_string();
-                    disable_fuse_after_runtime_failure(task, config, &reason);
+                    disable_fuse_after_runtime_failure(
+                        task,
+                        &config.fuse_state,
+                        config.observer.as_ref(),
+                        &reason,
+                    );
                     cleanup_task_environment(
                         &environment_provider,
                         environment,
@@ -1165,26 +1262,54 @@ fn display_paths(paths: &[PathBuf]) -> String {
 }
 
 fn task_result_fuse_infrastructure_failure(result: &TaskResult) -> Option<String> {
-    result
-        .tool_calls
+    tool_calls_fuse_infrastructure_failure(&result.tool_calls).or_else(|| {
+        result
+            .agent_output
+            .as_deref()
+            .filter(|output| is_fuse_infrastructure_error_message(output))
+            .map(str::to_string)
+    })
+}
+
+fn gate_result_fuse_infrastructure_failure(result: &TaskResult) -> Option<String> {
+    task_result_fuse_infrastructure_failure(result).or_else(|| {
+        let report = result.gate_report.as_ref()?;
+        report.results.iter().find_map(|gate| {
+            if gate.passed {
+                return None;
+            }
+
+            let detail = [&gate.stderr, &gate.stdout]
+                .into_iter()
+                .map(|output| output.trim())
+                .find(|output| is_fuse_backend_failure_message(output))?;
+            Some(format!(
+                "gate '{}' encountered FUSE infrastructure failure: {}",
+                gate.check_id,
+                truncate_fuse_failure_reason(detail)
+            ))
+        })
+    })
+}
+
+fn tool_calls_fuse_infrastructure_failure(tool_calls: &[ToolCallRecord]) -> Option<String> {
+    tool_calls
         .iter()
         .rev()
         .filter(|call| !call.success)
         .filter_map(|call| call.summary.as_deref())
         .find(|summary| is_fuse_infrastructure_error_message(summary))
         .map(str::to_string)
-        .or_else(|| {
-            result
-                .agent_output
-                .as_deref()
-                .filter(|output| is_fuse_infrastructure_error_message(output))
-                .map(str::to_string)
-        })
 }
 
-fn disable_fuse_after_runtime_failure(task: &TaskSpec, config: &ExecutorConfig, reason: &str) {
-    let first_disable = config.fuse_state.disable_first_time();
-    if let Some(observer) = &config.observer {
+fn disable_fuse_after_runtime_failure(
+    task: &TaskSpec,
+    fuse_state: &FuseProvisionState,
+    observer: Option<&Arc<dyn OrchestratorObserver>>,
+    reason: &str,
+) {
+    let first_disable = fuse_state.disable_first_time();
+    if let Some(observer) = observer {
         let prefix = if first_disable {
             "FUSE worktree failed during task execution"
         } else {
@@ -1202,6 +1327,21 @@ fn disable_fuse_after_runtime_failure(task: &TaskSpec, config: &ExecutorConfig, 
             },
         );
     }
+}
+
+fn fuse_cleanup_failure_reason(err: &io::Error) -> Option<String> {
+    if is_fuse_backend_failure_message(&err.to_string()) {
+        Some(format!("failed to clean up FUSE worktree: {err}"))
+    } else {
+        None
+    }
+}
+
+fn is_fuse_backend_failure_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    is_fuse_infrastructure_error_message(message)
+        || lower.contains("os error 22")
+        || lower.contains("invalid argument (os error 22)")
 }
 
 fn task_workspace_failure(task: &TaskSpec, err: io::Error) -> TaskResult {
@@ -2450,10 +2590,13 @@ mod tests {
             },
             intentspec::{profiles, types::*},
             orchestrator::types::{
-                ExecutionPlanSpec, TaskContract, TaskKind, TaskSpec, ToolDiffRecord,
+                ExecutionPlanSpec, GateResult, TaskContract, TaskKind, TaskSpec, ToolDiffRecord,
             },
             tools::{
-                handlers::{ApplyPatchHandler, ListDirHandler, ShellHandler},
+                ToolError, ToolHandler, ToolInvocation, ToolKind, ToolOutput, ToolSpec,
+                handlers::{
+                    ApplyPatchHandler, ListDirHandler, ShellHandler, SubmitTaskCompleteHandler,
+                },
                 registry::ToolRegistry,
             },
         },
@@ -2998,6 +3141,155 @@ mod tests {
                 reasoning_content: None,
                 raw_response: (),
             })
+        }
+    }
+
+    #[derive(Clone)]
+    struct PatchThenSubmitFailModel;
+
+    impl CompletionModel for PatchThenSubmitFailModel {
+        type Response = ();
+
+        async fn completion(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+            let prompt = request
+                .chat_history
+                .iter()
+                .filter_map(|message| match message {
+                    Message::User { content } => Some(
+                        content
+                            .iter()
+                            .filter_map(|item| match item {
+                                UserContent::Text(text) => Some(text.text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    ),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if prompt.contains("## Review Task") {
+                return Ok(CompletionResponse {
+                    content: vec![AssistantContent::Text(Text {
+                        text: r#"{"approved":true,"summary":"ok","issues":[]}"#.into(),
+                    })],
+                    reasoning_content: None,
+                    raw_response: (),
+                });
+            }
+
+            let saw_apply_patch_result = request.chat_history.iter().any(|message| match message {
+                Message::User { content } => content.iter().any(|item| match item {
+                    UserContent::ToolResult(result) => result.name == "apply_patch",
+                    _ => false,
+                }),
+                _ => false,
+            });
+            if saw_apply_patch_result {
+                return Ok(CompletionResponse {
+                    content: vec![AssistantContent::ToolCall(ToolCall {
+                        id: "call_submit_fail".to_string(),
+                        name: "submit_task_complete".to_string(),
+                        function: Function {
+                            name: "submit_task_complete".to_string(),
+                            arguments: serde_json::json!({
+                                "result": "fail",
+                                "summary": "acceptance blocked by verification failure",
+                                "evidence": [
+                                    {
+                                        "command": "cargo test",
+                                        "exit_code": 1,
+                                        "output_excerpt": "failed"
+                                    }
+                                ]
+                            }),
+                        },
+                    })],
+                    reasoning_content: None,
+                    raw_response: (),
+                });
+            }
+
+            Ok(CompletionResponse {
+                content: vec![AssistantContent::ToolCall(ToolCall {
+                    id: "call_patch_then_submit_fail".to_string(),
+                    name: "apply_patch".to_string(),
+                    function: Function {
+                        name: "apply_patch".to_string(),
+                        arguments: serde_json::json!({
+                            "input": "*** Begin Patch\n*** Update File: src/main.rs\n@@\n-fn main() {}\n+fn main() { println!(\"hello\"); }\n*** End Patch"
+                        }),
+                    },
+                })],
+                reasoning_content: None,
+                raw_response: (),
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct FuseFailToolModel;
+
+    impl CompletionModel for FuseFailToolModel {
+        type Response = ();
+
+        async fn completion(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+            let has_tool_result = request.chat_history.iter().any(|message| match message {
+                Message::User { content } => content
+                    .iter()
+                    .any(|item| matches!(item, UserContent::ToolResult(_))),
+                _ => false,
+            });
+
+            if has_tool_result {
+                return Ok(CompletionResponse {
+                    content: vec![AssistantContent::Text(Text {
+                        text: "done".to_string(),
+                    })],
+                    reasoning_content: None,
+                    raw_response: (),
+                });
+            }
+
+            Ok(CompletionResponse {
+                content: vec![AssistantContent::ToolCall(ToolCall {
+                    id: "call_fuse_fail".to_string(),
+                    name: "read_file".to_string(),
+                    function: Function {
+                        name: "read_file".to_string(),
+                        arguments: serde_json::json!({ "file_path": "/tmp/workspace/Cargo.toml" }),
+                    },
+                })],
+                reasoning_content: None,
+                raw_response: (),
+            })
+        }
+    }
+
+    struct FuseFailHandler;
+
+    #[async_trait::async_trait]
+    impl ToolHandler for FuseFailHandler {
+        fn kind(&self) -> ToolKind {
+            ToolKind::Function
+        }
+
+        async fn handle(&self, _invocation: ToolInvocation) -> Result<ToolOutput, ToolError> {
+            Err(ToolError::ExecutionFailed(
+                "failed to snapshot workspace: IO error for operation on /tmp/workspace: Device not configured (os error 6)"
+                    .into(),
+            ))
+        }
+
+        fn schema(&self) -> ToolSpec {
+            ToolSpec::read_file()
         }
     }
 
@@ -3596,6 +3888,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_implementation_task_honors_submit_task_complete_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        let mut registry = ToolRegistry::with_working_dir(dir.path().to_path_buf());
+        registry.register("apply_patch", Arc::new(ApplyPatchHandler));
+        registry.register("submit_task_complete", Arc::new(SubmitTaskCompleteHandler));
+        let registry = Arc::new(registry);
+        let config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig::default(),
+            max_retries: 0,
+            backoff_seconds: 0,
+            working_dir: dir.path().to_path_buf(),
+            spec: spec(),
+            reviewer_preamble: None,
+            dagrs_resume_checkpoint_id: None,
+            observer: None,
+            workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
+        };
+
+        let result = execute_task(
+            &implementation_task(),
+            &PatchThenSubmitFailModel,
+            &registry,
+            &config,
+        )
+        .await;
+
+        assert_eq!(result.status, TaskNodeStatus::Failed);
+        assert!(
+            result
+                .agent_output
+                .as_deref()
+                .is_some_and(|output| output.contains("acceptance blocked"))
+        );
+        assert!(
+            result
+                .tool_calls
+                .iter()
+                .any(|call| call.tool_name == "apply_patch" && call.success)
+        );
+        assert!(
+            result
+                .tool_calls
+                .iter()
+                .any(|call| call.tool_name == "submit_task_complete" && call.success)
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_implementation_task_stops_retrying_on_fuse_tool_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+
+        let mut registry = ToolRegistry::with_working_dir(dir.path().to_path_buf());
+        registry.register("read_file", Arc::new(FuseFailHandler));
+        let registry = Arc::new(registry);
+        let config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig::default(),
+            max_retries: 3,
+            backoff_seconds: 0,
+            working_dir: dir.path().to_path_buf(),
+            spec: spec(),
+            reviewer_preamble: None,
+            dagrs_resume_checkpoint_id: None,
+            observer: None,
+            workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
+        };
+
+        let result = execute_task(
+            &implementation_task(),
+            &FuseFailToolModel,
+            &registry,
+            &config,
+        )
+        .await;
+
+        assert_eq!(result.status, TaskNodeStatus::Failed);
+        assert_eq!(
+            result.retry_count, 0,
+            "FUSE infrastructure failures should escape the in-workspace retry loop"
+        );
+        assert!(
+            result
+                .agent_output
+                .as_deref()
+                .is_some_and(|output| output.contains("Device not configured"))
+        );
+        assert_eq!(result.tool_calls.len(), 1);
+    }
+
+    #[tokio::test]
     #[serial]
     async fn execute_dag_fails_noop_implementation_task() {
         let repo = tempfile::tempdir().unwrap();
@@ -4041,6 +4428,83 @@ mod tests {
             task_result_fuse_infrastructure_failure(&result)
                 .as_deref()
                 .is_some_and(|reason| reason.contains("Device not configured"))
+        );
+    }
+
+    #[test]
+    fn task_result_detects_fuse_infrastructure_shell_snapshot_failure() {
+        let result = TaskResult {
+            task_id: Uuid::new_v4(),
+            status: TaskNodeStatus::Completed,
+            gate_report: None,
+            agent_output: None,
+            retry_count: 0,
+            tool_calls: vec![ToolCallRecord {
+                tool_name: "shell".into(),
+                success: false,
+                summary: Some(
+                    "Tool execution failed: failed to inspect workspace changes after shell command: IO error for operation on /tmp/workspace: Device not configured (os error 6)"
+                        .into(),
+                ),
+                ..ToolCallRecord::default()
+            }],
+            policy_violations: Vec::new(),
+            model_usage: None,
+            review: None,
+            thinking: None,
+        };
+
+        assert!(
+            task_result_fuse_infrastructure_failure(&result)
+                .as_deref()
+                .is_some_and(|reason| reason.contains("failed to inspect workspace changes"))
+        );
+    }
+
+    #[test]
+    fn gate_result_detects_fuse_backend_os_error_22() {
+        let result = TaskResult {
+            task_id: Uuid::new_v4(),
+            status: TaskNodeStatus::Failed,
+            gate_report: Some(GateReport {
+                results: vec![GateResult {
+                    check_id: "cargo-build".into(),
+                    kind: "command".into(),
+                    passed: false,
+                    exit_code: 101,
+                    stdout: String::new(),
+                    stderr: "error: failed to read source: Invalid argument (os error 22)".into(),
+                    duration_ms: 1,
+                    timed_out: false,
+                }],
+                all_required_passed: false,
+            }),
+            agent_output: None,
+            retry_count: 0,
+            tool_calls: Vec::new(),
+            policy_violations: Vec::new(),
+            model_usage: None,
+            review: None,
+            thinking: None,
+        };
+
+        assert!(
+            gate_result_fuse_infrastructure_failure(&result)
+                .as_deref()
+                .is_some_and(|reason| {
+                    reason.contains("cargo-build") && reason.contains("os error 22")
+                })
+        );
+    }
+
+    #[test]
+    fn fuse_cleanup_failure_reason_detects_os_error_22() {
+        let err = io::Error::other("Invalid argument (os error 22)");
+
+        assert!(
+            fuse_cleanup_failure_reason(&err)
+                .as_deref()
+                .is_some_and(|reason| reason.contains("failed to clean up FUSE worktree"))
         );
     }
 

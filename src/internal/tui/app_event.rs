@@ -36,6 +36,12 @@ use crate::internal::ai::{
 /// keeping the transcript free of stale tool-call results or retries.
 pub type TurnId = u64;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnInputSource {
+    Local,
+    Automation,
+}
+
 /// Events emitted by agent execution to notify the UI.
 ///
 /// These are produced by the agent runtime and forwarded into [`AppEvent::AgentEvent`].
@@ -142,6 +148,7 @@ pub enum AppEvent {
     SubmitUserMessage {
         turn_id: TurnId,
         text: String,
+        source: TurnInputSource,
         /// If set, restrict tools for this message (agent tool restriction).
         allowed_tools: Option<Vec<String>>,
     },
@@ -325,6 +332,7 @@ mod tests {
         let event = AppEvent::SubmitUserMessage {
             turn_id: 42,
             text: "hello".to_string(),
+            source: TurnInputSource::Local,
             allowed_tools: None,
         };
         assert_eq!(event.turn_id(), 42);

@@ -583,8 +583,23 @@ fn cleanup_fuse_task_worktree(worktree: FuseTaskWorktreeBackend) -> io::Result<(
     let runtime = Handle::try_current().map_err(|err| {
         io::Error::other(format!("tokio runtime unavailable for FUSE cleanup: {err}"))
     })?;
-    runtime.block_on(worktree.mount_handle.unmount())?;
+    if let Err(err) = runtime.block_on(worktree.mount_handle.unmount()) {
+        if is_fuse_unmount_already_inactive_error(&err) {
+            warn!(
+                path = %worktree.cleanup_root.display(),
+                "FUSE task worktree mount was already inactive during cleanup: {}",
+                err
+            );
+        } else {
+            return Err(err);
+        }
+    }
     remove_cleanup_root(&worktree.cleanup_root)
+}
+
+#[cfg(unix)]
+fn is_fuse_unmount_already_inactive_error(err: &io::Error) -> bool {
+    matches!(err.raw_os_error(), Some(libc::EINVAL) | Some(libc::ENOENT))
 }
 
 fn remove_cleanup_root(cleanup_root: &Path) -> io::Result<()> {
@@ -1697,6 +1712,20 @@ mod tests {
         ));
         assert!(super::is_fuse_infrastructure_error_message(
             "failed to snapshot worktree: os error 6"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fuse_unmount_treats_einval_and_enoent_as_already_inactive() {
+        assert!(super::is_fuse_unmount_already_inactive_error(
+            &io::Error::from_raw_os_error(libc::EINVAL)
+        ));
+        assert!(super::is_fuse_unmount_already_inactive_error(
+            &io::Error::from_raw_os_error(libc::ENOENT)
+        ));
+        assert!(!super::is_fuse_unmount_already_inactive_error(
+            &io::Error::from_raw_os_error(libc::EIO)
         ));
     }
 

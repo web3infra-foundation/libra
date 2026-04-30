@@ -12,7 +12,7 @@
 ## Goals
 
 - 为正在运行的 TUI session 提供本地自动化入口：提交消息、响应 pending interaction、取消当前 turn、读取 session snapshot 和 diagnostics。
-- 把 Codex 执行后端接入默认 Libra TUI，移除 `libra code --provider codex` 的 Codex 单独 TUI / stdin 交互路径。
+- 把 Codex 执行后端接入默认 Libra TUI，移除 `libra code --provider codex` 的 Codex 单独 TUI / stdin 交互路径，并移除相关的代码。
 - 复用现有 Code UI snapshot / SSE / controller lease 基础设施，不在 v1 引入 typed delta + gap recovery。
 - 明确区分新 `libra code-control --stdio` shim 与现有 `libra code --stdio` MCP 模式。
 - 本计划新增的 automation 写操作受 loopback、token、controller lease、redaction、audit 约束。
@@ -31,7 +31,7 @@
 |------|------------|
 | `docs/improvement/code.md` | 主归属。controller lease、Code UI read model、future typed delta 和 Web takeover 最终应收敛到 Code UI Source Of Truth Unification。 |
 | `docs/improvement/agent.md` | 只作为交叉依赖。复用 Step 1.1 安全边界、Step 1.6 approval scope、Step 1.8 / 1.9 session/event 记录、Step 1.10 source/client 隔离原则；不把本计划并入 Agent 主线。 |
-| `docs/commands/code.md` | 后续实现落地时补用户命令说明，尤其说明 `code --stdio` 与 `code-control --stdio` 的区别。 |
+| `docs/commands/code.md` | 已补用户命令说明，尤其说明 `code --stdio` 与 `code-control --stdio` 的区别。 |
 
 ## 可行性审查结论（本轮修订）
 
@@ -48,6 +48,11 @@
 9. **验收命令必须符合当前 CLI 校验。** 当前 `--web-only --provider codex` 会被 `validate_mode_args` 拒绝；Phase 1 冒烟用默认 provider，或先单独修复 web-only provider 校验。
 10. **Codex 不能继续维护第二套交互式 TUI。** `--provider codex` 的执行后端可以特殊，但输入、approval、渲染和控制权必须统一进入默认 Libra TUI。
 11. **同仓库多实例必须显式拒绝。** 默认 token/info 路径固定（`.libra/code/control-token` 与 `.libra/code/control.json`）；若同一仓库已存在另一个 `--control write` 进程，第二个进程**不能默默覆盖**前者的文件而把它的 lease 静默劫持掉。需要在写文件前先获取 advisory file lock 并做 PID liveness 检查，冲突时 fail-fast 并报告既有 PID/URL；显式自定义 `--control-token-file` + `--control-info-file` 到不同路径是允许并发的唯一逃生口（由调用方自行管理冲突）。
+12. **跨进程 TUI e2e 必须跑在 PTY 中。** `cargo test` 子进程默认没有交互终端；Phase 6 如果直接 `Command` 启动 `libra code`，会在 CI 中失败或卡住。harness 必须使用 pseudo-terminal（例如 dev-dependency `portable-pty`）启动真实 TUI，并设置固定终端尺寸与 `TERM`。
+13. **fake provider 不能直接伪造 approval / user input。** 测试 provider 只能返回 provider-native `CompletionResponse`（text / tool call / error / optional stream delta）；审批、`request_user_input`、plan review 必须由现有 tool loop、sandbox 与 TUI App 真实触发，否则 e2e 覆盖不到生产路径。
+14. **control audit 必须贴合现有 `AuditEvent` 结构。** 当前 `AuditEvent` 字段是 `{ trace_id, principal_id, action, policy_version, redacted_summary, at }`；Phase 4 不应假设可以直接写 `{ thread_id, controller_kind, client_id, result }` 字段。需要用 `ControlAuditRecord` 组装 redacted JSON summary，或先显式迁移 `AuditEvent` 并更新所有调用点。
+15. **测试 harness 不能依赖 `Drop` 完成断言清理。** 子进程关闭要提供显式 `shutdown()`；`Drop` 只作 best-effort 兜底，测试必须主动调用 shutdown 以保证 PTY、日志与临时 control 文件被收口。
+16. **Phase 6 的直接聊天场景必须显式走 `/chat` 或专用测试入口。** 当前普通 provider 的 plain message 会先进入 IntentSpec / Plan review workflow；若场景期望“一次 submit 后立刻得到 assistant 文本”，测试输入必须使用 `/chat ...`，或把 fixture 写成完整 Phase 0/1 计划流程。
 
 ## 当前实现现状（Pre-Flight Reference）
 
@@ -246,13 +251,15 @@ v1 行为：
 
 ### Audit Event Schema
 
-沿用 [hardening.rs:178](src/internal/ai/runtime/hardening.rs) `AuditEvent`，写入 `TracingAuditSink`（[hardening.rs:256](src/internal/ai/runtime/hardening.rs)）。每个 write handler 入口/出口写一条：
+沿用 [hardening.rs:178](src/internal/ai/runtime/hardening.rs) `AuditEvent` 与 `TracingAuditSink`（[hardening.rs:256](src/internal/ai/runtime/hardening.rs)），但不要假设 `AuditEvent` 有 control 专属字段。新增一个内部 `ControlAuditRecord`，序列化成 redacted JSON 后写入 `AuditEvent.redacted_summary`；`AuditEvent` 的其它字段按下列规则填充：
 
-```
-{ thread_id, controller_kind, client_id, action, result, error_code, timestamp }
-```
+- `trace_id`：优先用当前 session/thread trace id；没有 canonical thread 时用启动时生成的 trace id。
+- `principal_id`：`local-tui-control:<controller_kind>:<client_id>`，client id 先经长度限制与 redaction。
+- `action`：`controller.attach` / `controller.detach` / `message.submit` / `interaction.respond` / `turn.cancel`。
+- `policy_version`：`local-tui-control/v1`。
+- `redacted_summary`：JSON string，形态为 `{ "thread_id": "...", "controller_kind": "automation", "client_id": "...", "result": "accepted|error", "error_code": null }`，不得包含 token、headers、provider body 或 env dump。
 
-`action` ∈ `{controller.attach, controller.detach, message.submit, interaction.respond, turn.cancel}`。
+如果后续决定扩展 `AuditEvent` 本身，必须作为独立 migration/refactor 处理，并同步更新 tool-boundary audit 的所有调用点和测试；Phase 4 默认不做该扩展。
 
 ## Implementation Phases
 
@@ -312,14 +319,14 @@ v1 行为：
   pub fn resolve_control_paths(working_dir: &Path, token_override: Option<&Path>, info_override: Option<&Path>) -> ControlPaths;
   pub fn acquire_control_lock(lock_path: &Path) -> Result<ControlLockGuard, ControlLockError>;
   pub fn inspect_existing_instance(info_path: &Path) -> Result<Option<LiveInstanceInfo>>;
-  pub fn pid_is_live(pid: u32) -> bool; // unix: kill(pid, 0) == 0；windows: OpenProcess + GetExitCodeProcess
+  pub fn pid_is_live(pid: u32) -> bool; // pid 0/out-of-range false；unix: kill(pid, 0)；windows: OpenProcess + GetExitCodeProcess
   ```
 - `ControlLockError` 至少包含 `AlreadyHeld { existing: Option<LiveInstanceInfo>, info_path: PathBuf, lock_path: PathBuf }` 与 `Io(std::io::Error)`；`AlreadyHeld` 必须可格式化成可操作的 stderr 消息（含 PID、`baseUrl`、修复建议）。
 - 实现细节：
   - `resolve_control_paths`：默认 token 路径 `.libra/code/control-token`；默认 info 路径 `.libra/code/control.json`；lock 路径默认与 info 同目录、同 stem，扩展名换为 `.lock`（默认即 `.libra/code/control.lock`）。当用户显式传 `--control-info-file` 自定义路径时，lock 路径同步跟随；这是上文 Option B 并发逃生口的实现基础——不同实例必须落在不同 info 目录或 stem，否则共用 lock 文件即冲突。
   - `acquire_control_lock`：`OpenOptions::new().create(true).read(true).write(true).truncate(false)` 打开 lock 文件；调用 `fs2::FileExt::try_lock_exclusive()`（或等价 advisory lock：`fd-lock` / 直接 `libc::flock(LOCK_EX | LOCK_NB)`；若 `Cargo.toml` 还没相应依赖，需在本任务中添加）。锁失败时尝试 `inspect_existing_instance(info_path)` 填充 `AlreadyHeld.existing` 以提升错误可读性，再返回错误。锁成功后把当前 PID 写入 lock 文件方便人工排查（仅 PID，**不写 token**）。`ControlLockGuard::drop` 释放锁、best-effort 删除 lock 文件；删除失败仅 redacted debug log。
   - `inspect_existing_instance`：读 info JSON，缺字段 / 解析失败时返回 `Ok(None)` 并记 debug log（防止半截文件阻塞新实例）；解析成功且 `pid_is_live(pid)` 为 true 时返回 `Some(...)`，否则视为 stale 返回 `Ok(None)`。
-  - `pid_is_live`：unix 用 `nix::sys::signal::kill(Pid::from_raw(pid as i32), None)`，`Ok(())` 视为存活，`ESRCH` 视为已退出，其他错误（`EPERM`）保守视为存活；windows 用 `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, ...)` + `GetExitCodeProcess`，`STILL_ACTIVE` 才视为存活。
+  - `pid_is_live`：先拒绝 `pid == 0`；unix 还必须拒绝 `pid > i32::MAX as u32`，避免 `u32::MAX` cast 成 `-1` 触发进程组/全局探测语义。合法 PID 再用 `nix::sys::signal::kill(Pid::from_raw(pid as i32), None)`，`Ok(())` 视为存活，`ESRCH` 视为已退出，其他错误（`EPERM`）保守视为存活；windows 用 `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, ...)` + `GetExitCodeProcess`，`STILL_ACTIVE` 才视为存活。
   - `ensure_control_token_file`：父目录不存在时 `create_dir_all`；每次 `--control write` 启动都生成新的 32 字节随机 token（base64），不复用旧文件内容。**调用方必须先成功 `acquire_control_lock`**，本函数不再二次防并发，避免活跃实例的 token 被覆盖。
   - token 文件不存在时用 `OpenOptions::new().create_new(true).mode(0o600)` 创建。
   - token 文件已存在时先 `symlink_metadata` 校验：必须是 regular file 且权限正好 `0600`；通过后用 `OpenOptions::write(true).truncate(true).mode(0o600)` 覆盖写入新 token。
@@ -365,7 +372,7 @@ v1 行为：
        - `Ok(guard)` → 把 guard 持有到进程结束（同生命周期；通过 `tokio::signal::ctrl_c` / shutdown handler 触发 drop）。
      - 调 `ensure_control_token_file(&paths.token)` 取得 token（lock 已成立，覆盖旧 0600 文件即可）。
      - 把 token 注入 `WebServerOptions`（新增字段 `automation_control_token: Option<Arc<str>>`）→ `WebAppState`。
-     - web server 启动成功后，用实际 bound addr 调 `write_control_info(&paths.info, &info)` 写 `control.json`（含 `pid = std::process::id()`，**不含** token / token hash / token path）。
+     - web server 启动成功后，用实际 bound addr 调 `write_control_info(&paths.info, &info)` 写 `control.json`（含 `pid = std::process::id()`，**不含** token / token hash / token path）。TUI 模式当前允许 web server 启动失败后继续运行；`--control write` 下必须改为 fail-hard，因为没有 Web endpoint 就没有可用控制面。
      - MCP server 启动成功后更新或重写 `mcpUrl`；若 MCP 启动失败，先删除 `paths.info` 与 `paths.token` 再返回错误（lock guard 在错误返回时一并 drop，自动释放）。
   3. 若 `control == Observe`：不创建 token、不获取 lock；只有显式传 `--control-info-file` 时才写 `mode: "observe"` 的 info 文件，但**不**附带 lock（observe 实例间不互斥）。
   4. 进程退出前 best-effort 清理 control-token 与 control.json，再 drop lock guard 释放 `.lock` 文件；清理失败只写 redacted debug log，不影响退出。
@@ -409,7 +416,6 @@ cargo test --all
   pub enum TuiControlCommand {
       SubmitMessage {
           text: String,
-          allowed_tools: Option<Vec<String>>,
           ack: oneshot::Sender<Result<(), TuiControlError>>,
       },
       RespondInteraction {
@@ -430,7 +436,7 @@ cargo test --all
 - File: [src/internal/tui/app.rs](src/internal/tui/app.rs)
   - `AppConfig` 增加 `code_control_rx: Option<UnboundedReceiver<TuiControlCommand>>`。
   - 主 `tokio::select!` 增加 `Some(command) = code_control_rx.recv()` 分支，调用 `handle_tui_control_command(command).await`。
-  - `SubmitMessage` 处理必须在 App 内部调用 `submit_direct_agent_message(text, allowed_tools)`；App 继续独占 `begin_turn()` / `next_turn_id`。
+  - `SubmitMessage` 处理必须在 App 内部调用现有 `submit_message(text).await`，让 slash command、plain-message planning workflow、pending revision guard 都走同一入口；App 继续独占 `begin_turn()` / `next_turn_id`。v1 HTTP `CodeUiMessageRequest` 只承载 `text`，不新增 `allowedTools` 字段。
   - 提交前校验本地状态：非 `AgentStatus::Idle`、存在 pending interaction、或正在 revision/plan gate 时返回 `Busy`（HTTP 映射 `SESSION_BUSY`）。
   - `RespondInteraction` 校验 `interaction_id` 与当前 pending state 匹配且 snapshot 中仍为 `Pending`；不匹配返回 `InteractionNotActive`。
   - 抽出 helper：`respond_pending_interaction_from_code_ui(interaction_id, response)`，复用 `submit_user_input_answer`、`submit_exec_approval_decision`、`submit_phase_confirmation_decision`、`submit_managed_interaction_decision` 的底层发送逻辑。不要通过模拟键盘事件实现。
@@ -480,11 +486,13 @@ cargo test --all
 #### Task 2.4 — TUI 输入只读 + 抢回
 
 - File: [src/internal/tui/app.rs](src/internal/tui/app.rs)
-- 在 Enter key handler 前通过 `code_ui_session.snapshot().await` 或 App 内缓存的 controller state 判断 `controller.kind == Automation && lease 未过期`：
-  - 是 → 忽略 Enter，状态栏渲染 "Automation in control · /control reclaim"；`Ctrl-C` / `/quit` 不受限。
+- 在 `handle_key_event` 中通过 `code_ui_session.snapshot().await` 或 App 内缓存的 controller state 判断 `controller.kind == Automation && lease 未过期`：
+  - `Ctrl-C`、`/quit`、`/control reclaim`、滚动与 mux 浏览不受限。
+  - 普通 freeform Enter 不提交 message；字符输入只作为本地 slash-command buffer 使用，不进入 agent turn。
+  - 状态栏渲染 "Automation in control · /control reclaim"。
 - 新增 `/control reclaim` slash command：
   - File: [src/internal/tui/slash_command.rs](src/internal/tui/slash_command.rs)，新增 `BuiltinCommand::Control`，`/control reclaim` 作为 args 分支处理。
-  - 行为：调 `runtime.detach_controller(Automation, client_id="", token="", force=true)`（force 路径不需 token，理由：TUI 物理同机用户即终极控制方）。
+  - 行为：调 `runtime.reclaim_local_tui_controller()`（或等价的专用 force-detach helper）。不要把 `force=true` 暴露成通用 HTTP detach 参数；force 只允许 App 内部调用，理由是 TUI 物理同机用户是最终控制方。
   - detach 后 broadcast snapshot（kind 回 `Tui`），下一次 automation 写请求拿不到匹配 token → `INVALID_CONTROLLER_TOKEN`。
 
 #### Task 2.5 — `POST /api/code/control/cancel`
@@ -524,7 +532,7 @@ cargo test --all
   - `/api/code/session` 和 `/api/code/events` 仍能观察 Codex run snapshot。
   - `rg "agent_codex::execute|stdin_rx|std::io::stdin" src/command src/internal/tui src/internal/ai/codex` 的结果证明 `libra code --provider codex` 路径不再进入 stdin 主循环（legacy 函数若保留需有明确注释和测试隔离）。
 - 测试：
-  - 新增 `tests/code_codex_default_tui_test.rs`，用 fake Codex WebSocket server 覆盖：launch → user submit → approval request → approval response → snapshot 更新。
+  - 新增 `tests/code_codex_default_tui_test.rs` 源码级 routing guard：`libra code --provider codex` 不调用 legacy `agent_codex::execute`，Codex 分支走 `run_tui_with_managed_code_runtime`，TUI/command 路径无 `std::io::stdin` 主循环。
   - 回归测试覆盖 `--web-only --provider codex` 不受默认 TUI 合并影响。
 
 #### Phase 2 验收
@@ -544,22 +552,22 @@ cargo test --all
 # 7) 确认只出现默认 Libra TUI；Codex execution、approval、snapshot 都经默认 TUI / Code UI runtime。
 ```
 
-集成测试目标（新增 `tests/code_ui_automation_test.rs`）：
+自动化覆盖目标（由 `src/internal/ai/web/code_ui.rs` / `src/internal/tui/code_ui_adapter.rs` 单测与 `tests/code_ui_scenarios.rs` 跨进程场景共同覆盖）：
 - attach automation → submit → snapshot.transcript 含新消息。
 - attach automation → respond approval → orchestrator 收到 oneshot 回应。
 - attach automation → reclaim → 旧 token 失效。
 - interaction id 不存在 / 已 resolved → `INTERACTION_NOT_ACTIVE`。
-- Codex provider → 默认 TUI → fake Codex approval round-trip 成功，无 stdin loop。
+- Codex provider → 默认 TUI routing guard 成功，无 legacy stdin loop。
 
 ---
 
-### Phase 3 — `code-control --stdio` Shim（v1 可推迟）
+### Phase 3 — `code-control --stdio` Shim
 
-**条件**：HTTP/SSE 已能满足 Claude Code 与本地 harness 时此 Phase 可推迟到 v1.1。如执行：
+**实现状态（2026-04-30）**：已落地。`libra code-control --stdio` 提供本地 NDJSON JSON-RPC 2.0 bridge；`libra code --stdio` 仍是 MCP stdio transport。
 
 - New file: `src/command/code_control.rs` + 在 [src/command/mod.rs](src/command/mod.rs) 新增 `pub mod code_control;` + 在 [src/cli.rs](src/cli.rs) 新增 `Commands::CodeControl(...)` 分支。
 - NDJSON JSON-RPC 2.0 dispatcher 自实现（rmcp 是 MCP-specific，不复用）。
-- HTTP backend 用 `reqwest`；SSE 用 `eventsource-stream`（若只在 `Cargo.lock` 中作为传递依赖出现，需在 `Cargo.toml` 显式新增直接依赖）。
+- HTTP backend 用 `reqwest`；SSE notification 由 `src/command/code_control.rs` 内的轻量 parser 读取 `/api/code/events` byte stream。
 - Method ↔ HTTP 映射见上文表。
 - 错误映射：HTTP 4xx/5xx → JSON-RPC error.data 含 HTTP status + libra error code。
 - 验收：
@@ -581,13 +589,14 @@ cargo test --all
 
 - File: [src/internal/ai/web/mod.rs](src/internal/ai/web/mod.rs)
 - `WebAppState` 加 `audit_sink: Arc<dyn AuditSink>`（启动时默认 `Arc::new(TracingAuditSink)`，复用 [hardening.rs:256](src/internal/ai/runtime/hardening.rs)）。
-- 在 5 个 write handler 入口/出口 await `audit_sink.append(...)`，字段按 Audit Schema 段落。
+- 新增 `ControlAuditRecord` + `append_control_audit(...)` helper，把 control 专属字段 redacted 后写入 `AuditEvent.redacted_summary`；不要直接改 `AuditEvent` 字段结构。
+- 在 5 个 write handler 入口/出口 await `append_control_audit(...)`。
 - 失败也写 audit（`result: "error", error_code: "..."`）。
 
 #### Task 4.3 — Redaction 规则覆盖与 golden test
 
 - 扩充 `SecretRedactor` markers（[hardening.rs:153-161](src/internal/ai/runtime/hardening.rs)）补 control token 模式。
-- 新增 `tests/diagnostics_redaction_test.rs` golden file（snapshot 对比）。
+- 新增 `tests/diagnostics_redaction_test.rs` golden-style integration test，覆盖 diagnostics 中 controller owner / active interaction 等字符串字段会经 `SecretRedactor` 过滤。
 - 单测覆盖：env dump / provider body / shell excerpt 全部经规则表过滤。
 
 #### Task 4.4 — Approval scope 隔离
@@ -663,6 +672,7 @@ cargo test diagnostics_redaction_test
 | 2 | `local-tui-control.md` HTTP API 段落（端点、鉴权、curl 示例、错误码 7 项）；`code.md` 加 `/control reclaim` 段；`docs/improvement/code.md` cross-link | `tui/control.rs` + `tui/code_ui_adapter.rs` 模块 doc；`attach_controller` 等方法 `///`；`code_router` 注释 |
 | 3 | `code-control.md` 新建；`local-tui-control.md` JSON-RPC 段填充；Quickstart 加 stdio 例 | `command/code_control.rs` 模块 doc |
 | 4 | `local-tui-control.md` 加 `/diagnostics` + Audit Schema 段、redaction 规则示例；Troubleshooting 加最后两项 | `runtime/hardening.rs` 新增 marker / sink 注释 |
+| 6 | `local-tui-control.md` 加 "Writing your own scenario"、PTY harness 复现步骤、artifact 解读 | `tests/harness/` 模块 doc；fake provider 模块 doc；scenario fixture schema 注释 |
 
 #### Task 5.4 — 文档与代码一致性 Lint
 
@@ -698,6 +708,221 @@ cargo run -- code --help | rg -- '--control'
 
 ---
 
+### Phase 6 — Automation-Driven TUI Test Harness
+
+**目标**：把 Phase 1–4 的 control surface 包装成可复用的端到端测试 harness。测试必须启动真实 `libra code` TUI 子进程，通过 HTTP control endpoints 执行 attach / submit / respond / cancel / reclaim，并断言 snapshot、controller、interaction、transcript、diagnostics 与 audit 日志。
+
+**实现状态（2026-04-30）**：Phase 6A 已落地。交付包括 `test-provider` feature、hidden fake provider、`portable-pty` harness、轻量 `Scenario` DSL（`tests/harness/scenario.rs`）、`tests/harness_self_test.rs`、`tests/code_ui_scenarios.rs`（6 个 scenario：basic chat / reclaim / cancel / oversize / unknown interaction / multi-instance conflict）、`tests/fixtures/code_ui/{basic_chat,delayed_chat}.json`、`--port 0` 真实端口写回修复，以及 `tests/code_codex_default_tui_test.rs`（Phase 2 Task 2.7 的源码级 routing guard，无需启动真实 Codex backend）。CI 已通过 `.github/workflows/base.yml` 的 "Run TUI automation scenarios" step 跑这套 scenario + harness 自检 + Codex routing guard，并在失败时上传 `target/code-ui-scenarios/**` 工件。6B 的 Phase 0/1、approval full-flow 和 transcript-level redaction e2e 是未来扩展项，不属于当前 v1 验收；Phase 4 的 diagnostics redaction 已由 `tests/diagnostics_redaction_test.rs` 覆盖。
+
+执行前置：Phase 1（control token + lock）与 Phase 2（automation lease + `TuiCodeUiAdapter`）必须先 land；Phase 4 完成后才启用 audit / diagnostics / redaction 场景。Phase 6 不替代 Phase 2 的 in-process adapter 单测；它只补跨进程、真实 CLI、真实 TUI runtime 的回归覆盖。
+
+#### 关键决策
+
+1. **真实 TUI 必须跑在 PTY 中**：`cargo test` 没有交互终端。harness 使用 dev-dependency `portable-pty` 启动 `libra code --control write --port 0`，设置 `TERM=xterm-256color` 与固定尺寸（建议 120x40），并把 PTY 输出写入 `pty.log`。
+2. **直接走 HTTP，不依赖 stdio shim**：Phase 3 的 `code-control --stdio` 可以推迟；harness 的底层 client 直接请求 `/api/code/*` 并轮询 snapshot，避免把两个新系统互相绑定。
+3. **fake provider 只模拟 provider 输出**：test-only provider 返回 `CompletionResponse` 的 text / tool_call / error / optional stream delta。它不得直接创建 approval、user input 或 plan-review interaction；这些必须由现有 tool loop、sandbox、App 状态机真实触发。
+4. **直接聊天场景显式用 `/chat`**：当前普通 provider 的 plain message 会进入 IntentSpec / Plan workflow。期望“一次 submit 后立刻出现 assistant 文本”的 scenario 必须提交 `/chat ...`；plain message scenario 必须按 Phase 0/1 workflow 编写 fixture。
+5. **路径默认隔离，冲突场景例外**：普通 scenario 显式传独立 `--control-token-file` / `--control-info-file` 到 `TempDir`；只有多实例冲突 scenario 使用同一 working dir 的默认路径。
+6. **日志由 harness 显式配置**：每个 session 设置 `LIBRA_LOG_FILE=<logs_dir>/libra.log` 与合适的 `LIBRA_LOG`，再从 `libra.log` 断言 audit substring；不要假设存在单独 `audit.log` 或 JSON tracing 格式。
+7. **显式 shutdown**：`CodeSession::shutdown()` 负责 graceful quit、等待子进程、收口 PTY reader；`Drop` 只作兜底，测试断言不得依赖 Drop。
+
+#### Task 6.1 — PTY harness 基础库 `CodeSession`
+
+- New file: `tests/harness/mod.rs`
+- New file: `tests/harness/code_session.rs`
+- `Cargo.toml` dev-dependency：`portable-pty`（仅测试使用）。
+- 关键类型：
+  ```rust
+  pub struct CodeSessionOptions {
+      pub fixture: PathBuf,
+      pub name: String,
+      pub use_default_control_paths: bool,
+  }
+
+  pub struct CodeSession {
+      child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
+      writer: Option<Box<dyn Write + Send>>,
+      reader_thread: Option<std::thread::JoinHandle<()>>,
+      base_url: String,
+      control_token: String,
+      controller_token: Option<String>,
+      client: reqwest::blocking::Client,
+      logs_dir: PathBuf,
+      info_path: PathBuf,
+      token_path: PathBuf,
+  }
+  ```
+- `spawn(builder)` 流程：
+  1. 用 `assert_cmd::cargo::cargo_bin("libra")` 或 `CARGO_BIN_EXE_libra` 找当前测试 binary。
+  2. 通过 `portable-pty` openpty，设置 env：`TERM=xterm-256color`、`LIBRA_ENABLE_TEST_PROVIDER=1`、`LIBRA_LOG_FILE=<logs_dir>/libra.log`、`LIBRA_LOG=info,libra::internal::ai::web=debug`。
+  3. 启动命令：`libra code --provider fake --fake-fixture <fixture> --control write --port 0 --mcp-port 0 --control-token-file <tmp>/control-token --control-info-file <tmp>/control.json`；多实例冲突 scenario 使用同一 working dir 的默认 control paths。
+  4. 轮询 `control.json`（30s 超时、100ms 间隔），解析真实 `baseUrl`；读取 token 文件。
+  5. PTY reader 持续写 `logs_dir/pty.log`，失败时保留最近输出供 panic message 使用；`debug_context()` 会同时 dump snapshot、`control.json`、`pty.log` tail 与 `libra.log` tail，并脱敏 token。
+- 公开方法：
+  - `attach_automation(client_id)`：自动注入 `X-Libra-Control-Token` 并保存返回的 `X-Code-Controller-Token`。
+  - `submit_message(text)` / `respond_interaction_expect_error(interaction_id)` / `cancel_turn()` / `write_tui_line("/control reclaim")`。
+  - `snapshot()` / `diagnostics()`。
+  - `wait_for_snapshot(predicate, timeout)`；超时 dump 最后 snapshot、`pty.log` tail、`libra.log` tail 与 `control.json`。
+  - `submit_message_expect_error(text)`、`submit_large_message(bytes)`、`run_default_control_conflict()`。
+  - `shutdown()`：先尝试在 PTY 输入 `/quit\r`，5s 内未退出则 kill，随后等待 reader thread 收口。
+- 自检测试：
+  - `tests/harness_self_test.rs` 用 fake provider + PTY 启动 TUI，等待 `control.json`，获取 snapshot 与 diagnostics，调用 `shutdown()`，断言子进程退出且临时 token/info 文件被清理。
+
+#### Task 6.2 — Fake provider（test-provider feature）
+
+- `Cargo.toml` features 新增 `test-provider = []`。
+- New files: `src/internal/ai/providers/fake/{mod.rs, completion.rs, fixture.rs}`。
+- File: [src/internal/ai/providers/mod.rs](src/internal/ai/providers/mod.rs) 新增 `#[cfg(feature = "test-provider")] mod fake;`。
+- File: [src/command/code.rs](src/command/code.rs)：在 `CodeProvider` 加 hidden `Fake` variant（`#[cfg(feature = "test-provider")]` + clap hidden value），`CodeArgs` 加 hidden `--fake-fixture <PATH>`。
+- 安全边界：
+  - `validate_mode_args` 中要求 `--provider fake` 必须同时满足 `cfg(feature = "test-provider")`、`--fake-fixture` 存在、`LIBRA_ENABLE_TEST_PROVIDER=1`。缺任一项返回 command usage error。
+  - fake provider 不进默认 features；即便 `--all-features` 编译出来，也必须由显式 env 才能运行。
+- Fixture schema（provider-native，不直接造 TUI interaction）：
+  ```json
+  {
+    "version": 1,
+    "responses": [
+      {
+        "match": { "last_user_regex": "^hello", "phase": "chat" },
+        "events": [
+          { "type": "stream_text", "text": "hi " },
+          { "type": "text", "text": "there" }
+        ]
+      },
+      {
+        "match": { "phase": "phase0" },
+        "events": [
+          {
+            "type": "tool_call",
+            "id": "call-input-1",
+            "name": "request_user_input",
+            "arguments": {
+              "questions": [{
+                "id": "risk_profile",
+                "header": "Risk",
+                "question": "Risk level?",
+                "options": ["Low", "Medium", "High"]
+              }]
+            }
+          },
+          {
+            "type": "tool_call",
+            "id": "call-intent-1",
+            "name": "submit_intent_draft",
+            "arguments": { "draft": { "...": "valid IntentDraft fixture" } }
+          }
+        ]
+      }
+    ],
+    "fallback": { "type": "error", "message": "no fake provider response matched" }
+  }
+  ```
+- 支持 event：`stream_text`、`thinking`、`text`、`tool_call`、`error`、`delay_ms`。`tool_call` 组装为 `AssistantContent::ToolCall`；`stream_text` 只通过 `CompletionRequest.stream_events` 发 delta，最终 response 仍必须包含完整 text 或 tool calls。
+- 匹配维度至少包括：`last_user_regex`、`phase`（由 prompt/preamble 分类：`chat` / `phase0` / `phase1` / `execution` / `repair`）、`after_tool_result`（可选，匹配最近 tool result 名称）。不要按全 prompt 字符串精确匹配，避免 prompt 文案微调导致 fixture 全量失效。
+- 单测：fixture 解析、fallback、stream delta + final text 一致、tool_call 参数 round-trip、`request_user_input` fixture 经真实 handler 阻塞并由测试释放。
+
+#### Task 6.3 — Scenario DSL
+
+> **状态（2026-04-30）**：已落地轻量 v1。`tests/harness/scenario.rs` 包装 `CodeSession` 的常用 step / assertion，并在失败上下文中追加 scenario 名、step 名、最新 snapshot、`pty.log` tail、`libra.log` tail 与 `control.json`。当前 basic chat scenario 已使用该 DSL；更复杂的 Phase 0/1 / approval builder 留作未来扩展。
+
+- New file: `tests/harness/scenario.rs`
+- API 示例：
+  ```rust
+  let mut scenario = Scenario::new("basic_chat", &mut session);
+  scenario
+      .step("attach")
+      .attach_automation("scenario-basic")?
+      .expect_controller_kind("automation")?;
+  scenario
+      .step("submit direct chat")
+      .submit("/chat hello")?
+      .expect_transcript_contains("hi there")?
+      .expect_status_eq("idle")?;
+  ```
+- 失败时 error context 必须包含：scenario 名、step 名、最近 snapshot、`pty.log` tail、`libra.log` tail、control.json 内容（确认不含 token）。完整 artifact 保留在 `target/code-ui-scenarios/<scenario>/`。
+- Assertion 不解析不存在的 `audit.log`；Phase 4 后使用 `log_contains("action=...")` 或 `redacted_summary` substring 验证 control audit。
+
+#### Task 6.4 — 标准 scenario 套件
+
+- New file: `tests/code_ui_scenarios.rs`
+- New dir: `tests/fixtures/code_ui/`
+- 每个 scenario 使用 `#[tokio::test(flavor = "multi_thread")] #[serial]`；后续若证明完全隔离再放宽。
+
+| 场景 | Fixture | 阶段 | 主要断言 |
+|------|---------|------|---------|
+| direct chat submit | `basic_chat.json` | 6A | attach automation → submit `/chat hello` → transcript 含 fake 文本 → status 回 idle |
+| automation reclaim | `basic_chat.json` | 6A | attach 后通过 PTY 输入 `/control reclaim` → controller.kind 回 `tui` → 旧 controller token 写请求返回 `INVALID_CONTROLLER_TOKEN` |
+| cancel running turn | `delayed_chat.json` | 6A | fake provider delay 中调用 cancel → TUI 回 idle / interrupted 文案出现；不要断言不存在的 `cancelled` status |
+| unknown interaction id | `basic_chat.json` | 6A | attach 后 respond 不存在 id → `INTERACTION_NOT_ACTIVE`，session 状态不变 |
+| payload too large | 无 fixture | 6A | submit 300KiB body → `PAYLOAD_TOO_LARGE`，adapter 未收到 message |
+| multi-instance conflict | `basic_chat.json` | 6A | 同一 working dir + 默认 control paths 启动第二个实例 → 非零退出，stderr/pty log 含 PID 与 `baseUrl` |
+
+6A 是当前 v1 的稳定跨进程 suite。Phase 4 diagnostics redaction 由 `tests/diagnostics_redaction_test.rs` 覆盖；不要求普通 assistant transcript/SSE 文本被 redacted。
+
+未来扩展（不属于当前 v1 验收）：
+
+| 场景 | Fixture | 主要断言 |
+|------|---------|---------|
+| phase0 user input | `phase0_user_input.json` | plain message 进入 Phase 0 → fake tool_call `request_user_input` → automation respond → fake `submit_intent_draft` → snapshot 出现 `IntentReviewChoice` |
+| intent review confirm | `phase1_plan.json` | respond Confirm → fake `submit_plan_draft` → snapshot 出现 post-plan choice |
+| approval allow full flow | `approval_allow_plan.json` | Execute Plan 后 fake execution 发 shell tool_call → sandbox approval interaction → automation Allow → tool result recorded |
+
+#### Task 6.5 — CI 接入
+
+- File: `.github/workflows/base.yml`
+- 在普通 `cargo test --all` 之后追加独立 step：
+  ```yaml
+  - name: Run TUI automation scenarios
+    env:
+      LIBRA_ENABLE_TEST_PROVIDER: "1"
+    run: |
+      cargo test --features test-provider \
+        --test code_ui_scenarios \
+        --test harness_self_test \
+        --test code_codex_default_tui_test \
+        -- --test-threads=1
+  - name: Upload scenario artifacts on failure
+    if: failure()
+    uses: actions/upload-artifact@v4
+    with:
+      name: code-ui-scenarios
+      path: target/code-ui-scenarios/**
+      if-no-files-found: ignore
+  ```
+- harness 自己为每个子进程设置 `LIBRA_LOG_FILE`；CI 不全局设置 `RUST_LOG`，避免日志写进 PTY 干扰 TUI。
+- `--test-threads=1` 是保守默认：PTY、临时端口、子进程清理和默认-path conflict scenario 都更容易稳定。若后续并行，必须先把 conflict scenario 单独 serial，并证明普通 scenario 使用 isolated control paths。
+
+#### Task 6.6 — 文档与本地复现
+
+- File: `docs/automation/local-tui-control.md`
+  - "Quickstart Recipes" 增 "Writing your own scenario"：fixture schema、Scenario DSL、PTY 注意事项、本地命令。
+  - "Troubleshooting" 增 "如何复现 CI scenario 失败"：`LIBRA_ENABLE_TEST_PROVIDER=1 cargo test --test code_ui_scenarios --features test-provider -- basic_chat --nocapture`，并说明查看 `target/code-ui-scenarios/<scenario>/pty.log` 与 `libra.log`。
+- File: `docs/improvement/tui.md`：Verification Matrix、Risks、Changelog 同步增补。
+- 不新增 `libra code-test` subcommand；v1 通过 cargo integration tests 运行。社区需要无 cargo fixture runner 时留 v1.1。
+
+#### 与既有计划的边界
+
+- **Phase 2 单测**：继续覆盖 in-process `TuiControlCommand` / adapter / App ack；Phase 6 只覆盖真实 CLI/TUI/HTTP 跨进程链路。
+- **Phase 4 redaction golden**：锁定 diagnostics/control-audit 结构；Phase 6 只验证跨进程暴露面没有泄露，不把 assistant transcript redaction 作为 v1 contract。
+- **Phase 5 文档**：Task 5.3 时序表新增 Phase 6 行：用户文档写 scenario/复现段，开发者文档写 `tests/harness/` 与 fake provider module doc。
+
+#### Phase 6 验收
+
+```bash
+cargo +nightly fmt --all
+cargo clippy --all-targets --all-features -- -D warnings
+# fake provider 单测
+LIBRA_ENABLE_TEST_PROVIDER=1 cargo test --features test-provider fake
+# 基础 PTY harness 自检
+LIBRA_ENABLE_TEST_PROVIDER=1 cargo test --test harness_self_test --features test-provider
+# Phase 6A 稳定 scenario
+LIBRA_ENABLE_TEST_PROVIDER=1 cargo test --test code_ui_scenarios --features test-provider -- --test-threads=1
+# 单独跑某个 scenario 调试
+LIBRA_ENABLE_TEST_PROVIDER=1 cargo test --test code_ui_scenarios --features test-provider -- basic_chat --nocapture
+```
+
+---
+
 ## Verification Matrix
 
 | 测试 | 命令 | 覆盖 |
@@ -707,11 +932,15 @@ cargo run -- code --help | rg -- '--control'
 | 全量 | `cargo test --all` | 所有测试 |
 | Phase 1 单测 | `cargo test code_control_files` | token 文件 lifecycle |
 | Phase 2 集成 | `cargo test code_ui_automation` | attach/submit/respond/reclaim/cancel |
-| Codex 默认 TUI | `cargo test code_codex_default_tui` | Codex backend 接入默认 TUI、无 stdin loop |
+| Codex 默认 TUI | `cargo test --test code_codex_default_tui_test` | Phase 2 Task 2.7 的源码级 routing guard：`agent_codex::execute` 不被 `libra code` 调用、Codex 分支走 `run_tui_with_managed_code_runtime`、TUI/command 路径无 `std::io::stdin` |
 | Phase 3 集成 | `cargo test code_control_stdio` | NDJSON shim（如执行） |
-| Phase 4 golden | `cargo test diagnostics_redaction` | redaction |
+| Phase 4 redactor | `cargo test --test ai_hardening_contract_test secret_redactor_removes_common_token_shapes`；`cargo test --test diagnostics_redaction_test` | `SecretRedactor::default_runtime()` 覆盖 OpenAI key / bearer / password / generic token / control-token 五类 marker；diagnostics controller owner / active interaction 字段脱敏 |
 | Phase 5 文档构建 | `cargo doc --no-deps --all-features` | intra-doc link、模块文档无 warning |
 | Phase 5 一致性 | `rg "/api/code/" docs/ src/internal/ai/web/`、`rg "X-Libra-Control-Token" docs/ src/`、`cargo run -- code --help \| rg -- '--control'` | HTTP 路径、header、CLI flag 双向一致 |
+| Phase 6 fake provider | `LIBRA_ENABLE_TEST_PROVIDER=1 cargo test --features test-provider fake` | provider-native fixture 解析、stream/text/tool_call/error 回放 |
+| Phase 6 PTY harness 自检 | `LIBRA_ENABLE_TEST_PROVIDER=1 cargo test --test harness_self_test --features test-provider` | PTY spawn、control.json 发现、sync shutdown、临时文件清理 |
+| Phase 6 scenario | `LIBRA_ENABLE_TEST_PROVIDER=1 cargo test --features test-provider --test code_ui_scenarios --test harness_self_test --test code_codex_default_tui_test -- --test-threads=1` | Phase 6A submit/respond/cancel/reclaim/oversize/多实例 + harness 自检 + Codex routing guard；Phase 4 后补 transcript-level redaction e2e |
+| Phase 6 CI | `.github/workflows/base.yml` 的 "Run TUI automation scenarios" step | CI 自动跑上一行命令；失败时 upload `target/code-ui-scenarios/**` 工件 |
 | 回归 | `cargo test command_test e2e_mcp_flow` | 既有命令、MCP stdio |
 
 ## Risks And Mitigations
@@ -725,12 +954,15 @@ cargo run -- code --help | rg -- '--control'
 | automation lease 抢占人工输入 | 用户失去本地控制感 | TUI 保留 Ctrl-C / /quit / reclaim；lease 短 TTL；snapshot 显示 owner。 |
 | 写通道绕过 Runtime | session/projection 不一致 | 所有 automation write 必经 `TuiControlCommand` → App helper；adapter 不直接 mutate snapshot、不共享 turn id。 |
 | **Adapter 抽象错位** | 普通 provider TUI 模式下 HTTP write 找不到出口 | 显式新增 `TuiCodeUiAdapter`，TUI 模式 automation 均走 App；Phase 2 验收强制 ollama provider。 |
-| Codex 默认 TUI 合并后出现双输入循环 | 用户看到重复输出、approval 被错误消费 | `--provider codex` 只允许默认 App 读输入；Codex runtime 禁止 stdin/stdout 用户交互；fake Codex integration test 覆盖 approval round-trip。 |
+| Codex 默认 TUI 合并后出现双输入循环 | 用户看到重复输出、approval 被错误消费 | `--provider codex` 只允许默认 App 读输入；Codex runtime 禁止 stdin/stdout 用户交互；源码级 routing guard 覆盖默认 TUI 路径不会进入 legacy stdin loop。 |
 | TUI 继续使用不可让渡 fixed controller | automation attach 永远 `CONTROLLER_CONFLICT` | Phase 2 把 TUI owner 从 fixed state 拆成可恢复 `local_tui_owner`。 |
 | symlink 攻击 token 文件 | 任意文件被覆盖/读取 | `O_NOFOLLOW` + 权限 lstat 校验；已有 0600 regular file 只覆盖写入新 token。 |
 | 同仓库多实例覆盖 token/info | 前一个实例的 lease 被静默劫持，原自动化客户端突然 401 或被路由到错进程 | 默认路径下 `acquire_control_lock` advisory lock + `control.json.pid` liveness 检查；冲突时 fail-fast 报告既有 PID/`baseUrl`；并发场景必须显式给出互不重合的 `--control-token-file` + `--control-info-file`（lock 路径自动跟随 info 路径分离）。 |
 | approval memo 跨 controller 泄露 | automation 触发 once-allow 被人工继承（反向亦然） | scope key 加 controller kind 前缀（Phase 4） |
 | 文档滞后导致契约漂移 | 用户用错 flag、客户端 hardcode 错路径或错 header、错误码语义不可发现 | Phase 5 把文档作为强约束交付：随 Phase 同步上线，`cargo doc` 无 warning，HTTP/header/flag/错误码双向 grep 一致；不接受"代码合入但文档缺失"的 PR。 |
+| e2e harness flake（PTY、端口、子进程时序、临时文件竞争） | Phase 6 scenario 间歇性失败，CI 信号被噪音稀释 | scenario 串行（`--test-threads=1`）；每 scenario 独立 `TempDir` + `--port 0`；`spawn` 30s 超时 + 100ms 轮询；失败 dump snapshot/`control.json`/`pty.log`/`libra.log` 到 artifact；harness 自检测试覆盖 PTY spawn 与 sync shutdown。 |
+| fake provider 与真实 provider 行为漂移 | scenario 全绿但真实 provider 上线后回归 | fake provider 只输出 provider-native `CompletionResponse` text/tool_call/error，不直接伪造 App interaction；Phase 2 端到端冒烟仍用 ollama provider；Phase 6 不替代手工冒烟。 |
+| test-provider 被误用于真实会话 | 隐藏测试 provider 在 `--all-features` binary 中可被解析 | `Fake` provider 和 `--fake-fixture` clap hidden；`validate_mode_args` 强制 `LIBRA_ENABLE_TEST_PROVIDER=1` + fixture；默认 features 不包含该 provider。 |
 
 ## Open Questions
 
@@ -755,3 +987,7 @@ cargo run -- code --help | rg -- '--control'
 | 2026-04-28 | Codex | 加入 Codex 默认 TUI 合并任务：`--provider codex` 使用默认 Libra TUI，Codex app-server 仅作执行后端，移除交互式路径中的 Codex 单独 TUI / stdin approval loop。 |
 | 2026-04-28 | Claude Code | 修复多实例并发冲突：默认路径下加 `.libra/code/control.lock` advisory file lock + `control.json.pid` liveness 检查 fail-fast；扩 Task 1.3 helpers / 测试、Task 1.5 启动流程、Phase 1 冒烟、Risks、Open Questions；显式自定义 token/info 路径作为 Option B 并发逃生口。 |
 | 2026-04-28 | Claude Code | 新增 Phase 5 — Documentation Deliverables：用户文档清单（`code.md` 增补、`code-control.md` 新建、`local-tui-control.md` 主指南、`code.md` cross-link）、开发者文档清单（模块/方法 docstring）、Phase ↔ 文档时序对齐表、文档与代码一致性 lint；同步更新 Verification Matrix 与 Risks。 |
+| 2026-04-29 | Claude Code | 新增并收敛 Phase 6：跨进程 e2e 改为 PTY 启动真实 TUI；fake provider 只返回 provider-native text/tool_call/error，不直接伪造 approval/user input；补 `LIBRA_ENABLE_TEST_PROVIDER` 安全门、显式 shutdown、`pty.log`/`libra.log` artifact、6A/6B scenario 分层；同步更新 Verification Matrix 与 Risks。 |
+| 2026-04-30 | Codex | 完成 Phase 6A：新增 hidden fake provider、PTY `CodeSession` harness、harness self-test、direct chat/reclaim/cancel/oversize scenarios；修复 `--port 0` 写回真实端口、raw PTY Enter 写入、fake fixture `delayMs` 解析与超限 body 稳定 413。 |
+| 2026-04-30 | Claude Code | 闭环 doc↔code gap：(1) `.github/workflows/base.yml` 新增 "Run TUI automation scenarios" step + 失败工件上传，CI 实际跑 `--features test-provider` scenario+harness 自检+Codex routing guard；(2) 新增 `tests/code_codex_default_tui_test.rs`（4 个源码级 routing guard：`agent_codex::execute` 不被 `libra code` 调用、Codex 分支走 `run_tui_with_managed_code_runtime`、`#[deprecated]` marker 保留、TUI/command 路径无 `std::io::stdin`），无需启动真实 Codex backend；(3) Phase 6 实现状态段落补完整 scenario 清单与 CI 现状；(4) Verification Matrix 修正 Codex / Phase 4 redactor 行指向真实测试名，新增 Phase 6 CI 行；(5) 不改动 Phase 1/2/4 已落地代码。 |
+| 2026-04-30 | Codex | 补齐剩余 TUI doc↔code gap：`CodeUiDiagnostics` 字符串字段接入 `SecretRedactor` 并新增 `tests/diagnostics_redaction_test.rs`；新增轻量 `tests/harness/scenario.rs` DSL 并接入 basic chat scenario；CI scenario step 移除全局 `RUST_LOG`；文档同步改为当前 v1 已落地范围，6B scenario 明确为未来扩展。 |

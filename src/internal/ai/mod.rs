@@ -8,8 +8,9 @@
 //!   [`ChatAgent`] types that wrap a provider's completion model with tools,
 //!   preamble injection, and message history.
 //! - **Providers** ([`providers`]): one submodule per LLM backend (`gemini`,
-//!   `openai`, `anthropic`, `deepseek`, `zhipu`, `ollama`, ...) — each implements
-//!   [`CompletionModel`] so the rest of the stack stays provider-agnostic.
+//!   `openai`, `anthropic`, `deepseek`, `kimi`, `zhipu`, `ollama`, ...) — each
+//!   implements [`CompletionModel`] so the rest of the stack stays
+//!   provider-agnostic.
 //! - **Completion contracts** ([`completion`]): the [`CompletionModel`], [`Chat`],
 //!   [`Prompt`], and [`Message`] traits/types that providers must satisfy.
 //! - **Tools** ([`tools`]): the registry and handlers (apply patch, shell, read

@@ -154,3 +154,27 @@ jobs:
           LIBRA_STORAGE_ACCESS_KEY: ${{ secrets.LIBRA_STORAGE_ACCESS_KEY }}
           LIBRA_STORAGE_SECRET_KEY: ${{ secrets.LIBRA_STORAGE_SECRET_KEY }}
         run: cargo test --all
+
+      # Phase 6 — Local TUI Automation Control scenario suite (docs/improvement/tui.md).
+      # Without `--features test-provider` + `LIBRA_ENABLE_TEST_PROVIDER=1`, the scenarios
+      # in tests/code_ui_scenarios.rs and tests/harness_self_test.rs short-circuit; CI
+      # would silently skip them. `--test-threads=1` because each scenario spawns a
+      # `libra code` subprocess that contends for 0600 control-token files and ports.
+      - name: Run TUI automation scenarios
+        env:
+          LIBRA_ENABLE_TEST_PROVIDER: "1"
+        run: |
+          cargo test --features test-provider \
+            --test code_ui_scenarios \
+            --test harness_self_test \
+            --test code_codex_default_tui_test \
+            -- --test-threads=1
+
+      - name: Upload TUI scenario artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-ui-scenarios
+          path: target/code-ui-scenarios/**
+          if-no-files-found: ignore
+          retention-days: 7

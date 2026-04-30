@@ -215,16 +215,31 @@ impl ToolOutput {
     pub fn log_preview(&self) -> String {
         const MAX_PREVIEW_LENGTH: usize = 500;
         match self {
-            ToolOutput::Function { content, .. } => {
-                if content.len() <= MAX_PREVIEW_LENGTH {
-                    content.clone()
-                } else {
-                    format!("{}... (truncated)", &content[..MAX_PREVIEW_LENGTH])
-                }
+            ToolOutput::Function { content, .. } => log_preview_text(content, MAX_PREVIEW_LENGTH),
+            ToolOutput::Mcp { result } => {
+                log_preview_text(&format!("{:?}", result), MAX_PREVIEW_LENGTH)
             }
-            ToolOutput::Mcp { result } => format!("{:?}", result),
         }
     }
+}
+
+fn log_preview_text(content: &str, max_bytes: usize) -> String {
+    if content.len() <= max_bytes {
+        content.to_string()
+    } else {
+        format!(
+            "{}... (truncated)",
+            truncate_to_utf8_boundary(content, max_bytes)
+        )
+    }
+}
+
+fn truncate_to_utf8_boundary(content: &str, max_bytes: usize) -> &str {
+    let mut end = max_bytes.min(content.len());
+    while !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    &content[..end]
 }
 
 /// Arguments for the read_file tool.
@@ -734,6 +749,16 @@ mod tests {
         let preview = output.log_preview();
         assert!(preview.len() < long_content.len());
         assert!(preview.contains("truncated"));
+    }
+
+    #[test]
+    fn test_log_preview_truncates_at_utf8_boundary() {
+        let content = format!("{}├suffix", "x".repeat(498));
+        let output = ToolOutput::success(content);
+        let preview = output.log_preview();
+
+        assert!(preview.contains("truncated"));
+        assert!(preview.is_char_boundary(preview.len()));
     }
 
     #[test]

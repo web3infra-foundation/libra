@@ -1,6 +1,6 @@
 //! Shared wire types and helpers for OpenAI-compatible chat completion providers.
 //!
-//! Several AI providers (OpenAI, Ollama, DeepSeek, Zhipu) expose an
+//! Several AI providers (OpenAI, Ollama, DeepSeek, Kimi, Zhipu) expose an
 //! OpenAI-compatible `/chat/completions` endpoint. This module centralizes the
 //! common request/response types and conversion helpers so that each provider
 //! only needs to define its own `Request` struct (to accommodate minor API
@@ -23,7 +23,7 @@ use crate::internal::ai::{
 
 /// A message in an OpenAI-compatible chat conversation, tagged by `role`.
 ///
-/// Used by all OpenAI-compatible providers (OpenAI, Ollama, DeepSeek, Zhipu).
+/// Used by all OpenAI-compatible providers (OpenAI, Ollama, DeepSeek, Kimi, Zhipu).
 /// The discriminant `role` is serialized as a lowercase string so it matches
 /// the on-the-wire JSON shape (`"role": "user"`, `"role": "assistant"`, etc.).
 #[derive(Debug, Serialize, Deserialize)]
