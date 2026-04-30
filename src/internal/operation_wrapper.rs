@@ -191,6 +191,7 @@ where
 
     let op_id = Uuid::now_v7().to_string();
     let view_id = Uuid::now_v7().to_string();
+    let start_ts = Utc::now().timestamp();
 
     let txn = db.begin().await.map_err(|err| {
         OperationError::begin(format!(
@@ -234,7 +235,7 @@ where
         description: meta.description.clone(),
         actor: meta.actor.clone(),
         args_digest: meta.args_digest.clone(),
-        start_ts: end_ts,
+        start_ts,
         end_ts: Some(end_ts),
         status: OperationStatus::Succeeded,
     };
@@ -260,14 +261,22 @@ where
         workspace: view.workspace.clone(),
     };
 
-    OperationService::persist_operation_graph_with_conn(&txn, &graph)
-        .await
-        .map_err(|err| {
-            OperationError::persist(format!(
-                "failed to persist operation graph for command '{}': {err}",
-                meta.command_name
-            ))
-        })?;
+    let persist_result = OperationService::persist_operation_graph_with_conn(&txn, &graph).await;
+    if let Err(err) = persist_result {
+        let persist_message = format!(
+            "failed to persist operation graph for command '{}': {err}",
+            meta.command_name
+        );
+        match txn.rollback().await {
+            Ok(()) => return Err(OperationError::persist(persist_message)),
+            Err(rollback_err) => {
+                return Err(OperationError::rollback(format!(
+                    "{persist_message}; rollback after persist failure also failed: {rollback_err}"
+                )));
+            }
+        }
+    }
+
 
     txn.commit().await.map_err(|err| {
         OperationError::commit(format!(
@@ -399,6 +408,7 @@ async fn collect_final_view_with_conn<C: sea_orm::ConnectionTrait>(
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
     use sea_orm::{
         ConnectionTrait, Database, DbBackend, DbErr, Statement,
     };
@@ -471,6 +481,27 @@ mod tests {
             )
             "#
             .to_string(),
+        ))
+        .await
+        .unwrap();
+    }
+
+    async fn create_operation_graph_tables_missing_view(db: &sea_orm::DatabaseConnection) {
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            "CREATE TABLE operation_parent (op_id TEXT NOT NULL,parent_op_id TEXT NOT NULL,PRIMARY KEY (op_id,parent_op_id))".to_string(),
+        ))
+        .await
+        .unwrap();
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            "CREATE TABLE operation_view_ref (view_id TEXT NOT NULL,ref_kind TEXT NOT NULL,ref_name TEXT NOT NULL,ref_remote TEXT NOT NULL,target_oid TEXT NOT NULL,PRIMARY KEY (view_id,ref_kind,ref_name,ref_remote))".to_string(),
+        ))
+        .await
+        .unwrap();
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            "CREATE TABLE operation_view_workspace (view_id TEXT NOT NULL,pointer_kind TEXT NOT NULL,pointer_value TEXT NOT NULL,PRIMARY KEY (view_id,pointer_kind))".to_string(),
         ))
         .await
         .unwrap();
@@ -598,6 +629,7 @@ mod tests {
         ))
         .await
         .unwrap();
+        let before = Utc::now().timestamp();
         let result = with_operation_log_with_conn(
             &db,
             valid_meta(),
@@ -606,11 +638,20 @@ mod tests {
         )
         .await
         .unwrap();
+        let after = Utc::now().timestamp();
 
         assert_eq!(result.payload, "ok");
         assert!(!result.op_id.is_empty());
         assert!(!result.view_id.is_empty());
-        assert!(result.end_ts > 0);
+        assert!(result.end_ts >= before);
+        assert!(result.end_ts <= after);
+
+        let op = OperationService::find_operation_by_id_with_conn(&db, &result.op_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let persisted_end_ts = op.end_ts.expect("persisted operation must have end_ts");
+        assert!(op.start_ts <= persisted_end_ts);
     }
 
     #[tokio::test]
@@ -657,6 +698,54 @@ mod tests {
         assert_eq!(graph.view.head_target, "main");
         assert_eq!(graph.refs.len(), 1);
         assert_eq!(graph.workspace.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn with_operation_log_rolls_back_when_persist_fails() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        create_operation_table(&db).await;
+        create_operation_graph_tables_missing_view(&db).await;
+        create_reference_table_with_head(&db).await;
+        create_tx_probe_table(&db).await;
+
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            "INSERT INTO reference(name, kind, \"commit\", remote) VALUES('main', 'Branch', '1111111111111111111111111111111111111111', NULL)"
+                .to_string(),
+        ))
+        .await
+        .unwrap();
+
+        let error = with_operation_log_with_conn(
+            &db,
+            valid_meta(),
+            OperationScope::default(),
+            |txn| {
+                Box::pin(async move {
+                    txn.execute(Statement::from_string(
+                        DbBackend::Sqlite,
+                        "INSERT INTO tx_probe(id) VALUES(2)".to_string(),
+                    ))
+                    .await?;
+                    Ok::<_, DbErr>(())
+                })
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, OperationError::Persist(_) | OperationError::Rollback(_)));
+
+        let row = db
+            .query_one(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT COUNT(*) FROM tx_probe WHERE id = 2".to_string(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        let count: i64 = row.try_get_by_index(0).unwrap_or_default();
+        assert_eq!(count, 0);
     }
 
     #[tokio::test]
