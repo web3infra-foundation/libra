@@ -77,12 +77,28 @@ impl OperationMeta {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OperationParentPolicy {
+    pub allow_multi_parent: bool,
+    pub max_parents: usize,
+}
+
+impl Default for OperationParentPolicy {
+    fn default() -> Self {
+        Self {
+            allow_multi_parent: false,
+            max_parents: 1,
+        }
+    }
+}
+
 /// Controls which parts of the final repository view should be captured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OperationScope {
     pub include_refs: bool,
     pub include_workspace: bool,
     pub include_remote_tracking: bool,
+    pub parent_policy: OperationParentPolicy,
 }
 
 impl Default for OperationScope {
@@ -91,6 +107,7 @@ impl Default for OperationScope {
             include_refs: true,
             include_workspace: true,
             include_remote_tracking: false,
+            parent_policy: OperationParentPolicy::default(),
         }
     }
 }
@@ -162,6 +179,18 @@ impl OperationError {
     }
 }
 
+fn validate_parent_policy(policy: OperationParentPolicy) -> Result<(), OperationError> {
+    if policy.max_parents == 0 {
+        return Err(OperationError::validation("parent_policy.max_parents must be greater than 0"));
+    }
+    if !policy.allow_multi_parent && policy.max_parents > 1 {
+        return Err(OperationError::validation(
+            "parent_policy.max_parents must be 1 when allow_multi_parent is false",
+        ));
+    }
+    Ok(())
+}
+
 /// Execute one business write closure in a transaction and return operation ids.
 ///
 /// Commit 2 scope:
@@ -202,6 +231,7 @@ where
     F: Send + 'static,
 {
     meta.validate()?;
+    validate_parent_policy(_scope.parent_policy)?;
 
     let op_id = Uuid::now_v7().to_string();
     let view_id = Uuid::now_v7().to_string();
@@ -217,7 +247,11 @@ where
     let parent_selection =
         resolve_parent_selection_with_conn(&txn, &meta.repo_id, ParentSelectionMode::SingleLatestSuccess)
             .await?;
-    let parent_op_id = parent_selection.selected.first().cloned();
+    let selected_parents = parent_selection
+        .selected
+        .into_iter()
+        .take(_scope.parent_policy.max_parents)
+        .collect::<Vec<_>>();
 
     let payload = match operation(&txn).await {
         Ok(payload) => payload,
@@ -256,13 +290,12 @@ where
         end_ts: Some(end_ts),
         status: OperationStatus::Succeeded,
     };
-    let parents = parent_op_id
-        .as_ref()
+    let parents = selected_parents
+        .into_iter()
         .map(|parent| OperationParentRecord {
             op_id: op_id.clone(),
-            parent_op_id: parent.clone(),
+            parent_op_id: parent,
         })
-        .into_iter()
         .collect::<Vec<_>>();
     let graph = OperationGraphRecord {
         operation: operation_record,

@@ -2,8 +2,8 @@ use libra::internal::operation::{
     OperationRecord, OperationService, OperationStatus,
 };
 use libra::internal::operation_wrapper::{
-    with_operation_log_with_conn, OperationError, OperationMeta, OperationScope,
-    ParentSelectionMode, resolve_parent_selection_with_conn,
+    with_operation_log_with_conn, OperationError, OperationMeta, OperationParentPolicy,
+    OperationScope, ParentSelectionMode, resolve_parent_selection_with_conn,
 };
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbBackend, DbErr, Statement};
 
@@ -122,6 +122,66 @@ async fn resolve_parent_selection_returns_mode_and_scan_stats() {
     assert_eq!(result.selected, vec!["op_latest_success".to_string()]);
     assert_eq!(result.scanned_pages, 1);
     assert_eq!(result.scanned_items, 3);
+}
+
+#[tokio::test]
+async fn invalid_parent_policy_is_rejected() {
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    create_operation_schema(&db).await;
+    create_reference_table_with_head(&db).await;
+
+    let mut scope = OperationScope::default();
+    scope.parent_policy = OperationParentPolicy {
+        allow_multi_parent: false,
+        max_parents: 2,
+    };
+
+    let error = with_operation_log_with_conn(
+        &db,
+        valid_meta(),
+        scope,
+        |_txn| Box::pin(async move { Ok::<_, DbErr>("ok".to_string()) }),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(matches!(error, OperationError::Validation(_)));
+}
+
+#[tokio::test]
+async fn success_path_still_persists_single_parent_when_multi_parent_reserved() {
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    create_operation_schema(&db).await;
+    create_reference_table_with_head(&db).await;
+
+    OperationService::insert_operation_with_conn(
+        &db,
+        &sample_record("op_seed_success", OperationStatus::Succeeded, 10),
+    )
+    .await
+    .unwrap();
+
+    let mut scope = OperationScope::default();
+    scope.parent_policy = OperationParentPolicy {
+        allow_multi_parent: true,
+        max_parents: 2,
+    };
+
+    let result = with_operation_log_with_conn(
+        &db,
+        valid_meta(),
+        scope,
+        |_txn| Box::pin(async move { Ok::<_, DbErr>("ok".to_string()) }),
+    )
+    .await
+    .unwrap();
+
+    let graph = OperationService::load_restore_view_by_operation_with_conn(&db, &result.op_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(graph.parents.len(), 1);
+    assert_eq!(graph.parents[0].parent_op_id, "op_seed_success");
 }
 
 #[tokio::test]
