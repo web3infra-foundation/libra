@@ -165,6 +165,10 @@ async fn success_path_exposes_parent_selection_metrics() {
     assert_eq!(result.parent_metrics.scanned_items, 2);
     assert_eq!(result.parent_metrics.success_candidates, 1);
     assert_eq!(result.parent_metrics.selected_parent_count, 1);
+    assert!(result
+        .parent_metrics
+        .selection_latency_us
+        <= u64::MAX);
 }
 
 #[tokio::test]

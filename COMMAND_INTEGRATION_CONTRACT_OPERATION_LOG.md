@@ -118,7 +118,3 @@ match with_operation_log(meta, scope, closure).await {
 - 包装器实现：`src/internal/operation_wrapper.rs`
 - 数据层/持久化：`src/internal/operation.rs`
 - Reflog 参考实现（事务包装示例）：`src/internal/reflog.rs`
-
----
-
-如需我将该文档再细化为“命令接入示例（按命令逐条）”或生成 PR 模板/检查清单（供 code review 使用），我可以继续分步生成。

@@ -10,7 +10,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{Mutex, OnceLock},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use chrono::Utc;
@@ -19,6 +19,7 @@ use sea_orm::{
     TransactionTrait,
 };
 use thiserror::Error;
+use tokio::time::sleep;
 use uuid::Uuid;
 
 use crate::internal::{
@@ -35,6 +36,8 @@ use crate::internal::{
 
 const PARENT_RESOLUTION_PAGE_SIZE: u64 = 200;
 const DEDUP_WINDOW_SECS: i64 = 5;
+const SQLITE_BUSY_MAX_RETRIES: usize = 8;
+const SQLITE_BUSY_RETRY_BASE_MS: u64 = 25;
 
 static ACTIVE_OPERATION_KEYS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
@@ -197,6 +200,20 @@ impl OperationError {
     }
 }
 
+fn is_sqlite_busy_operation_error(err: &OperationError) -> bool {
+    match err {
+        OperationError::Begin(message)
+        | OperationError::Snapshot(message)
+        | OperationError::Persist(message)
+        | OperationError::Commit(message)
+        | OperationError::Rollback(message)
+        | OperationError::Business(message) => {
+            message.contains("database is locked") || message.contains("database schema is locked")
+        }
+        OperationError::Validation(_) => false,
+    }
+}
+
 fn operation_dedup_key(meta: &OperationMeta) -> Option<String> {
     meta.args_digest
         .as_ref()
@@ -313,7 +330,7 @@ where
 pub async fn with_operation_log_with_conn<T, F>(
     db: &DatabaseConnection,
     meta: OperationMeta,
-    _scope: OperationScope,
+    scope: OperationScope,
     operation: F,
 ) -> Result<OperationResult<T>, OperationError>
 where
@@ -323,7 +340,7 @@ where
     F: Send + 'static,
 {
     meta.validate()?;
-    validate_parent_policy(_scope.parent_policy)?;
+    validate_parent_policy(scope.parent_policy)?;
 
     let op_id = Uuid::now_v7().to_string();
     let view_id = Uuid::now_v7().to_string();
@@ -335,22 +352,63 @@ where
 
     ensure_not_recent_duplicate_with_conn(db, &meta, start_ts).await?;
 
-    let txn = db.begin().await.map_err(|err| {
-        OperationError::begin(format!(
-            "failed to open operation transaction for command '{}': {err}",
-            meta.command_name
-        ))
-    })?;
+    let mut txn = None;
+    let mut parent_selection = None;
+    for attempt in 0..=SQLITE_BUSY_MAX_RETRIES {
+        let opened = db.begin().await.map_err(|err| {
+            OperationError::begin(format!(
+                "failed to open operation transaction for command '{}': {err}",
+                meta.command_name
+            ))
+        });
 
-    let selection_started_at = Instant::now();
-    let parent_selection =
-        resolve_parent_selection_with_conn(&txn, &meta.repo_id, ParentSelectionMode::SingleLatestSuccess)
-            .await?;
-    let selection_latency_us = selection_started_at.elapsed().as_micros() as u64;
+        let opened = match opened {
+            Ok(v) => v,
+            Err(err) if is_sqlite_busy_operation_error(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
+                sleep(Duration::from_millis(
+                    SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                ))
+                .await;
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
+
+        let selection_started_at = Instant::now();
+        let selected = resolve_parent_selection_with_conn(
+            &opened,
+            &meta.repo_id,
+            ParentSelectionMode::SingleLatestSuccess,
+        )
+        .await;
+
+        match selected {
+            Ok(result) => {
+                parent_selection = Some((result, selection_started_at.elapsed().as_micros() as u64));
+                txn = Some(opened);
+                break;
+            }
+            Err(err) if is_sqlite_busy_operation_error(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
+                let _ = opened.rollback().await;
+                sleep(Duration::from_millis(
+                    SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                ))
+                .await;
+            }
+            Err(err) => {
+                let _ = opened.rollback().await;
+                return Err(err);
+            }
+        }
+    }
+
+    let txn = txn.ok_or_else(|| OperationError::begin("failed to initialize operation transaction after retries"))?;
+    let (parent_selection, selection_latency_us) = parent_selection
+        .ok_or_else(|| OperationError::begin("failed to resolve parent selection after retries"))?;
     let selected_parents = parent_selection
         .selected
         .into_iter()
-        .take(_scope.parent_policy.max_parents)
+        .take(scope.parent_policy.max_parents)
         .collect::<Vec<_>>();
 
     let payload = match operation(&txn).await {
@@ -369,7 +427,7 @@ where
     };
 
     let end_ts = Utc::now().timestamp();
-    let view = collect_final_view_with_conn(&txn, &meta.repo_id, &view_id, _scope)
+    let view = collect_final_view_with_conn(&txn, &meta.repo_id, &view_id, scope)
         .await
         .map_err(|err| {
             OperationError::snapshot(format!(
@@ -378,18 +436,6 @@ where
             ))
         })?;
 
-    let operation_record = OperationRecord {
-        op_id: op_id.clone(),
-        repo_id: meta.repo_id.clone(),
-        view_id: view_id.clone(),
-        command_name: meta.command_name.clone(),
-        description: meta.description.clone(),
-        actor: meta.actor.clone(),
-        args_digest: meta.args_digest.clone(),
-        start_ts,
-        end_ts: Some(end_ts),
-        status: OperationStatus::Succeeded,
-    };
     let selected_parent_count = selected_parents.len() as u64;
     let parent_metrics = ParentSelectionMetrics {
         resolver_mode: parent_selection.mode,
@@ -398,6 +444,29 @@ where
         success_candidates: parent_selection.success_candidates,
         selected_parent_count,
         selection_latency_us,
+    };
+    let operation_record = OperationRecord {
+        op_id: op_id.clone(),
+        repo_id: meta.repo_id.clone(),
+        view_id: view_id.clone(),
+        command_name: meta.command_name.clone(),
+        description: format!(
+            "{} | resolver_mode={} scanned_pages={} scanned_items={} success_candidates={} selected_parents={} selection_latency_us={}",
+            meta.description,
+            match parent_metrics.resolver_mode {
+                ParentSelectionMode::SingleLatestSuccess => "single_latest_success",
+            },
+            parent_metrics.scanned_pages,
+            parent_metrics.scanned_items,
+            parent_metrics.success_candidates,
+            parent_metrics.selected_parent_count,
+            parent_metrics.selection_latency_us,
+        ),
+        actor: meta.actor.clone(),
+        args_digest: meta.args_digest.clone(),
+        start_ts,
+        end_ts: Some(end_ts),
+        status: OperationStatus::Succeeded,
     };
     let parents = selected_parents
         .into_iter()
@@ -435,7 +504,6 @@ where
             }
         }
     }
-
 
     txn.commit().await.map_err(|err| {
         OperationError::commit(format!(

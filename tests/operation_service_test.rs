@@ -110,7 +110,7 @@ async fn invalid_arguments_are_rejected() {
         .unwrap_err();
     assert!(matches!(error, OperationServiceError::InvalidArgument(_)));
 
-    let error = OperationService::find_workspace_snapshot_with_conn(&db, " ")
+    let error = OperationService::list_workspace_snapshots_with_conn(&db, " ")
         .await
         .unwrap_err();
     assert!(matches!(error, OperationServiceError::InvalidArgument(_)));
@@ -319,7 +319,7 @@ async fn view_refs_workspace_snapshot_write_read_roundtrip() {
         .await
         .unwrap();
 
-    let workspace = OperationService::find_workspace_snapshot_with_conn(&db, "view_roundtrip")
+    let workspace = OperationService::list_workspace_snapshots_with_conn(&db, "view_roundtrip")
         .await
         .unwrap();
     assert_eq!(workspace.len(), 2);

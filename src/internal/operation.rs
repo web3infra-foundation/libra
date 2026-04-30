@@ -747,7 +747,7 @@ impl OperationService {
     }
 
     /// List all workspace pointer snapshots for one operation view.
-    pub async fn find_workspace_snapshot_with_conn<C: ConnectionTrait>(
+    pub async fn list_workspace_snapshots_with_conn<C: ConnectionTrait>(
         db: &C,
         view_id: &str,
     ) -> Result<Vec<OperationViewWorkspaceRecord>, OperationServiceError> {
@@ -839,7 +839,7 @@ impl OperationService {
 
         let parents = Self::list_parents_with_conn(db, &operation.op_id).await?;
         let refs = Self::list_view_refs_with_conn(db, &view.view_id).await?;
-        let workspace = Self::find_workspace_snapshot_with_conn(db, &view.view_id).await?;
+        let workspace = Self::list_workspace_snapshots_with_conn(db, &view.view_id).await?;
 
         Ok(OperationGraphRecord {
             operation,
@@ -870,7 +870,7 @@ impl OperationService {
                 ))
             })?;
         let refs = Self::list_view_refs_with_conn(db, &view.view_id).await?;
-        let workspace = Self::find_workspace_snapshot_with_conn(db, &view.view_id).await?;
+        let workspace = Self::list_workspace_snapshots_with_conn(db, &view.view_id).await?;
 
         Ok(Some(OperationGraphRecord {
             operation,
