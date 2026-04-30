@@ -8,6 +8,7 @@
 use std::{
     future::Future,
     pin::Pin,
+    time::Instant,
 };
 
 use chrono::Utc;
@@ -42,6 +43,7 @@ pub struct ParentSelectionResult {
     pub selected: Vec<String>,
     pub scanned_pages: u64,
     pub scanned_items: u64,
+    pub success_candidates: u64,
     pub mode: ParentSelectionMode,
 }
 
@@ -112,6 +114,16 @@ impl Default for OperationScope {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParentSelectionMetrics {
+    pub resolver_mode: ParentSelectionMode,
+    pub scanned_pages: u64,
+    pub scanned_items: u64,
+    pub success_candidates: u64,
+    pub selected_parent_count: u64,
+    pub selection_latency_us: u64,
+}
+
 /// Wrapper return shape: business result and operation identifiers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OperationResult<T> {
@@ -120,6 +132,7 @@ pub struct OperationResult<T> {
     pub view_id: String,
     pub end_ts: i64,
     pub view: OperationViewSnapshot,
+    pub parent_metrics: ParentSelectionMetrics,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -244,9 +257,11 @@ where
         ))
     })?;
 
+    let selection_started_at = Instant::now();
     let parent_selection =
         resolve_parent_selection_with_conn(&txn, &meta.repo_id, ParentSelectionMode::SingleLatestSuccess)
             .await?;
+    let selection_latency_us = selection_started_at.elapsed().as_micros() as u64;
     let selected_parents = parent_selection
         .selected
         .into_iter()
@@ -289,6 +304,15 @@ where
         start_ts,
         end_ts: Some(end_ts),
         status: OperationStatus::Succeeded,
+    };
+    let selected_parent_count = selected_parents.len() as u64;
+    let parent_metrics = ParentSelectionMetrics {
+        resolver_mode: parent_selection.mode,
+        scanned_pages: parent_selection.scanned_pages,
+        scanned_items: parent_selection.scanned_items,
+        success_candidates: parent_selection.success_candidates,
+        selected_parent_count,
+        selection_latency_us,
     };
     let parents = selected_parents
         .into_iter()
@@ -341,6 +365,7 @@ where
         view_id,
         end_ts,
         view,
+        parent_metrics,
     })
 }
 
@@ -382,16 +407,23 @@ pub async fn resolve_parent_selection_with_conn<C: sea_orm::ConnectionTrait>(
         let items_len = records.items.len() as u64;
         scanned_items += items_len;
 
-        if let Some(parent) = records
-            .items
-            .into_iter()
-            .find(|record| record.status == OperationStatus::Succeeded)
-            .map(|record| record.op_id)
-        {
+        let mut success_candidates = 0;
+        let mut selected_parent = None;
+        for item in records.items {
+            if item.status == OperationStatus::Succeeded {
+                success_candidates += 1;
+                if selected_parent.is_none() {
+                    selected_parent = Some(item.op_id);
+                }
+            }
+        }
+
+        if let Some(parent) = selected_parent {
             return Ok(ParentSelectionResult {
                 selected: vec![parent],
                 scanned_pages,
                 scanned_items,
+                success_candidates,
                 mode,
             });
         }
@@ -401,6 +433,7 @@ pub async fn resolve_parent_selection_with_conn<C: sea_orm::ConnectionTrait>(
                 selected: Vec::new(),
                 scanned_pages,
                 scanned_items,
+                success_candidates,
                 mode,
             });
         }

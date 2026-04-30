@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use libra::internal::operation::{
     OperationRecord, OperationService, OperationStatus,
 };
@@ -122,6 +124,42 @@ async fn resolve_parent_selection_returns_mode_and_scan_stats() {
     assert_eq!(result.selected, vec!["op_latest_success".to_string()]);
     assert_eq!(result.scanned_pages, 1);
     assert_eq!(result.scanned_items, 3);
+    assert_eq!(result.success_candidates, 2);
+}
+
+#[tokio::test]
+async fn success_path_exposes_parent_selection_metrics() {
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    create_operation_schema(&db).await;
+    create_reference_table_with_head(&db).await;
+
+    OperationService::insert_operation_with_conn(
+        &db,
+        &sample_record("op_seed_failed", OperationStatus::Failed, 9),
+    )
+    .await
+    .unwrap();
+    OperationService::insert_operation_with_conn(
+        &db,
+        &sample_record("op_seed_success", OperationStatus::Succeeded, 10),
+    )
+    .await
+    .unwrap();
+
+    let result = with_operation_log_with_conn(
+        &db,
+        valid_meta(),
+        OperationScope::default(),
+        |_txn| Box::pin(async move { Ok::<_, DbErr>("ok".to_string()) }),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.parent_metrics.resolver_mode, ParentSelectionMode::SingleLatestSuccess);
+    assert_eq!(result.parent_metrics.scanned_pages, 1);
+    assert_eq!(result.parent_metrics.scanned_items, 2);
+    assert_eq!(result.parent_metrics.success_candidates, 1);
+    assert_eq!(result.parent_metrics.selected_parent_count, 1);
 }
 
 #[tokio::test]
@@ -317,6 +355,57 @@ async fn snapshot_failure_rolls_back_and_persists_nothing() {
         .unwrap_or_default();
     assert_eq!(tx_count, 0);
     assert_eq!(op_count, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_writes_keep_parent_links_non_orphaned() {
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    create_operation_schema(&db).await;
+    create_reference_table_with_head(&db).await;
+
+    OperationService::insert_operation_with_conn(
+        &db,
+        &sample_record("op_seed_success", OperationStatus::Succeeded, 10),
+    )
+    .await
+    .unwrap();
+
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let db_clone = db.clone();
+        handles.push(tokio::spawn(async move {
+            with_operation_log_with_conn(
+                &db_clone,
+                valid_meta(),
+                OperationScope::default(),
+                |_txn| Box::pin(async move { Ok::<_, DbErr>("ok".to_string()) }),
+            )
+            .await
+        }));
+    }
+
+    let mut op_ids = Vec::new();
+    for handle in handles {
+        let result = handle.await.unwrap().unwrap();
+        op_ids.push(result.op_id);
+    }
+
+    let mut seen = HashSet::new();
+    for op_id in &op_ids {
+        assert!(seen.insert(op_id.clone()));
+        let graph = OperationService::load_restore_view_by_operation_with_conn(&db, op_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(graph.parents.len() <= 1);
+        if let Some(parent) = graph.parents.first() {
+            let parent_exists = OperationService::find_operation_by_id_with_conn(&db, &parent.parent_op_id)
+                .await
+                .unwrap()
+                .is_some();
+            assert!(parent_exists);
+        }
+    }
 }
 
 #[tokio::test]
