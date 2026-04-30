@@ -1,0 +1,260 @@
+use libra::internal::operation::{
+    OperationRecord, OperationService, OperationStatus,
+};
+use libra::internal::operation_wrapper::{
+    with_operation_log_with_conn, OperationError, OperationMeta, OperationScope,
+};
+use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbBackend, DbErr, Statement};
+
+fn valid_meta() -> OperationMeta {
+    OperationMeta {
+        command_name: "commit".to_string(),
+        description: "record snapshot".to_string(),
+        actor: "alice".to_string(),
+        repo_id: "repo_1".to_string(),
+        args_digest: Some("sha256:abcd".to_string()),
+    }
+}
+
+fn sample_record(op_id: &str, status: OperationStatus, end_ts: i64) -> OperationRecord {
+    OperationRecord {
+        op_id: op_id.to_string(),
+        repo_id: "repo_1".to_string(),
+        view_id: format!("view_{op_id}"),
+        command_name: "commit".to_string(),
+        description: format!("desc_{op_id}"),
+        actor: "alice".to_string(),
+        args_digest: Some("sha256:abcd".to_string()),
+        start_ts: end_ts - 5,
+        end_ts: Some(end_ts),
+        status,
+    }
+}
+
+async fn create_operation_schema(db: &DatabaseConnection) {
+    let ddl = [
+        "CREATE TABLE operation(op_id TEXT PRIMARY KEY,repo_id TEXT NOT NULL,view_id TEXT NOT NULL,command_name TEXT NOT NULL,description TEXT NOT NULL,actor TEXT NOT NULL,args_digest TEXT,start_ts INTEGER NOT NULL,end_ts INTEGER,status TEXT NOT NULL);",
+        "CREATE TABLE operation_parent(op_id TEXT NOT NULL,parent_op_id TEXT NOT NULL,PRIMARY KEY (op_id,parent_op_id));",
+        "CREATE TABLE operation_view(view_id TEXT PRIMARY KEY,repo_id TEXT NOT NULL,head_kind TEXT NOT NULL,head_target TEXT NOT NULL,created_at INTEGER NOT NULL);",
+        "CREATE TABLE operation_view_ref(view_id TEXT NOT NULL,ref_kind TEXT NOT NULL,ref_name TEXT NOT NULL,ref_remote TEXT NOT NULL,target_oid TEXT NOT NULL,PRIMARY KEY (view_id,ref_kind,ref_name,ref_remote));",
+        "CREATE TABLE operation_view_workspace(view_id TEXT NOT NULL,pointer_kind TEXT NOT NULL,pointer_value TEXT NOT NULL,PRIMARY KEY (view_id,pointer_kind));",
+    ];
+    for sql in ddl {
+        db.execute(Statement::from_string(DbBackend::Sqlite, sql.to_string()))
+            .await
+            .unwrap();
+    }
+}
+
+async fn create_reference_table_with_head(db: &DatabaseConnection) {
+    db.execute(Statement::from_string(
+        DbBackend::Sqlite,
+        "CREATE TABLE reference (id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT,kind TEXT NOT NULL,\"commit\" TEXT,remote TEXT)".to_string(),
+    ))
+    .await
+    .unwrap();
+    db.execute(Statement::from_string(
+        DbBackend::Sqlite,
+        "INSERT INTO reference(name, kind, \"commit\", remote) VALUES('main', 'Head', NULL, NULL)".to_string(),
+    ))
+    .await
+    .unwrap();
+    db.execute(Statement::from_string(
+        DbBackend::Sqlite,
+        "INSERT INTO reference(name, kind, \"commit\", remote) VALUES('main', 'Branch', '1111111111111111111111111111111111111111', NULL)".to_string(),
+    ))
+    .await
+    .unwrap();
+}
+
+async fn create_reference_table_without_head(db: &DatabaseConnection) {
+    db.execute(Statement::from_string(
+        DbBackend::Sqlite,
+        "CREATE TABLE reference (id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT,kind TEXT NOT NULL,\"commit\" TEXT,remote TEXT)".to_string(),
+    ))
+    .await
+    .unwrap();
+}
+
+async fn create_tx_probe_table(db: &DatabaseConnection) {
+    db.execute(Statement::from_string(
+        DbBackend::Sqlite,
+        "CREATE TABLE tx_probe (id INTEGER PRIMARY KEY)".to_string(),
+    ))
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn success_path_persists_operation_view_and_parent() {
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    create_operation_schema(&db).await;
+    create_reference_table_with_head(&db).await;
+
+    OperationService::insert_operation_with_conn(
+        &db,
+        &sample_record("op_seed_success", OperationStatus::Succeeded, 10),
+    )
+    .await
+    .unwrap();
+
+    let result = with_operation_log_with_conn(
+        &db,
+        valid_meta(),
+        OperationScope::default(),
+        |_txn| Box::pin(async move { Ok::<_, DbErr>("ok".to_string()) }),
+    )
+    .await
+    .unwrap();
+
+    let graph = OperationService::load_restore_view_by_operation_with_conn(&db, &result.op_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(graph.view.head_kind, "branch");
+    assert_eq!(graph.refs.len(), 1);
+    assert_eq!(graph.workspace.len(), 1);
+    assert_eq!(graph.parents.len(), 1);
+    assert_eq!(graph.parents[0].parent_op_id, "op_seed_success");
+}
+
+#[tokio::test]
+async fn business_failure_rolls_back_all_writes() {
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    create_operation_schema(&db).await;
+    create_reference_table_with_head(&db).await;
+    create_tx_probe_table(&db).await;
+
+    let error = with_operation_log_with_conn(
+        &db,
+        valid_meta(),
+        OperationScope::default(),
+        |txn| {
+            Box::pin(async move {
+                txn.execute(Statement::from_string(
+                    DbBackend::Sqlite,
+                    "INSERT INTO tx_probe(id) VALUES(1)".to_string(),
+                ))
+                .await?;
+                Err::<(), DbErr>(DbErr::Custom("boom".to_string()))
+            })
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert!(matches!(error, OperationError::Business(_)));
+
+    let tx_count = db
+        .query_one(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT COUNT(*) FROM tx_probe".to_string(),
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get_by_index::<i64>(0)
+        .unwrap_or_default();
+    let op_count = db
+        .query_one(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT COUNT(*) FROM operation".to_string(),
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get_by_index::<i64>(0)
+        .unwrap_or_default();
+    assert_eq!(tx_count, 0);
+    assert_eq!(op_count, 0);
+}
+
+#[tokio::test]
+async fn snapshot_failure_rolls_back_and_persists_nothing() {
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    create_operation_schema(&db).await;
+    create_reference_table_without_head(&db).await;
+    create_tx_probe_table(&db).await;
+
+    let error = with_operation_log_with_conn(
+        &db,
+        valid_meta(),
+        OperationScope::default(),
+        |txn| {
+            Box::pin(async move {
+                txn.execute(Statement::from_string(
+                    DbBackend::Sqlite,
+                    "INSERT INTO tx_probe(id) VALUES(3)".to_string(),
+                ))
+                .await?;
+                Ok::<_, DbErr>(())
+            })
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert!(matches!(error, OperationError::Snapshot(_)));
+
+    let tx_count = db
+        .query_one(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT COUNT(*) FROM tx_probe WHERE id = 3".to_string(),
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get_by_index::<i64>(0)
+        .unwrap_or_default();
+    let op_count = db
+        .query_one(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT COUNT(*) FROM operation".to_string(),
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get_by_index::<i64>(0)
+        .unwrap_or_default();
+    assert_eq!(tx_count, 0);
+    assert_eq!(op_count, 0);
+}
+
+#[tokio::test]
+async fn parent_chain_restore_view_consistency() {
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    create_operation_schema(&db).await;
+    create_reference_table_with_head(&db).await;
+
+    let first = with_operation_log_with_conn(
+        &db,
+        valid_meta(),
+        OperationScope::default(),
+        |_txn| Box::pin(async move { Ok::<_, DbErr>("first".to_string()) }),
+    )
+    .await
+    .unwrap();
+
+    let second = with_operation_log_with_conn(
+        &db,
+        valid_meta(),
+        OperationScope::default(),
+        |_txn| Box::pin(async move { Ok::<_, DbErr>("second".to_string()) }),
+    )
+    .await
+    .unwrap();
+
+    let first_graph = OperationService::load_restore_view_by_operation_with_conn(&db, &first.op_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let second_graph = OperationService::load_restore_view_by_operation_with_conn(&db, &second.op_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(first_graph.parents.len(), 0);
+    assert_eq!(second_graph.parents.len(), 1);
+    assert_eq!(second_graph.parents[0].parent_op_id, first.op_id);
+    assert_eq!(second_graph.view.repo_id, "repo_1");
+}
