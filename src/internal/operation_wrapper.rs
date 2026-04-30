@@ -6,8 +6,10 @@
 //! without snapshot capture/persistence.
 
 use std::{
+    collections::HashSet,
     future::Future,
     pin::Pin,
+    sync::{Mutex, OnceLock},
     time::Instant,
 };
 
@@ -32,6 +34,9 @@ use crate::internal::{
 };
 
 const PARENT_RESOLUTION_PAGE_SIZE: u64 = 200;
+const DEDUP_WINDOW_SECS: i64 = 5;
+
+static ACTIVE_OPERATION_KEYS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParentSelectionMode {
@@ -192,6 +197,80 @@ impl OperationError {
     }
 }
 
+fn operation_dedup_key(meta: &OperationMeta) -> Option<String> {
+    meta.args_digest
+        .as_ref()
+        .filter(|digest| !digest.trim().is_empty())
+        .map(|digest| format!("{}::{}::{}", meta.repo_id, meta.command_name, digest.trim()))
+}
+
+struct ActiveDedupGuard {
+    key: String,
+}
+
+impl Drop for ActiveDedupGuard {
+    fn drop(&mut self) {
+        if let Some(lock) = ACTIVE_OPERATION_KEYS.get()
+            && let Ok(mut keys) = lock.lock()
+        {
+            keys.remove(&self.key);
+        }
+    }
+}
+
+fn try_acquire_active_dedup_guard(key: String) -> Result<ActiveDedupGuard, OperationError> {
+    let lock = ACTIVE_OPERATION_KEYS.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut keys = lock
+        .lock()
+        .map_err(|_| OperationError::begin("failed to lock active operation key set"))?;
+    if keys.contains(&key) {
+        return Err(OperationError::business(format!(
+            "duplicate operation in progress for key '{}'",
+            key
+        )));
+    }
+    keys.insert(key.clone());
+    Ok(ActiveDedupGuard { key })
+}
+
+async fn ensure_not_recent_duplicate_with_conn<C: sea_orm::ConnectionTrait>(
+    db: &C,
+    meta: &OperationMeta,
+    now_ts: i64,
+) -> Result<(), OperationError> {
+    let Some(digest) = meta.args_digest.as_ref().map(|v| v.trim()).filter(|v| !v.is_empty()) else {
+        return Ok(());
+    };
+
+    let records = OperationService::list_operations_by_repo_with_conn(db, &meta.repo_id, 50)
+        .await
+        .map_err(|err| {
+            OperationError::begin(format!(
+                "failed to query recent operations for repository '{}': {err}",
+                meta.repo_id
+            ))
+        })?;
+
+    let duplicated = records.into_iter().any(|record| {
+        record.command_name == meta.command_name
+            && record.args_digest.as_deref().map(str::trim) == Some(digest)
+            && record.status == OperationStatus::Succeeded
+            && record
+                .end_ts
+                .map(|end_ts| now_ts.saturating_sub(end_ts) <= DEDUP_WINDOW_SECS)
+                .unwrap_or(false)
+    });
+
+    if duplicated {
+        return Err(OperationError::business(format!(
+            "duplicate operation rejected within {}s window for command '{}'",
+            DEDUP_WINDOW_SECS, meta.command_name
+        )));
+    }
+
+    Ok(())
+}
+
 fn validate_parent_policy(policy: OperationParentPolicy) -> Result<(), OperationError> {
     if policy.max_parents == 0 {
         return Err(OperationError::validation("parent_policy.max_parents must be greater than 0"));
@@ -249,6 +328,12 @@ where
     let op_id = Uuid::now_v7().to_string();
     let view_id = Uuid::now_v7().to_string();
     let start_ts = Utc::now().timestamp();
+
+    let _active_dedup_guard = operation_dedup_key(&meta)
+        .map(try_acquire_active_dedup_guard)
+        .transpose()?;
+
+    ensure_not_recent_duplicate_with_conn(db, &meta, start_ts).await?;
 
     let txn = db.begin().await.map_err(|err| {
         OperationError::begin(format!(

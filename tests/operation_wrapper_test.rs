@@ -8,14 +8,19 @@ use libra::internal::operation_wrapper::{
     OperationScope, ParentSelectionMode, resolve_parent_selection_with_conn,
 };
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbBackend, DbErr, Statement};
+use uuid::Uuid;
 
 fn valid_meta() -> OperationMeta {
+    valid_meta_with_digest(&format!("sha256:{}", Uuid::now_v7()))
+}
+
+fn valid_meta_with_digest(digest: &str) -> OperationMeta {
     OperationMeta {
         command_name: "commit".to_string(),
         description: "record snapshot".to_string(),
         actor: "alice".to_string(),
         repo_id: "repo_1".to_string(),
-        args_digest: Some("sha256:abcd".to_string()),
+        args_digest: Some(digest.to_string()),
     }
 }
 
@@ -355,6 +360,73 @@ async fn snapshot_failure_rolls_back_and_persists_nothing() {
         .unwrap_or_default();
     assert_eq!(tx_count, 0);
     assert_eq!(op_count, 0);
+}
+
+#[tokio::test]
+async fn serial_duplicate_submission_is_rejected_within_window() {
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    create_operation_schema(&db).await;
+    create_reference_table_with_head(&db).await;
+
+    let meta = valid_meta_with_digest("sha256:dedup-serial");
+    let first = with_operation_log_with_conn(
+        &db,
+        meta.clone(),
+        OperationScope::default(),
+        |_txn| Box::pin(async move { Ok::<_, DbErr>("first".to_string()) }),
+    )
+    .await
+    .unwrap();
+
+    let second = with_operation_log_with_conn(
+        &db,
+        meta,
+        OperationScope::default(),
+        |_txn| Box::pin(async move { Ok::<_, DbErr>("second".to_string()) }),
+    )
+    .await;
+
+    assert!(matches!(second, Err(OperationError::Business(_))));
+
+    let first_graph = OperationService::load_restore_view_by_operation_with_conn(&db, &first.op_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(first_graph.operation.end_ts.is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_duplicate_submission_allows_only_one_success() {
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    create_operation_schema(&db).await;
+    create_reference_table_with_head(&db).await;
+
+    let mut handles = Vec::new();
+    for _ in 0..6 {
+        let db_clone = db.clone();
+        handles.push(tokio::spawn(async move {
+            with_operation_log_with_conn(
+                &db_clone,
+                valid_meta_with_digest("sha256:dedup-concurrent"),
+                OperationScope::default(),
+                |_txn| Box::pin(async move { Ok::<_, DbErr>("ok".to_string()) }),
+            )
+            .await
+        }));
+    }
+
+    let mut success_count = 0;
+    let mut duplicate_error_count = 0;
+    for handle in handles {
+        match handle.await.unwrap() {
+            Ok(_) => success_count += 1,
+            Err(OperationError::Business(_)) => duplicate_error_count += 1,
+            Err(err) => panic!("unexpected error: {err}"),
+        }
+    }
+
+    assert_eq!(success_count, 1);
+    assert_eq!(duplicate_error_count, 5);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
