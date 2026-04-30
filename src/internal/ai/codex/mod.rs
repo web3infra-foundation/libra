@@ -120,8 +120,7 @@ use crate::{
         db,
     },
     utils::{
-        storage::{Storage, local::LocalStorage},
-        storage_ext::StorageExt,
+        client_storage::ClientStorage, storage::Storage, storage_ext::StorageExt,
         util::try_get_storage_path,
     },
 };
@@ -984,7 +983,7 @@ pub async fn init_mcp_server(working_dir: &Path) -> Arc<LibraMcpServer> {
     };
 
     // Initialize storage
-    let storage: Arc<dyn Storage + Send + Sync> = Arc::new(LocalStorage::new(objects_dir));
+    let storage: Arc<dyn Storage + Send + Sync> = Arc::new(ClientStorage::init(objects_dir));
 
     let intent_history_manager = Arc::new(HistoryManager::new(
         storage.clone(),
@@ -2149,13 +2148,24 @@ pub async fn start_code_ui_runtime(
 /// # Arguments
 /// * `args`       — CLI 参数（WebSocket URL、工作目录、审批模式、模型配置等）。
 /// * `mcp_server` — 调用方提供的 MCP 服务器实例（`Some`）；或 `None`（创建本地实例）。
-///   The new `mcp_server` parameter allows the HTTP-serving caller to share its
-///   already-initialised `LibraMcpServer` instead of creating a duplicate.
-///   When `None`, a local-only instance is created for backward compatibility.
+///
+/// # Legacy stdin loop
+///
+/// `libra code --provider codex` does not call this path; it starts the default
+/// Libra TUI and uses [`start_code_ui_runtime`] as the managed execution
+/// backend. This function remains only for old internal callers that explicitly
+/// want Codex's stdin/stdout loop.
+///
+/// The `mcp_server` parameter allows an HTTP-serving caller to share its
+/// already-initialised `LibraMcpServer` instead of creating a duplicate. When
+/// `None`, a local-only instance is created for backward compatibility.
 ///
 /// # Errors
 /// - WebSocket 连接失败时返回 `anyhow::Error`。
 /// - 内部互斥锁初始化失败时返回 `anyhow::Error`。
+#[deprecated(
+    note = "legacy standalone Codex stdin loop; libra code --provider codex uses the default Libra TUI"
+)]
 pub async fn execute(
     args: AgentCodexArgs,
     mcp_server: Option<Arc<LibraMcpServer>>,

@@ -29,6 +29,8 @@ pub enum BuiltinCommand {
     Intent,
     /// `/mux` — focus / unfocus task panes during parallel DAG execution.
     Mux,
+    /// `/control` — local automation control commands.
+    Control,
     /// `/quit` — exit the application cleanly.
     Quit,
 }
@@ -49,6 +51,7 @@ impl BuiltinCommand {
             Self::Plan => "plan",
             Self::Intent => "intent",
             Self::Mux => "mux",
+            Self::Control => "control",
             Self::Quit => "quit",
         }
     }
@@ -68,6 +71,7 @@ impl BuiltinCommand {
             Self::Plan => "Generate validated IntentSpec from a request",
             Self::Intent => "IntentSpec utilities (show latest or execute it)",
             Self::Mux => "Control task mux view during parallel execution",
+            Self::Control => "Local automation control utilities",
             Self::Quit => "Quit the application",
         }
     }
@@ -88,6 +92,7 @@ impl BuiltinCommand {
             Self::Plan,
             Self::Intent,
             Self::Mux,
+            Self::Control,
             Self::Quit,
         ]
     }
@@ -178,6 +183,10 @@ mod tests {
             Some((BuiltinCommand::Mux, "next"))
         );
         assert_eq!(
+            parse_builtin("/control reclaim"),
+            Some((BuiltinCommand::Control, "reclaim"))
+        );
+        assert_eq!(
             parse_builtin("/model gemini"),
             Some((BuiltinCommand::Model, "gemini"))
         );
@@ -208,12 +217,13 @@ mod tests {
     #[test]
     fn all_hints_returns_all() {
         let hints = BuiltinCommand::all_hints();
-        assert_eq!(hints.len(), 9);
+        assert_eq!(hints.len(), 10);
         assert!(hints.iter().any(|(n, _)| n == "help"));
         assert!(hints.iter().any(|(n, _)| n == "chat"));
         assert!(hints.iter().any(|(n, _)| n == "quit"));
         assert!(hints.iter().any(|(n, _)| n == "plan"));
         assert!(hints.iter().any(|(n, _)| n == "intent"));
         assert!(hints.iter().any(|(n, _)| n == "mux"));
+        assert!(hints.iter().any(|(n, _)| n == "control"));
     }
 }

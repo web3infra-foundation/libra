@@ -5,12 +5,14 @@
 //! public guarantees of this module.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
     time::Duration,
 };
+
+const DEFAULT_APPROVAL_SCOPE: &str = "interactive";
 
 use tokio::{
     io::AsyncReadExt,
@@ -70,7 +72,7 @@ pub enum ReviewDecision {
 #[derive(Debug, Default)]
 pub struct ApprovalStore {
     map: HashMap<String, ReviewDecision>,
-    allow_all_commands: bool,
+    allow_all_commands_scopes: HashSet<String>,
 }
 
 impl ApprovalStore {
@@ -83,11 +85,21 @@ impl ApprovalStore {
     }
 
     pub fn allow_all_commands(&self) -> bool {
-        self.allow_all_commands
+        self.allow_all_commands_for_scope(DEFAULT_APPROVAL_SCOPE)
     }
 
     pub fn approve_all_commands(&mut self) {
-        self.allow_all_commands = true;
+        self.approve_all_commands_for_scope(DEFAULT_APPROVAL_SCOPE);
+    }
+
+    pub fn allow_all_commands_for_scope(&self, scope: &str) -> bool {
+        self.allow_all_commands_scopes
+            .contains(normalized_approval_scope(scope).as_str())
+    }
+
+    pub fn approve_all_commands_for_scope(&mut self, scope: &str) {
+        self.allow_all_commands_scopes
+            .insert(normalized_approval_scope(scope));
     }
 }
 
@@ -99,29 +111,37 @@ pub async fn request_cached_approval_with_keys<F>(
 where
     F: FnOnce(oneshot::Sender<ReviewDecision>) -> ExecApprovalRequest,
 {
+    let scope = ctx
+        .scope_key_prefix
+        .as_deref()
+        .unwrap_or(DEFAULT_APPROVAL_SCOPE);
+    let scoped_keys = scoped_approval_keys(scope, keys);
     {
         let store = ctx.store.lock().await;
-        if store.allow_all_commands() {
+        if store.allow_all_commands_for_scope(scope) {
             tracing::debug!(
                 target: "libra::internal::ai::sandbox",
                 key_count = keys.len(),
+                approval_scope = scope,
                 "approval request skipped by allow-all-commands session decision"
             );
             return ReviewDecision::ApprovedForAllCommands;
         }
     }
 
-    let already_approved = if keys.is_empty() {
+    let already_approved = if scoped_keys.is_empty() {
         false
     } else {
         let store = ctx.store.lock().await;
-        keys.iter()
+        scoped_keys
+            .iter()
             .all(|key| matches!(store.get(key), Some(ReviewDecision::ApprovedForSession)))
     };
     if already_approved {
         tracing::debug!(
             target: "libra::internal::ai::sandbox",
-            key_count = keys.len(),
+            key_count = scoped_keys.len(),
+            approval_scope = scope,
             "approval request skipped by matching session approval"
         );
         return ReviewDecision::ApprovedForSession;
@@ -136,23 +156,44 @@ where
     let decision = response_rx.await.unwrap_or_default();
     if matches!(decision, ReviewDecision::ApprovedForAllCommands) {
         let mut store = ctx.store.lock().await;
-        store.approve_all_commands();
+        store.approve_all_commands_for_scope(scope);
         tracing::debug!(
             target: "libra::internal::ai::sandbox",
+            approval_scope = scope,
             "approval decision cached as allow-all-commands for this session"
         );
-    } else if matches!(decision, ReviewDecision::ApprovedForSession) && !keys.is_empty() {
+    } else if matches!(decision, ReviewDecision::ApprovedForSession) && !scoped_keys.is_empty() {
         let mut store = ctx.store.lock().await;
-        for key in keys {
+        for key in &scoped_keys {
             store.put(key.clone(), ReviewDecision::ApprovedForSession);
         }
         tracing::debug!(
             target: "libra::internal::ai::sandbox",
-            key_count = keys.len(),
+            key_count = scoped_keys.len(),
+            approval_scope = scope,
             "approval decision cached for matching commands"
         );
     }
     decision
+}
+
+fn normalized_approval_scope(scope: &str) -> String {
+    let trimmed = scope.trim();
+    if trimmed.is_empty() {
+        DEFAULT_APPROVAL_SCOPE.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn scoped_approval_keys(scope: &str, keys: &[String]) -> Vec<String> {
+    let scope = normalized_approval_scope(scope);
+    if scope == DEFAULT_APPROVAL_SCOPE {
+        return keys.to_vec();
+    }
+    keys.iter()
+        .map(|key| format!("{scope}:{key}"))
+        .collect::<Vec<_>>()
 }
 
 #[derive(Clone, Debug)]
@@ -160,6 +201,7 @@ pub struct ToolApprovalContext {
     pub policy: AskForApproval,
     pub request_tx: UnboundedSender<ExecApprovalRequest>,
     pub store: Arc<Mutex<ApprovalStore>>,
+    pub scope_key_prefix: Option<String>,
 }
 
 pub struct ExecApprovalRequest {
@@ -909,6 +951,7 @@ mod tests {
             policy: AskForApproval::OnRequest,
             request_tx: tx,
             store: Arc::clone(&store),
+            scope_key_prefix: None,
         };
         let keys = vec!["k1".to_string(), "k2".to_string()];
 
@@ -938,6 +981,7 @@ mod tests {
             policy: AskForApproval::OnRequest,
             request_tx: tx,
             store: Arc::clone(&store),
+            scope_key_prefix: None,
         };
         let keys = vec!["a".to_string(), "b".to_string()];
 
@@ -975,6 +1019,7 @@ mod tests {
             policy: AskForApproval::OnRequest,
             request_tx: tx,
             store: Arc::clone(&store),
+            scope_key_prefix: None,
         };
 
         let responder = tokio::spawn(async move {
@@ -1025,5 +1070,58 @@ mod tests {
 
         assert_eq!(second_decision, ReviewDecision::ApprovedForAllCommands);
         assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn scoped_approval_does_not_inherit_interactive_session_cache() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let store = Arc::new(tokio::sync::Mutex::new(ApprovalStore::default()));
+        {
+            let mut guard = store.lock().await;
+            guard.put(
+                "shell:/tmp/workspace".to_string(),
+                ReviewDecision::ApprovedForSession,
+            );
+            guard.approve_all_commands();
+        }
+        let automation_ctx = ToolApprovalContext {
+            policy: AskForApproval::OnRequest,
+            request_tx: tx,
+            store: Arc::clone(&store),
+            scope_key_prefix: Some("automation:thread-1".to_string()),
+        };
+        let keys = vec!["shell:/tmp/workspace".to_string()];
+
+        let responder = tokio::spawn(async move {
+            let request = rx
+                .recv()
+                .await
+                .expect("automation approval request expected");
+            let _ = request.response_tx.send(ReviewDecision::Denied);
+        });
+        let decision = request_cached_approval_with_keys(&automation_ctx, &keys, |response_tx| {
+            ExecApprovalRequest {
+                call_id: "call-automation".to_string(),
+                command: "cargo test".to_string(),
+                cwd: PathBuf::from("/tmp/workspace"),
+                reason: None,
+                is_retry: false,
+                sandbox_label: "workspace-write".to_string(),
+                network_access: false,
+                writable_roots: vec![PathBuf::from("/tmp/workspace")],
+                response_tx,
+            }
+        })
+        .await;
+
+        responder.await.expect("responder task failed");
+        assert_eq!(decision, ReviewDecision::Denied);
+        assert!(store.lock().await.allow_all_commands());
+        assert!(
+            !store
+                .lock()
+                .await
+                .allow_all_commands_for_scope("automation:thread-1")
+        );
     }
 }

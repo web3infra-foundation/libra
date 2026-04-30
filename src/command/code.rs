@@ -15,7 +15,7 @@
 //!   tools (read, grep, patch, shell, etc.) over Streamable HTTP or Stdio transport,
 //!   enabling integration with external AI clients such as Claude Desktop.
 //! - **AI Agent**: A tool-calling loop powered by configurable LLM providers (Gemini,
-//!   OpenAI, Anthropic, DeepSeek, Zhipu, Ollama) or the managed Codex runtime.
+//!   OpenAI, Anthropic, DeepSeek, Kimi, Zhipu, Ollama) or the managed Codex runtime.
 //!
 //! ## Supported Modes
 //!
@@ -61,7 +61,10 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use chrono::Utc;
@@ -73,6 +76,7 @@ use hyper_util::{
 use rmcp::transport::streamable_http_server::{
     StreamableHttpService, session::local::LocalSessionManager,
 };
+use serde::{Deserialize, Serialize};
 use tokio::{
     process::{Child, Command},
     sync::oneshot,
@@ -82,8 +86,15 @@ use tokio_tungstenite::connect_async;
 use url::Url;
 use uuid::Uuid;
 
+#[cfg(feature = "test-provider")]
+use crate::internal::ai::providers::fake::{Client as FakeClient, FAKE_DEFAULT_MODEL};
 use crate::{
     cli_error,
+    command::code_control_files::{
+        ControlInfo, ControlLockError, ControlLockGuard, ControlPaths, acquire_control_lock,
+        cleanup_control_files, ensure_control_token_file, resolve_control_paths,
+        write_control_info,
+    },
     internal::{
         ai::{
             agent::{
@@ -106,6 +117,7 @@ use crate::{
                 anthropic::{CLAUDE_3_5_SONNET, Client as AnthropicClient},
                 deepseek::client::Client as DeepSeekClient,
                 gemini::{Client as GeminiClient, GEMINI_2_5_FLASH},
+                kimi::{Client as KimiClient, KIMI_K2_6},
                 ollama::Client as OllamaClient,
                 openai::{Client as OpenAIClient, GPT_4O_MINI},
                 zhipu::{Client as ZhipuClient, GLM_5},
@@ -130,17 +142,21 @@ use crate::{
                 WebServerHandle, WebServerOptions,
                 code_ui::{
                     CodeUiCapabilities, CodeUiControllerKind, CodeUiInitialController,
-                    CodeUiProviderInfo, CodeUiRuntimeHandle, CodeUiSession, CodeUiSessionStatus,
-                    CodeUiTranscriptEntry, CodeUiTranscriptEntryKind, ReadOnlyCodeUiAdapter,
-                    initial_snapshot, snapshot_from_thread_bundle,
+                    CodeUiProviderAdapter, CodeUiProviderInfo, CodeUiRuntimeHandle, CodeUiSession,
+                    CodeUiSessionStatus, CodeUiTranscriptEntry, CodeUiTranscriptEntryKind,
+                    ReadOnlyCodeUiAdapter, initial_snapshot, snapshot_from_thread_bundle,
                 },
                 start as start_web_server,
             },
         },
         db::establish_connection,
-        tui::{App, AppConfig, ExitReason, Tui, tui_init, tui_restore},
+        tui::{
+            App, AppConfig, ExitReason, Tui, TuiCodeUiAdapter, control::TuiControlCommand,
+            tui_init, tui_restore,
+        },
     },
     utils::{
+        client_storage::ClientStorage,
         error::{CliError, CliResult, StableErrorCode},
         output::OutputConfig,
         storage::local::LocalStorage,
@@ -185,9 +201,13 @@ pub enum CodeProvider {
     Openai,
     Anthropic,
     Deepseek,
+    Kimi,
     Zhipu,
     Ollama,
     Codex,
+    #[cfg(feature = "test-provider")]
+    #[value(name = "fake", hide = true)]
+    Fake,
 }
 
 /// Operating context that shapes the agent's system prompt and sandbox policy.
@@ -203,6 +223,16 @@ pub enum CodeContext {
     Review,
     #[value(alias = "explore")]
     Research,
+}
+
+/// Local TUI automation control mode.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlMode {
+    /// Keep the current loopback-only read behavior; no write token is created.
+    Observe,
+    /// Enable local automation write control with token and controller checks.
+    Write,
 }
 
 /// Ollama-specific thinking/reasoning mode.
@@ -249,6 +279,24 @@ impl From<DeepSeekThinkingArg> for CompletionThinking {
         match value {
             DeepSeekThinkingArg::Enabled => CompletionThinking::Enabled,
             DeepSeekThinkingArg::Disabled => CompletionThinking::Disabled,
+        }
+    }
+}
+
+/// Kimi-specific thinking mode.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum KimiThinkingArg {
+    /// Send `thinking: {"type": "enabled"}` to Kimi.
+    Enabled,
+    /// Send `thinking: {"type": "disabled"}` to Kimi.
+    Disabled,
+}
+
+impl From<KimiThinkingArg> for CompletionThinking {
+    fn from(value: KimiThinkingArg) -> Self {
+        match value {
+            KimiThinkingArg::Enabled => CompletionThinking::Enabled,
+            KimiThinkingArg::Disabled => CompletionThinking::Disabled,
         }
     }
 }
@@ -376,6 +424,18 @@ pub struct CodeArgs {
     #[arg(long = "env-file", value_name = "PATH")]
     pub env_file: Option<PathBuf>,
 
+    /// Local TUI automation control mode.
+    #[arg(long, value_enum, default_value_t = ControlMode::Observe)]
+    pub control: ControlMode,
+
+    /// Path to the local automation control token file.
+    #[arg(long)]
+    pub control_token_file: Option<PathBuf>,
+
+    /// Path to the local automation control discovery info file.
+    #[arg(long)]
+    pub control_info_file: Option<PathBuf>,
+
     /// AI provider backend
     #[arg(long, value_enum, default_value_t = CodeProvider::Gemini)]
     pub provider: CodeProvider,
@@ -409,6 +469,15 @@ pub struct CodeArgs {
     /// DeepSeek stream mode: true or false.
     #[arg(long = "deepseek-stream", alias = "stream", value_name = "BOOL")]
     pub deepseek_stream: Option<bool>,
+
+    /// Kimi thinking mode: enabled or disabled.
+    #[arg(long = "kimi-thinking", value_enum)]
+    pub kimi_thinking: Option<KimiThinkingArg>,
+
+    /// Test-only fake provider fixture.
+    #[cfg(feature = "test-provider")]
+    #[arg(long = "fake-fixture", hide = true, value_name = "PATH")]
+    pub fake_fixture: Option<PathBuf>,
 
     /// Operating context mode (dev, review, research)
     #[arg(long, value_enum)]
@@ -547,6 +616,7 @@ impl McpServerHandle {
 /// selected host would expose loopback-only browser control.
 async fn execute_web_only(args: &CodeArgs) -> CliResult<()> {
     let working_dir = resolve_code_working_dir(args)?;
+    let control_runtime = prepare_control_runtime(args, &working_dir).await?;
     let mcp_server = init_mcp_server(&working_dir).await;
 
     let mut managed_codex_server = None;
@@ -584,6 +654,8 @@ async fn execute_web_only(args: &CodeArgs) -> CliResult<()> {
         working_dir.clone(),
         WebServerOptions {
             code_ui: Some(code_ui_runtime.clone()),
+            automation_control_token: control_runtime.token.clone(),
+            audit_sink: None,
         },
     )
     .await
@@ -600,12 +672,39 @@ async fn execute_web_only(args: &CodeArgs) -> CliResult<()> {
             );
         }
     };
-    println!("Libra Code server running at http://{}", web_handle.addr);
+    let base_url = format!("http://{}", web_handle.addr);
+    let thread_id = code_ui_runtime.snapshot().await.thread_id;
+    if let Err(error) =
+        control_runtime.write_info_file(&working_dir, base_url.clone(), None, thread_id.clone())
+    {
+        let _ = code_ui_runtime.shutdown().await;
+        if let Some(server) = managed_codex_server.as_mut() {
+            server.shutdown().await;
+        }
+        web_handle.shutdown().await;
+        return Err(error);
+    }
+    println!("Libra Code server running at {base_url}");
 
     // Start MCP Server
     let mcp_handle = match start_mcp_server(&args.host, args.mcp_port, mcp_server.clone()).await {
         Ok(handle) => {
-            println!("MCP: http://{}", handle.addr);
+            let mcp_url = format!("http://{}", handle.addr);
+            if let Err(error) = control_runtime.write_info_file(
+                &working_dir,
+                base_url.clone(),
+                Some(mcp_url.clone()),
+                thread_id.clone(),
+            ) {
+                let _ = code_ui_runtime.shutdown().await;
+                if let Some(server) = managed_codex_server.as_mut() {
+                    server.shutdown().await;
+                }
+                web_handle.shutdown().await;
+                handle.shutdown().await;
+                return Err(error);
+            }
+            println!("MCP: {mcp_url}");
             handle
         }
         Err(err) => {
@@ -799,6 +898,7 @@ fn provider_env_value_with_lookup(
 async fn execute_tui(args: CodeArgs) -> CliResult<()> {
     let working_dir = resolve_code_working_dir(&args)?;
     let env_file = load_code_env_file(args.env_file.as_deref())?;
+    let control_runtime = prepare_control_runtime(&args, &working_dir).await?;
 
     // Validate --api-base: only honored for Ollama via CLI flag. Other providers
     // accept custom base URLs through their respective environment variables.
@@ -910,6 +1010,7 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
         exec_approval_rx,
         exec_approval_tx,
         mcp_server,
+        control_runtime,
     };
 
     // Create agent based on provider
@@ -949,6 +1050,17 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
             let model = client.completion_model(&model_name);
             run_tui_with_model(model, launch_config, model_name, provider_name).await?;
         }
+        CodeProvider::Kimi => {
+            let api_key = provider_env_value(&env_file, "MOONSHOT_API_KEY")
+                .ok_or_else(|| CliError::auth("MOONSHOT_API_KEY is not set"))?;
+            let client = match provider_env_value(&env_file, "MOONSHOT_BASE_URL") {
+                Some(base_url) => KimiClient::with_base_url(&base_url, api_key),
+                None => KimiClient::with_api_key(api_key),
+            };
+            let model_name = args.model.unwrap_or_else(|| KIMI_K2_6.to_string());
+            let model = client.completion_model(&model_name);
+            run_tui_with_model(model, launch_config, model_name, provider_name).await?;
+        }
         CodeProvider::Zhipu => {
             let client = match ZhipuClient::from_env() {
                 Ok(client) => client,
@@ -983,20 +1095,43 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
             let model = client.completion_model(&model_name);
             run_tui_with_model(model, launch_config, model_name, provider_name).await?;
         }
+        #[cfg(feature = "test-provider")]
+        CodeProvider::Fake => {
+            let fixture = args.fake_fixture.as_deref().ok_or_else(|| {
+                CliError::command_usage("--fake-fixture is required with --provider=fake")
+            })?;
+            let client = FakeClient::from_fixture_path(fixture).map_err(|error| {
+                CliError::io(format!(
+                    "failed to load fake provider fixture '{}': {error}",
+                    fixture.display()
+                ))
+            })?;
+            let model_name = args.model.unwrap_or_else(|| FAKE_DEFAULT_MODEL.to_string());
+            let model = client.completion_model(&model_name);
+            run_tui_with_model(model, launch_config, model_name, provider_name).await?;
+        }
         CodeProvider::Codex => {
             let mut server =
                 start_managed_codex_server(&args.codex_bin, args.codex_port, &working_dir).await?;
+            let initial_controller = if launch_config.control_runtime.is_write() {
+                CodeUiInitialController::LocalTui {
+                    owner_label: "Terminal UI".to_string(),
+                    reason: Some("The terminal UI controls this live Codex run".to_string()),
+                }
+            } else {
+                CodeUiInitialController::Fixed {
+                    kind: CodeUiControllerKind::Tui,
+                    owner_label: "Terminal UI".to_string(),
+                    reason: Some("The terminal UI controls this live Codex run".to_string()),
+                }
+            };
             let code_ui_runtime = match start_codex_code_ui_runtime(
                 &args,
                 &working_dir,
                 &server.ws_url,
                 launch_config.mcp_server.clone(),
                 false,
-                CodeUiInitialController::Fixed {
-                    kind: CodeUiControllerKind::Tui,
-                    owner_label: "Terminal UI".to_string(),
-                    reason: Some("The terminal UI controls this live Codex run".to_string()),
-                },
+                initial_controller,
             )
             .await
             {
@@ -1026,6 +1161,7 @@ fn completion_thinking_for_args(args: &CodeArgs) -> Option<CompletionThinking> {
     match args.provider {
         CodeProvider::Ollama => args.ollama_thinking.map(CompletionThinking::from),
         CodeProvider::Deepseek => args.deepseek_thinking.map(CompletionThinking::from),
+        CodeProvider::Kimi => args.kimi_thinking.map(CompletionThinking::from),
         _ => None,
     }
 }
@@ -1047,7 +1183,7 @@ fn completion_stream_for_args(args: &CodeArgs) -> Option<bool> {
 }
 
 fn preserve_reasoning_content_for_provider(provider: CodeProvider) -> bool {
-    matches!(provider, CodeProvider::Deepseek)
+    matches!(provider, CodeProvider::Deepseek | CodeProvider::Kimi)
 }
 
 // ---------------------------------------------------------------------------
@@ -1076,6 +1212,130 @@ impl ManagedCodexServer {
         }
         let _ = self.child.start_kill();
         let _ = tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await;
+    }
+}
+
+struct ControlRuntimeConfig {
+    mode: ControlMode,
+    paths: ControlPaths,
+    token: Option<Arc<str>>,
+    _lock_guard: Option<ControlLockGuard>,
+    write_info: bool,
+    cleanup_token: bool,
+    info_written: AtomicBool,
+    started_at: chrono::DateTime<Utc>,
+}
+
+impl ControlRuntimeConfig {
+    fn is_write(&self) -> bool {
+        self.mode == ControlMode::Write
+    }
+
+    fn mode_name(&self) -> &'static str {
+        match self.mode {
+            ControlMode::Observe => "observe",
+            ControlMode::Write => "write",
+        }
+    }
+
+    fn cleanup(&self) {
+        cleanup_control_files(
+            &self.paths,
+            self.cleanup_token,
+            self.info_written.load(Ordering::Relaxed),
+        );
+    }
+
+    fn write_info_file(
+        &self,
+        working_dir: &Path,
+        base_url: String,
+        mcp_url: Option<String>,
+        thread_id: Option<String>,
+    ) -> CliResult<()> {
+        if !self.write_info {
+            return Ok(());
+        }
+
+        let info = ControlInfo {
+            version: 1,
+            mode: self.mode_name().to_string(),
+            pid: std::process::id(),
+            base_url,
+            mcp_url,
+            working_dir: working_dir.to_path_buf(),
+            thread_id,
+            started_at: self.started_at,
+        };
+        write_control_info(&self.paths.info, &info).map_err(|error| {
+            CliError::fatal(format!(
+                "failed to write local TUI control info '{}': {error}",
+                self.paths.info.display()
+            ))
+            .with_stable_code(StableErrorCode::IoWriteFailed)
+        })?;
+        self.info_written.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+impl Drop for ControlRuntimeConfig {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
+async fn prepare_control_runtime(
+    args: &CodeArgs,
+    working_dir: &Path,
+) -> CliResult<ControlRuntimeConfig> {
+    let paths = resolve_control_paths(
+        working_dir,
+        args.control_token_file.as_deref(),
+        args.control_info_file.as_deref(),
+    );
+    let started_at = Utc::now();
+
+    match args.control {
+        ControlMode::Observe => Ok(ControlRuntimeConfig {
+            mode: ControlMode::Observe,
+            paths,
+            token: None,
+            _lock_guard: None,
+            write_info: args.control_info_file.is_some(),
+            cleanup_token: false,
+            info_written: AtomicBool::new(false),
+            started_at,
+        }),
+        ControlMode::Write => {
+            let lock_guard = acquire_control_lock(&paths.lock).map_err(|error| match error {
+                ControlLockError::AlreadyHeld { .. } => CliError::conflict(error.to_string()),
+                ControlLockError::Io(error) => CliError::io(format!(
+                    "failed to acquire local TUI control lock '{}': {error}",
+                    paths.lock.display()
+                )),
+            })?;
+            let token = ensure_control_token_file(&paths.token)
+                .await
+                .map_err(|error| {
+                    CliError::fatal(format!(
+                        "failed to prepare local TUI control token '{}': {error}",
+                        paths.token.display()
+                    ))
+                    .with_stable_code(StableErrorCode::IoWriteFailed)
+                })?;
+
+            Ok(ControlRuntimeConfig {
+                mode: ControlMode::Write,
+                paths,
+                token: Some(Arc::<str>::from(token)),
+                _lock_guard: Some(lock_guard),
+                write_info: true,
+                cleanup_token: true,
+                info_written: AtomicBool::new(false),
+                started_at,
+            })
+        }
     }
 }
 
@@ -1163,6 +1423,7 @@ async fn start_codex_code_ui_runtime(
             kind: CodeUiControllerKind::Cli,
             ..
         } => Some("cli".to_string()),
+        CodeUiInitialController::LocalTui { .. } => Some("managed-tui".to_string()),
         _ => Some("web".to_string()),
     };
     let agent_args = agent_codex::AgentCodexArgs {
@@ -1421,6 +1682,7 @@ struct TuiLaunchConfig {
     exec_approval_rx: tokio::sync::mpsc::UnboundedReceiver<ExecApprovalRequest>,
     exec_approval_tx: tokio::sync::mpsc::UnboundedSender<ExecApprovalRequest>,
     mcp_server: Arc<LibraMcpServer>,
+    control_runtime: ControlRuntimeConfig,
 }
 
 #[derive(Clone)]
@@ -1499,6 +1761,8 @@ async fn build_tui_code_ui_runtime(
     provider_name: &str,
     model_name: &str,
     projection_bundle: Option<&ThreadBundle>,
+    code_control_tx: Option<tokio::sync::mpsc::UnboundedSender<TuiControlCommand>>,
+    automation_write_enabled: bool,
 ) -> Arc<CodeUiRuntimeHandle> {
     let capabilities = build_tui_code_ui_capabilities();
     let provider = CodeUiProviderInfo {
@@ -1525,14 +1789,28 @@ async fn build_tui_code_ui_runtime(
     snapshot.updated_at = Utc::now();
 
     let code_ui_session = CodeUiSession::new(snapshot);
-    CodeUiRuntimeHandle::build(
-        ReadOnlyCodeUiAdapter::new(code_ui_session, capabilities),
-        false,
+    let adapter: Arc<dyn CodeUiProviderAdapter> = if let Some(control_tx) = code_control_tx {
+        TuiCodeUiAdapter::new(code_ui_session, capabilities, control_tx)
+    } else {
+        ReadOnlyCodeUiAdapter::new(code_ui_session, capabilities)
+    };
+    let initial_controller = if automation_write_enabled {
+        CodeUiInitialController::LocalTui {
+            owner_label: "Terminal UI".to_string(),
+            reason: Some("The terminal UI controls this live session".to_string()),
+        }
+    } else {
         CodeUiInitialController::Fixed {
             kind: CodeUiControllerKind::Tui,
             owner_label: "Terminal UI".to_string(),
             reason: Some("The terminal UI controls this live session".to_string()),
-        },
+        }
+    };
+    CodeUiRuntimeHandle::build_with_control(
+        adapter,
+        false,
+        automation_write_enabled,
+        initial_controller,
     )
     .await
 }
@@ -1623,6 +1901,7 @@ where
     M::Response: CompletionUsage,
 {
     let registry = params.registry;
+    let control_runtime = params.control_runtime;
     let hook_runner = {
         let runner = HookRunner::load(registry.working_dir());
         if runner.has_hooks() {
@@ -1695,8 +1974,34 @@ where
         SessionState::new(&working_dir_str)
     };
 
+    let (code_control_tx, code_control_rx) = if control_runtime.is_write() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<TuiControlCommand>();
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
+    let automation_write_enabled = code_control_tx.is_some();
+
     let code_ui_runtime = if let Some(runtime) = managed_code_ui_runtime.clone() {
-        runtime
+        if let Some(control_tx) = code_control_tx {
+            let adapter = runtime.adapter();
+            let code_ui_session = adapter.session();
+            let capabilities = adapter.capabilities();
+            let tui_adapter: Arc<dyn CodeUiProviderAdapter> =
+                TuiCodeUiAdapter::new(code_ui_session, capabilities, control_tx);
+            CodeUiRuntimeHandle::build_with_control(
+                tui_adapter,
+                false,
+                true,
+                CodeUiInitialController::LocalTui {
+                    owner_label: "Terminal UI".to_string(),
+                    reason: Some("The terminal UI controls this live managed session".to_string()),
+                },
+            )
+            .await
+        } else {
+            runtime
+        }
     } else {
         let projection_bundle = session_canonical_thread_id(&session)
             .and_then(|thread_id| Uuid::parse_str(&thread_id).ok());
@@ -1718,37 +2023,98 @@ where
             &provider_name,
             &model_name,
             projection_bundle.as_ref(),
+            code_control_tx,
+            automation_write_enabled,
         )
         .await
     };
     let code_ui_session = code_ui_runtime.adapter().session();
+    let code_ui_runtime_for_app = code_ui_runtime.clone();
 
-    let (web_handle, web_line) = match start_web_server(
+    let control_thread_id = session_canonical_thread_id(&session);
+    let (mut web_handle, web_line) = match start_web_server(
         &params.host,
         params.port,
         registry.working_dir().to_path_buf(),
         WebServerOptions {
             code_ui: Some(code_ui_runtime),
+            automation_control_token: control_runtime.token.clone(),
+            audit_sink: None,
         },
     )
     .await
     {
         Ok(handle) => {
-            let line = format!("Web: http://{}", handle.addr);
+            let base_url = format!("http://{}", handle.addr);
+            if let Err(error) = control_runtime.write_info_file(
+                registry.working_dir(),
+                base_url.clone(),
+                None,
+                control_thread_id.clone(),
+            ) {
+                handle.shutdown().await;
+                if let Some(runtime) = managed_code_ui_runtime.as_ref() {
+                    let _ = runtime.shutdown().await;
+                }
+                return Err(error);
+            }
+            let line = format!("Web: {base_url}");
             (Some(handle), line)
+        }
+        Err(err) if control_runtime.is_write() => {
+            if let Some(runtime) = managed_code_ui_runtime.as_ref() {
+                let _ = runtime.shutdown().await;
+            }
+            return Err(
+                CliError::network(format!("failed to start web server: {err}"))
+                    .with_detail("component", "web_server"),
+            );
         }
         Err(err) => (
             None::<WebServerHandle>,
             format!("Web: failed to start ({err})"),
         ),
     };
+    let control_base_url = web_handle
+        .as_ref()
+        .map(|handle| format!("http://{}", handle.addr));
 
     // Start MCP Server
     let (mcp_handle, mcp_line) =
         match start_mcp_server(&params.host, params.mcp_port, params.mcp_server.clone()).await {
             Ok(handle) => {
-                let line = format!("MCP: http://{}", handle.addr);
+                let mcp_url = format!("http://{}", handle.addr);
+                if let Some(base_url) = control_base_url.as_ref()
+                    && let Err(error) = control_runtime.write_info_file(
+                        registry.working_dir(),
+                        base_url.clone(),
+                        Some(mcp_url.clone()),
+                        control_thread_id.clone(),
+                    )
+                {
+                    if let Some(handle) = web_handle.take() {
+                        handle.shutdown().await;
+                    }
+                    handle.shutdown().await;
+                    if let Some(runtime) = managed_code_ui_runtime.as_ref() {
+                        let _ = runtime.shutdown().await;
+                    }
+                    return Err(error);
+                }
+                let line = format!("MCP: {mcp_url}");
                 (Some(handle), line)
+            }
+            Err(err) if control_runtime.is_write() => {
+                if let Some(handle) = web_handle.take() {
+                    handle.shutdown().await;
+                }
+                if let Some(runtime) = managed_code_ui_runtime.as_ref() {
+                    let _ = runtime.shutdown().await;
+                }
+                return Err(
+                    CliError::network(format!("failed to start MCP server: {err}"))
+                        .with_detail("component", "mcp_server"),
+                );
             }
             Err(err) => (None, format!("MCP: failed to start ({err})")),
         };
@@ -1787,6 +2153,8 @@ where
             provider_name,
             mcp_server: Some(params.mcp_server),
             code_ui_session: Some(code_ui_session),
+            code_ui_runtime: Some(code_ui_runtime_for_app),
+            code_control_rx,
             managed_code_ui_runtime,
             default_network_access: params.network_access,
         },
@@ -1838,6 +2206,7 @@ async fn start_mcp_server(
 ) -> anyhow::Result<McpServerHandle> {
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    let bound_addr = listener.local_addr()?;
 
     // Use rmcp's Streamable HTTP transport via Hyper directly
     let service = TowerToHyperService::new(StreamableHttpService::new(
@@ -1889,7 +2258,7 @@ async fn start_mcp_server(
     });
 
     Ok(McpServerHandle {
-        addr,
+        addr: bound_addr,
         shutdown_tx,
         join,
         connection_tasks,
@@ -1957,6 +2326,7 @@ fn default_tui_runtime_context(
             policy: approval_policy,
             request_tx: exec_approval_tx,
             store: Arc::new(tokio::sync::Mutex::new(approval_store)),
+            scope_key_prefix: None,
         }),
         max_output_bytes: None,
     }
@@ -2034,7 +2404,7 @@ async fn init_mcp_server(working_dir: &std::path::Path) -> Arc<LibraMcpServer> {
         }
     };
 
-    let storage = Arc::new(LocalStorage::new(objects_dir));
+    let storage = Arc::new(ClientStorage::init(objects_dir));
     let intent_history_manager = Arc::new(HistoryManager::new(storage.clone(), dot_libra, db_conn));
     Arc::new(LibraMcpServer::new_with_working_dir(
         Some(intent_history_manager),
@@ -2111,7 +2481,7 @@ async fn execute_stdio(args: &CodeArgs) -> CliResult<()> {
 ///   in web-only and stdio modes.
 /// - Provider-specific flags are only accepted for their respective providers.
 fn validate_mode_args(args: &CodeArgs, _output: &OutputConfig) -> Result<(), String> {
-    if !args.stdio && args.port == args.mcp_port {
+    if !args.stdio && args.port == args.mcp_port && args.port != 0 {
         return Err(format!(
             "--port ({}) and --mcp-port ({}) must be different",
             args.port, args.mcp_port
@@ -2123,10 +2493,20 @@ fn validate_mode_args(args: &CodeArgs, _output: &OutputConfig) -> Result<(), Str
     }
 
     if args.stdio {
+        if args.control == ControlMode::Write {
+            return Err(
+                "--control write is not supported with `libra code --stdio` because --stdio is the MCP stdio transport; use `libra code-control --stdio` for local TUI automation"
+                    .to_string(),
+            );
+        }
         reject_non_tui_flags(args, "--stdio")?;
         reject_mode_flag(args.host != DEFAULT_BIND_HOST, "--host", "--stdio")?;
         reject_mode_flag(args.port != DEFAULT_WEB_PORT, "--port", "--stdio")?;
         reject_mode_flag(args.mcp_port != DEFAULT_MCP_PORT, "--mcp-port", "--stdio")?;
+    }
+
+    if args.control == ControlMode::Write {
+        ensure_loopback_control_host_for_validation(&args.host)?;
     }
 
     if args.provider != CodeProvider::Codex {
@@ -2171,6 +2551,27 @@ fn validate_mode_args(args: &CodeArgs, _output: &OutputConfig) -> Result<(), Str
         );
     }
 
+    if args.provider != CodeProvider::Kimi && args.kimi_thinking.is_some() {
+        return Err("--kimi-thinking is only supported with --provider=kimi".to_string());
+    }
+
+    #[cfg(feature = "test-provider")]
+    {
+        if args.provider == CodeProvider::Fake {
+            if std::env::var_os("LIBRA_ENABLE_TEST_PROVIDER").is_none() {
+                return Err(
+                    "--provider=fake is test-only; set LIBRA_ENABLE_TEST_PROVIDER=1 to use it"
+                        .to_string(),
+                );
+            }
+            if args.fake_fixture.is_none() {
+                return Err("--fake-fixture is required with --provider=fake".to_string());
+            }
+        } else if args.fake_fixture.is_some() {
+            return Err("--fake-fixture is only supported with --provider=fake".to_string());
+        }
+    }
+
     Ok(())
 }
 
@@ -2181,6 +2582,21 @@ fn reject_mode_flag(is_invalid: bool, flag: &str, mode: &str) -> Result<(), Stri
         return Err(format!("{flag} is not supported in {mode} mode"));
     }
     Ok(())
+}
+
+fn ensure_loopback_control_host_for_validation(host: &str) -> Result<(), String> {
+    let normalized = host.trim().trim_matches('[').trim_matches(']');
+    let is_loopback = matches!(normalized, "localhost" | "127.0.0.1" | "::1")
+        || normalized
+            .parse::<std::net::IpAddr>()
+            .map(|addr| addr.is_loopback())
+            .unwrap_or(false);
+
+    if is_loopback {
+        Ok(())
+    } else {
+        Err("--control write requires a loopback --host such as 127.0.0.1 or ::1".to_string())
+    }
 }
 
 /// Rejects all TUI-specific flags when running in a non-TUI mode (web-only or stdio).
@@ -2203,6 +2619,7 @@ fn reject_non_tui_flags(args: &CodeArgs, mode: &str) -> Result<(), String> {
         mode,
     )?;
     reject_mode_flag(args.deepseek_stream.is_some(), "--deepseek-stream", mode)?;
+    reject_mode_flag(args.kimi_thinking.is_some(), "--kimi-thinking", mode)?;
     reject_mode_flag(args.context.is_some(), "--context", mode)?;
     reject_mode_flag(args.resume.is_some(), "--resume", mode)?;
     reject_mode_flag(
@@ -2239,6 +2656,9 @@ mod tests {
             cwd: None,
             repo: None,
             env_file: None,
+            control: ControlMode::Observe,
+            control_token_file: None,
+            control_info_file: None,
             provider: CodeProvider::Gemini,
             model: None,
             temperature: None,
@@ -2247,6 +2667,9 @@ mod tests {
             deepseek_thinking: None,
             deepseek_reasoning_effort: None,
             deepseek_stream: None,
+            kimi_thinking: None,
+            #[cfg(feature = "test-provider")]
+            fake_fixture: None,
             context: None,
             resume: None,
             approval_policy: CodeApprovalPolicy::OnRequest,
@@ -2287,6 +2710,43 @@ mod tests {
     fn accepts_default_tui_mode() {
         let args = base_args();
         assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn accepts_control_write_in_default_tui_mode() {
+        let mut args = base_args();
+        args.control = ControlMode::Write;
+
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn accepts_control_write_in_default_web_mode() {
+        let args = CodeArgs::try_parse_from(["libra", "--web", "--control", "write"]).unwrap();
+
+        assert!(args.web_only);
+        assert_eq!(args.control, ControlMode::Write);
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn rejects_control_write_in_stdio_mode() {
+        let mut args = base_args();
+        args.stdio = true;
+        args.control = ControlMode::Write;
+
+        let err = validate_mode_args(&args, &OutputConfig::default()).unwrap_err();
+        assert!(err.contains("code-control --stdio"));
+    }
+
+    #[test]
+    fn rejects_control_write_with_non_loopback_host() {
+        let mut args = base_args();
+        args.control = ControlMode::Write;
+        args.host = "0.0.0.0".to_string();
+
+        let err = validate_mode_args(&args, &OutputConfig::default()).unwrap_err();
+        assert!(err.contains("loopback"));
     }
 
     #[test]
@@ -2487,6 +2947,37 @@ mod tests {
     }
 
     #[test]
+    fn accepts_kimi_thinking_for_kimi_provider() {
+        let args = CodeArgs::try_parse_from([
+            "libra",
+            "--provider",
+            "kimi",
+            "--model",
+            "kimi-k2.6",
+            "--kimi-thinking",
+            "disabled",
+        ])
+        .unwrap();
+
+        assert_eq!(args.provider, CodeProvider::Kimi);
+        assert_eq!(args.kimi_thinking, Some(KimiThinkingArg::Disabled));
+        assert_eq!(
+            completion_thinking_for_args(&args),
+            Some(CompletionThinking::Disabled)
+        );
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn rejects_kimi_thinking_for_non_kimi_provider() {
+        let mut args = base_args();
+        args.kimi_thinking = Some(KimiThinkingArg::Enabled);
+
+        let err = validate_mode_args(&args, &OutputConfig::default()).unwrap_err();
+        assert!(err.contains("--kimi-thinking"));
+    }
+
+    #[test]
     fn accepts_deepseek_stream_alias_for_deepseek_provider() {
         let args =
             CodeArgs::try_parse_from(["libra", "--provider", "deepseek", "--stream", "false"])
@@ -2498,7 +2989,7 @@ mod tests {
     }
 
     #[test]
-    fn tui_preserves_reasoning_content_for_deepseek_only() {
+    fn tui_preserves_reasoning_content_for_reasoning_providers() {
         assert!(preserve_reasoning_content_for_provider(
             CodeProvider::Deepseek
         ));
@@ -2508,6 +2999,7 @@ mod tests {
         assert!(!preserve_reasoning_content_for_provider(
             CodeProvider::Ollama
         ));
+        assert!(preserve_reasoning_content_for_provider(CodeProvider::Kimi));
     }
 
     #[test]
@@ -2592,6 +3084,8 @@ mod tests {
             "ollama",
             "gemma4:31b",
             Some(&bundle),
+            None,
+            false,
         )
         .await;
         let snapshot = runtime.snapshot().await;

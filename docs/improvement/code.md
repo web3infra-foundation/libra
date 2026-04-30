@@ -2560,6 +2560,8 @@ match report.status() {
 
 把 UI 的真相源从 TUI 本地状态和 Codex session snapshot 收敛到共享 workflow projection。这个步骤不是"新增 Web UI adapter"，而是重构现有 `CodeUiProviderAdapter` 的责任边界，并把 Web 展示 / 输入接管都纳入同一 controller lease 协议。
 
+> 交叉依赖：[`docs/improvement/tui.md`](../improvement/tui.md) 引入的 `Automation` lease 与 control token 是本阶段统一的子集。后续 typed delta 迁移时不要破坏其语义（如 `TuiControlCommand` 独立于 `AppEvent`、turn id 由 App 独占等）。
+
 ### Scope
 
 1. 将现有 `CodeUiProviderAdapter` 拆成 `CodeUiCommandAdapter + CodeUiReadModel`。

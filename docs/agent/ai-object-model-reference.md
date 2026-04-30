@@ -209,6 +209,9 @@ Notes:
 - Phase 2 uses a conservative stage barrier: run `execution_dag` first,
   then switch the active stage to `test` only after execution work is
   complete.
+- Current Code-mode persistence writes this pair explicitly: non-gate
+  work maps to the execution plan, gate work maps to the test plan, and
+  Scheduler rebuild keeps the pair in `[execution, test]` order.
 
 Scheduler may also derive or cache:
 
@@ -303,6 +306,9 @@ Optional stable environment baseline.
 - used when the system needs a frozen starting or ending context
 - not required for every phase
 - should not be used as a mutable runtime context container
+- CLI and MCP readers accept `context_snapshot` as the public type name;
+  legacy history written by `git-internal` may still be stored under the
+  internal `snapshot` directory name.
 
 ### ContextFrame
 
@@ -320,7 +326,7 @@ Immutable incremental context fact.
 | Phase | Libra runtime / projection | Snapshot writes (`git-internal`) | Event writes (`git-internal`) |
 |---|---|---|---|
 | Phase 0 | Thread bootstrap, current intent revision, IntentSpec review, live context bootstrap | `Intent`, optional `ContextSnapshot` | `ToolInvocation`, `ContextFrame`, optional terminal `Decision` / `IntentEvent` |
-| Phase 1 | selected plan head, current plan heads, plan review, ready queue preview | `Plan`, `Task` | `ToolInvocation`, `ContextFrame`, optional terminal `Decision` / `IntentEvent` |
+| Phase 1 | selected plan set heads, current plan heads, plan review, ready queue preview | `Plan`, `Task` | `ToolInvocation`, `ContextFrame`, optional terminal `Decision` / `IntentEvent` |
 | Phase 2 | live context window, retry / replan loop, staging area | `Run`, `PatchSet`, `Provenance` | `TaskEvent`, `RunEvent`, `PlanStepEvent`, `ToolInvocation`, `Evidence`, `ContextFrame`, `RunUsage` |
 | Phase 3 | audit indexing, release candidate view | optional final `ContextSnapshot` | `Evidence`, `Decision`, terminal `TaskEvent` / `RunEvent` / `IntentEvent` |
 | Phase 4 | review UI, current thread pointers | none | `Decision`, optional terminal `IntentEvent` |

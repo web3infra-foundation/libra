@@ -74,6 +74,13 @@ fn validate(args: &SubmitTaskCompleteArgs) -> ToolResult<()> {
             "submit_task_complete requires a non-empty summary".to_string(),
         ));
     }
+    if args.result == TaskCompleteResult::Pass && contains_blocked_verification_claim(&args.summary)
+    {
+        return Err(ToolError::InvalidArguments(
+            "submit_task_complete result 'pass' cannot describe blocked, failed, or unexecuted verification; use result 'fail' when acceptance evidence is incomplete"
+                .to_string(),
+        ));
+    }
     // For pass/fail outcomes, evidence is strongly recommended but not
     // required: analysis tasks with read-only verification may legitimately
     // have empty evidence.  Reject obviously malformed entries instead.
@@ -83,8 +90,49 @@ fn validate(args: &SubmitTaskCompleteArgs) -> ToolResult<()> {
                 "submit_task_complete evidence[{idx}].command must not be empty"
             )));
         }
+        if args.result == TaskCompleteResult::Pass && entry.exit_code != 0 {
+            return Err(ToolError::InvalidArguments(format!(
+                "submit_task_complete result 'pass' cannot include failing evidence: evidence[{idx}] '{}' exited with {}",
+                entry.command, entry.exit_code
+            )));
+        }
+        if args.result == TaskCompleteResult::Pass
+            && entry
+                .output_excerpt
+                .as_deref()
+                .is_some_and(contains_blocked_verification_claim)
+        {
+            return Err(ToolError::InvalidArguments(format!(
+                "submit_task_complete result 'pass' cannot include blocked, failed, or unexecuted verification evidence: evidence[{idx}] '{}'",
+                entry.command
+            )));
+        }
     }
     Ok(())
+}
+
+fn contains_blocked_verification_claim(text: &str) -> bool {
+    let normalized = text.to_ascii_lowercase();
+    [
+        "could not be executed",
+        "could not execute",
+        "could not be run",
+        "could not run",
+        "did not run",
+        "not executed",
+        "unable to execute",
+        "unable to run",
+        "blocked by",
+        "verification failure",
+        "tool execution failed",
+        "failed to snapshot workspace",
+        "failed to inspect workspace",
+        "device not configured",
+        "os error 6",
+        "enotconn",
+    ]
+    .iter()
+    .any(|phrase| normalized.contains(phrase))
 }
 
 #[cfg(test)]
@@ -121,6 +169,98 @@ mod tests {
         let output = handler.handle(inv).await.unwrap();
         assert!(output.is_success());
         assert!(output.as_text().is_some_and(|t| t.contains("pass")));
+    }
+
+    #[tokio::test]
+    async fn rejects_pass_with_failing_evidence() {
+        let handler = SubmitTaskCompleteHandler;
+        let inv = make_invocation(
+            r#"{
+                "result": "pass",
+                "summary": "All checks passed",
+                "evidence": [
+                    {"command": "cargo clippy", "exit_code": -1, "output_excerpt": "failed to snapshot workspace: Device not configured (os error 6)"}
+                ]
+            }"#,
+        );
+
+        let result = handler.handle(inv).await;
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("cannot include failing evidence")
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_pass_when_summary_admits_verification_was_blocked() {
+        let handler = SubmitTaskCompleteHandler;
+        let inv = make_invocation(
+            r#"{
+                "result": "pass",
+                "summary": "cargo build succeeded, but cargo clippy and cargo fmt --check could not be executed due to a persistent FUSE filesystem disconnect (ENOTCONN) on the workspace mount.",
+                "evidence": [
+                    {"command": "cargo build", "exit_code": 0, "output_excerpt": "Finished dev profile"},
+                    {"command": "cargo run -- code", "exit_code": 0, "output_excerpt": "code"}
+                ]
+            }"#,
+        );
+
+        let result = handler.handle(inv).await;
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("acceptance evidence is incomplete")
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_pass_when_successful_evidence_excerpt_contains_tool_failure() {
+        let handler = SubmitTaskCompleteHandler;
+        let inv = make_invocation(
+            r#"{
+                "result": "pass",
+                "summary": "All checks passed",
+                "evidence": [
+                    {"command": "cargo clippy || true", "exit_code": 0, "output_excerpt": "Tool execution failed: failed to snapshot workspace: Device not configured (os error 6)"}
+                ]
+            }"#,
+        );
+
+        let result = handler.handle(inv).await;
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("cannot include blocked")
+        );
+    }
+
+    #[tokio::test]
+    async fn accepts_fail_with_failing_evidence() {
+        let handler = SubmitTaskCompleteHandler;
+        let inv = make_invocation(
+            r#"{
+                "result": "fail",
+                "summary": "clippy could not run",
+                "evidence": [
+                    {"command": "cargo clippy", "exit_code": -1, "output_excerpt": "failed to snapshot workspace: Device not configured (os error 6)"}
+                ]
+            }"#,
+        );
+
+        let output = handler.handle(inv).await.unwrap();
+
+        assert!(output.is_success());
+        assert!(output.as_text().is_some_and(|t| t.contains("fail")));
     }
 
     #[tokio::test]

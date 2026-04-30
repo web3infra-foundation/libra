@@ -36,7 +36,7 @@ use crate::{
         config::ConfigKv,
         db,
     },
-    utils::{error::emit_warning, object::write_git_object, storage::local::LocalStorage, util},
+    utils::{client_storage::ClientStorage, error::emit_warning, object::write_git_object, util},
 };
 
 // Metadata keys persisted on `SessionState`. Centralised here so that ingestion,
@@ -547,7 +547,7 @@ async fn persist_session_history(
     let objects_dir = storage_path.join("objects");
     std::fs::create_dir_all(&objects_dir)?;
 
-    let storage = Arc::new(LocalStorage::new(objects_dir));
+    let storage = Arc::new(ClientStorage::init(objects_dir));
     let db_conn = Arc::new(db::get_db_conn_instance().await.clone());
     let history_manager = HistoryManager::new(storage, storage_path.to_path_buf(), db_conn);
 

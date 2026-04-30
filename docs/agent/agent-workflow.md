@@ -6,6 +6,14 @@
 > `analysis`). Code-changing objectives may now run concurrently inside
 > task-specific linked worktrees, with successful results replayed back
 > into the primary workspace after conflict checks.
+>
+> Update (2026-04-29): Code-mode persistence writes reviewed plan sets as
+> execution/test Plan heads, creates task-level Run records for executed
+> plan tasks, materializes selected plan pairs in Scheduler state, and
+> rebuilds ContextFrame reverse indexes from direct frame links as well as
+> PlanStepEvent frame references. Code-mode AI object writes go through
+> `ClientStorage`, so the `.libra/libra.db` `object_index` is populated
+> alongside the AI history branch.
 
 
 This document defines the runtime workflow after the snapshot / event /
@@ -234,12 +242,10 @@ The Scheduler translates the confirmed `Intent` revision into reviewed
 plan and task definitions, while Libra derives the mutable planning
 view.
 
-Implementation note: the current generic TUI path is a transitional
-single execution-plan path while the full execution/test dual-plan
-Scheduler cutover is in progress. Even in that path, provider output is
-only a draft; Libra persists a formal `Plan(role=execution)` and matching
-`Task` snapshots, and every `Task.origin_step_id` must point to the
-persisted `Plan.steps[*].step_id`.
+Implementation note: provider output is only a draft. Libra persists a
+formal execution/test plan set and matching `Task` snapshots; every
+`Task.origin_step_id` must point to the persisted
+`Plan.steps[*].step_id` in the plan that owns that task.
 
 1. **Plan Construction**:
    - Read the confirmed `Intent` snapshot and relevant context material.

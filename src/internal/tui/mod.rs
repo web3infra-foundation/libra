@@ -38,6 +38,10 @@
 mod app;
 // Typed bus carrying events between agent and UI.
 mod app_event;
+// Code UI adapter that routes browser automation writes into the TUI event loop.
+mod code_ui_adapter;
+// Local automation control commands consumed by the TUI event loop.
+pub mod control;
 // Composer, popups, focus state machine.
 mod bottom_pane;
 // Scrollback transcript widget.
@@ -62,6 +66,7 @@ mod welcome_shader;
 // Curated public surface: only types that callers outside the module need.
 pub use app::{App, AppConfig, AppExitInfo, ExitReason};
 pub use app_event::{AgentEvent, AgentStatus, AppEvent};
+pub use code_ui_adapter::TuiCodeUiAdapter;
 pub use diff::{DiffSummary, FileChange};
 pub use history_cell::{AssistantHistoryCell, DiffHistoryCell, HistoryCell, PlanUpdateHistoryCell};
 pub use slash_command::{BuiltinCommand, parse_builtin};

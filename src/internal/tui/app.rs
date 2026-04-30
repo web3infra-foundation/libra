@@ -27,8 +27,10 @@ use tokio_stream::StreamExt;
 use super::{
     app_event::{
         AgentEvent, AgentStatus, AppEvent, ProviderPlanDraft, ProviderPlanDraftStep, TurnId,
+        TurnInputSource,
     },
     chatwidget::ChatWidget,
+    control::{CancelSource, TuiControlCommand, TuiControlError},
     diff::FileChange,
     history_cell::{
         AssistantHistoryCell, DiffHistoryCell, HistoryCell, OrchestratorResultHistoryCell,
@@ -391,6 +393,10 @@ pub struct AppConfig {
     pub mcp_server: Option<Arc<LibraMcpServer>>,
     /// Optional Code UI session mirror for the browser UI.
     pub code_ui_session: Option<Arc<CodeUiSession>>,
+    /// Optional Code UI runtime handle for local controller operations.
+    pub code_ui_runtime: Option<Arc<CodeUiRuntimeHandle>>,
+    /// Optional local automation command receiver.
+    pub code_control_rx: Option<UnboundedReceiver<TuiControlCommand>>,
     /// Optional managed provider runtime controlled through the same TUI.
     pub managed_code_ui_runtime: Option<Arc<CodeUiRuntimeHandle>>,
     /// Default network access policy selected at TUI launch.
@@ -485,6 +491,10 @@ pub struct App<M: CompletionModel> {
     active_turn_run_id: Option<Arc<Mutex<Option<String>>>>,
     /// Provider-agnostic web snapshot state shared with the browser UI.
     code_ui_session: Option<Arc<CodeUiSession>>,
+    /// Provider-agnostic web runtime state shared with the browser UI.
+    code_ui_runtime: Option<Arc<CodeUiRuntimeHandle>>,
+    /// Receiver for local automation commands from the Code UI adapter.
+    code_control_rx: Option<UnboundedReceiver<TuiControlCommand>>,
     /// Managed provider runtime for providers that own their own tool loop.
     managed_code_ui_runtime: Option<Arc<CodeUiRuntimeHandle>>,
     /// Default network access policy selected at TUI launch.
@@ -598,6 +608,8 @@ where
             running_tool_calls: 0,
             active_turn_run_id: None,
             code_ui_session: app_config.code_ui_session,
+            code_ui_runtime: app_config.code_ui_runtime,
+            code_control_rx: app_config.code_control_rx,
             managed_code_ui_runtime: app_config.managed_code_ui_runtime,
             default_network_access: app_config.default_network_access,
             next_code_ui_item_id: 1,
@@ -647,6 +659,7 @@ where
         let mut animation_tick = interval(Duration::from_millis(120));
         let (managed_event_tx, mut managed_event_rx) =
             mpsc::unbounded_channel::<CodeUiEventEnvelope>();
+        let mut code_control_rx = self.code_control_rx.take();
         let managed_event_task = self.managed_code_ui_runtime.as_ref().map(|runtime| {
             let mut events = runtime.subscribe();
             tokio::spawn(async move {
@@ -684,6 +697,15 @@ where
                 // Mirror managed provider snapshots into the local TUI.
                 Some(event) = managed_event_rx.recv(), if self.managed_code_ui_runtime.is_some() => {
                     self.handle_managed_code_ui_event(event).await?;
+                }
+
+                Some(command) = async {
+                    match code_control_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                }, if code_control_rx.is_some() => {
+                    self.handle_tui_control_command(command).await;
                 }
 
                 // Handle user-input requests from the tool handler
@@ -835,6 +857,339 @@ where
         self.schedule_draw();
     }
 
+    async fn handle_tui_control_command(&mut self, command: TuiControlCommand) {
+        match command {
+            TuiControlCommand::SubmitMessage { text, ack } => {
+                let result = self.submit_message_from_code_ui(text).await;
+                let _ = ack.send(result);
+            }
+            TuiControlCommand::RespondInteraction {
+                interaction_id,
+                response,
+                ack,
+            } => {
+                let result = self
+                    .respond_pending_interaction_from_code_ui(&interaction_id, response)
+                    .await;
+                let _ = ack.send(result);
+            }
+            TuiControlCommand::CancelCurrentTurn { ack } => {
+                let result = self.cancel_current_turn(CancelSource::Automation).await;
+                let _ = ack.send(result);
+            }
+            TuiControlCommand::ReclaimController { ack } => {
+                let result = self.reclaim_local_controller().await;
+                let _ = ack.send(result);
+            }
+        }
+    }
+
+    async fn submit_message_from_code_ui(&mut self, text: String) -> Result<(), TuiControlError> {
+        if !self.can_accept_code_ui_submit() {
+            return Err(TuiControlError::Busy);
+        }
+        self.submit_message_from_source(text, TurnInputSource::Automation)
+            .await;
+        Ok(())
+    }
+
+    fn can_accept_code_ui_submit(&self) -> bool {
+        matches!(self.widget.bottom_pane.status, AgentStatus::Idle)
+            && self.active_turn_id.is_none()
+            && self.pending_user_input.is_none()
+            && self.pending_exec_approval.is_none()
+            && self.pending_managed_interaction.is_none()
+            && self.pending_phase_confirmation.is_none()
+            && self.pending_post_plan.is_none()
+            && self.pending_network_policy.is_none()
+            && self.pending_intent_review.is_none()
+            && self.pending_plan_revision.is_none()
+            && self.pending_execution_plan_revision.is_none()
+    }
+
+    async fn automation_controller_active(&self) -> bool {
+        let Some(code_ui_session) = self.code_ui_session.as_ref() else {
+            return false;
+        };
+        let snapshot = code_ui_session.snapshot().await;
+        snapshot.controller.kind
+            == crate::internal::ai::web::code_ui::CodeUiControllerKind::Automation
+            && snapshot
+                .controller
+                .lease_expires_at
+                .is_some_and(|expires_at| expires_at > Utc::now())
+    }
+
+    async fn reclaim_local_controller(&mut self) -> Result<(), TuiControlError> {
+        let Some(runtime) = self.code_ui_runtime.clone() else {
+            return Err(TuiControlError::ControllerConflict);
+        };
+        runtime
+            .reclaim_local_tui_controller()
+            .await
+            .map_err(|error| {
+                if error.code == "CONTROLLER_CONFLICT" {
+                    TuiControlError::ControllerConflict
+                } else {
+                    TuiControlError::Internal(error.message)
+                }
+            })?;
+        self.sync_mux_input_context();
+        self.schedule_draw();
+        Ok(())
+    }
+
+    async fn respond_pending_interaction_from_code_ui(
+        &mut self,
+        interaction_id: &str,
+        response: CodeUiInteractionResponse,
+    ) -> Result<(), TuiControlError> {
+        if self
+            .pending_user_input
+            .as_ref()
+            .is_some_and(|pending| pending.request.call_id == interaction_id)
+        {
+            return self.respond_pending_user_input_from_code_ui(response).await;
+        }
+
+        if self
+            .pending_exec_approval
+            .as_ref()
+            .is_some_and(|pending| pending.request.call_id == interaction_id)
+        {
+            let selected = selection_from_response(
+                &[
+                    "approve",
+                    "approve_session",
+                    "allow_all_commands",
+                    "deny",
+                    "abort",
+                ],
+                &response,
+                Some(0),
+                Some(3),
+            )
+            .ok_or(TuiControlError::UnsupportedInteractionKind)?;
+            if let Some(pending) = self.pending_exec_approval.as_mut() {
+                pending.selected = selected;
+                self.widget.bottom_pane.exec_approval_selected = selected;
+            }
+            self.submit_exec_approval_decision();
+            return Ok(());
+        }
+
+        if self
+            .pending_phase_confirmation
+            .as_ref()
+            .is_some_and(|pending| pending.interaction_id == interaction_id)
+        {
+            let selected = selection_from_response(
+                &["continue", "reject", "abort"],
+                &response,
+                Some(0),
+                Some(1),
+            )
+            .ok_or(TuiControlError::UnsupportedInteractionKind)?;
+            if let Some(pending) = self.pending_phase_confirmation.as_mut() {
+                pending.selected = selected;
+                self.widget.bottom_pane.exec_approval_selected = selected;
+            }
+            self.submit_phase_confirmation_decision();
+            return Ok(());
+        }
+
+        if self
+            .pending_managed_interaction
+            .as_ref()
+            .is_some_and(|pending| pending.interaction.id == interaction_id)
+        {
+            let selected = {
+                let pending = self.pending_managed_interaction.as_ref().ok_or_else(|| {
+                    TuiControlError::Internal("managed interaction disappeared".to_string())
+                })?;
+                selection_from_interaction_options(&pending.interaction.options, &response)
+                    .ok_or(TuiControlError::UnsupportedInteractionKind)?
+            };
+            if let Some(pending) = self.pending_managed_interaction.as_mut() {
+                pending.selected = selected;
+                self.widget.bottom_pane.exec_approval_selected = selected;
+            }
+            self.submit_managed_interaction_decision();
+            return Ok(());
+        }
+
+        if self
+            .pending_intent_review
+            .as_ref()
+            .is_some_and(|pending| pending.interaction_id == interaction_id)
+        {
+            let selected = selection_from_response(
+                &["confirm", "modify", "cancel"],
+                &response,
+                Some(0),
+                Some(2),
+            )
+            .ok_or(TuiControlError::UnsupportedInteractionKind)?;
+            if let Some(pending) = self.pending_intent_review.as_mut() {
+                pending.selected = selected;
+            }
+            self.handle_intent_review_choice().await;
+            return Ok(());
+        }
+
+        if self.pending_post_plan.as_ref().is_some_and(|pending| {
+            pending.plan_id.as_deref().unwrap_or("post-plan-choice") == interaction_id
+        }) {
+            let selected = selection_from_response(
+                &["execute", "modify", "cancel"],
+                &response,
+                Some(0),
+                Some(2),
+            )
+            .ok_or(TuiControlError::UnsupportedInteractionKind)?;
+            if let Some(pending) = self.pending_post_plan.as_mut() {
+                pending.selected = selected;
+                self.widget.bottom_pane.post_plan_selected = selected;
+            }
+            self.handle_post_plan_choice().await;
+            return Ok(());
+        }
+
+        if self.pending_network_policy.as_ref().is_some_and(|pending| {
+            network_policy_interaction_id(pending.post_plan.plan_id.as_deref()) == interaction_id
+        }) {
+            let selected = selection_from_response(
+                &["network-deny", "network-allow", "back"],
+                &response,
+                None,
+                None,
+            )
+            .ok_or(TuiControlError::UnsupportedInteractionKind)?;
+            if let Some(pending) = self.pending_network_policy.as_mut() {
+                pending.selected = selected;
+                self.widget.bottom_pane.post_plan_selected = selected;
+            }
+            self.handle_network_policy_choice().await;
+            return Ok(());
+        }
+
+        Err(TuiControlError::InteractionNotActive)
+    }
+
+    async fn respond_pending_user_input_from_code_ui(
+        &mut self,
+        response: CodeUiInteractionResponse,
+    ) -> Result<(), TuiControlError> {
+        let Some(pending) = self.pending_user_input.take() else {
+            return Err(TuiControlError::InteractionNotActive);
+        };
+        let interaction_id = pending.request.call_id.clone();
+        let answers = user_input_answers_from_code_ui(&pending, response)?;
+        let _ = pending
+            .request
+            .response_tx
+            .send(UserInputResponse { answers });
+        self.widget.bottom_pane.set_user_input_questions(None);
+        self.widget.bottom_pane.clear();
+        self.widget
+            .bottom_pane
+            .set_status(AgentStatus::ExecutingTool);
+        self.sync_mux_input_context();
+        self.schedule_draw();
+        if let Some(code_ui_session) = self.code_ui_session.clone() {
+            code_ui_session.resolve_interaction(&interaction_id).await;
+            code_ui_session
+                .set_status(CodeUiSessionStatus::ExecutingTool)
+                .await;
+        }
+        Ok(())
+    }
+
+    async fn cancel_current_turn(&mut self, source: CancelSource) -> Result<(), TuiControlError> {
+        if !self.has_local_active_turn() && !self.has_code_ui_active_turn().await {
+            return Err(TuiControlError::Busy);
+        }
+
+        let reason = match source {
+            CancelSource::Esc => "Turn interrupted by user",
+            CancelSource::SlashQuit => "Turn interrupted by quit command",
+            CancelSource::Automation => "Turn interrupted by automation",
+        };
+        self.enqueue_mcp_turn_decision("abandon", reason.to_string());
+        self.cancel_pending_user_input();
+        self.cancel_pending_exec_approval();
+        self.cancel_pending_phase_confirmation_for_control();
+        self.clear_pending_code_ui_dialogs().await;
+        self.interrupt_agent_task();
+        self.clear_mcp_run_id();
+        self.widget.bottom_pane.set_status(AgentStatus::Idle);
+        self.sync_mux_input_context();
+        self.complete_streaming_assistant_cell("Interrupted.".to_string());
+        self.complete_running_tool_cells_with_interrupt();
+        self.schedule_draw();
+        if let Some(code_ui_session) = self.code_ui_session.clone() {
+            code_ui_session.set_status(CodeUiSessionStatus::Idle).await;
+        }
+        Ok(())
+    }
+
+    fn has_local_active_turn(&self) -> bool {
+        self.active_turn_id.is_some()
+            || matches!(
+                self.widget.bottom_pane.status,
+                AgentStatus::Thinking
+                    | AgentStatus::Retrying
+                    | AgentStatus::ExecutingTool
+                    | AgentStatus::AwaitingApproval
+            )
+    }
+
+    async fn has_code_ui_active_turn(&self) -> bool {
+        let Some(code_ui_session) = self.code_ui_session.as_ref() else {
+            return false;
+        };
+        matches!(
+            code_ui_session.snapshot().await.status,
+            CodeUiSessionStatus::Thinking
+                | CodeUiSessionStatus::ExecutingTool
+                | CodeUiSessionStatus::AwaitingInteraction
+        )
+    }
+
+    fn cancel_pending_phase_confirmation_for_control(&mut self) {
+        if let Some(pending) = self.pending_phase_confirmation.take() {
+            let _ = pending.response_tx.send(PhaseConfirmationDecision::Abort);
+            self.widget.bottom_pane.set_exec_approval(None);
+        }
+    }
+
+    async fn clear_pending_code_ui_dialogs(&mut self) {
+        let mut ids = Vec::new();
+        if let Some(pending) = self.pending_intent_review.take() {
+            ids.push(pending.interaction_id);
+        }
+        if let Some(pending) = self.pending_post_plan.take() {
+            ids.push(
+                pending
+                    .plan_id
+                    .unwrap_or_else(|| "post-plan-choice".to_string()),
+            );
+        }
+        if let Some(pending) = self.pending_network_policy.take() {
+            ids.push(network_policy_interaction_id(
+                pending.post_plan.plan_id.as_deref(),
+            ));
+        }
+        self.pending_plan_revision = None;
+        self.pending_execution_plan_revision = None;
+
+        if let Some(code_ui_session) = self.code_ui_session.clone() {
+            for id in ids {
+                code_ui_session.clear_interaction(&id).await;
+            }
+        }
+    }
+
     /// Handle a key press event.
     async fn handle_key_event(&mut self, key: crossterm::event::KeyEvent) -> anyhow::Result<()> {
         // Check for Ctrl+C first (always handled)
@@ -874,6 +1229,16 @@ where
                 // ── Normal idle handlers ─────────────────────────────
                 KeyCode::Enter if !self.widget.bottom_pane.is_empty() => {
                     let text = self.widget.bottom_pane.take_input();
+                    if self.automation_controller_active().await
+                        && !is_control_reclaim_command_input(&text)
+                    {
+                        self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                            "Automation is in control. Use `/control reclaim` to take back local input.".to_string(),
+                        )));
+                        self.widget.bottom_pane.sync_command_popup();
+                        self.schedule_draw();
+                        return Ok(());
+                    }
                     if self.welcome_active {
                         self.welcome_active = false;
                         self.schedule_draw();
@@ -1156,17 +1521,7 @@ where
                         self.schedule_draw();
                     }
                     KeyCode::Esc => {
-                        self.enqueue_mcp_turn_decision(
-                            "abandon",
-                            "Turn interrupted by user".to_string(),
-                        );
-                        self.interrupt_agent_task();
-                        self.clear_mcp_run_id();
-                        self.widget.bottom_pane.set_status(AgentStatus::Idle);
-                        self.sync_mux_input_context();
-                        self.complete_streaming_assistant_cell("Interrupted.".to_string());
-                        self.complete_running_tool_cells_with_interrupt();
-                        self.schedule_draw();
+                        let _ = self.cancel_current_turn(CancelSource::Esc).await;
                     }
                     _ => {}
                 }
@@ -1960,6 +2315,7 @@ where
             AppEvent::SubmitUserMessage {
                 turn_id,
                 text,
+                source,
                 allowed_tools,
             } => {
                 let browser_user_entry = CodeUiTranscriptEntry {
@@ -2051,6 +2407,9 @@ where
                 let model = self.model.clone();
                 let registry = self.registry.clone();
                 let mut config = self.config.clone();
+                if source == TurnInputSource::Automation {
+                    apply_automation_approval_scope(&mut config, turn_id);
+                }
                 config.allowed_tools =
                     Some(allowed_tools.unwrap_or_else(|| self.default_allowed_tools.clone()));
                 let history = self.history.clone();
@@ -3565,6 +3924,11 @@ where
 
     /// Submit a user message, expanding slash commands and applying agent context.
     async fn submit_message(&mut self, text: String) {
+        self.submit_message_from_source(text, TurnInputSource::Local)
+            .await;
+    }
+
+    async fn submit_message_from_source(&mut self, text: String, source: TurnInputSource) {
         // 1. Check for built-in TUI commands first.
         if let Some((cmd, args)) = super::slash_command::parse_builtin(&text) {
             self.handle_builtin_command(cmd, args).await;
@@ -3637,14 +4001,20 @@ where
 
         self.widget.clear_dag_panel();
         self.sync_mux_input_context();
-        self.submit_direct_agent_message(final_text, allowed_tools);
+        self.submit_direct_agent_message(final_text, allowed_tools, source);
     }
 
-    fn submit_direct_agent_message(&mut self, text: String, allowed_tools: Option<Vec<String>>) {
+    fn submit_direct_agent_message(
+        &mut self,
+        text: String,
+        allowed_tools: Option<Vec<String>>,
+        source: TurnInputSource,
+    ) {
         let turn_id = self.begin_turn();
         let _ = self.app_event_tx.send(AppEvent::SubmitUserMessage {
             turn_id,
             text,
+            source,
             allowed_tools,
         });
     }
@@ -3701,6 +4071,7 @@ where
                         "search_files".to_string(),
                         "web_search".to_string(),
                     ]),
+                    TurnInputSource::Local,
                 );
             }
             BuiltinCommand::Model => {
@@ -3791,6 +4162,29 @@ where
                 if !handled {
                     self.widget.add_cell(Box::new(AssistantHistoryCell::new(
                         "Mux unavailable. Start a parallel workflow first, or use `/mux next|prev|focus <n>|overview|toggle|list` while it is running.".to_string(),
+                    )));
+                }
+                self.schedule_draw();
+            }
+            BuiltinCommand::Control => {
+                if args.trim().eq_ignore_ascii_case("reclaim") {
+                    match self.reclaim_local_controller().await {
+                        Ok(()) => {
+                            self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                                "Local TUI control reclaimed.".to_string(),
+                            )));
+                        }
+                        Err(error) => {
+                            self.widget
+                                .add_cell(Box::new(AssistantHistoryCell::new(format!(
+                                    "Unable to reclaim control: {}",
+                                    error.message()
+                                ))));
+                        }
+                    }
+                } else {
+                    self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                        "Usage: /control reclaim".to_string(),
                     )));
                 }
                 self.schedule_draw();
@@ -7814,6 +8208,97 @@ fn code_ui_response_from_managed_selection(
     }
 }
 
+fn selection_from_interaction_options(
+    options: &[CodeUiInteractionOption],
+    response: &CodeUiInteractionResponse,
+) -> Option<usize> {
+    if let Some(selected_option) = response.selected_option.as_deref() {
+        return options
+            .iter()
+            .position(|option| option.id == selected_option || option.label == selected_option);
+    }
+    let ids = options
+        .iter()
+        .map(|option| option.id.as_str())
+        .collect::<Vec<_>>();
+    selection_from_response(&ids, response, Some(0), Some(1))
+}
+
+fn selection_from_response(
+    option_ids: &[&str],
+    response: &CodeUiInteractionResponse,
+    approved_index: Option<usize>,
+    rejected_index: Option<usize>,
+) -> Option<usize> {
+    if let Some(selected_option) = response.selected_option.as_deref()
+        && let Some(index) = option_ids.iter().position(|id| *id == selected_option)
+    {
+        return Some(index);
+    }
+
+    match response.approved {
+        Some(true) => {
+            if response.apply_to_future == Some(CodeUiApplyToFuture::AcceptAll)
+                && let Some(index) = option_ids
+                    .iter()
+                    .position(|id| matches!(*id, "allow_all_commands" | "approve_session"))
+            {
+                return Some(index);
+            }
+            approved_index
+        }
+        Some(false) => rejected_index,
+        None => None,
+    }
+}
+
+fn user_input_answers_from_code_ui(
+    pending: &PendingUserInput,
+    response: CodeUiInteractionResponse,
+) -> Result<HashMap<String, UserInputAnswer>, TuiControlError> {
+    let mut answers = pending.answers.clone();
+    if !response.answers.is_empty() {
+        for (question_id, values) in response.answers {
+            answers.insert(question_id, UserInputAnswer { answers: values });
+        }
+        return Ok(answers);
+    }
+
+    let Some(question) = pending.request.questions.get(pending.current_question) else {
+        return Err(TuiControlError::InteractionNotActive);
+    };
+
+    let mut values = Vec::new();
+    if let Some(selected_option) = response.selected_option.as_deref()
+        && let Some(option_index) = selected_option
+            .strip_prefix("option-")
+            .and_then(|value| value.parse::<usize>().ok())
+        && let Some(options) = question.options.as_ref()
+        && let Some(option) = options.get(option_index)
+    {
+        values.push(option.label.clone());
+    }
+    if values.is_empty()
+        && let Some(note) = response.note.as_deref().map(str::trim)
+        && !note.is_empty()
+    {
+        values.push(note.to_string());
+    }
+    if values.is_empty() {
+        match response.approved {
+            Some(true) => values.push("yes".to_string()),
+            Some(false) => values.push("no".to_string()),
+            None => {}
+        }
+    }
+    if values.is_empty() {
+        return Err(TuiControlError::UnsupportedInteractionKind);
+    }
+
+    answers.insert(question.id.clone(), UserInputAnswer { answers: values });
+    Ok(answers)
+}
+
 fn summarize_retry_error(error: &str) -> String {
     let lowered = error.to_ascii_lowercase();
     if lowered.contains("timeout") {
@@ -8712,6 +9197,24 @@ fn is_global_quit_command_input(text: &str) -> bool {
         super::slash_command::parse_builtin(text),
         Some((super::slash_command::BuiltinCommand::Quit, _))
     )
+}
+
+fn is_control_reclaim_command_input(text: &str) -> bool {
+    matches!(
+        super::slash_command::parse_builtin(text),
+        Some((super::slash_command::BuiltinCommand::Control, args))
+            if args.eq_ignore_ascii_case("reclaim")
+    )
+}
+
+fn apply_automation_approval_scope(config: &mut ToolLoopConfig, turn_id: TurnId) {
+    let Some(runtime_context) = config.runtime_context.as_mut() else {
+        return;
+    };
+    let Some(approval) = runtime_context.approval.as_mut() else {
+        return;
+    };
+    approval.scope_key_prefix = Some(format!("automation:{turn_id}"));
 }
 
 fn normalize_terminal_paste_text(text: &str) -> String {
