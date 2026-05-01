@@ -377,17 +377,22 @@ flowchart LR
 
 “字节级等价于 baseline” 不是手工肉眼比较——必须有可重放、可 CI 的实施步骤。本节是 CP-S2-3 唯一的 flag-off 检查 source of truth。
 
-**baseline commit 选择**：CP-S2-3 跑在 CP-4 之后；Step 1 的 1.1-1.11 已经引入新测试与新行为，所以**全量 `cargo test --all` 的字节级 baseline 不能是 `48ea0ae`**（CEX-00 commit），否则永远不会等价。规则：
-- **`cargo test --all` 整体**只做 pass/fail 比较（exit code + failed-test 集合应为空，stdout/stderr 之间允许内容差异）。
-- **CEX-00 baseline 测试套件**（即 `tests/ai_agent_baseline_test.rs` + `tests/command/code_test.rs::code_*`）逐一字节级等价于 `48ea0ae`——这两个文件由 CEX-00 起就稳定，不应被任何 Step 1.1-1.11 修改；如果某个 CEX 必须修改它们，**必须同时更新 CP-S2-3 baseline commit hash** 到那次提交并在 Changelog 显式记录。
-- **mock smoke session 产物**（`smoke.libra.normalized` / `test.libra.normalized`）字节级等价于 `48ea0ae`：smoke session 由 CEX-S2-12 引入的 `flag_off_smoke.json` 驱动，但 `48ea0ae` 不包含该 fixture。**脚本通过把工作树最新版的 `flag_off_smoke.json` + `scripts/normalize_session.sh` 同时复制到 baseline 与 candidate worktree** 来解决这个问题——也就是说 baseline commit 永远是 `48ea0ae`（不引入 `BASELINE_COMMIT` 变量），fixture 行为始终由候选树决定，diff 应当为空因为 sub-agent flag-off 时该 fixture 走的是 Step 1 单 Agent 路径，而 Step 1 单 Agent 路径在 `48ea0ae` 与候选树 flag-off 下应当字节级一致。如果某个 Step 1.x CEX 修改了 baseline 7 测试或 code_test 4 测试，必须显式更新 CP-S2-3 baseline commit hash 到那次提交，并在 Changelog 显式记录（参见上方 baseline commit 选择规则）。
+**baseline commit 选择（两个独立 baseline）**：CP-S2-3 跑在 CP-4 之后；Step 1.1-1.11 引入了新测试，**CEX-12 把 session 存储从 JSON blob 切到 JSONL，CEX-12.5 加了 sea-orm migration，CEX-16 加了 `agent_usage_stats`**——所以 `48ea0ae`（CEX-00 commit，pre-CEX-12）的 `.libra` schema 与候选树 flag-off 的 `.libra` schema 根本不兼容（JSON vs JSONL、缺 `agent_usage_stats` 表），mock smoke `.libra` 不可能与 `48ea0ae` 字节级等价。规则按比较产物**分两个 baseline**：
+
+| 比较产物 | baseline 来源 | 默认值 | 更新规则 |
+|----------|--------------|--------|----------|
+| `cargo test --all` 整体 | — | — | 只做 pass/fail 比较（exit 0 + failed 集合空，不要求 stdout/stderr 字节级等价）；不挂 baseline |
+| CEX-00 baseline 测试套件（`ai_agent_baseline_test.rs` + `code_test.rs::code_*`） | `CEX00_BASELINE_COMMIT` | **`48ea0ae`** | 这两个文件从 CEX-00 起稳定，不应被任何 Step 1.x CEX 修改；如某 CEX 必须修改它们，按 R9-1 规则更新 `CEX00_BASELINE_COMMIT` 并在 Changelog 显式记录 |
+| mock smoke session `.libra` 产物（`smoke.libra.normalized` / `test.libra.normalized`） | `CP4_BASELINE_COMMIT` | 由 CEX-S2-12 实施时确定，应取 “CEX-S2-12 完成那次 commit” 的 hash | 任何修改 mock smoke 行为或 `.libra` schema 的 CEX（CEX-12 / CEX-12.5 / CEX-13c / CEX-15 / CEX-16 等）→ 更新 `CP4_BASELINE_COMMIT` 并在 Changelog 显式记录 |
+
+> 为什么不能共用一个 baseline：`48ea0ae` 是 CEX-00 commit（pre-CEX-12），其 session 用 JSON blob 存储、没有 `agent_usage_stats` 表、没有 sea-orm migrations。CP-S2-3 跑在 CP-4 之后，候选树已经用 JSONL session + 完整 SQLite schema，因此 mock smoke `.libra` 与 `48ea0ae` 永远不会字节级等价。但 baseline 测试文件本身（`tests/ai_agent_baseline_test.rs` 等）是 CEX-00 起冻结的源代码，候选树该文件**未被修改**时与 `48ea0ae` 字节级等价仍然成立。两个 baseline 互不替代。
 
 **比较的产物（artifact set，必须全部捕获并按上面分类比较）：**
 
 1. **`cargo test --all` 全量结果**：捕获退出码、failed-test 集合；**只比 status + failed**（pass/fail 等价），不比 normalized stdout/stderr——Step 1.x 之间的合理输出差异不应被算作 flag-off 副作用。
-2. **`tests/ai_agent_baseline_test.rs` 全部 7 个测试**：normalized stdout / stderr 逐一字节级等价于 `48ea0ae`（CEX-00 commit）。
-3. **`tests/command/code_test.rs::code_*` 全部 4 个测试**：normalized stdout 逐一字节级等价于 `48ea0ae`。
-4. **mock-driven `libra code` smoke session**（用 `--provider fake --fake-fixture flag_off_smoke.json`，**fixture 由 CEX-S2-12 入库到候选树，baseline 树不包含此 fixture**——脚本必须把 fixture 复制到 baseline 树或用绝对路径引用；**fixture 设计必须保证 happy path 退出码为 0**——任何会触发非零 exit 的 mock turn 都不能放进 `flag_off_smoke.json`，否则 R7-1 去掉 `|| true` 后会让脚本误判失败）：
+2. **`tests/ai_agent_baseline_test.rs` 全部 7 个测试**：normalized stdout / stderr 逐一字节级等价于 `CEX00_BASELINE_COMMIT`（默认 `48ea0ae`）。
+3. **`tests/command/code_test.rs::code_*` 全部 4 个测试**：normalized stdout 逐一字节级等价于 `CEX00_BASELINE_COMMIT`。
+4. **mock-driven `libra code` smoke session**（用 `--provider fake --fake-fixture flag_off_smoke.json`；baseline 来源是 `CP4_BASELINE_COMMIT`——CEX-S2-12 完成那次 commit，包含完整 CEX-12 JSONL + CEX-12.5 / CEX-16 schema；**fixture 由 CEX-S2-12 入库**；**fixture 设计必须保证 happy path 退出码为 0**——任何会触发非零 exit 的 mock turn 都不能放进 `flag_off_smoke.json`，否则 R7-1 去掉 `|| true` 后会让脚本误判失败）：
    - `.libra/sessions/{id}/session.jsonl`（主 session 真相源）
    - `.libra/sessions/{id}/file_history/`（CEX-10 Step 1.5 输出）
    - `.libra/libra.db` 中 `agent_usage_stats` / `reflog` / `config` 表（schema + rows）
@@ -412,38 +417,52 @@ flowchart LR
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 0. Fixtures live ONLY in the candidate worktree (HEAD).  Capture absolute
-#    paths from the working tree NOW so we can copy them into BOTH worktrees
-#    after `git worktree add --detach HEAD` (HEAD checkout could be stale
-#    relative to the working copy used to launch the script).
+# 0. Two independent baselines (R12-1 split):
+#    - CEX00_BASELINE_COMMIT: source-level baseline for CEX-00 baseline tests.
+#      Default 48ea0ae. Updated by R9-1 rule whenever a CEX edits those files.
+#    - CP4_BASELINE_COMMIT:   runtime-level baseline for mock smoke .libra
+#      artifacts. Must include CEX-12 JSONL + CEX-12.5 / CEX-16 schema.
+#      Set by CEX-S2-12 to its own completion commit; updated by any later
+#      CEX that modifies smoke behavior or .libra schema.
+: "${CEX00_BASELINE_COMMIT:=48ea0ae}"
+: "${CP4_BASELINE_COMMIT:?CP4_BASELINE_COMMIT must be set by CEX-S2-12 to the smoke baseline commit}"
+
+# Fixtures live ONLY in the candidate worktree (HEAD).  Capture absolute
+# paths from the working tree NOW so we can copy them into BOTH worktrees
+# after `git worktree add --detach HEAD` (HEAD checkout could be stale
+# relative to the working copy used to launch the script).
 REPO=$(git rev-parse --show-toplevel)
 FIXTURE_SRC="$REPO/tests/data/flag_off_smoke.json"     # CEX-S2-12 output
 NORMALIZER="$REPO/scripts/normalize_session.sh"        # CEX-S2-12 output
 test -f "$FIXTURE_SRC" || { echo "missing fixture"; exit 2; }
 test -x "$NORMALIZER"  || { echo "missing normalizer"; exit 2; }
 
-# 1. unique tempdirs + cleanup; isolate each run from $HOME and any user .libra
-BASELINE=$(mktemp -d -t libra-baseline.XXXXXX)
+# 1. three unique tempdirs (CEX-00 baseline, CP-4 baseline, candidate) + cleanup
+CEX00_TREE=$(mktemp -d -t libra-cex00.XXXXXX)
+CP4_TREE=$(mktemp -d -t libra-cp4.XXXXXX)
 CANDIDATE=$(mktemp -d -t libra-candidate.XXXXXX)
 WORK=$(mktemp -d -t libra-cps2-3.XXXXXX)
-trap 'git worktree remove --force "$BASELINE" 2>/dev/null || true; \
-      git worktree remove --force "$CANDIDATE" 2>/dev/null || true; \
+trap 'git worktree remove --force "$CEX00_TREE" 2>/dev/null || true; \
+      git worktree remove --force "$CP4_TREE"   2>/dev/null || true; \
+      git worktree remove --force "$CANDIDATE"  2>/dev/null || true; \
       rm -rf "$WORK"' EXIT
 
-# 2. checkout both trees, then copy fixture+normalizer into BOTH (baseline at
-#    48ea0ae lacks them; candidate at HEAD may also lag the working tree).
-#    Also propagate Cargo.lock from the working tree into the candidate so
-#    the build matches what the reviewer is actually evaluating—`git worktree
-#    add ... HEAD` checks out HEAD's Cargo.lock, which can differ when the
-#    working tree has uncommitted dep changes.
-git worktree add --detach "$BASELINE" 48ea0ae
-git worktree add --detach "$CANDIDATE" HEAD
-for TREE in "$BASELINE" "$CANDIDATE"; do
+# 2. checkout three trees: CEX-00 baseline (source-level diff), CP-4 baseline
+#    (runtime-level smoke diff), candidate (HEAD).  Copy fixture+normalizer
+#    into all three because none of them necessarily contain the latest
+#    fixture/normalizer (CEX-00 commit predates them; CP-4 commit may predate
+#    later normalizer fixes; HEAD may lag the working tree).
+#    Propagate Cargo.lock to candidate so the build matches what the reviewer
+#    is actually evaluating.
+git worktree add --detach "$CEX00_TREE" "$CEX00_BASELINE_COMMIT"
+git worktree add --detach "$CP4_TREE"   "$CP4_BASELINE_COMMIT"
+git worktree add --detach "$CANDIDATE"  HEAD
+for TREE in "$CEX00_TREE" "$CP4_TREE" "$CANDIDATE"; do
   mkdir -p "$TREE/tests/data" "$TREE/scripts"
   cp "$FIXTURE_SRC" "$TREE/tests/data/flag_off_smoke.json"
   cp "$NORMALIZER"  "$TREE/scripts/normalize_session.sh"
 done
-# Propagate uncommitted Cargo.lock to candidate (baseline always uses 48ea0ae's lock).
+# Propagate uncommitted Cargo.lock to candidate; baselines keep their own locks.
 if [ -f "$REPO/Cargo.lock" ]; then
   cp "$REPO/Cargo.lock" "$CANDIDATE/Cargo.lock"
 fi
@@ -453,10 +472,13 @@ fi
 #    the `test-provider` Cargo feature AND a `LIBRA_ENABLE_TEST_PROVIDER=1`
 #    runtime env. Build with the feature flag here so the binary even contains
 #    the provider; the env is set per-invocation in run_artifacts() below.
-BASELINE_BIN="$BASELINE/target/release/libra"
+#    CEX00_TREE has no smoke binary use; only CP4 + candidate run smoke.
+CEX00_BIN="$CEX00_TREE/target/release/libra"
+CP4_BIN="$CP4_TREE/target/release/libra"
 CANDIDATE_BIN="$CANDIDATE/target/release/libra"
-( cd "$BASELINE"  && cargo build --release --features test-provider --bin libra )
-( cd "$CANDIDATE" && cargo build --release --features test-provider --bin libra )
+( cd "$CEX00_TREE" && cargo build --release --features test-provider --bin libra )
+( cd "$CP4_TREE"   && cargo build --release --features test-provider --bin libra )
+( cd "$CANDIDATE"  && cargo build --release --features test-provider --bin libra )
 
 # 4. run full artifact set on both, capturing exit code + content + failed-test set.
 #    Each invocation gets ITS OWN $HOME and $XDG_CONFIG_HOME so cargo test --all
@@ -516,27 +538,27 @@ run_artifacts() {
   "$TREE/scripts/normalize_session.sh" "$OUT/home_test/.libra"  > "$OUT/test.libra.normalized"  2>/dev/null || echo "<empty>" > "$OUT/test.libra.normalized"
   "$TREE/scripts/normalize_session.sh" "$OUT/home_smoke/.libra" > "$OUT/smoke.libra.normalized" 2>/dev/null || echo "<empty>" > "$OUT/smoke.libra.normalized"
 }
-run_artifacts "$BASELINE"  "$BASELINE_BIN"  "$WORK/baseline"  ""                                      # baseline has no flag yet
-run_artifacts "$CANDIDATE" "$CANDIDATE_BIN" "$WORK/candidate" "code.sub_agents.enabled=false"          # candidate sets flag-off
+run_artifacts "$CEX00_TREE" "$CEX00_BIN"    "$WORK/cex00"     ""                                      # CEX-00 baseline (no flag yet)
+run_artifacts "$CP4_TREE"   "$CP4_BIN"      "$WORK/cp4"       ""                                      # CP-4 baseline (Step 1.x runtime, no sub-agent flag yet)
+run_artifacts "$CANDIDATE"  "$CANDIDATE_BIN" "$WORK/candidate" "code.sub_agents.enabled=false"        # candidate with explicit flag-off
 
-# 5. compare every captured artifact.
-#    cargo test --all: pass/fail only (status + failed set must match;
-#       stdout/stderr text differs across Step 1.x evolution and is NOT
-#       diffed — that would never be satisfiable post-CP-4).
-#    CEX-00 baseline tests (baseline7 + code4): full normalized content
-#       must match 48ea0ae byte-for-byte; if a Step 1.x CEX must edit
-#       these files, update CP-S2-3 baseline commit hash explicitly.
-#    Mock smoke session: full normalized content of both .libra dirs.
-diff -u "$WORK/baseline/cargo_all.status"               "$WORK/candidate/cargo_all.status"
-diff -u "$WORK/baseline/cargo_all.failed"               "$WORK/candidate/cargo_all.failed"
-diff -u "$WORK/baseline/baseline7.stdout.normalized"    "$WORK/candidate/baseline7.stdout.normalized"
-diff -u "$WORK/baseline/code4.stdout.normalized"        "$WORK/candidate/code4.stdout.normalized"
-diff -u "$WORK/baseline/smoke.libra.normalized"         "$WORK/candidate/smoke.libra.normalized"
-diff -u "$WORK/baseline/test.libra.normalized"          "$WORK/candidate/test.libra.normalized"
+# 5. compare artifacts against the correct baseline:
+#    - cargo test --all status + failed set: candidate vs CP-4 baseline
+#      (pass/fail only; stdout/stderr text drift across Step 1.x is OK).
+#    - CEX-00 baseline tests (baseline7 + code4): candidate vs CEX-00
+#      baseline byte-for-byte (these files are frozen since CEX-00).
+#    - Mock smoke .libra dirs: candidate vs CP-4 baseline byte-for-byte
+#      (CEX-12 JSONL + CEX-12.5 / CEX-16 schema both present in both).
+diff -u "$WORK/cp4/cargo_all.status"               "$WORK/candidate/cargo_all.status"
+diff -u "$WORK/cp4/cargo_all.failed"               "$WORK/candidate/cargo_all.failed"
+diff -u "$WORK/cex00/baseline7.stdout.normalized"  "$WORK/candidate/baseline7.stdout.normalized"
+diff -u "$WORK/cex00/code4.stdout.normalized"      "$WORK/candidate/code4.stdout.normalized"
+diff -u "$WORK/cp4/smoke.libra.normalized"         "$WORK/candidate/smoke.libra.normalized"
+diff -u "$WORK/cp4/test.libra.normalized"          "$WORK/candidate/test.libra.normalized"
 echo "CP-S2-3 flag-off equivalence: PASS"
 ```
 
-任一 `diff` 非空、任一 `cargo build` 失败、normalizer 不存在或 fixture 不存在都视为 CP-S2-3 失败。CEX-S2-12 必须把 `scripts/normalize_session.sh`、`tests/data/flag_off_smoke.json` 与上面的比较脚本一并入库（参见 CEX-S2-12 Write set），不能依赖手写脚本。**字节级等价的强制点是步骤 5 的 6 个 `diff -u`**：`cargo_all.status` / `cargo_all.failed`（pass/fail-only，不要求 stdout/stderr 字节级等价）+ `baseline7.stdout.normalized` / `code4.stdout.normalized`（CEX-00 baseline 测试，对 `48ea0ae` 字节级等价）+ `smoke.libra.normalized` / `test.libra.normalized`（mock smoke session 与 cargo-test 期间的 `.libra` 副作用全捕获，对 baseline commit 字节级等价）。任何主路径 / `.libra` 副作用都会被 normalizer 抹掉非确定性字段后呈现在 diff 中。
+任一 `diff` 非空、任一 `cargo build` 失败、normalizer 不存在、fixture 不存在、`CP4_BASELINE_COMMIT` 未设置都视为 CP-S2-3 失败。CEX-S2-12 必须把 `scripts/normalize_session.sh`、`tests/data/flag_off_smoke.json` 与上面的比较脚本一并入库（参见 CEX-S2-12 Write set），不能依赖手写脚本，并必须在 CEX-S2-12 完成时把 `CP4_BASELINE_COMMIT` 默认值固化到脚本（指向 CEX-S2-12 那次 commit）。**字节级等价的强制点是步骤 5 的 6 个 `diff -u`**：`cargo_all.status` / `cargo_all.failed`（candidate vs CP-4 baseline，pass/fail-only）+ `baseline7.stdout.normalized` / `code4.stdout.normalized`（candidate vs `CEX00_BASELINE_COMMIT`，CEX-00 源代码字节级等价）+ `smoke.libra.normalized` / `test.libra.normalized`（candidate vs `CP4_BASELINE_COMMIT`，CEX-12 JSONL + CEX-12.5/16 schema 字节级等价）。任何主路径 / `.libra` 副作用都会被 normalizer 抹掉非确定性字段后呈现在 diff 中。
 
 ### Step 2 Codex review 协议（每张 CEX-S2-* 必走）
 
@@ -2129,6 +2151,7 @@ Step 2 出口标准**不**要求 Step 3 候选完成，但要求：
 | 2026-05-01 | Claude Code | CEX-00 review hardening pass（双轮 Codex 评审 + 修复）：(1) 修复 `code_test.rs` 中两个 DeepSeek 测试在临时目录无 `.libra/` 时被 `LBR-REPO-001` preflight 提前截断的问题，改为先调用 `init_repo_via_cli` 让请求达到 flag 校验 / auth bootstrap 阶段。(2) 删除 `ai_agent_baseline_test.rs` 中未使用的 `mod helpers;` 声明。(3) 强化 `list_dir` 断言：除 `lib.rs` substring 外额外校验 `Absolute path:` 前缀以及无 `error` 关键字，避免错误信息伪装成功。(4) 强化 `apply_patch` 观察者断言：先 `assert_eq!(observer.results.len(), 1)`，再 match `Ok` / panic on `Err`，与文件名子检查分离，并加 CONTRACT 注释指向 Step 1.5。(5) 强化 `allowed_tools` 断言：迭代 `seen_tools()` 全部快照而非仅 `[0]`，防止后续 turn 重新暴露 `apply_patch`。(6) 新增 session_store metadata 回环断言（`thread_id` round-trip）和负向测试 `session_store_does_not_resume_when_thread_id_is_unrelated`，明确 `load_for_thread_id` 不会回退为按 workspace 匹配。(7) 新增 `resumed_session_history_flows_into_the_tool_loop`：把 store 中的历史经 `to_history()` 注入 `run_tool_loop_with_history_and_observer`，断言 prior + new prompt + reply = 4 条，对齐 Step 1.0 验收 “带 `--resume` 的 session 能恢复上一轮对话”。(8) 在 DeepSeek auth bootstrap 测试中钉住 `LBR-AUTH-001` 错误码。(9) 为 `ScriptedToolModel` 三处 `Mutex::lock().unwrap()`、`ReadFileHandler` `L<n>:` 前缀、`apply_patch` 文件名子串以及 allowed_tools 错误字符串补 `// INVARIANT:` / `// CONTRACT:` 注释，便于 Step 1.1 / 1.5 / 1.8 后续修改时定位。最终 7 个 baseline + 4 个 code_test 全绿，`cargo +nightly fmt`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test --test ai_agent_baseline_test`、`cargo test --test command_test code_test` 均通过。 |
 | 2026-05-01 | Claude Code | Step 2 改造为可执行标准（基于 CEX-00 实施经验）：(1) **新增 4 张 Step 2 Runtime 任务卡 CEX-S2-15 / S2-16 / S2-17 / S2-18**，分别覆盖 Step 2.5 Merge / Validation pipeline + risk score、Step 2.6 UI / MCP observability（`/agents` / `/agent cancel` / 6 个 MCP resource）、Step 2.7 Capability Package / Plugin Trust（manifest + permission diff + 卸载清理）、Step 2.8 Evidence read-only query API + 字段冻结（read-only，不实现 distillation）。原 Step 2.5-2.8 仅有叙述章节、无 CEX 任务卡，导致无 Read first / Write set / Verification / 完成判定可对照。(2) **强化 CEX-S2-10 至 CEX-S2-14** 的任务卡 schema：从 5 列（ID / 目标 / 依赖 / Write set / Verification / 完成判定）扩为 6 列（增加 Read first），并把每张完成判定从 1 句扩展为 **5-6 条编号子项**（按任务复杂度差异化），每条子项可被一个测试断言验证。当前各卡子项数：S2-10=6, S2-11=5, S2-12=6（含 hook dispatch）, S2-13=5, S2-14=6, S2-15=5, S2-16=5, S2-17=6, S2-18=5。(3) **新增 5 个 Step 2 Checkpoints** CP-S2-1 至 CP-S2-5，逐 Checkpoint 列出触发条件 / 必跑验证 / 是否解锁下一阶段；CP-S2-2（Contracts gate）强制要求 flag-off `cargo test --all` 与 CEX-00 commit 字节级一致。(4) **新增 “Step 2 Codex review 协议”** 一节，把 CEX-00 实测的双轮 Codex review 流程写成 Step 2 强制流程，含 round 1 / round 2 / loop exit 字样 / commit-前最后跑标准检查。(5) **新增 “从 CEX-00 / Step 1.0 提炼的执行经验（Step 2 必读）”** 一节，6 条具体经验：acceptance criterion 必须直接被测试、Read first / Write set 列出已存在文件、CONTRACT / INVARIANT 注释挂在易变断言上、CLI 顺序经常出乎意料、Codex 双轮 review 不冗余、flag-off 字节级一致是硬约束。(6) **更新里程碑索引**：把 “Step 2.1 - 2.7” 单行扩为 8 行（架构基线 + Step 2.1-2.8），每行标注 `revised 2026-05-01：新增 CEX-S2-* 任务卡`。(7) **更新模型能力分层**：CEX-S2-15 至 S2-18 加入 Opus 4.7 推荐区，强约束说明 CEX-S2-17 / S2-18 即使单点改动量小但下游 trust / Step 3.D 兼容性都依赖其字段稳定性。(8) **更新 Plan Mode 触发条件**：从 “CEX-S2-10 至 CEX-S2-14” 扩为 “CEX-S2-10 至 CEX-S2-18”。(9) **更新 Step 2 出口标准**：每条标准映射到 1-2 张 CEX-S2-* 任务卡和一个 CP-S2-* checkpoint，新增 “Step 3.D 衔接” 一行（CEX-S2-18 字段冻结 + CP-S2-5）。(10) **每个 Step 2.x 章节** 新增 “对应任务卡” 第一行交叉引用 CEX-S2-* ID，避免读章节叙述时找不到执行入口。(11) **更新导航索引**：Step 2 子条目从 8 行扩为 14 行，含架构基线 / 经验 / 任务卡 / Checkpoint / Codex 协议 / 8 个 Step 2.x 子节。 |
 | 2026-05-01 | Claude Code | Step 2 改造修订（self-review 5 处不一致修复）：基于 `git ls` 实际比对 agent.md 中引用的源文件路径，并按 CEX-00 review 范式逐条扫描新任务卡的 schema 一致性，修复以下 5 个文档与代码不一致项：(1) **CEX-S2-10 Read first** 标注 `runtime/event.rs` / `runtime/snapshot.rs` 为 `（CEX-00.5 输出）`，澄清这两个文件目前不存在、依赖 CEX-00.5 抽象冻结后才落地。(2) **CEX-S2-14 → CEX-S2-16 ownership** 修正：原 CEX-S2-14 Write set 中包含 `src/internal/tui/agent_pane.rs`，CEX-S2-16 引用为 “CEX-S2-14 已建”；按 Step 2.4 vs Step 2.6 narrative，TUI agent pane 渲染面板属 Step 2.6 范围，将 `agent_pane.rs` 从 CEX-S2-14 移到 CEX-S2-16 Write set，并在 CEX-S2-14 完成判定 (6) 显式声明 “TUI agent pane 渲染不在本卡范围”；CEX-S2-14 目标更名为 “Controlled parallel execution + scheduler observability state”。(3) **CEX-S2-15 移除对 CEX-15 的依赖**：原依赖列出 `CEX-15（automation event source）`，但 Step 2.5 Phase 3 ValidatorEngine 是 orchestrator 内建（参考 `src/internal/ai/orchestrator/verifier.rs`），不需要 automation 触发；依赖修订为 `CEX-S2-13、CEX-S2-14`，并在完成判定 (2) 显式声明 “**不通过 CEX-15 automation 触发**”。(4) **CEX-S2-16 MCP 路径修正**：原 Write set 列出 `src/internal/ai/mcp/resources/agents.rs`，但仓库实际结构为 `src/internal/ai/mcp/resource.rs`（单数，无 `resources/` 子目录）；修订为在现有 `mcp/resource.rs` 内扩展，并在完成判定 (3) 显式说明 “无 `resources/` 子目录”。(5) **CEX-S2-18 依赖修正**：原依赖列出 `CEX-S2-10、CEX-S2-15`，但 `MergeDecision.distillable_evidence_ids` 字段在 CEX-S2-13 已落地（CEX-S2-13 完成判定 (3)），CEX-S2-18 仅新增**读路径**；依赖修订为 `CEX-S2-10、CEX-S2-13、CEX-13c`，并在完成判定 (2) 显式说明 “由 CEX-S2-13 已落地，本卡只新增读路径而不修改写路径”。Codex review CLI 暂时不可用，本次改动以 self-review 替代，仍通过 `cargo +nightly fmt --all -- --check` / `cargo test --test ai_agent_baseline_test` / `cargo test --test command_test code_test` 三项标准检查。 |
+| 2026-05-01 | Codex | Step 2 改造 Codex review 第十二轮（1 处 finding 修复）：第十二轮 `--fresh` 评审，找出 1 个 HIGH finding 全部修复。**R12-1 (HIGH)** R10-2 把 CP-S2-3 smoke baseline 锁定为 `48ea0ae`（CEX-00 commit）+ 复制 fixture 到 baseline 树，但忽略了 CEX-12 把 session 存储从 JSON blob 切到 JSONL、CEX-12.5 加 sea-orm migration、CEX-16 加 `agent_usage_stats` 表——这三个 Step 1.x CEX 都在 CP-4 内完成，所以 `48ea0ae` 的 `.libra` schema（无 JSONL、无 SQLite migration、无 usage 表）与候选树 flag-off 的 `.libra` schema 根本不兼容，mock smoke `.libra` 永远不会与 `48ea0ae` 字节级等价。CP-S2-3 重新拆为**两个独立 baseline**：(a) **`CEX00_BASELINE_COMMIT`**（默认 `48ea0ae`）只用于 CEX-00 baseline 测试套件源代码字节级比较——这两个文件从 CEX-00 起冻结；(b) **`CP4_BASELINE_COMMIT`**（CEX-S2-12 实施时设为其完成 commit，包含完整 CEX-12/12.5/16 schema）用于 mock smoke `.libra` 字节级比较与 `cargo test --all` pass/fail 比较。脚本相应改为 3 个 worktree（CEX-00 + CP-4 + candidate），跑 3 套 artifact，按各自 baseline 跑 6 个 diff（cargo status/failed vs CP-4 baseline；baseline7/code4 vs CEX-00 baseline；2 个 .libra dirs vs CP-4 baseline）。`CP4_BASELINE_COMMIT` 在 CEX-S2-12 完成时硬编码到脚本默认值；任何修改 mock smoke 行为或 `.libra` schema 的后续 CEX（如 CEX-12 / CEX-12.5 / CEX-13c / CEX-15 / CEX-16）必须更新该 hash 并在 Changelog 显式记录。 |
 | 2026-05-01 | Codex | Step 2 改造 Codex review 第十一轮（4 处 finding 修复）：第十一轮 `--fresh` 评审，找出 1 个 HIGH、3 个 MED finding，全部修复。**R11-1 (HIGH)** R10-1 同步了 CEX-S2-12 的 baseline equivalence 措辞，但 CEX-S2-10 完成判定 (6) 与 CP-S2-2 验证步骤还说 “`cargo test --all` 字节级等价于 `48ea0ae`”，post-CP-4 不可满足。两处都改为 “(a) cargo test --all pass/fail 等价；(b) CEX-00 baseline 测试套件字节级等价于 `48ea0ae`；(c) 暂不跑 mock smoke（留给 CEX-S2-12 + CP-S2-3）”。**R11-2 (MED)** `MergeDecision` ownership 在 CEX-S2-10（列出 `append_merge_decision` Runtime API + 引用 `MergeDecision[E]` 聚合 ID）与 CEX-S2-13（owns Snapshot/value schema）之间含糊。重写为分两层：CEX-S2-13 owns schema **field shape**（risk_score / conflict_list / 等）；CEX-S2-10 owns **Runtime write API signature** + Event variant 名 + 聚合 ID 字段，schema 字段类型在 CEX-S2-13 完成前用 `Option<MergeDecisionV0>` stub 占位，完成后替换。CEX-S2-15 只填值不改字段。**R11-3 (MED)** `HookInvocationPayload.hook_kind::CapabilityPackage(PackageId)` 引用了 CEX-S2-17 的 `PackageId`，但本卡完成时 CEX-S2-17 还没实施——CEX-S2-10 不知道在哪里定义 `PackageId`。在 CEX-S2-10 本卡同步前向声明 `pub struct PackageId(pub String)` newtype 占位，CEX-S2-17 完成时替换为真实定义但保持类型签名兼容。**R11-4 (MED)** “needs-human (exit 3) Approval 集成约束” 标题没限定 phase，与 hook 表的 PostToolUse exit 3 → `post_tool_review_required` 行冲突。约束加 “**仅适用于 PreToolUse exit 3**——这是唯一进入 Approval 路径的 hook outcome；PostToolUse exit 3 因 dispatch 已发生，按表内规则写 `post_tool_review_required (reason=hook_needs_human)`，不进入 Approval cache 或 Approval 流，由 Layer 1 review UI 单独处理”。 |
 | 2026-05-01 | Codex | Step 2 改造 Codex review 第十轮（5 处 finding 修复）：第十轮 `--fresh` 评审，找出 2 个 HIGH、2 个 MED、1 个 LOW finding，全部修复。**R10-1 (HIGH)** R9-1 把 CP-S2-3 拆为 “3 类比较”但没同步 CEX-S2-12 完成判定 (1)、Lessons 节第 6 条、E2E 场景 13 仍写 “与 CEX-00 commit `48ea0ae` 字节级一致”——三处都按 R9-1 重写为 “(a) cargo test --all pass/fail 等价；(b) CEX-00 baseline 测试套件字节级等价；(c) mock smoke `.libra` 字节级等价”。**R10-2 (HIGH)** CP-S2-3 prose 之前写 “mock-smoke baseline 取 CEX-S2-12 完成 commit, 脚本里 `BASELINE_COMMIT` 变量从配置读取”，但脚本实际硬编码 `48ea0ae` 且通过把 fixture/normalizer 复制到 baseline 树绕开。删去 `BASELINE_COMMIT` 提法，改为 prose “baseline commit 永远是 `48ea0ae`，fixture 行为由候选树决定，diff 应当为空因为 sub-agent flag-off 时该 fixture 走 Step 1 单 Agent 路径，与 `48ea0ae` 字节级一致”，并保留 “如某个 Step 1.x CEX 修改了 baseline 7 / code_test 4，必须更新 baseline commit hash 并在 Changelog 显式记录”。**R10-3 (MED)** CEX-S2-10 完成判定 (5) 只列了 `HookInvocationPayload` 的部分字段（`...` 占位），后续 CEX-S2-12 实施时会被迫推断完整 schema。本卡冻结 `HookInvocationPayload` 全部 9 个字段（phase / tool_name / tool_call_id / agent_run_id / hook_path / hook_checksum / hook_kind / stdin_event_json / timeout_ms）+ 5 个 hook outcome variants 全部字段（含 stdout/stderr truncation 长度上限默认 4 KiB / 上限 64 KiB），并显式声明 “CEX-S2-12 dispatch 实现只允许使用本卡声明的字段”。**R10-4 (MED)** CEX-S2-10 完成判定 (2) “所有新 event 含 `agent_run_id` 字段” 对聚合 events（如 `MergeDecision[E]` 覆盖多个 patchset / agent runs）含义不清。重写为：单 run 范围 events 用 `agent_run_id`；聚合 events 用 `merge_candidate_id + agent_run_ids: Vec<AgentRunId>`；其余 events 至少有 `thread_id`。schema 注释要显式说明每个 event 的 ID 字段集合。**R10-5 (LOW)** S2-INV-13 prose 还写 “覆盖 9 种终止状态”，但 R3-3 之后表已扩到 10 状态，CEX-S2-12 / E2E / fixture 列表都已是 10。改为 “覆盖 10 种终止状态：8 个 PostToolUse-capable + 2 个 PreToolUse-only spawn 失败”。 |
 | 2026-05-01 | Codex | Step 2 改造 Codex review 第九轮（6 处 finding 修复）：第九轮 `--fresh` 评审，找出 1 个 HIGH、4 个 MED、1 个 LOW finding，全部修复。**R9-1 (HIGH)** CP-S2-3 “`cargo test --all` 字节级等价于 `48ea0ae`” post-CP-4 不可满足——CP-4 后 Step 1 已经引入新测试与新行为，整个 `cargo test --all` 永远不可能字节级等价于 CEX-00 commit。CP-S2-3 重新分类比较产物：(a) `cargo test --all` 整体只比 pass/fail（exit code + failed-test 集合应为空，stdout/stderr 之间允许内容差异，6 个 diff 中删去 cargo_all.stdout/stderr.normalized 两处）；(b) CEX-00 baseline 测试套件（baseline 7 + code_test 4）逐一字节级等价于 `48ea0ae`，这两个文件由 CEX-00 起稳定，任何 CEX 修改它们必须同时更新 CP-S2-3 baseline commit hash 并在 Changelog 记录；(c) mock smoke session 产物字节级等价于 baseline 等价命中。Prose 同步从 “8 个 diff -u” 改为 “6 个 diff -u”。**R9-2 (MED)** Step 1.8 预留 `subagents/{agent_id}.jsonl` 但 Step 2 任务卡用 `agents/{run_id}.jsonl`——同一目录两个名字。Step 2 任务卡引用 `agents/{run_id}.jsonl` 已经多处定型；改 Step 1.8 的预留路径为 `agents/{run_id}.jsonl` 并明确 `agent_run_id` 是 `AgentRun[S]` 主键。**R9-3 (MED)** `MergeDecision.distillable_evidence_ids` 写 owner 不明——CEX-S2-13 写空 Vec、CEX-S2-18 read-only。在 CEX-S2-13 完成判定 (3) 显式分配：`risk_score` / `test_evidence` / `distillable_evidence_ids` 都由 CEX-S2-15 ValidatorEngine 在跑完 evidence 后扫描 `distillable=true` 条目写入；CEX-S2-18 只提供 read API。**R9-4 (MED)** CEX-S2-10 完成判定 (5) 写 “`AgentRunEvent::PreToolUse` / `PostToolUse` schema 字段就位”，但权威 variant 列表只声明了 hook 结果 events（`hook_passed` / `blocked_by_hook` / 等），没有 `PreToolUse` / `PostToolUse` 独立 variant——`PreToolUse`/`PostToolUse` 是 phase 字段值。改写为 “声明 `HookInvocationPayload { phase: PreToolUse | PostToolUse, ... }` 与 hook outcome variants；`PreToolUse`/`PostToolUse` 是 phase 字段值而非独立 event variant”。**R9-5 (MED)** Step 2.3 narrative 仍写 `AgentRunEvent::BudgetExceeded`（PascalCase）+ 只列 token / tool-call / wall-clock 三个限制，与 R7-4 加入的权威 variant `budget_exceeded`（snake_case）+ 5 个 dimension 不一致。改为 “`AgentRunEvent::budget_exceeded` 含 `dimension` 字段（`token` / `tool_call` / `wall_clock` / `source_call` / `cost`）”。**R9-6 (LOW)** CEX-S2-12 完成判定 (6) 残留 “10 个 fixture 覆盖全部 9 个 exit 状态 + spawn_eacces”，与表中 10 行不符。统一为 “10 个终止状态：8 个 PostToolUse-capable + 2 个 PreToolUse-only（spawn_enoent / spawn_eacces）”。 |
