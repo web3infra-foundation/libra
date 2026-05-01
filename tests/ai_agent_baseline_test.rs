@@ -1,9 +1,26 @@
-//! Step 1.0 single-agent baseline tests.
+//! Step 1.0 / CEX-00 single-agent baseline tests.
 //!
-//! These tests pin the current deterministic agent/runtime behavior before the
-//! Step 1 safety, JSON repair, semantic-tool, and session-storage refactors. They
-//! intentionally use local tempdirs and scripted models so the baseline does not
-//! depend on live provider credentials.
+//! Acts as the regression net for `libra code` single-agent behavior **before** any
+//! Step 1.x change lands (Step 1.1 safety hardening, Step 1.2 JSON repair, Step 1.3
+//! semantic tools, Step 1.5 file-level undo, Step 1.8 JSONL session storage). Each
+//! test pins one specific contract — tool result flow, file mutation through
+//! `apply_patch`, `allowed_tools` definition + execution gating, raw-`git` rejection
+//! in the shell tool, and JSON-blob session resume by canonical `thread_id` — so a
+//! later refactor that breaks one of those contracts fails the matching scenario
+//! by name rather than producing a silent behavior shift.
+//!
+//! All scenarios run against scripted in-process models and `tempfile::tempdir()`
+//! workspaces; no live provider credentials are required and no global state is
+//! mutated, so `#[serial]` is unnecessary. CP-S2-3 (Step 2's flag-off equivalence
+//! gate) compares this file's normalized output against the CEX-00 commit
+//! `48ea0ae`, so any future edit here that changes the test text must update
+//! `CEX00_BASELINE_COMMIT` in the CP-S2-3 script and the agent.md Changelog.
+//!
+//! **Layer:** L1 — uses scripted `CompletionModel` impls and direct handler
+//! invocations. The only L2-ish exception is
+//! `shell_blocks_git_status_and_libra_status_cli_still_works`, which spawns the
+//! `libra` binary in an isolated `HOME` to confirm `libra status` keeps working
+//! after `ShellHandler` rejects raw `git`.
 
 use std::{
     collections::VecDeque,
@@ -29,13 +46,31 @@ use libra::internal::ai::{
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
+/// Deterministic in-process [`CompletionModel`] that replays a fixed script of
+/// assistant turns, one per `completion()` call.
+///
+/// Each item in `steps` is the full `Vec<AssistantContent>` for one model turn,
+/// emitted in FIFO order; running out of script items returns
+/// `CompletionError::ResponseError("script exhausted")`. `seen_tools` records the
+/// tool-name slice the runtime sent in each request so callers can assert that
+/// `allowed_tools` filtering happened at the request layer (not just at dispatch).
+///
+/// `Arc<Mutex<...>>` is used because `CompletionModel::completion` takes `&self`
+/// while the scripted state must mutate; `clone()` on the model only clones the
+/// `Arc` handles, so multiple references see the same script and the same
+/// recorded snapshots.
 #[derive(Clone, Debug)]
 struct ScriptedToolModel {
+    /// FIFO queue of assistant turns to emit on successive `completion()` calls.
     steps: Arc<Mutex<VecDeque<Vec<AssistantContent>>>>,
+    /// One entry per `completion()` call — the names of every tool the runtime
+    /// included in `request.tools`. Used by the `allowed_tools` test to assert
+    /// the filter applies to every request, not just the first.
     seen_tools: Arc<Mutex<Vec<Vec<String>>>>,
 }
 
 impl ScriptedToolModel {
+    /// Build a scripted model from an ordered iterable of assistant turns.
     fn new(steps: impl IntoIterator<Item = Vec<AssistantContent>>) -> Self {
         Self {
             steps: Arc::new(Mutex::new(steps.into_iter().collect())),
@@ -43,6 +78,9 @@ impl ScriptedToolModel {
         }
     }
 
+    /// Snapshot of every tool list the runtime sent to this model so far,
+    /// in call order. Returned by clone so the caller can iterate without
+    /// holding the inner `Mutex`.
     fn seen_tools(&self) -> Vec<Vec<String>> {
         // INVARIANT: tests run on a single tokio task; the lock cannot be poisoned.
         self.seen_tools.lock().unwrap().clone()
@@ -52,6 +90,9 @@ impl ScriptedToolModel {
 impl CompletionModel for ScriptedToolModel {
     type Response = ();
 
+    /// Records the tool definitions presented to the model on this call, then
+    /// pops and returns the next scripted assistant turn. `Response` is `()`
+    /// because the scripted model has no provider-specific raw response body.
     async fn completion(
         &self,
         request: CompletionRequest,
@@ -77,6 +118,15 @@ impl CompletionModel for ScriptedToolModel {
     }
 }
 
+/// `ToolLoopObserver` impl that records every tool-call result the runtime
+/// emits, normalized to `Result<String, String>`.
+///
+/// `Ok` carries the success text (`ToolOutput::as_text`); `Err` carries the
+/// runtime's structured error message. Used by the `apply_patch` test to assert
+/// the success path produced exactly one observer entry, and by the
+/// `allowed_tools` test to assert the runtime emitted the documented
+/// "not in the allowed_tools list" rejection on the hallucinated mutating call.
+
 #[derive(Default)]
 struct ToolResultObserver {
     results: Vec<Result<String, String>>,
@@ -96,12 +146,20 @@ impl ToolLoopObserver for ToolResultObserver {
     }
 }
 
+/// Build a one-turn assistant script that emits a single text chunk and ends
+/// the loop. Used as the "stop" sentinel after a tool-call sequence.
 fn text_response(text: &str) -> Vec<AssistantContent> {
     vec![AssistantContent::Text(Text {
         text: text.to_string(),
     })]
 }
 
+/// Build a one-turn assistant script that emits a single tool call.
+///
+/// `id` is the call ID the runtime echoes back into the matching tool result;
+/// `name` is duplicated into both the outer `ToolCall.name` and the nested
+/// `Function.name` because some providers expose tool calls in either layer
+/// and the runtime is tolerant of both.
 fn tool_call(id: &str, name: &str, arguments: Value) -> Vec<AssistantContent> {
     vec![AssistantContent::ToolCall(ToolCall {
         id: id.to_string(),
@@ -113,6 +171,14 @@ fn tool_call(id: &str, name: &str, arguments: Value) -> Vec<AssistantContent> {
     })]
 }
 
+/// Extract every tool-result content string the runtime appended to model
+/// history, in chronological order.
+///
+/// Tool results travel back to the model as `User` messages whose `content`
+/// is `OneOrMany<UserContent::ToolResult>`. This helper flattens that nested
+/// shape to a flat `Vec<String>` so assertions can index into a single result
+/// (e.g. "the first tool result was the `read_file` body") without traversing
+/// the message tree at every call site.
 fn tool_result_contents(history: &[Message]) -> Vec<String> {
     history
         .iter()
@@ -130,14 +196,28 @@ fn tool_result_contents(history: &[Message]) -> Vec<String> {
         .collect()
 }
 
+/// Register the two read-only file tools (`read_file`, `list_dir`) every
+/// baseline scenario expects, so individual tests don't repeat the
+/// boilerplate. `apply_patch` and `shell` are registered per-test because
+/// only some scenarios need them.
 fn register_file_tools(registry: &mut ToolRegistry) {
     registry.register("read_file", Arc::new(ReadFileHandler));
     registry.register("list_dir", Arc::new(ListDirHandler));
 }
 
-/// Scenario: a scripted model calls `read_file` and then `list_dir`, receives both
-/// tool results in model history, and finishes with a text response. This pins the
-/// basic single-agent tool-result loop before later semantic-tool rewrites.
+/// Scenario: a scripted model calls `read_file` and then `list_dir`, the tool
+/// loop dispatches both handlers, the runtime threads the results back into
+/// model history as `UserContent::ToolResult`, and the model emits a final
+/// `"baseline complete"` text turn that ends the loop.
+///
+/// Asserts the round trip end-to-end: (a) `final_text` matches the scripted
+/// terminal text, (b) two tool results landed on history, (c) the `read_file`
+/// result still uses the documented `L<n>:` line-number prefix, and (d) the
+/// `list_dir` result starts with the documented `Absolute path:` header and
+/// names the file we just wrote with no error markers.
+///
+/// Acts as the contract pin for the basic tool-result loop before any Step 1.x
+/// semantic-tool work rewrites how `read_file` / `list_dir` shape their output.
 #[tokio::test]
 async fn basic_file_tools_return_results_to_the_agent_loop() {
     let temp = TempDir::new().unwrap();
@@ -200,9 +280,18 @@ async fn basic_file_tools_return_results_to_the_agent_loop() {
     );
 }
 
-/// Scenario: the agent calls `apply_patch` through the regular tool loop and the
-/// target file changes on disk. This guards the current edit path before Step 1.5
-/// introduces file-level undo snapshots around the same handler.
+/// Scenario: a scripted model issues a single `apply_patch` tool call with a
+/// minimal `*** Update File:` body, and the runtime drives it through the
+/// regular tool loop. Asserts that (a) the file actually mutates from `old\n`
+/// to `new\n` on disk, (b) the loop's terminal text matches the scripted
+/// `"patched"`, and (c) the observer sees exactly one `Ok(_)` result whose
+/// success summary mentions the touched file.
+///
+/// Acts as the pin for the un-undoable file-mutation path before CEX-10
+/// (Step 1.5 file-level undo) wraps `ApplyPatchHandler` with snapshot logic;
+/// after Step 1.5 the same flow must still produce the same on-disk result
+/// while emitting an additional pre-edit snapshot, so this test must stay
+/// green by construction.
 #[tokio::test]
 async fn apply_patch_tool_call_modifies_the_workspace() {
     let temp = TempDir::new().unwrap();
@@ -263,9 +352,24 @@ async fn apply_patch_tool_call_modifies_the_workspace() {
     );
 }
 
-/// Scenario: `allowed_tools` filters tool definitions before the request is sent
-/// and still blocks a hallucinated mutating tool at execution time. The file must
-/// remain unchanged even though the model emitted an `apply_patch` call.
+/// Scenario: with `ToolLoopConfig.allowed_tools = Some(["read_file"])` and
+/// `apply_patch` registered in the registry, a scripted model still tries to
+/// emit an `apply_patch` call. Asserts the runtime applies `allowed_tools` at
+/// **two** independent layers:
+///
+/// 1. **Definition filter** — every snapshot in `seen_tools()` (one per
+///    completion request, across the whole loop) shows only `read_file`,
+///    proving `apply_patch` never reached the model in the request payload.
+/// 2. **Execution filter** — even though the script forces the model to
+///    request `apply_patch`, the runtime intercepts it before dispatch and
+///    surfaces the documented `"not in the allowed_tools list"` error to the
+///    observer; the file on disk stays at `"original\n"` byte-for-byte.
+///
+/// Iterating every turn snapshot (not just `seen_tools()[0]`) guards against
+/// a regression where the loop re-includes the disallowed tool on the second
+/// turn after the first call gets blocked. This is also the contract pin for
+/// the exact rejection-error substring; Step 1.1 hardening that renames the
+/// error key must update both this assertion and the runtime together.
 #[tokio::test]
 async fn allowed_tools_filters_definitions_and_blocks_hallucinated_calls() {
     let temp = TempDir::new().unwrap();
@@ -329,10 +433,22 @@ async fn allowed_tools_filters_definitions_and_blocks_hallucinated_calls() {
     }));
 }
 
-/// Scenario: direct Git execution remains blocked in the shell tool, while the
-/// safe Libra CLI status path works in an initialized temp repository. This pins
-/// the current "no raw git from agents" baseline before CEX-01/CEX-02 replace the
-/// command-level allowlist with a parameter-level safety decision engine.
+/// Scenario: invoke `ShellHandler` directly with `command: "git status"` and
+/// assert it returns the documented `"git is not allowed"` error — agents are
+/// never allowed to execute raw `git` and must use `libra` / `run_libra_vcs`
+/// instead. As the positive counterpart, spawn the actual `libra` binary in
+/// the same temp dir and confirm `libra init` then `libra status` both
+/// succeed, proving the safe alternative remained reachable.
+///
+/// Acts as the regression pin for the current command-level git rejection
+/// before CEX-01 / CEX-02 (Step 1.1 safety hardening) replace the simple
+/// "deny if argv[0] == git" check with a parameter-level safety decision
+/// engine. After Step 1.1 lands the rejection message wording may change;
+/// this assertion needs to be updated in lockstep.
+///
+/// The `libra` subprocess uses `run_libra_binary`, which sets `HOME` /
+/// `XDG_CONFIG_HOME` to a tempdir and clears the rest of the environment so
+/// the host's user config can never leak into the test outcome.
 #[tokio::test]
 async fn shell_blocks_git_status_and_libra_status_cli_still_works() {
     let temp = TempDir::new().unwrap();
@@ -362,10 +478,24 @@ async fn shell_blocks_git_status_and_libra_status_cli_still_works() {
     );
 }
 
-/// Scenario: the JSON blob session store can resume a canonical thread in the
-/// matching workspace and reconstruct model-facing history from saved user and
-/// assistant messages. This is the migration baseline for the later JSONL session
-/// work in CEX-12.
+/// Scenario: write a `SessionState` with a canonical `thread_id` in metadata
+/// plus a user+assistant message pair to a `SessionStore` rooted at a tempdir,
+/// then load the same session by `(thread_id, working_dir)` and assert:
+///
+/// 1. `loaded.id == session.id` — the same on-disk session was returned.
+/// 2. `loaded.to_history()` produces the documented two-message
+///    User+Assistant alternation suitable for resume-time prompt rebuild.
+/// 3. The assistant message's tool-result substring `"Tool result: L1"`
+///    survives serialization (matches the `read_file` `L<n>:` convention
+///    pinned in `basic_file_tools_return_results_to_the_agent_loop`).
+/// 4. The `thread_id` metadata entry round-trips through serialize/deserialize
+///    — without this assertion `load_for_thread_id` could regress to
+///    "any most-recently-saved session for the workspace" and still pass.
+///
+/// Acts as the JSON-blob migration baseline for CEX-12 (Step 1.8 JSONL session
+/// storage). After CEX-12 the same store is expected to produce the same
+/// resumed history through a different on-disk format; this test must stay
+/// green by construction or `CEX00_BASELINE_COMMIT` in CP-S2-3 must be bumped.
 #[test]
 fn session_store_resumes_thread_history_for_matching_workspace() {
     let temp = TempDir::new().unwrap();
@@ -403,10 +533,17 @@ fn session_store_resumes_thread_history_for_matching_workspace() {
     );
 }
 
-/// Scenario: a session in the same workspace that does *not* declare the canonical
-/// `thread_id` must NOT be returned when resuming by that thread id. This guards
-/// against a regression where `load_for_thread_id` silently fell back to "any
-/// session whose working_dir matches".
+/// Scenario: persist a session whose `thread_id` metadata is a *different*
+/// UUID, then call `load_for_thread_id` with the queried thread id; assert the
+/// store returns `None` rather than the stored session.
+///
+/// This is the negative-match counterpart to
+/// `session_store_resumes_thread_history_for_matching_workspace`. Without it,
+/// a regression where `load_for_thread_id` silently fell back to "any session
+/// whose working_dir matches" would still pass the positive test (because the
+/// session it'd happen to return is the one we just saved). Both sides
+/// together define the resume contract: thread_id is required for a hit, and
+/// workspace-only matching is forbidden.
 #[test]
 fn session_store_does_not_resume_when_thread_id_is_unrelated() {
     let temp = TempDir::new().unwrap();
@@ -432,12 +569,23 @@ fn session_store_does_not_resume_when_thread_id_is_unrelated() {
     );
 }
 
-/// Scenario: a `--resume`-style continuation feeds the prior session history as the
-/// `existing_history` argument to the tool loop, the loop appends the new user
-/// prompt, and the model both *sees* the prior messages and the next assistant turn
-/// is appended on top of them. This is the agent-loop side of the resume contract
-/// — the store-only test above covers the persistence half. Together they pin the
-/// CEX-00 acceptance criterion that "带 `--resume` 的 session 能恢复上一轮对话".
+/// Scenario: persist a session with a `User("what is the answer?")` +
+/// `Assistant("the answer file says 42")` pair, reload it via
+/// `load_for_thread_id`, convert to model-facing history with `to_history()`,
+/// and feed that history as `existing_history` into
+/// `run_tool_loop_with_history_and_observer` along with a new prompt
+/// `"say what you remember"`. Assert:
+///
+/// 1. The final history length is 4 (2 prior + 1 new prompt + 1 reply) — the
+///    loop appended on top of resumed messages, not replaced them.
+/// 2. The prior user message text survives end-to-end into the loop history.
+/// 3. The new prompt is appended in the user role, in chronological order.
+///
+/// This pairs with the two store-only tests above to fully cover the CEX-00
+/// acceptance criterion `带 `--resume` 的 session 能恢复上一轮对话和已有 tool
+/// result` — without this scenario a regression that breaks the loop-side
+/// reattach would still pass the persistence-only tests. Codex round-2 review
+/// flagged this gap explicitly; the test was added to close it.
 #[tokio::test]
 async fn resumed_session_history_flows_into_the_tool_loop() {
     let temp = TempDir::new().unwrap();
@@ -518,6 +666,15 @@ async fn resumed_session_history_flows_into_the_tool_loop() {
     );
 }
 
+/// Spawn the `libra` binary built by `cargo test` (via `CARGO_BIN_EXE_libra`)
+/// in a fully isolated environment so the test never reads or mutates the
+/// host user's config.
+///
+/// The function clears `env_clear()`, sets a minimal `PATH`, and points
+/// `HOME` / `USERPROFILE` / `XDG_CONFIG_HOME` at a tempdir under `cwd` so any
+/// `libra` config / session / `.libra` directories the binary writes land in
+/// the temp scope and disappear with the `TempDir`. `LANG` / `LC_ALL` are
+/// pinned to `C` so localized error messages can't shift the assertion text.
 fn run_libra_binary(args: &[&str], cwd: &Path) -> Output {
     let home = cwd.join(".libra-test-home");
     let config_home = home.join(".config");
