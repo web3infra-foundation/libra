@@ -528,9 +528,46 @@ pub struct CodeArgs {
     #[arg(long)]
     pub codex_port: Option<u16>,
 
-    /// In Codex mode, require the agent to produce a plan before execution.
-    #[arg(long, default_value_t = false)]
-    pub plan_mode: bool,
+    /// Codex plan-first mode: require an approved plan before execution.
+    ///
+    /// When `--provider=codex`, this defaults to **on** so the session
+    /// follows `docs/agent/agent-workflow.md` Phase 0/1 (read-only intent &
+    /// plan drafting) before Phase 2 execution. Pass `--plan-mode=false` to
+    /// opt out for a single session. For non-Codex providers, omit the flag —
+    /// Libra drives Phase 0/1 through its own tool loop.
+    ///
+    /// Accepted forms:
+    /// `--plan-mode` (alias for `=true`), `--plan-mode=true`, `--plan-mode=false`.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    pub plan_mode: Option<bool>,
+}
+
+/// Resolves the effective `plan_mode` flag for the current invocation.
+///
+/// Returns the user-supplied value when present; otherwise defaults to
+/// `true` for the Codex provider and `false` for other providers.
+///
+/// **Scope of enforcement:** `plan_mode` is forwarded to Codex's
+/// `developerInstructions` / `baseInstructions` and tells Codex's own agent
+/// loop to produce a structured plan and wait for an approval before
+/// executing. The approval gate is therefore **Codex's own approval channel**
+/// (per-tool / per-command requests), not Libra's Phase 0 / Phase 1 review
+/// loop. Libra's own intent / plan drafting tool loop (`phase0_plan_tool_loop_config` /
+/// `phase1_plan_tool_loop_config` in `src/internal/tui/app.rs`) requires a
+/// generic `CompletionModel` and is bypassed when `managed_code_ui_runtime`
+/// is set (the Codex runtime is a managed backend, not a completion model —
+/// see the bypass at `src/internal/tui/app.rs` near
+/// `if self.managed_code_ui_runtime.is_none() && should_route_plain_message_to_plan(...)`).
+///
+/// Combining `--plan-mode=true` with `--approval-policy=allow-all` /
+/// `=never` means Codex still produces the plan, but its approval gate is
+/// auto-approved — the operator sees the plan in the transcript / log but
+/// is never asked to confirm. `start_codex_code_ui_runtime` emits a
+/// `tracing::warn!` when this combination is detected so the operator can
+/// notice that the review gate has been disabled.
+pub(crate) fn effective_plan_mode(args: &CodeArgs) -> bool {
+    args.plan_mode
+        .unwrap_or(matches!(args.provider, CodeProvider::Codex))
 }
 
 // ---------------------------------------------------------------------------
@@ -1431,6 +1468,29 @@ async fn start_codex_code_ui_runtime(
         CodeUiInitialController::LocalTui { .. } => Some("managed-tui".to_string()),
         _ => Some("web".to_string()),
     };
+    let plan_mode = effective_plan_mode(args);
+    let approval_auto_accepts = matches!(
+        args.approval_policy,
+        CodeApprovalPolicy::Never | CodeApprovalPolicy::AllowAll
+    );
+    tracing::info!(
+        target: "libra::internal::ai::codex",
+        plan_mode,
+        provider = "codex",
+        approval_policy = ?args.approval_policy,
+        "starting Codex code-ui runtime; plan_mode {} (defaults to true for codex provider)",
+        if plan_mode { "enabled" } else { "disabled" }
+    );
+    if plan_mode && approval_auto_accepts {
+        tracing::warn!(
+            target: "libra::internal::ai::codex",
+            approval_policy = ?args.approval_policy,
+            "plan_mode is enabled but the approval policy auto-accepts every \
+             request — Codex will produce a plan and then run it without an \
+             explicit operator review. Use --approval-policy on-request to \
+             keep the review gate active."
+        );
+    }
     let agent_args = agent_codex::AgentCodexArgs {
         url: ws_url.to_string(),
         cwd: working_dir.to_string_lossy().to_string(),
@@ -1439,7 +1499,7 @@ async fn start_codex_code_ui_runtime(
         service_tier: None,
         personality: None,
         model: args.model.clone(),
-        plan_mode: args.plan_mode,
+        plan_mode,
         debug: false,
         ui_mode,
     };
@@ -2521,7 +2581,7 @@ fn validate_mode_args(args: &CodeArgs, _output: &OutputConfig) -> Result<(), Str
         if args.codex_bin != DEFAULT_CODEX_BIN {
             return Err("--codex-bin is only supported with --provider=codex".to_string());
         }
-        if args.plan_mode {
+        if matches!(args.plan_mode, Some(true)) {
             return Err("--plan-mode is only supported with --provider=codex".to_string());
         }
     }
@@ -2690,7 +2750,7 @@ mod tests {
             api_base: None,
             codex_bin: DEFAULT_CODEX_BIN.to_string(),
             codex_port: None,
-            plan_mode: false,
+            plan_mode: None,
         }
     }
 
@@ -2830,6 +2890,95 @@ mod tests {
             AskForApproval::OnRequest
         );
         assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn plan_mode_defaults_to_none_when_omitted() {
+        let args = CodeArgs::try_parse_from(["libra"]).unwrap();
+        assert_eq!(args.plan_mode, None);
+    }
+
+    #[test]
+    fn plan_mode_bare_flag_is_true() {
+        let args = CodeArgs::try_parse_from(["libra", "--plan-mode"]).unwrap();
+        assert_eq!(args.plan_mode, Some(true));
+    }
+
+    #[test]
+    fn plan_mode_explicit_true_is_true() {
+        let args = CodeArgs::try_parse_from(["libra", "--plan-mode=true"]).unwrap();
+        assert_eq!(args.plan_mode, Some(true));
+    }
+
+    #[test]
+    fn plan_mode_explicit_false_is_false() {
+        let args = CodeArgs::try_parse_from(["libra", "--plan-mode=false"]).unwrap();
+        assert_eq!(args.plan_mode, Some(false));
+    }
+
+    #[test]
+    fn effective_plan_mode_defaults_to_true_for_codex() {
+        let mut args = base_args();
+        args.provider = CodeProvider::Codex;
+        assert!(effective_plan_mode(&args));
+    }
+
+    #[test]
+    fn effective_plan_mode_defaults_to_false_for_non_codex_providers() {
+        let providers = [
+            CodeProvider::Gemini,
+            CodeProvider::Openai,
+            CodeProvider::Anthropic,
+            CodeProvider::Deepseek,
+            CodeProvider::Kimi,
+            CodeProvider::Zhipu,
+            CodeProvider::Ollama,
+        ];
+        for provider in providers {
+            let mut args = base_args();
+            args.provider = provider;
+            assert!(
+                !effective_plan_mode(&args),
+                "expected plan_mode=false default for provider {provider:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn effective_plan_mode_respects_explicit_user_value() {
+        let mut args = base_args();
+        args.provider = CodeProvider::Codex;
+        args.plan_mode = Some(false);
+        assert!(
+            !effective_plan_mode(&args),
+            "explicit --plan-mode=false must override the codex default"
+        );
+
+        args.provider = CodeProvider::Gemini;
+        args.plan_mode = Some(true);
+        assert!(
+            effective_plan_mode(&args),
+            "explicit --plan-mode=true must take effect even for non-codex providers \
+             at the resolution layer (validate_mode_args is responsible for rejecting \
+             that combination separately)"
+        );
+    }
+
+    #[test]
+    fn rejects_explicit_plan_mode_true_for_non_codex_provider() {
+        let mut args = base_args();
+        args.provider = CodeProvider::Gemini;
+        args.plan_mode = Some(true);
+        let err = validate_mode_args(&args, &OutputConfig::default()).unwrap_err();
+        assert!(err.contains("--plan-mode"));
+    }
+
+    #[test]
+    fn accepts_explicit_plan_mode_false_for_non_codex_provider() {
+        let mut args = base_args();
+        args.provider = CodeProvider::Gemini;
+        args.plan_mode = Some(false);
+        validate_mode_args(&args, &OutputConfig::default()).unwrap();
     }
 
     #[test]
