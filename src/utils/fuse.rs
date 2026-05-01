@@ -153,6 +153,52 @@ fn is_fuse_task_worktree_cleanup_root(path: &Path) -> bool {
         .is_some_and(|name| name.starts_with(FUSE_TASK_WORKTREE_PREFIX))
 }
 
+/// Returns the FUSE task-worktree cleanup root that contains `path`, if any.
+///
+/// Only matches when `path` is at or below `<cleanup_root>/workspace` — the
+/// FUSE mount point. Other siblings of the cleanup root (`upper/`, `lower/`,
+/// the cleanup root itself) and unrelated nested directories whose basenames
+/// happen to share the FUSE prefix are excluded.
+///
+/// Symlinked paths are resolved via `fs::canonicalize` when possible so that
+/// callers passing `~/.../workspace` indirections still match. When
+/// canonicalization fails (e.g. the path does not exist on disk, as in unit
+/// tests with synthetic fixtures), we fall back to lexical normalization.
+pub fn enclosing_fuse_task_worktree_root(path: &Path) -> Option<PathBuf> {
+    let normalized = fs::canonicalize(path).unwrap_or_else(|_| normalize_abs_path(path));
+    for ancestor in normalized.ancestors() {
+        if ancestor.file_name().and_then(|name| name.to_str()) != Some("workspace") {
+            continue;
+        }
+        if let Some(parent) = ancestor.parent()
+            && is_fuse_task_worktree_cleanup_root(parent)
+        {
+            return Some(parent.to_path_buf());
+        }
+    }
+    None
+}
+
+/// Returns a stable, FUSE-external cargo target directory for builds rooted at
+/// `path` if and only if `path` is inside a FUSE task worktree.
+///
+/// The libfuse-fs overlay used to back task worktrees rejects some directory
+/// creation operations with `EPERM`, which breaks `cargo` (it cannot create
+/// `./target` inside the workspace). Redirecting `CARGO_TARGET_DIR` outside the
+/// FUSE mount lets builds proceed without changing the workspace contents.
+///
+/// The path is deterministic per worktree so successive builds reuse the same
+/// incremental cache, and the worktree id keeps separate task worktrees from
+/// stomping on each other.
+pub fn fuse_workspace_cargo_target_dir(path: &Path) -> Option<PathBuf> {
+    let cleanup_root = enclosing_fuse_task_worktree_root(path)?;
+    let worktree_id = cleanup_root.file_name()?.to_string_lossy().into_owned();
+    let mut dir = std::env::temp_dir();
+    dir.push("libra-fuse-cargo-target");
+    dir.push(worktree_id);
+    Some(dir)
+}
+
 pub fn sweep_repo_fuse_task_worktrees(
     repo_working_dir: &Path,
 ) -> io::Result<FuseTaskWorktreeSweepReport> {
@@ -399,6 +445,135 @@ mod tests {
         );
         assert_eq!(
             fuse_task_worktree_cleanup_root(Path::new("/tmp/workspace")),
+            None
+        );
+    }
+
+    #[test]
+    fn enclosing_fuse_task_worktree_root_walks_to_cleanup_dir() {
+        let cwd = Path::new(
+            "/repo/.libra/worktrees/tasks/libra-task-worktree-fuse-7-019d/workspace/src/main.rs",
+        );
+        assert_eq!(
+            enclosing_fuse_task_worktree_root(cwd),
+            Some(PathBuf::from(
+                "/repo/.libra/worktrees/tasks/libra-task-worktree-fuse-7-019d"
+            ))
+        );
+    }
+
+    #[test]
+    fn enclosing_fuse_task_worktree_root_matches_workspace_dir_itself() {
+        let cwd =
+            Path::new("/repo/.libra/worktrees/tasks/libra-task-worktree-fuse-7-019d/workspace");
+        assert_eq!(
+            enclosing_fuse_task_worktree_root(cwd),
+            Some(PathBuf::from(
+                "/repo/.libra/worktrees/tasks/libra-task-worktree-fuse-7-019d"
+            ))
+        );
+    }
+
+    #[test]
+    fn enclosing_fuse_task_worktree_root_ignores_cleanup_root_itself() {
+        // Only `<cleanup_root>/workspace[/...]` is the FUSE mount point.
+        // Passing the cleanup root directly is not "inside the worktree" for
+        // build purposes — that path holds `lower/`, `upper/` and the
+        // unmount-time scaffolding rather than the user's cwd.
+        let cwd = Path::new("/repo/.libra/worktrees/tasks/libra-task-worktree-fuse-7-019d");
+        assert_eq!(enclosing_fuse_task_worktree_root(cwd), None);
+    }
+
+    #[test]
+    fn enclosing_fuse_task_worktree_root_ignores_overlay_layers() {
+        for layer in ["upper", "lower"] {
+            let cwd = PathBuf::from(format!(
+                "/repo/.libra/worktrees/tasks/libra-task-worktree-fuse-7-019d/{layer}/main.rs"
+            ));
+            assert_eq!(
+                enclosing_fuse_task_worktree_root(&cwd),
+                None,
+                "layer {layer} must not be treated as the FUSE mount point"
+            );
+        }
+    }
+
+    #[test]
+    fn enclosing_fuse_task_worktree_root_picks_outer_when_workspace_contains_prefix_dir() {
+        // A workspace might happen to contain a directory whose basename
+        // re-uses the FUSE prefix (the user could check it in by accident).
+        // The detection must still resolve to the *outer* worktree's cleanup
+        // root, not the inner basename, because only the outer path is the
+        // real FUSE mount.
+        let cwd = Path::new(
+            "/repo/.libra/worktrees/tasks/libra-task-worktree-fuse-7-019d/workspace/foo/libra-task-worktree-fuse-99-zz/bar.rs",
+        );
+        assert_eq!(
+            enclosing_fuse_task_worktree_root(cwd),
+            Some(PathBuf::from(
+                "/repo/.libra/worktrees/tasks/libra-task-worktree-fuse-7-019d"
+            ))
+        );
+    }
+
+    #[test]
+    fn enclosing_fuse_task_worktree_root_ignores_copy_backend() {
+        let cwd = Path::new(
+            "/repo/.libra/worktrees/tasks/libra-task-worktree-copy-7-019d/workspace/src/main.rs",
+        );
+        assert_eq!(enclosing_fuse_task_worktree_root(cwd), None);
+    }
+
+    #[test]
+    fn enclosing_fuse_task_worktree_root_returns_none_outside_worktree() {
+        assert_eq!(
+            enclosing_fuse_task_worktree_root(Path::new("/repo/src/main.rs")),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enclosing_fuse_task_worktree_root_resolves_symlinked_workspace() {
+        // Real worktrees on macOS often live under `/var/folders/...` while a
+        // friendlier symlink may be advertised via `/tmp` (which itself is a
+        // symlink to `/private/tmp`). Canonicalisation must still reach the
+        // FUSE prefix in the resolved path.
+        let temp = tempdir().expect("create temp dir");
+        let cleanup_root = temp.path().join("libra-task-worktree-fuse-13-019sym");
+        let workspace = cleanup_root.join("workspace");
+        fs::create_dir_all(workspace.join("src")).expect("create workspace tree");
+        let symlink = temp.path().join("symlinked-cwd");
+        std::os::unix::fs::symlink(&workspace, &symlink).expect("create symlink");
+
+        let resolved =
+            enclosing_fuse_task_worktree_root(&symlink).expect("symlinked cwd must resolve");
+        let expected = fs::canonicalize(&cleanup_root).unwrap_or(cleanup_root);
+        assert_eq!(resolved, expected);
+    }
+
+    #[test]
+    fn fuse_workspace_cargo_target_dir_returns_stable_per_worktree_path() {
+        let cwd =
+            Path::new("/repo/.libra/worktrees/tasks/libra-task-worktree-fuse-7-019d/workspace/src");
+        let dir = fuse_workspace_cargo_target_dir(cwd).expect("FUSE worktree must yield a dir");
+        let expected = std::env::temp_dir()
+            .join("libra-fuse-cargo-target")
+            .join("libra-task-worktree-fuse-7-019d");
+        assert_eq!(dir, expected);
+
+        // Same worktree → same dir, regardless of subpath depth (incremental
+        // builds rely on this).
+        let nested = Path::new(
+            "/repo/.libra/worktrees/tasks/libra-task-worktree-fuse-7-019d/workspace/deep/nest/x.rs",
+        );
+        assert_eq!(fuse_workspace_cargo_target_dir(nested), Some(expected));
+    }
+
+    #[test]
+    fn fuse_workspace_cargo_target_dir_returns_none_outside_fuse_worktree() {
+        assert_eq!(
+            fuse_workspace_cargo_target_dir(Path::new("/repo/src/main.rs")),
             None
         );
     }

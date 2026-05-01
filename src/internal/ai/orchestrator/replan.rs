@@ -65,23 +65,37 @@ pub fn detect_replan(
         });
     }
 
-    if trigger_enabled(spec, ReplanTrigger::RepeatedTestFail)
-        && run_state.ordered_task_results().iter().any(|result| {
-            result.status == TaskNodeStatus::Failed
-                && matches!(
-                    task_kind_for_result(plan, result.task_id),
-                    Some(TaskKind::Implementation | TaskKind::Gate)
-                )
-                && result.retry_count >= spec.execution.retry.max_retries
-        })
-    {
-        return Some(ReplanDirective {
-            trigger: ReplanTrigger::RepeatedTestFail,
-            reason: "task kept failing after retries".to_string(),
-            diff_summary:
-                "Collapse execution into a single serial repair task for the next revision."
-                    .to_string(),
+    if trigger_enabled(spec, ReplanTrigger::RepeatedTestFail) {
+        // Gate tasks are not retried in-place (they're idempotent
+        // verifications), so a single failure already represents an exhausted
+        // attempt for replan purposes. Implementation tasks retry up to
+        // `max_retries` times before they should trigger a replan.
+        let exhausted = run_state.ordered_task_results().iter().find(|result| {
+            if result.status != TaskNodeStatus::Failed {
+                return false;
+            }
+            match task_kind_for_result(plan, result.task_id) {
+                Some(TaskKind::Gate) => true,
+                Some(TaskKind::Implementation) => {
+                    result.retry_count >= spec.execution.retry.max_retries
+                }
+                _ => false,
+            }
         });
+        if let Some(result) = exhausted {
+            let reason = match task_kind_for_result(plan, result.task_id) {
+                Some(TaskKind::Gate) => "verification gate failed; replanning",
+                _ => "implementation task kept failing after retries",
+            }
+            .to_string();
+            return Some(ReplanDirective {
+                trigger: ReplanTrigger::RepeatedTestFail,
+                reason,
+                diff_summary:
+                    "Collapse execution into a single serial repair task for the next revision."
+                        .to_string(),
+            });
+        }
     }
 
     if trigger_enabled(spec, ReplanTrigger::EvidenceConflict) && !system_report.artifacts_complete {
@@ -460,6 +474,60 @@ mod tests {
             },
         );
         assert!(directive.is_some());
+    }
+
+    #[test]
+    fn test_detect_replan_from_gate_failure_without_retries() {
+        // Gate tasks are idempotent verifications and never accumulate retry
+        // counts, so a single failure must still trigger replan. Otherwise
+        // every plan that fails at the gate (e.g. a flaky `cargo clippy` step)
+        // would be abandoned without giving the orchestrator a chance to
+        // recompile a focused repair plan.
+        let mut spec = spec_with_triggers();
+        spec.execution.replan.triggers = vec![ReplanTrigger::RepeatedTestFail];
+
+        let task = task_spec(TaskKind::Gate, "gate");
+        let task_id = task.id();
+        let plan = ExecutionPlanSpec {
+            intent_spec_id: "test".into(),
+            revision: 1,
+            parent_revision: None,
+            replan_reason: None,
+            tasks: vec![task],
+            max_parallel: 1,
+            checkpoints: vec![],
+        };
+        let directive = detect_replan(
+            &spec,
+            &plan,
+            &run_state(vec![TaskResult {
+                task_id,
+                status: TaskNodeStatus::Failed,
+                gate_report: Some(GateReport {
+                    results: vec![],
+                    all_required_passed: false,
+                }),
+                agent_output: None,
+                retry_count: 0,
+                tool_calls: vec![],
+                policy_violations: vec![],
+                model_usage: None,
+                review: None,
+                thinking: None,
+            }]),
+            &SystemReport {
+                integration: GateReport::empty(),
+                security: GateReport::empty(),
+                release: GateReport::empty(),
+                review_passed: true,
+                review_findings: vec![],
+                artifacts_complete: true,
+                missing_artifacts: vec![],
+                overall_passed: false,
+            },
+        );
+        assert!(directive.is_some());
+        assert_eq!(directive.unwrap().trigger, ReplanTrigger::RepeatedTestFail);
     }
 
     #[test]

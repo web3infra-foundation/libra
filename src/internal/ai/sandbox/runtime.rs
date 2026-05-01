@@ -13,8 +13,10 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
 use super::{SandboxPermissions, SandboxPolicy};
+use crate::utils::fuse;
 
 pub const LIBRA_SANDBOX_NETWORK_DISABLED_ENV_VAR: &str = "LIBRA_SANDBOX_NETWORK_DISABLED";
+const CARGO_TARGET_DIR_ENV_VAR: &str = "CARGO_TARGET_DIR";
 #[cfg(target_os = "macos")]
 const MACOS_PATH_TO_SEATBELT_EXECUTABLE: &str = "/usr/bin/sandbox-exec";
 
@@ -46,17 +48,70 @@ impl CommandSpec {
         sandbox_permissions: SandboxPermissions,
         justification: Option<String>,
     ) -> Self {
+        Self::shell_inner(
+            command,
+            cwd,
+            timeout_ms,
+            sandbox_permissions,
+            justification,
+            std::env::var_os(CARGO_TARGET_DIR_ENV_VAR).is_some(),
+        )
+    }
+
+    /// Inner constructor that accepts the ambient-env flag explicitly so tests
+    /// can pin the FUSE-injection branch without relying on whatever
+    /// `CARGO_TARGET_DIR` happens to be exported by the surrounding shell or
+    /// CI runner.
+    fn shell_inner(
+        command: impl Into<String>,
+        cwd: PathBuf,
+        timeout_ms: Option<u64>,
+        sandbox_permissions: SandboxPermissions,
+        justification: Option<String>,
+        ambient_cargo_target_dir_is_set: bool,
+    ) -> Self {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        let mut env = HashMap::new();
+        apply_fuse_workspace_env_overrides(&cwd, &mut env, ambient_cargo_target_dir_is_set);
         Self {
             program: shell,
             args: vec!["-c".to_string(), command.into()],
             cwd,
-            env: HashMap::new(),
+            env,
             timeout_ms,
             sandbox_permissions,
             justification,
         }
     }
+}
+
+/// Inject env-var overrides for commands launched inside FUSE-backed task
+/// worktrees.
+///
+/// The libfuse-fs overlay rejects some directory-creation calls with `EPERM`,
+/// which breaks `cargo` (it cannot create `./target` inside the worktree).
+/// Pointing `CARGO_TARGET_DIR` to a stable path outside the FUSE mount lets
+/// builds and gate checks succeed without modifying workspace contents.
+///
+/// Existing values are preserved: if the caller has already set
+/// `CARGO_TARGET_DIR` in `env` or the ambient process environment exposes one
+/// (per `ambient_cargo_target_dir_is_set`), we leave the choice to the
+/// user/operator.
+fn apply_fuse_workspace_env_overrides(
+    cwd: &Path,
+    env: &mut HashMap<String, String>,
+    ambient_cargo_target_dir_is_set: bool,
+) {
+    if env.contains_key(CARGO_TARGET_DIR_ENV_VAR) || ambient_cargo_target_dir_is_set {
+        return;
+    }
+    let Some(target_dir) = fuse::fuse_workspace_cargo_target_dir(cwd) else {
+        return;
+    };
+    env.insert(
+        CARGO_TARGET_DIR_ENV_VAR.to_string(),
+        target_dir.to_string_lossy().into_owned(),
+    );
 }
 
 #[derive(Debug, Clone)]
@@ -489,5 +544,120 @@ mod tests {
         assert_eq!(spec.cwd, cwd);
         assert_eq!(spec.args, vec!["-c".to_string(), "echo ok".to_string()]);
         assert!(!spec.program.is_empty());
+    }
+
+    #[test]
+    fn apply_fuse_workspace_env_overrides_sets_cargo_target_dir_inside_fuse_worktree() {
+        let cwd =
+            Path::new("/repo/.libra/worktrees/tasks/libra-task-worktree-fuse-7-019d/workspace/src");
+        let mut env = HashMap::new();
+        apply_fuse_workspace_env_overrides(cwd, &mut env, false);
+        let target = env
+            .get(CARGO_TARGET_DIR_ENV_VAR)
+            .expect("CARGO_TARGET_DIR should be set inside FUSE worktree");
+        let expected = std::env::temp_dir()
+            .join("libra-fuse-cargo-target")
+            .join("libra-task-worktree-fuse-7-019d");
+        assert_eq!(target, &expected.to_string_lossy().into_owned());
+    }
+
+    #[test]
+    fn apply_fuse_workspace_env_overrides_skips_when_caller_already_set_target_dir() {
+        let cwd =
+            Path::new("/repo/.libra/worktrees/tasks/libra-task-worktree-fuse-7-019d/workspace");
+        let mut env = HashMap::new();
+        env.insert(
+            CARGO_TARGET_DIR_ENV_VAR.to_string(),
+            "/explicit/target".to_string(),
+        );
+        apply_fuse_workspace_env_overrides(cwd, &mut env, false);
+        assert_eq!(
+            env.get(CARGO_TARGET_DIR_ENV_VAR).map(String::as_str),
+            Some("/explicit/target")
+        );
+    }
+
+    #[test]
+    fn apply_fuse_workspace_env_overrides_skips_when_ambient_env_has_target_dir() {
+        let cwd =
+            Path::new("/repo/.libra/worktrees/tasks/libra-task-worktree-fuse-7-019d/workspace");
+        let mut env = HashMap::new();
+        apply_fuse_workspace_env_overrides(cwd, &mut env, true);
+        assert!(
+            !env.contains_key(CARGO_TARGET_DIR_ENV_VAR),
+            "must not override an operator-supplied CARGO_TARGET_DIR"
+        );
+    }
+
+    #[test]
+    fn apply_fuse_workspace_env_overrides_noops_outside_fuse_worktree() {
+        let mut env = HashMap::new();
+        apply_fuse_workspace_env_overrides(Path::new("/repo/src"), &mut env, false);
+        assert!(env.is_empty());
+    }
+
+    #[test]
+    fn shell_command_spec_injects_cargo_target_dir_inside_fuse_workspace() {
+        // Production wrapper test: drives the inner constructor with an
+        // explicit ambient-env flag so we don't rely on whatever the test
+        // runner exports for `CARGO_TARGET_DIR`. This covers the wiring from
+        // `CommandSpec::shell{,_inner}` through `apply_fuse_workspace_env_overrides`.
+        let cwd =
+            Path::new("/repo/.libra/worktrees/tasks/libra-task-worktree-fuse-9-019e/workspace");
+        let spec = CommandSpec::shell_inner(
+            "cargo build",
+            cwd.to_path_buf(),
+            None,
+            SandboxPermissions::UseDefault,
+            None,
+            false,
+        );
+        let expected = std::env::temp_dir()
+            .join("libra-fuse-cargo-target")
+            .join("libra-task-worktree-fuse-9-019e")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            spec.env.get(CARGO_TARGET_DIR_ENV_VAR).map(String::as_str),
+            Some(expected.as_str()),
+            "CommandSpec::shell must redirect cargo's target dir for FUSE workspaces"
+        );
+    }
+
+    #[test]
+    fn shell_command_spec_skips_injection_when_ambient_env_has_target_dir() {
+        // When the operator has `CARGO_TARGET_DIR` exported the inner
+        // constructor must respect that choice, even inside a FUSE worktree.
+        let cwd =
+            Path::new("/repo/.libra/worktrees/tasks/libra-task-worktree-fuse-9-019e/workspace");
+        let spec = CommandSpec::shell_inner(
+            "cargo build",
+            cwd.to_path_buf(),
+            None,
+            SandboxPermissions::UseDefault,
+            None,
+            true,
+        );
+        assert!(
+            !spec.env.contains_key(CARGO_TARGET_DIR_ENV_VAR),
+            "CommandSpec::shell must defer to the ambient CARGO_TARGET_DIR"
+        );
+    }
+
+    #[test]
+    fn shell_command_spec_does_not_inject_cargo_target_dir_outside_fuse_workspace() {
+        let cwd = std::env::temp_dir();
+        let spec = CommandSpec::shell_inner(
+            "echo ok",
+            cwd,
+            None,
+            SandboxPermissions::UseDefault,
+            None,
+            false,
+        );
+        assert!(
+            !spec.env.contains_key(CARGO_TARGET_DIR_ENV_VAR),
+            "CommandSpec::shell must not redirect cargo target dir outside FUSE workspaces"
+        );
     }
 }
