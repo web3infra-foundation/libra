@@ -367,17 +367,17 @@ flowchart LR
 
 “字节级等价于 `48ea0ae`” 不是手工肉眼比较——必须有可重放、可 CI 的实施步骤。本节是 CP-S2-3 唯一的 flag-off 检查 source of truth。
 
-**比较的产物（artifact set）：**
+**比较的产物（artifact set，必须全部捕获并 normalize）：**
 
-1. `cargo test --all` 退出码 + stdout/stderr 总行数 + 失败测试名集合（应为空集）。
-2. `tests/ai_agent_baseline_test.rs` 全部 7 个测试逐一通过，断言文本与 commit `48ea0ae` 一致。
-3. `tests/command/code_test.rs::code_*` 全部 4 个测试逐一通过。
-4. 一次 mock-driven `libra code` smoke session（用 `--provider fake --fake-fixture flag_off_smoke.json`）跑完后，比较两组工件的 normalized 内容：
+1. **`cargo test --all` 全量结果**：捕获退出码、stdout 总行数、stderr 总行数、失败测试名集合（应为空集）；不只是 baseline test。
+2. **`tests/ai_agent_baseline_test.rs` 全部 7 个测试**：逐一通过，断言文本与 commit `48ea0ae` 一致。
+3. **`tests/command/code_test.rs::code_*` 全部 4 个测试**：逐一通过。
+4. **mock-driven `libra code` smoke session**（用 `--provider fake --fake-fixture flag_off_smoke.json`，**fixture 由 CEX-S2-12 入库到候选树，baseline 树不包含此 fixture**——脚本必须把 fixture 复制到 baseline 树或用绝对路径引用）：
    - `.libra/sessions/{id}/session.jsonl`（主 session 真相源）
    - `.libra/sessions/{id}/file_history/`（CEX-10 Step 1.5 输出）
    - `.libra/libra.db` 中 `agent_usage_stats` / `reflog` / `config` 表（schema + rows）
 
-**Normalization 规则（diff 前必须执行）：**
+**Normalization 规则（diff 前必须执行，由 `scripts/normalize_session.sh` 实现）：**
 
 | 字段 | 规则 |
 |------|------|
@@ -386,31 +386,75 @@ flowchart LR
 | 临时路径（`/tmp/...`、`tempdir` 路径） | 替换为 `<TMP>` |
 | `wall_clock_ms` / `provider_latency_ms` 等延迟字段 | 替换为 `<DURATION>` |
 | 进程 PID | 替换为 `<PID>` |
+| 文件遍历顺序 | 输出按 **lexicographic relative path** 排序（`find ... \| sort`），跨平台一致 |
+| SQLite 行序 | 每个表导出时**强制 `ORDER BY <stable_pkey>`**；不依赖 SQLite 隐式行序；schema 用 `.schema` 导出后 normalize（去 ROWID） |
+| JSONL 字段顺序 | 每行经 `jq -S .` canonicalize（key 字典序、空白统一）后再 diff |
+| Cargo test 输出 | 失败测试集合排序后比较；`finished in N.NNs` 时间正则替换为 `<DUR>` |
 
-**比较命令：**
+**比较脚本（CI-safe，避免固定 `/tmp/...` 路径冲突 + 修正 env-assignment 语法 + 强制每个 worktree 用自己 build 的 binary）：**
 
 ```sh
-# 1. baseline = checkout CEX-00 commit and run smoke
-git worktree add /tmp/baseline-48ea0ae 48ea0ae
-( cd /tmp/baseline-48ea0ae && cargo test --test ai_agent_baseline_test --quiet ) > /tmp/baseline.txt
-( cd /tmp/baseline-48ea0ae && libra code --provider fake --fake-fixture flag_off_smoke.json )
-scripts/normalize_session.sh /tmp/baseline-48ea0ae/.libra > /tmp/baseline.normalized
+#!/usr/bin/env bash
+set -euo pipefail
 
-# 2. candidate = current branch with code.sub_agents.enabled=false
-git worktree add /tmp/candidate-current HEAD
-LIBRA_CONFIG_OVERRIDE='code.sub_agents.enabled=false' \
-  ( cd /tmp/candidate-current && cargo test --test ai_agent_baseline_test --quiet ) > /tmp/candidate.txt
-LIBRA_CONFIG_OVERRIDE='code.sub_agents.enabled=false' \
-  ( cd /tmp/candidate-current && libra code --provider fake --fake-fixture flag_off_smoke.json )
-scripts/normalize_session.sh /tmp/candidate-current/.libra > /tmp/candidate.normalized
+# 0. Fixtures live in the candidate tree; capture before checkout
+REPO=$(git rev-parse --show-toplevel)
+FIXTURE_SRC="$REPO/tests/data/flag_off_smoke.json"     # CEX-S2-12 output
+NORMALIZER="$REPO/scripts/normalize_session.sh"        # CEX-S2-12 output
+test -f "$FIXTURE_SRC" || { echo "missing fixture"; exit 2; }
+test -x "$NORMALIZER"  || { echo "missing normalizer"; exit 2; }
 
-# 3. diff
-diff -u /tmp/baseline.txt /tmp/candidate.txt && \
-diff -u /tmp/baseline.normalized /tmp/candidate.normalized && \
+# 1. unique tempdirs + cleanup
+BASELINE=$(mktemp -d -t libra-baseline.XXXXXX)
+CANDIDATE=$(mktemp -d -t libra-candidate.XXXXXX)
+WORK=$(mktemp -d -t libra-cps2-3.XXXXXX)
+trap 'git worktree remove --force "$BASELINE" 2>/dev/null || true; \
+      git worktree remove --force "$CANDIDATE" 2>/dev/null || true; \
+      rm -rf "$WORK"' EXIT
+
+# 2. checkout both trees, copy fixture/normalizer into baseline (baseline lacks them)
+git worktree add --detach "$BASELINE" 48ea0ae
+git worktree add --detach "$CANDIDATE" HEAD
+mkdir -p "$BASELINE/tests/data" "$BASELINE/scripts"
+cp "$FIXTURE_SRC" "$BASELINE/tests/data/flag_off_smoke.json"
+cp "$NORMALIZER"  "$BASELINE/scripts/normalize_session.sh"
+
+# 3. build per-worktree binary (NEVER use $PATH `libra`)
+BASELINE_BIN="$BASELINE/target/release/libra"
+CANDIDATE_BIN="$CANDIDATE/target/release/libra"
+( cd "$BASELINE"  && cargo build --release --bin libra )
+( cd "$CANDIDATE" && cargo build --release --bin libra )
+
+# 4. run full artifact set on both, capturing exit code + line counts + failed-test set
+run_artifacts() {
+  local TREE="$1" BIN="$2" OUT="$3" CFG="$4"
+  mkdir -p "$OUT"
+  ( cd "$TREE" && \
+    LIBRA_CONFIG_OVERRIDE="$CFG" cargo test --all --quiet 2> "$OUT/cargo_all.stderr" > "$OUT/cargo_all.stdout"; \
+    echo "exit=$?" > "$OUT/cargo_all.status" ) || true
+  wc -l "$OUT/cargo_all.stdout" "$OUT/cargo_all.stderr" > "$OUT/cargo_all.lines"
+  grep -E '^test .* FAILED$' "$OUT/cargo_all.stdout" | sort > "$OUT/cargo_all.failed"
+  ( cd "$TREE" && LIBRA_CONFIG_OVERRIDE="$CFG" cargo test --test ai_agent_baseline_test --quiet > "$OUT/baseline7.stdout" 2>&1 )
+  ( cd "$TREE" && LIBRA_CONFIG_OVERRIDE="$CFG" cargo test --test command_test code_test --quiet > "$OUT/code4.stdout" 2>&1 )
+  HOME="$OUT/home" \
+    LIBRA_CONFIG_OVERRIDE="$CFG" \
+    "$BIN" code --provider fake --fake-fixture "$TREE/tests/data/flag_off_smoke.json" > "$OUT/smoke.stdout" 2>&1 || true
+  "$TREE/scripts/normalize_session.sh" "$OUT/home/.libra" > "$OUT/smoke.normalized"
+}
+run_artifacts "$BASELINE"  "$BASELINE_BIN"  "$WORK/baseline"  ""                                      # baseline has no flag yet
+run_artifacts "$CANDIDATE" "$CANDIDATE_BIN" "$WORK/candidate" "code.sub_agents.enabled=false"          # candidate sets flag-off
+
+# 5. compare every captured artifact
+diff -u "$WORK/baseline/cargo_all.status"     "$WORK/candidate/cargo_all.status"
+diff -u "$WORK/baseline/cargo_all.lines"      "$WORK/candidate/cargo_all.lines"
+diff -u "$WORK/baseline/cargo_all.failed"     "$WORK/candidate/cargo_all.failed"
+diff -u "$WORK/baseline/baseline7.stdout"     "$WORK/candidate/baseline7.stdout"
+diff -u "$WORK/baseline/code4.stdout"         "$WORK/candidate/code4.stdout"
+diff -u "$WORK/baseline/smoke.normalized"     "$WORK/candidate/smoke.normalized"
 echo "CP-S2-3 flag-off equivalence: PASS"
 ```
 
-任一 diff 非空都视为 CP-S2-3 失败。CEX-S2-12 必须把 `scripts/normalize_session.sh` 与 `flag_off_smoke.json` 一起入库（作为 Write set 的一部分），不能依赖手写脚本。
+任一 `diff` 非空、任一 `cargo build` 失败、normalizer 不存在或 fixture 不存在都视为 CP-S2-3 失败。CEX-S2-12 必须把 `scripts/normalize_session.sh`、`tests/data/flag_off_smoke.json` 与上面的比较脚本一并入库（参见 CEX-S2-12 Write set），不能依赖手写脚本。
 
 ### Step 2 Codex review 协议（每张 CEX-S2-* 必走）
 
@@ -1455,26 +1499,49 @@ Step 2 不重新发明一套与 `src/internal/ai/intentspec/` 平行的任务系
 
   **Hook exit-code 权威映射表（Step 2 / Step 3 共享，不可单方面修改）：**
 
-  | 终止状态 | 决策语义 | 后续路径 | AgentRunEvent / `reason` |
-  |---------|----------|----------|--------------------------|
-  | exit `0` | `allow` | dispatch 继续；后续 sandbox / approval 仍按各自规则执行 | `hook_passed` |
-  | exit `2` | `deny` | dispatch 被阻止；agent 收到结构化拒绝反馈 | `blocked_by_hook`（含 hook 路径与 stdout/stderr 截断） |
-  | exit `3` | `needs-human` | dispatch 暂停；走 Layer 1 approval（详见下方 Approval 集成约束） | `hook_requested_human` |
-  | exit 其他（含 `1`、负数、`>3`） | `deny`（**fail-closed**） | 等同 exit 2，不视为 “warn 但通过”；安全边界永远偏向拒绝 | `blocked_by_hook_failure / unknown_exit_code` |
-  | panic（process abort / unhandled exception） | `deny`（**fail-closed**） | 同上 | `blocked_by_hook_failure / panic` |
-  | timeout（默认 30s，可由 `[hooks].timeout_ms` 覆盖） | `deny`（**fail-closed**） | 同上 | `blocked_by_hook_failure / timeout` |
-  | SIGKILL / SIGTERM / 任何 OS 信号杀死（无 exit code） | `deny`（**fail-closed**） | 同上；不区分被谁杀死 | `blocked_by_hook_failure / killed_by_signal:<signo>` |
-  | spawn 失败：ENOENT（hook 二进制未找到） | `deny`（**fail-closed**） | 同上；启动期 / 运行期均按 deny 处理 | `blocked_by_hook_failure / spawn_enoent` |
-  | spawn 失败：EACCES（不可执行） | `deny`（**fail-closed**） | 同上 | `blocked_by_hook_failure / spawn_eacces` |
-  | exit `0` 且 stdout 为空 | `allow` | 等同标准 exit 0；hook 不必输出内容即可放行 | `hook_passed`（`empty_stdout=true`） |
-  | exit `2` / `3` 且 stdout 为空 | 仍按 exit code | `deny` / `needs-human`；缺少 reason 时记 `reason=unspecified`，UI 提示 “hook 未给出原因” | 同对应 exit code |
+  > ⚠️ **作用域**：本表的 “dispatch 被阻止 / 暂停” 语义**只适用于 `PreToolUse`** hook（dispatch 之前触发，可拦截）。`PostToolUse` 失败时 dispatch 已经发生，故 `deny` / `needs-human` 不再阻塞工具结果——而是写 `post_tool_review_required` event 走 Layer 1 review 路径，并将 `reason` 暴露给 UI；如果 `PostToolUse` 异常（panic / timeout / signal / spawn 失败），仍写 `blocked_by_hook_failure` 但 dispatch 结果保留并标注 “后置审计失败”。
+
+  | 终止状态 | PreToolUse 决策 | PreToolUse 后续路径 | PostToolUse 决策 | AgentRunEvent / `reason` |
+  |---------|-----------------|---------------------|------------------|--------------------------|
+  | exit `0` | `allow` | dispatch 继续；后续 sandbox / approval 仍按各自规则执行 | 通过：审计成功 | `hook_passed` |
+  | exit `2` | `deny` | dispatch 被阻止；agent 收到结构化拒绝反馈 | `post_tool_review_required`（不撤销已 dispatch 的结果） | `blocked_by_hook` / `post_tool_review_required`（含 hook 路径与 stdout/stderr 截断） |
+  | exit `3` | `needs-human` | dispatch 暂停；走 Layer 1 approval（详见下方 Approval 集成约束） | `post_tool_review_required` 同上 | `hook_requested_human` / `post_tool_review_required` |
+  | exit 其他（含 `1`、负数、`>3`） | `deny`（**fail-closed**） | 等同 exit 2，不视为 “warn 但通过”；安全边界永远偏向拒绝 | 同 PostToolUse `deny` 行 | `blocked_by_hook_failure / unknown_exit_code` |
+  | panic（process abort / unhandled exception） | `deny`（**fail-closed**） | 同上 | dispatch 已发生；写 `blocked_by_hook_failure / panic` 并保留结果 | `blocked_by_hook_failure / panic` |
+  | timeout（默认 30s，可由 `[hooks].timeout_ms` 覆盖） | `deny`（**fail-closed**） | 同上 | 同 panic 行 | `blocked_by_hook_failure / timeout` |
+  | SIGKILL / SIGTERM / 任何 OS 信号杀死（无 exit code） | `deny`（**fail-closed**） | 同上；不区分被谁杀死 | 同 panic 行 | `blocked_by_hook_failure / killed_by_signal:<signo>` |
+  | spawn 失败：ENOENT（hook 二进制未找到） | `deny`（**fail-closed**） | 同上；启动期 / 运行期均按 deny 处理 | 同 panic 行 | `blocked_by_hook_failure / spawn_enoent` |
+  | spawn 失败：EACCES（不可执行） | `deny`（**fail-closed**） | 同上 | 同 panic 行 | `blocked_by_hook_failure / spawn_eacces` |
+  | exit `0` 且 stdout 为空 | `allow` | 等同标准 exit 0；hook 不必输出内容即可放行 | 通过 | `hook_passed`（`empty_stdout=true`） |
+  | exit `2` / `3` 且 stdout 为空 | 仍按 exit code | `deny` / `needs-human`；缺少 reason 时记 `reason=unspecified`，UI 提示 “hook 未给出原因” | 同 PostToolUse 行 | 同对应 exit code |
 
   - 所有 sub-agent dispatch path 的 hook 处理都按此表执行；Step 3.E Hook Harness 扩展新 hook 类型时必须复用此表，**不允许**对“其他 exit code”、信号终止或 spawn 失败重新定义为 `warn but pass`。
-  - 测试覆盖：`tests/ai_subagent_hook_dispatch_test.rs` 至少 **9 个 fixture**（exit 0 / exit 0 空 stdout / exit 2 / exit 3 / exit 1（unknown） / panic / timeout / SIGKILL / spawn_enoent），每条断言对应 `AgentRunEvent` 类型与 `reason` 字段。
+  - 测试覆盖：`tests/ai_subagent_hook_dispatch_test.rs` 至少 **9 个 fixture**：exit 0 / exit 0 + 空 stdout / exit 2 / exit 3 / exit 1（unknown）/ panic / timeout / SIGKILL / spawn_enoent；外加 1 个 spawn_eacces（可与 spawn_enoent 共享 fixture 但单独断言 `reason=spawn_eacces`，确保表中列出的所有 `reason` 值都有对应断言）。每条 fixture 断言对应 `AgentRunEvent` 类型、`reason` 字段，以及 PreToolUse/PostToolUse 两种 phase 各跑一次（PreToolUse 行为按表内 dispatch-blocking 列；PostToolUse 异常按 `post_tool_review_required` / `blocked_by_hook_failure` 列）。
 
   **needs-human (exit 3) Approval 集成约束**（exit 3 唯一进入 Approval 路径，其他路径不命中 cache）：
 
-  - **ApprovalKey 必须包含 hook 身份**，避免一个 hook 的批准被另一个 hook 复用：`hash(tool_name + canonical_args + cwd + sandbox_scope + hook_path + hook_checksum + hook_reason_hash)`。`hook_path` / `hook_checksum` 任一变化都视为新 key，旧 cache 不命中。
+  - **ApprovalKey 必须包含 hook 身份 + Step 1.6 全部 scope / blast-radius 字段**，避免一个 hook 的批准被另一个 hook 或不同 scope 复用。最终 key 形式：
+    ```
+    ApprovalKey = hash(
+        // Step 1.6 mandatory fields (不可省略 — 详见 Step 1.6 Approval TTL 与细粒度记忆 节)
+        sensitivity_tier        // Strict / Directory / Pattern
+        + scope                 // session / project / user
+        + tool_name
+        + canonical_args        // argv[0] + sorted flags + normalized args
+        + cwd                   // 或 Directory tier 下的父目录
+        + sandbox_scope
+        + target_path           // 受影响文件路径
+        + protected_branch      // 涉及 protected branch 时
+        + source_slug           // 涉及 Source Pool 时
+        + network_domain        // 涉及外发请求时
+        + workspace_id          // 隔离 workspace 时
+        // Step 2 hook-specific 扩展
+        + hook_path             // PreToolUse hook 路径
+        + hook_checksum         // 二进制 SHA-256
+        + hook_reason_hash      // hook stdout 摘要
+    )
+    ```
+  - 含义：(1) **Step 1.6 字段不可省略**——hook approval 仍受 Strict/Directory/Pattern 敏感度分级、scope、blast-radius 约束；任何一个字段缺失或变化都视为新 key。(2) **hook 字段在 Step 1.6 之上叠加**：`hook_path` / `hook_checksum` 任一变化都视为新 key（即使 Step 1.6 字段全部相同），保证一个 hook 的批准不会被另一个 hook 复用。
   - **Notification fan-out**：`hook_requested_human` 事件同时投递到 (1) TUI（active session）的 approval prompt、(2) Web client（如果连接同 thread）、(3) MCP client 通过 `libra://agents/runs/{id}/permissions` 资源；三处 UI 都展示 `agent_id` / `task_id` / `tool_call` / `hook_path` / `hook_reason`（截断 stdout）。
   - **等待超时**：默认 `[hooks].needs_human_timeout_ms = 600000`（10 分钟）。超时未响应视为 `deny`（fail-closed），写入 `AgentRunEvent::blocked_by_hook_failure / reason=needs_human_timeout`。可由 config 覆盖，但**最大值不得超过 1 小时**——超过 1 小时只能通过手动取消 / 重启 sub-agent 处理。
   - **多 client 并发**：第一个响应（accept / deny）赢；其他 client 收到 `approval_resolved_by_other` 通知，UI 关闭对应 prompt。Sub-agent 不能批准自己的 approval（S2-INV-06），`agent_run_id` 与 approval requester 不能相同。
@@ -1488,7 +1555,7 @@ Step 2 不重新发明一套与 `src/internal/ai/intentspec/` 平行的任务系
 - 大型 monorepo 场景不会全量复制仓库；workspace 创建记录使用 worktree / sparse / blocked 的原因和耗时。
 - sparse workspace 中访问未授权路径时返回可读错误，并提示需要扩展 `AgentContextPack` scope。
 - `PreToolUse` hook 返回 `deny` 时，对应 tool call 在 dispatch 之前被拦截，AgentRunEvent 写入 `blocked_by_hook` 含 hook 路径和返回值。
-- hook exit code 严格按 [Step 2.2 权威映射表](#step-22isolated-workspace--tool-boundary)处理：`0=allow` / `2=deny` / `3=needs-human` / 其他（含 1）+ panic + timeout = `deny`（fail-closed）；测试覆盖 6 个 exit 状态，每条断言 `AgentRunEvent` 类型。
+- PreToolUse hook 的 exit code 严格按 [Step 2.2 权威映射表](#step-22isolated-workspace--tool-boundary)处理（dispatch-blocking 语义只适用于 PreToolUse；PostToolUse 见下方分相说明）；测试覆盖 9 个终止状态：exit 0 / exit 0 + 空 stdout / exit 2 / exit 3 / exit 1（unknown）/ panic / timeout / SIGKILL / spawn_enoent / spawn_eacces，每条断言 `AgentRunEvent` 类型与 `reason` 字段。
 - 任何 capability package、third-party MCP source、sub-agent definition 都无法关闭 hook 拦截；尝试关闭时加载失败。
 
 ### Step 2.3：Single Sub-Agent Behind Flag
@@ -1888,7 +1955,7 @@ Step 2 出口标准**不**要求 Step 3 候选完成，但要求：
 11. **Capability package**：安装包含 skill + MCP source + sub-agent 的 package 时显示 permission diff，未确认前不注册 mutating capability。
 12. **Evidence 接入点（CEX-S2-18）**：sub-agent 标记 `distillable=true` 的 evidence 在 `MergeDecision.distillable_evidence_ids` 中可读出；`evidence_query_by_scope(AnchorScope::AgentRun)` 返回该 run 的全量 evidence；`evidence_stream(filter)` 支持按 confidence / scope 过滤；删除字段时旧 reader 不崩溃但测试 fail（schema 兼容性回归）；sub-agent flag 关闭后 `.libra/sessions/{id}/session.jsonl` 不含任何 `AgentEvidence` / `MergeDecision` event。
 13. **Flag-off 字节级等价**：`code.sub_agents.enabled = false` 下 `cargo test --all` 输出与 CEX-00 commit `48ea0ae` 字节级一致（CP-S2-3 真实流；CP-S2-2 是 schema-only 等价）。
-14. **Hook fail-closed**：sub-agent dispatch 时 PreToolUse hook 跑 6 个 exit 状态各一次（exit 0=allow → dispatch / exit 2=deny / exit 3=needs-human / exit 1=deny fail-closed / panic=deny fail-closed / timeout=deny fail-closed），全部按 [Step 2.2 权威映射表](#step-22isolated-workspace--tool-boundary)处理；任何 capability package 或 sub-agent profile 试图关闭 hook 拦截时加载失败。
+14. **Hook fail-closed**：sub-agent dispatch 时 PreToolUse hook 跑 9 个终止状态各一次（exit 0=allow → dispatch / exit 0 + 空 stdout=allow / exit 2=deny / exit 3=needs-human / exit 1=deny fail-closed / panic=deny fail-closed / timeout=deny fail-closed / SIGKILL=deny fail-closed / spawn_enoent=deny fail-closed / spawn_eacces=deny fail-closed — `spawn_eacces` 可与 `spawn_enoent` 共享一组 fixture 或独立断言），全部按 [Step 2.2 权威映射表](#step-22isolated-workspace--tool-boundary)处理；PostToolUse hook 失败只发审计/review 事件、**不阻塞 dispatch（已经发生）**；任何 capability package 或 sub-agent profile 试图关闭 hook 拦截时加载失败。
 
 ---
 
@@ -1952,6 +2019,7 @@ Step 2 出口标准**不**要求 Step 3 候选完成，但要求：
 | 2026-05-01 | Claude Code | CEX-00 review hardening pass（双轮 Codex 评审 + 修复）：(1) 修复 `code_test.rs` 中两个 DeepSeek 测试在临时目录无 `.libra/` 时被 `LBR-REPO-001` preflight 提前截断的问题，改为先调用 `init_repo_via_cli` 让请求达到 flag 校验 / auth bootstrap 阶段。(2) 删除 `ai_agent_baseline_test.rs` 中未使用的 `mod helpers;` 声明。(3) 强化 `list_dir` 断言：除 `lib.rs` substring 外额外校验 `Absolute path:` 前缀以及无 `error` 关键字，避免错误信息伪装成功。(4) 强化 `apply_patch` 观察者断言：先 `assert_eq!(observer.results.len(), 1)`，再 match `Ok` / panic on `Err`，与文件名子检查分离，并加 CONTRACT 注释指向 Step 1.5。(5) 强化 `allowed_tools` 断言：迭代 `seen_tools()` 全部快照而非仅 `[0]`，防止后续 turn 重新暴露 `apply_patch`。(6) 新增 session_store metadata 回环断言（`thread_id` round-trip）和负向测试 `session_store_does_not_resume_when_thread_id_is_unrelated`，明确 `load_for_thread_id` 不会回退为按 workspace 匹配。(7) 新增 `resumed_session_history_flows_into_the_tool_loop`：把 store 中的历史经 `to_history()` 注入 `run_tool_loop_with_history_and_observer`，断言 prior + new prompt + reply = 4 条，对齐 Step 1.0 验收 “带 `--resume` 的 session 能恢复上一轮对话”。(8) 在 DeepSeek auth bootstrap 测试中钉住 `LBR-AUTH-001` 错误码。(9) 为 `ScriptedToolModel` 三处 `Mutex::lock().unwrap()`、`ReadFileHandler` `L<n>:` 前缀、`apply_patch` 文件名子串以及 allowed_tools 错误字符串补 `// INVARIANT:` / `// CONTRACT:` 注释，便于 Step 1.1 / 1.5 / 1.8 后续修改时定位。最终 7 个 baseline + 4 个 code_test 全绿，`cargo +nightly fmt`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test --test ai_agent_baseline_test`、`cargo test --test command_test code_test` 均通过。 |
 | 2026-05-01 | Claude Code | Step 2 改造为可执行标准（基于 CEX-00 实施经验）：(1) **新增 4 张 Step 2 Runtime 任务卡 CEX-S2-15 / S2-16 / S2-17 / S2-18**，分别覆盖 Step 2.5 Merge / Validation pipeline + risk score、Step 2.6 UI / MCP observability（`/agents` / `/agent cancel` / 6 个 MCP resource）、Step 2.7 Capability Package / Plugin Trust（manifest + permission diff + 卸载清理）、Step 2.8 Evidence read-only query API + 字段冻结（read-only，不实现 distillation）。原 Step 2.5-2.8 仅有叙述章节、无 CEX 任务卡，导致无 Read first / Write set / Verification / 完成判定可对照。(2) **强化 CEX-S2-10 至 CEX-S2-14** 的任务卡 schema：从 5 列（ID / 目标 / 依赖 / Write set / Verification / 完成判定）扩为 6 列（增加 Read first），并把每张完成判定从 1 句扩展为 **5-6 条编号子项**（按任务复杂度差异化），每条子项可被一个测试断言验证。当前各卡子项数：S2-10=6, S2-11=5, S2-12=6（含 hook dispatch）, S2-13=5, S2-14=6, S2-15=5, S2-16=5, S2-17=6, S2-18=5。(3) **新增 5 个 Step 2 Checkpoints** CP-S2-1 至 CP-S2-5，逐 Checkpoint 列出触发条件 / 必跑验证 / 是否解锁下一阶段；CP-S2-2（Contracts gate）强制要求 flag-off `cargo test --all` 与 CEX-00 commit 字节级一致。(4) **新增 “Step 2 Codex review 协议”** 一节，把 CEX-00 实测的双轮 Codex review 流程写成 Step 2 强制流程，含 round 1 / round 2 / loop exit 字样 / commit-前最后跑标准检查。(5) **新增 “从 CEX-00 / Step 1.0 提炼的执行经验（Step 2 必读）”** 一节，6 条具体经验：acceptance criterion 必须直接被测试、Read first / Write set 列出已存在文件、CONTRACT / INVARIANT 注释挂在易变断言上、CLI 顺序经常出乎意料、Codex 双轮 review 不冗余、flag-off 字节级一致是硬约束。(6) **更新里程碑索引**：把 “Step 2.1 - 2.7” 单行扩为 8 行（架构基线 + Step 2.1-2.8），每行标注 `revised 2026-05-01：新增 CEX-S2-* 任务卡`。(7) **更新模型能力分层**：CEX-S2-15 至 S2-18 加入 Opus 4.7 推荐区，强约束说明 CEX-S2-17 / S2-18 即使单点改动量小但下游 trust / Step 3.D 兼容性都依赖其字段稳定性。(8) **更新 Plan Mode 触发条件**：从 “CEX-S2-10 至 CEX-S2-14” 扩为 “CEX-S2-10 至 CEX-S2-18”。(9) **更新 Step 2 出口标准**：每条标准映射到 1-2 张 CEX-S2-* 任务卡和一个 CP-S2-* checkpoint，新增 “Step 3.D 衔接” 一行（CEX-S2-18 字段冻结 + CP-S2-5）。(10) **每个 Step 2.x 章节** 新增 “对应任务卡” 第一行交叉引用 CEX-S2-* ID，避免读章节叙述时找不到执行入口。(11) **更新导航索引**：Step 2 子条目从 8 行扩为 14 行，含架构基线 / 经验 / 任务卡 / Checkpoint / Codex 协议 / 8 个 Step 2.x 子节。 |
 | 2026-05-01 | Claude Code | Step 2 改造修订（self-review 5 处不一致修复）：基于 `git ls` 实际比对 agent.md 中引用的源文件路径，并按 CEX-00 review 范式逐条扫描新任务卡的 schema 一致性，修复以下 5 个文档与代码不一致项：(1) **CEX-S2-10 Read first** 标注 `runtime/event.rs` / `runtime/snapshot.rs` 为 `（CEX-00.5 输出）`，澄清这两个文件目前不存在、依赖 CEX-00.5 抽象冻结后才落地。(2) **CEX-S2-14 → CEX-S2-16 ownership** 修正：原 CEX-S2-14 Write set 中包含 `src/internal/tui/agent_pane.rs`，CEX-S2-16 引用为 “CEX-S2-14 已建”；按 Step 2.4 vs Step 2.6 narrative，TUI agent pane 渲染面板属 Step 2.6 范围，将 `agent_pane.rs` 从 CEX-S2-14 移到 CEX-S2-16 Write set，并在 CEX-S2-14 完成判定 (6) 显式声明 “TUI agent pane 渲染不在本卡范围”；CEX-S2-14 目标更名为 “Controlled parallel execution + scheduler observability state”。(3) **CEX-S2-15 移除对 CEX-15 的依赖**：原依赖列出 `CEX-15（automation event source）`，但 Step 2.5 Phase 3 ValidatorEngine 是 orchestrator 内建（参考 `src/internal/ai/orchestrator/verifier.rs`），不需要 automation 触发；依赖修订为 `CEX-S2-13、CEX-S2-14`，并在完成判定 (2) 显式声明 “**不通过 CEX-15 automation 触发**”。(4) **CEX-S2-16 MCP 路径修正**：原 Write set 列出 `src/internal/ai/mcp/resources/agents.rs`，但仓库实际结构为 `src/internal/ai/mcp/resource.rs`（单数，无 `resources/` 子目录）；修订为在现有 `mcp/resource.rs` 内扩展，并在完成判定 (3) 显式说明 “无 `resources/` 子目录”。(5) **CEX-S2-18 依赖修正**：原依赖列出 `CEX-S2-10、CEX-S2-15`，但 `MergeDecision.distillable_evidence_ids` 字段在 CEX-S2-13 已落地（CEX-S2-13 完成判定 (3)），CEX-S2-18 仅新增**读路径**；依赖修订为 `CEX-S2-10、CEX-S2-13、CEX-13c`，并在完成判定 (2) 显式说明 “由 CEX-S2-13 已落地，本卡只新增读路径而不修改写路径”。Codex review CLI 暂时不可用，本次改动以 self-review 替代，仍通过 `cargo +nightly fmt --all -- --check` / `cargo test --test ai_agent_baseline_test` / `cargo test --test command_test code_test` 三项标准检查。 |
+| 2026-05-01 | Codex | Step 2 改造 Codex review 第四轮（10 处 finding 修复）：第四轮 `--fresh` 评审，找出 3 个 HIGH、6 个 MED、1 个 LOW finding，全部修复。**R4-1 (MED)** 仍有 “6 个 exit 状态 / 6 fixture” 残留（Step 2.2 验收行、E2E 场景 14），R3-3 把表扩到 9 行后没同步这些处，全部改为 9 fixture 并列出全部状态。**R4-2 (MED)** 表中 `spawn_eacces` 行存在但 fixture 列表只列了 `spawn_enoent`；fixture 列表加 `spawn_eacces`（可与 `spawn_enoent` 共享 fixture 但单独断言 `reason`），保证表中所有 `reason` 值都有断言。**R4-3 (HIGH)** CP-S2-3 比较脚本里 `LIBRA_CONFIG_OVERRIDE='...' \ ( cd ... )` 是无效 zsh/bash 语法（env 赋值不能放在 parenthesized command 之前），脚本会在跑测试之前直接失败。重写为 `( cd ... && LIBRA_CONFIG_OVERRIDE=... cargo test ... )` 形式。**R4-4 (HIGH)** baseline 树 checkout 在 `48ea0ae`，但 smoke 用 `tests/data/flag_off_smoke.json`，该文件由 CEX-S2-12 入库，**baseline 树不存在**——脚本必须把 fixture 从候选树复制到 baseline 树，或用绝对路径引用。新版脚本在 worktree 创建后显式 `cp` fixture + normalizer。**R4-5 (HIGH)** 旧脚本两次 `libra code` 都从 `$PATH` 调用，会比较同一个已安装 binary 而非 “baseline `48ea0ae` 的 libra” vs “候选 libra”。新版脚本对每个 worktree 跑 `cargo build --release --bin libra` 并用绝对路径 `target/release/libra` 调用。**R4-6 (MED)** artifact set 列出 `cargo test --all` + 7 baseline + 4 code_test，但旧脚本只跑 `ai_agent_baseline_test`；扩展为捕获 `cargo test --all` 的退出码、stdout / stderr 行数、failed-test 集合，再跑 baseline 7 + code_test 4，每类都独立 normalize 并 diff。**R4-7 (MED)** 旧脚本用固定 `/tmp/baseline-48ea0ae` / `/tmp/candidate-current` 路径，并发 CI 会冲突；改为 `mktemp -d -t libra-baseline.XXXXXX` 等并加 `trap` cleanup。**R4-8 (MED)** normalization 没要求确定性序——目录遍历靠 OS 默认序、SQLite 行靠隐式 ROWID 序、JSONL 靠写入序，会产生 flaky diff。新增 3 条规则：文件按 lex relative path 排序、SQLite 表用强制 `ORDER BY <stable_pkey>` 导出（schema 用 `.schema` 去 ROWID）、JSONL 每行经 `jq -S .` canonicalize。**R4-9 (HIGH)** 第三轮 R3-5 加的 ApprovalKey 形式 `hash(tool_name + canonical_args + cwd + sandbox_scope + hook_path + hook_checksum + hook_reason_hash)` 漏掉了 Step 1.6 的 sensitivity_tier / scope / target_path / protected_branch / source_slug / network_domain / workspace_id 字段——按字面实现会让 hook approval 绕开 Strict/Directory/Pattern 分级。重写为 “Step 1.6 全部字段 + Step 2 hook 字段叠加” 的完整公式，并显式声明 Step 1.6 字段不可省略。**R4-10 (MED)** Hook exit-code 表的 “dispatch 被阻止 / 暂停” 语义只对 `PreToolUse` 成立——`PostToolUse` 是 dispatch 之后触发，工具结果已产生，无法 “阻止 dispatch”。表头加作用域警告，列拆为 PreToolUse / PostToolUse 双列；PostToolUse 失败写 `post_tool_review_required` 走 Layer 1 review，不影响已产生的工具结果；E2E 场景 14 同步说明 PostToolUse 不阻塞 dispatch。 |
 | 2026-05-01 | Codex | Step 2 改造 Codex review 第三轮（6 处 finding 修复）：第三轮 `--fresh` 评审，找出 1 个 HIGH、4 个 MED、1 个 LOW finding，全部修复。**R3-1 (MED)** CEX-S2-10 Verification 列还残留 `（确保 flag-off 不变）` 旧文案——R2-2 修了完成判定但没修 Verification，改为 “schema-only 主路径无副作用 ... 真实 flag-off 等价检查在 CP-S2-3”。**R3-2 (LOW)** 三处 spec 引用 hook fail-closed 但没有链回 Step 2.2 权威映射表（S2-INV-13 不变量行、Lessons 节 INVARIANT 注释、Step 2 出口标准 “安全” 行），全部加上跨链。**R3-3 (HIGH)** Hook exit-code 表只覆盖 6 种状态，遗漏：SIGKILL/SIGTERM 信号杀死、ENOENT (binary 未找到)、EACCES (不可执行)、exit 0 + 空 stdout 边界。表扩展为 9 行（覆盖 exit `0` / `2` / `3` / 其他 / panic / timeout / 信号 / spawn_enoent / spawn_eacces 加 exit 0 空 stdout 显式行），fixture 数从 6 提升到 9，每条断言对应 `AgentRunEvent` 类型与 `reason` 字段。**R3-4 (MED)** CP-S2-3 “字节级等价于 `48ea0ae`” 没定义比较哪些工件、如何归一化时间戳/UUID、给出实际 diff 命令。新增 [#cp-s2-3-flag-off-等价测试规范](#cp-s2-3-flag-off-等价测试规范)子节，明确 4 类比较产物（cargo test 输出 + baseline 7 测试 + code_test 4 测试 + mock smoke session）、5 类归一化规则（时间戳/UUID/temp 路径/延迟/PID）、以及完整 `git worktree` + `scripts/normalize_session.sh` + `diff -u` 比较命令；CEX-S2-12 Write set 加入 `scripts/normalize_session.sh` 与 `tests/data/flag_off_smoke.json`。**R3-5 (MED)** Exit code 3 (needs-human) 与 Step 1.6 ApprovalKey 集成不明——一个 hook 的批准可能 silently 覆盖另一个 hook 的批准。新增 “needs-human (exit 3) Approval 集成约束” 子节：`ApprovalKey = hash(tool_name + canonical_args + cwd + sandbox_scope + hook_path + hook_checksum + hook_reason_hash)`，`hook_path` / `checksum` 任一变化都视为新 key；black-list（黑名单 / protected branch / `secret_leak`/`cred_exposure` reason）永不缓存。**R3-6 (MED)** Exit code 3 通知 channel / 等待超时 / 无响应 fallback 未指定。同子节新增：fan-out 到 TUI + Web + MCP `permissions` resource；默认 `[hooks].needs_human_timeout_ms = 600000` (10 分钟)，超时按 deny fail-closed；最大值 1 小时 hard cap；多 client 并发以第一个响应为准，其他 client 收 `approval_resolved_by_other` 通知；sub-agent 不能批准自己的 approval (S2-INV-06)。 |
 | 2026-05-01 | Codex | Step 2 改造 Codex review 第二轮（5 处 finding 修复）：在第一轮基础上 Codex `--fresh` 重新评审，输出 5 条新 finding（HIGH × 1、MEDIUM × 3、LOW × 1）。修复明细：**R2-1 (HIGH)** Hook exit-code 语义在 Step 2.2 与 Step 3.E 之间冲突——Step 2.2 说 `非 0/2 = fail-closed`，Step 3.E 说 `其他 exit code = warn 但通过`，exit 1 落在两者解释相反的灰区。在 Step 2.2 内新增「Hook exit-code 权威映射表」作为单一真相源（`0=allow` / `2=deny` / `3=needs-human` / 其他+panic+timeout=`deny` fail-closed），CEX-S2-12 完成判定 (6)、Step 2.2 验收行、E2E 场景 14、Step 3.E 全部改为引用此表，从 3 fixture 提升到 6 fixture（覆盖 exit 0/2/3/1/panic/timeout）。**R2-2 (MED)** CEX-S2-10 完成判定 (6) 原称 “flag-off 等价”，但本卡执行时 `code.sub_agents.enabled` 标志尚未引入（CEX-S2-12 才创建），改为 “本卡完成时字节级一致”，明确 “真正的 flag-off 等价检查在 CP-S2-3”。**R2-3 (MED)** Step 2 出口标准「兼容性」行原同时映射到 CP-S2-2 / CP-S2-3，但 CP-S2-2 非真实 flag-off 检查，改为只映射 CP-S2-3 并显式注解 “CP-S2-2 仅 schema-only”。**R2-4 (MED)** CEX-S2-11 完成判定 (3) 缺无副作用约束——workspace 创建写 `WorkspaceMaterialized` 事件可能无意中污染主 session JSONL，明确 “写入路径为 `agents/{run_id}.jsonl`，不写入主 session JSONL”。**R2-5 (LOW)** `MergeCandidate.review_evidence` 字段在 CEX-S2-13 / CEX-S2-15 之间无 owner，CEX-S2-15 引用但 CEX-S2-13 未声明；在 CEX-S2-13 完成判定 (3) 显式 freezee schema “`MergeCandidate.review_evidence: Vec<EvidenceId>`”，与 CEX-S2-15 reviewer 路径填值职责一致。 |
 | 2026-05-01 | Codex | Step 2 改造 Codex review 第一轮（11 处有效 finding 修复）：Codex CLI 装回（`npm install -g @openai/codex` + ChatGPT login）后跑了一次 `--fresh` thread review，输出 12 条 P0/P1/P2 finding；其中 11 条有效已修复，1 条（F-12 commit hash typo `48aa0ae`）为 hallucination（实际 `git show` 验证 `48ea0ae` 是正确 hash，文件中无 `48aa0ae` 字符串）。修复明细：**F-01** CEX-S2-14 依赖补 CEX-14 / CEX-16（Source Pool 限流 + agent_usage_stats schema 都是 Step 1 的产物）；**F-02** Hook 物理拦截 dispatch 实现归属——schema 在 CEX-S2-10 已声明，但实际 dispatch loop 之前没有 owner，现在显式归 CEX-S2-12 完成判定 (6)，含 panic / 30s timeout / 异常 exit code 三条 fail-closed fixture，外加加载期校验 “任何 capability package 都不能关闭 hook 拦截”；**F-03** CP-S2-2 vs CEX-S2-12 循环依赖——原文要求 CP-S2-2 跑 “flag-off 等价”但 `code.sub_agents.enabled` 标志要 CEX-S2-12 才创建；改为 CP-S2-2 = 字节级等价于 `48ea0ae`（schema-only），CP-S2-3 = 真正 flag-off 等价（CEX-S2-12 引入标志后）；**F-04** CP-S2-4 / CP-S2-5 触发条件补 Step 1 前置 gate（CEX-14 / CEX-15 / CEX-16）；**F-05** Risk score / test evidence ownership 在 CEX-S2-13 vs CEX-S2-15 之间清晰分工——CEX-S2-13 只声明字段（写 `None` / 空 `Vec`），CEX-S2-15 ValidatorEngine 填值；CEX-S2-15 完成判定加 (5) “Schema 不变性” 约束；**F-06** CP-S2-5 “五个 resource” 改为 6 个并列出全部 URI 模板（`runs` / `runs/{id}` / `permissions` / `budget` / `context` / `merge-candidates/{id}`）；**F-07** CEX-S2-18 完成判定 (3) 改为可测条件——`tests/ai_subagent_evidence_query_test.rs::flag_off_session_does_not_persist_agent_evidence` 断言 `.libra/sessions/{id}/session.jsonl` 不含任何 AgentEvidence / MergeDecision event；**F-08** `/sources reload` 拼写改为 `/source reload`，与 Step 1.10 命令一致；**F-09** Changelog “扩展为 5 条编号子项” 改为 “5-6 条编号子项”，并列出实际各卡 clause 数（S2-10=6, S2-11=5, S2-12=6, S2-13=5, S2-14=6, S2-15=5, S2-16=5, S2-17=6, S2-18=5）；**F-10** code.md mapping table “Step 2.1 - 2.7” 改为 “Step 2.1 - 2.8”；**F-11** Step 2 E2E 验证场景 11 条扩为 14 条（新增场景 12 evidence 接入点 / 13 flag-off 字节级等价 / 14 hook fail-closed），每条均映射到一张 CEX-S2-* 卡。F-12 commit hash typo 经 `grep -n "48aa0ae" docs/improvement/agent.md` 确认无匹配，跳过。 |
