@@ -192,10 +192,97 @@ pub struct AuditEvent {
     pub at: DateTime<Utc>,
 }
 
+/// Append-only audit channel.
+///
+/// **CEX-00.5 contract**: implementors must persist (or otherwise observe)
+/// every `AuditEvent` passed to `append`. The two semantic helpers
+/// `record_decision` and `record_event` are provided with default
+/// implementations that wrap their inputs into an `AuditEvent` and forward to
+/// `append`; concrete sinks should not need to override them. Tests for those
+/// default flows live in `tests/ai_hardening_contract_test.rs`.
+///
+/// `flush` exists for sinks that buffer (e.g. file-based JSONL writers); the
+/// default `TracingAuditSink` and `InMemoryAuditSink` are unbuffered and
+/// return `Ok(())` immediately.
 #[async_trait]
 pub trait AuditSink: Send + Sync {
+    /// Lower-level write of a fully-formed audit event. The semantic helpers
+    /// (`record_decision` / `record_event`) call this after constructing the
+    /// `AuditEvent`.
     async fn append(&self, event: AuditEvent) -> Result<()>;
+
+    /// Flush any buffered writes.
     async fn flush(&self) -> Result<()>;
+
+    /// Record a `BoundaryDecision` made for a given principal and tool
+    /// operation. The default impl builds a summary string, runs it through
+    /// the supplied `redactor` so secrets in `decision.reason` or
+    /// `operation.tool_name` cannot leak verbatim, and forwards an
+    /// `AuditEvent` to `append`.
+    ///
+    /// **Why an explicit `&SecretRedactor`**: `AuditEvent.redacted_summary`
+    /// claims its content is post-redaction. Without an explicit redactor
+    /// argument, default-impl callers would silently violate that claim
+    /// (CEX-00.5 Codex review P1-a). Pass
+    /// `SecretRedactor::default_runtime()` if you have no project-specific
+    /// patterns; pass a configured redactor otherwise.
+    async fn record_decision(
+        &self,
+        trace_id: Uuid,
+        principal: &PrincipalContext,
+        policy_version: &str,
+        operation: &ToolOperation,
+        decision: &BoundaryDecision,
+        redactor: &SecretRedactor,
+    ) -> Result<()> {
+        let summary = format!(
+            "tool={} mutates={} network={} allowed={} approval_required={} reason={}",
+            operation.tool_name,
+            operation.mutates_state,
+            operation.requires_network,
+            decision.allowed,
+            decision.approval_required,
+            decision.reason
+        );
+        self.append(AuditEvent {
+            trace_id,
+            principal_id: principal.principal_id.clone(),
+            action: "boundary_decision".to_string(),
+            policy_version: policy_version.to_string(),
+            redacted_summary: redactor.redact(&summary),
+            at: Utc::now(),
+        })
+        .await
+    }
+
+    /// Record a domain event (anything implementing the `Event` trait) on
+    /// the audit channel. The default impl produces an action string of
+    /// `event/<event_kind>`, runs `event_summary()` through `redactor`, and
+    /// forwards to `append`.
+    ///
+    /// **Why an explicit `&SecretRedactor`**: same rationale as
+    /// `record_decision` — domain events may carry user prompts or tool
+    /// outputs containing secrets, and the `AuditEvent.redacted_summary`
+    /// claim must hold (CEX-00.5 Codex review P1-a).
+    async fn record_event(
+        &self,
+        trace_id: Uuid,
+        principal: &PrincipalContext,
+        policy_version: &str,
+        event: &dyn super::event::Event,
+        redactor: &SecretRedactor,
+    ) -> Result<()> {
+        let summary = event.event_summary();
+        self.append(AuditEvent {
+            trace_id,
+            principal_id: principal.principal_id.clone(),
+            action: super::event::audit_action_for(event),
+            policy_version: policy_version.to_string(),
+            redacted_summary: redactor.redact(&summary),
+            at: Utc::now(),
+        })
+        .await
+    }
 }
 
 #[derive(Clone)]

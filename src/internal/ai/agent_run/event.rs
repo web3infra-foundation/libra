@@ -322,6 +322,143 @@ pub enum AgentRunEvent {
     },
 }
 
+impl crate::internal::ai::runtime::Event for AgentRunEvent {
+    fn event_kind(&self) -> &'static str {
+        match self {
+            Self::Started { .. } => "started",
+            Self::ToolCall { .. } => "tool_call",
+            Self::Blocked { .. } => "blocked",
+            Self::Completed { .. } => "completed",
+            Self::Failed { .. } => "failed",
+            Self::Cancelled { .. } => "cancelled",
+            Self::TimedOut { .. } => "timed_out",
+            Self::BudgetExceeded { .. } => "budget_exceeded",
+            Self::HookPassed { .. } => "hook_passed",
+            Self::BlockedByHook { .. } => "blocked_by_hook",
+            Self::HookRequestedHuman { .. } => "hook_requested_human",
+            Self::BlockedByHookFailure { .. } => "blocked_by_hook_failure",
+            Self::PostToolReviewRequired { .. } => "post_tool_review_required",
+            Self::WorkspaceMaterialized { .. } => "workspace_materialized",
+            Self::RunUsage { .. } => "run_usage",
+        }
+    }
+
+    fn event_id(&self) -> uuid::Uuid {
+        // AgentRunEvent variants are scoped to a single `agent_run_id`;
+        // there is no per-occurrence id at this scaffold layer (CEX-S2-12 will
+        // assign event ids when JSONL lines are appended). Returning the
+        // run-scope id here matches the doc rule "single-run events carry
+        // `agent_run_id`" and gives audit/dedupe code something stable to
+        // group by per run.
+        match self {
+            Self::Started { agent_run_id }
+            | Self::ToolCall { agent_run_id, .. }
+            | Self::Blocked { agent_run_id, .. }
+            | Self::Completed { agent_run_id }
+            | Self::Failed { agent_run_id, .. }
+            | Self::Cancelled { agent_run_id, .. }
+            | Self::TimedOut { agent_run_id }
+            | Self::BudgetExceeded { agent_run_id, .. }
+            | Self::HookPassed { agent_run_id, .. }
+            | Self::BlockedByHook { agent_run_id, .. }
+            | Self::HookRequestedHuman { agent_run_id, .. }
+            | Self::BlockedByHookFailure { agent_run_id, .. }
+            | Self::PostToolReviewRequired { agent_run_id, .. }
+            | Self::WorkspaceMaterialized { agent_run_id, .. }
+            | Self::RunUsage { agent_run_id, .. } => agent_run_id.0,
+        }
+    }
+
+    fn event_summary(&self) -> String {
+        // Lightweight, allocation-frugal summary keyed by variant. Audit
+        // consumers requiring full payloads should inspect the JSONL row;
+        // this is the audit-channel sketch.
+        match self {
+            Self::Started { agent_run_id } => format!("started run={}", agent_run_id.0),
+            Self::ToolCall {
+                agent_run_id,
+                tool_name,
+                ..
+            } => format!("tool_call run={} tool={tool_name}", agent_run_id.0),
+            Self::Blocked {
+                agent_run_id,
+                reason,
+            } => format!("blocked run={} reason={reason}", agent_run_id.0),
+            Self::Completed { agent_run_id } => format!("completed run={}", agent_run_id.0),
+            Self::Failed {
+                agent_run_id,
+                reason,
+            } => format!("failed run={} reason={reason}", agent_run_id.0),
+            Self::Cancelled { agent_run_id, .. } => {
+                format!("cancelled run={}", agent_run_id.0)
+            }
+            Self::TimedOut { agent_run_id } => format!("timed_out run={}", agent_run_id.0),
+            Self::BudgetExceeded {
+                agent_run_id,
+                dimension,
+            } => format!(
+                "budget_exceeded run={} dimension={dimension:?}",
+                agent_run_id.0
+            ),
+            Self::HookPassed {
+                agent_run_id,
+                invocation,
+                ..
+            } => format!(
+                "hook_passed run={} tool={}",
+                agent_run_id.0, invocation.tool_name
+            ),
+            Self::BlockedByHook {
+                agent_run_id,
+                invocation,
+                exit_code,
+                ..
+            } => format!(
+                "blocked_by_hook run={} tool={} exit={exit_code}",
+                agent_run_id.0, invocation.tool_name
+            ),
+            Self::HookRequestedHuman {
+                agent_run_id,
+                invocation,
+                ..
+            } => format!(
+                "hook_requested_human run={} tool={}",
+                agent_run_id.0, invocation.tool_name
+            ),
+            Self::BlockedByHookFailure {
+                agent_run_id,
+                reason,
+                ..
+            } => format!(
+                "blocked_by_hook_failure run={} reason={reason:?}",
+                agent_run_id.0
+            ),
+            Self::PostToolReviewRequired {
+                agent_run_id,
+                reason,
+                ..
+            } => format!(
+                "post_tool_review_required run={} reason={reason:?}",
+                agent_run_id.0
+            ),
+            Self::WorkspaceMaterialized {
+                agent_run_id,
+                materialization,
+            } => format!(
+                "workspace_materialized run={} strategy={:?}",
+                agent_run_id.0, materialization.strategy
+            ),
+            Self::RunUsage {
+                agent_run_id,
+                usage,
+            } => format!(
+                "run_usage run={} prompt={} completion={}",
+                agent_run_id.0, usage.prompt_tokens, usage.completion_tokens
+            ),
+        }
+    }
+}
+
 /// Wire-level wrapper for `AgentRunEvent` that lets old readers parse newer
 /// streams without errors.
 ///

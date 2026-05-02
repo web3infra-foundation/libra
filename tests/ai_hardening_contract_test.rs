@@ -155,3 +155,337 @@ async fn audit_sink_records_redacted_policy_events() {
     assert_eq!(events[0].policy_version, "tool-boundary:v1");
     assert!(!events[0].redacted_summary.contains("secret"));
 }
+
+// ---------------------------------------------------------------------------
+// CEX-00.5: AuditSink semantic helpers (record_decision / record_event)
+// ---------------------------------------------------------------------------
+
+mod cex_00_5 {
+    use chrono::Utc;
+    use libra::internal::ai::{
+        hooks::lifecycle::{LifecycleEvent, LifecycleEventKind},
+        runtime::{
+            AuditEvent, AuditSink, BoundaryDecision, InMemoryAuditSink, PrincipalContext,
+            SecretRedactor, ToolBoundaryPolicy, ToolOperation,
+        },
+    };
+    use uuid::Uuid;
+
+    fn redactor() -> SecretRedactor {
+        SecretRedactor::default_runtime()
+    }
+
+    fn principal() -> PrincipalContext {
+        PrincipalContext::system()
+    }
+
+    fn operation(name: &str, mutates: bool) -> ToolOperation {
+        ToolOperation {
+            tool_name: name.to_string(),
+            mutates_state: mutates,
+            requires_network: false,
+        }
+    }
+
+    fn lifecycle(kind: LifecycleEventKind, session: &str) -> LifecycleEvent {
+        LifecycleEvent {
+            kind,
+            session_id: session.to_string(),
+            session_ref: None,
+            prompt: None,
+            model: None,
+            source: None,
+            tool_name: None,
+            tool_input: None,
+            tool_response: None,
+            assistant_message: None,
+            timestamp: Utc::now(),
+        }
+    }
+
+    /// Default `record_decision` impl on `AuditSink` must convert the
+    /// (principal, operation, decision) tuple into a `boundary_decision`
+    /// audit row with a deterministic redacted summary, then forward to
+    /// the existing `append` channel. This pins the CEX-00.5 contract for
+    /// pre-existing sinks that want the new helper without overriding it.
+    #[tokio::test]
+    async fn record_decision_default_impl_emits_boundary_decision_audit_row() {
+        let sink = InMemoryAuditSink::default();
+        let trace = Uuid::new_v4();
+        let principal = principal();
+        let policy = ToolBoundaryPolicy::default_runtime();
+        let op = operation("apply_patch", true);
+        let decision = BoundaryDecision {
+            allowed: true,
+            approval_required: false,
+            reason: "default".to_string(),
+        };
+
+        AuditSink::record_decision(
+            &sink,
+            trace,
+            &principal,
+            policy.policy_version(),
+            &op,
+            &decision,
+            &redactor(),
+        )
+        .await
+        .expect("record_decision must succeed via default impl");
+
+        let events = sink.events().await;
+        assert_eq!(events.len(), 1, "single decision -> single audit row");
+        let row = &events[0];
+        assert_eq!(row.trace_id, trace);
+        assert_eq!(row.principal_id, principal.principal_id);
+        assert_eq!(row.action, "boundary_decision");
+        assert_eq!(row.policy_version, policy.policy_version());
+        assert!(row.redacted_summary.contains("tool=apply_patch"));
+        assert!(row.redacted_summary.contains("allowed=true"));
+        assert!(row.redacted_summary.contains("approval_required=false"));
+    }
+
+    /// CEX-00.5 P1-a fix (round 2 — direct regression guard): a custom
+    /// `Event` impl whose `event_summary()` carries a secret must have that
+    /// secret stripped by `record_event` before reaching the audit row.
+    /// Without the redactor call in the default impl this test fails.
+    #[tokio::test]
+    async fn record_event_redacts_secrets_from_event_summary() {
+        use libra::internal::ai::runtime::Event;
+        use uuid::Uuid;
+
+        struct LeakyEvent;
+
+        impl Event for LeakyEvent {
+            fn event_kind(&self) -> &'static str {
+                "leaky"
+            }
+            fn event_id(&self) -> Uuid {
+                Uuid::nil()
+            }
+            fn event_summary(&self) -> String {
+                "user said password: hunter2 keep secret".to_string()
+            }
+        }
+
+        let sink = InMemoryAuditSink::default();
+        let policy = ToolBoundaryPolicy::default_runtime();
+
+        AuditSink::record_event(
+            &sink,
+            Uuid::nil(),
+            &principal(),
+            policy.policy_version(),
+            &LeakyEvent,
+            &redactor(),
+        )
+        .await
+        .expect("record_event");
+
+        let row = &sink.events().await[0];
+        assert!(
+            !row.redacted_summary.contains("hunter2"),
+            "redactor must strip password: hunter2 from event_summary"
+        );
+        assert!(
+            row.redacted_summary.contains("[REDACTED]"),
+            "expected at least one [REDACTED] marker in the summary"
+        );
+        assert_eq!(row.action, "event/leaky");
+    }
+
+    /// CEX-00.5 P1-a fix: secrets in `decision.reason` or `operation.tool_name`
+    /// must be redacted before reaching `AuditEvent.redacted_summary`. Pin
+    /// the contract: a `password=` token in the reason should never appear
+    /// verbatim in the audit row.
+    #[tokio::test]
+    async fn record_decision_redacts_secrets_in_reason() {
+        let sink = InMemoryAuditSink::default();
+        let policy = ToolBoundaryPolicy::default_runtime();
+        let decision = BoundaryDecision {
+            allowed: false,
+            approval_required: false,
+            reason: "blocked because password: hunter2 leaked".to_string(),
+        };
+
+        AuditSink::record_decision(
+            &sink,
+            Uuid::nil(),
+            &principal(),
+            policy.policy_version(),
+            &operation("shell", true),
+            &decision,
+            &redactor(),
+        )
+        .await
+        .expect("record_decision");
+
+        let events = sink.events().await;
+        let row = &events[0];
+        assert!(
+            !row.redacted_summary.contains("hunter2"),
+            "redactor must strip password: hunter2 from the summary"
+        );
+        assert!(row.redacted_summary.contains("[REDACTED]"));
+    }
+
+    /// A denied + approval-required decision must serialize all three
+    /// fields into the summary so reviewers can read why the operation
+    /// stopped.
+    #[tokio::test]
+    async fn record_decision_summary_carries_denied_and_reason() {
+        let sink = InMemoryAuditSink::default();
+        let policy = ToolBoundaryPolicy::default_runtime();
+        let decision = BoundaryDecision {
+            allowed: false,
+            approval_required: true,
+            reason: "policy".to_string(),
+        };
+
+        AuditSink::record_decision(
+            &sink,
+            Uuid::nil(),
+            &principal(),
+            policy.policy_version(),
+            &operation("shell", true),
+            &decision,
+            &redactor(),
+        )
+        .await
+        .expect("record_decision");
+
+        let events = sink.events().await;
+        assert_eq!(events.len(), 1);
+        assert!(events[0].redacted_summary.contains("allowed=false"));
+        assert!(
+            events[0]
+                .redacted_summary
+                .contains("approval_required=true")
+        );
+        assert!(events[0].redacted_summary.contains("reason=policy"));
+    }
+
+    /// `record_event` flows a `&dyn Event` through the audit channel and
+    /// produces an action of `event/<event_kind>`, using `event_summary()`
+    /// as the redacted summary (the redactor still runs at `append` time).
+    #[tokio::test]
+    async fn record_event_default_impl_uses_event_kind_in_action() {
+        let sink = InMemoryAuditSink::default();
+        let policy = ToolBoundaryPolicy::default_runtime();
+        let event = lifecycle(LifecycleEventKind::TurnStart, "session-A");
+
+        AuditSink::record_event(
+            &sink,
+            Uuid::nil(),
+            &principal(),
+            policy.policy_version(),
+            &event,
+            &redactor(),
+        )
+        .await
+        .expect("record_event");
+
+        let rows = sink.events().await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].action, "event/turn_start");
+        assert!(rows[0].redacted_summary.contains("kind=turn_start"));
+        assert!(rows[0].redacted_summary.contains("session=session-A"));
+    }
+
+    /// `event/<kind>` must match the existing `LifecycleEventKind::Display`
+    /// strings for every variant — drift here would split log readers.
+    #[tokio::test]
+    async fn record_event_action_string_is_stable_across_kinds() {
+        let sink = InMemoryAuditSink::default();
+        let policy = ToolBoundaryPolicy::default_runtime();
+        let kinds = [
+            (LifecycleEventKind::SessionStart, "event/session_start"),
+            (LifecycleEventKind::TurnStart, "event/turn_start"),
+            (LifecycleEventKind::ToolUse, "event/tool_use"),
+            (LifecycleEventKind::ModelUpdate, "event/model_update"),
+            (LifecycleEventKind::Compaction, "event/compaction"),
+            (LifecycleEventKind::TurnEnd, "event/turn_end"),
+            (LifecycleEventKind::SessionEnd, "event/session_end"),
+        ];
+
+        for (i, (kind, expected_action)) in kinds.iter().enumerate() {
+            let event = lifecycle(*kind, &format!("session-{i}"));
+            AuditSink::record_event(
+                &sink,
+                Uuid::nil(),
+                &principal(),
+                policy.policy_version(),
+                &event,
+                &redactor(),
+            )
+            .await
+            .expect("record_event");
+            let rows = sink.events().await;
+            assert_eq!(rows.last().unwrap().action, *expected_action);
+        }
+
+        let rows = sink.events().await;
+        assert_eq!(rows.len(), kinds.len());
+    }
+
+    /// Backward-compat regression guard: `append` is still a public,
+    /// callable method. CEX-00.5 only added new methods with default impls.
+    #[tokio::test]
+    async fn append_remains_callable_post_cex_00_5() {
+        let sink = InMemoryAuditSink::default();
+        let trace = Uuid::new_v4();
+        let event = AuditEvent {
+            trace_id: trace,
+            principal_id: "tester".to_string(),
+            action: "custom_action".to_string(),
+            policy_version: "v0".to_string(),
+            redacted_summary: "manual append".to_string(),
+            at: Utc::now(),
+        };
+
+        sink.append(event.clone())
+            .await
+            .expect("append must remain a public API");
+
+        let events = sink.events().await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, "custom_action");
+    }
+
+    /// The default impls reach pre-existing concrete sinks via dyn dispatch.
+    /// `Box<dyn AuditSink>` exists in `ToolBoundaryRuntime`, so we pin the
+    /// dyn-compatibility of the new methods explicitly.
+    #[tokio::test]
+    async fn semantic_helpers_work_via_dyn_dispatch() {
+        let sink: Box<dyn AuditSink> = Box::new(InMemoryAuditSink::default());
+        let policy = ToolBoundaryPolicy::default_runtime();
+
+        sink.record_decision(
+            Uuid::nil(),
+            &principal(),
+            policy.policy_version(),
+            &operation("read_file", false),
+            &BoundaryDecision {
+                allowed: true,
+                approval_required: false,
+                reason: "ro".to_string(),
+            },
+            &redactor(),
+        )
+        .await
+        .expect("record_decision via dyn");
+
+        let event = lifecycle(LifecycleEventKind::ToolUse, "session-dyn");
+        sink.record_event(
+            Uuid::nil(),
+            &principal(),
+            policy.policy_version(),
+            &event,
+            &redactor(),
+        )
+        .await
+        .expect("record_event via dyn");
+
+        sink.flush().await.unwrap();
+    }
+}

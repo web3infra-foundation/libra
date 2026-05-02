@@ -13,7 +13,7 @@ test-provider  = []   # deterministic hidden provider for local TUI automation t
 subagent-scaffold = []  # CEX-S2-10 schema-only scaffold (Step 2 sub-agent contracts; gated on CP-4 in production — see docs/improvement/agent.md "Step 2 audit closure")
 
 [dependencies]
-uuid = { version = "1.23.1", features = ["v4", "v7"] }
+uuid = { version = "1.23.1", features = ["v4", "v5", "v7"] }
 git-internal = "0.7.4"
 anyhow = "1.0.102"
 byte-unit = "5.2.0"

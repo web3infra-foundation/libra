@@ -6,12 +6,15 @@
 pub mod contracts;
 mod derived_records;
 pub mod environment;
+pub mod event;
 pub mod hardening;
 pub mod phase3;
 pub mod phase4;
 pub mod prompt_builders;
+pub mod snapshot;
 
 pub use contracts::{PromptPackage, WorkflowPhase};
+pub use event::{Event, audit_action_for};
 pub use hardening::{
     AuditEvent, AuditSink, BoundaryDecision, InMemoryAuditSink, PrincipalContext, PrincipalRole,
     SecretRedactor, ToolBoundaryPolicy, ToolBoundaryRuntime, ToolOperation, TracingAuditSink,
@@ -25,6 +28,7 @@ pub use phase4::{
     RiskScoreBreakdown, aggregate_risk_score, build_decision_proposal,
 };
 pub use prompt_builders::{IntentPromptBuilder, PlanningPromptBuilder, TaskPromptBuilder};
+pub use snapshot::Snapshot;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeConfig {
