@@ -9,12 +9,19 @@
 //!   - [`ensure_ai_projection_schema`] adds the AI projection tables (using
 //!     the bootstrap section delimited by `BEGIN/END AI PROJECTION SCHEMA`).
 //!   - [`ensure_ai_runtime_contract_schema`] applies Phase 0 contract DDL.
+//!   - [`migration::run_builtin_migrations`] (CEX-12.5) applies every
+//!     versioned migration registered in
+//!     [`migration::builtin_migrations`]. Future schema changes (CEX-13b /
+//!     CEX-15 / CEX-16) **must** add a [`migration::Migration`] there
+//!     instead of introducing a new ad-hoc `ensure_*_schema` helper.
 //! - Provide a process-wide cache ([`TEST_DB_CONNECTIONS`]) keyed by absolute
 //!   path so concurrent callers share a single sea-orm `DbConn` per database
 //!   (matching SQLite's "one writer at a time" model).
 //!
 //! Hash and ref invariants are not enforced here; that work lives in the
 //! `reference` model and `branch`/`tag` modules.
+
+pub mod migration;
 
 use std::{
     io,
@@ -103,6 +110,16 @@ pub async fn establish_connection_with_busy_timeout(
                 "Failed to ensure AI runtime contract schema: {err}"
             ))
         })?;
+    // CEX-12.5: apply every migration registered in
+    // `migration::builtin_migrations`. The runner is idempotent — on a
+    // fresh DB or a legacy DB it ensures the `schema_versions` tracking
+    // table and runs only the migrations whose `version` is not already
+    // recorded. Future persistence-touching CEXes plug in by adding to
+    // `builtin_migrations`; no new `ensure_*_schema` helpers should be
+    // added here.
+    migration::run_builtin_migrations(&conn)
+        .await
+        .map_err(|err| IOError::other(format!("Failed to run schema migrations: {err}")))?;
     Ok(conn)
 }
 // #[cfg(not(test))]
@@ -415,6 +432,22 @@ pub async fn create_database(db_path: &str) -> io::Result<DatabaseConnection> {
             setup_database_sql(&conn)
                 .await
                 .map_err(|err| IOError::other(format!("Failed to setup database: {err:?}")))?;
+            // CEX-12.5 P1#2 fix (Codex r3): the fresh-init path must run
+            // the migration runner so freshly created databases have the
+            // `schema_versions` bookkeeping table and any registered
+            // built-in migrations applied. Without this call, callers like
+            // `libra init` would create a DB whose schema diverges from a
+            // reconnected DB until the first `establish_connection` ran
+            // the migrations belatedly. The acceptance criterion in
+            // `docs/improvement/agent.md` line 313 requires fresh and
+            // existing repos to converge to the same schema after init.
+            migration::run_builtin_migrations(&conn)
+                .await
+                .map_err(|err| {
+                    IOError::other(format!(
+                        "Failed to run schema migrations on fresh database: {err}"
+                    ))
+                })?;
             Ok(conn)
         }
         _ => Err(IOError::other("Failed to connect to new database.")),
