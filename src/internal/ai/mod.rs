@@ -52,6 +52,11 @@
 
 // Agent framework: Agent, AgentBuilder, ChatAgent and their builders.
 pub mod agent;
+// Step 2 sub-agent contracts (CEX-S2-10 schema-only scaffold).
+// Gated behind `subagent-scaffold` Cargo feature; off by default. See module
+// docs for CP-4 gate-violation note.
+#[cfg(feature = "subagent-scaffold")]
+pub mod agent_run;
 // Generic LLM client helpers shared across providers.
 pub mod client;
 // Adapter for the managed Codex provider runtime.

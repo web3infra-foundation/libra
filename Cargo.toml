@@ -10,6 +10,7 @@ test-network   = []   # L2: tests requiring outbound network but no secrets
 test-live-ai   = []   # L3: tests calling real LLM APIs
 test-live-cloud = []  # L3: tests hitting real D1/R2 endpoints
 test-provider  = []   # deterministic hidden provider for local TUI automation tests
+subagent-scaffold = []  # CEX-S2-10 schema-only scaffold (Step 2 sub-agent contracts; gated on CP-4 in production — see docs/improvement/agent.md "Step 2 audit closure")
 
 [dependencies]
 uuid = { version = "1.23.1", features = ["v4", "v7"] }
