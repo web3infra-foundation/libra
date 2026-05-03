@@ -200,7 +200,8 @@ enum Commands {
     Clean(command::clean::CleanArgs),
     #[command(
         subcommand,
-        about = "Stash the changes in a dirty working directory away"
+        about = "Stash the changes in a dirty working directory away",
+        after_help = command::stash::STASH_EXAMPLES
     )]
     Stash(Stash),
     #[command(subcommand, about = "Large File Storage")]
@@ -267,7 +268,8 @@ enum Commands {
     Reflog(command::reflog::ReflogArgs),
     #[command(
         about = "Manage multiple working trees attached to this repository",
-        alias = "wt"
+        alias = "wt",
+        after_help = command::worktree::WORKTREE_EXAMPLES
     )]
     Worktree(command::worktree::WorktreeArgs),
     #[command(about = "Cloud backup and restore operations (D1/R2)")]
@@ -284,13 +286,13 @@ enum Commands {
     IndexPack(command::index_pack::IndexPackArgs),
 
     #[command(
-        about = "Check out and switch to a local or remote branches",
-        hide = true
+        about = "Branch compatibility surface; prefer 'switch' for branches and 'restore' for files"
     )]
     Checkout(command::checkout::CheckoutArgs),
     #[command(
         subcommand,
-        about = "Use binary search to find the commit that introduced a bug"
+        about = "Use binary search to find the commit that introduced a bug",
+        after_help = command::bisect::BISECT_EXAMPLES
     )]
     Bisect(Bisect),
 }
@@ -318,6 +320,30 @@ pub enum Stash {
     Drop {
         #[arg(help = "The stash to drop")]
         stash: Option<String>,
+    },
+    #[command(about = "Show the changes recorded in the stash as a file-level summary")]
+    Show {
+        #[arg(help = "Stash reference (default: stash@{0})")]
+        stash: Option<String>,
+        #[arg(long, help = "Show only the file names that changed")]
+        name_only: bool,
+        #[arg(long, help = "Show only file names with their status code")]
+        name_status: bool,
+    },
+    #[command(about = "Create and check out a new branch from the stash, then drop it")]
+    Branch {
+        #[arg(help = "Name of the new branch to create")]
+        branch: String,
+        #[arg(help = "Stash reference (default: stash@{0})")]
+        stash: Option<String>,
+    },
+    #[command(about = "Remove all stashed entries")]
+    Clear {
+        #[arg(
+            long,
+            help = "Skip confirmation; required outside JSON / machine modes"
+        )]
+        force: bool,
     },
 }
 
@@ -352,6 +378,18 @@ pub enum Bisect {
     },
     #[command(about = "Show bisect log")]
     Log,
+    #[command(about = "Run a script for each commit until convergence")]
+    Run {
+        #[arg(
+            help = "Command to run for each commit; first arg is the executable",
+            required = true,
+            trailing_var_arg = true,
+            allow_hyphen_values = true
+        )]
+        cmd: Vec<String>,
+    },
+    #[command(about = "Show the current bisect state and remaining candidates")]
+    View,
 }
 
 /// Synchronous CLI entry — used by both the `libra` binary and embedders that cannot

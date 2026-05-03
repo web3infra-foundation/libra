@@ -106,15 +106,36 @@ libra worktree prune
 
 ### Subcommand: `remove`
 
-Unregister a worktree from the state file. The directory on disk is intentionally left untouched to avoid destructive behavior. Cannot remove the main worktree or a locked worktree.
+Unregister a worktree from the state file. By default the directory on disk
+is intentionally left untouched to avoid destructive behavior. Pass
+`--delete-dir` for Git-style behavior — the directory is removed only after
+a dirty-state check passes. Cannot remove the main worktree or a locked
+worktree.
 
-| Argument | Description |
-|----------|-------------|
+| Argument / Flag | Description |
+|-----------------|-------------|
 | `<path>` | Filesystem path of the worktree to unregister. |
+| `--delete-dir` | After unregistering, also delete the directory on disk. Refused when the worktree contains uncommitted changes (staged or unstaged). |
 
 ```bash
+# Default — keep the directory on disk
 libra worktree remove ../my-feature
+
+# Git-style — also delete the directory (clean worktree only)
+libra worktree remove --delete-dir ../my-feature
+
+# Refused when dirty:
+$ libra worktree remove --delete-dir ../dirty-feature
+fatal: cannot delete dirty worktree '../dirty-feature' (uncommitted changes)
+       Hint: commit or stash changes, or remove without --delete-dir to keep the directory
 ```
+
+Behavior intentionally differs from Git: Git's default deletes the directory.
+Libra keeps it by default to prevent accidental data loss; `--delete-dir`
+restores Git-like semantics opt-in. See
+[`COMPATIBILITY.md`](../../COMPATIBILITY.md) and
+[`compatibility/worktree-surface.md`](../improvement/compatibility/worktree-surface.md)
+for the rationale.
 
 ### Subcommand: `umount`
 

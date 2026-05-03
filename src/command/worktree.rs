@@ -25,6 +25,21 @@ use crate::{
     },
 };
 
+/// `--help` examples shown in `libra worktree --help` output.
+pub const WORKTREE_EXAMPLES: &str = "\
+EXAMPLES:
+    libra worktree add ../feature-x                Create a linked worktree
+    libra worktree list                            List every registered worktree
+    libra worktree lock ../feature-x --reason wip  Lock a worktree to prevent prune/remove
+    libra worktree unlock ../feature-x             Release the lock
+    libra worktree move ../old ../new              Rename a worktree
+    libra worktree prune                           Drop entries whose paths vanished
+    libra worktree remove ../feature-x             Unregister, keep the directory on disk
+    libra worktree remove ../feature-x --delete-dir
+                                                   Unregister and delete the directory
+                                                   (refused on a dirty worktree)
+    libra worktree repair                          Fix stale or duplicate registry rows";
+
 /// CLI arguments for the `worktree` subcommand.
 ///
 /// This type is wired into the top-level CLI and dispatches to individual
@@ -70,10 +85,16 @@ pub enum WorktreeSubcommand {
     },
     /// Prune worktrees that are no longer valid or reachable.
     Prune,
-    /// Unregister a worktree without deleting its directory on disk.
+    /// Unregister a worktree. By default the directory on disk is preserved;
+    /// pass `--delete-dir` for Git-style behavior that also removes the
+    /// directory after a dirty-state check.
     Remove {
         /// Filesystem path of the worktree to unregister.
         path: String,
+        /// Also delete the worktree directory on disk after unregistering it.
+        /// Refuses on a dirty worktree (uncommitted changes).
+        #[clap(long)]
+        delete_dir: bool,
     },
     /// Unmount a FUSE task worktree mountpoint.
     #[cfg(unix)]
@@ -164,7 +185,7 @@ pub async fn execute_safe(args: WorktreeArgs, _output: &OutputConfig) -> CliResu
         WorktreeSubcommand::Unlock { path } => unlock_worktree(path),
         WorktreeSubcommand::Move { src, dest } => move_worktree(src, dest),
         WorktreeSubcommand::Prune => prune_worktrees(),
-        WorktreeSubcommand::Remove { path } => remove_worktree(path),
+        WorktreeSubcommand::Remove { path, delete_dir } => remove_worktree(path, delete_dir).await,
         #[cfg(unix)]
         WorktreeSubcommand::Umount { path, cleanup } => umount_fuse_path(path, cleanup),
         WorktreeSubcommand::Repair => repair_worktrees(),
@@ -712,12 +733,15 @@ fn prune_worktrees() -> io::Result<()> {
     Ok(())
 }
 
-/// Implements `worktree remove <path>`.
+/// Implements `worktree remove <path> [--delete-dir]`.
 ///
-/// The specified worktree is removed from the registry, provided it is neither
-/// the main worktree nor locked. The directory on disk is intentionally left
-/// untouched to avoid destructive behavior.
-fn remove_worktree(path: String) -> io::Result<()> {
+/// Defaults to preserving the directory on disk (Libra's intentional
+/// non-destructive behavior — see [`COMPATIBILITY.md`](../../../COMPATIBILITY.md)).
+/// With `--delete-dir`, the worktree must be clean (no staged or unstaged
+/// changes) and the directory is removed after the registry entry is dropped.
+/// Order matters: registry first, then disk — a half-completed delete cannot
+/// leave an orphan registry pointer.
+async fn remove_worktree(path: String, delete_dir: bool) -> io::Result<()> {
     let mut state = load_state()?;
     let target = canonicalize(path)?;
 
@@ -733,6 +757,36 @@ fn remove_worktree(path: String) -> io::Result<()> {
     }
     if entry.locked {
         return Err(io::Error::other("cannot remove locked worktree"));
+    }
+
+    if delete_dir {
+        // Dirty-check: refuse on staged or unstaged changes. The check runs
+        // inside the target worktree so the ignore policy and storage path
+        // resolution match what the user would see if they ran `libra status`
+        // there.
+        let _guard = DirGuard::change_to(&target).map_err(|e| {
+            io::Error::other(format!("cannot enter worktree '{}': {e}", target.display()))
+        })?;
+        let staged = crate::command::status::changes_to_be_committed_safe()
+            .await
+            .map_err(|e| io::Error::other(format!("failed to inspect worktree status: {e}")))?;
+        let unstaged = crate::command::status::changes_to_be_staged()
+            .map_err(|e| io::Error::other(format!("failed to inspect worktree status: {e}")))?;
+        if !staged.is_empty() || !unstaged.is_empty() {
+            return Err(io::Error::other(format!(
+                "cannot delete dirty worktree '{}' (uncommitted changes)\n\
+                 Hint: commit or stash changes, or remove without --delete-dir to keep the directory",
+                target.display()
+            )));
+        }
+        // Drop the guard so the cwd is restored before we rm -rf the target.
+        drop(_guard);
+        fs::remove_dir_all(&target).map_err(|e| {
+            io::Error::other(format!(
+                "failed to delete worktree directory '{}': {e}",
+                target.display()
+            ))
+        })?;
     }
 
     state.worktrees.remove(index);

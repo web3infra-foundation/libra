@@ -20,6 +20,12 @@ use uuid::Uuid;
 #[path = "worktree.rs"]
 mod legacy;
 
+// Re-export the shared `--help` examples constant so the cli definition can
+// reference `command::worktree::WORKTREE_EXAMPLES` regardless of whether the
+// `worktree-fuse` feature routed compilation through this file or directly
+// through `worktree.rs`.
+pub use legacy::WORKTREE_EXAMPLES;
+
 use crate::{
     command::{
         branch,
@@ -81,6 +87,8 @@ pub enum WorktreeSubcommand {
     Prune,
     Remove {
         path: String,
+        #[clap(long, help = "Also delete the worktree directory on disk")]
+        delete_dir: bool,
     },
     #[clap(alias = "unmount", about = "Unmount a FUSE worktree mountpoint")]
     Umount {
@@ -228,7 +236,7 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
             )
             .await
         }
-        WorktreeSubcommand::Remove { path } => {
+        WorktreeSubcommand::Remove { path, delete_dir } => {
             if remove_fuse_worktree(&path)
                 .await
                 .map_err(|e| CliError::fatal(e.to_string()))?
@@ -237,7 +245,7 @@ pub async fn execute_safe(args: WorktreeArgs, output: &OutputConfig) -> CliResul
             }
             legacy::execute_safe(
                 legacy::WorktreeArgs {
-                    command: legacy::WorktreeSubcommand::Remove { path },
+                    command: legacy::WorktreeSubcommand::Remove { path, delete_dir },
                 },
                 output,
             )

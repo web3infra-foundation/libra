@@ -190,6 +190,7 @@
 | **F** | 拼写纠错建议（确认 clap suggest 已启用） | 独立改进 |
 | **G** | 意外错误时输出 GitHub Issues URL | 独立改进 |
 | **H** | **In-process SSH Client**：使用 Rust SSH 库（`russh`）替换外部 `ssh` 进程调用，实现 SSH 私钥纯内存传递（不落盘），消除临时文件泄漏风险和文件系统依赖。解除 Agent blocker | 后续批次优先 |
+| **I** | **Git surface 兼容性补齐** → 见 [compatibility/README.md](compatibility/README.md)：4-tier `COMPATIBILITY.md` / 仓库治理 / CI 兼容矩阵 / stash・bisect 子命令面 / worktree 与 checkout 行为差异 | 与各命令批次并行 |
 
 ---
 

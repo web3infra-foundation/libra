@@ -234,6 +234,24 @@ truncated to the specified number of commits. The depth value is validated at pa
 does not yet support `--shallow-since` or `--shallow-exclude` for date-based or ref-based
 shallow boundaries, keeping the initial implementation focused and predictable.
 
+### `--sparse` is intentionally unsupported
+
+Sparse-checkout (`git clone --sparse`, `git sparse-checkout`) is intentionally not
+implemented. Sparse cone/skip-worktree relies on Git-managed worktree configuration,
+while Libra has migrated config / HEAD / refs to SQLite. The bridge is not free, and
+the audit-driven decision is to keep `--sparse` deferred until there is a concrete
+monorepo subtree-checkout requirement that cannot be met by tiered cloud storage.
+See [`docs/improvement/compatibility/declined.md`](../improvement/compatibility/declined.md)
+entry **D10** for the restart conditions.
+
+### `--recurse-submodules` is intentionally unsupported
+
+Per the broader product boundary on submodules (no submodule subcommand surface),
+`clone --recurse-submodules` is also unsupported. See
+[`docs/improvement/compatibility/declined.md`](../improvement/compatibility/declined.md)
+entries **D1** (submodule) and **D4** (clone --recurse-submodules) for restart
+conditions.
+
 ### `--single-branch` flag
 
 When combined with `--branch`, `--single-branch` reduces the data transferred during clone

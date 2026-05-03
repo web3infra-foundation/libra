@@ -137,3 +137,22 @@ assert_cmd = "2.2.1"
 pgp = "0.19.0"
 gag = "1.0.0"
 portable-pty = "0.9.0"
+
+# Compatibility-surface integration tests live under tests/compat/. Cargo's
+# default test discovery only picks up *.rs directly under tests/, so each
+# compat surface file must be registered here.
+[[test]]
+name = "compat_stash_subcommand_surface"
+path = "tests/compat/stash_subcommand_surface.rs"
+
+[[test]]
+name = "compat_bisect_subcommand_surface"
+path = "tests/compat/bisect_subcommand_surface.rs"
+
+[[test]]
+name = "compat_worktree_delete_dir"
+path = "tests/compat/worktree_delete_dir.rs"
+
+[[test]]
+name = "compat_checkout_alias_help"
+path = "tests/compat/checkout_alias_help.rs"

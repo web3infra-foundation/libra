@@ -230,6 +230,21 @@ tests/data/** -text
 - [ ] 禁止 force push。
 - [ ] 视团队执行情况启用 signed commits（与 contributing.md 中 PGP 要求对齐）。
 
+### required-checks 切换 checklist（C2 落地后由维护者在 GitHub UI 执行）
+
+C2 把 `.github/workflows/base.yml` 与 `.github/workflows/codeql.yml` 的 `name:` 字段
+统一到 `compat-*` / `security-*` 命名后，旧的 required-checks 标识（`Rustfmt Check`
+等）已经不会再出现。维护者必须按以下顺序在 GitHub UI 切换：
+
+- [ ] Settings → Branches → main → "Require status checks" 列表，移除旧名称：`Rustfmt Check` / `Clippy Check` / `Redundancy Check` / `Run Tests` / `Analyze (...)`。
+- [ ] 同一列表中加入新名称：`compat-rustfmt` / `compat-clippy` / `compat-redundancy` / `compat-offline-core` / `compat-network-remotes` / `security-codeql-actions` / `security-codeql-rust`。
+- [ ] **不要**把 `compat-live-ai` / `compat-live-cloud`（占位 / 未来 workflow_dispatch）加入 required-checks——这些依赖外部凭据，会让 PR 阻塞在配置外因素上。
+- [ ] 在临时分支故意提交一个会失败的 fmt 改动，确认 PR 显示 `compat-rustfmt` 失败并阻塞合并。
+- [ ] 在临时分支故意 lint 失败，确认 `compat-clippy` 阻塞合并。
+
+切换完成前不要 merge C2 自身——若 main 已经在跑新 job 名而 branch protection 还
+锁着旧名，所有 PR 会出现"required check 永远 pending"。
+
 ## 关键文件与改动
 
 | 文件 | 操作 | 说明 |

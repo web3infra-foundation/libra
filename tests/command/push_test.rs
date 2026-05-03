@@ -966,6 +966,7 @@ fn test_push_quiet_force_still_emits_warning_and_warning_exit_code() {
 
 #[cfg(unix)]
 #[tokio::test]
+#[serial]
 async fn test_push_ssh_remote_via_fake_ssh() {
     let temp_root = tempfile::tempdir().expect("failed to create temp root");
     let remote_dir = temp_root.path().join("remote.git");
@@ -1083,6 +1084,7 @@ async fn test_push_ssh_remote_via_fake_ssh() {
 
 #[cfg(unix)]
 #[tokio::test]
+#[serial]
 async fn test_push_ssh_host_key_failure_is_reported() {
     let temp_root = tempfile::tempdir().expect("failed to create temp root");
     let remote_dir = temp_root.path().join("remote.git");

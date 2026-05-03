@@ -362,6 +362,19 @@ impl BisectState {
     }
 }
 
+/// `--help` examples shown in `libra bisect --help` output.
+pub const BISECT_EXAMPLES: &str = "\
+EXAMPLES:
+    libra bisect start <bad> <good>            Begin a session with explicit bounds
+    libra bisect bad                           Mark the current HEAD as bad
+    libra bisect good                          Mark the current HEAD as good
+    libra bisect skip                          Skip the current commit and continue
+    libra bisect view                          Show current state and remaining candidates
+    libra bisect run cargo test                Auto-bisect by running a test command
+    libra bisect run cargo test -- --ignored   Forward flags to the test command
+    libra bisect log                           Print full session log
+    libra bisect reset                         End the session and restore HEAD";
+
 /// Entry point for the bisect command — dispatches the [`Bisect`] subvariant
 /// to the matching `handle_*` function.
 ///
@@ -376,6 +389,8 @@ pub async fn execute_safe(bisect_cmd: Bisect, output: &OutputConfig) -> CliResul
         Bisect::Reset { rev } => handle_reset(rev, output).await,
         Bisect::Skip { rev } => handle_skip(rev, output).await,
         Bisect::Log => handle_log(output).await,
+        Bisect::Run { cmd } => handle_run(cmd, output).await,
+        Bisect::View => handle_view(output).await,
     }
 }
 
@@ -970,6 +985,185 @@ async fn handle_log(output: &OutputConfig) -> CliResult<()> {
     info_println!(output, "  Steps remaining: {:?}", state.steps);
 
     Ok(())
+}
+
+/// Handle `bisect view` — print the current bisect state in the same shape
+/// as the JSON output described in the C4 plan.
+///
+/// Behavior:
+/// - When no session row exists, returns a fatal `RepoStateInvalid` error
+///   (the user must `bisect start` first).
+/// - When a session is in progress (or completed), prints the current HEAD,
+///   good/bad bounds, remaining-candidate count, and skipped commits.
+async fn handle_view(output: &OutputConfig) -> CliResult<()> {
+    if !BisectState::has_state().await.map_err(CliError::fatal)? {
+        return Err(
+            CliError::fatal("not in an active bisect; run `libra bisect start` first")
+                .with_stable_code(crate::utils::error::StableErrorCode::RepoStateInvalid)
+                .with_hint("start a bisect session before calling `bisect view`"),
+        );
+    }
+
+    let state = BisectState::load().await.map_err(CliError::fatal)?;
+    let head = Head::current_commit()
+        .await
+        .map(|h| h.to_string())
+        .unwrap_or_else(|| "(none)".to_string());
+    let good = state
+        .good
+        .first()
+        .map(|h| h.to_string()[..7].to_string())
+        .unwrap_or_else(|| "(unset)".to_string());
+    let bad = state
+        .bad
+        .map(|h| h.to_string()[..7].to_string())
+        .unwrap_or_else(|| "(unset)".to_string());
+    let remaining = count_commits_to_test(&state).await.unwrap_or(0);
+    let skipped = state
+        .skipped
+        .iter()
+        .map(|h| h.to_string()[..7].to_string())
+        .collect::<Vec<_>>();
+
+    info_println!(
+        output,
+        "Bisecting between {} (good) and {} (bad)",
+        good,
+        bad
+    );
+    info_println!(output, "HEAD: {}", &head[..head.len().min(7)]);
+    info_println!(output, "Remaining: {} candidate(s)", remaining);
+    if skipped.is_empty() {
+        info_println!(output, "Skipped: (none)");
+    } else {
+        info_println!(output, "Skipped: {}", skipped.join(", "));
+    }
+    Ok(())
+}
+
+/// Handle `bisect run <cmd> [args...]` — execute the script for each commit
+/// until the search converges (or every candidate has been skipped).
+///
+/// Exit-code semantics (aligned with `git bisect run`):
+/// - `0`            → mark good
+/// - `125`          → mark skip (cannot test this commit)
+/// - `1..=127`      → mark bad
+/// - `128..`        → fatal: terminate the bisect with `BISECT_RUN_FAILED`
+/// - signal / `None`→ fatal: same as 128+
+async fn handle_run(cmd: Vec<String>, output: &OutputConfig) -> CliResult<()> {
+    use std::process::Command;
+
+    if !BisectState::is_in_progress()
+        .await
+        .map_err(CliError::fatal)?
+    {
+        return Err(
+            CliError::fatal("not in an active bisect; run `libra bisect start` first")
+                .with_stable_code(crate::utils::error::StableErrorCode::RepoStateInvalid)
+                .with_hint("start a bisect session and mark good/bad bounds before `bisect run`"),
+        );
+    }
+
+    let (executable, args) = cmd
+        .split_first()
+        .ok_or_else(|| CliError::fatal("`bisect run` requires a command to execute"))?;
+
+    let mut steps = 0usize;
+    let mut session_skipped: Vec<String> = Vec::new();
+
+    loop {
+        let state = BisectState::load().await.map_err(CliError::fatal)?;
+        if state.completed {
+            // Already converged before we got to act this iteration.
+            let first_bad = state.bad.map(|h| h.to_string()).unwrap_or_default();
+            info_println!(
+                output,
+                "Converged: first bad commit is {}",
+                if first_bad.len() >= 7 {
+                    &first_bad[..7]
+                } else {
+                    &first_bad
+                }
+            );
+            info_println!(output, "{} steps, {} skipped", steps, session_skipped.len());
+            return Ok(());
+        }
+
+        let head_short = Head::current_commit()
+            .await
+            .map(|h| h.to_string()[..7].to_string())
+            .unwrap_or_else(|| "(no HEAD)".to_string());
+        info_println!(
+            output,
+            "Bisecting: running `{} {}` at {}",
+            executable,
+            args.join(" "),
+            head_short
+        );
+
+        let status = Command::new(executable).args(args).status().map_err(|e| {
+            CliError::fatal(format!("failed to spawn `{executable}`: {e}"))
+                .with_stable_code(crate::utils::error::StableErrorCode::IoReadFailed)
+        })?;
+
+        match status.code() {
+            Some(0) => {
+                steps += 1;
+                handle_good(None, output).await?;
+            }
+            Some(125) => {
+                steps += 1;
+                session_skipped.push(head_short.clone());
+                handle_skip(None, output).await?;
+            }
+            Some(code) if (1..=127).contains(&code) => {
+                steps += 1;
+                handle_bad(None, output).await?;
+            }
+            Some(code) => {
+                return Err(CliError::fatal(format!(
+                    "bisect run command failed with non-recoverable exit code {code}"
+                ))
+                .with_stable_code(crate::utils::error::StableErrorCode::InternalInvariant)
+                .with_hint(
+                    "re-run with a script that returns 0 (good) / 1-127 (bad) / 125 (skip)",
+                ));
+            }
+            None => {
+                return Err(
+                    CliError::fatal("bisect run command terminated by signal".to_string())
+                        .with_stable_code(crate::utils::error::StableErrorCode::InternalInvariant)
+                        .with_hint("ensure the script exits cleanly; signals abort the bisect"),
+                );
+            }
+        }
+
+        // After the mark, check if the session converged or all candidates skipped.
+        let next_state = BisectState::load().await.map_err(CliError::fatal)?;
+        if next_state.completed {
+            let first_bad = next_state.bad.map(|h| h.to_string()).unwrap_or_default();
+            info_println!(
+                output,
+                "Converged: first bad commit is {}",
+                if first_bad.len() >= 7 {
+                    &first_bad[..7]
+                } else {
+                    &first_bad
+                }
+            );
+            info_println!(output, "{} steps, {} skipped", steps, session_skipped.len());
+            return Ok(());
+        }
+
+        let remaining = count_commits_to_test(&next_state).await.unwrap_or(0);
+        if remaining == 0 {
+            return Err(CliError::fatal(
+                "no more candidate commits; bisect already converged".to_string(),
+            )
+            .with_stable_code(crate::utils::error::StableErrorCode::RepoStateInvalid)
+            .with_hint("run `libra bisect view` to inspect remaining candidates"));
+        }
+    }
 }
 
 /// Convert a user-supplied revision string (branch, tag, hash) into the
