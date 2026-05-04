@@ -90,7 +90,7 @@ fn init_tracing() {
         return;
     };
 
-    let env_filter = EnvFilter::new(log_filter.to_string_lossy());
+    let env_filter = build_env_filter(&log_filter.to_string_lossy());
     let Some(path) = log_file else {
         if let Err(err) = tracing_subscriber::fmt()
             .with_env_filter(env_filter)
@@ -123,4 +123,32 @@ fn init_tracing() {
             );
         }
     }
+}
+
+/// Build the [`EnvFilter`] that drives the global tracing subscriber.
+///
+/// Functional scope:
+/// - Parses `directives` (the resolved value of `LIBRA_LOG`/`RUST_LOG`/the
+///   `libra=debug` fallback) and, when the user did not say anything about
+///   the `rfuse3` target, pins `rfuse3::raw::session=error` so the spammy
+///   `"The data is not 4096 bytes aligned"` warning that fires for every
+///   sub-page write to the worktree FUSE mount stays out of normal logs.
+///
+/// Boundary conditions:
+/// - If the user opts in by mentioning `rfuse3` anywhere in their filter
+///   string (e.g. `LIBRA_LOG=rfuse3=warn`), we skip the suppression so the
+///   user's directive wins outright.
+/// - The added directive is a static literal whose parse cannot fail in any
+///   supported `tracing-subscriber` version; the `expect` is a hard
+///   invariant, not a runtime fallback.
+fn build_env_filter(directives: &str) -> EnvFilter {
+    let env_filter = EnvFilter::new(directives);
+    if directives.contains("rfuse3") {
+        return env_filter;
+    }
+    env_filter.add_directive(
+        "rfuse3::raw::session=error"
+            .parse()
+            .expect("static rfuse3 directive must parse"),
+    )
 }

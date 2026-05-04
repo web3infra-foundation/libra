@@ -197,6 +197,36 @@ fn kimi_thinking(thinking: Option<CompletionThinking>) -> Option<KimiThinking> {
     }
 }
 
+/// Kimi's thinking-enabled models reject any custom `temperature` value: the
+/// Moonshot API responds with `400 invalid temperature: only 1 is allowed for
+/// this model`. K2.6 and the dedicated `kimi-k2-thinking*` family default to
+/// thinking-on, so callers like the first-turn task intent classifier (which
+/// hard-codes `temperature = 0.0` for determinism) would otherwise hit that
+/// 400 every session. Drop the requested value when thinking is enabled and
+/// let the server apply its own default; pass it through verbatim otherwise.
+fn sanitize_kimi_temperature(
+    temperature: Option<f64>,
+    thinking: Option<&KimiThinking>,
+) -> Option<f64> {
+    let thinking_enabled = matches!(
+        thinking,
+        Some(KimiThinking {
+            r#type: KimiThinkingType::Enabled,
+            ..
+        })
+    );
+    if thinking_enabled && temperature.is_some() {
+        tracing::debug!(
+            provider = "kimi",
+            requested_temperature = ?temperature,
+            "Kimi thinking mode rejects custom temperature; dropping value to satisfy API constraint"
+        );
+        None
+    } else {
+        temperature
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct KimiStreamChunk {
     id: String,
@@ -597,10 +627,11 @@ impl CompletionModelTrait for Model {
         let stream = request.stream.unwrap_or(true);
         let stream_events = request.stream_events.clone();
 
+        let temperature = sanitize_kimi_temperature(request.temperature, thinking.as_ref());
         let mut kimi_request = KimiRequest {
             model: self.model.clone(),
             messages,
-            temperature: request.temperature,
+            temperature,
             tool_choice: if tools.is_empty() {
                 None
             } else {
@@ -812,6 +843,81 @@ mod tests {
         let json = serde_json::to_value(request).unwrap();
         assert_eq!(json["thinking"]["type"], "enabled");
         assert_eq!(json["thinking"]["keep"], "all");
+    }
+
+    /// Scenario: Kimi's thinking-on models reject custom temperatures with
+    /// `400 invalid temperature: only 1 is allowed for this model`. The
+    /// sanitizer must strip any caller-supplied temperature when thinking is
+    /// enabled (the default for K2.6 and the dedicated thinking family) so
+    /// the server applies its own default.
+    #[test]
+    fn test_sanitize_kimi_temperature_drops_when_thinking_enabled() {
+        let thinking = kimi_thinking(Some(CompletionThinking::Enabled));
+        assert_eq!(
+            sanitize_kimi_temperature(Some(0.0), thinking.as_ref()),
+            None
+        );
+        assert_eq!(
+            sanitize_kimi_temperature(Some(0.7), thinking.as_ref()),
+            None
+        );
+        assert_eq!(sanitize_kimi_temperature(None, thinking.as_ref()), None);
+    }
+
+    /// Scenario: the same drop must apply when the caller passed
+    /// `thinking = None`, because [`kimi_thinking`] turns that into the
+    /// thinking-enabled default for the K2.6/thinking family.
+    #[test]
+    fn test_sanitize_kimi_temperature_drops_when_thinking_defaulted() {
+        let thinking = kimi_thinking(None);
+        assert_eq!(
+            sanitize_kimi_temperature(Some(0.0), thinking.as_ref()),
+            None
+        );
+    }
+
+    /// Scenario: when the caller explicitly disables thinking the model
+    /// accepts arbitrary temperatures, so the sanitizer must pass them
+    /// through unchanged.
+    #[test]
+    fn test_sanitize_kimi_temperature_preserved_when_thinking_disabled() {
+        let thinking = kimi_thinking(Some(CompletionThinking::Disabled));
+        assert_eq!(
+            sanitize_kimi_temperature(Some(0.0), thinking.as_ref()),
+            Some(0.0)
+        );
+        assert_eq!(
+            sanitize_kimi_temperature(Some(0.7), thinking.as_ref()),
+            Some(0.7)
+        );
+    }
+
+    /// Scenario: full-envelope regression — a thinking-enabled K2.6 request
+    /// constructed with a `temperature` from the caller must serialise
+    /// without the `temperature` field, matching the constraint enforced by
+    /// the Moonshot API.
+    #[test]
+    fn test_kimi_thinking_request_omits_temperature() {
+        let thinking = kimi_thinking(Some(CompletionThinking::Enabled));
+        let temperature = sanitize_kimi_temperature(Some(0.0), thinking.as_ref());
+        let request = KimiRequest {
+            model: "kimi-k2.6".to_string(),
+            messages: vec![ChatMessage::User {
+                content: "hi".to_string(),
+            }],
+            temperature,
+            tools: Vec::new(),
+            tool_choice: None,
+            thinking,
+            stream: false,
+        };
+
+        let json = serde_json::to_value(&request).unwrap();
+        assert!(
+            json.get("temperature").is_none(),
+            "thinking-enabled request must omit `temperature`; got {json}"
+        );
+        assert_eq!(json["thinking"]["type"], "enabled");
     }
 
     /// Scenario: when thinking is enabled the request must include
