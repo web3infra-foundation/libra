@@ -57,7 +57,7 @@ pub fn is_mount_active(mountpoint: &Path) -> bool {
 
     #[cfg(target_os = "linux")]
     {
-        return mountinfo_contains_mountpoint(&target);
+        mountinfo_contains_mountpoint(&target)
     }
 
     #[cfg(not(target_os = "linux"))]
