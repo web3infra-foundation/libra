@@ -7,7 +7,7 @@ use git_internal::errors::GitError;
 use reqwest::{Body, RequestBuilder, Response, StatusCode, header::CONTENT_TYPE};
 use url::Url;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-network"))]
 use super::DiscRef;
 use super::{
     DiscoveryResult, FetchStream, ProtocolClient, generate_upload_pack_content,
@@ -217,8 +217,14 @@ impl HttpsClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "test-network")]
     use crate::{git_protocol::ServiceType::UploadPack, utils::test::init_debug_logger};
 
+    // Hits a real GitHub HTTPS endpoint to discover refs. Gated behind the
+    // `test-network` feature (see CI job `compat-network-remotes`) so the
+    // default `cargo test --all` run on `compat-offline-core` is not exposed
+    // to GitHub TLS flakes.
+    #[cfg(feature = "test-network")]
     #[tokio::test]
     async fn test_discover_reference_upload() {
         if std::env::var("LIBRA_TEST_GITHUB_TOKEN").map_or(true, |v| v.is_empty()) {
@@ -241,6 +247,11 @@ mod tests {
         }
     }
 
+    // Hits a real GitHub HTTPS endpoint and streams a pack. Gated behind the
+    // `test-network` feature (see CI job `compat-network-remotes`) so the
+    // default `cargo test --all` run on `compat-offline-core` is not exposed
+    // to GitHub TLS flakes (peer-closed connection without close_notify, etc.).
+    #[cfg(feature = "test-network")]
     #[tokio::test]
     async fn test_post_git_upload_pack_() {
         if std::env::var("LIBRA_TEST_GITHUB_TOKEN").map_or(true, |v| v.is_empty()) {

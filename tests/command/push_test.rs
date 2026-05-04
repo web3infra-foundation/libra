@@ -408,6 +408,7 @@ async fn test_push_invalid_remote() {
 
 #[cfg(unix)]
 #[tokio::test]
+#[serial]
 async fn test_push_force_with_local_changes() {
     let temp_root = tempfile::tempdir().expect("failed to create temp root");
     let remote_dir = temp_root.path().join("remote.git");
