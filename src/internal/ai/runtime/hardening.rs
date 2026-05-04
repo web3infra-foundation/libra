@@ -1,6 +1,6 @@
 //! Phase E hardening contracts for authorization, tool boundary, redaction, and audit.
 
-use std::{collections::BTreeSet, sync::Arc};
+use std::{collections::BTreeSet, fmt, sync::Arc};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -47,6 +47,119 @@ pub struct BoundaryDecision {
     pub reason: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SafetyDisposition {
+    Allow,
+    Deny,
+    NeedsHuman,
+}
+
+impl SafetyDisposition {
+    pub fn is_allow(self) -> bool {
+        self == Self::Allow
+    }
+
+    pub fn is_deny(self) -> bool {
+        self == Self::Deny
+    }
+
+    pub fn needs_human(self) -> bool {
+        self == Self::NeedsHuman
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlastRadius {
+    Workspace,
+    Repository,
+    System,
+    Network,
+    Unknown,
+}
+
+impl fmt::Display for BlastRadius {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            Self::Workspace => "workspace",
+            Self::Repository => "repository",
+            Self::System => "system",
+            Self::Network => "network",
+            Self::Unknown => "unknown",
+        };
+        f.write_str(label)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandSafetySurface {
+    Shell,
+    LibraVcs,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SafetyDecision {
+    pub disposition: SafetyDisposition,
+    pub rule_name: String,
+    pub reason: String,
+    pub blast_radius: BlastRadius,
+}
+
+impl SafetyDecision {
+    pub fn allow(
+        rule_name: impl Into<String>,
+        reason: impl Into<String>,
+        blast_radius: BlastRadius,
+    ) -> Self {
+        Self {
+            disposition: SafetyDisposition::Allow,
+            rule_name: rule_name.into(),
+            reason: reason.into(),
+            blast_radius,
+        }
+    }
+
+    pub fn deny(
+        rule_name: impl Into<String>,
+        reason: impl Into<String>,
+        blast_radius: BlastRadius,
+    ) -> Self {
+        Self {
+            disposition: SafetyDisposition::Deny,
+            rule_name: rule_name.into(),
+            reason: reason.into(),
+            blast_radius,
+        }
+    }
+
+    pub fn needs_human(
+        rule_name: impl Into<String>,
+        reason: impl Into<String>,
+        blast_radius: BlastRadius,
+    ) -> Self {
+        Self {
+            disposition: SafetyDisposition::NeedsHuman,
+            rule_name: rule_name.into(),
+            reason: reason.into(),
+            blast_radius,
+        }
+    }
+
+    pub fn is_allow(&self) -> bool {
+        self.disposition.is_allow()
+    }
+
+    pub fn is_deny(&self) -> bool {
+        self.disposition.is_deny()
+    }
+
+    pub fn is_needs_human(&self) -> bool {
+        self.disposition.needs_human()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolBoundaryPolicy {
     readonly_tools: BTreeSet<String>,
@@ -66,6 +179,7 @@ impl ToolBoundaryPolicy {
                 "web_search",
                 "request_user_input",
                 "mcp_read",
+                "run_libra_vcs",
             ]
             .into_iter()
             .map(str::to_string)

@@ -46,13 +46,18 @@ use crate::{
     cli_error,
     internal::ai::{
         agent::{
-            ToolLoopConfig, ToolLoopObserver, profile::AgentProfileRouter,
-            run_tool_loop_with_history_and_observer,
+            TaskIntent, TaskIntentClassificationRequest, TaskIntentClassifier,
+            TaskIntentClassifierError, TaskIntentDecision, ToolLoopConfig, ToolLoopObserver,
+            profile::AgentProfileRouter, run_tool_loop_with_history_and_observer,
         },
         commands::CommandDispatcher,
         completion::{
             CompletionModel, CompletionRetryEvent, CompletionRetryObserver, CompletionRetryPolicy,
             CompletionStreamEvent, CompletionUsage, Message, RetryingCompletionModel,
+        },
+        context_budget::{
+            MemoryAnchor, MemoryAnchorDraft, MemoryAnchorEvent, MemoryAnchorLookupError,
+            build_memory_anchor_prompt_section,
         },
         intentspec::{
             IntentDraft, IntentSpec, ResolveContext, RiskLevel, build_intentspec_review,
@@ -81,8 +86,14 @@ use crate::{
             },
         },
         projection::ProjectionRebuilder,
-        sandbox::{ExecApprovalRequest, ReviewDecision},
-        session::{SessionState, SessionStore},
+        prompt::SystemPromptBuilder,
+        sandbox::{ApprovalMemo, ExecApprovalRequest, FileHistoryRuntimeContext, ReviewDecision},
+        session::{
+            SessionState, SessionStore,
+            file_history::FileHistoryError,
+            jsonl::{SessionEvent, SessionJsonlStore},
+        },
+        skills::SkillDispatcher,
         tools::{
             ToolOutput, ToolRegistry,
             context::{
@@ -91,6 +102,7 @@ use crate::{
             },
             handlers::submit_intent_draft::parse_submit_intent_draft_value,
         },
+        usage::{UsageDisplaySnapshot, format_usage_badge},
         web::code_ui::{
             CodeUiApplyToFuture, CodeUiEventEnvelope, CodeUiInteractionKind,
             CodeUiInteractionOption, CodeUiInteractionRequest, CodeUiInteractionResponse,
@@ -361,7 +373,8 @@ fn review_scroll_action(key: crossterm::event::KeyEvent) -> Option<ReviewScrollA
 /// Pending sandbox approval state.
 struct PendingExecApproval {
     request: ExecApprovalRequest,
-    selected: usize, // 0=Approve, 1=Approve Session, 2=Approve All Commands, 3=Deny, 4=Abort
+    selected: usize,
+    allow_all_confirmation_requested: bool,
 }
 
 /// Pending managed-provider interaction mirrored into the approval dialog.
@@ -382,6 +395,7 @@ struct PendingPhaseConfirmation {
 pub struct AppConfig {
     pub welcome_message: String,
     pub command_dispatcher: CommandDispatcher,
+    pub skill_dispatcher: SkillDispatcher,
     pub agent_router: AgentProfileRouter,
     pub session: SessionState,
     pub session_store: SessionStore,
@@ -403,6 +417,8 @@ pub struct AppConfig {
     pub managed_code_ui_runtime: Option<Arc<CodeUiRuntimeHandle>>,
     /// Default network access policy selected at TUI launch.
     pub default_network_access: bool,
+    /// Whether the first unprofiled user message should be model-classified.
+    pub auto_classify_first_user_message: bool,
 }
 
 /// The main application struct.
@@ -439,6 +455,8 @@ pub struct App<M: CompletionModel> {
     welcome_active: bool,
     /// Slash command dispatcher.
     command_dispatcher: CommandDispatcher,
+    /// Markdown skill dispatcher.
+    skill_dispatcher: SkillDispatcher,
     /// Agent router for auto-selection.
     agent_router: AgentProfileRouter,
     /// Session state for persistence.
@@ -473,6 +491,8 @@ pub struct App<M: CompletionModel> {
     model_name: String,
     /// Provider identifier.
     provider_name: String,
+    /// Session-level model usage rendered in the compact bottom-pane line.
+    usage_snapshot: UsageDisplaySnapshot,
     /// MCP server instance for writing data.
     mcp_server: Option<Arc<LibraMcpServer>>,
     /// Latest execution plan ID for attaching new turn runs.
@@ -501,6 +521,8 @@ pub struct App<M: CompletionModel> {
     managed_code_ui_runtime: Option<Arc<CodeUiRuntimeHandle>>,
     /// Default network access policy selected at TUI launch.
     default_network_access: bool,
+    /// Whether the first unprofiled user message should be model-classified.
+    auto_classify_first_user_message: bool,
     /// Monotonic id source for browser transcript artifacts.
     next_code_ui_item_id: u64,
 }
@@ -542,12 +564,7 @@ where
             }
         }
         let history = app_config.session.to_history();
-        let default_allowed_tools = registry
-            .tool_specs()
-            .into_iter()
-            .map(|s| s.function.name)
-            .filter(|name| is_default_chat_tool(name))
-            .collect();
+        let default_allowed_tools = default_chat_allowed_tools(&registry, &config);
         let mut widget = ChatWidget::new();
         widget
             .bottom_pane
@@ -555,6 +572,17 @@ where
         widget
             .bottom_pane
             .set_git_branch(current_git_branch_label(registry.working_dir()));
+        let usage_snapshot = UsageDisplaySnapshot {
+            provider: app_config.provider_name.clone(),
+            model: app_config.model_name.clone(),
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            wall_clock_ms: 0,
+            cost_usd: None,
+        };
+        let usage_badge = format_usage_badge(&usage_snapshot);
+        widget.bottom_pane.set_usage_line(Some(usage_badge.clone()));
+        widget.set_usage_header(Some(usage_badge));
         let mcp_plan_id = app_config
             .session
             .metadata
@@ -583,6 +611,7 @@ where
             welcome_message: app_config.welcome_message,
             welcome_active: true,
             command_dispatcher: app_config.command_dispatcher,
+            skill_dispatcher: app_config.skill_dispatcher,
             agent_router: app_config.agent_router,
             session: app_config.session,
             session_store: app_config.session_store,
@@ -600,6 +629,7 @@ where
             pending_auto_plan_repair_execution: None,
             model_name: app_config.model_name,
             provider_name: app_config.provider_name,
+            usage_snapshot,
             mcp_server: app_config.mcp_server,
             mcp_plan_id,
             mcp_run_id: None,
@@ -614,6 +644,7 @@ where
             code_control_rx: app_config.code_control_rx,
             managed_code_ui_runtime: app_config.managed_code_ui_runtime,
             default_network_access: app_config.default_network_access,
+            auto_classify_first_user_message: app_config.auto_classify_first_user_message,
             next_code_ui_item_id: 1,
         }
     }
@@ -702,6 +733,12 @@ where
                 .iter()
                 .map(|c| (c.name.clone(), c.description.clone())),
         );
+        hints.extend(self.skill_dispatcher.skills().iter().map(|skill| {
+            (
+                format!("skill {}", skill.name),
+                format!("Skill: {}", skill.description),
+            )
+        }));
         self.widget.bottom_pane.set_command_hints(hints);
 
         // Initial draw - ensure UI is rendered immediately
@@ -1010,17 +1047,20 @@ where
             .as_ref()
             .is_some_and(|pending| pending.request.call_id == interaction_id)
         {
+            let Some(pending) = self.pending_exec_approval.as_ref() else {
+                return Err(TuiControlError::UnsupportedInteractionKind);
+            };
+            let cache_disabled = pending.request.cache_disabled_reason.is_some();
+            let confirm_allow_all = pending.allow_all_confirmation_requested;
+            let option_ids = exec_approval_option_ids(cache_disabled, confirm_allow_all);
             let selected = selection_from_response(
-                &[
-                    "approve",
-                    "approve_session",
-                    "allow_all_commands",
-                    "deny",
-                    "abort",
-                ],
+                &option_ids,
                 &response,
                 Some(0),
-                Some(3),
+                Some(exec_approval_deny_selection(
+                    cache_disabled,
+                    confirm_allow_all,
+                )),
             )
             .ok_or(TuiControlError::UnsupportedInteractionKind)?;
             if let Some(pending) = self.pending_exec_approval.as_mut() {
@@ -1393,7 +1433,7 @@ where
                         pending.selected = (pending.selected + 1).min(max);
                         self.widget.bottom_pane.exec_approval_selected = pending.selected;
                     } else if let Some(ref mut pending) = self.pending_exec_approval {
-                        pending.selected = (pending.selected + 1).min(4);
+                        pending.selected = (pending.selected + 1).min(5);
                         self.widget.bottom_pane.exec_approval_selected = pending.selected;
                     }
                     self.schedule_draw();
@@ -1943,33 +1983,7 @@ where
             title: Some("Sandbox approval required".to_string()),
             description: request.reason.clone(),
             prompt: Some(request.command.clone()),
-            options: vec![
-                CodeUiInteractionOption {
-                    id: "approve".to_string(),
-                    label: "Approve".to_string(),
-                    description: Some("Run this command once".to_string()),
-                },
-                CodeUiInteractionOption {
-                    id: "approve_session".to_string(),
-                    label: "Approve Session".to_string(),
-                    description: Some("Approve matching commands for this session".to_string()),
-                },
-                CodeUiInteractionOption {
-                    id: "allow_all_commands".to_string(),
-                    label: "Allow All Commands".to_string(),
-                    description: Some("Allow every command for this session".to_string()),
-                },
-                CodeUiInteractionOption {
-                    id: "deny".to_string(),
-                    label: "Deny".to_string(),
-                    description: Some("Reject this command".to_string()),
-                },
-                CodeUiInteractionOption {
-                    id: "abort".to_string(),
-                    label: "Abort".to_string(),
-                    description: Some("Stop the current turn".to_string()),
-                },
-            ],
+            options: exec_approval_interaction_options(request.cache_disabled_reason.is_some()),
             status: CodeUiInteractionStatus::Pending,
             metadata: serde_json::json!({
                 "cwd": request.cwd,
@@ -1977,6 +1991,7 @@ where
                 "networkAccess": request.network_access,
                 "writableRoots": request.writable_roots,
                 "isRetry": request.is_retry,
+                "cacheDisabledReason": request.cache_disabled_reason,
             }),
             requested_at: Utc::now(),
             resolved_at: None,
@@ -1986,6 +2001,7 @@ where
         self.pending_exec_approval = Some(PendingExecApproval {
             request,
             selected: 0,
+            allow_all_confirmation_requested: false,
         });
         self.widget.bottom_pane.exec_approval_selected = 0;
         self.widget
@@ -2166,7 +2182,18 @@ where
             return;
         };
 
-        let decision = exec_approval_decision_from_selection(pending.selected);
+        let cache_disabled = pending.request.cache_disabled_reason.is_some();
+        let decision = exec_approval_decision_from_selection(
+            pending.selected,
+            cache_disabled,
+            pending.allow_all_confirmation_requested,
+        );
+        if decision == ReviewDecision::ApprovedForAllCommands
+            && !pending.allow_all_confirmation_requested
+        {
+            self.request_allow_all_confirmation(pending);
+            return;
+        }
         let interaction_id = pending.request.call_id.clone();
         tracing::debug!(
             target: "libra::internal::tui::interaction",
@@ -2211,6 +2238,75 @@ where
                 code_ui_session
                     .set_status(CodeUiSessionStatus::ExecutingTool)
                     .await;
+            });
+        }
+    }
+
+    fn request_allow_all_confirmation(&mut self, mut pending: PendingExecApproval) {
+        pending.allow_all_confirmation_requested = true;
+        pending.selected = 0;
+        let interaction_id = pending.request.call_id.clone();
+        let command = pending.request.command.clone();
+        let cwd = pending.request.cwd.clone();
+        let sandbox_label = pending.request.sandbox_label.clone();
+        let network_access = pending.request.network_access;
+        let writable_roots = pending.request.writable_roots.clone();
+        let is_retry = pending.request.is_retry;
+
+        self.widget.bottom_pane.set_approval_dialog(
+            "Confirm allow all commands".to_string(),
+            command.clone(),
+            cwd.clone(),
+            Some(
+                "This will allow every command for this session and bypass future approval prompts."
+                    .to_string(),
+            ),
+            is_retry,
+            sandbox_label.clone(),
+            network_access,
+            writable_roots.clone(),
+            vec![
+                (
+                    "Confirm Allow All".to_string(),
+                    "Allow every command for this session".to_string(),
+                ),
+                ("Deny".to_string(), "Reject this execution".to_string()),
+                (
+                    "Abort Turn".to_string(),
+                    "Interrupt the current turn".to_string(),
+                ),
+            ],
+        );
+        self.widget.bottom_pane.exec_approval_selected = 0;
+        self.pending_exec_approval = Some(pending);
+        self.sync_mux_input_context();
+        self.schedule_draw();
+
+        if let Some(code_ui_session) = self.code_ui_session.clone() {
+            let interaction = CodeUiInteractionRequest {
+                id: interaction_id,
+                kind: CodeUiInteractionKind::SandboxApproval,
+                title: Some("Confirm allow all commands".to_string()),
+                description: Some(
+                    "This will allow every command for this session and bypass future approval prompts."
+                        .to_string(),
+                ),
+                prompt: Some(command),
+                options: exec_approval_allow_all_confirmation_options(),
+                status: CodeUiInteractionStatus::Pending,
+                metadata: serde_json::json!({
+                    "cwd": cwd,
+                    "sandboxLabel": sandbox_label,
+                    "networkAccess": network_access,
+                    "writableRoots": writable_roots,
+                    "isRetry": is_retry,
+                    "confirmation": "allow_all_commands",
+                }),
+                requested_at: Utc::now(),
+                resolved_at: None,
+            };
+            tokio::spawn(async move {
+                code_ui_session.upsert_interaction(interaction).await;
             });
         }
     }
@@ -2398,6 +2494,7 @@ where
                 // Track in session
                 self.running_tool_calls = 0;
                 self.session.add_user_message(&text);
+                self.save_session_snapshot_after_user_message();
 
                 // Add user cell immediately
                 self.widget
@@ -2463,8 +2560,23 @@ where
                 if source == TurnInputSource::Automation {
                     apply_automation_approval_scope(&mut config, turn_id);
                 }
-                config.allowed_tools =
-                    Some(allowed_tools.unwrap_or_else(|| self.default_allowed_tools.clone()));
+                let session_root = self.session_store.session_root(&self.session.id);
+                attach_file_history_context(&mut config, session_root.clone(), turn_id);
+                config.context_frame_session_root = Some(session_root.clone());
+                config.context_frame_prompt_id = Some(format!("turn-{turn_id}"));
+                let should_auto_classify = should_auto_classify_first_user_message(
+                    self.auto_classify_first_user_message,
+                    &self.history,
+                    allowed_tools.as_ref(),
+                );
+                if self.auto_classify_first_user_message && self.history.is_empty() {
+                    self.auto_classify_first_user_message = false;
+                }
+                config.allowed_tools = Some(
+                    allowed_tools
+                        .clone()
+                        .unwrap_or_else(|| self.default_allowed_tools.clone()),
+                );
                 let history = self.history.clone();
                 let tx = self.app_event_tx.clone();
                 let user_text = text;
@@ -2523,6 +2635,20 @@ where
                                 }
                                 _ => {}
                             }
+                        }
+
+                        fn on_model_usage_recorded(
+                            &mut self,
+                            usage: &crate::internal::ai::completion::CompletionUsageSummary,
+                            wall_clock_ms: u64,
+                        ) {
+                            let _ = self.tx.send(AppEvent::AgentEvent {
+                                turn_id: self.turn_id,
+                                event: AgentEvent::UsageUpdated {
+                                    usage: usage.clone(),
+                                    wall_clock_ms,
+                                },
+                            });
                         }
 
                         fn on_assistant_step_text(&mut self, text: &str) {
@@ -2634,6 +2760,34 @@ where
                         mcp_write_tracker,
                         turn_id,
                     };
+                    if should_auto_classify {
+                        match classify_first_turn_task_intent(
+                            &model,
+                            &registry,
+                            &mut config,
+                            &user_text,
+                            FirstTurnIntentPolicyUpdate::PromptAndAllowedTools,
+                        )
+                        .await
+                        {
+                            Ok(decision) => {
+                                send_task_intent_classified_event(
+                                    &observer.tx,
+                                    observer.turn_id,
+                                    decision,
+                                    &config,
+                                    &registry,
+                                );
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    error = %error,
+                                    "first-turn task intent classification failed; using launch prompt and tool policy"
+                                );
+                            }
+                        }
+                    }
+                    attach_memory_anchor_prompt_context(&mut config);
                     let result = run_tool_loop_with_history_and_observer(
                         &model,
                         history,
@@ -2667,11 +2821,55 @@ where
 
                 self.agent_task = Some(handle);
             }
+            AppEvent::TaskIntentClassified {
+                turn_id: _turn_id,
+                intent,
+                preamble,
+                allowed_tools,
+            } => {
+                self.config.preamble = Some(preamble);
+                self.config.allowed_tools = Some(allowed_tools.clone());
+                self.default_allowed_tools = allowed_tools;
+                tracing::info!(
+                    intent = %intent,
+                    "first-turn task intent classification updated TUI prompt and tool policy"
+                );
+            }
             AppEvent::AgentEvent {
                 turn_id: _turn_id,
                 event: agent_event,
             } => {
                 match agent_event {
+                    AgentEvent::UsageUpdated {
+                        usage,
+                        wall_clock_ms,
+                    } => {
+                        self.usage_snapshot.prompt_tokens = self
+                            .usage_snapshot
+                            .prompt_tokens
+                            .saturating_add(usage.input_tokens);
+                        self.usage_snapshot.completion_tokens = self
+                            .usage_snapshot
+                            .completion_tokens
+                            .saturating_add(usage.output_tokens);
+                        self.usage_snapshot.wall_clock_ms = self
+                            .usage_snapshot
+                            .wall_clock_ms
+                            .saturating_add(wall_clock_ms);
+                        self.usage_snapshot.cost_usd =
+                            match (self.usage_snapshot.cost_usd, usage.cost_usd) {
+                                (Some(current), Some(next)) => Some(current + next),
+                                (Some(current), None) => Some(current),
+                                (None, Some(next)) => Some(next),
+                                (None, None) => None,
+                            };
+                        let usage_badge = format_usage_badge(&self.usage_snapshot);
+                        self.widget
+                            .bottom_pane
+                            .set_usage_line(Some(usage_badge.clone()));
+                        self.widget.set_usage_header(Some(usage_badge));
+                        self.schedule_draw();
+                    }
                     AgentEvent::ResponseComplete { text, new_history } => {
                         self.enqueue_mcp_turn_decision(
                             "checkpoint",
@@ -4145,6 +4343,11 @@ where
                 self.widget
                     .add_cell(Box::new(AssistantHistoryCell::new(status)));
             }
+            BuiltinCommand::Usage => {
+                self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                    self.usage_report_text(),
+                )));
+            }
             BuiltinCommand::Plan => {
                 if let Some(pending) = self.pending_execution_plan_revision.take() {
                     match parse_pending_plan_revision_command(args) {
@@ -4207,6 +4410,22 @@ where
                     self.start_plan_workflow(args).await;
                 }
             }
+            BuiltinCommand::Skill => match self.skill_dispatcher.dispatch(args) {
+                Ok(result) => {
+                    self.widget.clear_dag_panel();
+                    self.sync_mux_input_context();
+                    self.submit_direct_agent_message(
+                        result.prompt,
+                        Some(result.allowed_tools),
+                        TurnInputSource::Local,
+                    );
+                }
+                Err(error) => {
+                    self.widget
+                        .add_cell(Box::new(AssistantHistoryCell::new(error.to_string())));
+                    self.schedule_draw();
+                }
+            },
             BuiltinCommand::Intent => {
                 self.handle_intent_command(args).await;
             }
@@ -4242,9 +4461,271 @@ where
                 }
                 self.schedule_draw();
             }
+            BuiltinCommand::Approvals => {
+                let message = self.approvals_command_message(args).await;
+                self.widget
+                    .add_cell(Box::new(AssistantHistoryCell::new(message)));
+                self.sync_mux_input_context();
+                self.schedule_draw();
+            }
+            BuiltinCommand::Anchors => {
+                let message = self.anchors_command_message(args);
+                self.widget
+                    .add_cell(Box::new(AssistantHistoryCell::new(message)));
+                self.sync_mux_input_context();
+                self.schedule_draw();
+            }
+            BuiltinCommand::Undo => {
+                let working_dir = self.registry.working_dir();
+                let message = if undo_should_prefer_vcs_rollback(working_dir) {
+                    "Working tree is clean. Use Libra VCS rollback for committed changes; /undo only reverts uncommitted AI file edits.".to_string()
+                } else {
+                    let store = self.session_store.file_history(&self.session.id);
+                    match store.undo_latest_batch(working_dir) {
+                        Ok(report) => format!(
+                            "Undid AI file edit batch `{}` ({} path(s) restored).",
+                            report.batch_id, report.restored_paths
+                        ),
+                        Err(FileHistoryError::NoUndoBatch) => {
+                            "No AI file edits are available to undo.".to_string()
+                        }
+                        Err(error) => format!("Unable to undo latest AI file edit batch: {error}"),
+                    }
+                };
+                self.widget
+                    .add_cell(Box::new(AssistantHistoryCell::new(message)));
+                self.sync_mux_input_context();
+                self.schedule_draw();
+            }
             BuiltinCommand::Quit => {
                 self.request_user_exit();
             }
+        }
+    }
+
+    fn usage_report_text(&self) -> String {
+        let total_tokens = self
+            .usage_snapshot
+            .prompt_tokens
+            .saturating_add(self.usage_snapshot.completion_tokens);
+        let cost = self
+            .usage_snapshot
+            .cost_usd
+            .map(|cost| format!("\nCost estimate: ${cost:.4}"))
+            .unwrap_or_default();
+        format!(
+            "Usage\nProvider: {}\nModel: {}\nPrompt tokens: {}\nCompletion tokens: {}\nTotal tokens: {}\nWall clock: {:.1}s{}",
+            self.usage_snapshot.provider,
+            self.usage_snapshot.model,
+            self.usage_snapshot.prompt_tokens,
+            self.usage_snapshot.completion_tokens,
+            total_tokens,
+            self.usage_snapshot.wall_clock_ms as f64 / 1000.0,
+            cost
+        )
+    }
+
+    async fn approvals_command_message(&self, args: &str) -> String {
+        let Some(approval) = self
+            .config
+            .runtime_context
+            .as_ref()
+            .and_then(|runtime| runtime.approval.as_ref())
+            .cloned()
+        else {
+            return "Approval cache is not available for this session.".to_string();
+        };
+
+        let args = args.trim();
+        if let Some(prefix) = args.strip_prefix("revoke").map(str::trim) {
+            if prefix.is_empty() {
+                return "Usage: /approvals revoke <key-prefix> | revoke allow-all <scope>"
+                    .to_string();
+            }
+
+            // Allow-all decisions live in a separate map and were previously
+            // unrevocable from the UI — once `ApprovedForAllCommands` was
+            // chosen the cache stayed open for the whole session. The
+            // `revoke allow-all <scope>` form clears that record.
+            if let Some(scope_arg) = prefix.strip_prefix("allow-all").map(str::trim) {
+                if scope_arg.is_empty() {
+                    return "Usage: /approvals revoke allow-all <scope>".to_string();
+                }
+                let mut store = approval.store.lock().await;
+                return if store.revoke_allow_all_for_scope(scope_arg) {
+                    format!("Revoked allow-all approval for scope `{scope_arg}`.")
+                } else {
+                    format!("No allow-all approval was active for scope `{scope_arg}`.")
+                };
+            }
+
+            let mut store = approval.store.lock().await;
+            let matches = store
+                .active_memos_at(Utc::now())
+                .into_iter()
+                .filter(|memo| memo.key.starts_with(prefix))
+                .collect::<Vec<_>>();
+
+            return match matches.as_slice() {
+                [] => format!("No active approval memo matches `{prefix}`."),
+                [memo] => {
+                    let key = memo.key.clone();
+                    if store.revoke(&key) {
+                        format!("Revoked approval memo `{key}`.")
+                    } else {
+                        format!("Approval memo `{key}` was already inactive.")
+                    }
+                }
+                _ => format!(
+                    "Approval key prefix `{prefix}` is ambiguous:\n{}",
+                    format_approval_memos(&matches)
+                ),
+            };
+        }
+
+        if !args.is_empty() && !args.eq_ignore_ascii_case("list") {
+            return "Usage: /approvals [list|revoke <key-prefix>|revoke allow-all <scope>]"
+                .to_string();
+        }
+
+        let store = approval.store.lock().await;
+        let memos = store.active_memos_at(Utc::now());
+        let allow_all = store.active_allow_all_scopes();
+        match (memos.is_empty(), allow_all.is_empty()) {
+            (true, true) => "No active approval memos.".to_string(),
+            (false, true) => format!("Active approval memos:\n{}", format_approval_memos(&memos)),
+            (true, false) => format!(
+                "Active allow-all scopes (use `/approvals revoke allow-all <scope>`):\n{}",
+                allow_all
+                    .iter()
+                    .map(|scope| format!("  {scope}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+            (false, false) => format!(
+                "Active approval memos:\n{}\nActive allow-all scopes (use `/approvals revoke allow-all <scope>`):\n{}",
+                format_approval_memos(&memos),
+                allow_all
+                    .iter()
+                    .map(|scope| format!("  {scope}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+        }
+    }
+
+    fn anchors_command_message(&self, args: &str) -> String {
+        let session_root = self.session_store.session_root(&self.session.id);
+        let store = SessionJsonlStore::new(session_root);
+        let args = args.trim();
+        if args.is_empty() || args.eq_ignore_ascii_case("list") {
+            return match store.load_memory_anchors() {
+                Ok(replay) => format_memory_anchors(&replay.anchors()),
+                Err(error) => format!("Unable to load memory anchors: {error}"),
+            };
+        }
+
+        if let Some(content) = args.strip_prefix("draft").map(str::trim) {
+            if content.is_empty() {
+                return "Usage: /anchors draft <memory>".to_string();
+            }
+            let event = MemoryAnchorEvent::draft(MemoryAnchorDraft::session_user_constraint(
+                content, "user",
+            ));
+            return match store.append(&SessionEvent::memory_anchor(event.clone())) {
+                Ok(()) => format!(
+                    "Drafted memory anchor `{}`. Use `/anchors confirm {}` to activate it.",
+                    short_anchor_id(event.anchor_id),
+                    short_anchor_id(event.anchor_id)
+                ),
+                Err(error) => format!("Unable to draft memory anchor: {error}"),
+            };
+        }
+
+        if let Some(prefix) = args.strip_prefix("confirm").map(str::trim) {
+            if prefix.is_empty() {
+                return "Usage: /anchors confirm <id-prefix>".to_string();
+            }
+            return self.update_anchor_by_prefix(&store, prefix, |anchor| {
+                MemoryAnchorEvent::confirm(anchor, Some("confirmed by user".to_string()))
+            });
+        }
+
+        if let Some(rest) = args.strip_prefix("revoke").map(str::trim) {
+            let (prefix, reason) = split_anchor_prefix_and_tail(rest);
+            if prefix.is_empty() {
+                return "Usage: /anchors revoke <id-prefix> [reason]".to_string();
+            }
+            let reason = if reason.is_empty() {
+                Some("revoked by user".to_string())
+            } else {
+                Some(reason.to_string())
+            };
+            return self.update_anchor_by_prefix(&store, prefix, |anchor| {
+                MemoryAnchorEvent::revoke(anchor, reason.clone())
+            });
+        }
+
+        if let Some(rest) = args.strip_prefix("supersede").map(str::trim) {
+            let (prefix, content) = split_anchor_prefix_and_tail(rest);
+            if prefix.is_empty() || content.is_empty() {
+                return "Usage: /anchors supersede <id-prefix> <replacement memory>".to_string();
+            }
+            let replay = match store.load_memory_anchors() {
+                Ok(replay) => replay,
+                Err(error) => return format!("Unable to load memory anchors: {error}"),
+            };
+            let anchor = match replay.find_unique_by_prefix(prefix) {
+                Ok(anchor) => anchor,
+                Err(error) => return anchor_lookup_message(error),
+            };
+            let draft = MemoryAnchorEvent::draft(MemoryAnchorDraft::session_user_constraint(
+                content, "user",
+            ));
+            let supersede = MemoryAnchorEvent::supersede(
+                &anchor,
+                draft.anchor_id,
+                Some("superseded by user".to_string()),
+            );
+            if let Err(error) = store.append(&SessionEvent::memory_anchor(draft.clone())) {
+                return format!("Unable to draft replacement memory anchor: {error}");
+            }
+            if let Err(error) = store.append(&SessionEvent::memory_anchor(supersede)) {
+                return format!("Unable to supersede memory anchor: {error}");
+            }
+            return format!(
+                "Superseded `{}` with draft `{}`. Use `/anchors confirm {}` to activate it.",
+                anchor.short_id(),
+                short_anchor_id(draft.anchor_id),
+                short_anchor_id(draft.anchor_id)
+            );
+        }
+
+        "Usage: /anchors [list|draft <memory>|confirm <id-prefix>|revoke <id-prefix> [reason]|supersede <id-prefix> <replacement memory>]".to_string()
+    }
+
+    fn update_anchor_by_prefix(
+        &self,
+        store: &SessionJsonlStore,
+        prefix: &str,
+        build_event: impl FnOnce(&MemoryAnchor) -> MemoryAnchorEvent,
+    ) -> String {
+        let replay = match store.load_memory_anchors() {
+            Ok(replay) => replay,
+            Err(error) => return format!("Unable to load memory anchors: {error}"),
+        };
+        let anchor = match replay.find_unique_by_prefix(prefix) {
+            Ok(anchor) => anchor,
+            Err(error) => return anchor_lookup_message(error),
+        };
+        let event = build_event(&anchor);
+        match store.append(&SessionEvent::memory_anchor(event.clone())) {
+            Ok(()) => format!(
+                "Memory anchor `{}` is now {}.",
+                anchor.short_id(),
+                event.review_state
+            ),
+            Err(error) => format!("Unable to update memory anchor: {error}"),
         }
     }
 
@@ -4470,6 +4951,16 @@ where
         self.agent_task = None;
         self.running_tool_calls = 0;
         self.clear_turn_tracking();
+    }
+
+    fn save_session_snapshot_after_user_message(&self) {
+        if let Err(error) = self.session_store.save(&self.session) {
+            tracing::warn!(
+                session_id = %self.session.id,
+                error = %error,
+                "failed to save session snapshot before context-frame recording"
+            );
+        }
     }
 
     fn set_idle_and_draw(&mut self) {
@@ -4750,7 +5241,10 @@ where
 
         let model = self.model.clone();
         let registry = self.registry.clone();
-        let config = phase1_plan_tool_loop_config(self.config.clone());
+        let mut config = phase1_plan_tool_loop_config(self.config.clone());
+        let session_root = self.session_store.session_root(&self.session.id);
+        config.context_frame_session_root = Some(session_root);
+        config.context_frame_prompt_id = Some(format!("turn-{turn_id}"));
         let tx = self.app_event_tx.clone();
         let mcp_server = self.mcp_server.clone();
         let fallback_history = self.history.clone();
@@ -4804,6 +5298,20 @@ where
                     }
                 }
 
+                fn on_model_usage_recorded(
+                    &mut self,
+                    usage: &crate::internal::ai::completion::CompletionUsageSummary,
+                    wall_clock_ms: u64,
+                ) {
+                    let _ = self.tx.send(AppEvent::AgentEvent {
+                        turn_id: self.turn_id,
+                        event: AgentEvent::UsageUpdated {
+                            usage: usage.clone(),
+                            wall_clock_ms,
+                        },
+                    });
+                }
+
                 fn on_tool_call_begin(
                     &mut self,
                     call_id: &str,
@@ -4851,6 +5359,7 @@ where
                 turn_id,
                 plan_draft: None,
             };
+            attach_memory_anchor_prompt_context(&mut config);
             let run_result = run_tool_loop_with_history_and_observer(
                 &model,
                 fallback_history.clone(),
@@ -5273,7 +5782,12 @@ where
 
         let model = self.model.clone();
         let registry = self.registry.clone();
-        let tool_loop_config = self.config.clone();
+        let mut tool_loop_config = self.config.clone();
+        attach_file_history_context(
+            &mut tool_loop_config,
+            self.session_store.session_root(&self.session.id),
+            turn_id,
+        );
         let working_dir = self.registry.working_dir().to_path_buf();
         let coder_preamble = self
             .agent_router
@@ -5663,6 +6177,7 @@ where
         let turn_id = self.begin_turn();
         self.running_tool_calls = 0;
         self.session.add_user_message(&user_text);
+        self.save_session_snapshot_after_user_message();
         self.widget
             .add_cell(Box::new(UserHistoryCell::new(user_text.clone())));
         self.widget.clear_dag_panel();
@@ -5675,12 +6190,25 @@ where
 
         let model = self.model.clone();
         let registry = self.registry.clone();
-        let config = phase0_plan_tool_loop_config(self.config.clone());
+        let mut config = phase0_plan_tool_loop_config(self.config.clone());
+        let session_root = self.session_store.session_root(&self.session.id);
+        attach_file_history_context(&mut config, session_root.clone(), turn_id);
+        config.context_frame_session_root = Some(session_root.clone());
+        config.context_frame_prompt_id = Some(format!("turn-{turn_id}"));
+        let should_auto_classify = should_auto_classify_first_user_message(
+            self.auto_classify_first_user_message,
+            &self.history,
+            None,
+        );
+        if self.auto_classify_first_user_message && self.history.is_empty() {
+            self.auto_classify_first_user_message = false;
+        }
         let history = self.history.clone();
         let tx = self.app_event_tx.clone();
         let mcp_server = self.mcp_server.clone();
         let working_dir = self.registry.working_dir().to_path_buf();
         let default_network_access = self.default_network_access;
+        let classification_text = user_text.clone();
 
         let handle = tokio::spawn(async move {
             struct PlanObserver {
@@ -5741,6 +6269,20 @@ where
                     }
                 }
 
+                fn on_model_usage_recorded(
+                    &mut self,
+                    usage: &crate::internal::ai::completion::CompletionUsageSummary,
+                    wall_clock_ms: u64,
+                ) {
+                    let _ = self.tx.send(AppEvent::AgentEvent {
+                        turn_id: self.turn_id,
+                        event: AgentEvent::UsageUpdated {
+                            usage: usage.clone(),
+                            wall_clock_ms,
+                        },
+                    });
+                }
+
                 fn on_tool_call_begin(
                     &mut self,
                     call_id: &str,
@@ -5797,6 +6339,30 @@ where
             }
 
             let mut observer = PlanObserver::new(tx.clone(), turn_id);
+            if should_auto_classify {
+                match classify_first_turn_task_intent(
+                    &model,
+                    &registry,
+                    &mut config,
+                    &classification_text,
+                    FirstTurnIntentPolicyUpdate::PromptOnly,
+                )
+                .await
+                {
+                    Ok(decision) => {
+                        send_task_intent_classified_event(
+                            &tx, turn_id, decision, &config, &registry,
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "first-turn task intent classification failed; using launch prompt and plan tool policy"
+                        );
+                    }
+                }
+            }
+            attach_memory_anchor_prompt_context(&mut config);
             let fallback_history = history.clone();
             let run_result = run_tool_loop_with_history_and_observer(
                 &model,
@@ -6669,14 +7235,231 @@ fn log_preview_text(text: &str) -> String {
     summarize_llm_output_for_context(text, MAX_CHARS)
 }
 
-fn exec_approval_decision_from_selection(selected: usize) -> ReviewDecision {
+fn exec_approval_option_ids(
+    cache_disabled: bool,
+    allow_all_confirmation_requested: bool,
+) -> Vec<&'static str> {
+    if allow_all_confirmation_requested {
+        return vec!["confirm_allow_all_commands", "deny", "abort"];
+    }
+    if cache_disabled {
+        return vec!["approve", "deny", "abort"];
+    }
+    vec![
+        "approve",
+        "approve_session",
+        "approve_ttl",
+        "approve_directory_ttl",
+        "approve_pattern_ttl",
+        "allow_all_commands",
+        "deny",
+        "abort",
+    ]
+}
+
+fn exec_approval_deny_selection(
+    cache_disabled: bool,
+    allow_all_confirmation_requested: bool,
+) -> usize {
+    if cache_disabled || allow_all_confirmation_requested {
+        1
+    } else {
+        6
+    }
+}
+
+fn exec_approval_interaction_options(cache_disabled: bool) -> Vec<CodeUiInteractionOption> {
+    if cache_disabled {
+        return vec![
+            CodeUiInteractionOption {
+                id: "approve".to_string(),
+                label: "Approve Once".to_string(),
+                description: Some("Run this command once; do not cache the decision".to_string()),
+            },
+            CodeUiInteractionOption {
+                id: "deny".to_string(),
+                label: "Deny".to_string(),
+                description: Some("Reject this command".to_string()),
+            },
+            CodeUiInteractionOption {
+                id: "abort".to_string(),
+                label: "Abort".to_string(),
+                description: Some("Stop the current turn".to_string()),
+            },
+        ];
+    }
+
+    vec![
+        CodeUiInteractionOption {
+            id: "approve".to_string(),
+            label: "Approve".to_string(),
+            description: Some("Run this command once".to_string()),
+        },
+        CodeUiInteractionOption {
+            id: "approve_session".to_string(),
+            label: "Approve Session".to_string(),
+            description: Some("Approve this exact command for this session".to_string()),
+        },
+        CodeUiInteractionOption {
+            id: "approve_ttl".to_string(),
+            label: "Approve TTL".to_string(),
+            description: Some("Approve this exact command until the TTL expires".to_string()),
+        },
+        CodeUiInteractionOption {
+            id: "approve_directory_ttl".to_string(),
+            label: "Directory TTL".to_string(),
+            description: Some(
+                "Approve matching command families in this directory until TTL expires".to_string(),
+            ),
+        },
+        CodeUiInteractionOption {
+            id: "approve_pattern_ttl".to_string(),
+            label: "Pattern TTL".to_string(),
+            description: Some(
+                "Approve commands with the same argument pattern until TTL expires".to_string(),
+            ),
+        },
+        CodeUiInteractionOption {
+            id: "allow_all_commands".to_string(),
+            label: "Allow All Commands".to_string(),
+            description: Some("Requires a second confirmation".to_string()),
+        },
+        CodeUiInteractionOption {
+            id: "deny".to_string(),
+            label: "Deny".to_string(),
+            description: Some("Reject this command".to_string()),
+        },
+        CodeUiInteractionOption {
+            id: "abort".to_string(),
+            label: "Abort".to_string(),
+            description: Some("Stop the current turn".to_string()),
+        },
+    ]
+}
+
+fn exec_approval_allow_all_confirmation_options() -> Vec<CodeUiInteractionOption> {
+    vec![
+        CodeUiInteractionOption {
+            id: "confirm_allow_all_commands".to_string(),
+            label: "Confirm Allow All".to_string(),
+            description: Some("Allow every command for this session".to_string()),
+        },
+        CodeUiInteractionOption {
+            id: "deny".to_string(),
+            label: "Deny".to_string(),
+            description: Some("Reject this command".to_string()),
+        },
+        CodeUiInteractionOption {
+            id: "abort".to_string(),
+            label: "Abort".to_string(),
+            description: Some("Stop the current turn".to_string()),
+        },
+    ]
+}
+
+fn exec_approval_decision_from_selection(
+    selected: usize,
+    cache_disabled: bool,
+    allow_all_confirmation_requested: bool,
+) -> ReviewDecision {
+    if allow_all_confirmation_requested {
+        return match selected {
+            0 => ReviewDecision::ApprovedForAllCommands,
+            1 => ReviewDecision::Denied,
+            _ => ReviewDecision::Abort,
+        };
+    }
+    if cache_disabled {
+        return match selected {
+            0 => ReviewDecision::Approved,
+            1 => ReviewDecision::Denied,
+            _ => ReviewDecision::Abort,
+        };
+    }
+
     match selected {
         0 => ReviewDecision::Approved,
         1 => ReviewDecision::ApprovedForSession,
-        2 => ReviewDecision::ApprovedForAllCommands,
-        3 => ReviewDecision::Denied,
+        2 => ReviewDecision::ApprovedForTtl,
+        3 => ReviewDecision::ApprovedForDirectoryTtl,
+        4 => ReviewDecision::ApprovedForPatternTtl,
+        5 => ReviewDecision::ApprovedForAllCommands,
+        6 => ReviewDecision::Denied,
         _ => ReviewDecision::Abort,
     }
+}
+
+fn format_approval_memos(memos: &[ApprovalMemo]) -> String {
+    memos
+        .iter()
+        .map(|memo| {
+            let lifetime = memo
+                .expires_at
+                .map(|expires_at| format!("expires {}", expires_at.to_rfc3339()))
+                .unwrap_or_else(|| "session".to_string());
+            format!(
+                "  {}  {:?} {:?} {:?} {}",
+                memo.key, memo.decision, memo.scope, memo.sensitivity_tier, lifetime
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_memory_anchors(anchors: &[MemoryAnchor]) -> String {
+    if anchors.is_empty() {
+        return "No memory anchors.".to_string();
+    }
+
+    let mut anchors = anchors.to_vec();
+    anchors.sort_by_key(|anchor| {
+        (
+            anchor.review_state,
+            anchor.scope,
+            anchor.kind,
+            anchor.anchor_id,
+        )
+    });
+
+    let mut lines = vec!["Memory anchors:".to_string()];
+    for anchor in anchors {
+        let expires = anchor
+            .expires_at
+            .map(|expires_at| format!(" expires_at={}", expires_at.to_rfc3339()))
+            .unwrap_or_default();
+        let superseded_by = anchor
+            .superseded_by
+            .map(|id| format!(" superseded_by={}", short_anchor_id(id)))
+            .unwrap_or_default();
+        lines.push(format!(
+            "  {} [{}] kind={} scope={} confidence={}{}{}",
+            anchor.short_id(),
+            anchor.review_state,
+            anchor.kind,
+            anchor.scope,
+            anchor.confidence,
+            expires,
+            superseded_by
+        ));
+        lines.push(format!("    {}", anchor.content));
+    }
+    lines.join("\n")
+}
+
+fn short_anchor_id(anchor_id: uuid::Uuid) -> String {
+    anchor_id.to_string().chars().take(8).collect()
+}
+
+fn split_anchor_prefix_and_tail(input: &str) -> (&str, &str) {
+    input
+        .trim()
+        .split_once(char::is_whitespace)
+        .map(|(prefix, tail)| (prefix, tail.trim()))
+        .unwrap_or((input.trim(), ""))
+}
+
+fn anchor_lookup_message(error: MemoryAnchorLookupError) -> String {
+    format!("Unable to find memory anchor: {error}")
 }
 
 fn summarize_llm_output_for_context(text: &str, max_chars: usize) -> String {
@@ -7038,22 +7821,29 @@ fn escape_markdown_cell(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        process::Command,
+        sync::{Arc, Mutex},
+    };
+
+    use async_trait::async_trait;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use git_internal::internal::object::{task::Task as GitTask, types::ActorRef};
     use serde_json::json;
 
     use super::{
         DEFAULT_AUTOMATIC_PLAN_REPAIR_ATTEMPTS, ExecutionFailureRevision,
-        MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS, PendingPlanRevisionCommand, ProviderPlanDraft,
-        ProviderPlanDraftStep, ReviewScrollAction, append_to_last_tool_group_cell,
-        append_to_last_tool_group_preview_cell, apply_developer_network_access,
-        automatic_plan_repair_request_from_report, automatic_plan_repair_threshold_message,
-        build_execution_plan_prompt, build_execution_plan_revision_prompt, build_plan_prompt,
-        build_plan_revision_prompt, classify_execution_failure_revision,
-        code_ui_response_from_managed_selection, exec_approval_decision_from_selection,
-        execution_failure_report, execution_failure_revision_message,
-        execution_requires_plan_repair, format_decision_stage_note,
-        format_intentspec_target_mismatch, format_orchestrator_result,
+        FirstTurnIntentPolicyUpdate, MAX_AUTOMATIC_PLAN_REPAIR_ATTEMPTS,
+        PendingPlanRevisionCommand, ProviderPlanDraft, ProviderPlanDraftStep, ReviewScrollAction,
+        append_to_last_tool_group_cell, append_to_last_tool_group_preview_cell,
+        apply_developer_network_access, automatic_plan_repair_request_from_report,
+        automatic_plan_repair_threshold_message, build_execution_plan_prompt,
+        build_execution_plan_revision_prompt, build_plan_prompt, build_plan_revision_prompt,
+        classify_execution_failure_revision, classify_first_turn_task_intent,
+        code_ui_response_from_managed_selection, default_chat_allowed_tools,
+        exec_approval_decision_from_selection, execution_failure_report,
+        execution_failure_revision_message, execution_requires_plan_repair,
+        format_decision_stage_note, format_intentspec_target_mismatch, format_orchestrator_result,
         format_plan_compiled_stage_note, format_plan_execution_stage_note,
         format_replan_stage_note, format_system_verification_stage_note,
         graph_thread_id_from_orchestrator_result, intentspec_failure_revision_message_from_report,
@@ -7063,13 +7853,18 @@ mod tests {
         pending_execution_plan_revision_help_message, pending_plan_revision_help_message,
         phase0_plan_tool_loop_config, phase1_plan_tool_loop_config, provider_plan_draft_from_args,
         provider_plan_draft_from_plan, record_orchestrator_thread_metadata, review_scroll_action,
-        session_graph_thread_id, should_auto_repair_execution_failure,
-        should_forward_phase0_model_text_delta, should_forward_phase1_model_text_delta,
-        should_route_plain_message_to_plan,
+        session_graph_thread_id, should_auto_classify_first_user_message,
+        should_auto_repair_execution_failure, should_forward_phase0_model_text_delta,
+        should_forward_phase1_model_text_delta, should_route_plain_message_to_plan,
+        undo_should_prefer_vcs_rollback,
     };
     use crate::internal::{
         ai::{
-            agent::ToolLoopConfig,
+            agent::{TaskIntent, ToolLoopConfig},
+            completion::{
+                AssistantContent, CompletionError, CompletionModel, CompletionRequest,
+                CompletionResponse, Message, Text,
+            },
             intentspec::{
                 ResolveContext,
                 draft::{DraftAcceptance, DraftIntent, DraftRisk, IntentDraft},
@@ -7086,7 +7881,11 @@ mod tests {
             },
             sandbox::ReviewDecision,
             session::SessionState,
-            tools::context::{PlanDraftStep, SubmitPlanDraftArgs},
+            tools::{
+                ToolHandler, ToolRegistry, ToolRegistryBuilder,
+                context::{PlanDraftStep, SubmitPlanDraftArgs},
+                spec::ToolSpec,
+            },
             web::code_ui::{
                 CodeUiApplyToFuture, CodeUiCapabilities, CodeUiInteractionKind,
                 CodeUiInteractionOption, CodeUiInteractionRequest, CodeUiInteractionStatus,
@@ -7156,6 +7955,15 @@ mod tests {
             review_scroll_action(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
             None
         );
+    }
+
+    fn run_git(cwd: &std::path::Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .status()
+            .expect("git command should run");
+        assert!(status.success(), "git {:?} failed with {status}", args);
     }
 
     fn orchestrator_fixture() -> OrchestratorResult {
@@ -7414,6 +8222,168 @@ mod tests {
         assert!(!is_default_chat_tool("submit_plan_draft"));
         assert!(is_default_chat_tool("update_plan"));
         assert!(is_default_chat_tool("web_search"));
+    }
+
+    #[test]
+    fn default_chat_allowed_tools_prefers_launch_config_policy() {
+        let registry = ToolRegistry::with_working_dir(std::path::PathBuf::from("/tmp"));
+        let config = ToolLoopConfig {
+            allowed_tools: Some(vec!["read_file".to_string(), "list_symbols".to_string()]),
+            ..ToolLoopConfig::default()
+        };
+
+        assert_eq!(
+            default_chat_allowed_tools(&registry, &config),
+            vec!["read_file".to_string(), "list_symbols".to_string()]
+        );
+    }
+
+    #[derive(Clone)]
+    struct IntentTestModel {
+        response: String,
+        requests: Arc<Mutex<Vec<CompletionRequest>>>,
+    }
+
+    impl IntentTestModel {
+        fn new(response: impl Into<String>) -> Self {
+            Self {
+                response: response.into(),
+                requests: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn requests(&self) -> Vec<CompletionRequest> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    impl CompletionModel for IntentTestModel {
+        type Response = serde_json::Value;
+
+        async fn completion(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+            self.requests.lock().unwrap().push(request);
+            Ok(CompletionResponse {
+                content: vec![AssistantContent::Text(Text {
+                    text: self.response.clone(),
+                })],
+                reasoning_content: None,
+                raw_response: serde_json::json!({ "provider": "intent-test" }),
+            })
+        }
+    }
+
+    struct NamedToolHandler(&'static str);
+
+    #[async_trait]
+    impl ToolHandler for NamedToolHandler {
+        fn kind(&self) -> crate::internal::ai::tools::context::ToolKind {
+            crate::internal::ai::tools::context::ToolKind::Function
+        }
+
+        async fn handle(
+            &self,
+            _invocation: crate::internal::ai::tools::context::ToolInvocation,
+        ) -> crate::internal::ai::tools::error::ToolResult<crate::internal::ai::tools::ToolOutput>
+        {
+            Ok(crate::internal::ai::tools::ToolOutput::success("ok"))
+        }
+
+        fn schema(&self) -> ToolSpec {
+            ToolSpec::new(self.0, "test tool")
+        }
+    }
+
+    #[tokio::test]
+    async fn first_turn_classifier_updates_prompt_and_direct_chat_tool_policy() {
+        let temp = tempfile::tempdir().unwrap();
+        let registry = ToolRegistryBuilder::with_working_dir(temp.path().to_path_buf())
+            .register("read_file", Arc::new(NamedToolHandler("read_file")))
+            .register("list_symbols", Arc::new(NamedToolHandler("list_symbols")))
+            .register("apply_patch", Arc::new(NamedToolHandler("apply_patch")))
+            .register("shell", Arc::new(NamedToolHandler("shell")))
+            .build();
+        let model = IntentTestModel::new(
+            r#"{"intent":"review","confidence":0.93,"rationale":"user asked for review"}"#,
+        );
+        let mut config = ToolLoopConfig {
+            preamble: Some(
+                crate::internal::ai::prompt::SystemPromptBuilder::new(temp.path())
+                    .with_intent(TaskIntent::Unknown)
+                    .with_dynamic_context()
+                    .build(),
+            ),
+            allowed_tools: Some(registry.filter_by_intent(TaskIntent::Unknown)),
+            ..ToolLoopConfig::default()
+        };
+
+        let decision = classify_first_turn_task_intent(
+            &model,
+            &registry,
+            &mut config,
+            "Please review this change for production risks",
+            FirstTurnIntentPolicyUpdate::PromptAndAllowedTools,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(decision.intent, TaskIntent::Review);
+        let allowed_tools = config.allowed_tools.as_ref().unwrap();
+        assert!(allowed_tools.contains(&"read_file".to_string()));
+        assert!(allowed_tools.contains(&"list_symbols".to_string()));
+        assert!(!allowed_tools.contains(&"apply_patch".to_string()));
+        assert!(!allowed_tools.contains(&"shell".to_string()));
+
+        let preamble = config.preamble.as_deref().unwrap();
+        assert!(preamble.contains("## Task Intent"));
+        assert!(preamble.contains("intent=review"));
+        assert!(!preamble.contains("intent=unknown"));
+
+        let requests = model.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].tools.is_empty());
+        assert!(
+            requests[0]
+                .preamble
+                .as_deref()
+                .unwrap()
+                .contains("Classify the user's libra code request")
+        );
+    }
+
+    #[test]
+    fn first_turn_auto_classification_is_only_for_unprofiled_empty_history() {
+        assert!(should_auto_classify_first_user_message(true, &[], None));
+        assert!(!should_auto_classify_first_user_message(false, &[], None));
+        assert!(!should_auto_classify_first_user_message(
+            true,
+            &[Message::user("previous turn")],
+            None
+        ));
+        assert!(!should_auto_classify_first_user_message(
+            true,
+            &[],
+            Some(&vec!["read_file".to_string()])
+        ));
+    }
+
+    #[test]
+    fn undo_prefers_vcs_rollback_only_for_clean_committed_worktree() {
+        let repo = tempfile::tempdir().unwrap();
+        run_git(repo.path(), &["init"]);
+        run_git(repo.path(), &["config", "user.email", "test@example.com"]);
+        run_git(repo.path(), &["config", "user.name", "Test User"]);
+        run_git(repo.path(), &["config", "commit.gpgsign", "false"]);
+        std::fs::write(repo.path().join("tracked.txt"), "base\n").unwrap();
+        run_git(repo.path(), &["add", "tracked.txt"]);
+        run_git(repo.path(), &["commit", "-m", "base"]);
+
+        assert!(undo_should_prefer_vcs_rollback(repo.path()));
+
+        std::fs::write(repo.path().join("tracked.txt"), "dirty\n").unwrap();
+        assert!(!undo_should_prefer_vcs_rollback(repo.path()));
     }
 
     #[test]
@@ -8147,15 +9117,43 @@ mod tests {
     #[test]
     fn exec_approval_selection_maps_allow_all_commands() {
         assert_eq!(
-            exec_approval_decision_from_selection(2),
+            exec_approval_decision_from_selection(2, false, false),
+            ReviewDecision::ApprovedForTtl
+        );
+        assert_eq!(
+            exec_approval_decision_from_selection(3, false, false),
+            ReviewDecision::ApprovedForDirectoryTtl
+        );
+        assert_eq!(
+            exec_approval_decision_from_selection(4, false, false),
+            ReviewDecision::ApprovedForPatternTtl
+        );
+        assert_eq!(
+            exec_approval_decision_from_selection(5, false, false),
             ReviewDecision::ApprovedForAllCommands
         );
         assert_eq!(
-            exec_approval_decision_from_selection(3),
+            exec_approval_decision_from_selection(6, false, false),
             ReviewDecision::Denied
         );
         assert_eq!(
-            exec_approval_decision_from_selection(4),
+            exec_approval_decision_from_selection(7, false, false),
+            ReviewDecision::Abort
+        );
+        assert_eq!(
+            exec_approval_decision_from_selection(0, true, false),
+            ReviewDecision::Approved
+        );
+        assert_eq!(
+            exec_approval_decision_from_selection(0, false, true),
+            ReviewDecision::ApprovedForAllCommands
+        );
+        assert_eq!(
+            exec_approval_decision_from_selection(1, false, true),
+            ReviewDecision::Denied
+        );
+        assert_eq!(
+            exec_approval_decision_from_selection(2, false, true),
             ReviewDecision::Abort
         );
     }
@@ -9233,8 +10231,121 @@ fn phase1_plan_tool_loop_config(mut config: ToolLoopConfig) -> ToolLoopConfig {
     config
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FirstTurnIntentPolicyUpdate {
+    PromptOnly,
+    PromptAndAllowedTools,
+}
+
+fn should_auto_classify_first_user_message(
+    enabled: bool,
+    history: &[Message],
+    requested_allowed_tools: Option<&Vec<String>>,
+) -> bool {
+    enabled && history.is_empty() && requested_allowed_tools.is_none()
+}
+
+async fn classify_first_turn_task_intent<M>(
+    model: &M,
+    registry: &ToolRegistry,
+    config: &mut ToolLoopConfig,
+    user_text: &str,
+    policy_update: FirstTurnIntentPolicyUpdate,
+) -> Result<TaskIntentDecision, TaskIntentClassifierError>
+where
+    M: CompletionModel,
+{
+    let classifier = TaskIntentClassifier::new(model.clone());
+    let decision = classifier
+        .classify(TaskIntentClassificationRequest::new(user_text))
+        .await?;
+    apply_task_intent_prompt(config, registry, decision.intent);
+    if policy_update == FirstTurnIntentPolicyUpdate::PromptAndAllowedTools {
+        config.allowed_tools = Some(registry.filter_by_intent(decision.intent));
+    }
+    Ok(decision)
+}
+
+fn apply_task_intent_prompt(
+    config: &mut ToolLoopConfig,
+    registry: &ToolRegistry,
+    intent: TaskIntent,
+) {
+    config.preamble = Some(
+        SystemPromptBuilder::new(registry.working_dir())
+            .with_intent(intent)
+            .with_dynamic_context()
+            .build(),
+    );
+}
+
+fn attach_memory_anchor_prompt_context(config: &mut ToolLoopConfig) {
+    let Some(session_root) = config.context_frame_session_root.as_deref() else {
+        return;
+    };
+
+    let replay = match SessionJsonlStore::new(session_root.to_path_buf()).load_memory_anchors() {
+        Ok(replay) => replay,
+        Err(error) => {
+            tracing::warn!(
+                session_root = %session_root.display(),
+                error = %error,
+                "failed to load memory anchors for prompt context"
+            );
+            return;
+        }
+    };
+    let anchors = replay.anchors();
+    let Some(section) = build_memory_anchor_prompt_section(&anchors, Utc::now()) else {
+        return;
+    };
+
+    match config.preamble.as_mut() {
+        Some(preamble) if !preamble.trim().is_empty() => {
+            preamble.push_str("\n\n");
+            preamble.push_str(&section);
+        }
+        _ => {
+            config.preamble = Some(section);
+        }
+    }
+}
+
+fn send_task_intent_classified_event(
+    tx: &UnboundedSender<AppEvent>,
+    turn_id: TurnId,
+    decision: TaskIntentDecision,
+    config: &ToolLoopConfig,
+    registry: &ToolRegistry,
+) {
+    let preamble = config.preamble.clone().unwrap_or_else(|| {
+        SystemPromptBuilder::new(registry.working_dir())
+            .with_intent(decision.intent)
+            .with_dynamic_context()
+            .build()
+    });
+    let allowed_tools = registry.filter_by_intent(decision.intent);
+    let _ = tx.send(AppEvent::TaskIntentClassified {
+        turn_id,
+        intent: decision.intent,
+        preamble,
+        allowed_tools,
+    });
+}
+
 fn is_default_chat_tool(tool_name: &str) -> bool {
     !matches!(tool_name, "submit_intent_draft" | "submit_plan_draft")
+}
+
+fn default_chat_allowed_tools(registry: &ToolRegistry, config: &ToolLoopConfig) -> Vec<String> {
+    config.allowed_tools.clone().unwrap_or_else(|| {
+        registry
+            .tool_specs()
+            .into_iter()
+            .map(|s| s.function.name)
+            .filter(|name| is_default_chat_tool(name))
+            .collect()
+    })
 }
 
 fn should_forward_phase0_model_text_delta(_delta: &str) -> bool {
@@ -9261,6 +10372,28 @@ fn is_control_reclaim_command_input(text: &str) -> bool {
     )
 }
 
+fn undo_should_prefer_vcs_rollback(working_dir: &std::path::Path) -> bool {
+    let head = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(working_dir)
+        .output();
+    let Ok(head) = head else {
+        return false;
+    };
+    if !head.status.success() {
+        return false;
+    }
+
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(working_dir)
+        .output();
+    let Ok(status) = status else {
+        return false;
+    };
+    status.status.success() && String::from_utf8_lossy(&status.stdout).trim().is_empty()
+}
+
 fn apply_automation_approval_scope(config: &mut ToolLoopConfig, turn_id: TurnId) {
     let Some(runtime_context) = config.runtime_context.as_mut() else {
         return;
@@ -9269,6 +10402,20 @@ fn apply_automation_approval_scope(config: &mut ToolLoopConfig, turn_id: TurnId)
         return;
     };
     approval.scope_key_prefix = Some(format!("automation:{turn_id}"));
+}
+
+fn attach_file_history_context(
+    config: &mut ToolLoopConfig,
+    session_root: PathBuf,
+    turn_id: TurnId,
+) {
+    let Some(runtime_context) = config.runtime_context.as_mut() else {
+        return;
+    };
+    runtime_context.file_history = Some(FileHistoryRuntimeContext {
+        session_root,
+        batch_id: format!("turn-{turn_id}"),
+    });
 }
 
 fn normalize_terminal_paste_text(text: &str) -> String {

@@ -4860,6 +4860,9 @@ mod tests {
             model_usage: Some(crate::internal::ai::completion::CompletionUsageSummary {
                 input_tokens: 10,
                 output_tokens: 5,
+                cached_tokens: None,
+                reasoning_tokens: None,
+                total_tokens: Some(15),
                 cost_usd: None,
             }),
             review: None,

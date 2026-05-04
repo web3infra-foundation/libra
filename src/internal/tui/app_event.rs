@@ -19,7 +19,8 @@ use uuid::Uuid;
 
 use super::history_cell::HistoryCell;
 use crate::internal::ai::{
-    completion::Message,
+    agent::TaskIntent,
+    completion::{CompletionUsageSummary, Message},
     intentspec::types::IntentSpec,
     orchestrator::types::{
         ExecutionPlanSpec, OrchestratorResult, PersistedPlanReviewBundle,
@@ -79,6 +80,11 @@ pub enum AgentEvent {
         total_attempts: u32,
         delay_ms: u64,
         error: String,
+    },
+    /// Provider usage for one completed model request.
+    UsageUpdated {
+        usage: CompletionUsageSummary,
+        wall_clock_ms: u64,
     },
 }
 
@@ -151,6 +157,15 @@ pub enum AppEvent {
         source: TurnInputSource,
         /// If set, restrict tools for this message (agent tool restriction).
         allowed_tools: Option<Vec<String>>,
+    },
+    /// First-turn model classification resolved the task intent. The TUI stores
+    /// the updated base prompt and direct-chat tool policy so later turns stay
+    /// aligned with the initial request.
+    TaskIntentClassified {
+        turn_id: TurnId,
+        intent: TaskIntent,
+        preamble: String,
+        allowed_tools: Vec<String>,
     },
     /// Complete result for a `/plan` workflow run. Carries the persisted bundle
     /// plus the in-memory spec/plan so the UI can transition to the post-plan
@@ -298,6 +313,7 @@ impl AppEvent {
         match self {
             AppEvent::AgentEvent { turn_id, .. }
             | AppEvent::SubmitUserMessage { turn_id, .. }
+            | AppEvent::TaskIntentClassified { turn_id, .. }
             | AppEvent::PlanWorkflowComplete { turn_id, .. }
             | AppEvent::IntentSpecReviewReady { turn_id, .. }
             | AppEvent::InsertHistoryCell { turn_id, .. }

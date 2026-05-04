@@ -13,6 +13,7 @@ pub mod mcp_bridge;
 pub mod plan;
 pub mod read_file;
 pub mod request_user_input;
+pub mod semantic;
 pub mod shell;
 pub mod submit_intent_draft;
 pub mod submit_plan_draft;
@@ -26,6 +27,10 @@ pub use mcp_bridge::McpBridgeHandler;
 pub use plan::PlanHandler;
 pub use read_file::ReadFileHandler;
 pub use request_user_input::RequestUserInputHandler;
+pub use semantic::{
+    FindReferencesHandler, ListSymbolsHandler, ReadSymbolHandler, TraceCallersHandler,
+    register_semantic_handlers,
+};
 use serde_json::Value;
 pub use shell::ShellHandler;
 pub use submit_intent_draft::SubmitIntentDraftHandler;

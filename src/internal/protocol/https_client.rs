@@ -214,16 +214,11 @@ impl HttpsClient {
         .await
     }
 }
-#[cfg(test)]
+#[cfg(all(test, feature = "test-network"))]
 mod tests {
     use super::*;
-    #[cfg(feature = "test-network")]
     use crate::{git_protocol::ServiceType::UploadPack, utils::test::init_debug_logger};
 
-    // Hits a real GitHub HTTPS endpoint to discover refs. Gated behind the
-    // `test-network` feature (see CI job `compat-network-remotes`) so the
-    // default `cargo test --all` run on `compat-offline-core` is not exposed
-    // to GitHub TLS flakes.
     #[cfg(feature = "test-network")]
     #[tokio::test]
     async fn test_discover_reference_upload() {
@@ -247,10 +242,6 @@ mod tests {
         }
     }
 
-    // Hits a real GitHub HTTPS endpoint and streams a pack. Gated behind the
-    // `test-network` feature (see CI job `compat-network-remotes`) so the
-    // default `cargo test --all` run on `compat-offline-core` is not exposed
-    // to GitHub TLS flakes (peer-closed connection without close_notify, etc.).
     #[cfg(feature = "test-network")]
     #[tokio::test]
     async fn test_post_git_upload_pack_() {

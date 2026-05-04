@@ -563,6 +563,8 @@ pub struct ChatWidget {
     task_mux: Option<TaskMuxState>,
     /// Number of lines scrolled up from the bottom. `0` means pinned to bottom.
     pub scroll_from_bottom_lines: usize,
+    /// Compact usage badge rendered in the chat-area header row.
+    usage_header: Option<String>,
     /// Bottom pane for input.
     pub bottom_pane: BottomPane,
     /// Last rendered input area rectangle (for mouse hit-testing).
@@ -579,6 +581,7 @@ impl ChatWidget {
             dag_panel: None,
             task_mux: None,
             scroll_from_bottom_lines: 0,
+            usage_header: None,
             bottom_pane: BottomPane::new(),
             last_input_area: None,
             last_chat_area_width: 80,
@@ -631,6 +634,10 @@ impl ChatWidget {
         self.dag_panel = None;
         self.task_mux = None;
         self.scroll_from_bottom_lines = 0;
+    }
+
+    pub fn set_usage_header(&mut self, usage_header: Option<String>) {
+        self.usage_header = usage_header;
     }
 
     pub fn show_dag_panel(&mut self, plan: ExecutionPlanSpec) {
@@ -878,10 +885,26 @@ impl ChatWidget {
             return;
         }
 
-        self.render_history_cells(main_area, buf);
+        let history_area = self.render_usage_header(main_area, buf);
+        self.render_history_cells(history_area, buf);
         if let Some(aux_area) = aux_area {
             self.render_dag_panel(aux_area, buf);
         }
+    }
+
+    fn render_usage_header(&self, area: Rect, buf: &mut Buffer) -> Rect {
+        let Some(header) = self.usage_header.as_deref() else {
+            return area;
+        };
+        if area.width == 0 || area.height == 0 {
+            return area;
+        }
+        let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
+        let header_text = truncate_label(header, chunks[0].width as usize);
+        Paragraph::new(Line::styled(header_text, theme::text::muted()))
+            .alignment(Alignment::Right)
+            .render(chunks[0], buf);
+        chunks[1]
     }
 
     fn split_chat_layout(&self, area: Rect) -> (Rect, Option<Rect>) {
@@ -2365,6 +2388,27 @@ mod tests {
         widget.show_dag_panel(sample_parallel_plan());
 
         assert!(widget.task_mux_list_lines().is_none());
+    }
+
+    #[test]
+    fn chat_usage_header_reserves_top_row() {
+        let mut widget = ChatWidget::new();
+        widget.add_cell(Box::new(AssistantHistoryCell::new(
+            "transcript sentinel".to_string(),
+        )));
+        widget.set_usage_header(Some("openai/gpt-test · 10 tok · 1.2s".to_string()));
+
+        let area = Rect::new(0, 0, 80, 8);
+        let mut buf = Buffer::empty(area);
+        widget.render_chat_area(area, &mut buf);
+
+        let rendered = (0..area.height)
+            .map(|y| row_text(&buf, y, area.width))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("openai/gpt-test"));
+        assert!(rendered.contains("transcript sentinel"));
     }
 
     #[test]

@@ -25,7 +25,7 @@ use crate::internal::ai::{
         openai_compat::{
             ChatChoice, ChatErrorResponse, ChatFunctionCall, ChatMessage, ChatResponse,
             ChatToolCall, ChatToolDefinition, ChatUsage, build_messages_with_reasoning_content,
-            choice_reasoning_content, parse_choice_content, parse_tools,
+            choice_reasoning_content, parse_choice_content_for_provider, parse_tools,
         },
     },
 };
@@ -649,7 +649,7 @@ impl CompletionModelTrait for Model {
             .ok_or_else(|| CompletionError::ResponseError("No choices in response".to_string()))?;
 
         let reasoning_content = choice_reasoning_content(choice);
-        let content = parse_choice_content(choice)?;
+        let content = parse_choice_content_for_provider("kimi", choice)?;
 
         Ok(CompletionResponse {
             content,
@@ -940,7 +940,7 @@ mod tests {
             response.usage.as_ref().map(|usage| usage.total_tokens),
             Some(5)
         );
-        let content = parse_choice_content(&response.choices[0]).unwrap();
+        let content = parse_choice_content_for_provider("kimi", &response.choices[0]).unwrap();
         assert!(matches!(
             &content[0],
             crate::internal::ai::completion::AssistantContent::Text(text) if text.text == "Hello!"
@@ -979,7 +979,7 @@ mod tests {
         .unwrap();
 
         let response = accumulator.into_response("fallback-model").unwrap();
-        let content = parse_choice_content(&response.choices[0]).unwrap();
+        let content = parse_choice_content_for_provider("kimi", &response.choices[0]).unwrap();
         assert!(matches!(
             &content[0],
             crate::internal::ai::completion::AssistantContent::ToolCall(tool_call)

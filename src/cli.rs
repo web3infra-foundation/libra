@@ -181,6 +181,10 @@ enum Commands {
     Code(command::code::CodeArgs),
     #[command(about = "Drive a local Libra Code TUI automation control session")]
     CodeControl(command::code_control::CodeControlArgs),
+    #[command(about = "Manage AI automation rules and history")]
+    Automation(command::automation::AutomationArgs),
+    #[command(about = "Report AI provider/model usage")]
+    Usage(command::usage::UsageArgs),
     #[command(about = "Inspect an AI thread version graph in a TUI")]
     Graph(command::graph::GraphArgs),
     // The rest of the commands require a repository to be present
@@ -871,6 +875,10 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Clone(cmd_args) => command::clone::execute_safe(cmd_args, &output).await?,
         Commands::Code(cmd_args) => command::code::execute(cmd_args, &output).await?,
         Commands::CodeControl(cmd_args) => command::code_control::execute(cmd_args).await?,
+        Commands::Automation(cmd_args) => {
+            command::automation::execute_safe(cmd_args, &output).await?
+        }
+        Commands::Usage(cmd_args) => command::usage::execute_safe(cmd_args, &output).await?,
         Commands::Graph(cmd_args) => command::graph::execute_safe(cmd_args, &output).await?,
         Commands::Add(cmd_args) => command::add::execute_safe(cmd_args, &output).await?,
         Commands::Rm(cmd_args) => command::remove::execute_safe(cmd_args, &output).await?,

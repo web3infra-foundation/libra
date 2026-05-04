@@ -5,6 +5,7 @@
 
 use std::{
     collections::BTreeMap,
+    ffi::OsStr,
     fs,
     path::{Path, PathBuf},
 };
@@ -17,13 +18,14 @@ use diffy::create_patch;
 use super::parse_arguments;
 use crate::{
     internal::ai::{
+        runtime::hardening::{CommandSafetySurface, SafetyDecision, SafetyDisposition},
         sandbox::{ShellCommandRequest, run_shell_command_with_approval},
         tools::{
             context::{ShellArgs, ToolInvocation, ToolKind, ToolOutput, ToolPayload},
             error::{ToolError, ToolResult},
             registry::ToolHandler,
             spec::ToolSpec,
-            utils::{command_invokes_git_version_control, resolve_path},
+            utils::{classify_ai_command_safety, is_within_working_dir, resolve_path},
         },
         workspace_snapshot::{
             WorkspaceSnapshot, changed_paths_since_baseline as changed_workspace_paths,
@@ -79,15 +81,20 @@ impl ToolHandler for ShellHandler {
         };
 
         let args: ShellArgs = parse_arguments(&arguments)?;
-        if command_invokes_git_version_control(&args.command) {
-            return Err(ToolError::ExecutionFailed(
-                "git is not allowed for Libra-managed agent execution; use the run_libra_vcs tool or a libra command instead"
-                    .to_string(),
-            ));
-        }
+        let safety_decision =
+            classify_ai_command_safety(CommandSafetySurface::Shell, &args.command, &[]);
+        enforce_shell_safety(&safety_decision)?;
 
         // Resolve and validate the execution working directory.
         let cwd = resolve_workdir(args.workdir.as_deref(), &working_dir)?;
+        if let Some(path) =
+            mutating_shell_target_outside_workspace(&args.command, &cwd, &working_dir)?
+        {
+            return Err(ToolError::ExecutionFailed(format!(
+                "shell command targets a path outside the workspace and was rejected: {}",
+                path.display()
+            )));
+        }
 
         let max_output_bytes = runtime_context
             .as_ref()
@@ -122,6 +129,7 @@ impl ToolHandler for ShellHandler {
             sandbox_runtime,
             approval,
             justification: args.justification,
+            safety_decision: Some(safety_decision.clone()),
         })
         .await
         .map_err(|err| {
@@ -150,6 +158,7 @@ impl ToolHandler for ShellHandler {
                 &final_snapshot,
                 &baseline_manifest_contents,
             )?,
+            "safety": shell_safety_metadata(&safety_decision),
         });
 
         let formatted = format_output(
@@ -236,6 +245,180 @@ fn resolve_workdir(requested_workdir: Option<&str>, working_dir: &Path) -> ToolR
     }
 
     Ok(requested_canon)
+}
+
+fn enforce_shell_safety(decision: &SafetyDecision) -> ToolResult<()> {
+    if !matches!(decision.disposition, SafetyDisposition::Deny) {
+        return Ok(());
+    }
+
+    Err(ToolError::ExecutionFailed(shell_safety_denial_message(
+        decision,
+    )))
+}
+
+fn shell_safety_denial_message(decision: &SafetyDecision) -> String {
+    if decision.rule_name == "shell.direct_git_forbidden" {
+        return format!(
+            "git is not allowed for Libra-managed agent execution; use the run_libra_vcs tool or a libra command instead (safety rule: {}; blast radius: {}; reason: {})",
+            decision.rule_name, decision.blast_radius, decision.reason
+        );
+    }
+
+    format!(
+        "shell safety denied command (rule: {}; blast radius: {}; reason: {})",
+        decision.rule_name, decision.blast_radius, decision.reason
+    )
+}
+
+fn shell_safety_metadata(decision: &SafetyDecision) -> serde_json::Value {
+    serde_json::json!({
+        "disposition": decision.disposition,
+        "rule_name": decision.rule_name,
+        "blast_radius": decision.blast_radius,
+    })
+}
+
+fn mutating_shell_target_outside_workspace(
+    command: &str,
+    cwd: &Path,
+    working_dir: &Path,
+) -> ToolResult<Option<PathBuf>> {
+    let Some(parts) = shlex::split(command) else {
+        return Ok(None);
+    };
+
+    mutating_words_target_outside_workspace(&parts, cwd, working_dir)
+}
+
+fn mutating_words_target_outside_workspace(
+    parts: &[String],
+    cwd: &Path,
+    working_dir: &Path,
+) -> ToolResult<Option<PathBuf>> {
+    let Some((cmd, args)) = normalized_shell_words(parts) else {
+        return Ok(None);
+    };
+
+    if is_shell_interpreter(&cmd)
+        && let Some(script) = shell_c_script(args)
+    {
+        return mutating_shell_target_outside_workspace(script, cwd, working_dir);
+    }
+
+    let path_args = mutating_shell_path_args(&cmd, args);
+    for path_arg in path_args {
+        let path = Path::new(path_arg);
+        let resolved = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            cwd.join(path)
+        };
+        if !is_within_working_dir(&resolved, working_dir)? {
+            return Ok(Some(resolved));
+        }
+    }
+
+    Ok(None)
+}
+
+fn normalized_shell_words(parts: &[String]) -> Option<(String, &[String])> {
+    let mut idx = 0;
+    while let Some(word) = parts.get(idx).map(String::as_str) {
+        match executable_name(word).as_deref() {
+            Some("command") | Some("sudo") => idx += 1,
+            Some("env") => {
+                idx += 1;
+                idx += skip_env_prefix(&parts[idx..]);
+            }
+            _ => break,
+        }
+    }
+
+    let cmd = executable_name(parts.get(idx).map(String::as_str)?)?;
+    Some((cmd, &parts[idx + 1..]))
+}
+
+fn skip_env_prefix(args: &[String]) -> usize {
+    let mut idx = 0;
+    while let Some(arg) = args.get(idx).map(String::as_str) {
+        if arg.contains('=') && !arg.starts_with('-') {
+            idx += 1;
+            continue;
+        }
+        if arg.starts_with("--unset=") || arg.starts_with("--chdir=") {
+            idx += 1;
+            continue;
+        }
+        if matches!(arg, "-i" | "--ignore-environment" | "-0" | "--null") {
+            idx += 1;
+            continue;
+        }
+        if matches!(arg, "-u" | "--unset" | "-C" | "--chdir") {
+            idx += 1;
+            if idx < args.len() {
+                idx += 1;
+            }
+            continue;
+        }
+        break;
+    }
+    idx
+}
+
+fn mutating_shell_path_args<'a>(cmd: &str, args: &'a [String]) -> Vec<&'a str> {
+    match cmd {
+        "touch" | "mkdir" | "rm" | "rmdir" | "cp" | "mv" => shell_non_option_args(args),
+        "chmod" | "chown" => {
+            let mut paths = shell_non_option_args(args);
+            if !paths.is_empty() {
+                paths.remove(0);
+            }
+            paths
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn shell_non_option_args(args: &[String]) -> Vec<&str> {
+    let mut after_double_dash = false;
+    args.iter()
+        .filter_map(|arg| {
+            if after_double_dash {
+                return Some(arg.as_str());
+            }
+            if arg == "--" {
+                after_double_dash = true;
+                return None;
+            }
+            if arg.starts_with('-') {
+                None
+            } else {
+                Some(arg.as_str())
+            }
+        })
+        .collect()
+}
+
+fn is_shell_interpreter(cmd: &str) -> bool {
+    matches!(cmd, "bash" | "dash" | "sh" | "zsh")
+}
+
+fn shell_c_script(args: &[String]) -> Option<&str> {
+    args.windows(2).find_map(|pair| {
+        if pair[0] == "-c" {
+            Some(pair[1].as_str())
+        } else {
+            None
+        }
+    })
+}
+
+fn executable_name(command: &str) -> Option<String> {
+    Path::new(command)
+        .file_name()
+        .and_then(OsStr::to_str)
+        .map(|name| name.trim_end_matches(".exe").to_ascii_lowercase())
 }
 
 fn changed_paths_to_strings(changed_paths: &[PathBuf]) -> Vec<String> {
@@ -343,13 +526,20 @@ fn is_cargo_manifest_path(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
 
     use serial_test::serial;
     use tempfile::TempDir;
 
     use super::*;
-    use crate::internal::ai::tools::context::ToolPayload;
+    use crate::internal::ai::{
+        sandbox::{
+            ApprovalCachePolicy, ApprovalStore, AskForApproval, ExecApprovalRequest,
+            ReviewDecision, SandboxPermissions, SandboxPolicy, ToolApprovalContext,
+            ToolRuntimeContext, ToolSandboxContext,
+        },
+        tools::context::ToolPayload,
+    };
 
     fn make_invocation(args: serde_json::Value, working_dir: std::path::PathBuf) -> ToolInvocation {
         ToolInvocation::new(
@@ -359,6 +549,40 @@ mod tests {
                 arguments: args.to_string(),
             },
             working_dir,
+        )
+    }
+
+    fn runtime_with_approval(
+        policy: AskForApproval,
+    ) -> (
+        ToolRuntimeContext,
+        tokio::sync::mpsc::UnboundedReceiver<ExecApprovalRequest>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        (
+            ToolRuntimeContext {
+                sandbox: Some(ToolSandboxContext {
+                    policy: SandboxPolicy::WorkspaceWrite {
+                        writable_roots: Vec::new(),
+                        network_access: false,
+                        exclude_tmpdir_env_var: false,
+                        exclude_slash_tmp: false,
+                    },
+                    permissions: SandboxPermissions::UseDefault,
+                }),
+                sandbox_runtime: None,
+                approval: Some(ToolApprovalContext {
+                    policy,
+                    request_tx: tx,
+                    store: Arc::new(tokio::sync::Mutex::new(ApprovalStore::default())),
+                    scope_key_prefix: None,
+                    approval_ttl: std::time::Duration::from_secs(300),
+                    cache_policy: ApprovalCachePolicy::default(),
+                }),
+                file_history: None,
+                max_output_bytes: Some(DEFAULT_MAX_OUTPUT_BYTES),
+            },
+            rx,
         )
     }
 
@@ -376,6 +600,108 @@ mod tests {
             .expect_err("git shell command should be rejected");
 
         assert!(error.to_string().contains("git is not allowed"));
+    }
+
+    #[tokio::test]
+    async fn rejects_destructive_shell_commands_before_spawn() {
+        let temp = TempDir::new().unwrap();
+        let target = temp.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("artifact"), "keep").unwrap();
+        let inv = make_invocation(
+            serde_json::json!({ "command": "rm -rf target" }),
+            temp.path().to_path_buf(),
+        );
+
+        let error = ShellHandler
+            .handle(inv)
+            .await
+            .expect_err("destructive shell command should be rejected");
+
+        let rendered = error.to_string();
+        assert!(rendered.contains("shell safety denied"), "{rendered}");
+        assert!(rendered.contains("shell.destructive_command"), "{rendered}");
+        assert!(
+            target.exists(),
+            "destructive command should be rejected before spawn"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_wrapped_destructive_shell_commands_before_spawn() {
+        let temp = TempDir::new().unwrap();
+        let target = temp.path().join("wrapped-target");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("artifact"), "keep").unwrap();
+        let inv = make_invocation(
+            serde_json::json!({ "command": "env rm -rf wrapped-target" }),
+            temp.path().to_path_buf(),
+        );
+
+        let error = ShellHandler
+            .handle(inv)
+            .await
+            .expect_err("wrapped destructive shell command should be rejected");
+
+        assert!(
+            error.to_string().contains("shell.destructive_command"),
+            "{error}"
+        );
+        assert!(
+            target.exists(),
+            "wrapped destructive command should be rejected before spawn"
+        );
+    }
+
+    #[tokio::test]
+    async fn needs_human_shell_safety_uses_approval_prompt() {
+        let temp = TempDir::new().unwrap();
+        let (runtime_context, mut approval_rx) = runtime_with_approval(AskForApproval::OnRequest);
+        let inv = make_invocation(
+            serde_json::json!({ "command": "touch generated.txt" }),
+            temp.path().to_path_buf(),
+        )
+        .with_runtime_context(runtime_context);
+
+        let task = tokio::spawn(async move { ShellHandler.handle(inv).await });
+        let approval = approval_rx
+            .recv()
+            .await
+            .expect("needs-human shell command should request approval");
+
+        assert_eq!(approval.command, "touch generated.txt");
+        let reason = approval.reason.as_deref().unwrap_or_default();
+        assert!(
+            reason.contains("shell.workspace_mutation_or_execution"),
+            "{reason}"
+        );
+        approval.response_tx.send(ReviewDecision::Denied).unwrap();
+
+        let error = task.await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("rejected by user"));
+        assert!(!temp.path().join("generated.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn mutating_shell_command_cannot_target_outside_workspace() {
+        let workspace = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let outside_file = outside.path().join("created-by-shell");
+        let inv = make_invocation(
+            serde_json::json!({ "command": format!("touch {}", outside_file.display()) }),
+            workspace.path().to_path_buf(),
+        );
+
+        let error = ShellHandler
+            .handle(inv)
+            .await
+            .expect_err("outside-workspace target should be rejected");
+
+        assert!(
+            error.to_string().contains("outside the workspace"),
+            "{error}"
+        );
+        assert!(!outside_file.exists());
     }
 
     // ── Basic execution ───────────────────────────────────────────────────────

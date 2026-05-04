@@ -145,7 +145,7 @@ jobs:
         env:
           LIBRA_TEST_GITHUB_TOKEN: ${{ secrets.LIBRA_TEST_GITHUB_TOKEN }}
           LIBRA_TEST_GITHUB_NAMESPACE: ${{ secrets.LIBRA_TEST_GITHUB_NAMESPACE }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           LIBRA_D1_ACCOUNT_ID: ${{ secrets.LIBRA_D1_ACCOUNT_ID }}
           LIBRA_D1_API_TOKEN: ${{ secrets.LIBRA_D1_API_TOKEN }}
           LIBRA_D1_DATABASE_ID: ${{ secrets.LIBRA_D1_DATABASE_ID }}

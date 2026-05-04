@@ -158,6 +158,11 @@ pub struct LogCommitEntry {
     pub files: Vec<LogFileChange>,
 }
 
+// Schema ownership: 本 LogCommitEntry 是 commit 元数据 JSON schema 的权威定义，
+// 详见 [README.md 跨命令契约约定 §4](README.md#4-json-schema-的所有权与重叠)。
+// `show` 命令的 ShowCommitData 直接复用这一字段集；任何新增字段必须先在这里落地，
+// 再同步到 show.md。`diff` 命令负责 hunk / patch 级输出，不在此 schema 中重复。
+
 #[derive(Debug, Clone, Serialize)]
 pub struct LogFileChange {
     /// File path

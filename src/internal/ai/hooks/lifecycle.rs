@@ -38,6 +38,10 @@ pub enum LifecycleEventKind {
     ToolUse,
     ModelUpdate,
     Compaction,
+    CompactionCompleted,
+    PermissionRequest,
+    SourceEnabled,
+    SourceDisabled,
     TurnEnd,
     SessionEnd,
 }
@@ -50,6 +54,10 @@ impl fmt::Display for LifecycleEventKind {
             LifecycleEventKind::ToolUse => "tool_use",
             LifecycleEventKind::ModelUpdate => "model_update",
             LifecycleEventKind::Compaction => "compaction",
+            LifecycleEventKind::CompactionCompleted => "compaction_completed",
+            LifecycleEventKind::PermissionRequest => "permission_request",
+            LifecycleEventKind::SourceEnabled => "source_enabled",
+            LifecycleEventKind::SourceDisabled => "source_disabled",
             LifecycleEventKind::TurnEnd => "turn_end",
             LifecycleEventKind::SessionEnd => "session_end",
         };
@@ -104,6 +112,10 @@ impl Event for LifecycleEvent {
             LifecycleEventKind::ToolUse => "tool_use",
             LifecycleEventKind::ModelUpdate => "model_update",
             LifecycleEventKind::Compaction => "compaction",
+            LifecycleEventKind::CompactionCompleted => "compaction_completed",
+            LifecycleEventKind::PermissionRequest => "permission_request",
+            LifecycleEventKind::SourceEnabled => "source_enabled",
+            LifecycleEventKind::SourceDisabled => "source_disabled",
             LifecycleEventKind::TurnEnd => "turn_end",
             LifecycleEventKind::SessionEnd => "session_end",
         }
@@ -330,6 +342,33 @@ pub fn apply_lifecycle_event(
                 .metadata
                 .insert("compaction_count".to_string(), json!(current + 1));
         }
+        LifecycleEventKind::CompactionCompleted => {
+            session.metadata.insert(
+                "last_compaction_completed_at".to_string(),
+                json!(event.timestamp),
+            );
+        }
+        LifecycleEventKind::PermissionRequest
+        | LifecycleEventKind::SourceEnabled
+        | LifecycleEventKind::SourceDisabled => {
+            let entry = json!({
+                "kind": event.kind.to_string(),
+                "source": event.source,
+                "tool": event.tool_name,
+                "timestamp": event.timestamp.to_rfc3339(),
+            });
+            let slot = session
+                .metadata
+                .entry("automation_events".to_string())
+                .or_insert_with(|| Value::Array(Vec::new()));
+            let Value::Array(items) = slot else {
+                session
+                    .metadata
+                    .insert("automation_events".to_string(), Value::Array(vec![entry]));
+                return;
+            };
+            items.push(entry);
+        }
         LifecycleEventKind::TurnEnd => {
             if let Some(message) = &event.assistant_message {
                 session.add_assistant_message(message);
@@ -555,6 +594,22 @@ mod tests {
         assert_eq!(LifecycleEventKind::ToolUse.to_string(), "tool_use");
         assert_eq!(LifecycleEventKind::ModelUpdate.to_string(), "model_update");
         assert_eq!(LifecycleEventKind::Compaction.to_string(), "compaction");
+        assert_eq!(
+            LifecycleEventKind::CompactionCompleted.to_string(),
+            "compaction_completed"
+        );
+        assert_eq!(
+            LifecycleEventKind::PermissionRequest.to_string(),
+            "permission_request"
+        );
+        assert_eq!(
+            LifecycleEventKind::SourceEnabled.to_string(),
+            "source_enabled"
+        );
+        assert_eq!(
+            LifecycleEventKind::SourceDisabled.to_string(),
+            "source_disabled"
+        );
         assert_eq!(LifecycleEventKind::TurnEnd.to_string(), "turn_end");
         assert_eq!(LifecycleEventKind::SessionEnd.to_string(), "session_end");
     }

@@ -1,4 +1,4 @@
-//! CEX-12.5 integration tests for the schema migration runner.
+//! Integration tests for the schema migration runner.
 //!
 //! Every test runs against an isolated, on-disk SQLite file inside
 //! `tempfile::tempdir()` so the cases neither pollute each other nor
@@ -31,22 +31,26 @@ async fn connect(url: &str) -> DatabaseConnection {
 }
 
 // ---------------------------------------------------------------------------
-// Builtin runner contract: ships empty in CEX-12.5
+// Builtin runner contract: current runtime migrations are registered
 // ---------------------------------------------------------------------------
 
 #[test]
-fn builtin_migrations_starts_empty_in_cex_12_5() {
-    // The CEX-12.5 release intentionally ships the framework with zero
-    // migrations. CEX-13b / 15 / 16 will add to `builtin_migrations` and
-    // this assertion changes accordingly.
-    assert!(
-        builtin_migrations().is_empty(),
-        "CEX-12.5 ships an empty registry; future CEXes populate it"
-    );
-    let runner = builtin_runner().expect("CEX-12.5 builtin registry must build clean");
-    assert!(runner.is_empty());
-    assert_eq!(runner.len(), 0);
-    assert_eq!(runner.max_registered_version(), None);
+fn builtin_migrations_register_current_schema_migrations() {
+    // Keep this explicit so future built-in migrations update this test with
+    // the registry shape they introduce.
+    let migrations = builtin_migrations();
+    let versions: Vec<i64> = migrations
+        .iter()
+        .map(|migration| migration.version)
+        .collect();
+    let names: Vec<&str> = migrations.iter().map(|migration| migration.name).collect();
+    assert_eq!(versions, vec![2026050301, 2026050302]);
+    assert_eq!(names, vec!["automation_log", "agent_usage_stats"]);
+
+    let runner = builtin_runner().expect("builtin registry must build clean");
+    assert!(!runner.is_empty());
+    assert_eq!(runner.len(), 2);
+    assert_eq!(runner.max_registered_version(), Some(2026050302));
 }
 
 // ---------------------------------------------------------------------------
@@ -972,16 +976,16 @@ async fn describe_schema_versions(conn: &DatabaseConnection) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn run_builtin_migrations_is_a_noop_in_cex_12_5() {
+async fn run_builtin_migrations_applies_current_builtin_registry() {
     let (_dir, url, _path) = fresh_db_url();
     let conn = connect(&url).await;
-    // Empty registry → returns Ok with an empty Vec, but leaves the
-    // bookkeeping table behind.
     let applied = run_builtin_migrations(&conn)
         .await
         .expect("run_builtin_migrations");
-    assert!(applied.is_empty());
+    assert_eq!(applied, vec![2026050301, 2026050302]);
     assert!(table_exists(&conn, "schema_versions").await);
+    assert!(table_exists(&conn, "automation_log").await);
+    assert!(table_exists(&conn, "agent_usage_stats").await);
 }
 
 // ---------------------------------------------------------------------------

@@ -41,9 +41,9 @@
 - 引入 `PullError` typed error enum，覆盖 pull 层面的错误场景
 - 所有 `PullError → CliError` 映射使用显式 `StableErrorCode`
 - 拆分执行层与渲染层：新增 `run_pull(args) -> Result<PullOutput, PullError>` 纯执行入口
-- 在 `fetch.rs` / `merge.rs` 建立 pull 可复用的 typed helper 与静默子级输出边界
+- 复用 `fetch.rs` / `merge.rs` 已落地的 typed helper 与静默子级输出边界
 
-> **前置依赖说明**：Pull 依赖 fetch/merge 的 typed helper，为打破批次依赖，本批将 **fetch 和 merge 的基础 typed helper** 纳入第一批前置工作。第五批（远程管理）将对 fetch 做完整 JSON/进度改造，本批仅要求 fetch/merge 提供 pull 可用的最小内部接口。
+> **依赖现状（已变更）**：原计划把"fetch / merge 的最小 typed helper"列为前置依赖；当前 `fetch` 第五批改造已整体落地（README #22），`fetch.rs` 已暴露 `FetchOutput` 顶层结果与可静默复用的内部接口；`merge` 命令的完整改造仍归 README 第六批（merge / rebase 状态机），本批 pull 只需要 merge 的"fast-forward / already-up-to-date / requires-manual-merge"最小接口，已可直接消费。**因此 pull 不再有任何阻塞性前置依赖**，剩余工作纯粹是 pull 自身的执行/渲染拆分与错误码补齐。
 
 - `PullOutput` 聚合 fetch 和 merge 的结构化结果，但**只覆盖当前底层真正支持的 pull 语义**（fast-forward / already-up-to-date）
 - JSON 输出只承诺当前底层确定可得的数据；拿不到稳定统计值的字段不进入首版 schema
@@ -398,8 +398,8 @@ EXAMPLES:
 | 文件 | 改动类型 | 说明 |
 |------|---------|------|
 | `src/command/pull.rs` | **重构** | 从 81 行薄包装扩展为完整的组合命令；新增 `PullError` typed enum；新增 `PullOutput` / `PullFetchResult` / `PullMergeResult` 结构体；新增 `run_pull()` 纯执行入口；`PullError → CliError` 显式 `StableErrorCode` 映射；fetch/merge 子级 `OutputConfig` 隔离；补齐 `--help` EXAMPLES |
-| `src/command/fetch.rs` | **前置依赖（第一批）** | 新增 pull 可复用的内部 typed helper `run_fetch_for_pull()` 与静默 child-output 边界；返回结构化 `FetchResult`；**注意：完整 JSON/进度改造留到第五批** |
-| `src/command/merge.rs` | **前置依赖（第一批）** | 新增 pull 可复用的内部 typed helper `run_merge_for_pull()`；仅返回 fast-forward / already-up-to-date / requires-manual-merge 结果；**注意：three-way merge 能力留到第六批** |
+| `src/command/fetch.rs` | **复用已落地能力** | 已具备 `FetchOutput` 顶层结果（fetch.md 第五批已整体落地）；pull 直接消费现有 typed 接口与静默 child-output 边界，无需在本批额外改造 fetch |
+| `src/command/merge.rs` | **复用最小接口** | merge 当前稳定支持 `Already up to date` / fast-forward / `requires-manual-merge` 三态，pull 已可消费；three-way merge 与冲突结构化输出由 README 第六批 merge / rebase 状态机改造交付，不在本批 pull 范围 |
 | `tests/command/pull_test.rs` | **重大扩展** | 新增 `PullError` 变体覆盖、fast-forward、up-to-date、quiet 场景 |
 | `tests/command/pull_json_test.rs` | **新增** | JSON schema 完整性和稳定性验证 |
 | `tests/command/pull_error_test.rs` | **新增** | CLI 错误码验证（exit code、StableErrorCode、阶段上下文） |

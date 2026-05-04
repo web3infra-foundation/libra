@@ -7,7 +7,7 @@
 
 ### 已完成前置条件与当前代码状态
 
-`config`、`init`、`clone`、`add`、`status` 的主改造均已在当前代码库落地。README 当前将 `commit` 标记为“部分完成，需对齐改进模式”，这一判断是准确的：`commit` 虽然功能面较完整，但与已改进命令（init/clone/add/status）的统一模式相比，仍有明显的架构、输出契约和测试覆盖缺口，需要继续收口。
+`config`、`init`、`clone`、`add`、`status` 的主改造均已在当前代码库落地，commit 的现代化改造也已整体落地。本节记录交付的对外契约与代码位置，作为后续命令复用的可信基线。
 
 **已确认落地的基线：**
 
@@ -15,47 +15,42 @@
 - `OutputConfig` + `emit_json_data()` + `info_println!()` 输出框架已可用
 - `StableErrorCode` 体系已有 18 个错误码
 - `CliError` 支持 `.with_hint()`、`.with_stable_code()`、`.with_exit_code()`、`.with_detail()`
-- `execute()` / `execute_safe(args, output)` 双入口已存在（`commit.rs:574-587`）
-- `execute_impl(args, output)` 内部执行入口已存在（`commit.rs:339`），返回 `Result<(), CommitExecError>`
-- **JSON 输出已部分实现**（`commit.rs:285-302`）：`emit_commit_summary()` 中通过 `emit_json_data("commit", ...)` 输出成功摘要
-- `CommitExecError` 桥接类型已存在（`commit.rs:127-152`），将内部 `String` 错误映射为 `CliError`
-- `classify_commit_error()` 已存在（`commit.rs:182-194`），将错误消息字符串映射到 `StableErrorCode`
-- `resolve_committer_identity()` 已存在（`commit.rs:196-234`），从 config/env 解析提交者身份
-- `parse_author()` 已存在（`commit.rs:91-125`），解析 `--author` 参数
+- `execute()` / `execute_safe(args, output)` 双入口已存在（`commit.rs:765` / `commit.rs:785`）
+- `parse_author()` 已存在（`commit.rs:276`），解析 `--author` 参数
+- `resolve_committer_identity()` 已存在（`commit.rs:323`），从 config/env 解析提交者身份；与 `init` 共用 `resolve_user_identity_sources(LocalIdentityTarget::CurrentRepo)` 共享 helper
 - 已有功能完整的 flag 支持：`--message/-m`、`--file/-F`、`--allow-empty`、`--conventional`、`--amend`、`--no-edit`、`--signoff/-s`、`--disable-pre`/`--no-verify`、`--all/-a`、`--author`
 
-**基于当前代码的 Review 结论（commit 与已改进命令模式对比后仍需改进的部分）：**
+**基于当前代码的已交付确认（commit 与其它已现代化命令的统一模式对齐情况）：**
 
-- **无 typed error enum**：`execute_impl()` 内部大量使用 `Result<(), String>` 错误——至少 18 处 `.map_err(|e| format!("failed to ...: {}", e))?`，没有像 `AddError`/`StatusError`/`InitError` 那样的 `thiserror` 枚举。`CommitExecError` 是一个简单的桥接类型，不是结构化错误分类
-- **StableErrorCode 依赖推断而非显式映射**：`classify_commit_error()` 仅对 `"nothing to commit"` 显式映射为 `RepoStateInvalid`，其余错误（包括身份认证失败）全部依赖 `infer_stable_error_code()` 的字符串子串匹配——这是脆弱的，任何错误消息措辞变化都会导致错误码偏移
-- **legacy `execute()` 包装仍使用默认 `OutputConfig`**：`execute()` 入口（`commit.rs:575`）仍以 `OutputConfig::default()` 调用 `execute_safe()`；但 CLI 主路径已经通过顶层 dispatcher 直接调用 `execute_safe(args, &output)`。因此这更像兼容包装层的收尾项，而不是阻断本批的主问题
-- **执行层与渲染层未拆分**：`execute_impl()` 是一个 233 行的单体函数，混合了索引操作、验证、树创建、签名、对象存储、HEAD 更新和输出渲染。没有像 `run_add()`/`run_init()` 那样的纯执行入口返回结构化结果
-- **JSON 输出不完整**：当前 JSON 仅输出成功摘要（commit hash + 文件统计），不包含 `amend` 标记、分支名、`signoff` 状态、`conventional` 验证状态等元数据；也没有 `--dry-run` 支持
-- **JSON 向后兼容方案当前写错了**：计划后文把现有字段 `head` 改名为 `branch`，并把 `files_changed.total/new/...` 改为另一套字段名；这与“仅做增量扩展”的原则冲突，会破坏已有 JSON consumer
-- **hook 输出当前会污染结构化输出**：pre-commit hook 直接继承父进程 stdout/stderr；若不在本批定义隔离规则，`--json` / `--machine` 成功路径无法保证 stdout/stderr 契约稳定
-- **`--signoff` 写入逻辑已存在但缺少回归测试**：`commit.rs:463-469` 和 `522-528` 两处路径已实现 `Signed-off-by` trailer 拼接到 `final_message`；但没有任何测试验证 trailer 在所有路径（含 amend + signoff 组合）下稳定写入，重构中可能意外丢失
-- **核心 helper 的错误传播仍不统一**：`vault_sign_commit()`、`create_tree()`、`auto_stage_tracked_changes()`、`update_head()`、`update_head_and_reflog()` 等关键路径仍以 `String` 为主要错误载体，无法精确映射到 `StableErrorCode`
-- **缺少 `--help` EXAMPLES 段**：`CommitArgs` 没有 doc comment 提供 clap 的 `EXAMPLES` 输出段
-- **部分 `unwrap()` 残留**：`ObjectHash::from_bytes(...).unwrap()`（`commit.rs:841`）在字节格式异常时会 panic
-- **`missing_identity_error()` 未显式设置 `StableErrorCode`**：返回的 `CliError::fatal("author identity unknown")` 依赖推断得到 `LBR-AUTH-001`，但这不是显式映射——消息措辞变化会导致推断失败
-- **测试覆盖有盲区**：无 JSON 输出格式测试、无 `--conventional` 验证测试、无 `--signoff` 格式测试、无 `-F`（file）消息源测试、无 vault 签名集成测试
+- **typed error enum 已交付**：`pub enum CommitError`（`commit.rs:112-169`）含 19 个 thiserror 变体（`IndexLoad` / `IndexSave` / `NothingToCommit` / `NothingToCommitNoTracked` / `IdentityMissing` / `NoCommitToAmend` / `AmendUnsupported` / `InvalidAuthor` / `MessageFileRead` / `EmptyMessage` / `TreeCreation` / `ObjectStorage` / `ParentCommitLoad` / `HeadUpdate` / `PreCommitHook` / `ConventionalCommit` / `VaultSign` / `AutoStage` / `StagedChanges`），完全替代旧 `Result<(), String>` 模式
+- **StableErrorCode 显式映射已交付**：`impl From<CommitError> for CliError`（`commit.rs:171-230`）每个变体都显式调用 `.with_stable_code(StableErrorCode::XXX)`（`RepoCorrupt` / `IoWriteFailed` / `RepoStateInvalid` / `AuthMissingCredentials` / `ConflictUnresolved` 等），不再依赖 `infer_stable_error_code()` 的子串推断
+- **执行层与渲染层已拆分**：`pub async fn run_commit(args, output) -> Result<CommitOutput, CommitError>`（`commit.rs:398`）纯执行；`fn render_commit_output(result, output) -> CliResult<()>`（`commit.rs:721`）独立渲染，与 `init` / `add` / `status` 模式一致
+- **JSON 向后兼容扩展已交付**：`pub struct CommitOutput`（`commit.rs:249-272`）含 11 个字段：`head`（保留）+ `branch: Option<String>`（新增）+ `commit` / `short_id` / `subject` / `root_commit` / `amend` / `files_changed` / `signoff` / `conventional: Option<bool>` / `signed`。**采用增量扩展策略**：旧字段（`head` / `commit` / `short_id` / `subject` / `root_commit` / `files_changed.total/new/modified/deleted`）保留名称、类型、语义不变；新元数据全部以新增字段形式追加，不破坏已有 JSON consumer
+- **hook I/O 隔离已交付**：`run_pre_commit_hook(output: &OutputConfig) -> Result<(), CommitError>`（`commit.rs:610`）接受 `OutputConfig`，在 `--json` / `--machine` 模式下对 hook 子进程使用 `Stdio::piped()`，确保结构化 stdout/stderr 不被污染；human 模式仍透传 hook 输出
+- **核心 helper 全部返回 typed `CommitError`**：`save_commit_object`（`commit.rs:666`）、`auto_stage_tracked_changes`（`commit.rs:951`）、`update_head`（`commit.rs:1019`）、`update_head_and_reflog`（`commit.rs:1039`）、`run_pre_commit_hook`（`commit.rs:610`）等关键 helper 全部以 `CommitError` 为错误载体，统一传播路径
+- **`--help` EXAMPLES 已交付**：`CommitArgs` doc comment（`commit.rs:60-62` 区域）含 5 条 EXAMPLES（`libra commit -am ...` / `libra commit --amend` / `libra commit --conventional` / `libra commit --allow-empty` / `libra commit --json`），通过 clap `#[command]` 注解挂载
+- **`missing_identity_error()` 已显式映射**：`commit.rs:313` 返回 `CommitError::IdentityMissing(...)`；该变体在 `commit.rs:187` 显式映射到 `StableErrorCode::AuthMissingCredentials` 并附 actionable hint，不再依赖消息子串推断
+- **测试覆盖已交付**：JSON schema 稳定性测试、CommitError 全变体单元映射测试、CLI 级集成测试均已就绪（详见 README 第 67-68 行 commit 已落地说明）
+
+**仍保留的低优先级收口项（不阻断验收）：**
+
+- legacy `execute()` 包装层（`commit.rs:765`）仍以 `OutputConfig::default()` 调用 `execute_safe()`；CLI 主路径不走它（顶层 dispatcher 直接调用 `execute_safe(args, &output)`），因此这是兼容包装层的收尾项，可独立小修
+- `commit.rs` 全文 `unwrap()` / `expect()` 共 23 处，多数位于 `#[cfg(test)]` 块，少量生产路径（如 `ObjectHash::from_bytes(...)` 字节解析）需要后续审计是否真的不可恢复，可独立小修
 
 ### 目标与非目标
 
-**本批目标：**
-- 引入 `CommitError` typed error enum，替代内部 `String` 错误
+**本批已交付：**
+- 引入了 `CommitError` typed error enum（19 变体），替代内部 `String` 错误
 - 所有 `CommitError → CliError` 映射使用显式 `StableErrorCode`，消除对 `infer_stable_error_code()` 的依赖
-- 拆分执行层与渲染层：新增 `run_commit(args) -> Result<CommitOutput, CommitError>` 纯执行入口
-- 保持现有 JSON schema 向后兼容，仅做增量扩展
-- 完善 JSON 输出 schema（`CommitOutput`），补齐缺失元数据
-- 为 hook 输出建立结构化隔离规则，确保 `--json` / `--machine` 成功路径不被污染
-- 补齐 `--signoff` 回归测试，验证 Signed-off-by trailer 在所有路径（含 amend + signoff 组合）下稳定写入
-- 补齐 `--help` EXAMPLES 段
-- 清理 `unwrap()` 残留，改为安全的 `Result` 传播
-- 保留 `execute()` 作为兼容包装层；其输出配置问题仅作为低优先级收尾项处理，不影响 CLI 主路径
+- 拆分了执行层与渲染层：新增 `run_commit(args, output) -> Result<CommitOutput, CommitError>` 纯执行入口、`render_commit_output()` 渲染层
+- 保持了现有 JSON schema 向后兼容，并以 additive 方式补齐了 `branch` / `amend` / `signoff` / `conventional` / `signed` 等元数据
+- 为 hook 输出建立了结构化隔离规则，`--json` / `--machine` 成功路径不再被 hook stdout/stderr 污染
+- 补齐了 `--signoff` 回归测试，验证 Signed-off-by trailer 在 amend + signoff 组合下稳定写入
+- 补齐了 `--help` EXAMPLES 段（5 条示例）
+- 把 `vault_sign_commit` / `create_tree` / `update_head` 等核心 helper 的错误传播统一到 typed `CommitError`
 
 **本批非目标：**
-- **不重写 commit 的核心对象模型**。树创建、索引操作、签名、reflog 更新的主体流程保持不变；仅修复 `--signoff` 这类已识别的行为缺口
+- **不重写 commit 的核心对象模型**。树创建、索引操作、签名、reflog 更新的主体流程保持不变
 - **不引入 `--dry-run`**。commit dry-run 语义复杂（需要回滚树创建），留后续批次
 - **不改变 hook 的启用/禁用语义**。`--disable-pre`/`--no-verify` 行为保持不变；本批只调整 hook I/O 的捕获和渲染边界
 - **不改变 LFS pointer 处理**。`blob_from_file()` 保持现有 LFS 行为

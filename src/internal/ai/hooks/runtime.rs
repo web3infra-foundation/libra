@@ -421,7 +421,11 @@ fn transition_phase(session: &mut SessionState, event_kind: LifecycleEventKind) 
         LifecycleEventKind::SessionStart
         | LifecycleEventKind::TurnStart
         | LifecycleEventKind::ToolUse
-        | LifecycleEventKind::Compaction => SessionPhase::Active,
+        | LifecycleEventKind::Compaction
+        | LifecycleEventKind::CompactionCompleted
+        | LifecycleEventKind::PermissionRequest
+        | LifecycleEventKind::SourceEnabled
+        | LifecycleEventKind::SourceDisabled => SessionPhase::Active,
         LifecycleEventKind::ModelUpdate => current_phase.unwrap_or(SessionPhase::Active),
     };
 

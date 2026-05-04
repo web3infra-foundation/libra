@@ -98,7 +98,7 @@ use crate::{
     internal::{
         ai::{
             agent::{
-                ToolLoopConfig,
+                TaskIntent, ToolLoopConfig,
                 profile::{AgentProfileRouter, load_profiles},
             },
             client::CompletionClient,
@@ -108,6 +108,7 @@ use crate::{
                 CompletionError, CompletionModel, CompletionReasoningEffort, CompletionRequest,
                 CompletionResponse, CompletionThinking, CompletionUsage,
             },
+            context_budget::ContextBudget,
             history::HistoryManager,
             hooks::HookRunner,
             mcp::server::LibraMcpServer,
@@ -124,10 +125,12 @@ use crate::{
             },
             runtime::{ToolBoundaryRuntime, TracingAuditSink},
             sandbox::{
-                ApprovalStore, AskForApproval, ExecApprovalRequest, SandboxPermissions,
-                SandboxPolicy, ToolApprovalContext, ToolRuntimeContext, ToolSandboxContext,
+                ApprovalCachePolicy, ApprovalStore, AskForApproval, DEFAULT_APPROVAL_TTL,
+                ExecApprovalRequest, SandboxPermissions, SandboxPolicy, ToolApprovalContext,
+                ToolRuntimeContext, ToolSandboxContext,
             },
             session::{SessionState, SessionStore},
+            skills::{SkillDispatcher, load_skills},
             tools::{
                 ToolRegistry, ToolRegistryBuilder,
                 context::UserInputRequest,
@@ -135,9 +138,10 @@ use crate::{
                     ApplyPatchHandler, GrepFilesHandler, ListDirHandler, McpBridgeHandler,
                     PlanHandler, ReadFileHandler, RequestUserInputHandler, SearchFilesHandler,
                     ShellHandler, SubmitIntentDraftHandler, SubmitPlanDraftHandler,
-                    SubmitTaskCompleteHandler, WebSearchHandler,
+                    SubmitTaskCompleteHandler, WebSearchHandler, register_semantic_handlers,
                 },
             },
+            usage::{UsageContext, UsageRecorder},
             web::{
                 WebServerHandle, WebServerOptions,
                 code_ui::{
@@ -160,7 +164,7 @@ use crate::{
         error::{CliError, CliResult, StableErrorCode},
         output::OutputConfig,
         storage::local::LocalStorage,
-        util::try_get_storage_path,
+        util::{DATABASE, try_get_storage_path},
     },
 };
 
@@ -499,6 +503,10 @@ pub struct CodeArgs {
     /// - `untrusted`: prompt for non-trusted operations, auto-allow known-safe reads
     #[arg(long, value_enum, default_value_t = CodeApprovalPolicy::OnRequest)]
     pub approval_policy: CodeApprovalPolicy,
+
+    /// Seconds that a TTL approval remains reusable for matching commands.
+    #[arg(long = "approval-ttl", value_name = "SECS")]
+    pub approval_ttl: Option<u64>,
 
     /// Network access policy for TUI shell and gate execution.
     #[arg(long, value_enum, default_value_t = CodeNetworkAccess::Deny)]
@@ -969,7 +977,13 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
         }
     }
 
-    let preamble = system_preamble(&working_dir, args.context);
+    let task_intent = task_intent_for_context(args.context);
+    let preamble = system_preamble(
+        &working_dir,
+        args.context,
+        args.provider,
+        args.model.as_deref(),
+    );
     let temperature = args.temperature;
     let thinking = completion_thinking_for_args(&args);
     let reasoning_effort = completion_reasoning_effort_for_args(&args);
@@ -1019,6 +1033,7 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
             "request_user_input",
             Arc::new(RequestUserInputHandler::new(user_input_tx.clone())),
         );
+    builder = register_semantic_handlers(builder);
 
     // AI user story: MCP bridge tools let the agent persist intent/task/run,
     // evidence, provenance, and Libra VCS operations in the same workflow graph
@@ -1029,7 +1044,14 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
     }
 
     let registry = Arc::new(builder.build());
+    let allowed_tools = registry.filter_by_intent(task_intent);
 
+    let approval_config = approval_config_from_project_config(registry.working_dir());
+    let approval_ttl = args
+        .approval_ttl
+        .map(Duration::from_secs)
+        .or(approval_config.ttl)
+        .unwrap_or(DEFAULT_APPROVAL_TTL);
     let provider_name = format!("{:?}", args.provider).to_lowercase();
     let launch_config = TuiLaunchConfig {
         host,
@@ -1042,10 +1064,14 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
         reasoning_effort,
         stream,
         preserve_reasoning_content,
+        allowed_tools: Some(allowed_tools),
+        auto_classify_first_user_message: args.context.is_none(),
         context: args.context,
         resume_thread_id,
         approval_policy: args.approval_policy.into(),
         allow_all_commands: args.approval_policy.allows_all_commands(),
+        approval_ttl,
+        approval_cache_policy: approval_config.cache_policy,
         network_access: args.network_access.is_allowed(),
         user_input_rx,
         exec_approval_rx,
@@ -1738,10 +1764,14 @@ struct TuiLaunchConfig {
     reasoning_effort: Option<CompletionReasoningEffort>,
     stream: Option<bool>,
     preserve_reasoning_content: bool,
+    allowed_tools: Option<Vec<String>>,
+    auto_classify_first_user_message: bool,
     context: Option<CodeContext>,
     resume_thread_id: Option<String>,
     approval_policy: AskForApproval,
     allow_all_commands: bool,
+    approval_ttl: Duration,
+    approval_cache_policy: ApprovalCachePolicy,
     network_access: bool,
     user_input_rx: tokio::sync::mpsc::UnboundedReceiver<UserInputRequest>,
     exec_approval_rx: tokio::sync::mpsc::UnboundedReceiver<ExecApprovalRequest>,
@@ -1976,19 +2006,23 @@ where
         }
     };
 
-    let config = ToolLoopConfig {
+    let mut config = ToolLoopConfig {
         preamble: Some(params.preamble),
         temperature: params.temperature,
         thinking: params.thinking,
         reasoning_effort: params.reasoning_effort,
         stream: params.stream,
         hook_runner,
-        allowed_tools: None,
+        allowed_tools: params.allowed_tools,
         runtime_context: Some(default_tui_runtime_context(
             registry.working_dir(),
             params.context,
-            params.approval_policy,
-            params.allow_all_commands,
+            DefaultTuiApprovalConfig {
+                policy: params.approval_policy,
+                allow_all_commands: params.allow_all_commands,
+                ttl: params.approval_ttl,
+                cache_policy: params.approval_cache_policy,
+            },
             params.network_access,
             params.exec_approval_tx.clone(),
         )),
@@ -2038,6 +2072,19 @@ where
     } else {
         SessionState::new(&working_dir_str)
     };
+    if let Some(usage_recorder) = build_usage_recorder(&storage_root).await {
+        config.usage_recorder = Some(usage_recorder);
+        config.usage_context = Some(UsageContext {
+            session_id: Some(session.id.clone()),
+            thread_id: session_canonical_thread_id(&session),
+            agent_run_id: None,
+            run_id: None,
+            provider: provider_name.clone(),
+            model: model_name.clone(),
+            request_kind: "completion".to_string(),
+            intent: None,
+        });
+    }
 
     let (code_control_tx, code_control_rx) = if control_runtime.is_write() {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<TuiControlCommand>();
@@ -2194,11 +2241,15 @@ where
     // Load slash commands
     let commands = load_commands(registry.working_dir());
     let command_dispatcher = CommandDispatcher::new(commands);
+    let skills = load_skills(registry.working_dir());
+    let skill_dispatcher = SkillDispatcher::new(skills);
 
     // Load agent profiles
     let profiles = load_profiles(registry.working_dir());
     let agent_router = AgentProfileRouter::new(profiles);
     let managed_runtime_for_shutdown = managed_code_ui_runtime.clone();
+    let auto_classify_first_user_message =
+        params.auto_classify_first_user_message && managed_code_ui_runtime.is_none();
 
     // Create and run app
     let mut app = App::new(
@@ -2209,6 +2260,7 @@ where
         AppConfig {
             welcome_message: welcome,
             command_dispatcher,
+            skill_dispatcher,
             agent_router,
             session,
             session_store,
@@ -2222,6 +2274,7 @@ where
             code_control_rx,
             managed_code_ui_runtime,
             default_network_access: params.network_access,
+            auto_classify_first_user_message,
         },
     );
 
@@ -2336,8 +2389,21 @@ async fn start_mcp_server(
 
 /// Builds the system prompt (preamble) for the AI agent, incorporating the
 /// working directory context and optional operating mode (dev/review/research).
-fn system_preamble(working_dir: &std::path::Path, context: Option<CodeContext>) -> String {
-    let mut builder = SystemPromptBuilder::new(working_dir);
+fn system_preamble(
+    working_dir: &std::path::Path,
+    context: Option<CodeContext>,
+    provider: CodeProvider,
+    model: Option<&str>,
+) -> String {
+    let intent = task_intent_for_context(context);
+    let budget = ContextBudget::for_provider_model(
+        context_budget_provider_name(provider),
+        model.unwrap_or_else(|| default_context_budget_model(provider)),
+    );
+    let mut builder = SystemPromptBuilder::new(working_dir)
+        .with_intent(intent)
+        .with_dynamic_context()
+        .with_context_budget(budget);
     if let Some(ctx) = context {
         let mode = match ctx {
             CodeContext::Dev => ContextMode::Dev,
@@ -2349,6 +2415,45 @@ fn system_preamble(working_dir: &std::path::Path, context: Option<CodeContext>) 
     builder.build()
 }
 
+fn context_budget_provider_name(provider: CodeProvider) -> &'static str {
+    match provider {
+        CodeProvider::Gemini => "gemini",
+        CodeProvider::Openai => "openai",
+        CodeProvider::Anthropic => "anthropic",
+        CodeProvider::Deepseek => "deepseek",
+        CodeProvider::Kimi => "kimi",
+        CodeProvider::Zhipu => "zhipu",
+        CodeProvider::Ollama => "ollama",
+        CodeProvider::Codex => "codex",
+        #[cfg(feature = "test-provider")]
+        CodeProvider::Fake => "fake",
+    }
+}
+
+fn default_context_budget_model(provider: CodeProvider) -> &'static str {
+    match provider {
+        CodeProvider::Gemini => GEMINI_2_5_FLASH,
+        CodeProvider::Openai => GPT_4O_MINI,
+        CodeProvider::Anthropic => CLAUDE_3_5_SONNET,
+        CodeProvider::Deepseek => "deepseek-chat",
+        CodeProvider::Kimi => KIMI_K2_6,
+        CodeProvider::Zhipu => GLM_5,
+        CodeProvider::Ollama => "ollama-default",
+        CodeProvider::Codex => "codex",
+        #[cfg(feature = "test-provider")]
+        CodeProvider::Fake => FAKE_DEFAULT_MODEL,
+    }
+}
+
+fn task_intent_for_context(context: Option<CodeContext>) -> TaskIntent {
+    match context {
+        Some(CodeContext::Dev) => TaskIntent::Feature,
+        Some(CodeContext::Review) => TaskIntent::Review,
+        Some(CodeContext::Research) => TaskIntent::Question,
+        None => TaskIntent::Unknown,
+    }
+}
+
 /// Constructs the default [`ToolRuntimeContext`] for TUI mode, configuring
 /// the sandbox policy based on the operating context:
 ///
@@ -2358,11 +2463,18 @@ fn system_preamble(working_dir: &std::path::Path, context: Option<CodeContext>) 
 /// - **Review / Research mode**: Read-only sandbox; no writes or network access.
 ///
 /// The approval policy and its communication channel are also wired in here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DefaultTuiApprovalConfig {
+    policy: AskForApproval,
+    allow_all_commands: bool,
+    ttl: Duration,
+    cache_policy: ApprovalCachePolicy,
+}
+
 fn default_tui_runtime_context(
     working_dir: &std::path::Path,
     context: Option<CodeContext>,
-    approval_policy: AskForApproval,
-    allow_all_commands: bool,
+    approval: DefaultTuiApprovalConfig,
     network_access: bool,
     exec_approval_tx: tokio::sync::mpsc::UnboundedSender<ExecApprovalRequest>,
 ) -> ToolRuntimeContext {
@@ -2377,7 +2489,7 @@ fn default_tui_runtime_context(
     };
 
     let mut approval_store = ApprovalStore::default();
-    if allow_all_commands {
+    if approval.allow_all_commands {
         approval_store.approve_all_commands();
     }
 
@@ -2388,13 +2500,93 @@ fn default_tui_runtime_context(
         }),
         sandbox_runtime: None,
         approval: Some(ToolApprovalContext {
-            policy: approval_policy,
+            policy: approval.policy,
             request_tx: exec_approval_tx,
             store: Arc::new(tokio::sync::Mutex::new(approval_store)),
             scope_key_prefix: None,
+            approval_ttl: approval.ttl,
+            cache_policy: approval.cache_policy,
         }),
+        file_history: None,
         max_output_bytes: None,
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct ApprovalProjectConfig {
+    approval: Option<ApprovalSectionConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApprovalSectionConfig {
+    ttl_seconds: Option<u64>,
+    #[serde(default)]
+    protected_branches: Option<Vec<String>>,
+    #[serde(default)]
+    allowed_network_domains: Option<Vec<String>>,
+    #[serde(default)]
+    no_cache_unknown_network: bool,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ApprovalRuntimeConfig {
+    ttl: Option<Duration>,
+    cache_policy: ApprovalCachePolicy,
+}
+
+fn approval_config_from_project_config(working_dir: &Path) -> ApprovalRuntimeConfig {
+    let path = working_dir.join(".libra").join("config.toml");
+    let Some(contents) = fs::read_to_string(&path).ok() else {
+        return ApprovalRuntimeConfig::default();
+    };
+    let Ok(config) = toml::from_str::<ApprovalProjectConfig>(&contents).map_err(|err| {
+        tracing::warn!(
+            target: "libra::command::code",
+            path = %path.display(),
+            error = %err,
+            "failed to parse approval config"
+        );
+        err
+    }) else {
+        return ApprovalRuntimeConfig::default();
+    };
+    let Some(approval) = config.approval else {
+        return ApprovalRuntimeConfig::default();
+    };
+    let ttl = approval.ttl_seconds.and_then(|ttl_seconds| {
+        if ttl_seconds == 0 {
+            tracing::warn!(
+                target: "libra::command::code",
+                path = %path.display(),
+                "ignoring approval ttl_seconds=0"
+            );
+            None
+        } else {
+            Some(Duration::from_secs(ttl_seconds))
+        }
+    });
+
+    let default_cache_policy = ApprovalCachePolicy::default();
+    ApprovalRuntimeConfig {
+        ttl,
+        cache_policy: ApprovalCachePolicy {
+            protected_branches: approval
+                .protected_branches
+                .unwrap_or(default_cache_policy.protected_branches),
+            allowed_network_domains: approval.allowed_network_domains.unwrap_or_default(),
+            no_cache_unknown_network: approval.no_cache_unknown_network,
+        },
+    }
+}
+
+#[cfg(test)]
+fn approval_ttl_from_project_config(working_dir: &Path) -> Option<Duration> {
+    approval_config_from_project_config(working_dir).ttl
+}
+
+#[cfg(test)]
+fn approval_cache_policy_from_project_config(working_dir: &Path) -> ApprovalCachePolicy {
+    approval_config_from_project_config(working_dir).cache_policy
 }
 
 // ---------------------------------------------------------------------------
@@ -2486,6 +2678,24 @@ async fn init_mcp_server(working_dir: &std::path::Path) -> Arc<LibraMcpServer> {
 pub(crate) fn resolve_storage_root(working_dir: &std::path::Path) -> std::path::PathBuf {
     try_get_storage_path(Some(working_dir.to_path_buf()))
         .unwrap_or_else(|_| working_dir.join(".libra"))
+}
+
+async fn build_usage_recorder(storage_root: &Path) -> Option<UsageRecorder> {
+    let db_path = storage_root.join(DATABASE);
+    let Some(db_path) = db_path.to_str() else {
+        tracing::warn!(
+            path = %storage_root.display(),
+            "usage stats disabled because the repository database path is not valid UTF-8"
+        );
+        return None;
+    };
+    match establish_connection(db_path).await {
+        Ok(conn) => Some(UsageRecorder::new(conn)),
+        Err(error) => {
+            tracing::warn!("usage stats disabled because database open failed: {error}");
+            None
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2697,6 +2907,7 @@ fn reject_non_tui_flags(args: &CodeArgs, mode: &str) -> Result<(), String> {
         "--approval-policy",
         mode,
     )?;
+    reject_mode_flag(args.approval_ttl.is_some(), "--approval-ttl", mode)?;
     reject_mode_flag(
         args.network_access != CodeNetworkAccess::Deny,
         "--network-access",
@@ -2744,6 +2955,7 @@ mod tests {
             context: None,
             resume: None,
             approval_policy: CodeApprovalPolicy::OnRequest,
+            approval_ttl: None,
             network_access: CodeNetworkAccess::Deny,
             mcp_port: DEFAULT_MCP_PORT,
             stdio: false,
@@ -2890,6 +3102,56 @@ mod tests {
             AskForApproval::OnRequest
         );
         assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn accepts_approval_ttl_cli_arg_in_tui_mode() {
+        let args = CodeArgs::try_parse_from(["libra", "--approval-ttl", "42"]).unwrap();
+
+        assert_eq!(args.approval_ttl, Some(42));
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn loads_approval_ttl_from_project_config() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let libra_dir = temp_dir.path().join(".libra");
+        fs::create_dir_all(&libra_dir).unwrap();
+        fs::write(
+            libra_dir.join("config.toml"),
+            "[approval]\nttl_seconds = 123\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            approval_ttl_from_project_config(temp_dir.path()),
+            Some(Duration::from_secs(123))
+        );
+    }
+
+    #[test]
+    fn loads_approval_cache_policy_from_project_config() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let libra_dir = temp_dir.path().join(".libra");
+        fs::create_dir_all(&libra_dir).unwrap();
+        fs::write(
+            libra_dir.join("config.toml"),
+            r#"[approval]
+protected_branches = ["main", "release"]
+allowed_network_domains = ["github.com"]
+no_cache_unknown_network = true
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            approval_cache_policy_from_project_config(temp_dir.path()),
+            ApprovalCachePolicy {
+                protected_branches: vec!["main".to_string(), "release".to_string()],
+                allowed_network_domains: vec!["github.com".to_string()],
+                no_cache_unknown_network: true,
+            }
+        );
     }
 
     #[test]
@@ -3286,13 +3548,52 @@ mod tests {
     }
 
     #[test]
+    fn code_context_maps_to_task_intent_for_prompt_and_tool_policy() {
+        assert_eq!(
+            task_intent_for_context(Some(CodeContext::Dev)),
+            TaskIntent::Feature
+        );
+        assert_eq!(
+            task_intent_for_context(Some(CodeContext::Review)),
+            TaskIntent::Review
+        );
+        assert_eq!(
+            task_intent_for_context(Some(CodeContext::Research)),
+            TaskIntent::Question
+        );
+        assert_eq!(task_intent_for_context(None), TaskIntent::Unknown);
+    }
+
+    #[test]
+    fn system_preamble_includes_explicit_context_intent_and_dynamic_context() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let prompt = system_preamble(
+            temp_dir.path(),
+            Some(CodeContext::Review),
+            CodeProvider::Openai,
+            Some("gpt-test"),
+        );
+
+        assert!(prompt.contains("Code Review Mode"));
+        assert!(prompt.contains("## Task Intent"));
+        assert!(prompt.contains("intent=review"));
+        assert!(prompt.contains("## Dynamic Workspace Context"));
+        assert!(prompt.contains("source=libra status --short"));
+        assert!(prompt.contains("## Context Budget Plan"));
+    }
+
+    #[test]
     fn default_tui_runtime_context_denies_network_in_dev_mode() {
         let (tx, _rx) = unbounded_channel();
         let runtime = default_tui_runtime_context(
             Path::new("/tmp/workspace"),
             Some(CodeContext::Dev),
-            AskForApproval::OnRequest,
-            false,
+            DefaultTuiApprovalConfig {
+                policy: AskForApproval::OnRequest,
+                allow_all_commands: false,
+                ttl: DEFAULT_APPROVAL_TTL,
+                cache_policy: ApprovalCachePolicy::default(),
+            },
             false,
             tx,
         );
@@ -3314,8 +3615,12 @@ mod tests {
         let runtime = default_tui_runtime_context(
             Path::new("/tmp/workspace"),
             Some(CodeContext::Dev),
-            AskForApproval::OnRequest,
-            false,
+            DefaultTuiApprovalConfig {
+                policy: AskForApproval::OnRequest,
+                allow_all_commands: false,
+                ttl: DEFAULT_APPROVAL_TTL,
+                cache_policy: ApprovalCachePolicy::default(),
+            },
             true,
             tx,
         );
@@ -3337,8 +3642,12 @@ mod tests {
         let runtime = default_tui_runtime_context(
             Path::new("/tmp/workspace"),
             Some(CodeContext::Dev),
-            AskForApproval::OnRequest,
-            true,
+            DefaultTuiApprovalConfig {
+                policy: AskForApproval::OnRequest,
+                allow_all_commands: true,
+                ttl: DEFAULT_APPROVAL_TTL,
+                cache_policy: ApprovalCachePolicy::default(),
+            },
             true,
             tx,
         );
@@ -3356,8 +3665,12 @@ mod tests {
             let runtime = default_tui_runtime_context(
                 Path::new("/tmp/workspace"),
                 Some(context),
-                AskForApproval::OnRequest,
-                false,
+                DefaultTuiApprovalConfig {
+                    policy: AskForApproval::OnRequest,
+                    allow_all_commands: false,
+                    ttl: DEFAULT_APPROVAL_TTL,
+                    cache_policy: ApprovalCachePolicy::default(),
+                },
                 true,
                 tx,
             );

@@ -492,12 +492,92 @@ async fn apply_down_migration(
 }
 
 /// Returns the canonical migration set the libra runtime registers on every
-/// connect. CEX-12.5 ships an empty registry — future CEXes (13b / 15 / 16)
-/// add their migrations here in version order. Keeping the set centralised
-/// in this function (rather than in `establish_connection`) makes it
-/// trivial to test the wiring against an isolated runner.
+/// connect. CEX-15 and CEX-16 now add migrations here in version order.
+/// Keeping the set centralised in this function (rather than in
+/// `establish_connection`) makes it trivial to test the wiring against an
+/// isolated runner.
 pub fn builtin_migrations() -> Vec<Migration> {
-    Vec::new()
+    vec![
+        Migration {
+            version: 2026050301,
+            name: "automation_log",
+            up: r#"
+CREATE TABLE IF NOT EXISTS `automation_log` (
+    `id` TEXT PRIMARY KEY,
+    `rule_id` TEXT NOT NULL,
+    `trigger_kind` TEXT NOT NULL,
+    `action_kind` TEXT NOT NULL,
+    `status` TEXT NOT NULL,
+    `message` TEXT NOT NULL,
+    `started_at` TEXT NOT NULL,
+    `finished_at` TEXT NOT NULL,
+    `details_json` TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS `idx_automation_log_finished_at`
+    ON `automation_log` (`finished_at`);
+CREATE INDEX IF NOT EXISTS `idx_automation_log_rule_id`
+    ON `automation_log` (`rule_id`);
+"#,
+            down: Some(
+                r#"
+DROP INDEX IF EXISTS `idx_automation_log_rule_id`;
+DROP INDEX IF EXISTS `idx_automation_log_finished_at`;
+DROP TABLE IF EXISTS `automation_log`;
+"#,
+            ),
+        },
+        Migration {
+            version: 2026050302,
+            name: "agent_usage_stats",
+            up: r#"
+CREATE TABLE IF NOT EXISTS `agent_usage_stats` (
+    `id` TEXT PRIMARY KEY,
+    `session_id` TEXT,
+    `thread_id` TEXT,
+    `agent_run_id` TEXT,
+    `run_id` TEXT,
+    `provider` TEXT NOT NULL,
+    `model` TEXT NOT NULL,
+    `request_kind` TEXT NOT NULL DEFAULT 'completion',
+    `intent` TEXT,
+    `prompt_tokens` INTEGER NOT NULL DEFAULT 0,
+    `completion_tokens` INTEGER NOT NULL DEFAULT 0,
+    `cached_tokens` INTEGER NOT NULL DEFAULT 0,
+    `reasoning_tokens` INTEGER NOT NULL DEFAULT 0,
+    `total_tokens` INTEGER NOT NULL DEFAULT 0,
+    `tool_call_count` INTEGER NOT NULL DEFAULT 0,
+    `wall_clock_ms` INTEGER NOT NULL DEFAULT 0,
+    `provider_latency_ms` INTEGER,
+    `cost_estimate_micro_dollars` INTEGER,
+    `cost_usd` REAL,
+    `usage_estimated` INTEGER NOT NULL DEFAULT 0,
+    `started_at` TEXT,
+    `finished_at` TEXT,
+    `success` INTEGER NOT NULL DEFAULT 1,
+    `error_kind` TEXT,
+    `schema_version` INTEGER NOT NULL DEFAULT 1,
+    `created_at` TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS `idx_agent_usage_stats_provider_model`
+    ON `agent_usage_stats` (`provider`, `model`);
+CREATE INDEX IF NOT EXISTS `idx_agent_usage_stats_thread`
+    ON `agent_usage_stats` (`thread_id`);
+CREATE INDEX IF NOT EXISTS `idx_agent_usage_stats_session`
+    ON `agent_usage_stats` (`session_id`);
+CREATE INDEX IF NOT EXISTS `idx_agent_usage_stats_started`
+    ON `agent_usage_stats` (`started_at`);
+"#,
+            down: Some(
+                r#"
+DROP INDEX IF EXISTS `idx_agent_usage_stats_started`;
+DROP INDEX IF EXISTS `idx_agent_usage_stats_session`;
+DROP INDEX IF EXISTS `idx_agent_usage_stats_thread`;
+DROP INDEX IF EXISTS `idx_agent_usage_stats_provider_model`;
+DROP TABLE IF EXISTS `agent_usage_stats`;
+"#,
+            ),
+        },
+    ]
 }
 
 /// Convenience: build a runner pre-loaded with [`builtin_migrations`].
@@ -594,14 +674,13 @@ mod tests {
     }
 
     #[test]
-    fn builtin_runner_starts_empty() {
-        // CEX-12.5 ships the framework with zero registered migrations.
-        // When CEX-13b / 15 / 16 land they add their migrations to
-        // `builtin_migrations()` and this assertion is updated to the new
-        // count.
+    fn builtin_runner_registers_current_builtin_migrations() {
+        // CEX-15 and CEX-16 now ship built-in migrations. Keep this count
+        // explicit so future migrations update this test with the registry.
         let runner = builtin_runner().expect("CEX-12.5 builtin registry must build clean");
-        assert_eq!(runner.len(), 0);
-        assert!(runner.is_empty());
+        assert_eq!(runner.len(), 2);
+        assert!(!runner.is_empty());
+        assert_eq!(runner.max_registered_version(), Some(2026050302));
     }
 
     #[test]
@@ -610,8 +689,8 @@ mod tests {
         // return `Result` (instead of silently dropping registration
         // errors) means a future CEX that introduces a duplicate version
         // is caught at registry-build time rather than at first-use of a
-        // missing migration. We synthesise a duplicate inline because
-        // `builtin_migrations()` itself is empty at this CEX.
+        // missing migration. We synthesise a duplicate inline so this test
+        // remains independent from the current built-in registry contents.
         let mut runner = MigrationRunner::new();
         runner
             .register(Migration {

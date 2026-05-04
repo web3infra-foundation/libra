@@ -23,14 +23,24 @@ pub enum BuiltinCommand {
     Model,
     /// `/status` — show the current agent status.
     Status,
+    /// `/usage` — show current session model usage.
+    Usage,
     /// `/plan` — kick off the IntentSpec generation workflow.
     Plan,
+    /// `/skill` — activate a markdown skill.
+    Skill,
     /// `/intent` — IntentSpec subcommands (show, execute, modify, cancel).
     Intent,
     /// `/mux` — focus / unfocus task panes during parallel DAG execution.
     Mux,
     /// `/control` — local automation control commands.
     Control,
+    /// `/approvals` — list or revoke cached approval memos.
+    Approvals,
+    /// `/anchors` — list or manage memory anchors.
+    Anchors,
+    /// `/undo` — roll back the latest uncommitted AI file-edit batch.
+    Undo,
     /// `/quit` — exit the application cleanly.
     Quit,
 }
@@ -48,10 +58,15 @@ impl BuiltinCommand {
             Self::Chat => "chat",
             Self::Model => "model",
             Self::Status => "status",
+            Self::Usage => "usage",
             Self::Plan => "plan",
+            Self::Skill => "skill",
             Self::Intent => "intent",
             Self::Mux => "mux",
             Self::Control => "control",
+            Self::Approvals => "approvals",
+            Self::Anchors => "anchors",
+            Self::Undo => "undo",
             Self::Quit => "quit",
         }
     }
@@ -68,10 +83,15 @@ impl BuiltinCommand {
             Self::Chat => "Send a direct chat message without plan workflow",
             Self::Model => "Show current model info",
             Self::Status => "Show current status",
+            Self::Usage => "Show current session usage",
             Self::Plan => "Generate validated IntentSpec from a request",
+            Self::Skill => "Activate a markdown skill",
             Self::Intent => "IntentSpec utilities (show latest or execute it)",
             Self::Mux => "Control task mux view during parallel execution",
             Self::Control => "Local automation control utilities",
+            Self::Approvals => "List or revoke cached approvals",
+            Self::Anchors => "List, draft, confirm, revoke memory anchors",
+            Self::Undo => "Undo latest AI file edit batch",
             Self::Quit => "Quit the application",
         }
     }
@@ -89,10 +109,15 @@ impl BuiltinCommand {
             Self::Chat,
             Self::Model,
             Self::Status,
+            Self::Usage,
             Self::Plan,
+            Self::Skill,
             Self::Intent,
             Self::Mux,
             Self::Control,
+            Self::Approvals,
+            Self::Anchors,
+            Self::Undo,
             Self::Quit,
         ]
     }
@@ -158,9 +183,14 @@ mod tests {
             Some((BuiltinCommand::Chat, "what is this"))
         );
         assert_eq!(parse_builtin("/quit"), Some((BuiltinCommand::Quit, "")));
+        assert_eq!(parse_builtin("/undo"), Some((BuiltinCommand::Undo, "")));
         assert_eq!(
             parse_builtin("/plan add auth"),
             Some((BuiltinCommand::Plan, "add auth"))
+        );
+        assert_eq!(
+            parse_builtin("/skill pr-description since=HEAD~3"),
+            Some((BuiltinCommand::Skill, "pr-description since=HEAD~3"))
         );
         assert_eq!(
             parse_builtin("/intent show"),
@@ -187,9 +217,18 @@ mod tests {
             Some((BuiltinCommand::Control, "reclaim"))
         );
         assert_eq!(
+            parse_builtin("/approvals revoke abc123"),
+            Some((BuiltinCommand::Approvals, "revoke abc123"))
+        );
+        assert_eq!(
+            parse_builtin("/anchors confirm abc123"),
+            Some((BuiltinCommand::Anchors, "confirm abc123"))
+        );
+        assert_eq!(
             parse_builtin("/model gemini"),
             Some((BuiltinCommand::Model, "gemini"))
         );
+        assert_eq!(parse_builtin("/usage"), Some((BuiltinCommand::Usage, "")));
     }
 
     /// Scenario: command names are matched case-insensitively because users
@@ -217,13 +256,18 @@ mod tests {
     #[test]
     fn all_hints_returns_all() {
         let hints = BuiltinCommand::all_hints();
-        assert_eq!(hints.len(), 10);
+        assert_eq!(hints.len(), 15);
         assert!(hints.iter().any(|(n, _)| n == "help"));
         assert!(hints.iter().any(|(n, _)| n == "chat"));
+        assert!(hints.iter().any(|(n, _)| n == "usage"));
         assert!(hints.iter().any(|(n, _)| n == "quit"));
         assert!(hints.iter().any(|(n, _)| n == "plan"));
+        assert!(hints.iter().any(|(n, _)| n == "skill"));
         assert!(hints.iter().any(|(n, _)| n == "intent"));
         assert!(hints.iter().any(|(n, _)| n == "mux"));
         assert!(hints.iter().any(|(n, _)| n == "control"));
+        assert!(hints.iter().any(|(n, _)| n == "approvals"));
+        assert!(hints.iter().any(|(n, _)| n == "anchors"));
+        assert!(hints.iter().any(|(n, _)| n == "undo"));
     }
 }
