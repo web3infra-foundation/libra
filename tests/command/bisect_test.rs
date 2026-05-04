@@ -519,8 +519,8 @@ fn test_bisect_help_lists_run_and_view() {
     );
 }
 
-/// `bisect view` outside an active session must return `RepoStateInvalid`
-/// (LBR-REPO-003) so callers can distinguish "no bisect" from a transient
+/// `bisect view` outside an active session must return `BisectNotActive`
+/// (LBR-BISECT-001) so callers can distinguish "no bisect" from a transient
 /// failure.
 #[tokio::test]
 #[serial]
@@ -536,8 +536,8 @@ async fn test_bisect_view_without_session_errors() {
     let err = result.unwrap_err();
     let stable = err.stable_code().as_str();
     assert_eq!(
-        stable, "LBR-REPO-003",
-        "view without session must use RepoStateInvalid, got {stable}"
+        stable, "LBR-BISECT-001",
+        "view without session must use BisectNotActive, got {stable}"
     );
 }
 
@@ -571,7 +571,7 @@ async fn test_bisect_view_inside_active_session() {
         .unwrap();
 }
 
-/// `bisect run` without an active session must reject with `RepoStateInvalid`.
+/// `bisect run` without an active session must reject with `BisectNotActive`.
 /// The user must `bisect start` (with bounds) before automation kicks in.
 #[tokio::test]
 #[serial]
@@ -592,11 +592,11 @@ async fn test_bisect_run_without_session_errors() {
     assert!(result.is_err(), "run without session must error");
     let err = result.unwrap_err();
     let stable = err.stable_code().as_str();
-    assert_eq!(stable, "LBR-REPO-003");
+    assert_eq!(stable, "LBR-BISECT-001");
 }
 
 /// `bisect run` with a script that always returns 128 must surface the
-/// non-recoverable exit code through `InternalInvariant` (LBR-INTERNAL-001).
+/// non-recoverable exit code through `BisectRunFailed` (LBR-BISECT-002).
 #[cfg(unix)]
 #[tokio::test]
 #[serial]
@@ -627,7 +627,7 @@ async fn test_bisect_run_propagates_fatal_exit_code() {
     assert!(result.is_err(), "exit 128 must abort bisect run");
     let err = result.unwrap_err();
     let stable = err.stable_code().as_str();
-    assert_eq!(stable, "LBR-INTERNAL-001");
+    assert_eq!(stable, "LBR-BISECT-002");
 
     // Clean up so the next test in the suite starts fresh.
     let _ = execute_safe(Bisect::Reset { rev: None }, &OutputConfig::default()).await;

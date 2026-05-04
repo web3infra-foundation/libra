@@ -97,6 +97,9 @@ structured report is always present.
 | `128` | `LBR-IO-001` | `io` | Read/open/load failure | failed to open pack, failed to read index |
 | `128` | `LBR-IO-002` | `io` | Write/save/update/remove failure | failed to write index, failed to remove file |
 | `128` | `LBR-INTERNAL-001` | `internal` | Unexpected internal invariant failure | invariant break, unclassified internal failure |
+| `128` | `LBR-BISECT-001` | `repo` | `bisect view` / `bisect run` invoked outside an active bisect session | running `bisect view` before `bisect start` |
+| `128` | `LBR-BISECT-002` | `internal` | `bisect run` command exited with code ≥ 128 or was killed by a signal | run script aborted via SIGINT, exit 130 |
+| `128` | `LBR-BISECT-003` | `repo` | `bisect run` cannot advance because no candidate commits remain | bisect already converged when `run` is invoked |
 | `9` | `LBR-WARN-001` | `warning` | Command completed with warnings | `--exit-code-on-warning` |
 
 ## Stable Codes By Category
@@ -150,6 +153,19 @@ structured report is always present.
 | Stable code | Meaning |
 | --- | --- |
 | `LBR-INTERNAL-001` | Unexpected internal invariant failure |
+
+### Bisect
+
+The `LBR-BISECT-*` codes are emitted exclusively by `libra bisect` and its
+subcommands. They use existing categories (`repo` for state issues, `internal`
+for run-script failures) so generic `LBR-REPO-*` / `LBR-INTERNAL-*` shell
+patterns continue to match them.
+
+| Stable code | Category | Meaning |
+| --- | --- | --- |
+| `LBR-BISECT-001` | `repo` | `bisect view` or `bisect run` invoked outside an active bisect session |
+| `LBR-BISECT-002` | `internal` | `bisect run` command exited with code ≥ 128 or was killed by a signal |
+| `LBR-BISECT-003` | `repo` | `bisect run` cannot advance because no candidate commits remain |
 
 ### Warning
 

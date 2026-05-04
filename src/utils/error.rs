@@ -199,6 +199,12 @@ pub enum StableErrorCode {
     AddNothingStaged,
     /// Feature or operation is not yet supported.
     Unsupported,
+    /// `bisect view` / `bisect run` invoked outside an active bisect session.
+    BisectNotActive,
+    /// `bisect run` command exited with code ≥ 128 or was killed by a signal.
+    BisectRunFailed,
+    /// `bisect run` cannot advance because no candidate commits remain.
+    BisectNoCandidates,
 }
 
 impl Serialize for StableErrorCode {
@@ -233,6 +239,9 @@ impl StableErrorCode {
             Self::WarningEmitted => "LBR-WARN-001",
             Self::AddNothingStaged => "LBR-ADD-001",
             Self::Unsupported => "LBR-UNSUPPORTED-001",
+            Self::BisectNotActive => "LBR-BISECT-001",
+            Self::BisectRunFailed => "LBR-BISECT-002",
+            Self::BisectNoCandidates => "LBR-BISECT-003",
         }
     }
 
@@ -250,9 +259,12 @@ impl StableErrorCode {
             Self::NetworkUnavailable | Self::NetworkProtocol => CliErrorCategory::Network,
             Self::AuthMissingCredentials | Self::AuthPermissionDenied => CliErrorCategory::Auth,
             Self::IoReadFailed | Self::IoWriteFailed => CliErrorCategory::Io,
-            Self::InternalInvariant | Self::Unsupported => CliErrorCategory::Internal,
+            Self::InternalInvariant | Self::Unsupported | Self::BisectRunFailed => {
+                CliErrorCategory::Internal
+            }
             Self::WarningEmitted => CliErrorCategory::Warning,
             Self::AddNothingStaged => CliErrorCategory::Cli,
+            Self::BisectNotActive | Self::BisectNoCandidates => CliErrorCategory::Repo,
         }
     }
 
@@ -329,6 +341,15 @@ impl StableErrorCode {
             }
             Self::AddNothingStaged => "All specified paths are ignored; nothing was staged.",
             Self::Unsupported => "Feature or operation is not yet supported.",
+            Self::BisectNotActive => {
+                "`bisect view` or `bisect run` was invoked outside an active bisect session."
+            }
+            Self::BisectRunFailed => {
+                "`bisect run` command exited with code 128+ or was killed by a signal."
+            }
+            Self::BisectNoCandidates => {
+                "Bisect cannot advance because no candidate commits remain to test."
+            }
         }
     }
 }

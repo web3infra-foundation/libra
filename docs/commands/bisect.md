@@ -332,5 +332,6 @@ Note: jj does not have a bisect command. Users who need binary search debugging 
 | `LBR-IO-001` | Failed to read bisect state from database |
 | `LBR-IO-002` | Failed to save bisect state to database |
 | `LBR-IO-002` | Failed to create bisect_state table |
-| `LBR-REPO-003` | `bisect view` or `bisect run` invoked outside an active bisect session |
-| `LBR-INTERNAL-001` | `bisect run` command exited with code ≥ 128 or was killed by a signal (`BISECT_RUN_FAILED`) |
+| `LBR-BISECT-001` | `bisect view` or `bisect run` invoked outside an active bisect session (`NOT_IN_BISECT`) |
+| `LBR-BISECT-002` | `bisect run` command exited with code ≥ 128 or was killed by a signal (`BISECT_RUN_FAILED`) |
+| `LBR-BISECT-003` | `bisect run` cannot advance because no candidate commits remain (`BISECT_NO_CANDIDATES`) |

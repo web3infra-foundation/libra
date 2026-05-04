@@ -745,6 +745,12 @@ mod tests {
         println!("{:?}", serde_json::to_string(&vars).unwrap());
     }
 
+    // Hits live `github.com/web3infra-foundation/mega.git` via the LFS
+    // batch endpoint. Same flake pattern as the https_client tests gated
+    // in e5b0001 — gated behind `test-network` (CI job
+    // `compat-network-remotes`) so the default `cargo test --all` run on
+    // `compat-offline-core` doesn't depend on Cloudflare/GitHub TLS.
+    #[cfg(feature = "test-network")]
     #[tokio::test]
     async fn test_github_batch() {
         if std::env::var("LIBRA_TEST_GITHUB_TOKEN").map_or(true, |v| v.is_empty()) {

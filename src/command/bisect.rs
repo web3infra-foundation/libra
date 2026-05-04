@@ -999,7 +999,7 @@ async fn handle_view(output: &OutputConfig) -> CliResult<()> {
     if !BisectState::has_state().await.map_err(CliError::fatal)? {
         return Err(
             CliError::fatal("not in an active bisect; run `libra bisect start` first")
-                .with_stable_code(crate::utils::error::StableErrorCode::RepoStateInvalid)
+                .with_stable_code(crate::utils::error::StableErrorCode::BisectNotActive)
                 .with_hint("start a bisect session before calling `bisect view`"),
         );
     }
@@ -1059,7 +1059,7 @@ async fn handle_run(cmd: Vec<String>, output: &OutputConfig) -> CliResult<()> {
     {
         return Err(
             CliError::fatal("not in an active bisect; run `libra bisect start` first")
-                .with_stable_code(crate::utils::error::StableErrorCode::RepoStateInvalid)
+                .with_stable_code(crate::utils::error::StableErrorCode::BisectNotActive)
                 .with_hint("start a bisect session and mark good/bad bounds before `bisect run`"),
         );
     }
@@ -1124,7 +1124,7 @@ async fn handle_run(cmd: Vec<String>, output: &OutputConfig) -> CliResult<()> {
                 return Err(CliError::fatal(format!(
                     "bisect run command failed with non-recoverable exit code {code}"
                 ))
-                .with_stable_code(crate::utils::error::StableErrorCode::InternalInvariant)
+                .with_stable_code(crate::utils::error::StableErrorCode::BisectRunFailed)
                 .with_hint(
                     "re-run with a script that returns 0 (good) / 1-127 (bad) / 125 (skip)",
                 ));
@@ -1132,7 +1132,7 @@ async fn handle_run(cmd: Vec<String>, output: &OutputConfig) -> CliResult<()> {
             None => {
                 return Err(
                     CliError::fatal("bisect run command terminated by signal".to_string())
-                        .with_stable_code(crate::utils::error::StableErrorCode::InternalInvariant)
+                        .with_stable_code(crate::utils::error::StableErrorCode::BisectRunFailed)
                         .with_hint("ensure the script exits cleanly; signals abort the bisect"),
                 );
             }
@@ -1160,7 +1160,7 @@ async fn handle_run(cmd: Vec<String>, output: &OutputConfig) -> CliResult<()> {
             return Err(CliError::fatal(
                 "no more candidate commits; bisect already converged".to_string(),
             )
-            .with_stable_code(crate::utils::error::StableErrorCode::RepoStateInvalid)
+            .with_stable_code(crate::utils::error::StableErrorCode::BisectNoCandidates)
             .with_hint("run `libra bisect view` to inspect remaining candidates"));
         }
     }
