@@ -119,8 +119,8 @@ libc = "0.2"
 rfuse3 = { version = "0.0.7", features = ["tokio-runtime", "unprivileged"] }
 
 [patch.crates-io]
-rfuse3 = { path = "/Volumes/Data/Rk8s/rk8s/project/rfuse3" }
-libfuse-fs = { path = "/Volumes/Data/Rk8s/rk8s/project/libfuse-fs" }
+rfuse3 = { git = "https://github.com/rk8s-dev/rk8s", branch = "main" }
+libfuse-fs = { git = "https://github.com/rk8s-dev/rk8s", branch = "main" }
 
 [dev-dependencies]
 serial_test = { version = "3.4.0", default-features = false, features = ["async"] }

@@ -83,6 +83,13 @@ pub fn resolve_intentspec(
     };
 
     merge_artifacts_from_checks(&verification_plan, &mut artifacts);
+    // Drop required artifacts whose stage has no declared checks: a profile-injected
+    // security artifact (e.g. SAST) cannot be produced if no security check was scheduled.
+    if verification_plan.security_checks.is_empty() {
+        artifacts
+            .required
+            .retain(|a| a.stage != ArtifactStage::Security);
+    }
     harmonize_retention(&constraints, &mut artifacts);
 
     let quality_gates = QualityGates {
@@ -1418,5 +1425,127 @@ mod tests {
         );
         assert_eq!(spec.intent.in_scope, vec!["Cargo.toml".to_string()]);
         assert_eq!(spec.intent.out_of_scope, vec![".git/**".to_string()]);
+    }
+
+    #[test]
+    fn medium_risk_without_security_checks_does_not_require_security_artifacts() {
+        let draft = IntentDraft {
+            intent: DraftIntent {
+                summary: "Init libra crate".into(),
+                problem_statement: "Scaffold cargo project".into(),
+                change_type: ChangeType::Feature,
+                objectives: vec![Objective {
+                    title: "scaffold".into(),
+                    kind: ObjectiveKind::Implementation,
+                }],
+                in_scope: vec!["src".into()],
+                out_of_scope: vec![],
+                touch_hints: None,
+            },
+            acceptance: DraftAcceptance {
+                success_criteria: vec!["builds".into()],
+                fast_checks: vec![DraftCheck {
+                    id: "fmt".into(),
+                    kind: CheckKind::Command,
+                    command: Some("cargo fmt --all --check".into()),
+                    timeout_seconds: Some(30),
+                    expected_exit_code: Some(0),
+                    required: true,
+                    artifacts_produced: vec![],
+                }],
+                integration_checks: vec![],
+                security_checks: vec![],
+                release_checks: vec![],
+            },
+            risk: DraftRisk {
+                rationale: "single external crate".into(),
+                factors: vec![],
+                level: Some(RiskLevel::Medium),
+            },
+        };
+
+        let spec = resolve_intentspec(
+            draft,
+            RiskLevel::Medium,
+            ResolveContext {
+                working_dir: ".".into(),
+                base_ref: "HEAD".into(),
+                created_by_id: "tester".into(),
+            },
+        );
+
+        let security_artifacts: Vec<&ArtifactReq> = spec
+            .artifacts
+            .required
+            .iter()
+            .filter(|a| a.stage == ArtifactStage::Security)
+            .collect();
+        assert!(
+            security_artifacts.is_empty(),
+            "medium risk without declared security_checks should not require security artifacts, got: {security_artifacts:?}"
+        );
+        assert!(
+            spec.artifacts
+                .required
+                .iter()
+                .any(|a| a.name == ArtifactName::Patchset && a.stage == ArtifactStage::PerTask),
+            "patchset@per-task should remain required for implementation work"
+        );
+    }
+
+    #[test]
+    fn medium_risk_with_security_checks_keeps_security_artifacts() {
+        let draft = IntentDraft {
+            intent: DraftIntent {
+                summary: "Add auth feature".into(),
+                problem_statement: "Implement login".into(),
+                change_type: ChangeType::Feature,
+                objectives: vec![Objective {
+                    title: "auth".into(),
+                    kind: ObjectiveKind::Implementation,
+                }],
+                in_scope: vec!["src".into()],
+                out_of_scope: vec![],
+                touch_hints: None,
+            },
+            acceptance: DraftAcceptance {
+                success_criteria: vec!["secure".into()],
+                fast_checks: vec![],
+                integration_checks: vec![],
+                security_checks: vec![DraftCheck {
+                    id: "audit".into(),
+                    kind: CheckKind::Command,
+                    command: Some("cargo audit".into()),
+                    timeout_seconds: Some(120),
+                    expected_exit_code: Some(0),
+                    required: true,
+                    artifacts_produced: vec![],
+                }],
+                release_checks: vec![],
+            },
+            risk: DraftRisk {
+                rationale: "auth changes".into(),
+                factors: vec![],
+                level: Some(RiskLevel::Medium),
+            },
+        };
+
+        let spec = resolve_intentspec(
+            draft,
+            RiskLevel::Medium,
+            ResolveContext {
+                working_dir: ".".into(),
+                base_ref: "HEAD".into(),
+                created_by_id: "tester".into(),
+            },
+        );
+
+        assert!(
+            spec.artifacts
+                .required
+                .iter()
+                .any(|a| a.stage == ArtifactStage::Security),
+            "medium risk with declared security_checks should keep security artifacts"
+        );
     }
 }
