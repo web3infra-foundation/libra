@@ -226,6 +226,15 @@ fn parse_patch_text(patch: &str, mode: ParseMode) -> Result<ApplyPatchArgs, Pars
     let mut remaining_lines = &lines[1..last_line_index];
     let mut line_number = 2;
     while !remaining_lines.is_empty() {
+        // Skip blank lines between hunks. AddFile/DeleteFile stop at (but do
+        // not consume) the line that breaks their pattern, so a blank line
+        // emitted by the model between hunks — or before *** End Patch —
+        // would otherwise be parsed as an invalid hunk header.
+        if remaining_lines[0].trim().is_empty() {
+            remaining_lines = &remaining_lines[1..];
+            line_number += 1;
+            continue;
+        }
         let (hunk, hunk_lines) = parse_one_hunk(remaining_lines, line_number)?;
         hunks.push(hunk);
         line_number += hunk_lines;
@@ -720,6 +729,51 @@ mod tests {
                     contents: "content\n".to_string()
                 }
             ]
+        );
+
+        // Blank line between hunks (model-emitted separator) should be
+        // tolerated instead of producing "'' is not a valid hunk header".
+        assert_eq!(
+            parse_patch_text(
+                "*** Begin Patch\n\
+                 *** Add File: a.txt\n\
+                 +alpha\n\
+                 \n\
+                 *** Add File: b.txt\n\
+                 +beta\n\
+                 *** End Patch",
+                ParseMode::Strict
+            )
+            .unwrap()
+            .hunks,
+            vec![
+                AddFile {
+                    path: PathBuf::from("a.txt"),
+                    contents: "alpha\n".to_string(),
+                },
+                AddFile {
+                    path: PathBuf::from("b.txt"),
+                    contents: "beta\n".to_string(),
+                },
+            ]
+        );
+        // Trailing blank line before *** End Patch (the reported regression).
+        assert_eq!(
+            parse_patch_text(
+                "*** Begin Patch\n\
+                 *** Add File: Cargo.toml\n\
+                 +[package]\n\
+                 +name = \"x\"\n\
+                 \n\
+                 *** End Patch",
+                ParseMode::Strict
+            )
+            .unwrap()
+            .hunks,
+            vec![AddFile {
+                path: PathBuf::from("Cargo.toml"),
+                contents: "[package]\nname = \"x\"\n".to_string(),
+            }]
         );
 
         // Update hunk without an explicit @@ header for the first chunk should parse.

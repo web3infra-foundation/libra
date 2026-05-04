@@ -42,3 +42,19 @@
 2. `cargo clippy --all-targets --all-features -- -D warnings`
 3. `cargo test fetch_test`
 4. `docs/commands/fetch.md` 与命令输出、错误码和进度语义保持一致
+
+## 审计驱动增量（C3 浅克隆契约）
+
+C3（[`compatibility/shallow.md`](compatibility/shallow.md)）在第五批已落地的
+fetch 基线上叠加一个用户决策：把 `fetch_repository(..., depth)` 已存在的内部
+能力公开为稳定 CLI flag。本节只承担兼容契约，不重新设计 fetch 主流程。
+
+- `FetchArgs` 新增 `--depth <N>`，`run_fetch()` 把 depth 透传给现有
+  `fetch_repository_with_result()` 调用点；不新增 `FetchError` 变体。
+- `--depth` 在 `--help` 中**不带 experimental 标记**（用户决策：稳定公开）。
+- 与 `--all` 组合时，depth 同时作用于全部被 fetch 的 remote。
+- `clone --depth` 已存在；`COMPATIBILITY.md` 与 `docs/commands/clone.md` 同步
+  记为 `supported`。`clone --sparse` / `clone --recurse-submodules` 显式登记
+  `unsupported`，链接 [`compatibility/declined.md`](compatibility/declined.md)。
+- 测试覆盖在 `tests/command/fetch_test.rs` 增量补齐 ≥3 条浅克隆用例（单分支
+  depth 1、`--all --depth N`、已 shallow 仓库幂等 fetch）。

@@ -15,7 +15,7 @@
 //!   tools (read, grep, patch, shell, etc.) over Streamable HTTP or Stdio transport,
 //!   enabling integration with external AI clients such as Claude Desktop.
 //! - **AI Agent**: A tool-calling loop powered by configurable LLM providers (Gemini,
-//!   OpenAI, Anthropic, DeepSeek, Zhipu, Ollama) or the managed Codex runtime.
+//!   OpenAI, Anthropic, DeepSeek, Kimi, Zhipu, Ollama) or the managed Codex runtime.
 //!
 //! ## Supported Modes
 //!
@@ -61,7 +61,10 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use chrono::Utc;
@@ -73,6 +76,7 @@ use hyper_util::{
 use rmcp::transport::streamable_http_server::{
     StreamableHttpService, session::local::LocalSessionManager,
 };
+use serde::{Deserialize, Serialize};
 use tokio::{
     process::{Child, Command},
     sync::oneshot,
@@ -82,12 +86,19 @@ use tokio_tungstenite::connect_async;
 use url::Url;
 use uuid::Uuid;
 
+#[cfg(feature = "test-provider")]
+use crate::internal::ai::providers::fake::{Client as FakeClient, FAKE_DEFAULT_MODEL};
 use crate::{
     cli_error,
+    command::code_control_files::{
+        ControlInfo, ControlLockError, ControlLockGuard, ControlPaths, acquire_control_lock,
+        cleanup_control_files, ensure_control_token_file, resolve_control_paths,
+        write_control_info,
+    },
     internal::{
         ai::{
             agent::{
-                ToolLoopConfig,
+                TaskIntent, ToolLoopConfig,
                 profile::{AgentProfileRouter, load_profiles},
             },
             client::CompletionClient,
@@ -97,6 +108,7 @@ use crate::{
                 CompletionError, CompletionModel, CompletionReasoningEffort, CompletionRequest,
                 CompletionResponse, CompletionThinking, CompletionUsage,
             },
+            context_budget::ContextBudget,
             history::HistoryManager,
             hooks::HookRunner,
             mcp::server::LibraMcpServer,
@@ -106,16 +118,19 @@ use crate::{
                 anthropic::{CLAUDE_3_5_SONNET, Client as AnthropicClient},
                 deepseek::client::Client as DeepSeekClient,
                 gemini::{Client as GeminiClient, GEMINI_2_5_FLASH},
+                kimi::{Client as KimiClient, KIMI_K2_6},
                 ollama::Client as OllamaClient,
                 openai::{Client as OpenAIClient, GPT_4O_MINI},
                 zhipu::{Client as ZhipuClient, GLM_5},
             },
             runtime::{ToolBoundaryRuntime, TracingAuditSink},
             sandbox::{
-                ApprovalStore, AskForApproval, ExecApprovalRequest, SandboxPermissions,
-                SandboxPolicy, ToolApprovalContext, ToolRuntimeContext, ToolSandboxContext,
+                ApprovalCachePolicy, ApprovalStore, AskForApproval, DEFAULT_APPROVAL_TTL,
+                ExecApprovalRequest, SandboxPermissions, SandboxPolicy, ToolApprovalContext,
+                ToolRuntimeContext, ToolSandboxContext,
             },
             session::{SessionState, SessionStore},
+            skills::{SkillDispatcher, load_skills},
             tools::{
                 ToolRegistry, ToolRegistryBuilder,
                 context::UserInputRequest,
@@ -123,28 +138,33 @@ use crate::{
                     ApplyPatchHandler, GrepFilesHandler, ListDirHandler, McpBridgeHandler,
                     PlanHandler, ReadFileHandler, RequestUserInputHandler, SearchFilesHandler,
                     ShellHandler, SubmitIntentDraftHandler, SubmitPlanDraftHandler,
-                    SubmitTaskCompleteHandler, WebSearchHandler,
+                    SubmitTaskCompleteHandler, WebSearchHandler, register_semantic_handlers,
                 },
             },
+            usage::{UsageContext, UsageRecorder},
             web::{
                 WebServerHandle, WebServerOptions,
                 code_ui::{
                     CodeUiCapabilities, CodeUiControllerKind, CodeUiInitialController,
-                    CodeUiProviderInfo, CodeUiRuntimeHandle, CodeUiSession, CodeUiSessionStatus,
-                    CodeUiTranscriptEntry, CodeUiTranscriptEntryKind, ReadOnlyCodeUiAdapter,
-                    initial_snapshot, snapshot_from_thread_bundle,
+                    CodeUiProviderAdapter, CodeUiProviderInfo, CodeUiRuntimeHandle, CodeUiSession,
+                    CodeUiSessionStatus, CodeUiTranscriptEntry, CodeUiTranscriptEntryKind,
+                    ReadOnlyCodeUiAdapter, initial_snapshot, snapshot_from_thread_bundle,
                 },
                 start as start_web_server,
             },
         },
         db::establish_connection,
-        tui::{App, AppConfig, ExitReason, Tui, tui_init, tui_restore},
+        tui::{
+            App, AppConfig, ExitReason, Tui, TuiCodeUiAdapter, control::TuiControlCommand,
+            tui_init, tui_restore,
+        },
     },
     utils::{
+        client_storage::ClientStorage,
         error::{CliError, CliResult, StableErrorCode},
         output::OutputConfig,
         storage::local::LocalStorage,
-        util::try_get_storage_path,
+        util::{DATABASE, try_get_storage_path},
     },
 };
 
@@ -185,9 +205,13 @@ pub enum CodeProvider {
     Openai,
     Anthropic,
     Deepseek,
+    Kimi,
     Zhipu,
     Ollama,
     Codex,
+    #[cfg(feature = "test-provider")]
+    #[value(name = "fake", hide = true)]
+    Fake,
 }
 
 /// Operating context that shapes the agent's system prompt and sandbox policy.
@@ -203,6 +227,16 @@ pub enum CodeContext {
     Review,
     #[value(alias = "explore")]
     Research,
+}
+
+/// Local TUI automation control mode.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlMode {
+    /// Keep the current loopback-only read behavior; no write token is created.
+    Observe,
+    /// Enable local automation write control with token and controller checks.
+    Write,
 }
 
 /// Ollama-specific thinking/reasoning mode.
@@ -249,6 +283,24 @@ impl From<DeepSeekThinkingArg> for CompletionThinking {
         match value {
             DeepSeekThinkingArg::Enabled => CompletionThinking::Enabled,
             DeepSeekThinkingArg::Disabled => CompletionThinking::Disabled,
+        }
+    }
+}
+
+/// Kimi-specific thinking mode.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum KimiThinkingArg {
+    /// Send `thinking: {"type": "enabled"}` to Kimi.
+    Enabled,
+    /// Send `thinking: {"type": "disabled"}` to Kimi.
+    Disabled,
+}
+
+impl From<KimiThinkingArg> for CompletionThinking {
+    fn from(value: KimiThinkingArg) -> Self {
+        match value {
+            KimiThinkingArg::Enabled => CompletionThinking::Enabled,
+            KimiThinkingArg::Disabled => CompletionThinking::Disabled,
         }
     }
 }
@@ -376,6 +428,18 @@ pub struct CodeArgs {
     #[arg(long = "env-file", value_name = "PATH")]
     pub env_file: Option<PathBuf>,
 
+    /// Local TUI automation control mode.
+    #[arg(long, value_enum, default_value_t = ControlMode::Observe)]
+    pub control: ControlMode,
+
+    /// Path to the local automation control token file.
+    #[arg(long)]
+    pub control_token_file: Option<PathBuf>,
+
+    /// Path to the local automation control discovery info file.
+    #[arg(long)]
+    pub control_info_file: Option<PathBuf>,
+
     /// AI provider backend
     #[arg(long, value_enum, default_value_t = CodeProvider::Gemini)]
     pub provider: CodeProvider,
@@ -410,6 +474,19 @@ pub struct CodeArgs {
     #[arg(long = "deepseek-stream", alias = "stream", value_name = "BOOL")]
     pub deepseek_stream: Option<bool>,
 
+    /// Kimi thinking mode: enabled or disabled.
+    #[arg(long = "kimi-thinking", value_enum)]
+    pub kimi_thinking: Option<KimiThinkingArg>,
+
+    /// Kimi stream mode: true or false. Defaults to true for Kimi.
+    #[arg(long = "kimi-stream", value_name = "BOOL")]
+    pub kimi_stream: Option<bool>,
+
+    /// Test-only fake provider fixture.
+    #[cfg(feature = "test-provider")]
+    #[arg(long = "fake-fixture", hide = true, value_name = "PATH")]
+    pub fake_fixture: Option<PathBuf>,
+
     /// Operating context mode (dev, review, research)
     #[arg(long, value_enum)]
     pub context: Option<CodeContext>,
@@ -426,6 +503,10 @@ pub struct CodeArgs {
     /// - `untrusted`: prompt for non-trusted operations, auto-allow known-safe reads
     #[arg(long, value_enum, default_value_t = CodeApprovalPolicy::OnRequest)]
     pub approval_policy: CodeApprovalPolicy,
+
+    /// Seconds that a TTL approval remains reusable for matching commands.
+    #[arg(long = "approval-ttl", value_name = "SECS")]
+    pub approval_ttl: Option<u64>,
 
     /// Network access policy for TUI shell and gate execution.
     #[arg(long, value_enum, default_value_t = CodeNetworkAccess::Deny)]
@@ -455,9 +536,46 @@ pub struct CodeArgs {
     #[arg(long)]
     pub codex_port: Option<u16>,
 
-    /// In Codex mode, require the agent to produce a plan before execution.
-    #[arg(long, default_value_t = false)]
-    pub plan_mode: bool,
+    /// Codex plan-first mode: require an approved plan before execution.
+    ///
+    /// When `--provider=codex`, this defaults to **on** so the session
+    /// follows `docs/agent/agent-workflow.md` Phase 0/1 (read-only intent &
+    /// plan drafting) before Phase 2 execution. Pass `--plan-mode=false` to
+    /// opt out for a single session. For non-Codex providers, omit the flag —
+    /// Libra drives Phase 0/1 through its own tool loop.
+    ///
+    /// Accepted forms:
+    /// `--plan-mode` (alias for `=true`), `--plan-mode=true`, `--plan-mode=false`.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    pub plan_mode: Option<bool>,
+}
+
+/// Resolves the effective `plan_mode` flag for the current invocation.
+///
+/// Returns the user-supplied value when present; otherwise defaults to
+/// `true` for the Codex provider and `false` for other providers.
+///
+/// **Scope of enforcement:** `plan_mode` is forwarded to Codex's
+/// `developerInstructions` / `baseInstructions` and tells Codex's own agent
+/// loop to produce a structured plan and wait for an approval before
+/// executing. The approval gate is therefore **Codex's own approval channel**
+/// (per-tool / per-command requests), not Libra's Phase 0 / Phase 1 review
+/// loop. Libra's own intent / plan drafting tool loop (`phase0_plan_tool_loop_config` /
+/// `phase1_plan_tool_loop_config` in `src/internal/tui/app.rs`) requires a
+/// generic `CompletionModel` and is bypassed when `managed_code_ui_runtime`
+/// is set (the Codex runtime is a managed backend, not a completion model —
+/// see the bypass at `src/internal/tui/app.rs` near
+/// `if self.managed_code_ui_runtime.is_none() && should_route_plain_message_to_plan(...)`).
+///
+/// Combining `--plan-mode=true` with `--approval-policy=allow-all` /
+/// `=never` means Codex still produces the plan, but its approval gate is
+/// auto-approved — the operator sees the plan in the transcript / log but
+/// is never asked to confirm. `start_codex_code_ui_runtime` emits a
+/// `tracing::warn!` when this combination is detected so the operator can
+/// notice that the review gate has been disabled.
+pub(crate) fn effective_plan_mode(args: &CodeArgs) -> bool {
+    args.plan_mode
+        .unwrap_or(matches!(args.provider, CodeProvider::Codex))
 }
 
 // ---------------------------------------------------------------------------
@@ -547,6 +665,7 @@ impl McpServerHandle {
 /// selected host would expose loopback-only browser control.
 async fn execute_web_only(args: &CodeArgs) -> CliResult<()> {
     let working_dir = resolve_code_working_dir(args)?;
+    let control_runtime = prepare_control_runtime(args, &working_dir).await?;
     let mcp_server = init_mcp_server(&working_dir).await;
 
     let mut managed_codex_server = None;
@@ -584,6 +703,8 @@ async fn execute_web_only(args: &CodeArgs) -> CliResult<()> {
         working_dir.clone(),
         WebServerOptions {
             code_ui: Some(code_ui_runtime.clone()),
+            automation_control_token: control_runtime.token.clone(),
+            audit_sink: None,
         },
     )
     .await
@@ -600,12 +721,39 @@ async fn execute_web_only(args: &CodeArgs) -> CliResult<()> {
             );
         }
     };
-    println!("Libra Code server running at http://{}", web_handle.addr);
+    let base_url = format!("http://{}", web_handle.addr);
+    let thread_id = code_ui_runtime.snapshot().await.thread_id;
+    if let Err(error) =
+        control_runtime.write_info_file(&working_dir, base_url.clone(), None, thread_id.clone())
+    {
+        let _ = code_ui_runtime.shutdown().await;
+        if let Some(server) = managed_codex_server.as_mut() {
+            server.shutdown().await;
+        }
+        web_handle.shutdown().await;
+        return Err(error);
+    }
+    println!("Libra Code server running at {base_url}");
 
     // Start MCP Server
     let mcp_handle = match start_mcp_server(&args.host, args.mcp_port, mcp_server.clone()).await {
         Ok(handle) => {
-            println!("MCP: http://{}", handle.addr);
+            let mcp_url = format!("http://{}", handle.addr);
+            if let Err(error) = control_runtime.write_info_file(
+                &working_dir,
+                base_url.clone(),
+                Some(mcp_url.clone()),
+                thread_id.clone(),
+            ) {
+                let _ = code_ui_runtime.shutdown().await;
+                if let Some(server) = managed_codex_server.as_mut() {
+                    server.shutdown().await;
+                }
+                web_handle.shutdown().await;
+                handle.shutdown().await;
+                return Err(error);
+            }
+            println!("MCP: {mcp_url}");
             handle
         }
         Err(err) => {
@@ -799,6 +947,7 @@ fn provider_env_value_with_lookup(
 async fn execute_tui(args: CodeArgs) -> CliResult<()> {
     let working_dir = resolve_code_working_dir(&args)?;
     let env_file = load_code_env_file(args.env_file.as_deref())?;
+    let control_runtime = prepare_control_runtime(&args, &working_dir).await?;
 
     // Validate --api-base: only honored for Ollama via CLI flag. Other providers
     // accept custom base URLs through their respective environment variables.
@@ -828,7 +977,13 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
         }
     }
 
-    let preamble = system_preamble(&working_dir, args.context);
+    let task_intent = task_intent_for_context(args.context);
+    let preamble = system_preamble(
+        &working_dir,
+        args.context,
+        args.provider,
+        args.model.as_deref(),
+    );
     let temperature = args.temperature;
     let thinking = completion_thinking_for_args(&args);
     let reasoning_effort = completion_reasoning_effort_for_args(&args);
@@ -878,6 +1033,7 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
             "request_user_input",
             Arc::new(RequestUserInputHandler::new(user_input_tx.clone())),
         );
+    builder = register_semantic_handlers(builder);
 
     // AI user story: MCP bridge tools let the agent persist intent/task/run,
     // evidence, provenance, and Libra VCS operations in the same workflow graph
@@ -888,7 +1044,14 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
     }
 
     let registry = Arc::new(builder.build());
+    let allowed_tools = registry.filter_by_intent(task_intent);
 
+    let approval_config = approval_config_from_project_config(registry.working_dir());
+    let approval_ttl = args
+        .approval_ttl
+        .map(Duration::from_secs)
+        .or(approval_config.ttl)
+        .unwrap_or(DEFAULT_APPROVAL_TTL);
     let provider_name = format!("{:?}", args.provider).to_lowercase();
     let launch_config = TuiLaunchConfig {
         host,
@@ -901,15 +1064,20 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
         reasoning_effort,
         stream,
         preserve_reasoning_content,
+        allowed_tools: Some(allowed_tools),
+        auto_classify_first_user_message: args.context.is_none(),
         context: args.context,
         resume_thread_id,
         approval_policy: args.approval_policy.into(),
         allow_all_commands: args.approval_policy.allows_all_commands(),
+        approval_ttl,
+        approval_cache_policy: approval_config.cache_policy,
         network_access: args.network_access.is_allowed(),
         user_input_rx,
         exec_approval_rx,
         exec_approval_tx,
         mcp_server,
+        control_runtime,
     };
 
     // Create agent based on provider
@@ -949,6 +1117,17 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
             let model = client.completion_model(&model_name);
             run_tui_with_model(model, launch_config, model_name, provider_name).await?;
         }
+        CodeProvider::Kimi => {
+            let api_key = provider_env_value(&env_file, "MOONSHOT_API_KEY")
+                .ok_or_else(|| CliError::auth("MOONSHOT_API_KEY is not set"))?;
+            let client = match provider_env_value(&env_file, "MOONSHOT_BASE_URL") {
+                Some(base_url) => KimiClient::with_base_url(&base_url, api_key),
+                None => KimiClient::with_api_key(api_key),
+            };
+            let model_name = args.model.unwrap_or_else(|| KIMI_K2_6.to_string());
+            let model = client.completion_model(&model_name);
+            run_tui_with_model(model, launch_config, model_name, provider_name).await?;
+        }
         CodeProvider::Zhipu => {
             let client = match ZhipuClient::from_env() {
                 Ok(client) => client,
@@ -983,20 +1162,43 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
             let model = client.completion_model(&model_name);
             run_tui_with_model(model, launch_config, model_name, provider_name).await?;
         }
+        #[cfg(feature = "test-provider")]
+        CodeProvider::Fake => {
+            let fixture = args.fake_fixture.as_deref().ok_or_else(|| {
+                CliError::command_usage("--fake-fixture is required with --provider=fake")
+            })?;
+            let client = FakeClient::from_fixture_path(fixture).map_err(|error| {
+                CliError::io(format!(
+                    "failed to load fake provider fixture '{}': {error}",
+                    fixture.display()
+                ))
+            })?;
+            let model_name = args.model.unwrap_or_else(|| FAKE_DEFAULT_MODEL.to_string());
+            let model = client.completion_model(&model_name);
+            run_tui_with_model(model, launch_config, model_name, provider_name).await?;
+        }
         CodeProvider::Codex => {
             let mut server =
                 start_managed_codex_server(&args.codex_bin, args.codex_port, &working_dir).await?;
+            let initial_controller = if launch_config.control_runtime.is_write() {
+                CodeUiInitialController::LocalTui {
+                    owner_label: "Terminal UI".to_string(),
+                    reason: Some("The terminal UI controls this live Codex run".to_string()),
+                }
+            } else {
+                CodeUiInitialController::Fixed {
+                    kind: CodeUiControllerKind::Tui,
+                    owner_label: "Terminal UI".to_string(),
+                    reason: Some("The terminal UI controls this live Codex run".to_string()),
+                }
+            };
             let code_ui_runtime = match start_codex_code_ui_runtime(
                 &args,
                 &working_dir,
                 &server.ws_url,
                 launch_config.mcp_server.clone(),
                 false,
-                CodeUiInitialController::Fixed {
-                    kind: CodeUiControllerKind::Tui,
-                    owner_label: "Terminal UI".to_string(),
-                    reason: Some("The terminal UI controls this live Codex run".to_string()),
-                },
+                initial_controller,
             )
             .await
             {
@@ -1026,6 +1228,7 @@ fn completion_thinking_for_args(args: &CodeArgs) -> Option<CompletionThinking> {
     match args.provider {
         CodeProvider::Ollama => args.ollama_thinking.map(CompletionThinking::from),
         CodeProvider::Deepseek => args.deepseek_thinking.map(CompletionThinking::from),
+        CodeProvider::Kimi => args.kimi_thinking.map(CompletionThinking::from),
         _ => None,
     }
 }
@@ -1042,12 +1245,13 @@ fn completion_reasoning_effort_for_args(args: &CodeArgs) -> Option<CompletionRea
 fn completion_stream_for_args(args: &CodeArgs) -> Option<bool> {
     match args.provider {
         CodeProvider::Deepseek => args.deepseek_stream,
+        CodeProvider::Kimi => Some(args.kimi_stream.unwrap_or(true)),
         _ => None,
     }
 }
 
 fn preserve_reasoning_content_for_provider(provider: CodeProvider) -> bool {
-    matches!(provider, CodeProvider::Deepseek)
+    matches!(provider, CodeProvider::Deepseek | CodeProvider::Kimi)
 }
 
 // ---------------------------------------------------------------------------
@@ -1076,6 +1280,130 @@ impl ManagedCodexServer {
         }
         let _ = self.child.start_kill();
         let _ = tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await;
+    }
+}
+
+struct ControlRuntimeConfig {
+    mode: ControlMode,
+    paths: ControlPaths,
+    token: Option<Arc<str>>,
+    _lock_guard: Option<ControlLockGuard>,
+    write_info: bool,
+    cleanup_token: bool,
+    info_written: AtomicBool,
+    started_at: chrono::DateTime<Utc>,
+}
+
+impl ControlRuntimeConfig {
+    fn is_write(&self) -> bool {
+        self.mode == ControlMode::Write
+    }
+
+    fn mode_name(&self) -> &'static str {
+        match self.mode {
+            ControlMode::Observe => "observe",
+            ControlMode::Write => "write",
+        }
+    }
+
+    fn cleanup(&self) {
+        cleanup_control_files(
+            &self.paths,
+            self.cleanup_token,
+            self.info_written.load(Ordering::Relaxed),
+        );
+    }
+
+    fn write_info_file(
+        &self,
+        working_dir: &Path,
+        base_url: String,
+        mcp_url: Option<String>,
+        thread_id: Option<String>,
+    ) -> CliResult<()> {
+        if !self.write_info {
+            return Ok(());
+        }
+
+        let info = ControlInfo {
+            version: 1,
+            mode: self.mode_name().to_string(),
+            pid: std::process::id(),
+            base_url,
+            mcp_url,
+            working_dir: working_dir.to_path_buf(),
+            thread_id,
+            started_at: self.started_at,
+        };
+        write_control_info(&self.paths.info, &info).map_err(|error| {
+            CliError::fatal(format!(
+                "failed to write local TUI control info '{}': {error}",
+                self.paths.info.display()
+            ))
+            .with_stable_code(StableErrorCode::IoWriteFailed)
+        })?;
+        self.info_written.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+impl Drop for ControlRuntimeConfig {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
+async fn prepare_control_runtime(
+    args: &CodeArgs,
+    working_dir: &Path,
+) -> CliResult<ControlRuntimeConfig> {
+    let paths = resolve_control_paths(
+        working_dir,
+        args.control_token_file.as_deref(),
+        args.control_info_file.as_deref(),
+    );
+    let started_at = Utc::now();
+
+    match args.control {
+        ControlMode::Observe => Ok(ControlRuntimeConfig {
+            mode: ControlMode::Observe,
+            paths,
+            token: None,
+            _lock_guard: None,
+            write_info: args.control_info_file.is_some(),
+            cleanup_token: false,
+            info_written: AtomicBool::new(false),
+            started_at,
+        }),
+        ControlMode::Write => {
+            let lock_guard = acquire_control_lock(&paths.lock).map_err(|error| match error {
+                ControlLockError::AlreadyHeld { .. } => CliError::conflict(error.to_string()),
+                ControlLockError::Io(error) => CliError::io(format!(
+                    "failed to acquire local TUI control lock '{}': {error}",
+                    paths.lock.display()
+                )),
+            })?;
+            let token = ensure_control_token_file(&paths.token)
+                .await
+                .map_err(|error| {
+                    CliError::fatal(format!(
+                        "failed to prepare local TUI control token '{}': {error}",
+                        paths.token.display()
+                    ))
+                    .with_stable_code(StableErrorCode::IoWriteFailed)
+                })?;
+
+            Ok(ControlRuntimeConfig {
+                mode: ControlMode::Write,
+                paths,
+                token: Some(Arc::<str>::from(token)),
+                _lock_guard: Some(lock_guard),
+                write_info: true,
+                cleanup_token: true,
+                info_written: AtomicBool::new(false),
+                started_at,
+            })
+        }
     }
 }
 
@@ -1163,8 +1491,32 @@ async fn start_codex_code_ui_runtime(
             kind: CodeUiControllerKind::Cli,
             ..
         } => Some("cli".to_string()),
+        CodeUiInitialController::LocalTui { .. } => Some("managed-tui".to_string()),
         _ => Some("web".to_string()),
     };
+    let plan_mode = effective_plan_mode(args);
+    let approval_auto_accepts = matches!(
+        args.approval_policy,
+        CodeApprovalPolicy::Never | CodeApprovalPolicy::AllowAll
+    );
+    tracing::info!(
+        target: "libra::internal::ai::codex",
+        plan_mode,
+        provider = "codex",
+        approval_policy = ?args.approval_policy,
+        "starting Codex code-ui runtime; plan_mode {} (defaults to true for codex provider)",
+        if plan_mode { "enabled" } else { "disabled" }
+    );
+    if plan_mode && approval_auto_accepts {
+        tracing::warn!(
+            target: "libra::internal::ai::codex",
+            approval_policy = ?args.approval_policy,
+            "plan_mode is enabled but the approval policy auto-accepts every \
+             request — Codex will produce a plan and then run it without an \
+             explicit operator review. Use --approval-policy on-request to \
+             keep the review gate active."
+        );
+    }
     let agent_args = agent_codex::AgentCodexArgs {
         url: ws_url.to_string(),
         cwd: working_dir.to_string_lossy().to_string(),
@@ -1173,7 +1525,7 @@ async fn start_codex_code_ui_runtime(
         service_tier: None,
         personality: None,
         model: args.model.clone(),
-        plan_mode: args.plan_mode,
+        plan_mode,
         debug: false,
         ui_mode,
     };
@@ -1412,15 +1764,20 @@ struct TuiLaunchConfig {
     reasoning_effort: Option<CompletionReasoningEffort>,
     stream: Option<bool>,
     preserve_reasoning_content: bool,
+    allowed_tools: Option<Vec<String>>,
+    auto_classify_first_user_message: bool,
     context: Option<CodeContext>,
     resume_thread_id: Option<String>,
     approval_policy: AskForApproval,
     allow_all_commands: bool,
+    approval_ttl: Duration,
+    approval_cache_policy: ApprovalCachePolicy,
     network_access: bool,
     user_input_rx: tokio::sync::mpsc::UnboundedReceiver<UserInputRequest>,
     exec_approval_rx: tokio::sync::mpsc::UnboundedReceiver<ExecApprovalRequest>,
     exec_approval_tx: tokio::sync::mpsc::UnboundedSender<ExecApprovalRequest>,
     mcp_server: Arc<LibraMcpServer>,
+    control_runtime: ControlRuntimeConfig,
 }
 
 #[derive(Clone)]
@@ -1499,6 +1856,8 @@ async fn build_tui_code_ui_runtime(
     provider_name: &str,
     model_name: &str,
     projection_bundle: Option<&ThreadBundle>,
+    code_control_tx: Option<tokio::sync::mpsc::UnboundedSender<TuiControlCommand>>,
+    automation_write_enabled: bool,
 ) -> Arc<CodeUiRuntimeHandle> {
     let capabilities = build_tui_code_ui_capabilities();
     let provider = CodeUiProviderInfo {
@@ -1525,14 +1884,28 @@ async fn build_tui_code_ui_runtime(
     snapshot.updated_at = Utc::now();
 
     let code_ui_session = CodeUiSession::new(snapshot);
-    CodeUiRuntimeHandle::build(
-        ReadOnlyCodeUiAdapter::new(code_ui_session, capabilities),
-        false,
+    let adapter: Arc<dyn CodeUiProviderAdapter> = if let Some(control_tx) = code_control_tx {
+        TuiCodeUiAdapter::new(code_ui_session, capabilities, control_tx)
+    } else {
+        ReadOnlyCodeUiAdapter::new(code_ui_session, capabilities)
+    };
+    let initial_controller = if automation_write_enabled {
+        CodeUiInitialController::LocalTui {
+            owner_label: "Terminal UI".to_string(),
+            reason: Some("The terminal UI controls this live session".to_string()),
+        }
+    } else {
         CodeUiInitialController::Fixed {
             kind: CodeUiControllerKind::Tui,
             owner_label: "Terminal UI".to_string(),
             reason: Some("The terminal UI controls this live session".to_string()),
-        },
+        }
+    };
+    CodeUiRuntimeHandle::build_with_control(
+        adapter,
+        false,
+        automation_write_enabled,
+        initial_controller,
     )
     .await
 }
@@ -1623,6 +1996,7 @@ where
     M::Response: CompletionUsage,
 {
     let registry = params.registry;
+    let control_runtime = params.control_runtime;
     let hook_runner = {
         let runner = HookRunner::load(registry.working_dir());
         if runner.has_hooks() {
@@ -1632,19 +2006,23 @@ where
         }
     };
 
-    let config = ToolLoopConfig {
+    let mut config = ToolLoopConfig {
         preamble: Some(params.preamble),
         temperature: params.temperature,
         thinking: params.thinking,
         reasoning_effort: params.reasoning_effort,
         stream: params.stream,
         hook_runner,
-        allowed_tools: None,
+        allowed_tools: params.allowed_tools,
         runtime_context: Some(default_tui_runtime_context(
             registry.working_dir(),
             params.context,
-            params.approval_policy,
-            params.allow_all_commands,
+            DefaultTuiApprovalConfig {
+                policy: params.approval_policy,
+                allow_all_commands: params.allow_all_commands,
+                ttl: params.approval_ttl,
+                cache_policy: params.approval_cache_policy,
+            },
             params.network_access,
             params.exec_approval_tx.clone(),
         )),
@@ -1694,9 +2072,48 @@ where
     } else {
         SessionState::new(&working_dir_str)
     };
+    if let Some(usage_recorder) = build_usage_recorder(&storage_root).await {
+        config.usage_recorder = Some(usage_recorder);
+        config.usage_context = Some(UsageContext {
+            session_id: Some(session.id.clone()),
+            thread_id: session_canonical_thread_id(&session),
+            agent_run_id: None,
+            run_id: None,
+            provider: provider_name.clone(),
+            model: model_name.clone(),
+            request_kind: "completion".to_string(),
+            intent: None,
+        });
+    }
+
+    let (code_control_tx, code_control_rx) = if control_runtime.is_write() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<TuiControlCommand>();
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
+    let automation_write_enabled = code_control_tx.is_some();
 
     let code_ui_runtime = if let Some(runtime) = managed_code_ui_runtime.clone() {
-        runtime
+        if let Some(control_tx) = code_control_tx {
+            let adapter = runtime.adapter();
+            let code_ui_session = adapter.session();
+            let capabilities = adapter.capabilities();
+            let tui_adapter: Arc<dyn CodeUiProviderAdapter> =
+                TuiCodeUiAdapter::new(code_ui_session, capabilities, control_tx);
+            CodeUiRuntimeHandle::build_with_control(
+                tui_adapter,
+                false,
+                true,
+                CodeUiInitialController::LocalTui {
+                    owner_label: "Terminal UI".to_string(),
+                    reason: Some("The terminal UI controls this live managed session".to_string()),
+                },
+            )
+            .await
+        } else {
+            runtime
+        }
     } else {
         let projection_bundle = session_canonical_thread_id(&session)
             .and_then(|thread_id| Uuid::parse_str(&thread_id).ok());
@@ -1718,37 +2135,98 @@ where
             &provider_name,
             &model_name,
             projection_bundle.as_ref(),
+            code_control_tx,
+            automation_write_enabled,
         )
         .await
     };
     let code_ui_session = code_ui_runtime.adapter().session();
+    let code_ui_runtime_for_app = code_ui_runtime.clone();
 
-    let (web_handle, web_line) = match start_web_server(
+    let control_thread_id = session_canonical_thread_id(&session);
+    let (mut web_handle, web_line) = match start_web_server(
         &params.host,
         params.port,
         registry.working_dir().to_path_buf(),
         WebServerOptions {
             code_ui: Some(code_ui_runtime),
+            automation_control_token: control_runtime.token.clone(),
+            audit_sink: None,
         },
     )
     .await
     {
         Ok(handle) => {
-            let line = format!("Web: http://{}", handle.addr);
+            let base_url = format!("http://{}", handle.addr);
+            if let Err(error) = control_runtime.write_info_file(
+                registry.working_dir(),
+                base_url.clone(),
+                None,
+                control_thread_id.clone(),
+            ) {
+                handle.shutdown().await;
+                if let Some(runtime) = managed_code_ui_runtime.as_ref() {
+                    let _ = runtime.shutdown().await;
+                }
+                return Err(error);
+            }
+            let line = format!("Web: {base_url}");
             (Some(handle), line)
+        }
+        Err(err) if control_runtime.is_write() => {
+            if let Some(runtime) = managed_code_ui_runtime.as_ref() {
+                let _ = runtime.shutdown().await;
+            }
+            return Err(
+                CliError::network(format!("failed to start web server: {err}"))
+                    .with_detail("component", "web_server"),
+            );
         }
         Err(err) => (
             None::<WebServerHandle>,
             format!("Web: failed to start ({err})"),
         ),
     };
+    let control_base_url = web_handle
+        .as_ref()
+        .map(|handle| format!("http://{}", handle.addr));
 
     // Start MCP Server
     let (mcp_handle, mcp_line) =
         match start_mcp_server(&params.host, params.mcp_port, params.mcp_server.clone()).await {
             Ok(handle) => {
-                let line = format!("MCP: http://{}", handle.addr);
+                let mcp_url = format!("http://{}", handle.addr);
+                if let Some(base_url) = control_base_url.as_ref()
+                    && let Err(error) = control_runtime.write_info_file(
+                        registry.working_dir(),
+                        base_url.clone(),
+                        Some(mcp_url.clone()),
+                        control_thread_id.clone(),
+                    )
+                {
+                    if let Some(handle) = web_handle.take() {
+                        handle.shutdown().await;
+                    }
+                    handle.shutdown().await;
+                    if let Some(runtime) = managed_code_ui_runtime.as_ref() {
+                        let _ = runtime.shutdown().await;
+                    }
+                    return Err(error);
+                }
+                let line = format!("MCP: {mcp_url}");
                 (Some(handle), line)
+            }
+            Err(err) if control_runtime.is_write() => {
+                if let Some(handle) = web_handle.take() {
+                    handle.shutdown().await;
+                }
+                if let Some(runtime) = managed_code_ui_runtime.as_ref() {
+                    let _ = runtime.shutdown().await;
+                }
+                return Err(
+                    CliError::network(format!("failed to start MCP server: {err}"))
+                        .with_detail("component", "mcp_server"),
+                );
             }
             Err(err) => (None, format!("MCP: failed to start ({err})")),
         };
@@ -1763,11 +2241,15 @@ where
     // Load slash commands
     let commands = load_commands(registry.working_dir());
     let command_dispatcher = CommandDispatcher::new(commands);
+    let skills = load_skills(registry.working_dir());
+    let skill_dispatcher = SkillDispatcher::new(skills);
 
     // Load agent profiles
     let profiles = load_profiles(registry.working_dir());
     let agent_router = AgentProfileRouter::new(profiles);
     let managed_runtime_for_shutdown = managed_code_ui_runtime.clone();
+    let auto_classify_first_user_message =
+        params.auto_classify_first_user_message && managed_code_ui_runtime.is_none();
 
     // Create and run app
     let mut app = App::new(
@@ -1778,6 +2260,7 @@ where
         AppConfig {
             welcome_message: welcome,
             command_dispatcher,
+            skill_dispatcher,
             agent_router,
             session,
             session_store,
@@ -1787,8 +2270,11 @@ where
             provider_name,
             mcp_server: Some(params.mcp_server),
             code_ui_session: Some(code_ui_session),
+            code_ui_runtime: Some(code_ui_runtime_for_app),
+            code_control_rx,
             managed_code_ui_runtime,
             default_network_access: params.network_access,
+            auto_classify_first_user_message,
         },
     );
 
@@ -1838,6 +2324,7 @@ async fn start_mcp_server(
 ) -> anyhow::Result<McpServerHandle> {
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    let bound_addr = listener.local_addr()?;
 
     // Use rmcp's Streamable HTTP transport via Hyper directly
     let service = TowerToHyperService::new(StreamableHttpService::new(
@@ -1889,7 +2376,7 @@ async fn start_mcp_server(
     });
 
     Ok(McpServerHandle {
-        addr,
+        addr: bound_addr,
         shutdown_tx,
         join,
         connection_tasks,
@@ -1902,8 +2389,21 @@ async fn start_mcp_server(
 
 /// Builds the system prompt (preamble) for the AI agent, incorporating the
 /// working directory context and optional operating mode (dev/review/research).
-fn system_preamble(working_dir: &std::path::Path, context: Option<CodeContext>) -> String {
-    let mut builder = SystemPromptBuilder::new(working_dir);
+fn system_preamble(
+    working_dir: &std::path::Path,
+    context: Option<CodeContext>,
+    provider: CodeProvider,
+    model: Option<&str>,
+) -> String {
+    let intent = task_intent_for_context(context);
+    let budget = ContextBudget::for_provider_model(
+        context_budget_provider_name(provider),
+        model.unwrap_or_else(|| default_context_budget_model(provider)),
+    );
+    let mut builder = SystemPromptBuilder::new(working_dir)
+        .with_intent(intent)
+        .with_dynamic_context()
+        .with_context_budget(budget);
     if let Some(ctx) = context {
         let mode = match ctx {
             CodeContext::Dev => ContextMode::Dev,
@@ -1915,6 +2415,45 @@ fn system_preamble(working_dir: &std::path::Path, context: Option<CodeContext>) 
     builder.build()
 }
 
+fn context_budget_provider_name(provider: CodeProvider) -> &'static str {
+    match provider {
+        CodeProvider::Gemini => "gemini",
+        CodeProvider::Openai => "openai",
+        CodeProvider::Anthropic => "anthropic",
+        CodeProvider::Deepseek => "deepseek",
+        CodeProvider::Kimi => "kimi",
+        CodeProvider::Zhipu => "zhipu",
+        CodeProvider::Ollama => "ollama",
+        CodeProvider::Codex => "codex",
+        #[cfg(feature = "test-provider")]
+        CodeProvider::Fake => "fake",
+    }
+}
+
+fn default_context_budget_model(provider: CodeProvider) -> &'static str {
+    match provider {
+        CodeProvider::Gemini => GEMINI_2_5_FLASH,
+        CodeProvider::Openai => GPT_4O_MINI,
+        CodeProvider::Anthropic => CLAUDE_3_5_SONNET,
+        CodeProvider::Deepseek => "deepseek-chat",
+        CodeProvider::Kimi => KIMI_K2_6,
+        CodeProvider::Zhipu => GLM_5,
+        CodeProvider::Ollama => "ollama-default",
+        CodeProvider::Codex => "codex",
+        #[cfg(feature = "test-provider")]
+        CodeProvider::Fake => FAKE_DEFAULT_MODEL,
+    }
+}
+
+fn task_intent_for_context(context: Option<CodeContext>) -> TaskIntent {
+    match context {
+        Some(CodeContext::Dev) => TaskIntent::Feature,
+        Some(CodeContext::Review) => TaskIntent::Review,
+        Some(CodeContext::Research) => TaskIntent::Question,
+        None => TaskIntent::Unknown,
+    }
+}
+
 /// Constructs the default [`ToolRuntimeContext`] for TUI mode, configuring
 /// the sandbox policy based on the operating context:
 ///
@@ -1924,11 +2463,18 @@ fn system_preamble(working_dir: &std::path::Path, context: Option<CodeContext>) 
 /// - **Review / Research mode**: Read-only sandbox; no writes or network access.
 ///
 /// The approval policy and its communication channel are also wired in here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DefaultTuiApprovalConfig {
+    policy: AskForApproval,
+    allow_all_commands: bool,
+    ttl: Duration,
+    cache_policy: ApprovalCachePolicy,
+}
+
 fn default_tui_runtime_context(
     working_dir: &std::path::Path,
     context: Option<CodeContext>,
-    approval_policy: AskForApproval,
-    allow_all_commands: bool,
+    approval: DefaultTuiApprovalConfig,
     network_access: bool,
     exec_approval_tx: tokio::sync::mpsc::UnboundedSender<ExecApprovalRequest>,
 ) -> ToolRuntimeContext {
@@ -1943,7 +2489,7 @@ fn default_tui_runtime_context(
     };
 
     let mut approval_store = ApprovalStore::default();
-    if allow_all_commands {
+    if approval.allow_all_commands {
         approval_store.approve_all_commands();
     }
 
@@ -1954,12 +2500,93 @@ fn default_tui_runtime_context(
         }),
         sandbox_runtime: None,
         approval: Some(ToolApprovalContext {
-            policy: approval_policy,
+            policy: approval.policy,
             request_tx: exec_approval_tx,
             store: Arc::new(tokio::sync::Mutex::new(approval_store)),
+            scope_key_prefix: None,
+            approval_ttl: approval.ttl,
+            cache_policy: approval.cache_policy,
         }),
+        file_history: None,
         max_output_bytes: None,
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct ApprovalProjectConfig {
+    approval: Option<ApprovalSectionConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApprovalSectionConfig {
+    ttl_seconds: Option<u64>,
+    #[serde(default)]
+    protected_branches: Option<Vec<String>>,
+    #[serde(default)]
+    allowed_network_domains: Option<Vec<String>>,
+    #[serde(default)]
+    no_cache_unknown_network: bool,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ApprovalRuntimeConfig {
+    ttl: Option<Duration>,
+    cache_policy: ApprovalCachePolicy,
+}
+
+fn approval_config_from_project_config(working_dir: &Path) -> ApprovalRuntimeConfig {
+    let path = working_dir.join(".libra").join("config.toml");
+    let Some(contents) = fs::read_to_string(&path).ok() else {
+        return ApprovalRuntimeConfig::default();
+    };
+    let Ok(config) = toml::from_str::<ApprovalProjectConfig>(&contents).map_err(|err| {
+        tracing::warn!(
+            target: "libra::command::code",
+            path = %path.display(),
+            error = %err,
+            "failed to parse approval config"
+        );
+        err
+    }) else {
+        return ApprovalRuntimeConfig::default();
+    };
+    let Some(approval) = config.approval else {
+        return ApprovalRuntimeConfig::default();
+    };
+    let ttl = approval.ttl_seconds.and_then(|ttl_seconds| {
+        if ttl_seconds == 0 {
+            tracing::warn!(
+                target: "libra::command::code",
+                path = %path.display(),
+                "ignoring approval ttl_seconds=0"
+            );
+            None
+        } else {
+            Some(Duration::from_secs(ttl_seconds))
+        }
+    });
+
+    let default_cache_policy = ApprovalCachePolicy::default();
+    ApprovalRuntimeConfig {
+        ttl,
+        cache_policy: ApprovalCachePolicy {
+            protected_branches: approval
+                .protected_branches
+                .unwrap_or(default_cache_policy.protected_branches),
+            allowed_network_domains: approval.allowed_network_domains.unwrap_or_default(),
+            no_cache_unknown_network: approval.no_cache_unknown_network,
+        },
+    }
+}
+
+#[cfg(test)]
+fn approval_ttl_from_project_config(working_dir: &Path) -> Option<Duration> {
+    approval_config_from_project_config(working_dir).ttl
+}
+
+#[cfg(test)]
+fn approval_cache_policy_from_project_config(working_dir: &Path) -> ApprovalCachePolicy {
+    approval_config_from_project_config(working_dir).cache_policy
 }
 
 // ---------------------------------------------------------------------------
@@ -2034,7 +2661,7 @@ async fn init_mcp_server(working_dir: &std::path::Path) -> Arc<LibraMcpServer> {
         }
     };
 
-    let storage = Arc::new(LocalStorage::new(objects_dir));
+    let storage = Arc::new(ClientStorage::init(objects_dir));
     let intent_history_manager = Arc::new(HistoryManager::new(storage.clone(), dot_libra, db_conn));
     Arc::new(LibraMcpServer::new_with_working_dir(
         Some(intent_history_manager),
@@ -2051,6 +2678,24 @@ async fn init_mcp_server(working_dir: &std::path::Path) -> Arc<LibraMcpServer> {
 pub(crate) fn resolve_storage_root(working_dir: &std::path::Path) -> std::path::PathBuf {
     try_get_storage_path(Some(working_dir.to_path_buf()))
         .unwrap_or_else(|_| working_dir.join(".libra"))
+}
+
+async fn build_usage_recorder(storage_root: &Path) -> Option<UsageRecorder> {
+    let db_path = storage_root.join(DATABASE);
+    let Some(db_path) = db_path.to_str() else {
+        tracing::warn!(
+            path = %storage_root.display(),
+            "usage stats disabled because the repository database path is not valid UTF-8"
+        );
+        return None;
+    };
+    match establish_connection(db_path).await {
+        Ok(conn) => Some(UsageRecorder::new(conn)),
+        Err(error) => {
+            tracing::warn!("usage stats disabled because database open failed: {error}");
+            None
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2111,7 +2756,7 @@ async fn execute_stdio(args: &CodeArgs) -> CliResult<()> {
 ///   in web-only and stdio modes.
 /// - Provider-specific flags are only accepted for their respective providers.
 fn validate_mode_args(args: &CodeArgs, _output: &OutputConfig) -> Result<(), String> {
-    if !args.stdio && args.port == args.mcp_port {
+    if !args.stdio && args.port == args.mcp_port && args.port != 0 {
         return Err(format!(
             "--port ({}) and --mcp-port ({}) must be different",
             args.port, args.mcp_port
@@ -2123,10 +2768,20 @@ fn validate_mode_args(args: &CodeArgs, _output: &OutputConfig) -> Result<(), Str
     }
 
     if args.stdio {
+        if args.control == ControlMode::Write {
+            return Err(
+                "--control write is not supported with `libra code --stdio` because --stdio is the MCP stdio transport; use `libra code-control --stdio` for local TUI automation"
+                    .to_string(),
+            );
+        }
         reject_non_tui_flags(args, "--stdio")?;
         reject_mode_flag(args.host != DEFAULT_BIND_HOST, "--host", "--stdio")?;
         reject_mode_flag(args.port != DEFAULT_WEB_PORT, "--port", "--stdio")?;
         reject_mode_flag(args.mcp_port != DEFAULT_MCP_PORT, "--mcp-port", "--stdio")?;
+    }
+
+    if args.control == ControlMode::Write {
+        ensure_loopback_control_host_for_validation(&args.host)?;
     }
 
     if args.provider != CodeProvider::Codex {
@@ -2136,7 +2791,7 @@ fn validate_mode_args(args: &CodeArgs, _output: &OutputConfig) -> Result<(), Str
         if args.codex_bin != DEFAULT_CODEX_BIN {
             return Err("--codex-bin is only supported with --provider=codex".to_string());
         }
-        if args.plan_mode {
+        if matches!(args.plan_mode, Some(true)) {
             return Err("--plan-mode is only supported with --provider=codex".to_string());
         }
     }
@@ -2171,6 +2826,31 @@ fn validate_mode_args(args: &CodeArgs, _output: &OutputConfig) -> Result<(), Str
         );
     }
 
+    if args.provider != CodeProvider::Kimi && args.kimi_thinking.is_some() {
+        return Err("--kimi-thinking is only supported with --provider=kimi".to_string());
+    }
+
+    if args.provider != CodeProvider::Kimi && args.kimi_stream.is_some() {
+        return Err("--kimi-stream is only supported with --provider=kimi".to_string());
+    }
+
+    #[cfg(feature = "test-provider")]
+    {
+        if args.provider == CodeProvider::Fake {
+            if std::env::var_os("LIBRA_ENABLE_TEST_PROVIDER").is_none() {
+                return Err(
+                    "--provider=fake is test-only; set LIBRA_ENABLE_TEST_PROVIDER=1 to use it"
+                        .to_string(),
+                );
+            }
+            if args.fake_fixture.is_none() {
+                return Err("--fake-fixture is required with --provider=fake".to_string());
+            }
+        } else if args.fake_fixture.is_some() {
+            return Err("--fake-fixture is only supported with --provider=fake".to_string());
+        }
+    }
+
     Ok(())
 }
 
@@ -2181,6 +2861,21 @@ fn reject_mode_flag(is_invalid: bool, flag: &str, mode: &str) -> Result<(), Stri
         return Err(format!("{flag} is not supported in {mode} mode"));
     }
     Ok(())
+}
+
+fn ensure_loopback_control_host_for_validation(host: &str) -> Result<(), String> {
+    let normalized = host.trim().trim_matches('[').trim_matches(']');
+    let is_loopback = matches!(normalized, "localhost" | "127.0.0.1" | "::1")
+        || normalized
+            .parse::<std::net::IpAddr>()
+            .map(|addr| addr.is_loopback())
+            .unwrap_or(false);
+
+    if is_loopback {
+        Ok(())
+    } else {
+        Err("--control write requires a loopback --host such as 127.0.0.1 or ::1".to_string())
+    }
 }
 
 /// Rejects all TUI-specific flags when running in a non-TUI mode (web-only or stdio).
@@ -2203,6 +2898,8 @@ fn reject_non_tui_flags(args: &CodeArgs, mode: &str) -> Result<(), String> {
         mode,
     )?;
     reject_mode_flag(args.deepseek_stream.is_some(), "--deepseek-stream", mode)?;
+    reject_mode_flag(args.kimi_thinking.is_some(), "--kimi-thinking", mode)?;
+    reject_mode_flag(args.kimi_stream.is_some(), "--kimi-stream", mode)?;
     reject_mode_flag(args.context.is_some(), "--context", mode)?;
     reject_mode_flag(args.resume.is_some(), "--resume", mode)?;
     reject_mode_flag(
@@ -2210,6 +2907,7 @@ fn reject_non_tui_flags(args: &CodeArgs, mode: &str) -> Result<(), String> {
         "--approval-policy",
         mode,
     )?;
+    reject_mode_flag(args.approval_ttl.is_some(), "--approval-ttl", mode)?;
     reject_mode_flag(
         args.network_access != CodeNetworkAccess::Deny,
         "--network-access",
@@ -2239,6 +2937,9 @@ mod tests {
             cwd: None,
             repo: None,
             env_file: None,
+            control: ControlMode::Observe,
+            control_token_file: None,
+            control_info_file: None,
             provider: CodeProvider::Gemini,
             model: None,
             temperature: None,
@@ -2247,16 +2948,21 @@ mod tests {
             deepseek_thinking: None,
             deepseek_reasoning_effort: None,
             deepseek_stream: None,
+            kimi_thinking: None,
+            kimi_stream: None,
+            #[cfg(feature = "test-provider")]
+            fake_fixture: None,
             context: None,
             resume: None,
             approval_policy: CodeApprovalPolicy::OnRequest,
+            approval_ttl: None,
             network_access: CodeNetworkAccess::Deny,
             mcp_port: DEFAULT_MCP_PORT,
             stdio: false,
             api_base: None,
             codex_bin: DEFAULT_CODEX_BIN.to_string(),
             codex_port: None,
-            plan_mode: false,
+            plan_mode: None,
         }
     }
 
@@ -2287,6 +2993,43 @@ mod tests {
     fn accepts_default_tui_mode() {
         let args = base_args();
         assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn accepts_control_write_in_default_tui_mode() {
+        let mut args = base_args();
+        args.control = ControlMode::Write;
+
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn accepts_control_write_in_default_web_mode() {
+        let args = CodeArgs::try_parse_from(["libra", "--web", "--control", "write"]).unwrap();
+
+        assert!(args.web_only);
+        assert_eq!(args.control, ControlMode::Write);
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn rejects_control_write_in_stdio_mode() {
+        let mut args = base_args();
+        args.stdio = true;
+        args.control = ControlMode::Write;
+
+        let err = validate_mode_args(&args, &OutputConfig::default()).unwrap_err();
+        assert!(err.contains("code-control --stdio"));
+    }
+
+    #[test]
+    fn rejects_control_write_with_non_loopback_host() {
+        let mut args = base_args();
+        args.control = ControlMode::Write;
+        args.host = "0.0.0.0".to_string();
+
+        let err = validate_mode_args(&args, &OutputConfig::default()).unwrap_err();
+        assert!(err.contains("loopback"));
     }
 
     #[test]
@@ -2359,6 +3102,145 @@ mod tests {
             AskForApproval::OnRequest
         );
         assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn accepts_approval_ttl_cli_arg_in_tui_mode() {
+        let args = CodeArgs::try_parse_from(["libra", "--approval-ttl", "42"]).unwrap();
+
+        assert_eq!(args.approval_ttl, Some(42));
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn loads_approval_ttl_from_project_config() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let libra_dir = temp_dir.path().join(".libra");
+        fs::create_dir_all(&libra_dir).unwrap();
+        fs::write(
+            libra_dir.join("config.toml"),
+            "[approval]\nttl_seconds = 123\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            approval_ttl_from_project_config(temp_dir.path()),
+            Some(Duration::from_secs(123))
+        );
+    }
+
+    #[test]
+    fn loads_approval_cache_policy_from_project_config() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let libra_dir = temp_dir.path().join(".libra");
+        fs::create_dir_all(&libra_dir).unwrap();
+        fs::write(
+            libra_dir.join("config.toml"),
+            r#"[approval]
+protected_branches = ["main", "release"]
+allowed_network_domains = ["github.com"]
+no_cache_unknown_network = true
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            approval_cache_policy_from_project_config(temp_dir.path()),
+            ApprovalCachePolicy {
+                protected_branches: vec!["main".to_string(), "release".to_string()],
+                allowed_network_domains: vec!["github.com".to_string()],
+                no_cache_unknown_network: true,
+            }
+        );
+    }
+
+    #[test]
+    fn plan_mode_defaults_to_none_when_omitted() {
+        let args = CodeArgs::try_parse_from(["libra"]).unwrap();
+        assert_eq!(args.plan_mode, None);
+    }
+
+    #[test]
+    fn plan_mode_bare_flag_is_true() {
+        let args = CodeArgs::try_parse_from(["libra", "--plan-mode"]).unwrap();
+        assert_eq!(args.plan_mode, Some(true));
+    }
+
+    #[test]
+    fn plan_mode_explicit_true_is_true() {
+        let args = CodeArgs::try_parse_from(["libra", "--plan-mode=true"]).unwrap();
+        assert_eq!(args.plan_mode, Some(true));
+    }
+
+    #[test]
+    fn plan_mode_explicit_false_is_false() {
+        let args = CodeArgs::try_parse_from(["libra", "--plan-mode=false"]).unwrap();
+        assert_eq!(args.plan_mode, Some(false));
+    }
+
+    #[test]
+    fn effective_plan_mode_defaults_to_true_for_codex() {
+        let mut args = base_args();
+        args.provider = CodeProvider::Codex;
+        assert!(effective_plan_mode(&args));
+    }
+
+    #[test]
+    fn effective_plan_mode_defaults_to_false_for_non_codex_providers() {
+        let providers = [
+            CodeProvider::Gemini,
+            CodeProvider::Openai,
+            CodeProvider::Anthropic,
+            CodeProvider::Deepseek,
+            CodeProvider::Kimi,
+            CodeProvider::Zhipu,
+            CodeProvider::Ollama,
+        ];
+        for provider in providers {
+            let mut args = base_args();
+            args.provider = provider;
+            assert!(
+                !effective_plan_mode(&args),
+                "expected plan_mode=false default for provider {provider:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn effective_plan_mode_respects_explicit_user_value() {
+        let mut args = base_args();
+        args.provider = CodeProvider::Codex;
+        args.plan_mode = Some(false);
+        assert!(
+            !effective_plan_mode(&args),
+            "explicit --plan-mode=false must override the codex default"
+        );
+
+        args.provider = CodeProvider::Gemini;
+        args.plan_mode = Some(true);
+        assert!(
+            effective_plan_mode(&args),
+            "explicit --plan-mode=true must take effect even for non-codex providers \
+             at the resolution layer (validate_mode_args is responsible for rejecting \
+             that combination separately)"
+        );
+    }
+
+    #[test]
+    fn rejects_explicit_plan_mode_true_for_non_codex_provider() {
+        let mut args = base_args();
+        args.provider = CodeProvider::Gemini;
+        args.plan_mode = Some(true);
+        let err = validate_mode_args(&args, &OutputConfig::default()).unwrap_err();
+        assert!(err.contains("--plan-mode"));
+    }
+
+    #[test]
+    fn accepts_explicit_plan_mode_false_for_non_codex_provider() {
+        let mut args = base_args();
+        args.provider = CodeProvider::Gemini;
+        args.plan_mode = Some(false);
+        validate_mode_args(&args, &OutputConfig::default()).unwrap();
     }
 
     #[test]
@@ -2487,6 +3369,68 @@ mod tests {
     }
 
     #[test]
+    fn accepts_kimi_thinking_for_kimi_provider() {
+        let args = CodeArgs::try_parse_from([
+            "libra",
+            "--provider",
+            "kimi",
+            "--model",
+            "kimi-k2.6",
+            "--kimi-thinking",
+            "disabled",
+        ])
+        .unwrap();
+
+        assert_eq!(args.provider, CodeProvider::Kimi);
+        assert_eq!(args.kimi_thinking, Some(KimiThinkingArg::Disabled));
+        assert_eq!(
+            completion_thinking_for_args(&args),
+            Some(CompletionThinking::Disabled)
+        );
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn defaults_kimi_stream_for_kimi_provider() {
+        let args = CodeArgs::try_parse_from(["libra", "--provider", "kimi"]).unwrap();
+
+        assert_eq!(args.provider, CodeProvider::Kimi);
+        assert_eq!(args.kimi_stream, None);
+        assert_eq!(completion_stream_for_args(&args), Some(true));
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn accepts_kimi_stream_override_for_kimi_provider() {
+        let args =
+            CodeArgs::try_parse_from(["libra", "--provider", "kimi", "--kimi-stream", "false"])
+                .unwrap();
+
+        assert_eq!(args.provider, CodeProvider::Kimi);
+        assert_eq!(args.kimi_stream, Some(false));
+        assert_eq!(completion_stream_for_args(&args), Some(false));
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn rejects_kimi_thinking_for_non_kimi_provider() {
+        let mut args = base_args();
+        args.kimi_thinking = Some(KimiThinkingArg::Enabled);
+
+        let err = validate_mode_args(&args, &OutputConfig::default()).unwrap_err();
+        assert!(err.contains("--kimi-thinking"));
+    }
+
+    #[test]
+    fn rejects_kimi_stream_for_non_kimi_provider() {
+        let mut args = base_args();
+        args.kimi_stream = Some(true);
+
+        let err = validate_mode_args(&args, &OutputConfig::default()).unwrap_err();
+        assert!(err.contains("--kimi-stream"));
+    }
+
+    #[test]
     fn accepts_deepseek_stream_alias_for_deepseek_provider() {
         let args =
             CodeArgs::try_parse_from(["libra", "--provider", "deepseek", "--stream", "false"])
@@ -2498,7 +3442,7 @@ mod tests {
     }
 
     #[test]
-    fn tui_preserves_reasoning_content_for_deepseek_only() {
+    fn tui_preserves_reasoning_content_for_reasoning_providers() {
         assert!(preserve_reasoning_content_for_provider(
             CodeProvider::Deepseek
         ));
@@ -2508,6 +3452,7 @@ mod tests {
         assert!(!preserve_reasoning_content_for_provider(
             CodeProvider::Ollama
         ));
+        assert!(preserve_reasoning_content_for_provider(CodeProvider::Kimi));
     }
 
     #[test]
@@ -2592,6 +3537,8 @@ mod tests {
             "ollama",
             "gemma4:31b",
             Some(&bundle),
+            None,
+            false,
         )
         .await;
         let snapshot = runtime.snapshot().await;
@@ -2601,13 +3548,52 @@ mod tests {
     }
 
     #[test]
+    fn code_context_maps_to_task_intent_for_prompt_and_tool_policy() {
+        assert_eq!(
+            task_intent_for_context(Some(CodeContext::Dev)),
+            TaskIntent::Feature
+        );
+        assert_eq!(
+            task_intent_for_context(Some(CodeContext::Review)),
+            TaskIntent::Review
+        );
+        assert_eq!(
+            task_intent_for_context(Some(CodeContext::Research)),
+            TaskIntent::Question
+        );
+        assert_eq!(task_intent_for_context(None), TaskIntent::Unknown);
+    }
+
+    #[test]
+    fn system_preamble_includes_explicit_context_intent_and_dynamic_context() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let prompt = system_preamble(
+            temp_dir.path(),
+            Some(CodeContext::Review),
+            CodeProvider::Openai,
+            Some("gpt-test"),
+        );
+
+        assert!(prompt.contains("Code Review Mode"));
+        assert!(prompt.contains("## Task Intent"));
+        assert!(prompt.contains("intent=review"));
+        assert!(prompt.contains("## Dynamic Workspace Context"));
+        assert!(prompt.contains("source=libra status --short"));
+        assert!(prompt.contains("## Context Budget Plan"));
+    }
+
+    #[test]
     fn default_tui_runtime_context_denies_network_in_dev_mode() {
         let (tx, _rx) = unbounded_channel();
         let runtime = default_tui_runtime_context(
             Path::new("/tmp/workspace"),
             Some(CodeContext::Dev),
-            AskForApproval::OnRequest,
-            false,
+            DefaultTuiApprovalConfig {
+                policy: AskForApproval::OnRequest,
+                allow_all_commands: false,
+                ttl: DEFAULT_APPROVAL_TTL,
+                cache_policy: ApprovalCachePolicy::default(),
+            },
             false,
             tx,
         );
@@ -2629,8 +3615,12 @@ mod tests {
         let runtime = default_tui_runtime_context(
             Path::new("/tmp/workspace"),
             Some(CodeContext::Dev),
-            AskForApproval::OnRequest,
-            false,
+            DefaultTuiApprovalConfig {
+                policy: AskForApproval::OnRequest,
+                allow_all_commands: false,
+                ttl: DEFAULT_APPROVAL_TTL,
+                cache_policy: ApprovalCachePolicy::default(),
+            },
             true,
             tx,
         );
@@ -2652,8 +3642,12 @@ mod tests {
         let runtime = default_tui_runtime_context(
             Path::new("/tmp/workspace"),
             Some(CodeContext::Dev),
-            AskForApproval::OnRequest,
-            true,
+            DefaultTuiApprovalConfig {
+                policy: AskForApproval::OnRequest,
+                allow_all_commands: true,
+                ttl: DEFAULT_APPROVAL_TTL,
+                cache_policy: ApprovalCachePolicy::default(),
+            },
             true,
             tx,
         );
@@ -2671,8 +3665,12 @@ mod tests {
             let runtime = default_tui_runtime_context(
                 Path::new("/tmp/workspace"),
                 Some(context),
-                AskForApproval::OnRequest,
-                false,
+                DefaultTuiApprovalConfig {
+                    policy: AskForApproval::OnRequest,
+                    allow_all_commands: false,
+                    ttl: DEFAULT_APPROVAL_TTL,
+                    cache_policy: ApprovalCachePolicy::default(),
+                },
                 true,
                 tx,
             );

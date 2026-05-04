@@ -179,6 +179,12 @@ enum Commands {
     Clone(command::clone::CloneArgs),
     #[command(about = "Start Libra Code interactive TUI (with background web server)")]
     Code(command::code::CodeArgs),
+    #[command(about = "Drive a local Libra Code TUI automation control session")]
+    CodeControl(command::code_control::CodeControlArgs),
+    #[command(about = "Manage AI automation rules and history")]
+    Automation(command::automation::AutomationArgs),
+    #[command(about = "Report AI provider/model usage")]
+    Usage(command::usage::UsageArgs),
     #[command(about = "Inspect an AI thread version graph in a TUI")]
     Graph(command::graph::GraphArgs),
     // The rest of the commands require a repository to be present
@@ -198,7 +204,8 @@ enum Commands {
     Clean(command::clean::CleanArgs),
     #[command(
         subcommand,
-        about = "Stash the changes in a dirty working directory away"
+        about = "Stash the changes in a dirty working directory away",
+        after_help = command::stash::STASH_EXAMPLES
     )]
     Stash(Stash),
     #[command(subcommand, about = "Large File Storage")]
@@ -265,7 +272,8 @@ enum Commands {
     Reflog(command::reflog::ReflogArgs),
     #[command(
         about = "Manage multiple working trees attached to this repository",
-        alias = "wt"
+        alias = "wt",
+        after_help = command::worktree::WORKTREE_EXAMPLES
     )]
     Worktree(command::worktree::WorktreeArgs),
     #[command(about = "Cloud backup and restore operations (D1/R2)")]
@@ -282,13 +290,13 @@ enum Commands {
     IndexPack(command::index_pack::IndexPackArgs),
 
     #[command(
-        about = "Check out and switch to a local or remote branches",
-        hide = true
+        about = "Branch compatibility surface; prefer 'switch' for branches and 'restore' for files"
     )]
     Checkout(command::checkout::CheckoutArgs),
     #[command(
         subcommand,
-        about = "Use binary search to find the commit that introduced a bug"
+        about = "Use binary search to find the commit that introduced a bug",
+        after_help = command::bisect::BISECT_EXAMPLES
     )]
     Bisect(Bisect),
 }
@@ -316,6 +324,30 @@ pub enum Stash {
     Drop {
         #[arg(help = "The stash to drop")]
         stash: Option<String>,
+    },
+    #[command(about = "Show the changes recorded in the stash as a file-level summary")]
+    Show {
+        #[arg(help = "Stash reference (default: stash@{0})")]
+        stash: Option<String>,
+        #[arg(long, help = "Show only the file names that changed")]
+        name_only: bool,
+        #[arg(long, help = "Show only file names with their status code")]
+        name_status: bool,
+    },
+    #[command(about = "Create and check out a new branch from the stash, then drop it")]
+    Branch {
+        #[arg(help = "Name of the new branch to create")]
+        branch: String,
+        #[arg(help = "Stash reference (default: stash@{0})")]
+        stash: Option<String>,
+    },
+    #[command(about = "Remove all stashed entries")]
+    Clear {
+        #[arg(
+            long,
+            help = "Skip confirmation; required outside JSON / machine modes"
+        )]
+        force: bool,
     },
 }
 
@@ -350,6 +382,18 @@ pub enum Bisect {
     },
     #[command(about = "Show bisect log")]
     Log,
+    #[command(about = "Run a script for each commit until convergence")]
+    Run {
+        #[arg(
+            help = "Command to run for each commit; first arg is the executable",
+            required = true,
+            trailing_var_arg = true,
+            allow_hyphen_values = true
+        )]
+        cmd: Vec<String>,
+    },
+    #[command(about = "Show the current bisect state and remaining candidates")]
+    View,
 }
 
 /// Synchronous CLI entry — used by both the `libra` binary and embedders that cannot
@@ -632,7 +676,13 @@ fn repo_not_found_error(path: Option<&Path>) -> CliError {
 
 fn command_preflight_storage(command: &Commands) -> CliResult<Option<std::path::PathBuf>> {
     match command {
-        Commands::Init(_) | Commands::Clone(_) | Commands::Open(_) => Ok(None),
+        Commands::Init(_) | Commands::Clone(_) | Commands::Open(_) | Commands::CodeControl(_) => {
+            Ok(None)
+        }
+        #[cfg(unix)]
+        Commands::Worktree(command::worktree::WorktreeArgs {
+            command: command::worktree::WorktreeSubcommand::Umount { .. },
+        }) => Ok(None),
         // Config global/system scopes don't require a repository.
         Commands::Config(cfg) if cfg.global || cfg.system => Ok(None),
         Commands::Code(code_args) => {
@@ -824,6 +874,11 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         }
         Commands::Clone(cmd_args) => command::clone::execute_safe(cmd_args, &output).await?,
         Commands::Code(cmd_args) => command::code::execute(cmd_args, &output).await?,
+        Commands::CodeControl(cmd_args) => command::code_control::execute(cmd_args).await?,
+        Commands::Automation(cmd_args) => {
+            command::automation::execute_safe(cmd_args, &output).await?
+        }
+        Commands::Usage(cmd_args) => command::usage::execute_safe(cmd_args, &output).await?,
         Commands::Graph(cmd_args) => command::graph::execute_safe(cmd_args, &output).await?,
         Commands::Add(cmd_args) => command::add::execute_safe(cmd_args, &output).await?,
         Commands::Rm(cmd_args) => command::remove::execute_safe(cmd_args, &output).await?,
@@ -942,6 +997,14 @@ mod tests {
             matches!(cli.command, Commands::Config(_)),
             "`cfg` should parse as the config subcommand"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worktree_umount_preflight_does_not_require_repo() {
+        let cli = Cli::try_parse_from(["libra", "worktree", "umount", "/tmp/libra-task"]).unwrap();
+
+        assert!(matches!(command_preflight_storage(&cli.command), Ok(None)));
     }
 
     /// Scenario: clap's built-in Levenshtein matcher should suggest `init` for the

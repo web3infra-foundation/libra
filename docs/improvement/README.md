@@ -174,7 +174,7 @@
 
 **不纳入命令级批次改进的模块：**
 - `web_assets.rs`（11 行）：纯资源嵌入模块，无命令逻辑
-- `claudecode/` 与 `code.rs` **不在上面的命令批次表中推进**，但已由 [code.md](code.md) 作为 AI Agent / `libra code` 专项计划统一跟踪；后续涉及 shared runtime、workflow phase、provider formal writes、SQL projection 与 `claudecode` 清退的改动，以该计划为准
+- `code.rs` 及 AI 子系统（`src/internal/ai/`、`src/internal/tui/`）**不在上面的命令批次表中推进**，但已由 [agent.md](agent.md) 作为 AI Agent 子系统专项计划统一跟踪；该文档现在是 Agent runtime / `libra code` Phase Workflow & Implementation Phase 0-5 / Local TUI Automation Control 的唯一权威来源（2026-05-02 已合并原 `code.md` 与 `tui.md` 的全部内容；`claudecode/` 已在 Wave 1C 完成硬删除）
 
 ### 全局层面改进（贯穿所有命令）
 
@@ -190,6 +190,74 @@
 | **F** | 拼写纠错建议（确认 clap suggest 已启用） | 独立改进 |
 | **G** | 意外错误时输出 GitHub Issues URL | 独立改进 |
 | **H** | **In-process SSH Client**：使用 Rust SSH 库（`russh`）替换外部 `ssh` 进程调用，实现 SSH 私钥纯内存传递（不落盘），消除临时文件泄漏风险和文件系统依赖。解除 Agent blocker | 后续批次优先 |
+| **I** | **Git surface 兼容性补齐** → 见 [compatibility/README.md](compatibility/README.md)：4-tier `COMPATIBILITY.md` / 仓库治理 / CI 兼容矩阵 / stash・bisect 子命令面 / worktree 与 checkout 行为差异 | 与各命令批次并行 |
+
+### 跨命令契约约定（所有命令文档共用）
+
+为避免命令子计划之间出现命名漂移、字段冲突和职责重叠，下面是被所有 ✅ 已落地命令隐式遵守、并要求所有后续新命令显式遵守的跨命令约定。任何命令子计划都不应在自己的"设计原则"中重复声明这些规则；冲突时以本节为准。
+
+#### 1. 函数命名（执行/渲染层）
+
+- 顶层入口：`pub async fn execute_safe(args, output: &OutputConfig) -> CliResult<()>`
+- 纯执行层：`async fn run_<cmd>(args) -> Result<<Cmd>Output, <Cmd>Error>`（命名前缀必须是 `run_`，不接受 `execute_impl_` / `do_` / `internal_` 等变体）
+- 渲染层：`fn render_<cmd>_output(result: &<Cmd>Output, output: &OutputConfig) -> CliResult<()>`（命名后缀必须是 `_output`）
+- 委托型命令（如 `pull` 调 `fetch` + `merge`）：内部 helper 命名为 `run_<cmd>_for_<delegator>()`，例如 `run_fetch_for_pull()`，明确"被谁复用"。
+- 已落地基线：`init` / `add` / `status` / `commit` / `branch` / `tag` / `reset` / `restore` / `revert` / `cherry_pick` / `stash` / `remote` / `clean` / `describe` / `shortlog` 都遵守该命名。
+- 不要求改名的历史例外：暂无；任何不一致都按本节修正。
+
+#### 2. typed error enum 字段风格
+
+- 单字符串场景（来自外部 io / parse / 字符串透传）使用 **元组变体**：`InvalidObjectName(String)`
+- 多字段或带 `detail` 的场景使用 **结构体变体**：`InvalidRevision { revision: String, detail: String }`
+- 当一个变体只承载一个有语义的字段（不是错误透传）但未来可能扩展时，建议使用结构体变体而非元组变体，例如 `BadRevision { revision: String }` 而非 `BadRevision(String)`，便于未来加 `detail` / `hint` 字段
+- 跨命令对外契约（`StableErrorCode`、退出码）必须一致；内部变体形状只是实现细节，不强制完全统一
+
+#### 3. JSON schema 演化规则
+
+- **向后兼容是绝对约束**：已发布字段名、类型和语义不可变；新增字段必须是 additive
+- 字段命名必须 `snake_case`；嵌套对象使用平铺式（不引入 envelope 包装层），example：直接 `data.head` 不要 `data.commit.head`
+- 跨命令重复出现的字段必须使用同一名字（详见 §5）
+- 底层命令（`show-ref` / `index-pack` / `cat-file`）扩展时也遵守同样规则；不允许各自演化出不一致的字段命名
+- 如需 breaking change：新增独立字段 + 标记旧字段 deprecated，至少跨一个 release 后才能删旧字段
+
+#### 4. JSON schema 的所有权与重叠
+
+- 同一概念的 schema **只能由一个命令拥有定义权**；其他命令引用而非重复定义。
+- 当前 schema 所有权：
+  - **commit 元数据**（hash / author / committer / subject / body / parents / refs / files）：由 `log.md` 拥有；`show.md` 复用并允许追加 type-specific 字段（如 tag / tree / blob 子类）
+  - **diff hunk / patch**：由 `diff.md` 拥有；`log` / `show` 不重复 hunk 级输出，只输出文件变更摘要
+  - **fetch result**：由 `fetch.md` 拥有；`pull` / `clone` 通过内部 helper 复用
+  - **restore result**：由 `restore.md` 拥有；`checkout` 兼容路径复用 `RestoreError` typed API
+- 同一字段在多个命令的 JSON 中出现时（如 `branch` / `commit` / `head`），其类型与含义必须保持一致
+
+#### 5. 跨命令字段命名（含 URL 字段）
+
+- **URL 字段**：远端 fetch/push URL 用 `remote_url`；浏览器 deep link 用 `web_url`；不要使用 `website_url` / `forge_url` / `homepage_url` 等同义词
+- **commit 引用**：完整 hash 用 `commit`；7 字符短形式用 `short_id`（`log` / `commit` / `cherry-pick` 已用）或 `short_<role>`（`revert` 用 `short_reverted` / `short_new`，因为同一 envelope 含两个 commit）
+- **分支字段**：当前分支名用 `branch`；HEAD 标签（branch name 或 "detached"）用 `head`
+- **文件变更**：列表字段用 `files`（条目含 `path` + `status`）；统计字段用 `files_changed`（含 `total` / `new` / `modified` / `deleted`）
+- **路径字段**：相对仓库根目录的路径用 `path`；绝对路径仅在 init / clone 等创建仓库的命令使用
+- 任何新命令引入新字段前，先在本表查找是否已有同义字段；必须复用而非新造
+
+#### 6. `DelegatedCli` passthrough 兼容债
+
+`switch` / `branch` 等命令在过渡期通过 `<Cmd>Error::DelegatedCli(#[from] CliError)` 变体透传未 typed 化的下游 helper（如 `branch::create_branch_safe()` / `restore::execute_safe()`）。这是**有意识的技术债**，不是最终态。
+
+- **偿还路径**：随 `branch` / `restore` / `checkout` 各自的 typed sub-error 改造逐步消除；当被委托命令的 helper 全部返回 typed error 时，`DelegatedCli` 变体即可删除
+- **偿还时间表**：本债务不阻断任何当前命令验收；偿还跟随 README 第 170-172 行后续批次（reflog / mv / rm / worktree / merge / rebase）演进，**不晚于** merge / rebase 批次完成
+- **新代码约束**：在债务清偿前，新加的命令一律不允许引入 `DelegatedCli` 模式——只有 `switch` / `branch` 这种已存在的兼容点可继续保留
+
+#### 7. AI 子系统单文档结构（agent.md）
+
+**2026-05-02 合并**：原 `code.md` 与 `tui.md` 已合入 [agent.md](agent.md)，分别作为 Part B（`libra code` 实现规格）和 Part C（Local TUI Automation Control）。AI 子系统（Agent runtime / `libra code` / TUI automation）从此只有 agent.md 一份权威计划，避免跨文档协调成本。
+
+agent.md 内部分工：
+
+- **Part A（Step 1.x / Step 2.x）**：Agent 子系统两步演进——单 Agent 基线补齐 + 三层 sub-agent 架构。Part A 的 `--resume` 章节聚焦 JSONL session 字节层（header + tail N 快速恢复 / append-only 崩溃恢复）
+- **Part B（Implementation Phase 0-5 + Wave 1A/1B/1C）**：`libra code` 的 Phase Workflow 状态机（Phase 0 Intent / Phase 1 Plan / Phase 2 Execution / Phase 3 Validation / Phase 4 Decision）、`Runtime` formal write 层、Snapshot / Event / Projection 对象模型、provider TaskExecutor、`--resume <thread_id>` 的 phase-aware 恢复合同。**Wave 1C claudecode 硬删除已完成（2026-05-02 baseline 验证：`src/internal/ai/claudecode/` 不存在，CLI 仅保留迁移提示）**
+- **Part C（Phase 0-6）**：Local TUI Automation Control——`--control` CLI / token + lease 鉴权 / HTTP control endpoints / redaction / audit。Part C 与 Part B 的 Implementation Phase 3 协同：Part C 的 `Automation` lease 是 Phase 3 真相源统一的子集
+- **`from_env() → resolve_env()` 改造**：归属 agent.md Part B Implementation Phase 5（Security / Permission / Diagnostics / Testing Hardening）；当前 6 个 provider（gemini / openai / anthropic / deepseek / zhipu / ollama 加上 kimi）仍在用 `from_env()`，是 Part B Phase 5 的待收口项
+- agent.md 内部 Part A / Part B / Part C 的冲突，以 Part A Changelog 中最近一次明确修订为准
 
 ---
 
@@ -228,7 +296,10 @@
 
 ## AI Agent 子系统专项计划
 
-- [Code 命令改进详细计划](code.md) — 进行中；覆盖 `src/command/code.rs`、共享 Runtime、Implementation Phase 0 contract stabilization、Phase 0-4 工作流、formal object / projection 存储分层、`--resume <thread_id>` 合同以及 `claudecode` 清退
+- [Agent 子系统改进详细计划（Agent + libra code + TUI Automation 三合一）](agent.md) — 进行中；2026-05-02 合并自原 `code.md` + `tui.md` + `agent.md`，覆盖：
+  - **Part A**：Step 1.0 - 1.11（单 Agent 基线补齐）+ Step 2.1 - 2.8（三层 sub-agent 架构）
+  - **Part B**：`libra code` Phase Workflow（Phase 0-4）+ Implementation Phase 0-5（含 Wave 1A/1B/1C，**claudecode 已硬删除**）+ Snapshot / Event / Projection 对象模型 + dagrs 0.8.1（**已升级**）
+  - **Part C**：Local TUI Automation Control（Phase 0-6，Phase 1 已落地：`ControlMode` / `--control` / `code_control_files.rs` / `TuiControlCommand` / TuiCodeUiAdapter）
 
 ## 命令改进实施记录
 
@@ -260,7 +331,13 @@
 
 ### AI Provider `from_env()` → `resolve_env()` 改造
 
-`config.md` 设计原则 #5 只说明这项改造**不属于 config 批次本身**；该 follow-up 现已并入 [code.md](code.md) 的 AI Agent / `libra code` 专项计划，不再作为“命令批次全部结束后再处理”的独立尾项。当前涉及 6 个 provider（gemini、openai、anthropic、deepseek、zhipu、ollama）共 12 个文件。实施时应与 `libra code` 的 provider bootstrap、vault/env 优先级、diagnostics 和 Runtime 启动路径一起收口，使 `vault.env.*` 配置对 AI provider 生效且不再与 `from_env()` 双轨并存。
+`config.md` 设计原则 #5 只说明这项改造**不属于 config 批次本身**；该 follow-up 现已并入 [agent.md](agent.md) Part B（原 `code.md`）的 Implementation Phase 5（Security / Permission / Diagnostics / Testing Hardening），不再作为"命令批次全部结束后再处理"的独立尾项。
+
+**2026-05-02 baseline 验证**：当前涉及 7 个 provider（gemini / openai / anthropic / deepseek / zhipu / ollama / kimi）的 `Client::from_env()` 入口仍在使用，对应文件：
+- `src/internal/ai/providers/{gemini,openai,anthropic,deepseek,zhipu,kimi}/client.rs::from_env()`
+- `src/internal/ai/providers/ollama/client.rs::from_env()`
+
+实施时应与 `libra code` 的 provider bootstrap、vault/env 优先级、diagnostics 和 Runtime 启动路径一起收口，使 `vault.env.*` 配置对 AI provider 生效且不再与 `from_env()` 双轨并存。
 
 ---
 

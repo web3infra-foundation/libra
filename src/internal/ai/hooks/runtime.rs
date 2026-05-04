@@ -36,7 +36,7 @@ use crate::{
         config::ConfigKv,
         db,
     },
-    utils::{error::emit_warning, object::write_git_object, storage::local::LocalStorage, util},
+    utils::{client_storage::ClientStorage, error::emit_warning, object::write_git_object, util},
 };
 
 // Metadata keys persisted on `SessionState`. Centralised here so that ingestion,
@@ -421,7 +421,11 @@ fn transition_phase(session: &mut SessionState, event_kind: LifecycleEventKind) 
         LifecycleEventKind::SessionStart
         | LifecycleEventKind::TurnStart
         | LifecycleEventKind::ToolUse
-        | LifecycleEventKind::Compaction => SessionPhase::Active,
+        | LifecycleEventKind::Compaction
+        | LifecycleEventKind::CompactionCompleted
+        | LifecycleEventKind::PermissionRequest
+        | LifecycleEventKind::SourceEnabled
+        | LifecycleEventKind::SourceDisabled => SessionPhase::Active,
         LifecycleEventKind::ModelUpdate => current_phase.unwrap_or(SessionPhase::Active),
     };
 
@@ -547,7 +551,7 @@ async fn persist_session_history(
     let objects_dir = storage_path.join("objects");
     std::fs::create_dir_all(&objects_dir)?;
 
-    let storage = Arc::new(LocalStorage::new(objects_dir));
+    let storage = Arc::new(ClientStorage::init(objects_dir));
     let db_conn = Arc::new(db::get_db_conn_instance().await.clone());
     let history_manager = HistoryManager::new(storage, storage_path.to_path_buf(), db_conn);
 

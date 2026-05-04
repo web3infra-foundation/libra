@@ -9,9 +9,14 @@ use std::collections::BTreeSet;
 
 use super::{
     run_state::RunStateSnapshot,
-    types::{ExecutionPlanSpec, GateReport, GateStage, SystemReport, TaskKind},
+    types::{
+        ExecutionPlanSpec, GateReport, GateStage, SystemReport, TaskKind, TaskNodeStatus,
+        TaskResult, ToolCallRecord,
+    },
 };
 use crate::internal::ai::intentspec::types::{ArtifactName, ArtifactStage, IntentSpec};
+
+const NO_CHANGES_NEEDED_TOKEN: &str = "[NO_CHANGES_NEEDED]";
 
 /// Build the system verification report from executed gate tasks, review results,
 /// and required artifact contracts.
@@ -31,7 +36,7 @@ pub fn build_system_report(
     let execution_complete = plan
         .tasks
         .iter()
-        .all(|task| run_state.status_for(task.id()) == super::types::TaskNodeStatus::Completed);
+        .all(|task| run_state.status_for(task.id()) == TaskNodeStatus::Completed);
 
     let overall_passed = execution_complete
         && integration.all_required_passed
@@ -127,11 +132,8 @@ fn produced_artifacts(plan: &ExecutionPlanSpec, run_state: &RunStateSnapshot) ->
         };
 
         if task.kind == TaskKind::Implementation
-            && result.status == super::types::TaskNodeStatus::Completed
-            && result
-                .tool_calls
-                .iter()
-                .any(|call| !call.paths_written.is_empty() || !call.diffs.is_empty())
+            && result.status == TaskNodeStatus::Completed
+            && implementation_has_patchset_evidence(result)
         {
             produced.insert(artifact_key(
                 &ArtifactName::Patchset,
@@ -160,6 +162,52 @@ fn produced_artifacts(plan: &ExecutionPlanSpec, run_state: &RunStateSnapshot) ->
     }
 
     produced
+}
+
+fn implementation_has_patchset_evidence(result: &TaskResult) -> bool {
+    has_successful_write(&result.tool_calls)
+        || submit_task_complete_no_changes_needed(&result.tool_calls)
+        || (result
+            .agent_output
+            .as_deref()
+            .is_some_and(agent_declared_no_changes_needed)
+            && has_noop_evidence(&result.tool_calls))
+}
+
+fn has_successful_write(tool_calls: &[ToolCallRecord]) -> bool {
+    tool_calls
+        .iter()
+        .any(|call| call.success && (!call.paths_written.is_empty() || !call.diffs.is_empty()))
+}
+
+fn has_noop_evidence(tool_calls: &[ToolCallRecord]) -> bool {
+    tool_calls.iter().any(|call| {
+        call.success
+            && call.paths_written.is_empty()
+            && call.diffs.is_empty()
+            && (!call.paths_read.is_empty()
+                || matches!(call.action.as_str(), "read" | "query" | "execute"))
+    })
+}
+
+fn agent_declared_no_changes_needed(agent_output: &str) -> bool {
+    agent_output.trim_end().ends_with(NO_CHANGES_NEEDED_TOKEN)
+}
+
+fn submit_task_complete_no_changes_needed(tool_calls: &[ToolCallRecord]) -> bool {
+    submit_task_complete_result(tool_calls)
+        .map(|result| result == "no_changes_needed")
+        .unwrap_or(false)
+}
+
+fn submit_task_complete_result(tool_calls: &[ToolCallRecord]) -> Option<&str> {
+    tool_calls
+        .iter()
+        .rev()
+        .find(|call| call.success && call.tool_name == "submit_task_complete")
+        .and_then(|call| call.arguments_json.as_ref())
+        .and_then(|args| args.get("result"))
+        .and_then(|value| value.as_str())
 }
 
 fn stage_for_gate(stage: Option<&GateStage>) -> ArtifactStage {
@@ -238,7 +286,7 @@ mod tests {
             run_state::{RunStateSnapshot, TaskStatusSnapshot},
             types::{
                 ExecutionCheckpoint, ExecutionPlanSpec, GateResult, ReviewOutcome, TaskContract,
-                TaskKind, TaskNodeStatus, TaskResult, TaskSpec,
+                TaskKind, TaskNodeStatus, TaskResult, TaskSpec, ToolCallRecord,
             },
         },
     };
@@ -528,6 +576,87 @@ mod tests {
         let report = build_system_report(&spec, &plan, &run_state);
         assert!(report.review_passed);
         assert!(report.artifacts_complete);
+        assert!(report.overall_passed);
+    }
+
+    #[test]
+    fn test_no_changes_needed_implementation_satisfies_patchset_artifact() {
+        let spec = spec_with_required_artifacts();
+        let plan = plan_with_gates();
+        let results = vec![
+            TaskResult {
+                task_id: plan.tasks[0].id(),
+                status: TaskNodeStatus::Completed,
+                gate_report: None,
+                agent_output: Some("Task complete: no_changes_needed (1 evidence entries)".into()),
+                retry_count: 0,
+                tool_calls: vec![ToolCallRecord {
+                    tool_name: "submit_task_complete".into(),
+                    action: "execute".into(),
+                    arguments_json: Some(serde_json::json!({
+                        "result": "no_changes_needed",
+                        "summary": "workspace already satisfies acceptance criteria",
+                        "evidence": [
+                            {
+                                "command": "cargo test",
+                                "exit_code": 0,
+                                "output_excerpt": "ok"
+                            }
+                        ]
+                    })),
+                    success: true,
+                    ..ToolCallRecord::default()
+                }],
+                policy_violations: vec![],
+                model_usage: None,
+                review: Some(ReviewOutcome {
+                    approved: true,
+                    summary: "looks good".into(),
+                    issues: vec![],
+                }),
+                thinking: None,
+            },
+            TaskResult {
+                task_id: plan.tasks[1].id(),
+                status: TaskNodeStatus::Completed,
+                gate_report: Some(GateReport {
+                    results: vec![GateResult {
+                        check_id: "release-test".into(),
+                        kind: "test".into(),
+                        passed: true,
+                        exit_code: 0,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        duration_ms: 1,
+                        timed_out: false,
+                    }],
+                    all_required_passed: true,
+                }),
+                agent_output: None,
+                retry_count: 0,
+                tool_calls: vec![],
+                policy_violations: vec![],
+                model_usage: None,
+                review: None,
+                thinking: None,
+            },
+        ];
+        let run_state = RunStateSnapshot {
+            intent_spec_id: plan.intent_spec_id.clone(),
+            revision: plan.revision,
+            task_statuses: results
+                .iter()
+                .map(|result| TaskStatusSnapshot {
+                    task_id: result.task_id,
+                    status: result.status.clone(),
+                })
+                .collect(),
+            task_results: results,
+            dagrs_runtime: Default::default(),
+        };
+
+        let report = build_system_report(&spec, &plan, &run_state);
+        assert!(report.artifacts_complete, "{:?}", report.missing_artifacts);
         assert!(report.overall_passed);
     }
 

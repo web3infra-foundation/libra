@@ -120,8 +120,7 @@ use crate::{
         db,
     },
     utils::{
-        storage::{Storage, local::LocalStorage},
-        storage_ext::StorageExt,
+        client_storage::ClientStorage, storage::Storage, storage_ext::StorageExt,
         util::try_get_storage_path,
     },
 };
@@ -153,6 +152,50 @@ const COMMAND_DIFF_MAX_FILES: usize = 512;
 // 工具函数 / Helper Functions
 // ---------------------------------------------------------------------------
 
+/// Returns `true` for high-frequency Codex notifications whose only effect is
+/// to append a streaming delta to in-memory state.
+///
+/// Delta events fire at every streamed token, so publishing a fresh
+/// `CodeUiSession` snapshot for each one causes a deep clone of the entire
+/// `CodexSession` per token — a major source of latency under fast-streaming
+/// models. Skipping the publish for these methods lets the next non-delta
+/// event (item completion, turn completion, approval request) flush the
+/// accumulated state to subscribers in one shot.
+fn is_streaming_delta_method(method: MethodKind) -> bool {
+    matches!(
+        method,
+        MethodKind::AgentMessageDelta
+            | MethodKind::CommandExecutionOutputDelta
+            | MethodKind::FileChangeOutputDelta
+            | MethodKind::PlanDelta
+    )
+}
+
+/// Truncates a string for safe inclusion in tracing logs.
+///
+/// Codex emits long reasoning chunks, agent messages, file diffs, and command
+/// output that would otherwise dominate the log file and slow down tracing-fmt
+/// formatting. This helper bounds each entry to `max_chars` Unicode scalar
+/// values and replaces non-display-friendly whitespace (newlines, carriage
+/// returns) with literal `\n` / `\r` so the entry stays on a single log line.
+fn truncate_for_log(input: &str, max_chars: usize) -> String {
+    let escaped: String = input
+        .chars()
+        .map(|c| match c {
+            '\n' => "\\n".to_string(),
+            '\r' => "\\r".to_string(),
+            '\t' => "\\t".to_string(),
+            other => other.to_string(),
+        })
+        .collect();
+    let mut iter = escaped.char_indices();
+    let cutoff = iter.nth(max_chars).map(|(idx, _)| idx);
+    match cutoff {
+        Some(idx) => format!("{}…(truncated)", &escaped[..idx]),
+        None => escaped,
+    }
+}
+
 /// 安全地获取 `Mutex` 锁，若锁已中毒（poisoned）则打印警告并返回 `None`。
 ///
 /// 标准库的 `Mutex::lock()` 在持有锁的线程 panic 后会返回 `PoisonError`。
@@ -163,13 +206,20 @@ const COMMAND_DIFF_MAX_FILES: usize = 512;
 /// cascading panics from unwrap() calls throughout the codebase.
 ///
 /// # Arguments
-/// * `mutex`   — 需要加锁的 `Arc<Mutex<T>>`。The mutex to lock.
-/// * `context` — 用于日志的上下文描述字符串。Human-readable context string for the warning.
+///
+/// - `mutex`   — 需要加锁的 `Arc<Mutex<T>>`。The mutex to lock.
+/// - `context` — 用于日志的上下文描述字符串。Human-readable context string for
+///   the warning.
 fn lock_or_warn<'a, T>(mutex: &'a Arc<Mutex<T>>, context: &str) -> Option<MutexGuard<'a, T>> {
     match mutex.lock() {
         Ok(guard) => Some(guard),
         Err(e) => {
-            eprintln!("[WARN] {context}: failed to lock mutex: {e}");
+            tracing::warn!(
+                target: "libra::internal::ai::codex",
+                context,
+                error = %e,
+                "failed to lock mutex"
+            );
             None
         }
     }
@@ -946,10 +996,12 @@ pub async fn init_mcp_server(working_dir: &Path) -> Arc<LibraMcpServer> {
     let (objects_dir, dot_libra) = (storage_dir.join("objects"), storage_dir);
 
     // Try to create the directory
-    if let Err(_e) = std::fs::create_dir_all(&objects_dir) {
-        eprintln!(
-            "Warning: Failed to create storage directory: {}. Running in read-only mode.",
-            objects_dir.display()
+    if let Err(error) = std::fs::create_dir_all(&objects_dir) {
+        tracing::warn!(
+            target: "libra::internal::ai::codex",
+            objects_dir = %objects_dir.display(),
+            %error,
+            "failed to create storage directory; running in read-only mode"
         );
         return Arc::new(LibraMcpServer::new_with_working_dir(
             None,
@@ -969,11 +1021,12 @@ pub async fn init_mcp_server(working_dir: &Path) -> Arc<LibraMcpServer> {
 
     let db_conn = match db::establish_connection(db_path_str).await {
         Ok(conn) => conn,
-        Err(e) => {
-            eprintln!(
-                "Warning: Failed to connect to database: {}. Running in read-only mode. Error: {}",
-                db_path.display(),
-                e
+        Err(error) => {
+            tracing::warn!(
+                target: "libra::internal::ai::codex",
+                db_path = %db_path.display(),
+                %error,
+                "failed to connect to database; running in read-only mode"
             );
             return Arc::new(LibraMcpServer::new_with_working_dir(
                 None,
@@ -984,7 +1037,7 @@ pub async fn init_mcp_server(working_dir: &Path) -> Arc<LibraMcpServer> {
     };
 
     // Initialize storage
-    let storage: Arc<dyn Storage + Send + Sync> = Arc::new(LocalStorage::new(objects_dir));
+    let storage: Arc<dyn Storage + Send + Sync> = Arc::new(ClientStorage::init(objects_dir));
 
     let intent_history_manager = Arc::new(HistoryManager::new(
         storage.clone(),
@@ -1125,27 +1178,53 @@ pub async fn store_to_mcp<T: serde::Serialize + Send + Sync>(
     debug: bool,
 ) {
     if object_id.is_empty() {
-        eprintln!("[WARN] Refusing to store {object_type} with empty object id");
+        tracing::warn!(
+            target: "libra::internal::ai::codex",
+            object_type,
+            "refusing to store object with empty id"
+        );
         return;
     }
     if let Some(storage) = &mcp_server.storage {
         match storage.put_json(object).await {
             Ok(hash) => {
-                if let Err(e) =
+                if let Err(error) =
                     append_history_hash_if_changed(mcp_server, object_type, object_id, hash).await
                 {
-                    eprintln!("[WARN] {e}");
+                    tracing::warn!(
+                        target: "libra::internal::ai::codex",
+                        object_type,
+                        object_id,
+                        %error,
+                        "failed to append history hash"
+                    );
                 }
-                if debug {
-                    eprintln!("[DEBUG] Stored {object_type} {object_id} to MCP (hash: {hash})");
-                }
+                let _ = debug; // tracing replaces ad-hoc debug-print routing
+                tracing::debug!(
+                    target: "libra::internal::ai::codex",
+                    object_type,
+                    object_id,
+                    %hash,
+                    "stored object to MCP"
+                );
             }
-            Err(e) => {
-                eprintln!("[WARN] Failed to store {object_type} to MCP: {e}");
+            Err(error) => {
+                tracing::warn!(
+                    target: "libra::internal::ai::codex",
+                    object_type,
+                    object_id,
+                    %error,
+                    "failed to store object to MCP"
+                );
             }
         }
     } else {
-        eprintln!("[WARN] MCP storage not available");
+        tracing::warn!(
+            target: "libra::internal::ai::codex",
+            object_type,
+            object_id,
+            "MCP storage not available"
+        );
     }
 }
 
@@ -1512,17 +1591,12 @@ impl CodeUiCommandAdapter for CodexCodeUiAdapter {
         interaction_id: &str,
         response: CodeUiInteractionResponse,
     ) -> anyhow::Result<()> {
-        if let Some(apply_to_future) = response.apply_to_future.as_ref()
-            && let Some(mut approval_mode) =
-                lock_or_warn(&self.approval_mode, "codex code ui approval mode write")
-        {
-            *approval_mode = match apply_to_future {
-                CodeUiApplyToFuture::No => "ask".to_string(),
-                CodeUiApplyToFuture::AcceptAll => "accept".to_string(),
-                CodeUiApplyToFuture::DeclineAll => "decline".to_string(),
-            };
-        }
-
+        // Validate the decision and locate the pending sender BEFORE mutating
+        // shared `approval_mode`. Otherwise a malformed response (no decision,
+        // unknown interaction id, or already-resolved approval) would still
+        // flip future Codex approvals to accept-all / decline-all, which is a
+        // privilege-escalation risk. Mutate `approval_mode` only after we have
+        // committed to delivering the user's decision.
         let Some(approved) = response
             .approved
             .or(match response.selected_option.as_deref() {
@@ -1542,6 +1616,17 @@ impl CodeUiCommandAdapter for CodexCodeUiAdapter {
         sender
             .send(approved)
             .map_err(|_| anyhow!("The pending approval is no longer awaiting a response"))?;
+
+        if let Some(apply_to_future) = response.apply_to_future.as_ref()
+            && let Some(mut approval_mode) =
+                lock_or_warn(&self.approval_mode, "codex code ui approval mode write")
+        {
+            *approval_mode = match apply_to_future {
+                CodeUiApplyToFuture::No => "ask".to_string(),
+                CodeUiApplyToFuture::AcceptAll => "accept".to_string(),
+                CodeUiApplyToFuture::DeclineAll => "decline".to_string(),
+            };
+        }
         Ok(())
     }
 }
@@ -1554,9 +1639,23 @@ pub async fn start_code_ui_runtime(
 ) -> anyhow::Result<Arc<CodeUiRuntimeHandle>> {
     let history_recorder = Arc::new(HistoryRecorder::new(mcp_server.clone(), args.debug));
     let history_writer = Arc::new(HistoryWriter::new(mcp_server.clone(), args.debug));
+    tracing::info!(
+        target: "libra::internal::ai::codex",
+        url = %args.url,
+        cwd = %args.cwd,
+        approval = %args.approval,
+        plan_mode = args.plan_mode,
+        model = %args.model.as_deref().unwrap_or("(default)"),
+        "connecting to Codex app-server"
+    );
     let (ws_stream, _) = connect_async(args.url.as_str())
         .await
         .map_err(|e| anyhow::anyhow!("failed to connect to Codex at {}: {}", args.url, e))?;
+    tracing::info!(
+        target: "libra::internal::ai::codex",
+        url = %args.url,
+        "connected to Codex app-server"
+    );
 
     let (mut write, read) = ws_stream.split();
     let (tx, mut rx) = mpsc::channel::<String>(100);
@@ -1674,16 +1773,24 @@ pub async fn start_code_ui_runtime(
     publish_code_ui_snapshot(&browser_session, &codex_session, &args.cwd).await;
 
     tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                Some(msg) = rx.recv() => {
-                    if write.send(Message::Text(msg.into())).await.is_err() {
-                        break;
-                    }
-                }
-                _ = tokio::time::sleep(tokio::time::Duration::from_secs(1)) => {}
+        // Drain the outbound channel as fast as it fills. Earlier code wrapped
+        // `rx.recv()` in a `tokio::select!` with a 1s timer, but `recv().await`
+        // already wakes immediately on every message and exits cleanly once the
+        // channel closes — the timer added cost without changing semantics.
+        while let Some(msg) = rx.recv().await {
+            if let Err(error) = write.send(Message::Text(msg.into())).await {
+                tracing::warn!(
+                    target: "libra::internal::ai::codex",
+                    %error,
+                    "code-ui WebSocket write failed; closing writer task"
+                );
+                break;
             }
         }
+        tracing::debug!(
+            target: "libra::internal::ai::codex",
+            "code-ui WebSocket writer task exited"
+        );
     });
 
     let responses_clone = responses.clone();
@@ -1701,8 +1808,24 @@ pub async fn start_code_ui_runtime(
     let thread_id_clone = thread_id.clone();
     tokio::spawn(async move {
         let mut read = read;
+        // When a streaming-delta event mutates in-memory state we deliberately
+        // skip the publish_code_ui_snapshot broadcast so subscribers don't pay
+        // a per-token deep clone of the entire CodexSession. This flag remembers
+        // whether at least one delta has been skipped since the last publish so
+        // that, if the WebSocket closes (clean disconnect, error abort) right
+        // after a delta — without ever emitting a non-delta event such as
+        // ItemCompleted / TurnCompleted — we still flush the final accumulated
+        // text to subscribers before the reader task exits.
+        let mut delta_skipped_since_publish = false;
         while let Some(message) = read.next().await {
             let Ok(Message::Text(text)) = message else {
+                if let Err(error) = message {
+                    tracing::warn!(
+                        target: "libra::internal::ai::codex",
+                        %error,
+                        "code-ui WebSocket frame error"
+                    );
+                }
                 continue;
             };
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
@@ -1715,6 +1838,13 @@ pub async fn start_code_ui_runtime(
                         && has_result_or_error
                         && !has_method
                     {
+                        let is_error = json.get("error").is_some();
+                        tracing::debug!(
+                            target: "libra::internal::ai::codex",
+                            request_id = id,
+                            is_error,
+                            "code-ui RPC response received"
+                        );
                         if let Some(mut resp) =
                             lock_or_warn(&responses_clone, "store code ui response")
                         {
@@ -1738,10 +1868,20 @@ pub async fn start_code_ui_runtime(
                     .get("params")
                     .cloned()
                     .unwrap_or_else(|| serde_json::json!({}));
+                tracing::trace!(
+                    target: "libra::internal::ai::codex",
+                    method,
+                    "code-ui notification dispatch"
+                );
 
                 match mk {
                     MethodKind::ThreadStarted => {
                         let started_thread_id = extract_thread_id(&params, None);
+                        tracing::info!(
+                            target: "libra::internal::ai::codex",
+                            thread_id = %started_thread_id,
+                            "Codex thread started"
+                        );
                         if let Some(mut current_thread_id) =
                             lock_or_warn(&thread_id_clone, "code ui thread id update")
                         {
@@ -1783,6 +1923,11 @@ pub async fn start_code_ui_runtime(
                             .and_then(|value| value.as_str())
                             .unwrap_or("")
                             .to_string();
+                        tracing::info!(
+                            target: "libra::internal::ai::codex",
+                            turn_id = %run_id,
+                            "Codex turn started"
+                        );
                         if let Some(mut session) =
                             lock_or_warn(&codex_session_clone, "code ui turn started update")
                         {
@@ -1804,6 +1949,11 @@ pub async fn start_code_ui_runtime(
                             lock_or_warn(&codex_session_clone, "code ui turn completed update")
                             && let Some(run_id) = session.thread.current_turn_id.clone()
                         {
+                            tracing::info!(
+                                target: "libra::internal::ai::codex",
+                                turn_id = %run_id,
+                                "Codex turn completed"
+                            );
                             let thread_id = session.thread.id.clone();
                             session.add_run(Run {
                                 id: run_id,
@@ -1831,6 +1981,13 @@ pub async fn start_code_ui_runtime(
                                 .and_then(|value| value.as_str())
                                 .unwrap_or("")
                                 .to_string();
+                            tracing::debug!(
+                                target: "libra::internal::ai::codex",
+                                item_type,
+                                item_id = %item_id,
+                                turn_id = %run_id,
+                                "Codex item started"
+                            );
                             match item_type {
                                 "intent" => {
                                     if let Some(content) =
@@ -1840,6 +1997,12 @@ pub async fn start_code_ui_runtime(
                                             "code ui intent started update",
                                         )
                                     {
+                                        tracing::debug!(
+                                            target: "libra::internal::ai::codex",
+                                            item_id = %item_id,
+                                            preview = %truncate_for_log(content, 200),
+                                            "Codex intent draft started"
+                                        );
                                         session.add_intent(Intent {
                                             id: item_id,
                                             content: content.to_string(),
@@ -1856,6 +2019,12 @@ pub async fn start_code_ui_runtime(
                                             "code ui agent message started update",
                                         )
                                     {
+                                        tracing::debug!(
+                                            target: "libra::internal::ai::codex",
+                                            item_id = %item_id,
+                                            preview = %truncate_for_log(content, 200),
+                                            "Codex agent message started"
+                                        );
                                         session.add_agent_message(AgentMessage {
                                             id: item_id,
                                             run_id,
@@ -1865,7 +2034,74 @@ pub async fn start_code_ui_runtime(
                                         });
                                     }
                                 }
-                                _ => {}
+                                "reasoning" => {
+                                    let preview = item
+                                        .get("text")
+                                        .and_then(|value| value.as_str())
+                                        .map(|text| truncate_for_log(text, 400))
+                                        .unwrap_or_default();
+                                    tracing::debug!(
+                                        target: "libra::internal::ai::codex",
+                                        item_id = %item_id,
+                                        turn_id = %run_id,
+                                        preview = %preview,
+                                        "Codex reasoning (thinking) started"
+                                    );
+                                }
+                                "plan" => {
+                                    let text = item
+                                        .get("text")
+                                        .and_then(|value| value.as_str())
+                                        .unwrap_or("");
+                                    tracing::debug!(
+                                        target: "libra::internal::ai::codex",
+                                        item_id = %item_id,
+                                        turn_id = %run_id,
+                                        preview = %truncate_for_log(text, 400),
+                                        "Codex plan started"
+                                    );
+                                }
+                                "commandExecution" => {
+                                    let cmd = item
+                                        .get("command")
+                                        .and_then(|value| value.as_str())
+                                        .unwrap_or("");
+                                    tracing::debug!(
+                                        target: "libra::internal::ai::codex",
+                                        item_id = %item_id,
+                                        turn_id = %run_id,
+                                        command = %truncate_for_log(cmd, 200),
+                                        "Codex command execution started"
+                                    );
+                                }
+                                "fileChange" => {
+                                    tracing::debug!(
+                                        target: "libra::internal::ai::codex",
+                                        item_id = %item_id,
+                                        turn_id = %run_id,
+                                        "Codex file change started"
+                                    );
+                                }
+                                "mcpToolCall" | "tool" => {
+                                    let tool = item
+                                        .get("tool")
+                                        .and_then(|value| value.as_str())
+                                        .unwrap_or("");
+                                    tracing::debug!(
+                                        target: "libra::internal::ai::codex",
+                                        item_id = %item_id,
+                                        tool = %tool,
+                                        "Codex tool invocation started"
+                                    );
+                                }
+                                _ => {
+                                    tracing::trace!(
+                                        target: "libra::internal::ai::codex",
+                                        item_type,
+                                        item_id = %item_id,
+                                        "Codex unhandled item type started"
+                                    );
+                                }
                             }
                         }
                     }
@@ -1876,16 +2112,24 @@ pub async fn start_code_ui_runtime(
                             .and_then(|value| value.as_str())
                             && let Some(delta) =
                                 params.get("delta").and_then(|value| value.as_str())
-                            && let Some(mut session) = lock_or_warn(
+                        {
+                            tracing::trace!(
+                                target: "libra::internal::ai::codex",
+                                item_id,
+                                delta_bytes = delta.len(),
+                                delta = %truncate_for_log(delta, 200),
+                                "Codex agent message delta"
+                            );
+                            if let Some(mut session) = lock_or_warn(
                                 &codex_session_clone,
                                 "code ui agent message delta update",
-                            )
-                            && let Some(message) = session
+                            ) && let Some(message) = session
                                 .agent_messages
                                 .iter_mut()
                                 .find(|message| message.id == item_id)
-                        {
-                            message.content.push_str(delta);
+                            {
+                                message.content.push_str(delta);
+                            }
                         }
                     }
                     MethodKind::PlanUpdated | MethodKind::PlanDelta => {
@@ -1894,24 +2138,41 @@ pub async fn start_code_ui_runtime(
                                 .get("id")
                                 .or_else(|| plan.get("planId"))
                                 .and_then(|value| value.as_str())
-                            && let Some(mut session) =
-                                lock_or_warn(&codex_session_clone, "code ui plan update")
                         {
-                            let thread_id = session.thread.id.clone();
-                            let turn_id = session.thread.current_turn_id.clone();
                             let explanation = plan
                                 .get("explanation")
                                 .and_then(|value| value.as_str())
                                 .map(ToString::to_string);
-                            session.add_plan(Plan {
-                                id: plan_id.to_string(),
-                                text: build_plan_text(explanation.as_ref(), &[]),
-                                intent_id: None,
-                                thread_id,
-                                turn_id,
-                                status: PlanStatus::InProgress,
-                                created_at: Utc::now(),
-                            });
+                            let kind = if matches!(mk, MethodKind::PlanUpdated) {
+                                "plan_updated"
+                            } else {
+                                "plan_delta"
+                            };
+                            tracing::debug!(
+                                target: "libra::internal::ai::codex",
+                                plan_id,
+                                kind,
+                                explanation = %explanation
+                                    .as_deref()
+                                    .map(|text| truncate_for_log(text, 400))
+                                    .unwrap_or_default(),
+                                "Codex plan update"
+                            );
+                            if let Some(mut session) =
+                                lock_or_warn(&codex_session_clone, "code ui plan update")
+                            {
+                                let thread_id = session.thread.id.clone();
+                                let turn_id = session.thread.current_turn_id.clone();
+                                session.add_plan(Plan {
+                                    id: plan_id.to_string(),
+                                    text: build_plan_text(explanation.as_ref(), &[]),
+                                    intent_id: None,
+                                    thread_id,
+                                    turn_id,
+                                    status: PlanStatus::InProgress,
+                                    created_at: Utc::now(),
+                                });
+                            }
                         }
                     }
                     MethodKind::RequestApproval
@@ -1933,6 +2194,12 @@ pub async fn start_code_ui_runtime(
                             MethodKind::RequestApprovalApplyPatch => ApprovalType::ApplyPatch,
                             _ => ApprovalType::Unknown,
                         };
+                        tracing::info!(
+                            target: "libra::internal::ai::codex",
+                            request_id = %request_id,
+                            approval_kind = ?approval_type,
+                            "Codex approval requested"
+                        );
                         let approval_request = ApprovalRequest {
                             id: request_id.clone(),
                             approval_type,
@@ -1989,7 +2256,23 @@ pub async fn start_code_ui_runtime(
                                 &working_dir_clone,
                             )
                             .await;
-                            oneshot_rx.await.unwrap_or(true)
+                            // Default to *deny* when the approval channel is
+                            // dropped (TUI exit, runtime teardown). Auto-
+                            // approving on cancellation could let a sandbox-
+                            // escaping command run after the operator already
+                            // closed the session.
+                            match oneshot_rx.await {
+                                Ok(decision) => decision,
+                                Err(_) => {
+                                    tracing::warn!(
+                                        target: "libra::internal::ai::codex",
+                                        request_id = %request_id,
+                                        "approval channel closed before user response; \
+                                         defaulting to DECLINE"
+                                    );
+                                    false
+                                }
+                            }
                         };
 
                         if let Some(mut session) =
@@ -2029,12 +2312,23 @@ pub async fn start_code_ui_runtime(
                     _ => {}
                 }
 
-                publish_code_ui_snapshot(
-                    &browser_session_clone,
-                    &codex_session_clone,
-                    &working_dir_clone,
-                )
-                .await;
+                // Coalesce broadcast: streaming-delta methods (AgentMessageDelta,
+                // CommandExecutionOutputDelta, FileChangeOutputDelta, PlanDelta)
+                // can fire many times per second per item. Skipping the publish
+                // for those methods avoids per-token deep clones of the entire
+                // CodexSession; the next item-completion / turn-completion /
+                // approval event flushes the accumulated state to subscribers.
+                if is_streaming_delta_method(mk) {
+                    delta_skipped_since_publish = true;
+                } else {
+                    publish_code_ui_snapshot(
+                        &browser_session_clone,
+                        &codex_session_clone,
+                        &working_dir_clone,
+                    )
+                    .await;
+                    delta_skipped_since_publish = false;
+                }
 
                 let _ = (
                     &mcp_server_clone,
@@ -2044,6 +2338,29 @@ pub async fn start_code_ui_runtime(
                 );
             }
         }
+
+        // Final flush: the WebSocket has closed (clean disconnect, error abort,
+        // or peer EOF). If any streaming delta was skipped without being
+        // followed by a non-delta event, the broadcast snapshot is now stale.
+        // Publish once unconditionally so subscribers (e.g. the App's
+        // `start_managed_code_turn`) always observe the final agent text /
+        // patchset content even on abrupt termination.
+        if delta_skipped_since_publish {
+            tracing::debug!(
+                target: "libra::internal::ai::codex",
+                "WebSocket closed with pending streaming deltas; flushing final snapshot"
+            );
+            publish_code_ui_snapshot(
+                &browser_session_clone,
+                &codex_session_clone,
+                &working_dir_clone,
+            )
+            .await;
+        }
+        tracing::info!(
+            target: "libra::internal::ai::codex",
+            "code-ui WebSocket reader task exited"
+        );
     });
 
     let _ = send_request(
@@ -2149,13 +2466,24 @@ pub async fn start_code_ui_runtime(
 /// # Arguments
 /// * `args`       — CLI 参数（WebSocket URL、工作目录、审批模式、模型配置等）。
 /// * `mcp_server` — 调用方提供的 MCP 服务器实例（`Some`）；或 `None`（创建本地实例）。
-///   The new `mcp_server` parameter allows the HTTP-serving caller to share its
-///   already-initialised `LibraMcpServer` instead of creating a duplicate.
-///   When `None`, a local-only instance is created for backward compatibility.
+///
+/// # Legacy stdin loop
+///
+/// `libra code --provider codex` does not call this path; it starts the default
+/// Libra TUI and uses [`start_code_ui_runtime`] as the managed execution
+/// backend. This function remains only for old internal callers that explicitly
+/// want Codex's stdin/stdout loop.
+///
+/// The `mcp_server` parameter allows an HTTP-serving caller to share its
+/// already-initialised `LibraMcpServer` instead of creating a duplicate. When
+/// `None`, a local-only instance is created for backward compatibility.
 ///
 /// # Errors
 /// - WebSocket 连接失败时返回 `anyhow::Error`。
 /// - 内部互斥锁初始化失败时返回 `anyhow::Error`。
+#[deprecated(
+    note = "legacy standalone Codex stdin loop; libra code --provider codex uses the default Libra TUI"
+)]
 pub async fn execute(
     args: AgentCodexArgs,
     mcp_server: Option<Arc<LibraMcpServer>>,
@@ -6048,4 +6376,199 @@ Task Completed"
     }
     #[allow(unreachable_code)]
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_streaming_delta_method, truncate_for_log};
+    use crate::internal::ai::codex::protocol::MethodKind;
+
+    #[test]
+    fn truncate_for_log_escapes_whitespace_and_caps_length() {
+        let truncated = truncate_for_log("line1\nline2\rtab\there", 12);
+        assert!(
+            truncated.starts_with("line1\\nline2"),
+            "expected escaped newline prefix, got: {truncated}"
+        );
+        assert!(
+            truncated.ends_with("…(truncated)"),
+            "expected truncation marker, got: {truncated}"
+        );
+    }
+
+    #[test]
+    fn truncate_for_log_returns_full_string_when_under_limit() {
+        let truncated = truncate_for_log("hi", 200);
+        assert_eq!(truncated, "hi");
+    }
+
+    #[test]
+    fn truncate_for_log_handles_multi_byte_unicode() {
+        // 4 graphemes / 4 char codepoints / >= 8 bytes — we want the truncation
+        // boundary to fall on a Unicode char boundary, not in the middle of a
+        // UTF-8 byte sequence.
+        let truncated = truncate_for_log("résumé你好", 3);
+        assert!(
+            truncated.starts_with("rés"),
+            "expected first 3 chars preserved, got: {truncated}"
+        );
+        assert!(truncated.ends_with("…(truncated)"));
+    }
+
+    #[test]
+    fn is_streaming_delta_method_covers_all_four_token_streams() {
+        for method in [
+            MethodKind::AgentMessageDelta,
+            MethodKind::CommandExecutionOutputDelta,
+            MethodKind::FileChangeOutputDelta,
+            MethodKind::PlanDelta,
+        ] {
+            assert!(
+                is_streaming_delta_method(method),
+                "expected {method:?} to be classified as a streaming delta"
+            );
+        }
+    }
+
+    #[test]
+    fn is_streaming_delta_method_excludes_lifecycle_events() {
+        for method in [
+            MethodKind::ThreadStarted,
+            MethodKind::TurnStarted,
+            MethodKind::TurnCompleted,
+            MethodKind::ItemStarted,
+            MethodKind::ItemCompleted,
+            MethodKind::PlanUpdated,
+            MethodKind::RequestApprovalCommandExecution,
+        ] {
+            assert!(
+                !is_streaming_delta_method(method),
+                "expected {method:?} to remain a publish-triggering event"
+            );
+        }
+    }
+
+    /// Mirrors the reader-task publish book-keeping that lives in
+    /// `start_code_ui_runtime`.
+    ///
+    /// Each non-delta method publishes once at the post-match coalescing branch
+    /// (and clears `delta_skipped_since_publish`). Streaming-delta methods set
+    /// the flag without publishing. After the loop exits, if the flag is still
+    /// set, the final flush adds one publish.
+    ///
+    /// Approval-request methods have an **extra** pre-publish inside the
+    /// approval handler — but **only** when the operator-facing approval mode
+    /// is "ask" (i.e. neither auto-accept nor auto-decline). When the mode is
+    /// "accept" / "decline" (e.g. `--approval-policy allow-all`) the pre-publish
+    /// is skipped. The `ask_mode_for_approvals` parameter models this branch
+    /// so the helper stays a faithful mirror of the production reader.
+    fn simulate_reader_publish_count(methods: &[MethodKind], ask_mode_for_approvals: bool) -> u32 {
+        let mut delta_skipped_since_publish = false;
+        let mut publish_count: u32 = 0;
+        for &m in methods {
+            // Pre-publish: in ask mode the approval handler publishes once
+            // before awaiting the operator decision so the approval prompt
+            // appears in the broadcast snapshot. The post-match branch below
+            // unconditionally overwrites `delta_skipped_since_publish` for
+            // this same iteration (every approval method is non-streaming),
+            // so we don't need to clear the flag here — that would be a
+            // dead store.
+            if ask_mode_for_approvals
+                && matches!(
+                    m,
+                    MethodKind::RequestApproval
+                        | MethodKind::RequestApprovalCommandExecution
+                        | MethodKind::RequestApprovalFileChange
+                        | MethodKind::RequestApprovalApplyPatch
+                        | MethodKind::RequestApprovalExec
+                )
+            {
+                publish_count += 1;
+            }
+
+            if is_streaming_delta_method(m) {
+                delta_skipped_since_publish = true;
+            } else {
+                publish_count += 1;
+                delta_skipped_since_publish = false;
+            }
+        }
+        if delta_skipped_since_publish {
+            publish_count += 1;
+        }
+        publish_count
+    }
+
+    #[test]
+    fn final_flush_runs_after_socket_close_with_dangling_deltas() {
+        // Two streaming deltas with no lifecycle event between them and
+        // socket close: the loop body would skip both publishes, so the
+        // final-flush branch must publish exactly once.
+        let methods = [MethodKind::AgentMessageDelta, MethodKind::AgentMessageDelta];
+        assert_eq!(simulate_reader_publish_count(&methods, false), 1);
+    }
+
+    #[test]
+    fn final_flush_does_not_duplicate_when_completion_already_flushed() {
+        // Delta then ItemCompleted: ItemCompleted publishes once and clears
+        // the flag, so the post-loop flush must NOT add a second publish.
+        let methods = [MethodKind::AgentMessageDelta, MethodKind::ItemCompleted];
+        assert_eq!(simulate_reader_publish_count(&methods, false), 1);
+    }
+
+    #[test]
+    fn no_publish_at_all_when_stream_is_empty() {
+        assert_eq!(simulate_reader_publish_count(&[], false), 0);
+        assert_eq!(simulate_reader_publish_count(&[], true), 0);
+    }
+
+    #[test]
+    fn lifecycle_events_publish_once_per_event_with_no_extra_flush() {
+        let methods = [
+            MethodKind::ThreadStarted,
+            MethodKind::TurnStarted,
+            MethodKind::ItemStarted,
+            MethodKind::ItemCompleted,
+            MethodKind::TurnCompleted,
+        ];
+        assert_eq!(simulate_reader_publish_count(&methods, false), 5);
+    }
+
+    #[test]
+    fn long_streaming_burst_followed_by_completion_publishes_twice() {
+        let mut methods = vec![MethodKind::AgentMessageDelta; 100];
+        methods.push(MethodKind::ItemCompleted);
+        methods.extend(std::iter::repeat_n(MethodKind::AgentMessageDelta, 100));
+        // First completion publishes (and clears the flag); the trailing
+        // 100-delta burst sets the flag and the final flush publishes once.
+        assert_eq!(simulate_reader_publish_count(&methods, false), 2);
+    }
+
+    #[test]
+    fn ask_mode_approval_event_publishes_twice_when_sandwiched_in_deltas() {
+        // [delta, RequestApprovalCommandExecution, delta, close] under ask
+        // mode: pre-publish for the prompt + post-publish for the event +
+        // final flush for the dangling delta = 3 publishes total. This
+        // regression-tests the gap Codex flagged in round 4.
+        let methods = [
+            MethodKind::AgentMessageDelta,
+            MethodKind::RequestApprovalCommandExecution,
+            MethodKind::AgentMessageDelta,
+        ];
+        assert_eq!(simulate_reader_publish_count(&methods, true), 3);
+    }
+
+    #[test]
+    fn auto_approve_mode_skips_the_approval_pre_publish() {
+        // Same sequence as the ask-mode test, but the operator selected
+        // --approval-policy=allow-all so codex maps to "accept" and the
+        // pre-publish is skipped. Result: post-publish for the event +
+        // final flush = 2 publishes total.
+        let methods = [
+            MethodKind::AgentMessageDelta,
+            MethodKind::RequestApprovalCommandExecution,
+            MethodKind::AgentMessageDelta,
+        ];
+        assert_eq!(simulate_reader_publish_count(&methods, false), 2);
+    }
 }

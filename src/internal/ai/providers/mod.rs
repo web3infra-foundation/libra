@@ -27,12 +27,16 @@
 //! | `openai`    | OpenAI           | Bearer token             | `https://api.openai.com/v1` |
 //! | `deepseek`  | DeepSeek         | Bearer token             | `https://api.deepseek.com` |
 //! | `gemini`    | Google Gemini    | `x-goog-api-key` header  | `https://generativelanguage.googleapis.com` |
+//! | `kimi`      | Moonshot AI Kimi | Bearer token             | `https://api.moonshot.cn/v1` |
 //! | `zhipu`     | Zhipu GLM        | Bearer token             | `https://open.bigmodel.cn/api/paas/v4` |
 //! | `ollama`    | Ollama (local)   | None                     | `http://127.0.0.1:11434/v1` |
 
 pub mod anthropic;
 pub mod deepseek;
+#[cfg(feature = "test-provider")]
+pub mod fake;
 pub mod gemini;
+pub mod kimi;
 pub mod ollama;
 pub mod openai;
 pub(crate) mod openai_compat;

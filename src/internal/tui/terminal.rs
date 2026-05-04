@@ -14,6 +14,8 @@ use std::{
     io::{self, IsTerminal, Result, Stdout, stdin, stdout},
     panic,
     pin::Pin,
+    sync::OnceLock,
+    thread::{self, ThreadId},
     time::Duration,
 };
 
@@ -40,6 +42,8 @@ pub const TARGET_FRAME_INTERVAL: Duration = Duration::from_millis(16); // ~60 FP
 /// Always crossterm-backed because the TUI binds platform behaviour (raw
 /// mode, alt-screen, keyboard flags) directly to crossterm primitives.
 pub type TerminalType = Terminal<CrosstermBackend<Stdout>>;
+
+static PANIC_RESTORE_THREAD: OnceLock<ThreadId> = OnceLock::new();
 
 /// Events from the terminal.
 ///
@@ -91,6 +95,7 @@ pub fn init() -> Result<TerminalType> {
     let _ = redirect_stderr_for_tui();
 
     set_modes()?;
+    record_panic_restore_thread();
     set_panic_hook();
 
     let backend = CrosstermBackend::new(stdout());
@@ -204,16 +209,31 @@ pub fn restore() -> Result<()> {
 }
 
 /// Install a panic hook that restores the terminal before delegating to the
-/// previous hook.
+/// previous hook for fatal CLI-thread panics.
 ///
 /// Without this, a panic mid-frame would leave the user staring at a terminal
 /// in raw mode with no echo and no cursor.
 fn set_panic_hook() {
     let hook = panic::take_hook();
     panic::set_hook(Box::new(move |panic_info| {
-        let _ = restore(); // ignore any errors as we are already failing
+        let current_thread = thread::current();
+        if should_restore_terminal_for_panic(current_thread.id()) {
+            let _ = restore(); // ignore any errors as we are already failing
+        }
         hook(panic_info);
     }));
+}
+
+fn record_panic_restore_thread() {
+    let _ = PANIC_RESTORE_THREAD.set(thread::current().id());
+}
+
+fn should_restore_terminal_for_panic(thread_id: ThreadId) -> bool {
+    thread_should_restore_terminal(thread_id, PANIC_RESTORE_THREAD.get().copied())
+}
+
+fn thread_should_restore_terminal(thread_id: ThreadId, restore_thread: Option<ThreadId>) -> bool {
+    restore_thread.is_some_and(|owner| owner == thread_id)
 }
 
 /// The TUI wrapper that manages terminal and event streaming.
@@ -390,5 +410,28 @@ impl Tui {
     pub fn size(&self) -> Result<ratatui::layout::Rect> {
         let size = self.terminal.size()?;
         Ok(ratatui::layout::Rect::new(0, 0, size.width, size.height))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::thread;
+
+    use super::thread_should_restore_terminal;
+
+    #[test]
+    fn owner_thread_panic_restores_terminal() {
+        let owner = thread::current().id();
+
+        assert!(thread_should_restore_terminal(owner, Some(owner)));
+    }
+
+    #[test]
+    fn worker_thread_panic_does_not_restore_terminal() {
+        let owner = thread::current().id();
+        let worker = thread::spawn(|| thread::current().id()).join().unwrap();
+
+        assert!(!thread_should_restore_terminal(worker, Some(owner)));
+        assert!(!thread_should_restore_terminal(owner, None));
     }
 }

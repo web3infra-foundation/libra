@@ -102,6 +102,19 @@ pub struct MaterializedProjection {
     pub summary: serde_json::Value,
 }
 
+impl super::snapshot::Snapshot for MaterializedProjection {
+    fn snapshot_kind(&self) -> &'static str {
+        "materialized_projection"
+    }
+
+    fn snapshot_id(&self) -> Uuid {
+        // Projection identity is the owning thread; multiple projection
+        // versions for the same thread share the same snapshot id and are
+        // distinguished by `versions`.
+        self.thread_id
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mutation", rename_all = "snake_case")]
 pub enum SchedulerMutation {

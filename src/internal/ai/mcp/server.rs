@@ -91,6 +91,11 @@ impl LibraMcpServer {
         }
 
         if let Some(object_type) = uri.strip_prefix("libra://objects/") {
+            let object_type = match object_type {
+                "context_snapshot" => "snapshot",
+                "tool_invocation" => "invocation",
+                other => other,
+            };
             let history = self
                 .intent_history_manager
                 .as_ref()

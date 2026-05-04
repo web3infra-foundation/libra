@@ -9,6 +9,7 @@
 //! rendering consequences.
 
 pub mod add;
+pub mod automation;
 pub mod bisect;
 pub mod blame;
 pub mod branch;
@@ -19,6 +20,8 @@ pub mod clean;
 pub mod clone;
 pub mod cloud;
 pub mod code;
+pub mod code_control;
+pub mod code_control_files;
 pub mod commit;
 pub mod config;
 pub mod describe;
@@ -48,6 +51,7 @@ pub mod shortlog;
 pub mod show;
 pub mod show_ref;
 pub mod tag;
+pub mod usage;
 #[cfg(all(unix, feature = "worktree-fuse"))]
 #[path = "worktree-fuse.rs"]
 pub mod worktree;

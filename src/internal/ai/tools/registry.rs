@@ -13,7 +13,10 @@ use super::{
     error::{ToolError, ToolResult},
     spec::ToolSpec,
 };
-use crate::internal::ai::runtime::{ToolBoundaryRuntime, ToolOperation};
+use crate::internal::ai::{
+    agent::TaskIntent,
+    runtime::{ToolBoundaryRuntime, ToolOperation},
+};
 
 /// Handler trait that all tools must implement.
 ///
@@ -167,6 +170,18 @@ impl ToolRegistry {
         self.handlers.keys().cloned().collect()
     }
 
+    /// Return the registered tool names allowed for a classified task intent.
+    pub fn filter_by_intent(&self, intent: TaskIntent) -> Vec<String> {
+        let mut tools = self
+            .handlers
+            .keys()
+            .filter(|name| tool_allowed_for_intent(name, intent))
+            .cloned()
+            .collect::<Vec<_>>();
+        tools.sort();
+        tools
+    }
+
     /// Get all tool specs as a vector of JSON values.
     pub fn tool_specs(&self) -> Vec<ToolSpec> {
         self.handlers
@@ -296,6 +311,45 @@ impl ToolRegistry {
     pub fn is_empty(&self) -> bool {
         self.handlers.is_empty()
     }
+}
+
+fn tool_allowed_for_intent(tool_name: &str, intent: TaskIntent) -> bool {
+    match intent {
+        TaskIntent::Question | TaskIntent::Review => is_read_only_or_semantic_tool(tool_name),
+        TaskIntent::Command => is_read_only_or_semantic_tool(tool_name) || tool_name == "shell",
+        TaskIntent::BugFix
+        | TaskIntent::Feature
+        | TaskIntent::Refactor
+        | TaskIntent::Test
+        | TaskIntent::Documentation
+        | TaskIntent::Chore
+        | TaskIntent::Unknown => true,
+    }
+}
+
+fn is_read_only_or_semantic_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "read_file"
+            | "list_dir"
+            | "grep_files"
+            | "search_files"
+            | "web_search"
+            | "list_symbols"
+            | "read_symbol"
+            | "find_references"
+            | "trace_callers"
+            | "request_user_input"
+            | "list_tasks"
+            | "list_runs"
+            | "list_plans"
+            | "list_evidences"
+            | "list_patchsets"
+            | "list_decisions"
+            | "list_context_snapshots"
+            | "list_tool_invocations"
+            | "list_provenances"
+    )
 }
 
 fn rebase_payload_path_aliases(

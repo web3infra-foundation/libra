@@ -1,0 +1,29 @@
+{"name":"valid_object","input":"{\"file_path\":\"Cargo.toml\"}","expected":{"file_path":"Cargo.toml"},"repaired":false}
+{"name":"valid_array","input":"[{\"path\":\"src/lib.rs\"}]","expected":[{"path":"src/lib.rs"}],"repaired":false}
+{"name":"fenced_json","input":"```json\n{\"command\":\"cargo test\"}\n```","expected":{"command":"cargo test"},"repaired":true}
+{"name":"fenced_without_language","input":"```\n{\"ok\":true}\n```","expected":{"ok":true},"repaired":true}
+{"name":"prose_before_after","input":"Here are args:\n{\"file_path\":\"src/main.rs\"}\nDone.","expected":{"file_path":"src/main.rs"},"repaired":true}
+{"name":"single_quotes","input":"{'file_path':'Cargo.toml','limit':3}","expected":{"file_path":"Cargo.toml","limit":3},"repaired":true}
+{"name":"unquoted_keys","input":"{file_path:\"Cargo.toml\", limit:3}","expected":{"file_path":"Cargo.toml","limit":3},"repaired":true}
+{"name":"single_value_with_unquoted_key","input":"{file_path:'Cargo.toml'}","expected":{"file_path":"Cargo.toml"},"repaired":true}
+{"name":"trailing_comma_object","input":"{\"file_path\":\"Cargo.toml\",}","expected":{"file_path":"Cargo.toml"},"repaired":true}
+{"name":"trailing_comma_array","input":"{\"paths\":[\"src/lib.rs\",]}","expected":{"paths":["src/lib.rs"]},"repaired":true}
+{"name":"missing_closing_brace","input":"{\"file_path\":\"Cargo.toml\"","expected":{"file_path":"Cargo.toml"},"repaired":true}
+{"name":"missing_nested_closers","input":"{\"filters\":{\"path\":\"src\",\"kinds\":[\"fn\",\"struct\"]","expected":{"filters":{"path":"src","kinds":["fn","struct"]}},"repaired":true}
+{"name":"python_literals","input":"{enabled: True, dry_run: False, value: None}","expected":{"enabled":true,"dry_run":false,"value":null},"repaired":true}
+{"name":"undefined_literal","input":"{value: undefined}","expected":{"value":null},"repaired":true}
+{"name":"line_comments","input":"{\n// choose file\n\"file_path\":\"Cargo.toml\"\n}","expected":{"file_path":"Cargo.toml"},"repaired":true}
+{"name":"block_comments","input":"{/*comment*/\"file_path\":\"Cargo.toml\"}","expected":{"file_path":"Cargo.toml"},"repaired":true}
+{"name":"smart_quotes","input":"{\u201cfile_path\u201d: \u201cCargo.toml\u201d}","expected":{"file_path":"Cargo.toml"},"repaired":true}
+{"name":"top_level_fields","input":"\"file_path\":\"Cargo.toml\",\"limit\":5","expected":{"file_path":"Cargo.toml","limit":5},"repaired":true}
+{"name":"top_level_unquoted_fields","input":"file_path:'Cargo.toml', limit:5","expected":{"file_path":"Cargo.toml","limit":5},"repaired":true}
+{"name":"extra_closing_delimiter","input":"{\"file_path\":\"Cargo.toml\"}}","expected":{"file_path":"Cargo.toml"},"repaired":true}
+{"name":"prose_with_fenced_json","input":"Use these args:\n```json\n{path: 'src/lib.rs', recursive: True,}\n```\nThanks.","expected":{"path":"src/lib.rs","recursive":true},"repaired":true}
+{"name":"incomplete_string","input":"{\"message\":\"hello","expected":{"message":"hello"},"repaired":true}
+{"name":"single_quoted_string_contains_double_quote","input":"{'patch':'say \"hi\"'}","expected":{"patch":"say \"hi\""},"repaired":true}
+{"name":"mixed_repairs","input":"{foo: 'bar', list: [1, 2,], // tail\n flag: True}","expected":{"foo":"bar","list":[1,2],"flag":true},"repaired":true}
+{"name":"empty_input","input":"","error_kind":"empty_input"}
+{"name":"no_json_candidate","input":"I cannot produce tool arguments.","error_kind":"no_json_candidate"}
+{"name":"missing_colon","input":"{file_path Cargo.toml}","error_kind":"parse_failed"}
+{"name":"malformed_array","input":"[1 2 3]","error_kind":"parse_failed"}
+{"name":"invalid_escape","input":"{\"message\":\"bad\\xescape\"}","error_kind":"parse_failed"}

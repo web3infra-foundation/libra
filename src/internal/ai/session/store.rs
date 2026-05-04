@@ -1,6 +1,7 @@
 //! Session storage: save and load sessions from disk.
 
 use std::{
+    collections::BTreeSet,
     fs::{self, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
@@ -10,7 +11,12 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use super::state::SessionState;
+use super::{
+    file_history::FileHistoryStore,
+    jsonl::{SessionEvent, SessionJsonlStore},
+    migration::LegacySessionMigrator,
+    state::SessionState,
+};
 
 const SESSION_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 const SESSION_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -19,7 +25,7 @@ const THREAD_ID_METADATA_KEYS: &[&str] = &["thread_id", "threadId", "canonical_t
 
 /// Manages session persistence on disk.
 ///
-/// Sessions are stored as JSON files in a sessions directory.
+/// Sessions are stored as append-only JSONL streams in a sessions directory.
 pub struct SessionStore {
     sessions_dir: PathBuf,
 }
@@ -78,20 +84,51 @@ impl SessionStore {
         fs::create_dir_all(&self.sessions_dir)
     }
 
+    /// Return the on-disk root directory for a session.
+    pub fn session_root(&self, id: &str) -> PathBuf {
+        self.sessions_dir.join(id)
+    }
+
+    /// Return the file-history store for a session.
+    pub fn file_history(&self, id: &str) -> FileHistoryStore {
+        FileHistoryStore::new(self.session_root(id))
+    }
+
     /// Save a session to disk.
     pub fn save(&self, session: &SessionState) -> io::Result<()> {
         self.ensure_dir()?;
-        let path = self.session_path(&session.id);
-        let json = serde_json::to_string_pretty(session)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        self.write_atomic(&path, json.as_bytes())
+        SessionJsonlStore::new(self.session_root(&session.id))
+            .append(&SessionEvent::snapshot(session.clone()))
     }
 
     /// Load a session by ID.
     pub fn load(&self, id: &str) -> io::Result<SessionState> {
+        self.migrate_legacy_session_if_needed(id)?;
+        let jsonl = SessionJsonlStore::new(self.session_root(id));
+        if let Some(session) = jsonl.load_state()? {
+            return Ok(session);
+        }
+
         let path = self.session_path(id);
-        let content = fs::read_to_string(path)?;
-        serde_json::from_str(&content).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        match fs::read_to_string(&path) {
+            Ok(content) => serde_json::from_str(&content)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                let events_path = jsonl.events_path();
+                if events_path.exists() {
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "session event log '{}' contains no replayable session state",
+                            events_path.display()
+                        ),
+                    ))
+                } else {
+                    Err(err)
+                }
+            }
+            Err(err) => Err(err),
+        }
     }
 
     /// Load the most recently updated session.
@@ -107,10 +144,7 @@ impl SessionStore {
         for info in sessions {
             match self.load(&info.id) {
                 Ok(session) => {
-                    let path = self.session_path(&info.id);
-                    let modified = fs::metadata(&path)
-                        .and_then(|m| m.modified())
-                        .unwrap_or(SystemTime::UNIX_EPOCH);
+                    let modified = self.session_modified_time(&info.id);
 
                     if latest
                         .as_ref()
@@ -143,10 +177,7 @@ impl SessionStore {
         for info in sessions {
             match self.load(&info.id) {
                 Ok(session) if session.working_dir == working_dir => {
-                    let path = self.session_path(&info.id);
-                    let modified = fs::metadata(&path)
-                        .and_then(|m| m.modified())
-                        .unwrap_or(SystemTime::UNIX_EPOCH);
+                    let modified = self.session_modified_time(&info.id);
 
                     if latest
                         .as_ref()
@@ -183,10 +214,7 @@ impl SessionStore {
                     if session.working_dir == working_dir
                         && session_matches_thread_id(&session, thread_id) =>
                 {
-                    let path = self.session_path(&info.id);
-                    let modified = fs::metadata(&path)
-                        .and_then(|m| m.modified())
-                        .unwrap_or(SystemTime::UNIX_EPOCH);
+                    let modified = self.session_modified_time(&info.id);
 
                     if latest
                         .as_ref()
@@ -221,31 +249,38 @@ impl SessionStore {
             return Ok(Vec::new());
         }
 
-        let mut sessions = Vec::new();
+        let mut ids = BTreeSet::new();
         for entry in fs::read_dir(&self.sessions_dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().is_some_and(|ext| ext == "json") {
-                match fs::read_to_string(&path)
-                    .map_err(|e| e.to_string())
-                    .and_then(|content| {
-                        serde_json::from_str::<SessionState>(&content).map_err(|e| e.to_string())
-                    }) {
-                    Ok(session) => {
-                        sessions.push(SessionInfo {
-                            id: session.id,
-                            created_at: session.created_at.to_string(),
-                            summary: session.summary,
-                            message_count: session.messages.len(),
-                        });
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            path = %path.display(),
-                            error = %e,
-                            "skipping malformed session file"
-                        );
-                    }
+            if path.is_dir() {
+                if let Some(id) = path.file_name().and_then(|name| name.to_str()) {
+                    ids.insert(id.to_string());
+                }
+            } else if path.extension().is_some_and(|ext| ext == "json")
+                && let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
+            {
+                ids.insert(stem.to_string());
+            }
+        }
+
+        let mut sessions = Vec::new();
+        for id in ids {
+            match self.load(&id) {
+                Ok(session) => {
+                    sessions.push(SessionInfo {
+                        id: session.id,
+                        created_at: session.created_at.to_string(),
+                        summary: session.summary,
+                        message_count: session.messages.len(),
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        session_id = %id,
+                        error = %e,
+                        "skipping malformed session"
+                    );
                 }
             }
         }
@@ -255,8 +290,45 @@ impl SessionStore {
 
     /// Delete a session by ID.
     pub fn delete(&self, id: &str) -> io::Result<()> {
-        let path = self.session_path(id);
-        fs::remove_file(path)
+        let mut removed = false;
+        let legacy_path = self.session_path(id);
+        match fs::remove_file(&legacy_path) {
+            Ok(()) => removed = true,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(io::Error::new(
+                    err.kind(),
+                    format!(
+                        "failed to remove legacy session file '{}': {err}",
+                        legacy_path.display()
+                    ),
+                ));
+            }
+        }
+
+        let root = self.session_root(id);
+        match fs::remove_dir_all(&root) {
+            Ok(()) => removed = true,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(io::Error::new(
+                    err.kind(),
+                    format!(
+                        "failed to remove session directory '{}': {err}",
+                        root.display()
+                    ),
+                ));
+            }
+        }
+
+        if removed {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("session '{id}' was not found"),
+            ))
+        }
     }
 
     /// Acquire an exclusive lock for one session ID.
@@ -331,14 +403,31 @@ impl SessionStore {
 
     /// Move a malformed session file out of the way so ingestion can continue.
     pub fn archive_corrupt_session(&self, id: &str) -> io::Result<Option<PathBuf>> {
-        let source = self.session_path(id);
-        let archived = self.sessions_dir.join(format!(
-            "{id}.corrupt.{}.json",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
+        let legacy_source = self.session_path(id);
+        let session_root = self.session_root(id);
+        let (source, archived) = if legacy_source.exists() {
+            (
+                legacy_source,
+                self.sessions_dir.join(format!(
+                    "{id}.corrupt.{}.json",
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos()
+                )),
+            )
+        } else {
+            (
+                session_root,
+                self.sessions_dir.join(format!(
+                    "{id}.corrupt.{}",
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos()
+                )),
+            )
+        };
 
         match fs::rename(&source, &archived) {
             Ok(()) => Ok(Some(archived)),
@@ -418,6 +507,21 @@ impl SessionStore {
         self.sessions_dir.join(format!("{id}.json"))
     }
 
+    fn migrate_legacy_session_if_needed(&self, id: &str) -> io::Result<bool> {
+        LegacySessionMigrator::new(self.sessions_dir.clone())
+            .migrate_if_needed(id, &self.session_root(id))
+    }
+
+    fn session_modified_time(&self, id: &str) -> SystemTime {
+        let events_path = SessionJsonlStore::new(self.session_root(id)).events_path();
+        fs::metadata(&events_path)
+            .and_then(|metadata| metadata.modified())
+            .or_else(|_| {
+                fs::metadata(self.session_path(id)).and_then(|metadata| metadata.modified())
+            })
+            .unwrap_or(SystemTime::UNIX_EPOCH)
+    }
+
     fn session_lock_path(&self, id: &str) -> PathBuf {
         self.sessions_dir.join(format!("{id}.lock"))
     }
@@ -433,80 +537,6 @@ impl SessionStore {
             return false;
         };
         elapsed >= STALE_SESSION_LOCK_AGE
-    }
-
-    fn write_atomic(&self, destination: &Path, data: &[u8]) -> io::Result<()> {
-        let parent = destination.parent().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "invalid session file path without parent: '{}'",
-                    destination.display()
-                ),
-            )
-        })?;
-
-        let file_name = destination
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("invalid session file name: '{}'", destination.display()),
-                )
-            })?;
-
-        let unique_suffix = format!(
-            "{}.{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        );
-        let temp_path = parent.join(format!(".{file_name}.{unique_suffix}.tmp"));
-
-        fs::write(&temp_path, data).map_err(|err| {
-            io::Error::new(
-                err.kind(),
-                format!(
-                    "failed to write temporary session file '{}': {err}",
-                    temp_path.display()
-                ),
-            )
-        })?;
-
-        #[cfg(windows)]
-        {
-            if destination.exists() {
-                match fs::remove_file(destination) {
-                    Ok(()) => {}
-                    Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-                    Err(err) => {
-                        let _ = fs::remove_file(&temp_path);
-                        return Err(io::Error::new(
-                            err.kind(),
-                            format!(
-                                "failed to replace session file '{}': {err}",
-                                destination.display()
-                            ),
-                        ));
-                    }
-                }
-            }
-        }
-
-        fs::rename(&temp_path, destination).map_err(|err| {
-            let _ = fs::remove_file(&temp_path);
-            io::Error::new(
-                err.kind(),
-                format!(
-                    "failed to replace session file '{}' with '{}': {err}",
-                    destination.display(),
-                    temp_path.display()
-                ),
-            )
-        })
     }
 }
 
@@ -616,7 +646,8 @@ mod tests {
         assert!(
             tmp.path()
                 .join("sessions")
-                .join(format!("{}.json", session.id))
+                .join(&session.id)
+                .join("events.jsonl")
                 .exists()
         );
     }

@@ -17,7 +17,7 @@ libra graph <THREAD_ID> [--repo <PATH>]
 
 `libra code` starts an interactive coding session that pairs a human developer with an AI agent. The default mode launches a terminal UI (TUI) built on ratatui/crossterm with a background web server. Plain developer requests in the generic provider TUI are routed through the built-in planning workflow first: Libra generates a reviewable IntentSpec and execution plan, then waits for Execute Plan / Network / Modify Plan / Cancel before running mutating tools. Two alternative modes are available: `--web-only` runs the web server without the TUI (useful for browser access or remote hosting), and `--stdio` runs an MCP server over standard input/output for integration with AI clients like Claude Desktop.
 
-The command supports seven AI provider backends (Gemini, OpenAI, Anthropic, DeepSeek, Zhipu, Ollama, Codex) and three operating contexts (dev, review, research) that tune the agent's behavior for different workflows. Sessions can be persisted and resumed with Libra's canonical `--resume <thread_id>` flow.
+The command supports eight AI provider backends (Gemini, OpenAI, Anthropic, DeepSeek, Kimi, Zhipu, Ollama, Codex) and three operating contexts (dev, review, research) that tune the agent's behavior for different workflows. Sessions can be persisted and resumed with Libra's canonical `--resume <thread_id>` flow.
 
 A sandboxed tool-execution layer enforces approval policies that control when the agent can run shell commands, apply patches, web search, or perform other potentially destructive operations. TUI dev sessions default to workspace-write execution with network access denied. After the execution plan is ready, the Plan review dialog includes a `Network: Deny` / `Network: Allow` toggle; the selected value becomes the execution `IntentSpec` network policy for shell, gate, and `web_search` use. Review and research contexts remain read-only and do not grant network access.
 
@@ -32,6 +32,9 @@ When the TUI exits and Libra can derive the canonical thread ID, `libra code` pr
 | Host | | `--host` | `127.0.0.1` | Web server bind address. |
 | Working directory | | `--cwd` | current dir | Working directory for the session. |
 | Env file | | `--env-file <PATH>` | none | Load provider environment variables from a dotenv-style file; file values take precedence over the process environment. |
+| Control mode | | `--control <observe\|write>` | `observe` | Local automation control mode. `observe` preserves existing loopback read behavior; `write` enables local token discovery and process-level automation control auth. |
+| Control token file | | `--control-token-file <PATH>` | `.libra/code/control-token` | Path for the per-process local automation token. In `write` mode, Unix/macOS files must be regular files with `0600` permissions. |
+| Control info file | | `--control-info-file <PATH>` | `.libra/code/control.json` | Path for non-secret local endpoint discovery metadata. The file never contains token material. |
 | Provider | | `--provider` | `gemini` | AI provider backend (see Provider Backends below). |
 | Model | | `--model` | provider default | Provider-specific model ID. |
 | Temperature | | `--temperature` | provider default | Sampling temperature for generation. |
@@ -40,6 +43,7 @@ When the TUI exits and Libra can derive the canonical thread ID, `libra code` pr
 | DeepSeek thinking | | `--deepseek-thinking <enabled\|disabled>` | omitted | Sends DeepSeek's `thinking` object when using `--provider deepseek`. |
 | DeepSeek reasoning effort | | `--deepseek-reasoning-effort <low\|medium\|high\|max>` | omitted | Sends DeepSeek's `reasoning_effort` value when using `--provider deepseek`; `xhigh` is accepted as an alias for `max`. |
 | DeepSeek stream | | `--deepseek-stream <true\|false>` / `--stream <true\|false>` | `false` | Sends DeepSeek's `stream` boolean when using `--provider deepseek`. |
+| Kimi thinking | | `--kimi-thinking <enabled\|disabled>` | model default | Sends Kimi's `thinking` object when using `--provider kimi`. |
 | Context | | `--context` | none | Operating context: `dev` (alias `development`), `review` (alias `code-review`), `research` (alias `explore`). |
 | Resume | | `--resume <THREAD_ID>` | none | Resume a canonical Libra thread by thread ID. |
 | Approval policy | | `--approval-policy` | `on-request` | Tool approval policy (see Approval Policies below). |
@@ -59,14 +63,32 @@ When the TUI exits and Libra can derive the canonical thread ID, `libra code` pr
 | `openai` | OpenAI (default: gpt-4o-mini) | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
 | `anthropic` | Anthropic (default: claude-3.5-sonnet) | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
 | `deepseek` | DeepSeek | `DEEPSEEK_API_KEY` | -- |
+| `kimi` | Moonshot AI Kimi (default: kimi-k2.6) | `MOONSHOT_API_KEY` | `MOONSHOT_BASE_URL`, `--kimi-thinking` |
 | `zhipu` | Zhipu GLM (default: glm-5) | `ZHIPU_API_KEY` | `ZHIPU_BASE_URL` |
 | `ollama` | Ollama (local models and direct Cloud API) | `OLLAMA_API_KEY` for direct Cloud API | `OLLAMA_BASE_URL`, `OLLAMA_THINK`, `OLLAMA_COMPACT_TOOLS`, `--api-base`, `--ollama-thinking`, or `--ollama-compact-tools` |
 | `codex` | Codex app-server | -- | `--codex-bin` / `--codex-port` |
 
 DeepSeek requests can opt into provider-specific fields with `--deepseek-thinking enabled --deepseek-reasoning-effort high --deepseek-stream true`; these flags are rejected for non-DeepSeek providers.
+Kimi requests default to the selected model's thinking behavior; use `--kimi-thinking disabled` for K2.6/K2.5 runs where lower latency or official web-search compatibility matters. Libra preserves Kimi `reasoning_content` across tool-call turns when the provider returns it.
 Use `--env-file .env.test` when testing with a local dotenv file so provider keys from that file override stale shell environment variables.
 
 Ollama requests stream `/api/chat` responses by default and add a per-request `request_id` to debug logs. They also default to `think:false` so reasoning-capable local models do not spend several minutes generating hidden reasoning before tool calls. Use `--ollama-thinking high` for a single run, or set `OLLAMA_THINK=true`, `low`, `medium`, `high`, or `auto` as the environment default. `auto` omits the `think` field and lets Ollama decide. Use `--ollama-compact-tools` or `OLLAMA_COMPACT_TOOLS=true` when a remote/cloud Ollama endpoint accepts simple tools but returns 503 for Libra's full tool schema payload.
+
+### Local Automation Control
+
+`libra code --control observe` is the default and does not create local control files unless `--control-info-file` is explicitly supplied. Loopback clients can continue reading `/api/code/session` and `/api/code/events` without a token.
+
+`libra code --control write` enables the local automation security envelope. Libra creates a fresh 32-byte token in `.libra/code/control-token`, writes non-secret endpoint metadata to `.libra/code/control.json` after the web server binds, and holds `.libra/code/control.lock` for the process lifetime. `control.json` includes `version`, `mode`, `pid`, `baseUrl`, optional `mcpUrl`, `workingDir`, optional `threadId`, and `startedAt`; it never includes the token, token hash, token path, provider credentials, headers, or provider request/response bodies.
+
+Write control is local-only. `--control write` is rejected with `--stdio`, and it requires `--host` to be loopback (`127.0.0.1`, `::1`, or `localhost`). A second write-control instance using the same default paths fails fast with `CONTROL_INSTANCE_CONFLICT`; use distinct `--control-token-file` and `--control-info-file` paths only when the caller intentionally manages multiple local instances.
+
+Automation clients attach with `POST /api/code/controller/attach`, body `{ "clientId": "...", "kind": "automation" }`, header `X-Libra-Control-Token`, and then use the returned `X-Code-Controller-Token` for writes. Automation-held leases require both tokens for `/api/code/messages`, `/api/code/interactions/{id}`, `/api/code/controller/detach`, and `/api/code/control/cancel`. The local TUI can reclaim control with `/control reclaim`, which invalidates the automation lease. Code UI write request bodies are capped at 256KiB.
+
+`GET /api/code/diagnostics` returns a redacted observe-only status summary for local tools. Control attach, detach, submit, respond, and cancel operations emit `local-tui-control/v1` audit events through the runtime audit sink. For stdio automation clients, use [`libra code-control --stdio`](code-control.md); `libra code --stdio` remains the MCP stdio server and does not control a live TUI.
+
+### Web Search
+
+The `web_search` tool requires the session network policy to allow outbound access. If `BRAVE_SEARCH_API_KEY` is available from the process environment or `vault.env.BRAVE_SEARCH_API_KEY`, Libra tries the Brave Search API first and returns result titles, URLs, and snippets. If Brave is not configured or the request fails, Libra falls back to the zero-configuration DuckDuckGo HTML endpoint.
 
 ### Approval Policies
 
@@ -103,6 +125,11 @@ libra code --stdio
 # Use DeepSeek with reasoning enabled
 libra code --provider deepseek --model deepseek-v4-pro --deepseek-thinking enabled --deepseek-reasoning-effort high --deepseek-stream true
 libra code --env-file .env.test --provider deepseek --model deepseek-v4-pro --deepseek-thinking enabled --deepseek-reasoning-effort high --deepseek-stream true
+
+# Use Kimi (Moonshot AI) with the K2.6 default; opt out of thinking for lower latency
+libra code --provider kimi
+libra code --provider kimi --model kimi-k2-thinking --kimi-thinking enabled
+libra code --provider kimi --model kimi-k2.6 --kimi-thinking disabled
 
 # Use a local Ollama model; plain requests generate a reviewable plan first
 libra code --provider ollama --model llama3 --api-base http://127.0.0.1:11434/v1
@@ -209,3 +236,7 @@ Note: Neither Git nor jj have an equivalent to `libra code`. This command repres
 | Port already in use | Fatal error with port number | non-zero |
 | No terminal available in TUI mode | Falls back or reports error | non-zero |
 | Thread ID not found on resume | Fatal error with canonical `thread_id` | non-zero |
+| `--control write --stdio` | Usage error; MCP stdio and local TUI automation stdio are separate modes | non-zero |
+| `--control write --host 0.0.0.0` or other non-loopback host | Usage error; write control is loopback-only | non-zero |
+| Another live `--control write` owns the same control lock | `CONTROL_INSTANCE_CONFLICT` with existing PID/URL when available | non-zero |
+| Control token file is a symlink, non-regular file, or not `0600` on Unix/macOS | Fatal setup error before the web server starts | non-zero |

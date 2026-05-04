@@ -20,6 +20,8 @@
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    io,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
@@ -32,11 +34,18 @@ use crate::internal::ai::{
         CompletionUsageSummary, Message, OneOrMany, ToolResult, UserContent,
         request::CompletionResponse,
     },
+    context_budget::{
+        CompactionEvent, CompactionReason, ContextAttachmentStore, ContextBudget,
+        ContextFrameBuilder, ContextFrameCandidate, ContextFrameEvent, ContextFrameKind,
+        ContextFrameSource, ContextSegmentKind, ContextTrustLevel,
+    },
     hooks::{HookAction, HookRunner},
+    session::jsonl::{SessionEvent, SessionJsonlStore},
     tools::{
         FunctionParameters, ToolDefinition, ToolInvocation, ToolOutput, ToolPayload, ToolRegistry,
         ToolRuntimeContext,
     },
+    usage::{UsageContext, UsageRecorder},
 };
 
 /// A single complete tool-loop turn result.
@@ -64,6 +73,10 @@ pub trait ToolLoopObserver: Send {
     fn on_model_turn_start(&mut self, _turn: usize) {}
 
     fn on_model_usage(&mut self, _usage: &CompletionUsageSummary) {}
+
+    fn on_model_usage_recorded(&mut self, usage: &CompletionUsageSummary, _wall_clock_ms: u64) {
+        self.on_model_usage(usage);
+    }
 
     fn on_model_stream_event(&mut self, _event: &CompletionStreamEvent) {}
 
@@ -123,6 +136,18 @@ pub struct ToolLoopConfig {
     pub repeat_abort_threshold: Option<usize>,
     /// Tools that complete the current loop immediately after a successful call.
     pub terminal_tools: Option<Vec<String>>,
+    /// Session root used for append-only context-frame recording.
+    pub context_frame_session_root: Option<PathBuf>,
+    /// Stable prefix for context-frame prompt IDs.
+    pub context_frame_prompt_id: Option<String>,
+    /// Optional budget override used by tests and constrained runtimes.
+    pub context_frame_budget: Option<ContextBudget>,
+    /// Optional attachment threshold override used by tests and constrained runtimes.
+    pub context_frame_attachment_threshold_bytes: Option<usize>,
+    /// Optional usage recorder for provider-neutral token/cost stats.
+    pub usage_recorder: Option<UsageRecorder>,
+    /// Provider/model/thread metadata attached to usage rows.
+    pub usage_context: Option<UsageContext>,
     /// Whether assistant reasoning content should be retained in model history.
     pub preserve_reasoning_content: bool,
 }
@@ -143,6 +168,12 @@ impl Default for ToolLoopConfig {
             repeat_warning_threshold: Some(DEFAULT_REPEAT_WARNING_THRESHOLD),
             repeat_abort_threshold: Some(DEFAULT_REPEAT_ABORT_THRESHOLD),
             terminal_tools: None,
+            context_frame_session_root: None,
+            context_frame_prompt_id: None,
+            context_frame_budget: None,
+            context_frame_attachment_threshold_bytes: None,
+            usage_recorder: None,
+            usage_context: None,
             preserve_reasoning_content: false,
         }
     }
@@ -290,8 +321,10 @@ where
             ..Default::default()
         };
 
+        record_tool_loop_context_frame(&config, turn_count, &request);
         observer.on_model_turn_start(turn_count);
-        let response = {
+        let model_request_started = std::time::Instant::now();
+        let response_result = {
             // Drive the completion future and stream events concurrently. When the
             // future resolves we drain any events still buffered on the channel before
             // breaking out, otherwise late events would be lost.
@@ -304,7 +337,7 @@ where
                         while let Ok(event) = stream_rx.try_recv() {
                             observer.on_model_stream_event(&event);
                         }
-                        break result?;
+                        break result;
                     }
                     Some(event) = stream_rx.recv() => {
                         observer.on_model_stream_event(&event);
@@ -312,9 +345,22 @@ where
                 }
             }
         };
-        if let Some(usage) = response.raw_response.usage_summary() {
-            observer.on_model_usage(&usage);
-        }
+        let wall_clock_ms = duration_millis_u64(model_request_started.elapsed());
+        let response = match response_result {
+            Ok(response) => response,
+            Err(error) => {
+                if let (Some(recorder), Some(context)) = (
+                    config.usage_recorder.as_ref(),
+                    config.usage_context.as_ref(),
+                ) && let Err(record_error) = recorder
+                    .record_failure(context, completion_error_kind(&error), Some(wall_clock_ms))
+                    .await
+                {
+                    tracing::warn!("failed to record failed model usage stats: {record_error}");
+                }
+                return Err(error);
+            }
+        };
 
         let mut tool_calls = Vec::new();
         let mut text_parts = Vec::new();
@@ -327,6 +373,38 @@ where
                     }
                 }
             }
+        }
+        if let (Some(recorder), Some(context)) = (
+            config.usage_recorder.as_ref(),
+            config.usage_context.as_ref(),
+        ) {
+            let tool_call_count = u64::try_from(tool_calls.len()).unwrap_or(u64::MAX);
+            match response.raw_response.usage_summary() {
+                Some(usage) => {
+                    if let Err(error) = recorder
+                        .record_summary_with_tool_count(
+                            context,
+                            &usage,
+                            Some(wall_clock_ms),
+                            tool_call_count,
+                        )
+                        .await
+                    {
+                        tracing::warn!("failed to record model usage stats: {error}");
+                    }
+                    observer.on_model_usage_recorded(&usage, wall_clock_ms);
+                }
+                None => {
+                    if let Err(error) = recorder
+                        .record_missing_usage(context, Some(wall_clock_ms), tool_call_count)
+                        .await
+                    {
+                        tracing::warn!("failed to record estimated model usage stats: {error}");
+                    }
+                }
+            }
+        } else if let Some(usage) = response.raw_response.usage_summary() {
+            observer.on_model_usage_recorded(&usage, wall_clock_ms);
         }
 
         if !tool_calls.is_empty() {
@@ -841,6 +919,277 @@ fn registry_tool_definitions(registry: &ToolRegistry) -> Vec<ToolDefinition> {
         .collect()
 }
 
+fn record_tool_loop_context_frame(
+    config: &ToolLoopConfig,
+    model_turn: usize,
+    request: &CompletionRequest,
+) {
+    let Some(session_root) = config.context_frame_session_root.as_deref() else {
+        return;
+    };
+
+    let prompt_id = context_frame_prompt_id(config.context_frame_prompt_id.as_deref(), model_turn);
+    let budget = config.context_frame_budget.clone().unwrap_or_default();
+    let frame = match build_tool_loop_context_frame(
+        session_root,
+        prompt_id,
+        request,
+        budget,
+        config.context_frame_attachment_threshold_bytes,
+    ) {
+        Ok(frame) => frame,
+        Err(error) => {
+            tracing::warn!(
+                model_turn,
+                error = %error,
+                "failed to build tool-loop context frame"
+            );
+            return;
+        }
+    };
+
+    let store = SessionJsonlStore::new(session_root.to_path_buf());
+    if let Err(error) = store.append(&SessionEvent::context_frame(frame.clone())) {
+        tracing::warn!(
+            model_turn,
+            error = %error,
+            "failed to append tool-loop context frame"
+        );
+        return;
+    }
+
+    if frame_requires_compaction_event(&frame) {
+        let compaction = CompactionEvent::from_frame(
+            &frame,
+            CompactionReason::BudgetPressure,
+            format!("deterministic context allocation for model turn {model_turn}"),
+        );
+        if let Err(error) = store.append(&SessionEvent::compaction(compaction)) {
+            tracing::warn!(
+                model_turn,
+                error = %error,
+                "failed to append context compaction event"
+            );
+        }
+    }
+}
+
+fn context_frame_prompt_id(base_prompt_id: Option<&str>, model_turn: usize) -> String {
+    match base_prompt_id.filter(|value| !value.trim().is_empty()) {
+        Some(base) => format!("{base}/model-turn-{model_turn}"),
+        None => format!("model-turn-{model_turn}"),
+    }
+}
+
+fn duration_millis_u64(duration: std::time::Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn completion_error_kind(error: &CompletionError) -> &'static str {
+    match error {
+        CompletionError::HttpError(_) => "http_error",
+        CompletionError::JsonError(_) => "json_error",
+        CompletionError::RequestError(_) => "request_error",
+        CompletionError::ProviderError(_) => "provider_error",
+        CompletionError::ResponseError(_) => "response_error",
+        CompletionError::NotImplemented(_) => "not_implemented",
+    }
+}
+
+fn build_tool_loop_context_frame(
+    session_root: &Path,
+    prompt_id: String,
+    request: &CompletionRequest,
+    budget: ContextBudget,
+    attachment_threshold_bytes: Option<usize>,
+) -> io::Result<ContextFrameEvent> {
+    let attachments = ContextAttachmentStore::new(session_root);
+    let mut builder =
+        ContextFrameBuilder::new(ContextFrameKind::PromptBuild, budget).with_prompt_id(prompt_id);
+    if let Some(threshold) = attachment_threshold_bytes {
+        builder = builder.with_attachment_threshold_bytes(threshold);
+    }
+
+    if let Some(preamble) = request.preamble.as_deref()
+        && !preamble.trim().is_empty()
+    {
+        builder = builder.push(
+            ContextFrameCandidate::new("preamble", ContextSegmentKind::SystemRules, preamble)
+                .source(ContextFrameSource::runtime("tool_loop_preamble"))
+                .trust(ContextTrustLevel::Trusted)
+                .non_compressible(true),
+        );
+    }
+
+    for (message_index, message) in request.chat_history.iter().enumerate() {
+        builder = push_message_context_candidates(builder, message_index, message);
+    }
+
+    builder.build(&attachments)
+}
+
+fn push_message_context_candidates(
+    mut builder: ContextFrameBuilder,
+    message_index: usize,
+    message: &Message,
+) -> ContextFrameBuilder {
+    match message {
+        Message::User { content } => {
+            for (part_index, part) in content.iter().enumerate() {
+                match part {
+                    UserContent::Text(text) => {
+                        builder = push_text_context_candidate(
+                            builder,
+                            format!("message-{message_index}-user-{part_index}"),
+                            ContextSegmentKind::RecentMessages,
+                            text.text.clone(),
+                            ContextFrameSource::runtime("conversation_user"),
+                            ContextTrustLevel::Untrusted,
+                            false,
+                        );
+                    }
+                    UserContent::Image(image) => {
+                        builder = push_text_context_candidate(
+                            builder,
+                            format!("message-{message_index}-user-image-{part_index}"),
+                            ContextSegmentKind::RecentMessages,
+                            format!(
+                                "image mime_type={} bytes={}",
+                                image.mime_type.as_deref().unwrap_or("unknown"),
+                                image.data.len()
+                            ),
+                            ContextFrameSource::runtime("conversation_user_image"),
+                            ContextTrustLevel::Untrusted,
+                            false,
+                        );
+                    }
+                    UserContent::ToolResult(result) => {
+                        builder = push_text_context_candidate(
+                            builder,
+                            format!("message-{message_index}-tool-result-{part_index}"),
+                            ContextSegmentKind::ToolResults,
+                            render_tool_result_context(result),
+                            ContextFrameSource::tool(result.name.clone(), result.id.clone()),
+                            ContextTrustLevel::External,
+                            false,
+                        );
+                    }
+                }
+            }
+        }
+        Message::Assistant { content, .. } => {
+            for (part_index, part) in content.iter().enumerate() {
+                match part {
+                    AssistantContent::Text(text) => {
+                        builder = push_text_context_candidate(
+                            builder,
+                            format!("message-{message_index}-assistant-{part_index}"),
+                            ContextSegmentKind::RecentMessages,
+                            text.text.clone(),
+                            ContextFrameSource::runtime("conversation_assistant"),
+                            ContextTrustLevel::Trusted,
+                            false,
+                        );
+                    }
+                    AssistantContent::ToolCall(call) => {
+                        builder = push_text_context_candidate(
+                            builder,
+                            format!("message-{message_index}-tool-call-{part_index}"),
+                            ContextSegmentKind::RecentMessages,
+                            render_tool_call_context(call),
+                            ContextFrameSource::runtime("conversation_assistant_tool_call"),
+                            ContextTrustLevel::Trusted,
+                            false,
+                        );
+                    }
+                }
+            }
+        }
+        Message::System { content } => {
+            for (part_index, part) in content.iter().enumerate() {
+                if let Some(content) = render_user_content_context(part) {
+                    builder = push_text_context_candidate(
+                        builder,
+                        format!("message-{message_index}-system-{part_index}"),
+                        ContextSegmentKind::SystemRules,
+                        content,
+                        ContextFrameSource::runtime("conversation_system"),
+                        ContextTrustLevel::Trusted,
+                        true,
+                    );
+                }
+            }
+        }
+    }
+    builder
+}
+
+fn push_text_context_candidate(
+    builder: ContextFrameBuilder,
+    id: String,
+    segment: ContextSegmentKind,
+    content: String,
+    source: ContextFrameSource,
+    trust: ContextTrustLevel,
+    non_compressible: bool,
+) -> ContextFrameBuilder {
+    if content.trim().is_empty() {
+        return builder;
+    }
+
+    builder.push(
+        ContextFrameCandidate::new(id, segment, content)
+            .source(source)
+            .trust(trust)
+            .non_compressible(non_compressible),
+    )
+}
+
+fn render_user_content_context(content: &UserContent) -> Option<String> {
+    match content {
+        UserContent::Text(text) => Some(text.text.clone()),
+        UserContent::Image(image) => Some(format!(
+            "image mime_type={} bytes={}",
+            image.mime_type.as_deref().unwrap_or("unknown"),
+            image.data.len()
+        )),
+        UserContent::ToolResult(result) => Some(render_tool_result_context(result)),
+    }
+}
+
+fn render_tool_call_context(call: &crate::internal::ai::completion::ToolCall) -> String {
+    format!(
+        "tool_call id={} name={} arguments={}",
+        call.id,
+        call.function.name,
+        json_string(&call.function.arguments)
+    )
+}
+
+fn render_tool_result_context(result: &ToolResult) -> String {
+    format!(
+        "tool_result id={} name={} result={}",
+        result.id,
+        result.name,
+        json_string(&result.result)
+    )
+}
+
+fn json_string(value: &Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|error| {
+        format!("\"<failed to serialize JSON value for context frame: {error}>\"")
+    })
+}
+
+fn frame_requires_compaction_event(frame: &ContextFrameEvent) -> bool {
+    frame.budget_exceeded_by > 0
+        || !frame.omissions.is_empty()
+        || frame
+            .segments
+            .iter()
+            .any(|segment| segment.attachment.is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{
@@ -916,6 +1265,26 @@ mod tests {
             _invocation: ToolInvocation,
         ) -> crate::internal::ai::tools::ToolResult<ToolOutput> {
             Ok(ToolOutput::success("ok"))
+        }
+
+        fn schema(&self) -> ToolSpec {
+            ToolSpec::new("mock_tool", "mock tool")
+        }
+    }
+
+    struct LongOutputHandler;
+
+    #[async_trait]
+    impl ToolHandler for LongOutputHandler {
+        fn kind(&self) -> ToolKind {
+            ToolKind::Function
+        }
+
+        async fn handle(
+            &self,
+            _invocation: ToolInvocation,
+        ) -> crate::internal::ai::tools::ToolResult<ToolOutput> {
+            Ok(ToolOutput::success(long_tool_context_output()))
         }
 
         fn schema(&self) -> ToolSpec {
@@ -1134,6 +1503,12 @@ mod tests {
                 repeat_warning_threshold: Some(DEFAULT_REPEAT_WARNING_THRESHOLD),
                 repeat_abort_threshold: Some(DEFAULT_REPEAT_ABORT_THRESHOLD),
                 terminal_tools: None,
+                context_frame_session_root: None,
+                context_frame_prompt_id: None,
+                context_frame_budget: None,
+                context_frame_attachment_threshold_bytes: None,
+                usage_recorder: None,
+                usage_context: None,
                 preserve_reasoning_content: false,
             },
             &mut observer,
@@ -1157,6 +1532,77 @@ mod tests {
         assert!(matches!(&turn.history[1], Message::Assistant { .. }));
         assert!(matches!(&turn.history[2], Message::User { .. }));
         assert!(matches!(&turn.history[3], Message::Assistant { .. }));
+    }
+
+    /// Scenario: every provider request is mirrored as an append-only context frame,
+    /// and large tool results are moved to session attachments before replay.
+    #[tokio::test]
+    async fn tool_loop_records_context_frames_and_attachments() {
+        let temp_dir = TempDir::new().unwrap();
+        let session_root = temp_dir.path().join("session-1");
+        let mut registry = ToolRegistry::with_working_dir(temp_dir.path().to_path_buf());
+        registry.register("mock_tool", Arc::new(LongOutputHandler));
+
+        let turn = run_tool_loop_with_history_and_observer(
+            &MockModel,
+            Vec::new(),
+            "hello",
+            &registry,
+            ToolLoopConfig {
+                preamble: Some("system rules\nprotected branch=main".to_string()),
+                context_frame_session_root: Some(session_root.clone()),
+                context_frame_prompt_id: Some("turn-42".to_string()),
+                context_frame_attachment_threshold_bytes: Some(64),
+                ..Default::default()
+            },
+            &mut RecordingObserver::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(turn.final_text, "done");
+        let replay = SessionJsonlStore::new(session_root.clone())
+            .load_context_replay()
+            .unwrap();
+        assert_eq!(replay.frames.len(), 2);
+        assert_eq!(
+            replay.frames[0].prompt_id.as_deref(),
+            Some("turn-42/model-turn-1")
+        );
+        assert_eq!(
+            replay.frames[1].prompt_id.as_deref(),
+            Some("turn-42/model-turn-2")
+        );
+        assert!(replay.frames[0].segments.iter().any(|segment| {
+            segment.id == "preamble"
+                && segment.segment == ContextSegmentKind::SystemRules
+                && segment.non_compressible
+        }));
+
+        let tool_segment = replay.frames[1]
+            .segments
+            .iter()
+            .find(|segment| segment.segment == ContextSegmentKind::ToolResults)
+            .unwrap();
+        let attachment = tool_segment.attachment.as_ref().unwrap();
+        let attachments = ContextAttachmentStore::new(&session_root);
+        assert_eq!(
+            attachments.read_to_string(attachment).unwrap(),
+            render_tool_result_context(&ToolResult {
+                id: "call_1".to_string(),
+                name: "mock_tool".to_string(),
+                result: ToolOutput::success(long_tool_context_output()).into_response(),
+            })
+        );
+        assert_eq!(replay.compactions.len(), 1);
+        assert!(
+            replay.compactions[0]
+                .protected_segment_ids
+                .iter()
+                .any(|id| id == "preamble")
+        );
+        let events = std::fs::read_to_string(session_root.join("events.jsonl")).unwrap();
+        assert!(!events.contains("tool output line 7"));
     }
 
     /// Scenario: when `preserve_reasoning_content` is `false` (default), assistant
@@ -1508,6 +1954,12 @@ mod tests {
                 repeat_warning_threshold: Some(DEFAULT_REPEAT_WARNING_THRESHOLD),
                 repeat_abort_threshold: Some(DEFAULT_REPEAT_ABORT_THRESHOLD),
                 terminal_tools: None,
+                context_frame_session_root: None,
+                context_frame_prompt_id: None,
+                context_frame_budget: None,
+                context_frame_attachment_threshold_bytes: None,
+                usage_recorder: None,
+                usage_context: None,
                 preserve_reasoning_content: false,
             },
             &mut observer,
@@ -1589,6 +2041,12 @@ mod tests {
                 repeat_warning_threshold: Some(DEFAULT_REPEAT_WARNING_THRESHOLD),
                 repeat_abort_threshold: Some(DEFAULT_REPEAT_ABORT_THRESHOLD),
                 terminal_tools: None,
+                context_frame_session_root: None,
+                context_frame_prompt_id: None,
+                context_frame_budget: None,
+                context_frame_attachment_threshold_bytes: None,
+                usage_recorder: None,
+                usage_context: None,
                 preserve_reasoning_content: false,
             },
             &mut observer,
@@ -2212,5 +2670,12 @@ mod tests {
         assert!(
             matches!(err, CompletionError::ResponseError(msg) if msg.contains("repeated blocked calls"))
         );
+    }
+
+    fn long_tool_context_output() -> String {
+        (0..8)
+            .map(|index| format!("tool output line {index}: xxxxxxxxxxxxxxxxxxxx"))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }

@@ -37,7 +37,7 @@ use crate::internal::ai::{
         openai_compat::{
             ChatChoice, ChatErrorResponse, ChatFunctionCall, ChatMessage, ChatResponse,
             ChatToolCall, ChatToolDefinition, ChatUsage, build_messages_with_reasoning_content,
-            choice_reasoning_content, parse_choice_content, parse_tools,
+            choice_reasoning_content, parse_choice_content_for_provider, parse_tools,
         },
     },
 };
@@ -997,7 +997,7 @@ impl CompletionModelTrait for Model {
                 "DeepSeek returned no text or tool calls"
             );
         }
-        let content = parse_choice_content(choice)?;
+        let content = parse_choice_content_for_provider("deepseek", choice)?;
         let reasoning_content = choice_reasoning_content(choice);
         let text_parts = content
             .iter()
@@ -1328,7 +1328,7 @@ mod tests {
             response.usage.as_ref().map(|usage| usage.total_tokens),
             Some(5)
         );
-        let content = parse_choice_content(&response.choices[0]).unwrap();
+        let content = parse_choice_content_for_provider("deepseek", &response.choices[0]).unwrap();
         assert!(matches!(
             &content[0],
             crate::internal::ai::completion::AssistantContent::Text(text) if text.text == "Hello!"
@@ -1367,7 +1367,7 @@ mod tests {
         .unwrap();
 
         let response = accumulator.into_response("fallback-model").unwrap();
-        let content = parse_choice_content(&response.choices[0]).unwrap();
+        let content = parse_choice_content_for_provider("deepseek", &response.choices[0]).unwrap();
         assert!(matches!(
             &content[0],
             crate::internal::ai::completion::AssistantContent::ToolCall(tool_call)
@@ -1524,7 +1524,7 @@ mod tests {
 
         let response: ChatResponse = serde_json::from_str(json).unwrap();
         let choice = &response.choices[0];
-        let content = parse_choice_content(choice).unwrap();
+        let content = parse_choice_content_for_provider("deepseek", choice).unwrap();
 
         assert_eq!(
             choice_reasoning_content(choice).as_deref(),
@@ -1535,6 +1535,44 @@ mod tests {
             crate::internal::ai::completion::AssistantContent::ToolCall(tool_call)
                 if tool_call.id == "call_1"
                     && tool_call.function.name == "read_file"
+        ));
+    }
+
+    #[test]
+    fn test_deepseek_repairs_malformed_tool_arguments() {
+        let json = r#"
+        {
+            "id": "chatcmpl-repair",
+            "object": "chat.completion",
+            "created": 1677652288,
+            "model": "deepseek-chat",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": "{file_path: 'Cargo.toml',}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": null
+        }
+        "#;
+
+        let response: ChatResponse = serde_json::from_str(json).unwrap();
+        let content = parse_choice_content_for_provider("deepseek", &response.choices[0]).unwrap();
+
+        assert!(matches!(
+            &content[0],
+            crate::internal::ai::completion::AssistantContent::ToolCall(tool_call)
+                if tool_call.function.arguments == serde_json::json!({"file_path": "Cargo.toml"})
         ));
     }
 

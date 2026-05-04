@@ -103,6 +103,8 @@ pub struct BottomPane {
     input_context_label: Option<String>,
     /// Optional placeholder override for local TUI controls.
     input_hint: Option<String>,
+    /// Optional compact usage line shown between composer and status.
+    usage_line: Option<String>,
 }
 
 impl BottomPane {
@@ -133,6 +135,7 @@ impl BottomPane {
             retry_notice: None,
             input_context_label: None,
             input_hint: None,
+            usage_line: None,
         }
     }
 
@@ -161,15 +164,20 @@ impl BottomPane {
 
     pub fn set_exec_approval(&mut self, request: Option<&ExecApprovalRequest>) {
         if let Some(request) = request {
-            self.set_approval_dialog(
-                "Sandbox approval required".to_string(),
-                request.command.clone(),
-                request.cwd.clone(),
-                request.reason.clone(),
-                request.is_retry,
-                request.sandbox_label.clone(),
-                request.network_access,
-                request.writable_roots.clone(),
+            let reason = approval_dialog_reason(request);
+            let options = if request.cache_disabled_reason.is_some() {
+                vec![
+                    (
+                        "Approve Once".to_string(),
+                        "Allow this execution once; this decision will not be cached".to_string(),
+                    ),
+                    ("Deny".to_string(), "Reject this execution".to_string()),
+                    (
+                        "Abort Turn".to_string(),
+                        "Interrupt the current turn".to_string(),
+                    ),
+                ]
+            } else {
                 vec![
                     (
                         "Approve".to_string(),
@@ -177,18 +185,43 @@ impl BottomPane {
                     ),
                     (
                         "Approve Session".to_string(),
-                        "Allow matching commands for this session".to_string(),
+                        "Allow this exact command for this session".to_string(),
+                    ),
+                    (
+                        "Approve TTL".to_string(),
+                        "Allow this exact command until the approval TTL expires".to_string(),
+                    ),
+                    (
+                        "Directory TTL".to_string(),
+                        "Allow matching command families in this directory until TTL expires"
+                            .to_string(),
+                    ),
+                    (
+                        "Pattern TTL".to_string(),
+                        "Allow commands with the same argument pattern until TTL expires"
+                            .to_string(),
                     ),
                     (
                         "Allow All Commands".to_string(),
-                        "Allow every command for this session".to_string(),
+                        "Requires a second confirmation; use only for trusted work".to_string(),
                     ),
                     ("Deny".to_string(), "Reject this execution".to_string()),
                     (
                         "Abort Turn".to_string(),
                         "Interrupt the current turn".to_string(),
                     ),
-                ],
+                ]
+            };
+            self.set_approval_dialog(
+                "Sandbox approval required".to_string(),
+                request.command.clone(),
+                request.cwd.clone(),
+                reason,
+                request.is_retry,
+                request.sandbox_label.clone(),
+                request.network_access,
+                request.writable_roots.clone(),
+                options,
             );
         } else {
             self.exec_approval = None;
@@ -338,6 +371,11 @@ impl BottomPane {
         self.input_hint = hint;
     }
 
+    /// Set or clear the compact model usage line.
+    pub fn set_usage_line(&mut self, usage_line: Option<String>) {
+        self.usage_line = usage_line;
+    }
+
     // ── Slash-command autocomplete popup ────────────────────────────
 
     /// Set the known slash commands (called once at startup).
@@ -480,8 +518,9 @@ impl BottomPane {
             return 6;
         }
         if self.status != AgentStatus::AwaitingUserInput {
-            // Normal mode: rounded input box(5, with 3-line input inner area) + statusline(1) = 6
-            return 6;
+            // Normal mode: rounded input box(5, with 3-line input inner area)
+            // + optional usage line + statusline(1).
+            return if self.usage_line.is_some() { 7 } else { 6 };
         }
 
         let questions = match &self.user_input_questions {
@@ -536,16 +575,28 @@ impl BottomPane {
         }
 
         // Split area into input area and status bar.
-        let chunks = Layout::vertical([
-            Constraint::Length(5), // Rounded input box (3-line inner input)
-            Constraint::Length(1), // Status line
-        ])
-        .split(area);
+        let constraints = if self.usage_line.is_some() {
+            vec![
+                Constraint::Length(5), // Rounded input box (3-line inner input)
+                Constraint::Length(1), // Usage line
+                Constraint::Length(1), // Status line
+            ]
+        } else {
+            vec![
+                Constraint::Length(5), // Rounded input box (3-line inner input)
+                Constraint::Length(1), // Status line
+            ]
+        };
+        let chunks = Layout::vertical(constraints).split(area);
 
         // Render input area
         let cursor_pos = self.render_input_area(chunks[0], buf);
-        // Render status bar below the input box
-        self.render_status_bar(chunks[1], buf);
+        if self.usage_line.is_some() {
+            self.render_usage_line(chunks[1], buf);
+            self.render_status_bar(chunks[2], buf);
+        } else {
+            self.render_status_bar(chunks[1], buf);
+        }
 
         // Render command popup (floats above the bottom pane)
         if self.command_popup.visible && self.status == AgentStatus::Idle {
@@ -568,8 +619,16 @@ impl BottomPane {
         }
 
         if self.status != AgentStatus::AwaitingUserInput {
-            let chunks =
-                Layout::vertical([Constraint::Length(5), Constraint::Length(1)]).split(area);
+            let constraints = if self.usage_line.is_some() {
+                vec![
+                    Constraint::Length(5),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                ]
+            } else {
+                vec![Constraint::Length(5), Constraint::Length(1)]
+            };
+            let chunks = Layout::vertical(constraints).split(area);
             return Some(chunks[0]);
         }
 
@@ -1029,6 +1088,17 @@ impl BottomPane {
         paragraph.render(clamped, buf);
     }
 
+    fn render_usage_line(&self, area: Rect, buf: &mut Buffer) {
+        let Some(usage_line) = self.usage_line.as_deref() else {
+            return;
+        };
+        Paragraph::new(Line::styled(
+            format!("usage {usage_line}"),
+            theme::text::muted(),
+        ))
+        .render(area, buf);
+    }
+
     fn render_status_bar(&self, area: Rect, buf: &mut Buffer) {
         let phase = animation_phase(120);
         let status_line = match self.status {
@@ -1278,6 +1348,17 @@ impl BottomPane {
     }
 }
 
+fn approval_dialog_reason(request: &ExecApprovalRequest) -> Option<String> {
+    match (&request.reason, &request.cache_disabled_reason) {
+        (Some(reason), Some(cache_disabled_reason)) => {
+            Some(format!("{reason}\n{cache_disabled_reason}"))
+        }
+        (Some(reason), None) => Some(reason.clone()),
+        (None, Some(cache_disabled_reason)) => Some(cache_disabled_reason.clone()),
+        (None, None) => None,
+    }
+}
+
 fn animation_phase(step_ms: u128) -> usize {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1409,6 +1490,25 @@ mod tests {
     fn normal_mode_height_is_six_lines() {
         let pane = BottomPane::new();
         assert_eq!(pane.desired_height(), 6);
+    }
+
+    #[test]
+    fn usage_line_extends_normal_mode_without_affecting_approval_dialog() {
+        let mut pane = BottomPane::new();
+        pane.set_usage_line(Some("openai/gpt-test · 10 tok · 1.2s".to_string()));
+        assert_eq!(pane.desired_height(), 7);
+
+        let area = Rect::new(0, 0, 80, 7);
+        let mut buf = Buffer::empty(area);
+        let _ = pane.render(area, &mut buf);
+        let rendered = (0..area.height)
+            .map(|y| row_text(&buf, y, area.width))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("usage openai/gpt-test"));
+
+        pane.status = AgentStatus::AwaitingApproval;
+        assert_ne!(pane.desired_height(), 7);
     }
 
     #[test]

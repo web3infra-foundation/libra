@@ -20,8 +20,9 @@ use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
+use uuid::Uuid;
 
-use crate::internal::ai::session::SessionState;
+use crate::internal::ai::{runtime::event::Event, session::SessionState};
 
 /// Agent-agnostic lifecycle event kinds.
 ///
@@ -37,6 +38,10 @@ pub enum LifecycleEventKind {
     ToolUse,
     ModelUpdate,
     Compaction,
+    CompactionCompleted,
+    PermissionRequest,
+    SourceEnabled,
+    SourceDisabled,
     TurnEnd,
     SessionEnd,
 }
@@ -49,6 +54,10 @@ impl fmt::Display for LifecycleEventKind {
             LifecycleEventKind::ToolUse => "tool_use",
             LifecycleEventKind::ModelUpdate => "model_update",
             LifecycleEventKind::Compaction => "compaction",
+            LifecycleEventKind::CompactionCompleted => "compaction_completed",
+            LifecycleEventKind::PermissionRequest => "permission_request",
+            LifecycleEventKind::SourceEnabled => "source_enabled",
+            LifecycleEventKind::SourceDisabled => "source_disabled",
             LifecycleEventKind::TurnEnd => "turn_end",
             LifecycleEventKind::SessionEnd => "session_end",
         };
@@ -74,6 +83,86 @@ pub struct LifecycleEvent {
     pub tool_response: Option<Value>,
     pub assistant_message: Option<String>,
     pub timestamp: DateTime<Utc>,
+}
+
+/// Fixed v4 UUID acting as the namespace for `Uuid::new_v5` derivation of
+/// `LifecycleEvent::event_id`.
+///
+/// **Stability contract**: this constant **must not change**. Any change is
+/// equivalent to renumbering every previously-emitted lifecycle event id and
+/// would break audit-log dedupe / correlation. If a future migration ever
+/// needs a different namespace, ship it as `LIFECYCLE_EVENT_NAMESPACE_V2` and
+/// version the `event_id` derivation explicitly.
+const LIFECYCLE_EVENT_NAMESPACE: Uuid = Uuid::from_bytes([
+    0x4d, 0xe6, 0x3a, 0x6b, // libra
+    0x8a, 0x12, // lifecycle
+    0x4f, 0x77, // namespace v1
+    0x9c, 0x4b, // (random — frozen)
+    0x05, 0x02, 0x06, 0x01, 0x10, 0x05, // 2026-05-02 round 2
+]);
+
+impl Event for LifecycleEvent {
+    fn event_kind(&self) -> &'static str {
+        // Stable wire kinds — keep this match in sync with
+        // `LifecycleEventKind::Display` so audit / projection consumers see
+        // a single canonical form.
+        match self.kind {
+            LifecycleEventKind::SessionStart => "session_start",
+            LifecycleEventKind::TurnStart => "turn_start",
+            LifecycleEventKind::ToolUse => "tool_use",
+            LifecycleEventKind::ModelUpdate => "model_update",
+            LifecycleEventKind::Compaction => "compaction",
+            LifecycleEventKind::CompactionCompleted => "compaction_completed",
+            LifecycleEventKind::PermissionRequest => "permission_request",
+            LifecycleEventKind::SourceEnabled => "source_enabled",
+            LifecycleEventKind::SourceDisabled => "source_disabled",
+            LifecycleEventKind::TurnEnd => "turn_end",
+            LifecycleEventKind::SessionEnd => "session_end",
+        }
+    }
+
+    fn event_id(&self) -> Uuid {
+        // Lifecycle events do not have a provider-assigned UUID, but generic
+        // dedupe / indexing code expects `event_id()` to be stable per
+        // occurrence. Derive a deterministic UUID v5 from the event's
+        // natural identity tuple `(session_id, timestamp_nanos, kind)` so
+        // two structurally identical events hash to the same id and two
+        // distinct events do not collide. (CEX-00.5 Codex review P2 fix,
+        // round 2: switched from `DefaultHasher` to `Uuid::new_v5` because
+        // `DefaultHasher` is documented as not stable across Rust releases
+        // and `event_id` may end up persisted in audit logs.)
+        //
+        // `LIFECYCLE_EVENT_NAMESPACE` is a fixed v4 UUID generated for the
+        // libra runtime; it acts as the SHA-1 namespace for v5 derivation
+        // and **must not change** without a coordinated audit-log migration.
+        let mut name = Vec::with_capacity(self.session_id.len() + 32);
+        name.extend_from_slice(self.session_id.as_bytes());
+        name.push(0u8);
+        name.extend_from_slice(
+            &self
+                .timestamp
+                .timestamp_nanos_opt()
+                .unwrap_or(0)
+                .to_be_bytes(),
+        );
+        name.push(0u8);
+        name.push(self.kind as u8);
+        Uuid::new_v5(&LIFECYCLE_EVENT_NAMESPACE, &name)
+    }
+
+    fn event_summary(&self) -> String {
+        let mut parts: Vec<String> = vec![
+            format!("kind={}", self.kind),
+            format!("session={}", self.session_id),
+        ];
+        if let Some(tool) = self.tool_name.as_deref() {
+            parts.push(format!("tool={tool}"));
+        }
+        if let Some(model) = self.model.as_ref().and_then(|v| v.as_str()) {
+            parts.push(format!("model={model}"));
+        }
+        parts.join(" ")
+    }
 }
 
 /// Common hook payload envelope shared by provider-specific parsers.
@@ -252,6 +341,33 @@ pub fn apply_lifecycle_event(
             session
                 .metadata
                 .insert("compaction_count".to_string(), json!(current + 1));
+        }
+        LifecycleEventKind::CompactionCompleted => {
+            session.metadata.insert(
+                "last_compaction_completed_at".to_string(),
+                json!(event.timestamp),
+            );
+        }
+        LifecycleEventKind::PermissionRequest
+        | LifecycleEventKind::SourceEnabled
+        | LifecycleEventKind::SourceDisabled => {
+            let entry = json!({
+                "kind": event.kind.to_string(),
+                "source": event.source,
+                "tool": event.tool_name,
+                "timestamp": event.timestamp.to_rfc3339(),
+            });
+            let slot = session
+                .metadata
+                .entry("automation_events".to_string())
+                .or_insert_with(|| Value::Array(Vec::new()));
+            let Value::Array(items) = slot else {
+                session
+                    .metadata
+                    .insert("automation_events".to_string(), Value::Array(vec![entry]));
+                return;
+            };
+            items.push(entry);
         }
         LifecycleEventKind::TurnEnd => {
             if let Some(message) = &event.assistant_message {
@@ -478,6 +594,22 @@ mod tests {
         assert_eq!(LifecycleEventKind::ToolUse.to_string(), "tool_use");
         assert_eq!(LifecycleEventKind::ModelUpdate.to_string(), "model_update");
         assert_eq!(LifecycleEventKind::Compaction.to_string(), "compaction");
+        assert_eq!(
+            LifecycleEventKind::CompactionCompleted.to_string(),
+            "compaction_completed"
+        );
+        assert_eq!(
+            LifecycleEventKind::PermissionRequest.to_string(),
+            "permission_request"
+        );
+        assert_eq!(
+            LifecycleEventKind::SourceEnabled.to_string(),
+            "source_enabled"
+        );
+        assert_eq!(
+            LifecycleEventKind::SourceDisabled.to_string(),
+            "source_disabled"
+        );
         assert_eq!(LifecycleEventKind::TurnEnd.to_string(), "turn_end");
         assert_eq!(LifecycleEventKind::SessionEnd.to_string(), "session_end");
     }

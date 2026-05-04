@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   format:
-    name: Rustfmt Check
+    name: compat-rustfmt
     runs-on: [self-hosted]
 
     env:
@@ -23,7 +23,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           submodules: recursive
-      
+
       - name: Install nightly toolchain
         run: |
           rustup toolchain install nightly --profile minimal
@@ -33,7 +33,7 @@ jobs:
         run: cargo +nightly fmt --all --check
 
   clippy:
-    name: Clippy Check
+    name: compat-clippy
     strategy:
       fail-fast: true
 
@@ -58,10 +58,10 @@ jobs:
         run: corepack enable
 
       - name: Run cargo clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
   redundancy:
-    name: Redundancy Check
+    name: compat-redundancy
     runs-on: [self-hosted]
 
     steps:
@@ -85,7 +85,7 @@ jobs:
           fi
 
   test:
-    name: Run Tests
+    name: compat-offline-core
 
     runs-on: [self-hosted]
 
@@ -145,7 +145,7 @@ jobs:
         env:
           LIBRA_TEST_GITHUB_TOKEN: ${{ secrets.LIBRA_TEST_GITHUB_TOKEN }}
           LIBRA_TEST_GITHUB_NAMESPACE: ${{ secrets.LIBRA_TEST_GITHUB_NAMESPACE }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           LIBRA_D1_ACCOUNT_ID: ${{ secrets.LIBRA_D1_ACCOUNT_ID }}
           LIBRA_D1_API_TOKEN: ${{ secrets.LIBRA_D1_API_TOKEN }}
           LIBRA_D1_DATABASE_ID: ${{ secrets.LIBRA_D1_DATABASE_ID }}
@@ -154,3 +154,58 @@ jobs:
           LIBRA_STORAGE_ACCESS_KEY: ${{ secrets.LIBRA_STORAGE_ACCESS_KEY }}
           LIBRA_STORAGE_SECRET_KEY: ${{ secrets.LIBRA_STORAGE_SECRET_KEY }}
         run: cargo test --all
+
+      # Phase 6 — Local TUI Automation Control scenario suite (docs/improvement/tui.md).
+      # Without `--features test-provider` + `LIBRA_ENABLE_TEST_PROVIDER=1`, the scenarios
+      # in tests/code_ui_scenarios.rs and tests/harness_self_test.rs short-circuit; CI
+      # would silently skip them. `--test-threads=1` because each scenario spawns a
+      # `libra code` subprocess that contends for 0600 control-token files and ports.
+      - name: Run TUI automation scenarios
+        env:
+          LIBRA_ENABLE_TEST_PROVIDER: "1"
+        run: |
+          cargo test --features test-provider \
+            --test code_ui_scenarios \
+            --test harness_self_test \
+            --test code_codex_default_tui_test \
+            -- --test-threads=1
+
+      - name: Upload TUI scenario artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-ui-scenarios
+          path: target/code-ui-scenarios/**
+          if-no-files-found: ignore
+          retention-days: 7
+
+  network-remotes:
+    name: compat-network-remotes
+    runs-on: [self-hosted]
+
+    env:
+      CARGO_TERM_COLOR: always
+      RUSTUP_TOOLCHAIN: stable
+      LIBRA_SKIP_WEB_BUILD: "1"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Enable pnpm
+        run: corepack enable
+
+      # Network-only test layer (`test-network` feature gate). Tests requiring outbound
+      # network but no secrets are surfaced through this job; tests requiring real
+      # credentials live behind `test-live-ai` / `test-live-cloud` and run only in
+      # the `compat-live-*` (workflow_dispatch) jobs, which are intentionally not
+      # GitHub required-checks.
+      - name: Run network-remote tests
+        run: cargo test --all --features test-network

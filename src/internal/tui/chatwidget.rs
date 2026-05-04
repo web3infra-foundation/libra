@@ -29,14 +29,22 @@ struct DagPanelNode {
     kind: TaskKind,
     title: String,
     dependency_count: usize,
+    dependencies: Vec<Uuid>,
     depth: usize,
+    /// Column within the depth layer (0..lanes_at_depth).
+    lane: usize,
     ordinal: usize,
     status: TaskNodeStatus,
 }
 
 #[derive(Debug, Clone, Default)]
 struct DagPanelState {
+    intent_spec_id: String,
     revision: u32,
+    parent_revision: Option<u32>,
+    replan_reason: Option<String>,
+    max_parallel: u8,
+    checkpoint_count: usize,
     completed: usize,
     total: usize,
     nodes: Vec<DagPanelNode>,
@@ -54,23 +62,44 @@ impl DagPanelState {
             }
         }
 
+        // Stable lane assignment: tasks at the same depth keep the order they
+        // appear in `plan.tasks`, so re-renders don't shuffle columns.
+        let mut lane_cursor: std::collections::HashMap<usize, usize> =
+            std::collections::HashMap::new();
         let nodes = plan
             .tasks
             .iter()
             .enumerate()
-            .map(|(idx, task)| DagPanelNode {
-                task_id: task.id(),
-                kind: task.kind.clone(),
-                title: task.title().to_string(),
-                dependency_count: task.dependencies().len(),
-                depth: id_to_depth.get(&task.id()).copied().unwrap_or_default(),
-                ordinal: idx + 1,
-                status: TaskNodeStatus::Pending,
+            .map(|(idx, task)| {
+                let depth = id_to_depth.get(&task.id()).copied().unwrap_or_default();
+                let lane = lane_cursor.entry(depth).or_default();
+                let assigned_lane = *lane;
+                *lane += 1;
+                DagPanelNode {
+                    task_id: task.id(),
+                    kind: task.kind.clone(),
+                    title: task.title().to_string(),
+                    dependency_count: task.dependencies().len(),
+                    dependencies: task.dependencies().to_vec(),
+                    depth,
+                    lane: assigned_lane,
+                    ordinal: idx + 1,
+                    status: TaskNodeStatus::Pending,
+                }
             })
             .collect::<Vec<_>>();
 
         Self {
+            intent_spec_id: plan.intent_spec_id.clone(),
             revision: plan.revision,
+            parent_revision: plan.parent_revision,
+            replan_reason: plan
+                .replan_reason
+                .as_ref()
+                .map(|reason| reason.trim().to_string())
+                .filter(|reason| !reason.is_empty()),
+            max_parallel: plan.max_parallel,
+            checkpoint_count: plan.checkpoints.len(),
             total: plan.tasks.len(),
             completed: 0,
             nodes,
@@ -149,6 +178,51 @@ impl DagPanelState {
             .iter()
             .filter(|node| node.status == TaskNodeStatus::Failed)
             .count()
+    }
+
+    /// Width-bounded human-readable lines describing the current thread/plan
+    /// context (intent identifier, revision lineage, replan reason, parallel
+    /// budget, checkpoint count). Returns an empty vec when the available
+    /// width is too small to render anything meaningful.
+    fn context_lines(&self, width: u16) -> Vec<Line<'static>> {
+        if width < 18 {
+            return Vec::new();
+        }
+        let mut lines: Vec<Line<'static>> = Vec::new();
+
+        if !self.intent_spec_id.is_empty() {
+            let intent = truncate_label(&self.intent_spec_id, width.saturating_sub(7) as usize);
+            lines.push(Line::from(vec![
+                Span::styled("intent ", theme::text::muted()),
+                Span::styled(intent, theme::text::primary().add_modifier(Modifier::BOLD)),
+            ]));
+        }
+
+        let lineage = match self.parent_revision {
+            Some(parent) => format!("plan r{} ← r{}", self.revision, parent),
+            None => format!("plan r{}", self.revision),
+        };
+        let parallel = format!("· parallel {}", self.max_parallel.max(1));
+        let checkpoints = if self.checkpoint_count > 0 {
+            format!(" · checkpoints {}", self.checkpoint_count)
+        } else {
+            String::new()
+        };
+        let line = format!("{lineage} {parallel}{checkpoints}");
+        lines.push(Line::styled(
+            truncate_label(&line, width as usize),
+            theme::text::muted(),
+        ));
+
+        if let Some(reason) = self.replan_reason.as_ref() {
+            let label = format!("replan: {reason}");
+            lines.push(Line::styled(
+                truncate_label(&label, width as usize),
+                theme::status::warning().add_modifier(Modifier::DIM),
+            ));
+        }
+
+        lines
     }
 }
 
@@ -489,6 +563,8 @@ pub struct ChatWidget {
     task_mux: Option<TaskMuxState>,
     /// Number of lines scrolled up from the bottom. `0` means pinned to bottom.
     pub scroll_from_bottom_lines: usize,
+    /// Compact usage badge rendered in the chat-area header row.
+    usage_header: Option<String>,
     /// Bottom pane for input.
     pub bottom_pane: BottomPane,
     /// Last rendered input area rectangle (for mouse hit-testing).
@@ -505,6 +581,7 @@ impl ChatWidget {
             dag_panel: None,
             task_mux: None,
             scroll_from_bottom_lines: 0,
+            usage_header: None,
             bottom_pane: BottomPane::new(),
             last_input_area: None,
             last_chat_area_width: 80,
@@ -557,6 +634,10 @@ impl ChatWidget {
         self.dag_panel = None;
         self.task_mux = None;
         self.scroll_from_bottom_lines = 0;
+    }
+
+    pub fn set_usage_header(&mut self, usage_header: Option<String>) {
+        self.usage_header = usage_header;
     }
 
     pub fn show_dag_panel(&mut self, plan: ExecutionPlanSpec) {
@@ -804,10 +885,26 @@ impl ChatWidget {
             return;
         }
 
-        self.render_history_cells(main_area, buf);
+        let history_area = self.render_usage_header(main_area, buf);
+        self.render_history_cells(history_area, buf);
         if let Some(aux_area) = aux_area {
             self.render_dag_panel(aux_area, buf);
         }
+    }
+
+    fn render_usage_header(&self, area: Rect, buf: &mut Buffer) -> Rect {
+        let Some(header) = self.usage_header.as_deref() else {
+            return area;
+        };
+        if area.width == 0 || area.height == 0 {
+            return area;
+        }
+        let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
+        let header_text = truncate_label(header, chunks[0].width as usize);
+        Paragraph::new(Line::styled(header_text, theme::text::muted()))
+            .alignment(Alignment::Right)
+            .render(chunks[0], buf);
+        chunks[1]
     }
 
     fn split_chat_layout(&self, area: Rect) -> (Rect, Option<Rect>) {
@@ -1251,21 +1348,35 @@ impl ChatWidget {
             ),
         ]);
         Paragraph::new(title).render(Rect::new(area.x, area.y, area.width, 1), buf);
+
+        // Context block: intent / plan lineage / replan reason. Sits between
+        // the title and the "Thread graph" heading.
+        let context_area_top = area.y.saturating_add(1);
+        let context_lines = panel.context_lines(area.width);
+        let context_height = (context_lines.len() as u16).min(area.height.saturating_sub(1));
+        if context_height > 0 {
+            let context_rect = Rect::new(area.x, context_area_top, area.width, context_height);
+            Paragraph::new(Text::from(context_lines)).render(context_rect, buf);
+        }
+
+        // Layout: title (1 row) + context (N rows) + blank gap + heading + blank + graph rows.
+        let heading_y = context_area_top
+            .saturating_add(context_height)
+            .saturating_add(1);
+        if heading_y >= area.bottom() {
+            return;
+        }
         Paragraph::new(Line::styled(
             "Thread graph",
             theme::text::primary().add_modifier(Modifier::BOLD),
         ))
-        .render(
-            Rect::new(area.x, area.y.saturating_add(2), area.width, 1),
-            buf,
-        );
+        .render(Rect::new(area.x, heading_y, area.width, 1), buf);
 
-        let rows_area = Rect::new(
-            area.x,
-            area.y.saturating_add(4),
-            area.width,
-            area.height.saturating_sub(4),
-        );
+        let rows_y = heading_y.saturating_add(2);
+        if rows_y >= area.bottom() {
+            return;
+        }
+        let rows_area = Rect::new(area.x, rows_y, area.width, area.bottom() - rows_y);
         if rows_area.height == 0 {
             return;
         }
@@ -1276,8 +1387,17 @@ impl ChatWidget {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkflowBranchLane {
+    /// Trunk row (intent/plan/phase/validation/release). Renders on lane 0
+    /// with continuation through the multi-lane region below.
     Main,
+    /// Task row, using `WorkflowBranchRow::lane` as a column index alongside
+    /// the trunk. `lanes_in_layer` reports the fan width for the depth layer
+    /// so the renderer can draw connecting edges.
     Task,
+    /// Synthetic row that draws the fan-in connector merging an N-lane layer
+    /// back to the trunk before the next stage. Reserves its own grid row so
+    /// it never overlaps with a labelled node.
+    LayerMerge,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1294,6 +1414,24 @@ struct WorkflowBranchRow {
     lane: WorkflowBranchLane,
     status: WorkflowBranchStatus,
     label: String,
+    /// Column within the depth layer (0-based). Only meaningful for `Task`.
+    lane_index: usize,
+    /// Fan width of the depth layer this row belongs to. Only meaningful for
+    /// `Task`. Used by the renderer to draw fan-out / fan-in edges.
+    lanes_in_layer: usize,
+    /// First/last task row marker for the layer. Used by the renderer to
+    /// position fan-out / fan-in glyphs.
+    layer_position: LayerPosition,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum LayerPosition {
+    #[default]
+    None,
+    First,
+    Middle,
+    Last,
+    Solo,
 }
 
 fn workflow_branch_rows(panel: &DagPanelState, max_rows: usize) -> Vec<WorkflowBranchRow> {
@@ -1301,33 +1439,127 @@ fn workflow_branch_rows(panel: &DagPanelState, max_rows: usize) -> Vec<WorkflowB
         return Vec::new();
     }
 
-    let lane_count = panel.lane_count().max(1);
-    let layer_count = panel.depth_count().max(1);
+    let lane_count = panel.lane_count();
+    let layer_count = panel.depth_count();
     let mut rows = Vec::new();
     rows.push(WorkflowBranchRow {
         lane: WorkflowBranchLane::Main,
         status: WorkflowBranchStatus::Complete,
         label: "intent: confirm".to_string(),
+        lane_index: 0,
+        lanes_in_layer: 0,
+        layer_position: LayerPosition::None,
     });
+    let plan_label = if panel.nodes.is_empty() {
+        "plan: exec + test".to_string()
+    } else {
+        format!(
+            "plan: exec + test · {} lanes · {} layers",
+            lane_count.max(1),
+            layer_count.max(1)
+        )
+    };
     rows.push(WorkflowBranchRow {
         lane: WorkflowBranchLane::Main,
         status: WorkflowBranchStatus::Complete,
-        label: format!("plan: exec + test · {lane_count} lanes · {layer_count} layers"),
+        label: plan_label,
+        lane_index: 0,
+        lanes_in_layer: 0,
+        layer_position: LayerPosition::None,
     });
     rows.push(WorkflowBranchRow {
         lane: WorkflowBranchLane::Main,
         status: workflow_phase2_status(panel),
         label: "phase 2: start".to_string(),
+        lane_index: 0,
+        lanes_in_layer: 0,
+        layer_position: LayerPosition::None,
     });
 
     let reserve_for_terminal_rows = 2usize;
-    let task_capacity = max_rows.saturating_sub(rows.len() + reserve_for_terminal_rows);
+    let base_task_capacity = max_rows.saturating_sub(rows.len() + reserve_for_terminal_rows);
+    // If we will truncate, drop one slot so the `"... N more tasks"` overflow
+    // marker can actually be emitted; the previous capacity exactly equalled
+    // the budget and the overflow guard below was therefore unreachable.
+    let will_omit = panel.nodes.len() > base_task_capacity;
+    let task_capacity = if will_omit && base_task_capacity > 1 {
+        base_task_capacity - 1
+    } else {
+        base_task_capacity
+    };
+    // Reserve the saved slot for the overflow marker, so the synthetic
+    // `LayerMerge` row below cannot eat it before the marker is pushed.
+    let reserve_for_overflow_marker = usize::from(will_omit && base_task_capacity > 1);
     let visible_task_count = panel.nodes.len().min(task_capacity);
-    for node in panel.nodes.iter().take(visible_task_count) {
+    // Layer-aware ordering: render tasks grouped by depth (top-to-bottom),
+    // then by lane (left-to-right) so multi-lane layers stay contiguous even
+    // when the underlying plan declared tasks in interleaved order.
+    let mut depth_sorted: Vec<&DagPanelNode> = panel.nodes.iter().collect();
+    depth_sorted.sort_by_key(|node| (node.depth, node.lane, node.ordinal));
+    let visible_nodes: Vec<&DagPanelNode> =
+        depth_sorted.into_iter().take(visible_task_count).collect();
+    // Recompute lane widths from the visible subset, not the full panel
+    // state. Otherwise a row budget that truncates a parallel layer mid-fan
+    // would still draw connectors and ghost-lane glyphs for tasks that are
+    // not actually being rendered.
+    let visible_lanes_at_depth: std::collections::HashMap<usize, usize> = {
+        let mut per_depth: std::collections::HashMap<usize, usize> =
+            std::collections::HashMap::new();
+        for node in &visible_nodes {
+            *per_depth.entry(node.depth).or_default() += 1;
+        }
+        per_depth
+    };
+    let id_to_ordinal: std::collections::HashMap<Uuid, usize> = panel
+        .nodes
+        .iter()
+        .map(|node| (node.task_id, node.ordinal))
+        .collect();
+    for (idx, node) in visible_nodes.iter().enumerate() {
         let dep_suffix = if node.dependency_count == 0 {
             String::new()
         } else {
-            format!(" · dep {}", node.dependency_count)
+            // Show explicit predecessor ordinals (`dep 01,02`) instead of just a
+            // count so reviewers can trace the DAG without expanding the row.
+            let mut deps: Vec<usize> = node
+                .dependencies
+                .iter()
+                .filter_map(|dep| id_to_ordinal.get(dep).copied())
+                .collect();
+            deps.sort_unstable();
+            if deps.is_empty() {
+                format!(" · dep {}", node.dependency_count)
+            } else {
+                let joined = deps
+                    .iter()
+                    .map(|ord| format!("{:02}", ord))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!(" · dep {joined}")
+            }
+        };
+        let lanes = visible_lanes_at_depth
+            .get(&node.depth)
+            .copied()
+            .unwrap_or(1)
+            .max(1);
+        let prev_depth = if idx == 0 {
+            None
+        } else {
+            Some(visible_nodes[idx - 1].depth)
+        };
+        let next_depth = visible_nodes.get(idx + 1).map(|next| next.depth);
+        let layer_position = match (prev_depth, next_depth) {
+            (prev, next) if prev != Some(node.depth) && next != Some(node.depth) => {
+                if lanes == 1 {
+                    LayerPosition::Solo
+                } else {
+                    LayerPosition::First
+                }
+            }
+            (prev, _) if prev != Some(node.depth) => LayerPosition::First,
+            (_, next) if next != Some(node.depth) => LayerPosition::Last,
+            _ => LayerPosition::Middle,
         };
         rows.push(WorkflowBranchRow {
             lane: WorkflowBranchLane::Task,
@@ -1339,7 +1571,38 @@ fn workflow_branch_rows(panel: &DagPanelState, max_rows: usize) -> Vec<WorkflowB
                 node.title,
                 dep_suffix
             ),
+            lane_index: node.lane,
+            lanes_in_layer: lanes,
+            layer_position,
         });
+
+        // After the last task in a multi-lane layer, reserve a synthetic
+        // merge row so the fan-in glyphs don't overwrite the next stage. We
+        // only push the merge if the running budget still has room for: the
+        // merge row itself, all REMAINING visible task rows below this layer,
+        // the validation/release stages, and the overflow marker (when
+        // truncation is pending). Otherwise `truncate(max_rows)` below would
+        // silently drop downstream task rows, terminal stages, or the
+        // overflow marker.
+        let remaining_visible_task_rows = visible_nodes.len().saturating_sub(idx + 1);
+        if matches!(layer_position, LayerPosition::Last)
+            && lanes > 1
+            && rows.len()
+                + 1
+                + remaining_visible_task_rows
+                + reserve_for_terminal_rows
+                + reserve_for_overflow_marker
+                <= max_rows
+        {
+            rows.push(WorkflowBranchRow {
+                lane: WorkflowBranchLane::LayerMerge,
+                status: WorkflowBranchStatus::Pending,
+                label: String::new(),
+                lane_index: 0,
+                lanes_in_layer: lanes,
+                layer_position: LayerPosition::None,
+            });
+        }
     }
 
     let omitted = panel.nodes.len().saturating_sub(visible_task_count);
@@ -1348,6 +1611,9 @@ fn workflow_branch_rows(panel: &DagPanelState, max_rows: usize) -> Vec<WorkflowB
             lane: WorkflowBranchLane::Task,
             status: WorkflowBranchStatus::Pending,
             label: format!("... {omitted} more tasks"),
+            lane_index: 0,
+            lanes_in_layer: 1,
+            layer_position: LayerPosition::Solo,
         });
     }
 
@@ -1355,11 +1621,17 @@ fn workflow_branch_rows(panel: &DagPanelState, max_rows: usize) -> Vec<WorkflowB
         lane: WorkflowBranchLane::Main,
         status: workflow_validation_status(panel),
         label: "validation".to_string(),
+        lane_index: 0,
+        lanes_in_layer: 0,
+        layer_position: LayerPosition::None,
     });
     rows.push(WorkflowBranchRow {
         lane: WorkflowBranchLane::Main,
         status: workflow_stage_status(panel.release_status),
         label: "release".to_string(),
+        lane_index: 0,
+        lanes_in_layer: 0,
+        layer_position: LayerPosition::None,
     });
     rows.truncate(max_rows);
     rows
@@ -1412,19 +1684,46 @@ fn workflow_status_from_task(status: &TaskNodeStatus) -> WorkflowBranchStatus {
     }
 }
 
+/// Spacing between adjacent task lanes (number of columns each lane occupies).
+const LANE_STRIDE: u16 = 3;
+
 fn render_workflow_branch_rows(area: Rect, buf: &mut Buffer, rows: &[WorkflowBranchRow]) {
     if rows.is_empty() || area.width < 8 {
         return;
     }
 
     let main_x = area.x.saturating_add(2);
-    let branch_x = area.x.saturating_add(5).min(area.right().saturating_sub(1));
-    let first_branch = rows
+    let max_lanes = rows
         .iter()
-        .position(|row| row.lane == WorkflowBranchLane::Task);
-    let last_branch = rows
-        .iter()
-        .rposition(|row| row.lane == WorkflowBranchLane::Task);
+        .filter(|row| row.lane == WorkflowBranchLane::Task)
+        .map(|row| row.lanes_in_layer)
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    // First task lane sits 3 columns to the right of the trunk.
+    let branch_origin = main_x.saturating_add(3);
+    // Width consumed by lane glyphs alone: max_lanes lanes × stride, minus
+    // trailing slack so the label still fits.
+    let lane_columns = (max_lanes as u16).saturating_mul(LANE_STRIDE);
+    let label_origin = branch_origin
+        .saturating_add(lane_columns.saturating_sub(LANE_STRIDE.saturating_sub(1)))
+        .min(area.right().saturating_sub(1));
+
+    // Indices of the first and last task-or-merge rows so we can keep the
+    // in-layer lane lines visible across all rows that span the task block
+    // (including synthetic merge markers).
+    let first_branch = rows.iter().position(|row| {
+        matches!(
+            row.lane,
+            WorkflowBranchLane::Task | WorkflowBranchLane::LayerMerge
+        )
+    });
+    let last_branch = rows.iter().rposition(|row| {
+        matches!(
+            row.lane,
+            WorkflowBranchLane::Task | WorkflowBranchLane::LayerMerge
+        )
+    });
     let trunk_style = theme::text::subtle();
     let branch_style = theme::interactive::accent();
 
@@ -1434,42 +1733,134 @@ fn render_workflow_branch_rows(area: Rect, buf: &mut Buffer, rows: &[WorkflowBra
             break;
         }
 
-        if rows.len() > 1 {
+        // Draw the trunk line on every interior row so rows above and below
+        // visually connect. We draw `│` first and let the node glyph below
+        // overwrite it where appropriate. Clip to the panel area so we never
+        // touch a column owned by an adjacent panel.
+        if rows.len() > 1 && main_x < area.right() {
             set_branch_cell(buf, main_x, y, "│", trunk_style);
         }
 
-        if row.lane == WorkflowBranchLane::Task {
-            if first_branch == Some(index) && branch_x > main_x {
-                set_branch_cell(buf, main_x, y, "├", branch_style);
-                for x in main_x.saturating_add(1)..branch_x {
-                    set_branch_cell(buf, x, y, "─", branch_style);
+        // While we are inside the task block, keep all in-layer lanes drawn
+        // through this row so multi-row layers stay visually connected. Skip
+        // for the LayerMerge row since it draws its own connectors.
+        if let (Some(first), Some(last)) = (first_branch, last_branch)
+            && row.lane == WorkflowBranchLane::Task
+            && index >= first
+            && index <= last
+        {
+            for lane_idx in 0..row.lanes_in_layer {
+                let lane_x = lane_x_for(branch_origin, lane_idx);
+                if lane_x < area.right() {
+                    set_branch_cell(buf, lane_x, y, "│", branch_style);
                 }
-            }
-            if let (Some(first), Some(last)) = (first_branch, last_branch)
-                && index >= first
-                && index <= last
-            {
-                set_branch_cell(buf, branch_x, y, "│", branch_style);
             }
         }
 
-        let node_x = match row.lane {
-            WorkflowBranchLane::Main => main_x,
-            WorkflowBranchLane::Task => branch_x,
-        };
-        let label_x = match row.lane {
-            WorkflowBranchLane::Main => main_x.saturating_add(4),
-            WorkflowBranchLane::Task => branch_x.saturating_add(3),
-        };
-        set_branch_cell(
-            buf,
-            node_x,
-            y,
-            workflow_branch_glyph(row.status),
-            workflow_branch_style(row.status).add_modifier(Modifier::BOLD),
-        );
-        write_branch_label(buf, label_x, y, area.right(), &row.label, row.status);
+        match row.lane {
+            WorkflowBranchLane::Main => {
+                set_branch_cell(
+                    buf,
+                    main_x,
+                    y,
+                    workflow_branch_glyph(row.status),
+                    workflow_branch_style(row.status).add_modifier(Modifier::BOLD),
+                );
+                write_branch_label(
+                    buf,
+                    main_x.saturating_add(4),
+                    y,
+                    area.right(),
+                    &row.label,
+                    row.status,
+                );
+            }
+            WorkflowBranchLane::Task => {
+                let lane_x = lane_x_for(branch_origin, row.lane_index);
+                if lane_x < area.right() {
+                    // Draw a fan-out connector on the row that opens the
+                    // layer, joining the trunk to all lanes for this layer.
+                    if matches!(
+                        row.layer_position,
+                        LayerPosition::First | LayerPosition::Solo
+                    ) {
+                        set_branch_cell(buf, main_x, y, "├", branch_style);
+                        let last_lane_x =
+                            lane_x_for(branch_origin, row.lanes_in_layer.saturating_sub(1));
+                        // Continuous horizontal bridge from the trunk to the
+                        // far-right lane, clipped to the panel area so we
+                        // never bleed into adjacent panes. Lane glyphs are
+                        // overlaid afterwards.
+                        let bridge_end = last_lane_x.min(area.right().saturating_sub(1));
+                        for x in main_x.saturating_add(1)..=bridge_end {
+                            set_branch_cell(buf, x, y, "─", branch_style);
+                        }
+                        if row.lanes_in_layer > 1 {
+                            for lane_idx in 0..row.lanes_in_layer {
+                                let mid_x = lane_x_for(branch_origin, lane_idx);
+                                if mid_x >= area.right() {
+                                    break;
+                                }
+                                let glyph = if lane_idx == 0 && row.lane_index == 0 {
+                                    workflow_branch_glyph(row.status)
+                                } else if lane_idx == row.lanes_in_layer - 1 {
+                                    "╮"
+                                } else {
+                                    "┬"
+                                };
+                                let style = if lane_idx == 0 && row.lane_index == 0 {
+                                    workflow_branch_style(row.status).add_modifier(Modifier::BOLD)
+                                } else {
+                                    branch_style
+                                };
+                                set_branch_cell(buf, mid_x, y, glyph, style);
+                            }
+                        }
+                    }
+
+                    // Always render the node glyph for this row's lane.
+                    set_branch_cell(
+                        buf,
+                        lane_x,
+                        y,
+                        workflow_branch_glyph(row.status),
+                        workflow_branch_style(row.status).add_modifier(Modifier::BOLD),
+                    );
+
+                    let label_x = lane_x.saturating_add(2).max(label_origin);
+                    write_branch_label(buf, label_x, y, area.right(), &row.label, row.status);
+                }
+            }
+            WorkflowBranchLane::LayerMerge => {
+                if row.lanes_in_layer > 1 {
+                    set_branch_cell(buf, main_x, y, "├", branch_style);
+                    let last_lane_x = lane_x_for(branch_origin, row.lanes_in_layer - 1);
+                    // Bridge clipped to the panel area so the merge connector
+                    // never overwrites the column to the right of the panel.
+                    let bridge_end = last_lane_x.min(area.right().saturating_sub(1));
+                    for x in main_x.saturating_add(1)..=bridge_end {
+                        set_branch_cell(buf, x, y, "─", branch_style);
+                    }
+                    for lane_idx in 0..row.lanes_in_layer {
+                        let mid_x = lane_x_for(branch_origin, lane_idx);
+                        if mid_x >= area.right() {
+                            break;
+                        }
+                        let glyph = if lane_idx == row.lanes_in_layer - 1 {
+                            "╯"
+                        } else {
+                            "┴"
+                        };
+                        set_branch_cell(buf, mid_x, y, glyph, branch_style);
+                    }
+                }
+            }
+        }
     }
+}
+
+fn lane_x_for(origin: u16, lane_index: usize) -> u16 {
+    origin.saturating_add((lane_index as u16).saturating_mul(LANE_STRIDE))
 }
 
 fn set_branch_cell(buf: &mut Buffer, x: u16, y: u16, symbol: &str, style: Style) {
@@ -1809,7 +2200,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        ChatWidget, TaskMuxTranscriptEntry, WorkflowBranchStatus, render_task_transcript_lines,
+        ChatWidget, DagPanelState, LayerPosition, TaskMuxTranscriptEntry, WorkflowBranchLane,
+        WorkflowBranchRow, WorkflowBranchStatus, render_task_transcript_lines,
         workflow_branch_rows,
     };
     use crate::internal::{
@@ -1996,6 +2388,27 @@ mod tests {
         widget.show_dag_panel(sample_parallel_plan());
 
         assert!(widget.task_mux_list_lines().is_none());
+    }
+
+    #[test]
+    fn chat_usage_header_reserves_top_row() {
+        let mut widget = ChatWidget::new();
+        widget.add_cell(Box::new(AssistantHistoryCell::new(
+            "transcript sentinel".to_string(),
+        )));
+        widget.set_usage_header(Some("openai/gpt-test · 10 tok · 1.2s".to_string()));
+
+        let area = Rect::new(0, 0, 80, 8);
+        let mut buf = Buffer::empty(area);
+        widget.render_chat_area(area, &mut buf);
+
+        let rendered = (0..area.height)
+            .map(|y| row_text(&buf, y, area.width))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("openai/gpt-test"));
+        assert!(rendered.contains("transcript sentinel"));
     }
 
     #[test]
@@ -2235,5 +2648,215 @@ mod tests {
         assert!(rendered.contains("Thread graph"));
         assert!(rendered.contains("Plan r1"));
         assert!(rendered.contains("G03 Gate"));
+    }
+
+    #[test]
+    fn dag_panel_renders_intent_and_plan_lineage_in_context_block() {
+        let plan = sample_serial_replan(3);
+        let mut widget = ChatWidget::new();
+        widget.show_dag_panel(plan);
+
+        let area = Rect::new(0, 0, 60, 24);
+        let mut buf = Buffer::empty(area);
+        widget.render_dag_panel(area, &mut buf);
+
+        let rendered = (0..area.height)
+            .map(|y| row_text(&buf, y, area.width))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            rendered.contains("intent intent-replan"),
+            "rendered=\n{rendered}"
+        );
+        assert!(rendered.contains("plan r3 ← r2"), "rendered=\n{rendered}");
+        assert!(
+            rendered.contains("replan: parallel task failed"),
+            "rendered=\n{rendered}"
+        );
+        assert!(rendered.contains("parallel 1"), "rendered=\n{rendered}");
+    }
+
+    #[test]
+    fn overflow_marker_appears_when_tasks_exceed_budget() {
+        // 5 tasks but only enough room to render 2 — the renderer must emit
+        // a visible "... 3 more tasks" marker rather than silently dropping
+        // the rest.
+        let plan = ExecutionPlanSpec {
+            intent_spec_id: "intent-overflow".into(),
+            revision: 7,
+            parent_revision: None,
+            replan_reason: None,
+            tasks: (0..5)
+                .map(|idx| make_task(&format!("Step {}", idx + 1), TaskKind::Analysis, vec![]))
+                .collect(),
+            max_parallel: 1,
+            checkpoints: vec![],
+        };
+        let panel = DagPanelState::new(plan);
+        // 8 rows = 3 main + 2 task + 1 overflow + 2 terminal.
+        let rows = workflow_branch_rows(&panel, 8);
+        assert!(
+            rows.iter().any(|row| row.label == "... 3 more tasks"),
+            "expected overflow marker, got {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.label == "validation"),
+            "validation row dropped, got {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.label == "release"),
+            "release row dropped, got {rows:?}"
+        );
+    }
+
+    #[test]
+    fn overflow_marker_survives_competing_layer_merge_row() {
+        // Two parallel implementation tasks at depth 0 plus three sequential
+        // analyses at depths 1..=3. The merge guard must yield to the
+        // overflow marker AND leave room for any remaining downstream task
+        // rows so neither validation/release nor the marker is dropped.
+        let parallel_a = make_task("Parallel A", TaskKind::Implementation, vec![]);
+        let parallel_b = make_task("Parallel B", TaskKind::Implementation, vec![]);
+        let mid = make_task(
+            "Mid",
+            TaskKind::Analysis,
+            vec![parallel_a.id(), parallel_b.id()],
+        );
+        let late = make_task("Late", TaskKind::Analysis, vec![mid.id()]);
+        let last = make_task("Last", TaskKind::Analysis, vec![late.id()]);
+        let plan = ExecutionPlanSpec {
+            intent_spec_id: "intent-merge-vs-overflow".into(),
+            revision: 9,
+            parent_revision: None,
+            replan_reason: None,
+            tasks: vec![parallel_a, parallel_b, mid, late, last],
+            max_parallel: 2,
+            checkpoints: vec![],
+        };
+        let panel = DagPanelState::new(plan);
+
+        // Two budgets that previously failed in different ways: an 8-row
+        // budget exposes the original LayerMerge-vs-overflow conflict, and a
+        // 9-row budget exposes the remaining-task-rows variant where the
+        // merge eats the overflow slot via downstream task pressure.
+        for budget in [8usize, 9] {
+            let rows = workflow_branch_rows(&panel, budget);
+            assert!(
+                rows.iter().any(|row| row.label == "validation"),
+                "validation dropped at budget {budget}, got {rows:?}"
+            );
+            assert!(
+                rows.iter().any(|row| row.label == "release"),
+                "release dropped at budget {budget}, got {rows:?}"
+            );
+            assert!(
+                rows.iter()
+                    .any(|row| row.label.starts_with("...") && row.label.contains("more tasks")),
+                "overflow marker dropped at budget {budget}, got {rows:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn truncated_parallel_layer_only_draws_visible_lanes() {
+        // Build a 3-lane parallel layer where the row budget only admits the
+        // first task. The renderer must not draw connector glyphs for the
+        // two ghost lanes.
+        let first = make_task("Implement A", TaskKind::Implementation, vec![]);
+        let second = make_task("Implement B", TaskKind::Implementation, vec![]);
+        let third = make_task("Implement C", TaskKind::Implementation, vec![]);
+        let plan = ExecutionPlanSpec {
+            intent_spec_id: "intent-trim".into(),
+            revision: 4,
+            parent_revision: None,
+            replan_reason: None,
+            tasks: vec![first, second, third],
+            max_parallel: 3,
+            checkpoints: vec![],
+        };
+        let panel = DagPanelState::new(plan);
+
+        // 6 row budget = intent + plan + phase + 1 task + validation + release.
+        let rows = workflow_branch_rows(&panel, 6);
+        let task_rows: Vec<&WorkflowBranchRow> = rows
+            .iter()
+            .filter(|row| row.lane == WorkflowBranchLane::Task)
+            .collect();
+        assert_eq!(task_rows.len(), 1, "rows = {rows:?}");
+        // The lone visible task must be marked as a Solo layer (no fan-out
+        // glyphs) because no other lanes are being rendered alongside it.
+        let only_task = task_rows[0];
+        assert_eq!(only_task.lanes_in_layer, 1);
+        assert_eq!(only_task.layer_position, LayerPosition::Solo);
+        // No synthetic LayerMerge row should slip in either.
+        assert!(
+            !rows
+                .iter()
+                .any(|row| row.lane == WorkflowBranchLane::LayerMerge)
+        );
+    }
+
+    #[test]
+    fn parallel_layer_fans_out_into_multiple_lanes() {
+        let plan = sample_parallel_plan();
+        let mut widget = ChatWidget::new();
+        widget.show_dag_panel(plan);
+
+        let panel = widget.dag_panel.as_ref().unwrap();
+        let rows = workflow_branch_rows(panel, 32);
+        let task_layer: Vec<&WorkflowBranchRow> = rows
+            .iter()
+            .filter(|row| row.lane == WorkflowBranchLane::Task)
+            .collect();
+        // Two parallel implementation tasks at depth 0, one gate at depth 1.
+        assert!(
+            task_layer
+                .iter()
+                .any(|row| row.lane_index == 1 && row.lanes_in_layer == 2)
+        );
+        assert_eq!(
+            task_layer
+                .iter()
+                .filter(|row| row.lanes_in_layer == 2)
+                .count(),
+            2
+        );
+
+        let area = Rect::new(0, 0, 60, 32);
+        let mut buf = Buffer::empty(area);
+        widget.render_dag_panel(area, &mut buf);
+        let row_lines: Vec<String> = (0..area.height)
+            .map(|y| row_text(&buf, y, area.width))
+            .collect();
+        let rendered = row_lines.join("\n");
+
+        // Pin the exact column layout of the fan-out row so a regression that
+        // dropped the lane-0 → lane-1 bridge segment (cols 6,7) cannot pass.
+        // Layout: main_x=2, branch_origin=5, LANE_STRIDE=3, lanes 0/1 at 5/8.
+        let fanout = row_lines
+            .iter()
+            .find(|line| line.contains('╮'))
+            .expect("fan-out row should contain ╮");
+        let fanout_chars: Vec<char> = fanout.chars().collect();
+        assert_eq!(
+            &fanout_chars[2..=8],
+            &['├', '─', '─', '○', '─', '─', '╮'][..],
+            "fan-out columns mismatch, got:\n{rendered}"
+        );
+
+        let fanin = row_lines
+            .iter()
+            .find(|line| line.contains('╯'))
+            .expect("fan-in row should contain ╯");
+        let fanin_chars: Vec<char> = fanin.chars().collect();
+        assert_eq!(
+            &fanin_chars[2..=8],
+            &['├', '─', '─', '┴', '─', '─', '╯'][..],
+            "fan-in columns mismatch, got:\n{rendered}"
+        );
+
+        // Dependency suffix should reference the upstream task ordinals.
+        assert!(rendered.contains("dep 01,02") || rendered.contains("dep 02,01"));
     }
 }

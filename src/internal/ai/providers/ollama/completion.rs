@@ -17,14 +17,15 @@ use crate::internal::ai::{
     client::{CompletionClient, Provider},
     completion::{
         AssistantContent, CompletionError, CompletionModel as CompletionModelTrait,
-        CompletionStreamEvent, CompletionThinking, Function, Message, UserContent,
+        CompletionStreamEvent, CompletionThinking, Message, UserContent,
         request::{CompletionRequest, CompletionResponse},
     },
     providers::{
         ollama::client::Client,
         openai_compat::{
             ChatChoice, ChatErrorResponse, ChatFunctionCall, ChatMessage, ChatResponse,
-            ChatToolCall, ChatToolDefinition, ChatUsage, parse_tools,
+            ChatToolCall, ChatToolDefinition, ChatUsage, parse_choice_content_for_provider,
+            parse_tools,
         },
     },
     tools::ToolDefinition,
@@ -684,6 +685,8 @@ fn ollama_response_to_chat_response(response: OllamaResponse, response_id: Strin
             prompt_tokens,
             completion_tokens,
             total_tokens: prompt_tokens.saturating_add(completion_tokens),
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
         }),
         _ => None,
     };
@@ -1041,43 +1044,7 @@ impl CompletionModelTrait for Model {
             .first()
             .ok_or_else(|| CompletionError::ResponseError("No choices in response".to_string()))?;
 
-        let content = match &choice.message {
-            ChatMessage::Assistant {
-                content,
-                reasoning_content: _,
-                tool_calls,
-            } => {
-                let mut parsed = Vec::new();
-                if let Some(content) = content
-                    && !content.trim().is_empty()
-                {
-                    parsed.push(AssistantContent::Text(
-                        crate::internal::ai::completion::Text {
-                            text: content.clone(),
-                        },
-                    ));
-                }
-                for call in tool_calls {
-                    parsed.push(AssistantContent::ToolCall(
-                        crate::internal::ai::completion::ToolCall {
-                            id: call.id.clone(),
-                            name: call.function.name.clone(),
-                            function: Function {
-                                name: call.function.name.clone(),
-                                arguments: serde_json::from_str(&call.function.arguments)
-                                    .unwrap_or(Value::String(call.function.arguments.clone())),
-                            },
-                        },
-                    ));
-                }
-                parsed
-            }
-            _ => {
-                return Err(CompletionError::ResponseError(
-                    "Expected assistant message in Ollama response".to_string(),
-                ));
-            }
-        };
+        let content = parse_choice_content_for_provider("ollama", choice)?;
 
         Ok(CompletionResponse {
             content,
@@ -1099,8 +1066,8 @@ impl CompletionClient for Client {
 mod tests {
     use super::*;
     use crate::internal::ai::{
-        completion::{AssistantContent, OneOrMany, ToolCall},
-        providers::openai_compat::{ChatMessage, ChatResponse, parse_choice_content},
+        completion::{AssistantContent, Function, OneOrMany, ToolCall},
+        providers::openai_compat::{ChatMessage, ChatResponse, parse_choice_content_for_provider},
     };
 
     #[test]
@@ -1270,6 +1237,35 @@ mod tests {
         assert_eq!(tool_calls[0].id, "call_streamed");
         assert_eq!(tool_calls[0].function.name, "echo");
         assert_eq!(tool_calls[0].function.arguments, r#"{"text":"hi"}"#);
+    }
+
+    #[test]
+    fn test_ollama_repairs_malformed_tool_arguments() {
+        let response = OllamaResponse {
+            model: "qwen3.6".to_string(),
+            created_at: "2026-04-17T13:04:30Z".to_string(),
+            message: OllamaMessage {
+                content: None,
+                thinking: None,
+                tool_calls: vec![OllamaToolCall {
+                    id: Some("call_1".to_string()),
+                    function: OllamaFunctionCall {
+                        name: "read_file".to_string(),
+                        arguments: Value::String("{file_path: 'Cargo.toml',}".to_string()),
+                    },
+                }],
+            },
+            prompt_eval_count: Some(5),
+            eval_count: Some(3),
+        };
+        let response = ollama_response_to_chat_response(response, "ollama-req".to_string());
+        let content = parse_choice_content_for_provider("ollama", &response.choices[0]).unwrap();
+
+        assert!(matches!(
+            &content[0],
+            AssistantContent::ToolCall(call)
+                if call.function.arguments == serde_json::json!({"file_path": "Cargo.toml"})
+        ));
     }
 
     #[test]
@@ -1510,7 +1506,7 @@ mod tests {
         let response: ChatResponse = serde_json::from_str(json).unwrap();
         assert_eq!(response.model, "llama3.2");
 
-        let content = parse_choice_content(&response.choices[0]).unwrap();
+        let content = parse_choice_content_for_provider("ollama", &response.choices[0]).unwrap();
         assert_eq!(content.len(), 1);
         match &content[0] {
             AssistantContent::Text(t) => {

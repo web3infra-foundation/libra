@@ -324,6 +324,7 @@ async fn test_push_file_remote_fails_without_reflog() {
 }
 
 #[tokio::test]
+#[serial]
 /// Test pushing to an invalid remote repository with timeout
 async fn test_push_invalid_remote() {
     if std::env::var("LIBRA_TEST_GITHUB_TOKEN").map_or(true, |v| v.is_empty()) {
@@ -408,6 +409,7 @@ async fn test_push_invalid_remote() {
 
 #[cfg(unix)]
 #[tokio::test]
+#[serial]
 async fn test_push_force_with_local_changes() {
     let temp_root = tempfile::tempdir().expect("failed to create temp root");
     let remote_dir = temp_root.path().join("remote.git");
@@ -966,6 +968,7 @@ fn test_push_quiet_force_still_emits_warning_and_warning_exit_code() {
 
 #[cfg(unix)]
 #[tokio::test]
+#[serial]
 async fn test_push_ssh_remote_via_fake_ssh() {
     let temp_root = tempfile::tempdir().expect("failed to create temp root");
     let remote_dir = temp_root.path().join("remote.git");
@@ -1083,6 +1086,7 @@ async fn test_push_ssh_remote_via_fake_ssh() {
 
 #[cfg(unix)]
 #[tokio::test]
+#[serial]
 async fn test_push_ssh_host_key_failure_is_reported() {
     let temp_root = tempfile::tempdir().expect("failed to create temp root");
     let remote_dir = temp_root.path().join("remote.git");

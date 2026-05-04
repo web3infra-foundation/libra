@@ -117,10 +117,16 @@ Git muscle memory is deeply ingrained. Developers who have used `git checkout` f
 
 The command intentionally supports only the branch-switching subset of `git checkout` -- it does not support file restoration (`git checkout -- file`), which is handled by `libra restore`.
 
-### Why hidden / not promoted?
+### Visible compatibility surface (post-C5)
 
-`checkout` is not prominently featured in help output or documentation indexes. It exists for compatibility, not as a primary interface. New Libra users and AI agents should use `switch` and `restore`, which provide:
-- Typed error enums with stable error codes (checkout uses raw `CliError`)
+`checkout` is exposed in top-level help (`libra --help`) as a compatibility
+surface — it is **no longer hidden**. New users coming from Git can find it
+without surprise, but the help banner and the command index both steer
+day-to-day usage to `switch` (branch navigation) and `restore` (file
+restoration). `switch` and `restore` provide:
+
+- Typed error enums with stable error codes (checkout still uses raw `CliError`
+  pending its own modernization batch)
 - Structured JSON output (`--json` / `--machine`)
 - Fuzzy branch suggestions on typos
 - Explicit semantics (no ambiguity between "switch branch" and "restore file")
