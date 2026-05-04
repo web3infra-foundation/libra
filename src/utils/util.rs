@@ -866,19 +866,51 @@ async fn resolve_commit_base_atom_typed(name: &str) -> Result<ObjectHash, Commit
 
     match object_type {
         ObjectType::Commit => Ok(object_id),
-        ObjectType::Tag => {
-            // Manually dereference tag if search returned a tag object directly
-            let tag_obj: git_internal::internal::object::tag::Tag = load_object(&object_id)
-                .map_err(|e| {
-                    CommitBaseError::classify_storage_failure(format!(
-                        "failed to load tag object: {e}"
-                    ))
-                })?;
-            Ok(tag_obj.object_hash)
-        }
+        ObjectType::Tag => peel_tag_hash_to_commit(&storage, object_id, name),
         _ => Err(CommitBaseError::InvalidReference(format!(
             "reference is not a commit: {name}, is {object_type}"
         ))),
+    }
+}
+
+fn peel_tag_hash_to_commit(
+    storage: &ClientStorage,
+    object_id: ObjectHash,
+    display_name: &str,
+) -> Result<ObjectHash, CommitBaseError> {
+    let mut current = object_id;
+    let mut seen = HashSet::new();
+
+    loop {
+        if !seen.insert(current) {
+            return Err(CommitBaseError::CorruptReference(format!(
+                "tag cycle detected while resolving '{display_name}'"
+            )));
+        }
+
+        let tag_obj: git_internal::internal::object::tag::Tag =
+            load_object(&current).map_err(|error| {
+                CommitBaseError::classify_storage_failure(format!(
+                    "failed to load tag object while resolving '{display_name}': {error}"
+                ))
+            })?;
+        let target_type = storage
+            .get_object_type(&tag_obj.object_hash)
+            .map_err(|error| {
+                CommitBaseError::classify_storage_failure(format!(
+                    "could not read tag target type while resolving '{display_name}': {error}"
+                ))
+            })?;
+
+        match target_type {
+            ObjectType::Commit => return Ok(tag_obj.object_hash),
+            ObjectType::Tag => current = tag_obj.object_hash,
+            _ => {
+                return Err(CommitBaseError::InvalidReference(format!(
+                    "reference is not a commit: {display_name}, tag points to {target_type}"
+                )));
+            }
+        }
     }
 }
 
@@ -1070,6 +1102,10 @@ pub fn get_min_unique_hash_length(commits: &[Commit]) -> usize {
 mod test {
     use std::{env, path::PathBuf};
 
+    use git_internal::internal::object::{
+        signature::{Signature, SignatureType},
+        tag::Tag as GitTag,
+    };
     use sea_orm::{ActiveModelTrait, Set};
     use serial_test::serial;
     use tempfile::tempdir;
@@ -1079,10 +1115,27 @@ mod test {
         command::{
             add::{self, AddArgs},
             commit::{self, CommitArgs},
+            save_object,
         },
         internal::{db::get_db_conn_instance, head::Head, model::reference, tag as internal_tag},
         utils::test,
     };
+
+    fn test_tag_object(object_hash: ObjectHash, object_type: ObjectType, name: &str) -> GitTag {
+        GitTag::new(
+            object_hash,
+            object_type,
+            name.to_string(),
+            Signature {
+                signature_type: SignatureType::Tagger,
+                name: "tester".to_string(),
+                email: "tester@example.com".to_string(),
+                timestamp: 1,
+                timezone: "+0000".to_string(),
+            },
+            format!("{name} message"),
+        )
+    }
 
     #[test]
     ///Test get current directory success.
@@ -1253,6 +1306,93 @@ mod test {
             .await
             .expect("tag object hash ^0 should resolve to the tagged commit");
         assert_eq!(resolved, head_commit);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn get_commit_base_typed_peels_nested_tag_object_hash_to_commit() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+
+        test::ensure_file("tracked.txt", Some("tracked\n"));
+        add::execute(AddArgs {
+            pathspec: vec!["tracked.txt".into()],
+            all: false,
+            update: false,
+            refresh: false,
+            verbose: false,
+            force: false,
+            dry_run: false,
+            ignore_errors: false,
+        })
+        .await;
+        commit::execute(CommitArgs {
+            message: Some("base".into()),
+            disable_pre: true,
+            no_verify: true,
+            ..Default::default()
+        })
+        .await;
+
+        let head_commit = Head::current_commit()
+            .await
+            .expect("expected committed HEAD");
+        let inner = internal_tag::create("inner", Some("inner tag".into()), false)
+            .await
+            .expect("failed to create inner tag");
+        let outer = test_tag_object(inner.target, ObjectType::Tag, "outer");
+        save_object(&outer, &outer.id).expect("failed to save outer tag object");
+
+        let resolved = get_commit_base_typed(&outer.id.to_string())
+            .await
+            .expect("nested tag object hash should resolve to commit");
+
+        assert_eq!(resolved, head_commit);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn get_commit_base_typed_reports_tag_cycle_as_corruption() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+
+        test::ensure_file("tracked.txt", Some("tracked\n"));
+        add::execute(AddArgs {
+            pathspec: vec!["tracked.txt".into()],
+            all: false,
+            update: false,
+            refresh: false,
+            verbose: false,
+            force: false,
+            dry_run: false,
+            ignore_errors: false,
+        })
+        .await;
+        commit::execute(CommitArgs {
+            message: Some("base".into()),
+            disable_pre: true,
+            no_verify: true,
+            ..Default::default()
+        })
+        .await;
+
+        let head_commit = Head::current_commit()
+            .await
+            .expect("expected committed HEAD");
+        let tag_a = test_tag_object(head_commit, ObjectType::Commit, "tag-a");
+        let tag_b = test_tag_object(tag_a.id, ObjectType::Tag, "tag-b");
+        let tag_a_cycle = test_tag_object(tag_b.id, ObjectType::Tag, "tag-a");
+        save_object(&tag_b, &tag_b.id).expect("failed to save tag-b");
+        save_object(&tag_a_cycle, &tag_a.id).expect("failed to save cyclic tag-a");
+
+        let error = get_commit_base_typed(&tag_a.id.to_string())
+            .await
+            .expect_err("tag cycle should fail");
+
+        assert!(matches!(error, CommitBaseError::CorruptReference(_)));
+        assert!(error.to_string().contains("tag cycle detected"));
     }
 
     #[tokio::test]
