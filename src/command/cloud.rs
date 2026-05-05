@@ -31,7 +31,7 @@ use crate::{
         model::{object_index, reference},
     },
     utils::{
-        d1_client::D1Client,
+        d1_client::{AgentCheckpointRow, AgentSessionRow, D1Client},
         error::{CliError, CliResult, emit_warning},
         output::OutputConfig,
         path,
@@ -485,9 +485,13 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
             emit_warning(format!("failed to restore metadata: {}", e));
         }
 
-        // Post-restore: update HEAD and restore worktree if we're in a fresh repo state
-        // This handles the case where we restored a repo into an empty directory
-        // We try to find the latest commit and checkout to it
+        // Post-restore: update HEAD and restore worktree if we're in a fresh repo state.
+        // We do this BEFORE the agent-capture restore so that a strict
+        // agent-capture failure (Codex Q2: hard-fail on partial restore)
+        // doesn't leave the user with a populated objects/refs but no
+        // worktree. The agent_session / agent_checkpoint catalogue is
+        // metadata about external agent runs — it's not blocking for the
+        // user to start working in the restored tree (Codex Q3).
 
         // Check if HEAD has a commit (either restored or existing)
         let head_commit = Head::current_commit_result()
@@ -517,6 +521,17 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
                 println!("No HEAD commit or main branch found. Skipping worktree restore.");
             }
         }
+
+        // CEX-EntireIO §14.3 acceptance: pull `agent_session` /
+        // `agent_checkpoint` rows back from D1 so the new machine sees the
+        // captured-agent listing without having to re-ingest hooks. This
+        // runs LAST (after worktree restore) per Codex Q3 — the inner
+        // helper is strict (Q2), so propagating its error here surfaces
+        // partial-restore problems to the caller without blocking the
+        // worktree materialization that runs above.
+        restore_agent_capture_from_d1(&db_conn, &d1_client, &repo_id)
+            .await
+            .map_err(|e| format!("agent capture restore failed: {}", e))?;
 
         Ok(())
     }
@@ -800,8 +815,6 @@ async fn sync_agent_capture_tables(
 ) -> Result<(), String> {
     use sea_orm::{ConnectionTrait, Statement};
 
-    use crate::utils::d1_client::{AgentCheckpointRow, AgentSessionRow};
-
     // Bail out cleanly when the migration that creates these tables
     // hasn't run on this clone yet. We do this rather than blanket-erroring
     // because `libra cloud sync` is callable on legacy databases.
@@ -924,6 +937,239 @@ async fn sync_agent_capture_tables(
     if sessions_failed > 0 || checkpoints_failed > 0 {
         Err(format!(
             "{} session + {} checkpoint upserts failed",
+            sessions_failed, checkpoints_failed
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// CEX-EntireIO §10.2 / §14.3: restore the local `agent_session` +
+/// `agent_checkpoint` catalog from D1.
+///
+/// Mirrors [`sync_agent_capture_tables`] in reverse: lists D1 rows for the
+/// repo and inserts them into the local SQLite catalog.
+///
+/// Behaviour, refined per Codex Phase-3.5b review:
+/// - Bails with an explicit warning when the local schema predates the
+///   migration that creates these tables (was a silent `Ok(())` previously
+///   — Codex Q4).
+/// - Hard-fails the aggregate when any row can't be restored — restore is
+///   stricter than the upload-side soft-fail because a missing session
+///   would leave orphan checkpoints in the local catalog (Codex Q2).
+/// - Checkpoint upserts use explicit `ON CONFLICT(checkpoint_id) DO UPDATE
+///   SET …` rather than `INSERT OR REPLACE` so the row's CASCADE delete
+///   semantics are preserved on conflict (Codex Q1).
+async fn restore_agent_capture_from_d1(
+    db_conn: &sea_orm::DatabaseConnection,
+    d1_client: &D1Client,
+    repo_id: &str,
+) -> Result<(), String> {
+    use sea_orm::{ConnectionTrait, Statement};
+
+    // Codex round-2 follow-up: check BOTH tables locally — a partial
+    // schema (e.g. `agent_session` exists but `agent_checkpoint` does not
+    // because a half-applied legacy migration left things mid-flight)
+    // would otherwise bypass the warning and either fail loudly later or
+    // silently succeed with no checkpoint rows. Warn and bail in that
+    // case so the user gets a single actionable hint.
+    let backend = db_conn.get_database_backend();
+    let session_present = db_conn
+        .query_one(Statement::from_sql_and_values(
+            backend,
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agent_session' LIMIT 1",
+            [],
+        ))
+        .await
+        .map_err(|e| format!("query sqlite_master: {e}"))?
+        .is_some();
+    let checkpoint_present = db_conn
+        .query_one(Statement::from_sql_and_values(
+            backend,
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agent_checkpoint' LIMIT 1",
+            [],
+        ))
+        .await
+        .map_err(|e| format!("query sqlite_master: {e}"))?
+        .is_some();
+    if !session_present || !checkpoint_present {
+        // Codex review Q4: emit an actionable hint instead of silently
+        // succeeding so a user on an old binary knows why their session
+        // list is empty after restore. Round-2 expanded this check to
+        // include `agent_checkpoint` so a partial schema can't sneak past.
+        emit_warning(
+            "agent_session / agent_checkpoint table absent locally — restore skipped. \
+             Run `libra init` (or upgrade libra) to create the schema, \
+             then rerun `libra cloud restore`.",
+        );
+        return Ok(());
+    }
+
+    println!("Restoring agent_session / agent_checkpoint from D1...");
+
+    // Codex round-2 follow-up: ensure the catalogue tables exist on the
+    // remote D1 before listing. Old backups taken by a libra binary that
+    // predates Phase 3.5a will not have these tables, and the bare
+    // `SELECT … FROM agent_session` would surface as a hard error and
+    // (now that Q3 propagates errors) abort `libra cloud restore`. This
+    // matches the symmetric `sync_agent_capture_tables` upload path,
+    // which already creates the tables before writing — running it on
+    // restore makes a fresh pull from a legacy remote behave like an
+    // empty catalogue rather than failing the whole restore.
+    d1_client
+        .ensure_agent_session_table()
+        .await
+        .map_err(|e| format!("ensure_agent_session_table on D1: {}", e.message))?;
+    d1_client
+        .ensure_agent_checkpoint_table()
+        .await
+        .map_err(|e| format!("ensure_agent_checkpoint_table on D1: {}", e.message))?;
+
+    let session_rows = d1_client
+        .list_agent_sessions(repo_id)
+        .await
+        .map_err(|e| format!("list_agent_sessions: {}", e.message))?;
+    let checkpoint_rows = d1_client
+        .list_agent_checkpoints(repo_id)
+        .await
+        .map_err(|e| format!("list_agent_checkpoints: {}", e.message))?;
+
+    restore_agent_capture_from_rows(db_conn, &session_rows, &checkpoint_rows).await
+}
+
+/// Connection-bound core of [`restore_agent_capture_from_d1`]. Extracted
+/// per Codex Phase-3.5b review Q5 so the per-row INSERT logic is
+/// testable against an in-memory SQLite without a live D1 endpoint.
+///
+/// Returns aggregate counts via the printed report and a hard error if
+/// any row failed to insert. Caller decides what to do with the error
+/// (e.g. defer it past the worktree restore).
+async fn restore_agent_capture_from_rows(
+    db_conn: &sea_orm::DatabaseConnection,
+    session_rows: &[AgentSessionRow],
+    checkpoint_rows: &[AgentCheckpointRow],
+) -> Result<(), String> {
+    use sea_orm::{ConnectionTrait, Statement};
+
+    let backend = db_conn.get_database_backend();
+
+    let mut sessions_inserted = 0usize;
+    let mut sessions_failed = 0usize;
+    for row in session_rows {
+        // Mirror the same upsert semantics as the local hook ingest path
+        // (`ON CONFLICT(agent_kind, provider_session_id) DO UPDATE SET …`)
+        // so re-running restore over an existing local row is idempotent.
+        let stmt = Statement::from_sql_and_values(
+            backend,
+            "INSERT INTO agent_session (
+                session_id, agent_kind, provider_session_id, state, working_dir,
+                worktree_id, parent_commit, parent_session_id, metadata_json,
+                redaction_report, started_at, last_event_at, stopped_at, schema_version
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(agent_kind, provider_session_id) DO UPDATE SET
+                state = excluded.state,
+                working_dir = excluded.working_dir,
+                worktree_id = excluded.worktree_id,
+                parent_commit = excluded.parent_commit,
+                parent_session_id = excluded.parent_session_id,
+                metadata_json = excluded.metadata_json,
+                redaction_report = excluded.redaction_report,
+                last_event_at = excluded.last_event_at,
+                stopped_at = excluded.stopped_at,
+                schema_version = excluded.schema_version",
+            [
+                row.session_id.clone().into(),
+                row.agent_kind.clone().into(),
+                row.provider_session_id.clone().into(),
+                row.state.clone().into(),
+                row.working_dir.clone().into(),
+                row.worktree_id.clone().into(),
+                row.parent_commit.clone().into(),
+                row.parent_session_id.clone().into(),
+                row.metadata_json.clone().into(),
+                row.redaction_report.clone().into(),
+                row.started_at.into(),
+                row.last_event_at.into(),
+                row.stopped_at.into(),
+                row.schema_version.into(),
+            ],
+        );
+        match db_conn.execute(stmt).await {
+            Ok(_) => sessions_inserted += 1,
+            Err(e) => {
+                eprintln!(
+                    "warning: agent_session {} restore failed: {e}",
+                    row.session_id
+                );
+                sessions_failed += 1;
+            }
+        }
+    }
+
+    let mut checkpoints_inserted = 0usize;
+    let mut checkpoints_failed = 0usize;
+    for row in checkpoint_rows {
+        // Codex Q1: explicit ON CONFLICT rather than INSERT OR REPLACE
+        // — REPLACE deletes the conflicting row first, which would also
+        // cascade-delete child rows in any FK-enforcing context. The
+        // local schema doesn't currently have children of agent_checkpoint
+        // but using DO UPDATE keeps semantics future-proof.
+        let stmt = Statement::from_sql_and_values(
+            backend,
+            "INSERT INTO agent_checkpoint (
+                checkpoint_id, session_id, parent_checkpoint_id, scope, parent_commit,
+                tree_oid, metadata_blob_oid, traces_commit, tool_use_id,
+                subagent_session_id, description, created_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(checkpoint_id) DO UPDATE SET
+                session_id = excluded.session_id,
+                parent_checkpoint_id = excluded.parent_checkpoint_id,
+                scope = excluded.scope,
+                parent_commit = excluded.parent_commit,
+                tree_oid = excluded.tree_oid,
+                metadata_blob_oid = excluded.metadata_blob_oid,
+                traces_commit = excluded.traces_commit,
+                tool_use_id = excluded.tool_use_id,
+                subagent_session_id = excluded.subagent_session_id,
+                description = excluded.description,
+                created_at = excluded.created_at",
+            [
+                row.checkpoint_id.clone().into(),
+                row.session_id.clone().into(),
+                row.parent_checkpoint_id.clone().into(),
+                row.scope.clone().into(),
+                row.parent_commit.clone().into(),
+                row.tree_oid.clone().into(),
+                row.metadata_blob_oid.clone().into(),
+                row.traces_commit.clone().into(),
+                row.tool_use_id.clone().into(),
+                row.subagent_session_id.clone().into(),
+                row.description.clone().into(),
+                row.created_at.into(),
+            ],
+        );
+        match db_conn.execute(stmt).await {
+            Ok(_) => checkpoints_inserted += 1,
+            Err(e) => {
+                eprintln!(
+                    "warning: agent_checkpoint {} restore failed: {e}",
+                    row.checkpoint_id
+                );
+                checkpoints_failed += 1;
+            }
+        }
+    }
+
+    println!(
+        "Agent capture restore: {sessions_inserted}/{} sessions, \
+         {checkpoints_inserted}/{} checkpoints ({sessions_failed} + \
+         {checkpoints_failed} failed).",
+        session_rows.len(),
+        checkpoint_rows.len()
+    );
+    if sessions_failed > 0 || checkpoints_failed > 0 {
+        Err(format!(
+            "{} session + {} checkpoint inserts failed",
             sessions_failed, checkpoints_failed
         ))
     } else {
@@ -1221,6 +1467,292 @@ mod tests {
             &repo_db_path,
         ))
         .expect("R2 storage should initialize from local config values even after cwd drift");
+    }
+
+    /// Build a minimum-viable `AgentSessionRow` for the restore-fixture tests.
+    /// Defaults to a kind/state pair that satisfies the schema's CHECK
+    /// constraints; tests override fields they care about.
+    fn fixture_session_row(session_id: &str, provider_session_id: &str) -> AgentSessionRow {
+        AgentSessionRow {
+            session_id: session_id.to_string(),
+            agent_kind: "claude_code".to_string(),
+            provider_session_id: provider_session_id.to_string(),
+            state: "active".to_string(),
+            working_dir: "/tmp/fixture".to_string(),
+            worktree_id: None,
+            parent_commit: None,
+            parent_session_id: None,
+            metadata_json: "{}".to_string(),
+            redaction_report: "{}".to_string(),
+            started_at: 1_700_000_000,
+            last_event_at: 1_700_000_001,
+            stopped_at: None,
+            schema_version: 1,
+        }
+    }
+
+    fn fixture_checkpoint_row(
+        checkpoint_id: &str,
+        session_id: &str,
+        description: Option<&str>,
+    ) -> AgentCheckpointRow {
+        AgentCheckpointRow {
+            checkpoint_id: checkpoint_id.to_string(),
+            session_id: session_id.to_string(),
+            parent_checkpoint_id: None,
+            scope: "committed".to_string(),
+            parent_commit: None,
+            tree_oid: "0000000000000000000000000000000000000000".to_string(),
+            metadata_blob_oid: "1111111111111111111111111111111111111111".to_string(),
+            traces_commit: "2222222222222222222222222222222222222222".to_string(),
+            tool_use_id: None,
+            subagent_session_id: None,
+            description: description.map(String::from),
+            created_at: 1_700_000_010,
+        }
+    }
+
+    /// Codex Q5 fixture: a fresh restore inserts both sessions and
+    /// checkpoints into the local catalog. Smoke-tests the happy path
+    /// without spinning up a D1 client.
+    #[test]
+    #[serial]
+    fn restore_agent_capture_inserts_fresh_rows() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let repo = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _test_home = ScopedEnvVar::set("LIBRA_TEST_HOME", home.path());
+        rt.block_on(setup_with_new_libra_in(repo.path()));
+        let _cwd = ChangeDirGuard::new(repo.path());
+
+        rt.block_on(async {
+            let db_conn = db::get_db_conn_instance().await;
+            let sessions = vec![fixture_session_row("sess-A", "prov-A")];
+            let checkpoints = vec![fixture_checkpoint_row("ckpt-A", "sess-A", Some("first"))];
+
+            restore_agent_capture_from_rows(&db_conn, &sessions, &checkpoints)
+                .await
+                .expect("fresh restore should succeed");
+
+            let session_count = scalar_count(&db_conn, "SELECT COUNT(*) AS n FROM agent_session")
+                .await
+                .unwrap();
+            let checkpoint_count =
+                scalar_count(&db_conn, "SELECT COUNT(*) AS n FROM agent_checkpoint")
+                    .await
+                    .unwrap();
+            assert_eq!(session_count, 1);
+            assert_eq!(checkpoint_count, 1);
+        });
+    }
+
+    /// Codex Q5 fixture: re-running restore over an existing session row
+    /// with the same `(agent_kind, provider_session_id)` MUST update the
+    /// existing row in place rather than inserting a duplicate or erroring
+    /// on the unique index (`idx_agent_session_provider`).
+    #[test]
+    #[serial]
+    fn restore_agent_capture_upserts_existing_session_on_conflict() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let repo = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _test_home = ScopedEnvVar::set("LIBRA_TEST_HOME", home.path());
+        rt.block_on(setup_with_new_libra_in(repo.path()));
+        let _cwd = ChangeDirGuard::new(repo.path());
+
+        rt.block_on(async {
+            let db_conn = db::get_db_conn_instance().await;
+            let initial = vec![fixture_session_row("sess-A", "prov-A")];
+            restore_agent_capture_from_rows(&db_conn, &initial, &[])
+                .await
+                .expect("first restore");
+
+            let mut updated = fixture_session_row("sess-A", "prov-A");
+            updated.state = "stopped".to_string();
+            updated.last_event_at = 1_800_000_000;
+            updated.stopped_at = Some(1_800_000_000);
+
+            restore_agent_capture_from_rows(&db_conn, &[updated], &[])
+                .await
+                .expect("conflict update");
+
+            let session_count = scalar_count(&db_conn, "SELECT COUNT(*) AS n FROM agent_session")
+                .await
+                .unwrap();
+            assert_eq!(session_count, 1, "no duplicate row");
+
+            let stopped_count = scalar_count(
+                &db_conn,
+                "SELECT COUNT(*) AS n FROM agent_session WHERE state = 'stopped'",
+            )
+            .await
+            .unwrap();
+            assert_eq!(stopped_count, 1, "state column reflects updated row");
+        });
+    }
+
+    /// Codex Q1 + Q5 fixture: checkpoint conflict goes through the
+    /// explicit `ON CONFLICT(checkpoint_id) DO UPDATE SET …` path. We
+    /// verify by mutating `description` and checking the column was
+    /// rewritten on the second restore.
+    #[test]
+    #[serial]
+    fn restore_agent_capture_upserts_existing_checkpoint_on_conflict() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let repo = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _test_home = ScopedEnvVar::set("LIBRA_TEST_HOME", home.path());
+        rt.block_on(setup_with_new_libra_in(repo.path()));
+        let _cwd = ChangeDirGuard::new(repo.path());
+
+        rt.block_on(async {
+            let db_conn = db::get_db_conn_instance().await;
+            let session = vec![fixture_session_row("sess-A", "prov-A")];
+            let initial = vec![fixture_checkpoint_row("ckpt-A", "sess-A", Some("v1"))];
+            restore_agent_capture_from_rows(&db_conn, &session, &initial)
+                .await
+                .expect("first restore");
+
+            let updated = vec![fixture_checkpoint_row("ckpt-A", "sess-A", Some("v2"))];
+            restore_agent_capture_from_rows(&db_conn, &session, &updated)
+                .await
+                .expect("conflict update");
+
+            use sea_orm::Statement;
+            let backend = db_conn.get_database_backend();
+            let row = db_conn
+                .query_one(Statement::from_sql_and_values(
+                    backend,
+                    "SELECT description FROM agent_checkpoint WHERE checkpoint_id = ?",
+                    ["ckpt-A".into()],
+                ))
+                .await
+                .unwrap()
+                .expect("row present");
+            let description: Option<String> = row.try_get_by(0).unwrap();
+            assert_eq!(
+                description.as_deref(),
+                Some("v2"),
+                "ON CONFLICT DO UPDATE rewrote description"
+            );
+
+            let count = scalar_count(&db_conn, "SELECT COUNT(*) AS n FROM agent_checkpoint")
+                .await
+                .unwrap();
+            assert_eq!(count, 1, "no duplicate checkpoint row");
+        });
+    }
+
+    /// Codex Q2 + Q5 fixture: a partial failure (one row violates the
+    /// CHECK constraint on `agent_kind`) MUST surface as `Err(...)` from
+    /// the helper so the cloud-restore caller treats the restore as
+    /// strict. The valid sibling row should still land in the catalog —
+    /// we don't roll back, we report.
+    #[test]
+    #[serial]
+    fn restore_agent_capture_partial_failure_returns_err() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let repo = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _test_home = ScopedEnvVar::set("LIBRA_TEST_HOME", home.path());
+        rt.block_on(setup_with_new_libra_in(repo.path()));
+        let _cwd = ChangeDirGuard::new(repo.path());
+
+        rt.block_on(async {
+            let db_conn = db::get_db_conn_instance().await;
+            let mut bad = fixture_session_row("sess-bad", "prov-bad");
+            bad.agent_kind = "not_a_real_kind".to_string(); // violates CHECK
+            let good = fixture_session_row("sess-good", "prov-good");
+
+            let err = restore_agent_capture_from_rows(&db_conn, &[bad, good], &[])
+                .await
+                .expect_err("strict restore should bubble the failure");
+            assert!(
+                err.contains("session") || err.contains("checkpoint"),
+                "error message identifies the failing kind: {err}"
+            );
+
+            // Good row still landed — we report aggregate failure but do not
+            // roll back; that matches the helper's documented contract.
+            let good_count = scalar_count(
+                &db_conn,
+                "SELECT COUNT(*) AS n FROM agent_session WHERE session_id = 'sess-good'",
+            )
+            .await
+            .unwrap();
+            assert_eq!(good_count, 1);
+        });
+    }
+
+    /// Codex round-2 follow-up Q4: when the local `agent_checkpoint`
+    /// table is missing (partial schema), `restore_agent_capture_from_d1`
+    /// must take the warning-and-bail path rather than proceed to insert
+    /// rows into a half-built catalogue. This test simulates that
+    /// scenario by dropping the checkpoint table after init.
+    #[test]
+    #[serial]
+    fn restore_agent_capture_warns_when_checkpoint_table_missing() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let repo = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _test_home = ScopedEnvVar::set("LIBRA_TEST_HOME", home.path());
+        rt.block_on(setup_with_new_libra_in(repo.path()));
+        let _cwd = ChangeDirGuard::new(repo.path());
+
+        rt.block_on(async {
+            let db_conn = db::get_db_conn_instance().await;
+            use sea_orm::Statement;
+            let backend = db_conn.get_database_backend();
+            // Drop the checkpoint table to simulate a partial schema. We
+            // exercise the local-presence guard, not the D1 list call —
+            // the helper bails before either ensure_*_table fires.
+            db_conn
+                .execute(Statement::from_sql_and_values(
+                    backend,
+                    "DROP TABLE agent_checkpoint",
+                    [],
+                ))
+                .await
+                .expect("drop checkpoint table");
+
+            // Build a stub D1Client that we never actually call. The
+            // helper short-circuits on the local-schema check before
+            // touching the network, so the stub credentials are never
+            // dereferenced.
+            let d1_client = D1Client::new(
+                "stub-account".to_string(),
+                "stub-token".to_string(),
+                "stub-database".to_string(),
+            );
+
+            let result = restore_agent_capture_from_d1(&db_conn, &d1_client, "fixture-repo").await;
+            assert!(
+                result.is_ok(),
+                "partial-schema path returns Ok with a warning, not Err: {:?}",
+                result.err()
+            );
+        });
+    }
+
+    /// Tiny helper for the fixture tests above. Mirrors the shape of
+    /// `agent::doctor::scalar_count` but lives in this module so the cloud
+    /// tests don't depend on a binary-only helper.
+    async fn scalar_count(
+        conn: &sea_orm::DatabaseConnection,
+        sql: &str,
+    ) -> Result<i64, sea_orm::DbErr> {
+        use sea_orm::Statement;
+        let backend = conn.get_database_backend();
+        let row = conn
+            .query_one(Statement::from_sql_and_values(backend, sql, []))
+            .await?
+            .ok_or(sea_orm::DbErr::Custom("count returned no rows".to_string()))?;
+        row.try_get_by::<i64, _>("n")
     }
 
     #[test]

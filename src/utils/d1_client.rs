@@ -765,6 +765,44 @@ impl D1Client {
         Ok(())
     }
 
+    /// Read every `agent_session` row for a repo. Used by
+    /// `libra cloud restore` to repopulate the local catalog on a fresh
+    /// machine — paired with [`Self::upsert_agent_session`] so a
+    /// round-trip preserves shape.
+    pub async fn list_agent_sessions(
+        &self,
+        repo_id: &str,
+    ) -> Result<Vec<AgentSessionRow>, D1Error> {
+        let sql = r#"
+            SELECT session_id, agent_kind, provider_session_id, state, working_dir,
+                   worktree_id, parent_commit, parent_session_id, metadata_json,
+                   redaction_report, started_at, last_event_at, stopped_at, schema_version
+            FROM agent_session
+            WHERE repo_id = ?1
+        "#;
+        self.query(sql, Some(vec![serde_json::json!(repo_id)]))
+            .await
+    }
+
+    /// Read every `agent_checkpoint` row for a repo. Used by
+    /// `libra cloud restore` together with
+    /// [`Self::list_agent_sessions`].
+    pub async fn list_agent_checkpoints(
+        &self,
+        repo_id: &str,
+    ) -> Result<Vec<AgentCheckpointRow>, D1Error> {
+        let sql = r#"
+            SELECT checkpoint_id, session_id, parent_checkpoint_id, scope, parent_commit,
+                   tree_oid, metadata_blob_oid, traces_commit, tool_use_id,
+                   subagent_session_id, description, created_at
+            FROM agent_checkpoint
+            WHERE repo_id = ?1
+            ORDER BY created_at ASC
+        "#;
+        self.query(sql, Some(vec![serde_json::json!(repo_id)]))
+            .await
+    }
+
     /// Upsert one `agent_checkpoint` row keyed by `(repo_id, checkpoint_id)`.
     ///
     /// `synced_at` is stamped server-side via `strftime('%s', 'now')` for
