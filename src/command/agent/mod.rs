@@ -22,6 +22,7 @@ use crate::{
     },
 };
 
+mod checkpoint;
 mod hooks;
 mod session;
 mod status;
@@ -153,7 +154,7 @@ pub async fn execute_safe(args: AgentArgs, output: &OutputConfig) -> CliResult<(
         AgentSubcommand::Enable(args) => enable_agents(&args.agents, output),
         AgentSubcommand::Disable(args) => disable_agents(&args.agents, output),
         AgentSubcommand::Session(cmd) => session::execute_safe(cmd, output).await,
-        AgentSubcommand::Checkpoint(_) => stub_phase2(output, "checkpoint"),
+        AgentSubcommand::Checkpoint(cmd) => checkpoint::execute_safe(cmd, output).await,
         AgentSubcommand::Clean(_) => stub_phase2(output, "clean"),
         AgentSubcommand::Doctor(_) => stub_phase2(output, "doctor"),
         AgentSubcommand::Push(_) => stub_phase3(output, "push"),

@@ -589,6 +589,19 @@ DROP TABLE IF EXISTS `agent_usage_stats`;
                 "../../../sql/migrations/2026050303_agent_capture_down.sql"
             )),
         },
+        // CEX-EntireIO Phase 2.1 follow-up: relax `agent_checkpoint.parent_commit`
+        // to NULLable so the runtime can distinguish "user branch unborn / no
+        // HEAD" from "lookup error" — see Codex review round 1 NEEDS-CHANGES.
+        Migration {
+            version: 2026050501,
+            name: "agent_checkpoint_parent_nullable",
+            up: include_str!(
+                "../../../sql/migrations/2026050501_agent_checkpoint_parent_nullable.sql"
+            ),
+            down: Some(include_str!(
+                "../../../sql/migrations/2026050501_agent_checkpoint_parent_nullable_down.sql"
+            )),
+        },
     ]
 }
 
@@ -687,12 +700,13 @@ mod tests {
 
     #[test]
     fn builtin_runner_registers_current_builtin_migrations() {
-        // CEX-15 and CEX-16 now ship built-in migrations. Keep this count
-        // explicit so future migrations update this test with the registry.
+        // Bump this assertion whenever a new migration is registered in
+        // `builtin_migrations()` so silent registry regressions surface
+        // here in addition to `tests/db_migration_test.rs`.
         let runner = builtin_runner().expect("CEX-12.5 builtin registry must build clean");
-        assert_eq!(runner.len(), 2);
+        assert_eq!(runner.len(), 4);
         assert!(!runner.is_empty());
-        assert_eq!(runner.max_registered_version(), Some(2026050302));
+        assert_eq!(runner.max_registered_version(), Some(2026050501));
     }
 
     #[test]

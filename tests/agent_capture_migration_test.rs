@@ -121,11 +121,13 @@ async fn agent_capture_rollback_drops_tables_and_indexes_only() {
     let runner = registered_runner();
     runner.run_pending(&conn).await.expect("run_pending");
 
+    // Rolling back to before agent_capture also rolls back the parent_commit
+    // nullable follow-up since both migrations sit on top of agent_capture.
     let rolled_back = runner
         .rollback_to(&conn, 2026050302)
         .await
         .expect("rollback_to(2026050302)");
-    assert_eq!(rolled_back, vec![2026050303]);
+    assert_eq!(rolled_back, vec![2026050501, 2026050303]);
 
     // agent_capture artifacts gone.
     assert!(!table_exists(&conn, "agent_session").await);
@@ -159,8 +161,70 @@ async fn agent_capture_up_down_up_round_trip() {
 
     let applied_again = runner.run_pending(&conn).await.expect("up #2");
     assert!(applied_again.contains(&2026050303));
+    assert!(applied_again.contains(&2026050501));
     assert!(table_exists(&conn, "agent_session").await);
     assert!(table_exists(&conn, "agent_checkpoint").await);
+}
+
+/// CEX-EntireIO Phase 2 follow-up: `agent_checkpoint.parent_commit` must be
+/// NULLable so the runtime can distinguish "user branch unborn" from
+/// "lookup error" without conflating both into an empty string. After the
+/// `2026050501` migration applies, an INSERT with NULL parent_commit must
+/// succeed, and SELECTing it back must yield None.
+#[tokio::test]
+async fn agent_capture_parent_commit_is_nullable_after_migration() {
+    let (_dir, url) = fresh_db_url();
+    let conn = connect(&url).await;
+    // The FK from `agent_session.thread_id` references `ai_thread`, which is
+    // created by the legacy bootstrap. Replay it so the FK declaration is
+    // satisfiable when SQLite enforces it on INSERT.
+    run_legacy_bootstrap(&conn).await;
+    let runner = registered_runner();
+    runner.run_pending(&conn).await.expect("run_pending");
+
+    let backend = conn.get_database_backend();
+    // Seed an agent_session that the FK'd checkpoint can hang off of.
+    conn.execute(Statement::from_string(
+        backend,
+        "INSERT INTO agent_session (
+            session_id, agent_kind, provider_session_id, state, working_dir,
+            started_at, last_event_at
+         ) VALUES ('s1', 'claude_code', 'p1', 'active', '/tmp', 0, 0)"
+            .to_string(),
+    ))
+    .await
+    .expect("seed agent_session");
+
+    // Insert a checkpoint with NULL parent_commit. Pre-migration this would
+    // have failed the NOT NULL constraint; post-migration it must succeed.
+    let res = conn
+        .execute(Statement::from_string(
+            backend,
+            "INSERT INTO agent_checkpoint (
+                checkpoint_id, session_id, scope, parent_commit, tree_oid,
+                metadata_blob_oid, traces_commit, created_at
+             ) VALUES ('c1', 's1', 'committed', NULL, 't', 'm', 'tc', 0)"
+                .to_string(),
+        ))
+        .await;
+    assert!(
+        res.is_ok(),
+        "NULL parent_commit must be accepted post-migration: {res:?}"
+    );
+
+    let row = conn
+        .query_one(Statement::from_string(
+            backend,
+            "SELECT parent_commit FROM agent_checkpoint WHERE checkpoint_id = 'c1'".to_string(),
+        ))
+        .await
+        .expect("query")
+        .expect("row");
+    let parent: Option<String> = row.try_get_by("parent_commit").unwrap();
+    assert!(
+        parent.is_none(),
+        "parent_commit must round-trip as NULL, got {parent:?}"
+    );
 }
 
 #[tokio::test]

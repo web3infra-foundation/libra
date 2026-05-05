@@ -834,10 +834,286 @@ impl HistoryManager {
         unreachable!("sqlite busy retry loop must return on success or terminal error")
     }
 
+    /// Append a checkpoint commit to this manager's ref.
+    ///
+    /// CEX-EntireIO Phase 2.1. Builds the layered tree
+    /// `checkpoint/<id[:2]>/<id[2:]>/{metadata.json, transcript/<provider>,
+    /// events/<provider>.jsonl}` and merges it into the parent commit's tree
+    /// so successive checkpoints accumulate (rather than overwrite). The
+    /// resulting commit message carries `Libra-*` trailers per the design
+    /// spec (see `docs/improvement/entire.md` §3.3).
+    ///
+    /// Returns the freshly-written commit hash plus the OIDs callers need to
+    /// stamp onto `agent_checkpoint` (root tree OID and metadata blob OID).
+    pub async fn append_checkpoint_commit(
+        &self,
+        params: CheckpointCommitParams<'_>,
+    ) -> Result<CheckpointCommit> {
+        // Phase 1: write content blobs once. They are content-addressed, so
+        // re-running a CAS retry loop never duplicates them.
+        let metadata_blob_oid = write_git_object(&self.repo_path, "blob", params.metadata_json)
+            .context("failed to write checkpoint metadata.json blob")?;
+        let transcript_blob_oid =
+            write_git_object(&self.repo_path, "blob", params.transcript_redacted)
+                .context("failed to write checkpoint transcript blob")?;
+        let events_blob_oid = match params.events_jsonl {
+            Some(bytes) => Some(
+                write_git_object(&self.repo_path, "blob", bytes)
+                    .context("failed to write checkpoint events.jsonl blob")?,
+            ),
+            None => None,
+        };
+
+        // Phase 2: build the leaf trees (transcript/, optional events/).
+        let transcript_subtree = self.write_tree(&[TreeItem::new(
+            TreeItemMode::Blob,
+            transcript_blob_oid,
+            params.provider_name.to_string(),
+        )])?;
+
+        let mut inner_items = vec![
+            TreeItem::new(
+                TreeItemMode::Blob,
+                metadata_blob_oid,
+                "metadata.json".to_string(),
+            ),
+            TreeItem::new(
+                TreeItemMode::Tree,
+                transcript_subtree,
+                "transcript".to_string(),
+            ),
+        ];
+        if let Some(events_oid) = events_blob_oid {
+            let events_subtree = self.write_tree(&[TreeItem::new(
+                TreeItemMode::Blob,
+                events_oid,
+                format!("{}.jsonl", params.provider_name),
+            )])?;
+            inner_items.push(TreeItem::new(
+                TreeItemMode::Tree,
+                events_subtree,
+                "events".to_string(),
+            ));
+        }
+        inner_items.sort_by(|a, b| a.name.cmp(&b.name));
+        let inner_tree = self.write_tree(&inner_items)?;
+
+        // Phase 3: CAS loop. Read parent, splice
+        // `checkpoint/<prefix>/<rest>` into its tree, write the new commit,
+        // and update the ref atomically. Retries on head conflict, mirroring
+        // the existing `append` flow.
+        let prefix = params
+            .checkpoint_id
+            .get(..2)
+            .ok_or_else(|| anyhow!("checkpoint_id must be at least 2 characters"))?
+            .to_string();
+        let rest = params.checkpoint_id[2..].to_string();
+        for attempt in 0..=HISTORY_HEAD_CONFLICT_MAX_RETRIES {
+            let parent = self.resolve_history_head().await?;
+            let new_root = self.splice_checkpoint_tree(parent, &prefix, &rest, inner_tree)?;
+
+            let trailer = format_libra_trailers(&params);
+            let message = format!(
+                "agent-traces: {} checkpoint {}\n\n{trailer}",
+                params.scope.as_str(),
+                params.checkpoint_id,
+            );
+            let author = Signature::new(
+                SignatureType::Author,
+                "Libra".to_string(),
+                "agent-traces@libra".to_string(),
+            );
+            let committer = Signature::new(
+                SignatureType::Committer,
+                "Libra".to_string(),
+                "agent-traces@libra".to_string(),
+            );
+            let parents = parent.into_iter().collect::<Vec<_>>();
+            let commit = Commit::new(author, committer, new_root, parents, &message);
+            let commit_data = commit
+                .to_data()
+                .context("failed to serialize checkpoint commit")?;
+            let commit_hash = write_git_object(&self.repo_path, "commit", &commit_data)?;
+
+            match self
+                .update_ref_if_matches(&self.ref_name, parent, commit_hash)
+                .await?
+            {
+                RefUpdateOutcome::Updated => {
+                    return Ok(CheckpointCommit {
+                        commit_hash,
+                        tree_oid: new_root,
+                        metadata_blob_oid,
+                    });
+                }
+                RefUpdateOutcome::HeadChanged if attempt < HISTORY_HEAD_CONFLICT_MAX_RETRIES => {
+                    continue;
+                }
+                RefUpdateOutcome::HeadChanged => {
+                    return Err(anyhow!(
+                        "history head changed repeatedly while appending checkpoint {}",
+                        params.checkpoint_id
+                    ));
+                }
+            }
+        }
+        unreachable!("CAS retry loop must return on success or terminal error")
+    }
+
+    /// Splice `inner_tree` into `parent`'s tree at the path
+    /// `checkpoint/<prefix>/<rest>`, preserving any existing entries in the
+    /// surrounding subtrees. Phase 2.1 helper for [`append_checkpoint_commit`].
+    fn splice_checkpoint_tree(
+        &self,
+        parent: Option<ObjectHash>,
+        prefix: &str,
+        rest: &str,
+        inner_tree: ObjectHash,
+    ) -> Result<ObjectHash> {
+        let mut root_items = match parent {
+            Some(parent_id) => self.load_commit_tree(&parent_id)?,
+            None => Vec::new(),
+        };
+        let checkpoint_entry = root_items
+            .iter()
+            .find(|item| item.name == "checkpoint")
+            .cloned();
+        let mut checkpoint_items = match checkpoint_entry {
+            Some(entry) if entry.mode == TreeItemMode::Tree => self.load_tree(&entry.id)?,
+            Some(entry) => {
+                return Err(anyhow!(
+                    "agent-traces tree corruption: 'checkpoint' entry expected to be a tree, \
+                     got mode {:?} (oid {})",
+                    entry.mode,
+                    entry.id
+                ));
+            }
+            None => Vec::new(),
+        };
+
+        let prefix_entry = checkpoint_items
+            .iter()
+            .find(|item| item.name == prefix)
+            .cloned();
+        let mut prefix_items = match prefix_entry {
+            Some(entry) if entry.mode == TreeItemMode::Tree => self.load_tree(&entry.id)?,
+            Some(entry) => {
+                return Err(anyhow!(
+                    "agent-traces tree corruption: 'checkpoint/{prefix}' entry expected to be a \
+                     tree, got mode {:?} (oid {})",
+                    entry.mode,
+                    entry.id
+                ));
+            }
+            None => Vec::new(),
+        };
+
+        prefix_items.retain(|item| item.name != rest);
+        prefix_items.push(TreeItem::new(
+            TreeItemMode::Tree,
+            inner_tree,
+            rest.to_string(),
+        ));
+        prefix_items.sort_by(|a, b| a.name.cmp(&b.name));
+        let prefix_tree = self.write_tree(&prefix_items)?;
+
+        checkpoint_items.retain(|item| item.name != prefix);
+        checkpoint_items.push(TreeItem::new(
+            TreeItemMode::Tree,
+            prefix_tree,
+            prefix.to_string(),
+        ));
+        checkpoint_items.sort_by(|a, b| a.name.cmp(&b.name));
+        let checkpoint_tree = self.write_tree(&checkpoint_items)?;
+
+        root_items.retain(|item| item.name != "checkpoint");
+        root_items.push(TreeItem::new(
+            TreeItemMode::Tree,
+            checkpoint_tree,
+            "checkpoint".to_string(),
+        ));
+        root_items.sort_by(|a, b| a.name.cmp(&b.name));
+        self.write_tree(&root_items)
+    }
+
     #[cfg(test)]
     pub fn get_storage(&self) -> Arc<dyn Storage + Send + Sync> {
         self.storage.clone()
     }
+}
+
+/// Inputs to [`HistoryManager::append_checkpoint_commit`].
+///
+/// All byte slices live for the duration of the call; the function does not
+/// retain references after returning.
+#[derive(Debug)]
+pub struct CheckpointCommitParams<'a> {
+    /// UUIDv4 of the checkpoint, used both as the row primary key and as
+    /// the leaf path under `checkpoint/<id[:2]>/<id[2:]>/...`.
+    pub checkpoint_id: &'a str,
+    /// `agent_session.session_id` this checkpoint belongs to.
+    pub session_id: &'a str,
+    /// `agent_session.agent_kind` (snake_case form, e.g. `claude_code`).
+    pub agent_kind: &'a str,
+    /// User-branch HEAD oid at the moment the checkpoint was taken.
+    pub parent_commit: Option<&'a str>,
+    /// Scope category: temporary, committed, or subagent.
+    pub scope: CheckpointScope,
+    /// Optional tool-use id when the checkpoint was triggered by a tool call.
+    pub tool_use_id: Option<&'a str>,
+    /// Pre-serialised metadata JSON to land at `metadata.json`.
+    pub metadata_json: &'a [u8],
+    /// Already-redacted transcript bytes.
+    pub transcript_redacted: &'a [u8],
+    /// File-name component used inside `transcript/<name>` and
+    /// `events/<name>.jsonl`. Conventionally the agent's slug
+    /// (`claude_code`, `gemini`, …).
+    pub provider_name: &'a str,
+    /// Optional events JSONL stream (`SessionStore`-backed).
+    pub events_jsonl: Option<&'a [u8]>,
+}
+
+/// Scope tag stamped on each checkpoint, mirroring the
+/// `agent_checkpoint.scope` CHECK constraint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointScope {
+    Temporary,
+    Committed,
+    Subagent,
+}
+
+impl CheckpointScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Temporary => "temporary",
+            Self::Committed => "committed",
+            Self::Subagent => "subagent",
+        }
+    }
+}
+
+/// Output from [`HistoryManager::append_checkpoint_commit`]; what the caller
+/// stores in `agent_checkpoint`.
+#[derive(Debug, Clone)]
+pub struct CheckpointCommit {
+    pub commit_hash: ObjectHash,
+    pub tree_oid: ObjectHash,
+    pub metadata_blob_oid: ObjectHash,
+}
+
+fn format_libra_trailers(params: &CheckpointCommitParams<'_>) -> String {
+    let mut buf = String::new();
+    buf.push_str(&format!("Libra-Session: {}\n", params.session_id));
+    buf.push_str(&format!("Libra-Agent: {}\n", params.agent_kind));
+    if let Some(commit) = params.parent_commit {
+        buf.push_str(&format!("Libra-Parent-Commit: {commit}\n"));
+    }
+    buf.push_str(&format!("Libra-Checkpoint-ID: {}\n", params.checkpoint_id));
+    buf.push_str(&format!("Libra-Scope: {}\n", params.scope.as_str()));
+    if let Some(tool) = params.tool_use_id {
+        buf.push_str(&format!("Libra-Tool-Use-ID: {tool}\n"));
+    }
+    buf
 }
 
 #[cfg(test)]

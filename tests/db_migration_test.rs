@@ -44,16 +44,24 @@ fn builtin_migrations_register_current_schema_migrations() {
         .map(|migration| migration.version)
         .collect();
     let names: Vec<&str> = migrations.iter().map(|migration| migration.name).collect();
-    assert_eq!(versions, vec![2026050301, 2026050302, 2026050303]);
+    assert_eq!(
+        versions,
+        vec![2026050301, 2026050302, 2026050303, 2026050501]
+    );
     assert_eq!(
         names,
-        vec!["automation_log", "agent_usage_stats", "agent_capture"]
+        vec![
+            "automation_log",
+            "agent_usage_stats",
+            "agent_capture",
+            "agent_checkpoint_parent_nullable",
+        ]
     );
 
     let runner = builtin_runner().expect("builtin registry must build clean");
     assert!(!runner.is_empty());
-    assert_eq!(runner.len(), 3);
-    assert_eq!(runner.max_registered_version(), Some(2026050303));
+    assert_eq!(runner.len(), 4);
+    assert_eq!(runner.max_registered_version(), Some(2026050501));
 }
 
 // ---------------------------------------------------------------------------
@@ -985,7 +993,10 @@ async fn run_builtin_migrations_applies_current_builtin_registry() {
     let applied = run_builtin_migrations(&conn)
         .await
         .expect("run_builtin_migrations");
-    assert_eq!(applied, vec![2026050301, 2026050302, 2026050303]);
+    assert_eq!(
+        applied,
+        vec![2026050301, 2026050302, 2026050303, 2026050501]
+    );
     assert!(table_exists(&conn, "schema_versions").await);
     assert!(table_exists(&conn, "automation_log").await);
     assert!(table_exists(&conn, "agent_usage_stats").await);

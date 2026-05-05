@@ -428,20 +428,36 @@ async fn ingest_agent_traces(
         .await
         .map_err(|err| anyhow!("failed to open libra database: {err}"))?;
 
-    ingest_agent_traces_payload(&stdin_bytes, command, expected_kind, provider, &conn).await
+    ingest_agent_traces_payload(
+        &stdin_bytes,
+        command,
+        expected_kind,
+        provider,
+        &conn,
+        Some(&storage_path),
+    )
+    .await
 }
 
 /// Connection-bound core of [`ingest_agent_traces`]. `pub(crate)` so unit
 /// tests in this module can drive the function without stubbing stdin or
 /// the process-wide working directory; it is intentionally NOT re-exported
-/// from the crate root. Fully deterministic given `payload` and the
-/// connection — round-2 BLOCK #10 acceptance criterion.
+/// from the crate root. Fully deterministic given `payload`, the
+/// connection, and (optionally) `repo_path` — round-2 BLOCK #10 acceptance
+/// criterion.
+///
+/// `repo_path` is the `.libra` directory used to resolve the Git object
+/// store for checkpoint commit creation (Phase 2.1). Passing `None` skips
+/// the checkpoint commit step on `SessionEnd` and only persists the
+/// `agent_session` summary; tests use that path so they don't need a live
+/// `libra init` workspace.
 pub(crate) async fn ingest_agent_traces_payload(
     payload: &[u8],
     command: super::provider::ProviderHookCommand,
     expected_kind: LifecycleEventKind,
     provider: &dyn HookProvider,
     conn: &sea_orm::DatabaseConnection,
+    repo_path: Option<&std::path::Path>,
 ) -> Result<()> {
     use sea_orm::{ConnectionTrait, Statement};
 
@@ -559,12 +575,12 @@ pub(crate) async fn ingest_agent_traces_payload(
         backend,
         upsert_sql,
         [
-            session_id.into(),
+            session_id.clone().into(),
             agent_kind.into(),
             envelope.session_id.clone().into(),
             new_state.into(),
             envelope.cwd.clone().into(),
-            redaction_report_json.into(),
+            redaction_report_json.clone().into(),
             now.into(),
             now.into(),
             stopped_at.into(),
@@ -573,7 +589,180 @@ pub(crate) async fn ingest_agent_traces_payload(
     .await
     .with_context(|| format!("failed to upsert agent_session for command '{command}'"))?;
 
+    // Phase 2.1: on SessionEnd, materialise a `committed` checkpoint commit
+    // on `refs/libra/agent-traces` and index it in `agent_checkpoint`. The
+    // checkpoint's tree carries metadata.json + transcript blob; events
+    // blob inclusion lands in a follow-up alongside SessionStore JSONL
+    // wiring. Earlier-in-session events (TurnEnd) get checkpoints in a
+    // future change.
+    if matches!(event.kind, LifecycleEventKind::SessionEnd)
+        && let Some(repo) = repo_path
+    {
+        write_session_end_checkpoint(
+            conn,
+            repo,
+            &session_id,
+            &envelope,
+            agent_kind,
+            event.prompt.as_deref(),
+            &redaction_report_json,
+            &all_matches,
+            now,
+        )
+        .await?;
+    }
+
     Ok(())
+}
+
+/// Write a SessionEnd checkpoint: materialise transcript + metadata blobs,
+/// append a commit on `refs/libra/agent-traces`, and insert the
+/// corresponding `agent_checkpoint` row. Errors are surfaced verbatim — a
+/// failure here means the SessionEnd ingest cannot acknowledge a clean
+/// shutdown to the caller.
+#[allow(clippy::too_many_arguments)]
+async fn write_session_end_checkpoint(
+    conn: &sea_orm::DatabaseConnection,
+    repo_path: &std::path::Path,
+    libra_session_id: &str,
+    envelope: &SessionHookEnvelope,
+    agent_kind: &str,
+    redacted_prompt: Option<&str>,
+    redaction_report_json: &str,
+    redaction_matches: &[crate::internal::ai::observed_agents::RedactionMatch],
+    now: i64,
+) -> Result<()> {
+    use sea_orm::{ConnectionTrait, Statement};
+
+    use crate::internal::ai::history::{CheckpointCommitParams, CheckpointScope, HistoryManager};
+
+    // Build a minimal metadata.json. Phase 2 keeps the schema small; later
+    // phases extend with model_info, tool_use_id, subagent links, etc.
+    let metadata = serde_json::json!({
+        "schema_version": 1,
+        "checkpoint_id": null, // filled in below once we have the UUID
+        "session_id": libra_session_id,
+        "agent_kind": agent_kind,
+        "scope": "committed",
+        "provider_session_id": envelope.session_id,
+        "working_dir": envelope.cwd,
+        "redaction_report": serde_json::from_str::<serde_json::Value>(redaction_report_json)
+            .unwrap_or_else(|_| serde_json::json!({})),
+        "created_at": now,
+    });
+
+    let checkpoint_id = uuid::Uuid::new_v4().to_string();
+    let mut metadata = metadata;
+    if let Some(obj) = metadata.as_object_mut() {
+        obj.insert(
+            "checkpoint_id".to_string(),
+            serde_json::Value::String(checkpoint_id.clone()),
+        );
+    }
+    let metadata_bytes =
+        serde_json::to_vec_pretty(&metadata).context("serialize checkpoint metadata")?;
+
+    // Transcript bytes for this minimal checkpoint = the redacted prompt the
+    // session ended on, or an empty stream when no prompt was carried. The
+    // bytes are already redacted because the upsert path scrubs them in
+    // place; we capture the same view here so the persisted blob never
+    // contains a leaked secret. Extending to the full session transcript is
+    // adapter-specific work (Phase 2 follow-up — `read_transcript` on
+    // ObservedAgent).
+    let transcript_bytes = redacted_prompt.unwrap_or("").as_bytes().to_vec();
+
+    let provider_name = envelope_provider_slug(agent_kind);
+
+    let objects_dir = repo_path.join("objects");
+    std::fs::create_dir_all(&objects_dir).context("create objects dir for checkpoint commit")?;
+    let storage = std::sync::Arc::new(crate::utils::client_storage::ClientStorage::init(
+        objects_dir,
+    ));
+    let manager = HistoryManager::new_with_ref(
+        storage,
+        repo_path.to_path_buf(),
+        std::sync::Arc::new(conn.clone()),
+        crate::internal::branch::AGENT_TRACES_BRANCH,
+    );
+
+    // Resolve the user-branch HEAD via the typed helper so we can
+    // distinguish "no HEAD yet (unborn)" from real storage errors. The
+    // empty-string conflation produced by the lossy wrapper was flagged
+    // in the Codex Phase-2 round-1 review.
+    //
+    // Three semantic cases land in `parent_commit`:
+    // - `Some(hash)` — repo has at least one commit and HEAD resolves.
+    // - `None` from typed `Ok(None)` — HEAD is born but the branch is
+    //   commit-less (e.g. immediately after `libra init`).
+    // - `None` from `BranchStoreError::Corrupt { "HEAD reference is missing" }`
+    //   — the schema is wired but the HEAD row was never seeded. This
+    //   shows up in test fixtures that bootstrap the migrations without
+    //   running `initialize_refs`. Functionally equivalent to "unborn" for
+    //   the agent-traces writer, so we coerce to `None` rather than
+    //   failing the whole ingest.
+    let parent_commit: Option<String> =
+        match crate::internal::head::Head::current_commit_result_with_conn(conn).await {
+            Ok(commit) => commit.map(|h| h.to_string()),
+            Err(crate::internal::branch::BranchStoreError::Corrupt { detail, .. })
+                if detail.contains("HEAD reference is missing") =>
+            {
+                None
+            }
+            Err(err) => {
+                return Err(anyhow!(
+                    "failed to resolve HEAD while writing checkpoint: {err}"
+                ));
+            }
+        };
+
+    let written = manager
+        .append_checkpoint_commit(CheckpointCommitParams {
+            checkpoint_id: &checkpoint_id,
+            session_id: libra_session_id,
+            agent_kind,
+            parent_commit: parent_commit.as_deref(),
+            scope: CheckpointScope::Committed,
+            tool_use_id: None,
+            metadata_json: &metadata_bytes,
+            transcript_redacted: &transcript_bytes,
+            provider_name,
+            events_jsonl: None,
+        })
+        .await
+        .context("failed to append checkpoint commit on agent-traces")?;
+
+    let parent_commit_value: sea_orm::Value = parent_commit.clone().into();
+    conn.execute(Statement::from_sql_and_values(
+        conn.get_database_backend(),
+        "INSERT INTO agent_checkpoint (
+            checkpoint_id, session_id, scope, parent_commit, tree_oid,
+            metadata_blob_oid, traces_commit, created_at
+         ) VALUES (?, ?, 'committed', ?, ?, ?, ?, ?)",
+        [
+            checkpoint_id.into(),
+            libra_session_id.into(),
+            parent_commit_value,
+            written.tree_oid.to_string().into(),
+            written.metadata_blob_oid.to_string().into(),
+            written.commit_hash.to_string().into(),
+            now.into(),
+        ],
+    ))
+    .await
+    .context("failed to insert agent_checkpoint row")?;
+
+    // Suppress the unused-warning for redaction_matches; reserved for a
+    // Phase 3 enhancement that adds per-rule counters to metadata.
+    let _ = redaction_matches;
+    Ok(())
+}
+
+/// Map `agent_session.agent_kind` (the closed enum stored in the database)
+/// onto the file-name component used inside the checkpoint tree
+/// (`transcript/<provider>` and `events/<provider>.jsonl`). For Phase 1's
+/// stable agents (claude_code, gemini) the slug equals the kind string.
+fn envelope_provider_slug(agent_kind: &str) -> &str {
+    agent_kind
 }
 
 ///
@@ -1150,6 +1339,7 @@ mod tests {
             LifecycleEventKind::SessionStart,
             claude_provider(),
             &conn,
+            None,
         )
         .await
         .expect("session start ingest succeeds");
@@ -1197,6 +1387,7 @@ mod tests {
             LifecycleEventKind::SessionStart,
             claude_provider(),
             &conn,
+            None,
         )
         .await
         .expect("start ok");
@@ -1208,6 +1399,7 @@ mod tests {
             LifecycleEventKind::SessionEnd,
             claude_provider(),
             &conn,
+            None,
         )
         .await
         .expect("end ok");
@@ -1264,6 +1456,7 @@ mod tests {
             LifecycleEventKind::TurnStart,
             claude_provider(),
             &conn,
+            None,
         )
         .await
         .expect("prompt ingest succeeds");
@@ -1320,6 +1513,7 @@ mod tests {
             LifecycleEventKind::SessionEnd,
             claude_provider(),
             &conn,
+            None,
         )
         .await
         .expect_err("kind mismatch must fail");
@@ -1360,6 +1554,7 @@ mod tests {
             LifecycleEventKind::SessionStart,
             claude_provider(),
             &conn,
+            None,
         )
         .await
         .expect_err("missing table must fail");
@@ -1368,5 +1563,90 @@ mod tests {
                 .contains("agent_session table does not exist"),
             "unexpected error: {err}"
         );
+    }
+
+    /// Phase 2.1: when a `repo_path` is supplied and SessionEnd fires, the
+    /// runtime must (a) write a checkpoint commit on `refs/libra/agent-traces`
+    /// and (b) insert a row into `agent_checkpoint`. The checkpoint blob /
+    /// commit objects live under `<repo>/objects/`, so we point the test at a
+    /// fresh tempdir for that side too.
+    #[tokio::test]
+    async fn ingest_session_end_writes_checkpoint_when_repo_path_provided() {
+        let (dir, conn) = ingest_fresh_conn().await;
+        // Use the same tempdir as the SQLite file so the objects directory
+        // and DB live together. We never need to run `libra init` here —
+        // `append_checkpoint_commit` only needs the objects/ directory and
+        // a sea-orm connection.
+        let repo_path = dir.path().to_path_buf();
+
+        let start = ingest_envelope("SessionStart", "S-cp", json!({}));
+        ingest_agent_traces_payload(
+            &start,
+            super::super::provider::ProviderHookCommand::SessionStart,
+            LifecycleEventKind::SessionStart,
+            claude_provider(),
+            &conn,
+            Some(&repo_path),
+        )
+        .await
+        .expect("start ok");
+
+        // SessionEnd must trigger checkpoint creation.
+        let end = ingest_envelope("SessionEnd", "S-cp", json!({}));
+        ingest_agent_traces_payload(
+            &end,
+            super::super::provider::ProviderHookCommand::SessionEnd,
+            LifecycleEventKind::SessionEnd,
+            claude_provider(),
+            &conn,
+            Some(&repo_path),
+        )
+        .await
+        .expect("end ok");
+
+        let backend = conn.get_database_backend();
+        let row = conn
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                "SELECT checkpoint_id, scope, traces_commit, tree_oid, metadata_blob_oid \
+                 FROM agent_checkpoint WHERE session_id = (SELECT session_id FROM agent_session \
+                  WHERE provider_session_id = 'S-cp' LIMIT 1)",
+                [],
+            ))
+            .await
+            .expect("query")
+            .expect("checkpoint row exists");
+        assert_eq!(row.try_get_by::<String, _>("scope").unwrap(), "committed");
+        let traces_commit: String = row.try_get_by("traces_commit").unwrap();
+        let tree_oid: String = row.try_get_by("tree_oid").unwrap();
+        let metadata_blob_oid: String = row.try_get_by("metadata_blob_oid").unwrap();
+        assert!(!traces_commit.is_empty());
+        assert!(!tree_oid.is_empty());
+        assert!(!metadata_blob_oid.is_empty());
+
+        // The metadata blob must exist on disk and parse as JSON whose
+        // `agent_kind` matches what we ingested.
+        let metadata_path = repo_path
+            .join("objects")
+            .join(&metadata_blob_oid[..2])
+            .join(&metadata_blob_oid[2..]);
+        assert!(
+            metadata_path.exists(),
+            "metadata blob missing at {metadata_path:?}"
+        );
+
+        // The agent-traces ref row must point at the checkpoint commit hash.
+        let backend = conn.get_database_backend();
+        let ref_row = conn
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                "SELECT `commit` FROM reference WHERE name = ? AND kind = 'Branch' LIMIT 1",
+                [crate::internal::branch::AGENT_TRACES_BRANCH.into()],
+            ))
+            .await
+            .expect("query agent-traces ref")
+            .expect("agent-traces ref row exists");
+        let head: String = ref_row.try_get_by("commit").unwrap();
+        assert_eq!(head, traces_commit);
     }
 }
