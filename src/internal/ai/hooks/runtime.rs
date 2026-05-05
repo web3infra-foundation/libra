@@ -65,6 +65,23 @@ pub const AI_SESSION_TYPE: &str = "ai_session";
 /// Schema version. Bump when the persisted shape changes incompatibly.
 pub const AI_SESSION_SCHEMA: &str = "libra.ai_session.v2";
 
+/// Where a parsed hook event should land.
+///
+/// CEX-EntireIO Phase 1.5 introduces this enum so the same parsing /
+/// validation pipeline can fan out to two refs:
+///
+/// - [`HookTarget::AiIntent`] — the canonical `refs/libra/intent` writer used
+///   by `libra code` and the existing Claude/Gemini hook configs.
+/// - [`HookTarget::AgentTraces`] — the new external-Agent capture writer
+///   that lives on `refs/libra/agent-traces`. **Phase 1 stub**: the variant
+///   exists for API surface stability, but the runtime currently rejects it
+///   with a clear "not yet wired" message; Phase 2 lands the actual writer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookTarget {
+    AiIntent,
+    AgentTraces,
+}
+
 /// Coarse session lifecycle phase recorded as `session_phase` metadata.
 ///
 /// Distinct from [`LifecycleEventKind`] — the latter is per-event, the former is
@@ -141,6 +158,29 @@ pub async fn process_hook_event_from_stdin(
     expected_kind: LifecycleEventKind,
     provider: &dyn HookProvider,
 ) -> Result<()> {
+    process_hook_event_with_target(command, expected_kind, provider, HookTarget::AiIntent).await
+}
+
+/// Parametric form of [`process_hook_event_from_stdin`] that selects the
+/// writer destination via [`HookTarget`].
+///
+/// CEX-EntireIO Phase 1.5: this is the seam Phase 2 grows into. For
+/// [`HookTarget::AiIntent`] the function is exactly the historical behaviour
+/// (1:1 byte-compatible). For [`HookTarget::AgentTraces`] the function
+/// runs a Phase 1 minimal ingest — stdin parse, validate, redact, and
+/// upsert into `agent_session` — and returns. Phase 2 will extend the
+/// AgentTraces branch to additionally generate checkpoint commits on
+/// `refs/libra/agent-traces`.
+pub async fn process_hook_event_with_target(
+    command: super::provider::ProviderHookCommand,
+    expected_kind: LifecycleEventKind,
+    provider: &dyn HookProvider,
+    target: HookTarget,
+) -> Result<()> {
+    if matches!(target, HookTarget::AgentTraces) {
+        return ingest_agent_traces(command, expected_kind, provider).await;
+    }
+
     let mut stdin_bytes = Vec::new();
     std::io::stdin()
         .take((MAX_STDIN_BYTES + 1) as u64)
@@ -347,6 +387,195 @@ pub async fn process_hook_event_from_stdin(
 }
 
 /// Load `core.objectformat` from the local repository and pin the global hash kind.
+/// CEX-EntireIO Phase 1: minimal AgentTraces ingest.
+///
+/// Reads the hook envelope from stdin, validates, parses to a
+/// [`LifecycleEvent`], redacts free-form fields, and upserts into
+/// `agent_session`. Does NOT yet generate checkpoint commits on
+/// `refs/libra/agent-traces` — that is Phase 2 work.
+///
+/// Boundary conditions:
+/// - Idempotent on repeated `SessionStart` for the same provider session
+///   (UPSERT keyed by `(agent_kind, provider_session_id)`).
+/// - Best-effort on `agent_session` table absence: if the migration hasn't
+///   run, returns a clear error so misconfigured installs surface a
+///   diagnostic rather than panic.
+async fn ingest_agent_traces(
+    command: super::provider::ProviderHookCommand,
+    expected_kind: LifecycleEventKind,
+    provider: &dyn HookProvider,
+) -> Result<()> {
+    let mut stdin_bytes = Vec::new();
+    std::io::stdin()
+        .take((MAX_STDIN_BYTES + 1) as u64)
+        .read_to_end(&mut stdin_bytes)
+        .context("failed to read stdin")?;
+    if stdin_bytes.len() > MAX_STDIN_BYTES {
+        bail!("hook input exceeds {MAX_STDIN_BYTES} bytes");
+    }
+
+    // Resolve storage and pin hash kind, exactly as the AiIntent flow does,
+    // so this entry point's surface stays compatible with the rest of the
+    // runtime.
+    let process_cwd = std::env::current_dir().context("failed to read current directory")?;
+    let storage_path = util::try_get_storage_path(Some(process_cwd.clone()))
+        .context("failed to resolve libra storage path from current directory")?;
+    set_hash_kind_from_repo()
+        .await
+        .context("failed to configure hash kind from repo config")?;
+
+    let conn = db::get_db_conn_instance_for_path(&storage_path.join(util::DATABASE))
+        .await
+        .map_err(|err| anyhow!("failed to open libra database: {err}"))?;
+
+    ingest_agent_traces_payload(&stdin_bytes, command, expected_kind, provider, &conn).await
+}
+
+/// Connection-bound core of [`ingest_agent_traces`]. `pub(crate)` so unit
+/// tests in this module can drive the function without stubbing stdin or
+/// the process-wide working directory; it is intentionally NOT re-exported
+/// from the crate root. Fully deterministic given `payload` and the
+/// connection — round-2 BLOCK #10 acceptance criterion.
+pub(crate) async fn ingest_agent_traces_payload(
+    payload: &[u8],
+    command: super::provider::ProviderHookCommand,
+    expected_kind: LifecycleEventKind,
+    provider: &dyn HookProvider,
+    conn: &sea_orm::DatabaseConnection,
+) -> Result<()> {
+    use sea_orm::{ConnectionTrait, Statement};
+
+    use crate::internal::ai::observed_agents::{RedactionMatch, Redactor};
+
+    if payload.len() > MAX_STDIN_BYTES {
+        bail!("hook input exceeds {MAX_STDIN_BYTES} bytes");
+    }
+    let stdin = std::str::from_utf8(payload).context("hook input is not valid UTF-8")?;
+    if stdin.trim().is_empty() {
+        bail!("hook input is empty");
+    }
+
+    let envelope: SessionHookEnvelope =
+        serde_json::from_str(stdin).map_err(|err| anyhow!("invalid hook JSON payload: {err}"))?;
+    validate_session_hook_envelope(&envelope, MAX_TRANSCRIPT_PATH_BYTES)?;
+
+    let mut event = provider.parse_hook_event(&envelope.hook_event_name, &envelope)?;
+    if event.kind != expected_kind {
+        bail!(
+            "hook event kind mismatch: expected '{}', got '{}' from hook_event_name '{}'",
+            expected_kind,
+            event.kind,
+            envelope.hook_event_name
+        );
+    }
+
+    // Redact free-form text fields before they get anywhere near durable
+    // storage. We aggregate the per-field reports into a single JSON document
+    // that lands in `agent_session.redaction_report` so the persisted row is
+    // observably scrubbed (Codex round-3 review: "assert observable redaction
+    // outcome").
+    let redactor = Redactor::new_default();
+    let mut all_matches: Vec<RedactionMatch> = Vec::new();
+    let mut bytes_scanned: usize = 0;
+    let mut bytes_redacted: usize = 0;
+    if let Some(prompt) = event.prompt.take() {
+        let (redacted, report) = redactor.redact(prompt.as_bytes());
+        event.prompt = Some(String::from_utf8_lossy(redacted.bytes()).into_owned());
+        bytes_scanned += report.bytes_scanned;
+        bytes_redacted += report.bytes_redacted;
+        all_matches.extend(report.matches);
+    }
+    if let Some(input) = event.tool_input.take() {
+        let serialized = serde_json::to_vec(&input).unwrap_or_default();
+        let (redacted, report) = redactor.redact(&serialized);
+        event.tool_input = serde_json::from_slice(redacted.bytes()).ok();
+        bytes_scanned += report.bytes_scanned;
+        bytes_redacted += report.bytes_redacted;
+        all_matches.extend(report.matches);
+    }
+    let redaction_report_json = serde_json::to_string(&serde_json::json!({
+        "matches": all_matches,
+        "bytes_scanned": bytes_scanned,
+        "bytes_redacted": bytes_redacted,
+    }))
+    .unwrap_or_else(|_| "{}".to_string());
+
+    let backend = conn.get_database_backend();
+
+    // If the migration has not run yet, fail loud rather than silently.
+    let table_check = conn
+        .query_one(Statement::from_sql_and_values(
+            backend,
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agent_session' LIMIT 1",
+            [],
+        ))
+        .await
+        .context("failed to query sqlite_master")?;
+    if table_check.is_none() {
+        bail!(
+            "agent_session table does not exist; run `libra init` against this repository to apply migrations",
+        );
+    }
+
+    let now = Utc::now().timestamp();
+    let session_id = build_ai_session_id(provider.provider_name(), &envelope.session_id);
+    let agent_kind = match provider.provider_name() {
+        // Map HookProvider names to the closed set used by the
+        // `agent_kind` CHECK constraint. Adding a new provider here
+        // requires extending both this match and the migration.
+        "claude" => "claude_code",
+        "gemini" => "gemini",
+        other => other,
+    };
+
+    let new_state = match event.kind {
+        LifecycleEventKind::SessionStart => "active",
+        LifecycleEventKind::SessionEnd => "stopped",
+        LifecycleEventKind::Compaction => "condensed",
+        LifecycleEventKind::CompactionCompleted => "active",
+        _ => "active",
+    };
+
+    // UPSERT: insert a fresh row on first sight; otherwise just bump
+    // `last_event_at`, `state`, and `redaction_report`. We key by
+    // `(agent_kind, provider_session_id)` because the unique index already
+    // lives there.
+    let upsert_sql = "
+        INSERT INTO agent_session (
+            session_id, agent_kind, provider_session_id, state, working_dir,
+            redaction_report, started_at, last_event_at, stopped_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(agent_kind, provider_session_id) DO UPDATE SET
+            state = excluded.state,
+            last_event_at = excluded.last_event_at,
+            redaction_report = excluded.redaction_report,
+            stopped_at = CASE WHEN excluded.state = 'stopped' THEN excluded.last_event_at
+                              ELSE agent_session.stopped_at END
+    ";
+    let stopped_at: Option<i64> =
+        matches!(event.kind, LifecycleEventKind::SessionEnd).then_some(now);
+    conn.execute(Statement::from_sql_and_values(
+        backend,
+        upsert_sql,
+        [
+            session_id.into(),
+            agent_kind.into(),
+            envelope.session_id.clone().into(),
+            new_state.into(),
+            envelope.cwd.clone().into(),
+            redaction_report_json.into(),
+            now.into(),
+            now.into(),
+            stopped_at.into(),
+        ],
+    ))
+    .await
+    .with_context(|| format!("failed to upsert agent_session for command '{command}'"))?;
+
+    Ok(())
+}
+
 ///
 /// Mirrors `cli::set_local_hash_kind_for_storage` but reads via the already-open
 /// connection that the hook runtime obtains. Defaults to `sha1` for repositories
@@ -841,5 +1070,303 @@ mod tests {
         assert_eq!(payload["summary"]["message_count"], json!(2));
         assert_eq!(payload["summary"]["user_message_count"], json!(1));
         assert_eq!(payload["transcript"]["path"], json!("/tmp/t.jsonl"));
+    }
+
+    // -------------------------------------------------------------------
+    // CEX-EntireIO: AgentTraces ingest tests. Codex round-2 BLOCK #10 + #2
+    // round-3 followup ("assert observable redaction outcome").
+    // -------------------------------------------------------------------
+
+    use sea_orm::{
+        ConnectOptions, ConnectionTrait, Database, DatabaseConnection, ExecResult, Statement,
+    };
+    use tempfile::TempDir;
+
+    use crate::internal::db::{
+        ensure_ai_runtime_contract_schema, migration::run_builtin_migrations,
+    };
+
+    const LEGACY_BOOTSTRAP_SQL: &str = include_str!("../../../../sql/sqlite_20260309_init.sql");
+
+    async fn ingest_fresh_conn() -> (TempDir, DatabaseConnection) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ingest.db");
+        std::fs::File::create(&path).expect("touch sqlite file");
+        let url = format!("sqlite://{}", path.display());
+        let mut opts = ConnectOptions::new(url);
+        opts.sqlx_logging(false);
+        let conn = Database::connect(opts).await.expect("connect");
+        // Mirror production wiring exactly: legacy bootstrap (creates
+        // `ai_thread`) → AI runtime contract → registered migrations.
+        let backend = conn.get_database_backend();
+        for raw in LEGACY_BOOTSTRAP_SQL.split(';') {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let _: ExecResult = conn
+                .execute(Statement::from_string(backend, trimmed.to_string()))
+                .await
+                .unwrap_or_else(|e| panic!("legacy bootstrap stmt failed: {trimmed}\n{e}"));
+        }
+        ensure_ai_runtime_contract_schema(&conn)
+            .await
+            .expect("ensure_ai_runtime_contract_schema");
+        run_builtin_migrations(&conn)
+            .await
+            .expect("run_builtin_migrations");
+        (dir, conn)
+    }
+
+    fn ingest_envelope(
+        hook_event_name: &str,
+        session_id: &str,
+        extra: serde_json::Value,
+    ) -> Vec<u8> {
+        let mut base = json!({
+            "hook_event_name": hook_event_name,
+            "session_id": session_id,
+            "cwd": "/tmp/repo",
+            "transcript_path": "/tmp/repo/transcript.jsonl",
+        });
+        if let serde_json::Value::Object(extra_map) = extra
+            && let serde_json::Value::Object(base_map) = &mut base
+        {
+            for (k, v) in extra_map {
+                base_map.insert(k, v);
+            }
+        }
+        serde_json::to_vec(&base).expect("serialize envelope")
+    }
+
+    #[tokio::test]
+    async fn ingest_session_start_creates_active_row() {
+        let (_dir, conn) = ingest_fresh_conn().await;
+
+        let payload = ingest_envelope("SessionStart", "S-001", json!({}));
+        ingest_agent_traces_payload(
+            &payload,
+            super::super::provider::ProviderHookCommand::SessionStart,
+            LifecycleEventKind::SessionStart,
+            claude_provider(),
+            &conn,
+        )
+        .await
+        .expect("session start ingest succeeds");
+
+        let backend = conn.get_database_backend();
+        let row = conn
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                "SELECT agent_kind, state, working_dir, provider_session_id, stopped_at \
+                 FROM agent_session WHERE provider_session_id = ?",
+                ["S-001".into()],
+            ))
+            .await
+            .expect("query")
+            .expect("session row exists");
+
+        assert_eq!(
+            row.try_get_by::<String, _>("agent_kind").unwrap(),
+            "claude_code"
+        );
+        assert_eq!(row.try_get_by::<String, _>("state").unwrap(), "active");
+        assert_eq!(
+            row.try_get_by::<String, _>("working_dir").unwrap(),
+            "/tmp/repo"
+        );
+        assert_eq!(
+            row.try_get_by::<String, _>("provider_session_id").unwrap(),
+            "S-001"
+        );
+        assert!(
+            row.try_get_by::<Option<i64>, _>("stopped_at")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn ingest_session_end_marks_stopped_and_is_idempotent() {
+        let (_dir, conn) = ingest_fresh_conn().await;
+
+        let start = ingest_envelope("SessionStart", "S-002", json!({}));
+        ingest_agent_traces_payload(
+            &start,
+            super::super::provider::ProviderHookCommand::SessionStart,
+            LifecycleEventKind::SessionStart,
+            claude_provider(),
+            &conn,
+        )
+        .await
+        .expect("start ok");
+
+        let end = ingest_envelope("SessionEnd", "S-002", json!({}));
+        ingest_agent_traces_payload(
+            &end,
+            super::super::provider::ProviderHookCommand::SessionEnd,
+            LifecycleEventKind::SessionEnd,
+            claude_provider(),
+            &conn,
+        )
+        .await
+        .expect("end ok");
+
+        let backend = conn.get_database_backend();
+        let row = conn
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                "SELECT state, stopped_at FROM agent_session WHERE provider_session_id = ?",
+                ["S-002".into()],
+            ))
+            .await
+            .expect("query")
+            .expect("row");
+
+        assert_eq!(row.try_get_by::<String, _>("state").unwrap(), "stopped");
+        assert!(
+            row.try_get_by::<Option<i64>, _>("stopped_at")
+                .unwrap()
+                .is_some()
+        );
+
+        // Repeat-ingest is idempotent: still exactly one row for that session.
+        let count_row = conn
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                "SELECT COUNT(*) AS n FROM agent_session WHERE provider_session_id = ?",
+                ["S-002".into()],
+            ))
+            .await
+            .expect("count query")
+            .expect("count row");
+        assert_eq!(count_row.try_get_by::<i64, _>("n").unwrap(), 1);
+    }
+
+    /// Round-3 strengthened test: the redaction_report column should be
+    /// populated with at least one match when an envelope carries a known
+    /// secret, so the persisted row carries observable evidence the redactor
+    /// ran.
+    #[tokio::test]
+    async fn ingest_persists_observable_redaction_report() {
+        let (_dir, conn) = ingest_fresh_conn().await;
+
+        let payload = ingest_envelope(
+            "UserPromptSubmit",
+            "S-redact",
+            json!({
+                "prompt": "deploy with AKIAIOSFODNN7EXAMPLE please",
+            }),
+        );
+        ingest_agent_traces_payload(
+            &payload,
+            super::super::provider::ProviderHookCommand::Prompt,
+            LifecycleEventKind::TurnStart,
+            claude_provider(),
+            &conn,
+        )
+        .await
+        .expect("prompt ingest succeeds");
+
+        let backend = conn.get_database_backend();
+        let row = conn
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                "SELECT state, redaction_report FROM agent_session WHERE provider_session_id = ?",
+                ["S-redact".into()],
+            ))
+            .await
+            .expect("query")
+            .expect("row");
+
+        assert_eq!(row.try_get_by::<String, _>("state").unwrap(), "active");
+
+        let report_json: String = row.try_get_by("redaction_report").unwrap();
+        let report: serde_json::Value =
+            serde_json::from_str(&report_json).expect("redaction_report is JSON");
+        let matches = report
+            .get("matches")
+            .and_then(|v| v.as_array())
+            .expect("matches is an array");
+        assert!(
+            !matches.is_empty(),
+            "redaction_report.matches must be non-empty when prompt carries a known secret; got: {report_json}"
+        );
+        let bytes_redacted = report
+            .get("bytes_redacted")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        assert!(
+            bytes_redacted > 0,
+            "redaction_report.bytes_redacted must be > 0; got {bytes_redacted}"
+        );
+        // The literal AKIA secret must NOT be reachable through the
+        // persisted row — the only place we'd have stored its bytes is the
+        // redaction_report, which now contains only positional matches.
+        assert!(
+            !report_json.contains("AKIAIOSFODNN7EXAMPLE"),
+            "raw secret leaked into redaction_report column: {report_json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ingest_rejects_kind_mismatch() {
+        let (_dir, conn) = ingest_fresh_conn().await;
+
+        let payload = ingest_envelope("SessionStart", "S-mismatch", json!({}));
+        let err = ingest_agent_traces_payload(
+            &payload,
+            super::super::provider::ProviderHookCommand::SessionEnd,
+            LifecycleEventKind::SessionEnd,
+            claude_provider(),
+            &conn,
+        )
+        .await
+        .expect_err("kind mismatch must fail");
+        assert!(
+            err.to_string().contains("hook event kind mismatch"),
+            "unexpected error: {err}"
+        );
+
+        // No row should have been written.
+        let backend = conn.get_database_backend();
+        let count_row = conn
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                "SELECT COUNT(*) AS n FROM agent_session WHERE provider_session_id = ?",
+                ["S-mismatch".into()],
+            ))
+            .await
+            .expect("count query")
+            .expect("count row");
+        assert_eq!(count_row.try_get_by::<i64, _>("n").unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn ingest_fails_loud_when_table_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("noschema.db");
+        std::fs::File::create(&path).expect("touch sqlite file");
+        let url = format!("sqlite://{}", path.display());
+        let mut opts = ConnectOptions::new(url);
+        opts.sqlx_logging(false);
+        let conn = Database::connect(opts).await.expect("connect");
+        // intentionally NOT calling run_builtin_migrations.
+
+        let payload = ingest_envelope("SessionStart", "S-bare", json!({}));
+        let err = ingest_agent_traces_payload(
+            &payload,
+            super::super::provider::ProviderHookCommand::SessionStart,
+            LifecycleEventKind::SessionStart,
+            claude_provider(),
+            &conn,
+        )
+        .await
+        .expect_err("missing table must fail");
+        assert!(
+            err.to_string()
+                .contains("agent_session table does not exist"),
+            "unexpected error: {err}"
+        );
     }
 }

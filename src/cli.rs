@@ -279,6 +279,15 @@ enum Commands {
     #[command(about = "Cloud backup and restore operations (D1/R2)")]
     Cloud(command::cloud::CloudArgs),
 
+    // CEX-EntireIO: external-Agent capture surface.
+    #[command(about = "Manage external-agent capture (Claude Code, Gemini, …)")]
+    Agent(command::agent::AgentArgs),
+    #[command(
+        about = "Compatibility entry for hook configurations installed by `libra agent enable`",
+        hide = true
+    )]
+    Hooks(command::hooks::HooksArgs),
+
     // other hidden commands
     #[command(about = "Provide content, type or size info for repository objects")]
     CatFile(command::cat_file::CatFileArgs),
@@ -921,6 +930,8 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Reflog(cmd_args) => command::reflog::execute_safe(cmd_args, &output).await?,
         Commands::Worktree(cmd_args) => command::worktree::execute_safe(cmd_args, &output).await?,
         Commands::Cloud(cmd_args) => command::cloud::execute_safe(cmd_args, &output).await?,
+        Commands::Agent(cmd_args) => command::agent::execute_safe(cmd_args, &output).await?,
+        Commands::Hooks(cmd_args) => command::hooks::execute_safe(cmd_args, &output).await?,
         Commands::Bisect(bisect_cmd) => command::bisect::execute_safe(bisect_cmd, &output).await?,
     }
 

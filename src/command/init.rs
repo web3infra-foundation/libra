@@ -913,7 +913,23 @@ async fn initialize_refs(conn: &DbConn, initial_branch_name: &str) -> Result<(),
     .await?;
 
     reference::ActiveModel {
-        name: Set(Some("intent".to_string())),
+        name: Set(Some(crate::internal::branch::INTENT_BRANCH.to_string())),
+        kind: Set(reference::ConfigKind::Branch),
+        commit: Set(None),
+        remote: Set(None),
+        ..Default::default()
+    }
+    .insert(conn)
+    .await?;
+
+    // CEX-EntireIO Phase 1.7: register the parallel orphan branch used by the
+    // external-agent capture subsystem. Mirrors the `intent` row above; the
+    // first checkpoint commit will fill in its `commit` column via the same
+    // `HistoryManager::create_append_commit` machinery used by `intent`.
+    reference::ActiveModel {
+        name: Set(Some(
+            crate::internal::branch::AGENT_TRACES_BRANCH.to_string(),
+        )),
         kind: Set(reference::ConfigKind::Branch),
         commit: Set(None),
         remote: Set(None),

@@ -6,15 +6,22 @@ This directory holds **versioned, idempotent SQL migrations** managed by
 ## Filename convention
 
 ```
-NNNN_<snake_case_name>.sql        # forward (up) migration
-NNNN_<snake_case_name>.down.sql   # optional matching rollback
+YYYYMMDDNN_<snake_case_name>.sql         # forward (up) migration
+YYYYMMDDNN_<snake_case_name>_down.sql    # optional matching rollback
 ```
 
-- `NNNN` is a zero-padded 4-digit monotonic version (`0001`, `0002`, ...).
+- `YYYYMMDDNN` is a 10-digit monotonic version derived from the calendar date
+  the migration was authored, suffixed with a 2-digit ordinal so multiple
+  migrations on the same day stay ordered (e.g., `2026050301`, `2026050302`,
+  `2026050303`). The runner enforces strictly increasing versions at
+  registration time.
 - `<snake_case_name>` mirrors the migration's `name` field passed to
   `Migration { name: "...", .. }`.
-- Forward migrations are required; `.down.sql` files are optional. A
-  migration without a `.down.sql` cannot be rolled back through.
+- Forward migrations are required; `_down.sql` files are optional. A
+  migration without a matching `_down.sql` cannot be rolled back through.
+
+> Older docs referenced a 4-digit `NNNN` scheme; the codebase has standardised
+> on `YYYYMMDDNN` since the very first registered migration (`2026050301`).
 
 ## Idempotency requirement
 
@@ -93,8 +100,36 @@ When adding a new migration:
 
 ## CEX-12.5 initial state
 
-CEX-12.5 ships the framework with **zero registered migrations**. The
-`builtin_migrations()` registry is empty; the existing legacy schema
-remains owned by `sqlite_20260309_init.sql` and the `ensure_*_schema`
-helpers in `db.rs`. Future CEXes (13b, 15, 16, …) populate this directory
-and the registry.
+CEX-12.5 shipped the framework with **zero registered migrations**. The
+`builtin_migrations()` registry was empty; the existing legacy schema
+remained owned by `sqlite_20260309_init.sql` and the `ensure_*_schema`
+helpers in `db.rs`. Subsequent CEXes have populated this directory.
+
+## Current registry
+
+| Version       | Name                | Source                                          |
+|---------------|---------------------|-------------------------------------------------|
+| `2026050301`  | `automation_log`    | inline in `builtin_migrations()`                |
+| `2026050302`  | `agent_usage_stats` | inline in `builtin_migrations()`                |
+| `2026050303`  | `agent_capture`     | `2026050303_agent_capture{,_down}.sql`          |
+
+The first two migrations stayed inline for stability; new migrations move to
+the file + `include_str!` form.
+
+## `include_str!` example
+
+```rust
+Migration {
+    version: 2026050303,
+    name: "agent_capture",
+    up: include_str!("../../../sql/migrations/2026050303_agent_capture.sql"),
+    down: Some(include_str!(
+        "../../../sql/migrations/2026050303_agent_capture_down.sql"
+    )),
+}
+```
+
+The relative path is resolved by `rustc` from the source file containing
+`include_str!`. From `src/internal/db/migration.rs`, three `..` segments
+escape `src/internal/db/`, then `sql/migrations/<file>.sql` descends into
+this directory.

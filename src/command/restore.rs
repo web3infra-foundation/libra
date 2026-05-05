@@ -19,7 +19,7 @@ use serde::Serialize;
 use crate::{
     command::{calc_file_blob_hash, load_object},
     internal::{
-        branch::{Branch, BranchStoreError},
+        branch::{self, Branch, BranchStoreError},
         head::Head,
         protocol::lfs_client::LFSClient,
     },
@@ -68,6 +68,11 @@ pub enum RestoreError {
     WriteWorktree,
     #[error("failed to download LFS content")]
     LfsDownload,
+    /// Refused to restore from a Libra-managed locked branch (`intent`,
+    /// `agent-traces`, …). These refs hold AI-agent state that the user
+    /// should not be able to overwrite with `restore --source`.
+    #[error("refusing to restore from locked branch '{0}'")]
+    LockedSource(String),
 }
 
 impl RestoreError {
@@ -82,6 +87,7 @@ impl RestoreError {
             Self::InvalidPathEncoding => StableErrorCode::CliInvalidArguments,
             Self::WriteWorktree => StableErrorCode::IoWriteFailed,
             Self::LfsDownload => StableErrorCode::NetworkUnavailable,
+            Self::LockedSource(_) => StableErrorCode::CliInvalidTarget,
         }
     }
 }
@@ -107,6 +113,12 @@ impl From<RestoreError> for CliError {
             RestoreError::LfsDownload => CliError::fatal(message)
                 .with_stable_code(stable_code)
                 .with_hint("check LFS server availability"),
+            RestoreError::LockedSource(_) => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_exit_code(128)
+                .with_hint(
+                    "Libra-managed branches like 'intent' and 'agent-traces' cannot be used as restore sources",
+                ),
             _ => CliError::fatal(message).with_stable_code(stable_code),
         }
     }
@@ -181,6 +193,15 @@ async fn run_restore(args: RestoreArgs) -> Result<RestoreOutput, RestoreError> {
     let mut source = args.source;
     if source.is_none() && staged {
         source = Some(HEAD.to_string());
+    }
+
+    // Refuse to use Libra-managed locked branches (`intent`, `agent-traces`)
+    // as a restore source. `is_locked_revision` also strips revision suffixes
+    // (`~1`, `^`, `@{0}`) so users can't end-run the guard with `agent-traces~1`.
+    if let Some(src) = source.as_deref()
+        && branch::is_locked_revision(src)
+    {
+        return Err(RestoreError::LockedSource(src.to_string()));
     }
 
     let storage = util::objects_storage();

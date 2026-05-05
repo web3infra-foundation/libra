@@ -87,6 +87,9 @@ pub mod mcp;
 pub mod node_adapter;
 // Phase 0/1/2 orchestrator: intent -> plan -> execute pipeline.
 pub mod orchestrator;
+// External-Agent capture (CEX-EntireIO): contracts and redaction engine for
+// observing externally-hosted agents (Claude Code, Gemini CLI, …).
+pub mod observed_agents;
 // Read-only projections of session state for UI consumers.
 pub mod projection;
 // Prompt templates and rendering helpers.

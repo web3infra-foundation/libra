@@ -331,6 +331,14 @@ fn map_checkout_error(source: RestoreError) -> CliError {
                 .with_stable_code(StableErrorCode::NetworkUnavailable)
                 .with_hint("checkout required downloading LFS content, but the transfer failed")
         }
+        // `clone` never resolves user revisions, so the locked-source guard
+        // in `restore::run_restore` is unreachable here. Surface a fatal
+        // diagnostic rather than panicking on the unreachable branch — keeps
+        // the match exhaustive without burying the case.
+        RestoreError::LockedSource(name) => CliError::fatal(format!(
+            "internal error: clone checkout attempted to restore from locked branch '{name}'"
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid),
     }
 }
 

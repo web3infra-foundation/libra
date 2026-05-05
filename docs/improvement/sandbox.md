@@ -13,6 +13,41 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 
 本计划对齐 Claude Code 官方沙箱文档（`code.claude.com/docs/en/sandboxing`）与 Bubblewrap 工程实践，目标是把 Libra 在 AI Agent 失控场景下的实际爆炸半径降到与 Claude Code 相当的水平，并保证改动与 [code.md](code.md) 的 Runtime 正式写入层兼容。**网络服务访问采取默认拒绝（default deny）策略**：沙箱内除 loopback 外的一切出站连接默认被 OS 层阻断，只能通过显式白名单放行。
 
+## 0.16.2 落地审计快照（2026-05-05）
+
+### 审计范围
+
+- 代码版本：`libra 0.16.2`（`Cargo.toml`）
+- 审计对象：本计划“阶段 1～阶段 7”是否已在主代码路径落地（不按文档目标推断，以代码事实为准）
+
+### 审计结论
+
+- **阶段 1～阶段 7 仍未实质落地**，整体状态仍是“前置基线已具备 + 计划项待实施”。
+- 与上次审计相比，`sandbox` 关键缺口（静默降级、`--new-session`、敏感路径拒读、per-command tmp、危险挂载拒绝、`sandbox status`、网络三态）没有进入主干实现。
+
+### 分阶段状态（0.16.2）
+
+| 阶段 | 目标 | 现状 |
+|---|---|---|
+| 阶段 1 | `SandboxEnforcement` + `libra sandbox status` | 未落地 |
+| 阶段 2 | 内建 bwrap 直调 + seccomp | 未落地 |
+| 阶段 3 | `setsid` / `--new-session` | 未落地 |
+| 阶段 4 | 敏感路径拒读（`deny_read`） | 未落地 |
+| 阶段 5 | 每命令 0o700 tmp + 清理 | 未落地 |
+| 阶段 6 | 危险挂载拒绝清单 | 未落地 |
+| 阶段 7 | 网络三态 + allowlist/proxy | 未落地 |
+
+### 关键证据（代码锚点）
+
+- 仍然是 Linux helper 缺失后 `warn` 并回退到无沙箱：`src/internal/ai/sandbox/runtime.rs:270-290`。
+- 仍无 `SandboxEnforcement`、`EnforcementFailed`、`NetworkEnforcementFailed` 类型/错误分支（`src/internal/ai/sandbox/policy.rs`、`runtime.rs`）。
+- 仍没有 `libra sandbox status` 子命令入口：`src/cli.rs:170-302`，且 `src/command/` 下无 `sandbox.rs`。
+- Linux 仍是外部 helper 参数转发路径（`--sandbox-policy` / `--use-bwrap-sandbox`），无内建 `create_bwrap_command_args`：`src/internal/ai/sandbox/runtime.rs:323-340`。
+- macOS 读权限仍是 `(allow file-read*)` 全放行：`src/internal/ai/sandbox/runtime.rs:354`。
+- 执行路径仍未注入 per-command 私有 tmp，也无 finally 清理：`src/internal/ai/sandbox/mod.rs:986-1061`。
+- `writable_roots` 仅规范化/去重，未做危险路径拒绝：`src/internal/ai/sandbox/policy.rs:117-159`。
+- 网络模型仍是 `Restricted/Enabled` + `bool network_access`，不是 `Denied/Allowlist/Full`：`src/internal/ai/sandbox/policy.rs:27-33`、`src/internal/ai/sandbox/mod.rs:750-760`、`src/command/code.rs:357-364`。
+
 ## 已完成前置条件与当前代码状态
 
 ### 已确认落地的基线
@@ -34,17 +69,17 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 - 会话级审批缓存 `ApprovalStore`
 - tree-sitter bash 解析 + 安全命令白/黑名单
 - 沙箱拒绝关键词触发升级重试提示（mod.rs:178-186）
-- 默认 10 秒超时、100 KiB 输出上限（mod.rs:175、[src/internal/ai/tools/handlers/shell.rs:35](../../src/internal/ai/tools/handlers/shell.rs:35)）
+- 默认 60 秒超时、100 KiB 输出上限（[src/internal/ai/sandbox/mod.rs](../../src/internal/ai/sandbox/mod.rs) `DEFAULT_TIMEOUT_MS=60_000`、[src/internal/ai/tools/handlers/shell.rs:47](../../src/internal/ai/tools/handlers/shell.rs:47)）
 
 **Worktree FUSE overlay** [src/command/worktree-fuse.rs](../../src/command/worktree-fuse.rs)
 - 基于 `libfuse_fs::overlayfs` 的 COW 隔离，与 AI 沙箱解耦，当前仅服务 `git worktree --fuse`，尚未接入 AI 命令执行
 
 ### 基于当前代码的 Review 结论
 
-- Linux 外部 helper 缺失时走 `tracing::warn!` 后"裸跑"（runtime.rs:224-228），这是**静默安全降级**，用户无感知。
-- Seatbelt 策略对读操作使用 `(allow file-read*)` 全盘放行（runtime.rs:293），`~/.ssh` / `~/.aws` / `~/.netrc` / 浏览器 cookie / 各类 token 默认可被 agent 读取并外发。
+- Linux 外部 helper 缺失时走 `tracing::warn!` 后“裸跑”（runtime.rs:270-290），这是**静默安全降级**，用户无感知。
+- Seatbelt 策略对读操作使用 `(allow file-read*)` 全盘放行（runtime.rs:354），`~/.ssh` / `~/.aws` / `~/.netrc` / 浏览器 cookie / 各类 token 默认可被 agent 读取并外发。
 - `create_seatbelt_command_args` 与外部 Linux helper 都没有对沙箱进程做 `setsid` / `--new-session`，TIOCSTI 终端注入路径未封堵。
-- `CommandSpec::env` 目前由调用方传入，未专门为沙箱进程准备 0o700 私有 tmp，`$TMPDIR` 直接复用宿主。
+- `CommandSpec::env` 目前由调用方传入，`run_command_spec` 未专门为沙箱进程准备 0o700 私有 tmp，`$TMPDIR` 直接复用宿主。
 - `WorkspaceWrite::writable_roots` 装载不做危险路径校验，用户若为兼容 Docker 工具链写入 `/var/run/docker.sock`，沙箱一挂即可逃逸。
 - 缺少 `libra sandbox status` 入口，用户无法确认当前 `SandboxType` 的实际生效状态。
 

@@ -577,6 +577,18 @@ DROP TABLE IF EXISTS `agent_usage_stats`;
 "#,
             ),
         },
+        // CEX-EntireIO Phase 1.1: external-agent capture catalog. Uses
+        // `include_str!` to keep DDL out of the Rust file — the path resolves
+        // from `src/internal/db/migration.rs` (three `..` segments to repo
+        // root, then descend into `sql/migrations/`).
+        Migration {
+            version: 2026050303,
+            name: "agent_capture",
+            up: include_str!("../../../sql/migrations/2026050303_agent_capture.sql"),
+            down: Some(include_str!(
+                "../../../sql/migrations/2026050303_agent_capture_down.sql"
+            )),
+        },
     ]
 }
 
