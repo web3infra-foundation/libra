@@ -580,6 +580,284 @@ impl D1Client {
         let result: Vec<IdRow> = self.query(sql, Some(vec![serde_json::json!(name)])).await?;
         Ok(result.into_iter().next().map(|r| r.repo_id))
     }
+
+    // ── CEX-EntireIO §10.2: agent_session / agent_checkpoint mirroring ──
+
+    /// Create the `agent_session` table on the D1 side.
+    ///
+    /// Mirrors a subset of the local SQLite schema (see
+    /// `sql/migrations/2026050303_agent_capture.sql`) — only the columns
+    /// `libra cloud sync` needs to round-trip a session listing on a fresh
+    /// machine. The `agent_kind` CHECK matches the local CHECK so a
+    /// future widening migration on either side stays in lock-step.
+    ///
+    /// **Intentional divergences from the local schema** (operators
+    /// debugging cloud-vs-local drift should know about these). Each
+    /// bullet names the responsible team and the planned revisit window
+    /// so a future operator can chase the right thread:
+    ///
+    /// - **No FK to `ai_thread(thread_id)`**. D1 does not host the
+    ///   `ai_thread` table; `thread_id` is always NULL in v1
+    ///   (`docs/improvement/entire.md` §11.3). **Owner**: cloud-sync
+    ///   path (this module). **Revisit**: Phase 4 migration that
+    ///   replicates `ai_thread` to D1; until then, treat any non-NULL
+    ///   `thread_id` rows as a local-only join key.
+    /// - **No `ON DELETE CASCADE`** between session and checkpoint.
+    ///   D1 typically does not enforce FKs, so cascades would be a
+    ///   no-op even if declared. Orphan-row reconciliation is the
+    ///   caller's responsibility — `libra agent clean` handles the
+    ///   local side, and a future Phase 3 follow-up will add the D1
+    ///   side.
+    /// - **No payload size cap on `metadata_json` / `redaction_report`**.
+    ///   D1 has its own row-size cap; we rely on the local
+    ///   `Redactor::DEFAULT_RULES` keeping these blobs small in
+    ///   practice. **Owner**: redaction module
+    ///   (`observed_agents::redaction`). **Revisit**: Phase 4 if D1
+    ///   row-size violations are observed in production sync logs;
+    ///   Phase 3 already telemeters bytes_redacted via the report so
+    ///   the trigger condition is observable from the agent_session
+    ///   row itself.
+    ///
+    /// Idempotent — safe to call on every backup.
+    pub async fn ensure_agent_session_table(&self) -> Result<(), D1Error> {
+        let sql = r#"
+            CREATE TABLE IF NOT EXISTS agent_session (
+                session_id TEXT NOT NULL,
+                repo_id TEXT NOT NULL,
+                agent_kind TEXT NOT NULL CHECK(agent_kind IN (
+                    'claude_code', 'cursor', 'codex', 'gemini',
+                    'opencode', 'copilot', 'factory_ai'
+                )),
+                provider_session_id TEXT NOT NULL,
+                state TEXT NOT NULL,
+                working_dir TEXT NOT NULL,
+                worktree_id TEXT,
+                parent_commit TEXT,
+                parent_session_id TEXT,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                redaction_report TEXT NOT NULL DEFAULT '{}',
+                started_at INTEGER NOT NULL,
+                last_event_at INTEGER NOT NULL,
+                stopped_at INTEGER,
+                schema_version INTEGER NOT NULL DEFAULT 1,
+                synced_at INTEGER NOT NULL,
+                PRIMARY KEY (repo_id, session_id)
+            )
+        "#;
+        self.execute(sql, None).await?;
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_d1_agent_session_repo ON agent_session (repo_id)",
+            None,
+        )
+        .await?;
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_d1_agent_session_kind \
+             ON agent_session (repo_id, agent_kind)",
+            None,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Create the `agent_checkpoint` table on the D1 side.
+    ///
+    /// As with `agent_session`, this mirrors the local-side schema minus
+    /// the FK constraint (`ON DELETE CASCADE` from session → checkpoint
+    /// would require D1 to enforce FKs, which the host typically does
+    /// not). Cleanup of orphan checkpoints is therefore the caller's
+    /// responsibility — `libra agent clean` handles this on the local
+    /// side; D1 garbage rows would persist until a future
+    /// `libra cloud sync` reconciliation.
+    ///
+    /// Idempotent — safe to call on every backup.
+    pub async fn ensure_agent_checkpoint_table(&self) -> Result<(), D1Error> {
+        let sql = r#"
+            CREATE TABLE IF NOT EXISTS agent_checkpoint (
+                checkpoint_id TEXT NOT NULL,
+                repo_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                parent_checkpoint_id TEXT,
+                scope TEXT NOT NULL CHECK(scope IN ('temporary','committed','subagent')),
+                parent_commit TEXT,
+                tree_oid TEXT NOT NULL,
+                metadata_blob_oid TEXT NOT NULL,
+                traces_commit TEXT NOT NULL,
+                tool_use_id TEXT,
+                subagent_session_id TEXT,
+                description TEXT,
+                created_at INTEGER NOT NULL,
+                synced_at INTEGER NOT NULL,
+                PRIMARY KEY (repo_id, checkpoint_id)
+            )
+        "#;
+        self.execute(sql, None).await?;
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_d1_agent_checkpoint_session \
+             ON agent_checkpoint (repo_id, session_id, created_at)",
+            None,
+        )
+        .await?;
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_d1_agent_checkpoint_scope \
+             ON agent_checkpoint (repo_id, scope)",
+            None,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Upsert one `agent_session` row keyed by `(repo_id, session_id)`.
+    ///
+    /// On conflict the latest local view wins — `last_event_at`,
+    /// `stopped_at`, `state`, and `redaction_report` are overwritten so
+    /// repeated `libra cloud sync` runs converge to whatever the local
+    /// SQLite has now.
+    ///
+    /// `synced_at` is stamped server-side via `strftime('%s', 'now')` so
+    /// multi-machine clock skew between Libra clients does not poison the
+    /// observability column. Codex Phase-3.5 review #Q3.
+    pub async fn upsert_agent_session(
+        &self,
+        repo_id: &str,
+        row: &AgentSessionRow,
+    ) -> Result<(), D1Error> {
+        let sql = r#"
+            INSERT INTO agent_session (
+                session_id, repo_id, agent_kind, provider_session_id, state, working_dir,
+                worktree_id, parent_commit, parent_session_id, metadata_json,
+                redaction_report, started_at, last_event_at, stopped_at, schema_version,
+                synced_at
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                CAST(strftime('%s', 'now') AS INTEGER)
+            )
+            ON CONFLICT(repo_id, session_id) DO UPDATE SET
+                state = excluded.state,
+                working_dir = excluded.working_dir,
+                worktree_id = excluded.worktree_id,
+                parent_commit = excluded.parent_commit,
+                parent_session_id = excluded.parent_session_id,
+                metadata_json = excluded.metadata_json,
+                redaction_report = excluded.redaction_report,
+                last_event_at = excluded.last_event_at,
+                stopped_at = excluded.stopped_at,
+                schema_version = excluded.schema_version,
+                synced_at = CAST(strftime('%s', 'now') AS INTEGER)
+        "#;
+        let params = vec![
+            serde_json::json!(row.session_id),
+            serde_json::json!(repo_id),
+            serde_json::json!(row.agent_kind),
+            serde_json::json!(row.provider_session_id),
+            serde_json::json!(row.state),
+            serde_json::json!(row.working_dir),
+            serde_json::json!(row.worktree_id),
+            serde_json::json!(row.parent_commit),
+            serde_json::json!(row.parent_session_id),
+            serde_json::json!(row.metadata_json),
+            serde_json::json!(row.redaction_report),
+            serde_json::json!(row.started_at),
+            serde_json::json!(row.last_event_at),
+            serde_json::json!(row.stopped_at),
+            serde_json::json!(row.schema_version),
+        ];
+        self.execute(sql, Some(params)).await?;
+        Ok(())
+    }
+
+    /// Upsert one `agent_checkpoint` row keyed by `(repo_id, checkpoint_id)`.
+    ///
+    /// `synced_at` is stamped server-side via `strftime('%s', 'now')` for
+    /// the same reason as [`Self::upsert_agent_session`].
+    pub async fn upsert_agent_checkpoint(
+        &self,
+        repo_id: &str,
+        row: &AgentCheckpointRow,
+    ) -> Result<(), D1Error> {
+        let sql = r#"
+            INSERT INTO agent_checkpoint (
+                checkpoint_id, repo_id, session_id, parent_checkpoint_id, scope,
+                parent_commit, tree_oid, metadata_blob_oid, traces_commit, tool_use_id,
+                subagent_session_id, description, created_at, synced_at
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                CAST(strftime('%s', 'now') AS INTEGER)
+            )
+            ON CONFLICT(repo_id, checkpoint_id) DO UPDATE SET
+                session_id = excluded.session_id,
+                parent_checkpoint_id = excluded.parent_checkpoint_id,
+                scope = excluded.scope,
+                parent_commit = excluded.parent_commit,
+                tree_oid = excluded.tree_oid,
+                metadata_blob_oid = excluded.metadata_blob_oid,
+                traces_commit = excluded.traces_commit,
+                tool_use_id = excluded.tool_use_id,
+                subagent_session_id = excluded.subagent_session_id,
+                description = excluded.description,
+                created_at = excluded.created_at,
+                synced_at = CAST(strftime('%s', 'now') AS INTEGER)
+        "#;
+        let params = vec![
+            serde_json::json!(row.checkpoint_id),
+            serde_json::json!(repo_id),
+            serde_json::json!(row.session_id),
+            serde_json::json!(row.parent_checkpoint_id),
+            serde_json::json!(row.scope),
+            serde_json::json!(row.parent_commit),
+            serde_json::json!(row.tree_oid),
+            serde_json::json!(row.metadata_blob_oid),
+            serde_json::json!(row.traces_commit),
+            serde_json::json!(row.tool_use_id),
+            serde_json::json!(row.subagent_session_id),
+            serde_json::json!(row.description),
+            serde_json::json!(row.created_at),
+        ];
+        self.execute(sql, Some(params)).await?;
+        Ok(())
+    }
+}
+
+/// Local view of an `agent_session` row prepared for D1 mirroring.
+///
+/// Field set is the same as the local SQLite schema (see
+/// `sql/migrations/2026050303_agent_capture.sql`) minus the optional
+/// `id`/auto-increment surrogate columns. The cloud caller (`command::cloud`)
+/// builds these from a SELECT and hands them to
+/// [`D1Client::upsert_agent_session`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSessionRow {
+    pub session_id: String,
+    pub agent_kind: String,
+    pub provider_session_id: String,
+    pub state: String,
+    pub working_dir: String,
+    pub worktree_id: Option<String>,
+    pub parent_commit: Option<String>,
+    pub parent_session_id: Option<String>,
+    pub metadata_json: String,
+    pub redaction_report: String,
+    pub started_at: i64,
+    pub last_event_at: i64,
+    pub stopped_at: Option<i64>,
+    pub schema_version: i64,
+}
+
+/// Local view of an `agent_checkpoint` row prepared for D1 mirroring.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentCheckpointRow {
+    pub checkpoint_id: String,
+    pub session_id: String,
+    pub parent_checkpoint_id: Option<String>,
+    pub scope: String,
+    /// Nullable per the `2026050501` follow-up migration.
+    pub parent_commit: Option<String>,
+    pub tree_oid: String,
+    pub metadata_blob_oid: String,
+    pub traces_commit: String,
+    pub tool_use_id: Option<String>,
+    pub subagent_session_id: Option<String>,
+    pub description: Option<String>,
+    pub created_at: i64,
 }
 
 /// One row of the `object_index` table.

@@ -209,6 +209,12 @@ async fn execute_sync(args: SyncArgs) -> Result<(), String> {
         sync_metadata(&db_conn, &r2_storage)
             .await
             .map_err(|e| format!("Metadata sync failed: {}", e))?;
+        // CEX-EntireIO §10.2: even when there are no new git objects to
+        // ship, the agent_session/agent_checkpoint catalog may have new
+        // rows from local hook ingestion. Mirror them on every sync.
+        if let Err(err) = sync_agent_capture_tables(&db_conn, &d1_client, &repo_id).await {
+            eprintln!("warning: agent capture sync incomplete: {err}");
+        }
         return Ok(());
     }
 
@@ -265,6 +271,13 @@ async fn execute_sync(args: SyncArgs) -> Result<(), String> {
         sync_metadata(&db_conn, &r2_storage)
             .await
             .map_err(|e| format!("Metadata sync failed: {}", e))?;
+        // CEX-EntireIO §10.2: append agent capture catalog mirroring at
+        // the tail of the sync flow per the plan. Errors here are
+        // surfaced as a warning rather than a hard failure so an entirely
+        // green object sync is not undone by a transient D1 hiccup.
+        if let Err(err) = sync_agent_capture_tables(&db_conn, &d1_client, &repo_id).await {
+            eprintln!("warning: agent capture sync incomplete: {err}");
+        }
         Ok(())
     }
 }
@@ -770,6 +783,152 @@ async fn sync_metadata(
 
     println!("Metadata synced ({} references).", sorted_refs.len());
     Ok(())
+}
+
+/// Mirror local `agent_session` and `agent_checkpoint` rows up to the D1
+/// side. CEX-EntireIO §10.2 — explicitly skips the per-event JSONL stream
+/// (Phase 4 work) and only ships session / checkpoint summaries.
+///
+/// Both tables are best-effort: if the local schema is at a version that
+/// predates `2026050303`, we skip the table without erroring; if the D1
+/// upserts fail individually we report the count and keep going so the rest
+/// of `libra cloud sync` does not roll back.
+async fn sync_agent_capture_tables(
+    db_conn: &sea_orm::DatabaseConnection,
+    d1_client: &D1Client,
+    repo_id: &str,
+) -> Result<(), String> {
+    use sea_orm::{ConnectionTrait, Statement};
+
+    use crate::utils::d1_client::{AgentCheckpointRow, AgentSessionRow};
+
+    // Bail out cleanly when the migration that creates these tables
+    // hasn't run on this clone yet. We do this rather than blanket-erroring
+    // because `libra cloud sync` is callable on legacy databases.
+    let backend = db_conn.get_database_backend();
+    let session_present = db_conn
+        .query_one(Statement::from_sql_and_values(
+            backend,
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agent_session' LIMIT 1",
+            [],
+        ))
+        .await
+        .map_err(|e| format!("query sqlite_master: {e}"))?
+        .is_some();
+    if !session_present {
+        // Older local schema — nothing to mirror.
+        return Ok(());
+    }
+
+    println!("Syncing agent_session / agent_checkpoint to D1...");
+    d1_client
+        .ensure_agent_session_table()
+        .await
+        .map_err(|e| format!("ensure_agent_session_table: {}", e.message))?;
+    d1_client
+        .ensure_agent_checkpoint_table()
+        .await
+        .map_err(|e| format!("ensure_agent_checkpoint_table: {}", e.message))?;
+
+    // Pull every session, push it. The on-disk catalog is small in v1
+    // (capped at the number of agent sessions per repo) so a full
+    // re-upload is cheap and lets us avoid a `dirty` watermark column.
+    let session_rows = db_conn
+        .query_all(Statement::from_sql_and_values(
+            backend,
+            "SELECT session_id, agent_kind, provider_session_id, state, working_dir,
+                    worktree_id, parent_commit, parent_session_id, metadata_json,
+                    redaction_report, started_at, last_event_at, stopped_at, schema_version
+             FROM agent_session",
+            [],
+        ))
+        .await
+        .map_err(|e| format!("query agent_session: {e}"))?;
+
+    let mut sessions_synced = 0usize;
+    let mut sessions_failed = 0usize;
+    for row in session_rows {
+        let agent_row = AgentSessionRow {
+            session_id: row.try_get_by("session_id").unwrap_or_default(),
+            agent_kind: row.try_get_by("agent_kind").unwrap_or_default(),
+            provider_session_id: row.try_get_by("provider_session_id").unwrap_or_default(),
+            state: row.try_get_by("state").unwrap_or_default(),
+            working_dir: row.try_get_by("working_dir").unwrap_or_default(),
+            worktree_id: row.try_get_by("worktree_id").ok().flatten(),
+            parent_commit: row.try_get_by("parent_commit").ok().flatten(),
+            parent_session_id: row.try_get_by("parent_session_id").ok().flatten(),
+            metadata_json: row.try_get_by("metadata_json").unwrap_or_default(),
+            redaction_report: row.try_get_by("redaction_report").unwrap_or_default(),
+            started_at: row.try_get_by("started_at").unwrap_or_default(),
+            last_event_at: row.try_get_by("last_event_at").unwrap_or_default(),
+            stopped_at: row.try_get_by("stopped_at").ok().flatten(),
+            schema_version: row.try_get_by("schema_version").unwrap_or(1i64),
+        };
+        match d1_client.upsert_agent_session(repo_id, &agent_row).await {
+            Ok(_) => sessions_synced += 1,
+            Err(e) => {
+                eprintln!(
+                    "warning: agent_session {} upsert failed: {}",
+                    agent_row.session_id, e.message
+                );
+                sessions_failed += 1;
+            }
+        }
+    }
+
+    let checkpoint_rows = db_conn
+        .query_all(Statement::from_sql_and_values(
+            backend,
+            "SELECT checkpoint_id, session_id, parent_checkpoint_id, scope, parent_commit,
+                    tree_oid, metadata_blob_oid, traces_commit, tool_use_id,
+                    subagent_session_id, description, created_at
+             FROM agent_checkpoint",
+            [],
+        ))
+        .await
+        .map_err(|e| format!("query agent_checkpoint: {e}"))?;
+
+    let mut checkpoints_synced = 0usize;
+    let mut checkpoints_failed = 0usize;
+    for row in checkpoint_rows {
+        let cp_row = AgentCheckpointRow {
+            checkpoint_id: row.try_get_by("checkpoint_id").unwrap_or_default(),
+            session_id: row.try_get_by("session_id").unwrap_or_default(),
+            parent_checkpoint_id: row.try_get_by("parent_checkpoint_id").ok().flatten(),
+            scope: row.try_get_by("scope").unwrap_or_default(),
+            parent_commit: row.try_get_by("parent_commit").ok().flatten(),
+            tree_oid: row.try_get_by("tree_oid").unwrap_or_default(),
+            metadata_blob_oid: row.try_get_by("metadata_blob_oid").unwrap_or_default(),
+            traces_commit: row.try_get_by("traces_commit").unwrap_or_default(),
+            tool_use_id: row.try_get_by("tool_use_id").ok().flatten(),
+            subagent_session_id: row.try_get_by("subagent_session_id").ok().flatten(),
+            description: row.try_get_by("description").ok().flatten(),
+            created_at: row.try_get_by("created_at").unwrap_or_default(),
+        };
+        match d1_client.upsert_agent_checkpoint(repo_id, &cp_row).await {
+            Ok(_) => checkpoints_synced += 1,
+            Err(e) => {
+                eprintln!(
+                    "warning: agent_checkpoint {} upsert failed: {}",
+                    cp_row.checkpoint_id, e.message
+                );
+                checkpoints_failed += 1;
+            }
+        }
+    }
+
+    println!(
+        "Agent capture sync: {sessions_synced} sessions ({sessions_failed} failed), \
+         {checkpoints_synced} checkpoints ({checkpoints_failed} failed)."
+    );
+    if sessions_failed > 0 || checkpoints_failed > 0 {
+        Err(format!(
+            "{} session + {} checkpoint upserts failed",
+            sessions_failed, checkpoints_failed
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 async fn restore_metadata(

@@ -640,7 +640,7 @@ mod tests {
         // some secret scanners use as a heuristic) never appears in
         // source. The fixture body is just `xxxx…` — enough to satisfy
         // the regex's `[\s\S]*?` between the BEGIN/END markers.
-        let body: String = std::iter::repeat('x').take(40).collect();
+        let body = "x".repeat(40);
         let begin = "-----BEGIN PRIVATE KEY-----";
         let end = "-----END PRIVATE KEY-----";
         let json = format!(
@@ -677,9 +677,9 @@ mod tests {
         // whether it's actually live. Splitting the parts and joining at
         // runtime keeps the test deterministic without tripping the
         // scanner.
-        let part1: String = std::iter::repeat('M').take(24).collect();
+        let part1 = "M".repeat(24);
         let part2 = "GabcDe";
-        let part3: String = std::iter::repeat('a').take(29).collect();
+        let part3 = "a".repeat(29);
         let token = format!("{part1}.{part2}.{part3}");
         let (out, _) = redact_str(&r, &token);
         assert!(out.contains("<REDACTED:discord-bot-token>"));
