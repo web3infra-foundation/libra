@@ -137,6 +137,7 @@ mod tests {
             session_id: "s".to_string(),
             provider_session_id: "p".to_string(),
             working_dir: std::path::PathBuf::from("/tmp"),
+            transcript_path: None,
         };
         let err = agent.read_transcript(&ctx).unwrap_err();
         assert!(

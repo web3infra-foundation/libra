@@ -568,18 +568,28 @@ pub(crate) async fn ingest_agent_traces_payload(
     // `last_event_at`, `state`, and `redaction_report`. We key by
     // `(agent_kind, provider_session_id)` because the unique index already
     // lives there.
+    //
+    // Phase 4.1: also persist the `transcript_path` from the envelope
+    // into `metadata_json` so `libra agent checkpoint rewind --apply`
+    // can resolve the on-disk transcript file without re-running the
+    // adapter's path-discovery heuristics.
+    let metadata_json = build_agent_session_metadata_json(&envelope);
     let upsert_sql = "
         INSERT INTO agent_session (
             session_id, agent_kind, provider_session_id, state, working_dir,
-            redaction_report, started_at, last_event_at, stopped_at
+            metadata_json, redaction_report, started_at, last_event_at, stopped_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(agent_kind, provider_session_id) DO UPDATE SET
             state = excluded.state,
             last_event_at = excluded.last_event_at,
             redaction_report = excluded.redaction_report,
             stopped_at = CASE WHEN excluded.state = 'stopped' THEN excluded.last_event_at
-                              ELSE agent_session.stopped_at END
+                              ELSE agent_session.stopped_at END,
+            metadata_json = CASE
+                WHEN length(excluded.metadata_json) > 2 THEN excluded.metadata_json
+                ELSE agent_session.metadata_json
+            END
     ";
     let stopped_at: Option<i64> =
         matches!(event.kind, LifecycleEventKind::SessionEnd).then_some(now);
@@ -592,6 +602,7 @@ pub(crate) async fn ingest_agent_traces_payload(
             envelope.session_id.clone().into(),
             new_state.into(),
             envelope.cwd.clone().into(),
+            metadata_json.into(),
             redaction_report_json.clone().into(),
             now.into(),
             now.into(),
@@ -625,6 +636,27 @@ pub(crate) async fn ingest_agent_traces_payload(
     }
 
     Ok(())
+}
+
+/// Build the JSON object stored in `agent_session.metadata_json`.
+/// Currently captures the agent's on-disk transcript path so the rewind
+/// path can locate the file without re-deriving provider conventions.
+/// Returns `"{}"` when no useful fields are populated, so the upsert
+/// CASE expression can detect the placeholder.
+fn build_agent_session_metadata_json(envelope: &SessionHookEnvelope) -> String {
+    let mut obj = serde_json::Map::new();
+    if let Some(path) = envelope.transcript_path.as_deref()
+        && !path.is_empty()
+    {
+        obj.insert(
+            "transcript_path".to_string(),
+            serde_json::Value::String(path.to_string()),
+        );
+    }
+    if obj.is_empty() {
+        return "{}".to_string();
+    }
+    serde_json::to_string(&obj).unwrap_or_else(|_| "{}".to_string())
 }
 
 /// Write a SessionEnd checkpoint: materialise transcript + metadata blobs,

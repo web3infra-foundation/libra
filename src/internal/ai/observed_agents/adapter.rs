@@ -127,6 +127,13 @@ pub struct AgentSessionCtx {
     pub provider_session_id: String,
     /// Working directory the session was started in.
     pub working_dir: PathBuf,
+    /// Absolute path to the agent's on-disk transcript file (e.g. Claude
+    /// Code's session JSONL). Captured from the SessionStart hook
+    /// envelope and persisted on the SessionState; the adapter relies on
+    /// this to avoid having to reconstruct provider-specific path
+    /// conventions (e.g. `~/.claude/projects/<workdir>/<id>.jsonl`).
+    /// `None` when no envelope ever provided one.
+    pub transcript_path: Option<PathBuf>,
 }
 
 /// Reasons an adapter call can fail.
