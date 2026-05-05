@@ -217,9 +217,21 @@ pub async fn process_hook_event_with_target(
         .context("failed to configure hash kind from repo config")?;
 
     let process_cwd_str = process_cwd.to_string_lossy().to_string();
-    let session_store = SessionStore::from_storage_path(&storage_path);
+    // CEX-EntireIO §11.2: agent capture sessions live under `sessions/agent/`
+    // so their session-id locks cannot collide with `libra code` session
+    // locks (which still live one level up at `sessions/`). The store also
+    // adopts any in-flight legacy entry, preserving hook continuity for
+    // sessions that started before this partition existed.
+    let session_store = SessionStore::from_storage_path_with_subdir(&storage_path, "agent");
 
     let ai_session_id = build_ai_session_id(provider.provider_name(), &envelope.session_id);
+    if let Err(err) = session_store.adopt_legacy_subdir_session_if_needed(&ai_session_id) {
+        tracing::warn!(
+            session_id = %redact_session_id(&ai_session_id),
+            error = %err,
+            "failed to migrate legacy session into agent subdir; continuing with fresh session under sessions/agent/"
+        );
+    }
     let recovered_from_out_of_order = event.kind != LifecycleEventKind::SessionStart;
     let _session_lock = session_store
         .lock_session(&ai_session_id)
