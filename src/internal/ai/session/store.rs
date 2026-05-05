@@ -79,6 +79,18 @@ impl SessionStore {
         }
     }
 
+    /// Create a store rooted at `{storage_path}/sessions/{subdir}/`. Used
+    /// by CEX-EntireIO Phase 3 (`docs/improvement/entire.md` §11.5) to
+    /// keep `libra code` and `libra agent` session locks in disjoint
+    /// subtrees so their `.lock` files cannot collide. Pre-existing
+    /// callers stay on [`Self::from_storage_path`] which preserves the
+    /// historical layout.
+    pub fn from_storage_path_with_subdir(storage_path: &Path, subdir: &str) -> Self {
+        Self {
+            sessions_dir: storage_path.join("sessions").join(subdir),
+        }
+    }
+
     /// Create the sessions directory if it doesn't exist.
     fn ensure_dir(&self) -> io::Result<()> {
         fs::create_dir_all(&self.sessions_dir)

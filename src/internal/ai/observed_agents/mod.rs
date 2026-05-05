@@ -21,12 +21,14 @@
 //! generation; Phase 3 wires the cloud-sync hooks.
 
 pub mod adapter;
+pub mod preview;
 pub mod redaction;
 
 pub use adapter::{
-    AgentKind, AgentSessionCtx, ObservedAgent, ObservedAgentHooks, TranscriptChunker,
-    TranscriptTruncator,
+    AgentKind, AgentSessionCtx, AgentStability, ObservedAgent, ObservedAgentHooks,
+    TranscriptChunker, TranscriptTruncator,
 };
+pub use preview::{PREVIEW_SPECS, PreviewAgent, PreviewSpec, is_preview, preview_spec_for};
 pub use redaction::{
     RedactedBytes, RedactedSink, RedactionMatch, RedactionReport, RedactionRule, Redactor,
 };

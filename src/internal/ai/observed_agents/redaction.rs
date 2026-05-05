@@ -268,11 +268,90 @@ static DEFAULT_RULES: Lazy<Arc<Vec<RedactionRule>>> = Lazy::new(|| {
             "credential-uri",
             r"(?i)\b(?:postgres|postgresql|mysql|mongodb|redis|amqp|amqps)://[^\s/@:]+:[^\s/@]+@[^\s]+",
         ),
+        // Google service-account JSON `private_key` field. JSON pretty-
+        // printers escape the BEGIN/END markers; this rule catches both the
+        // raw and the JSON-escaped forms by anchoring on `\"private_key\"`.
+        // MUST come BEFORE the bare `private-key-pem` rule below — the
+        // bare PEM rule matches the inner armoured key first otherwise,
+        // which produces `<REDACTED:private-key-pem>` for the inner span
+        // and never gives this more-specific JSON-aware rule a chance.
+        (
+            "google-service-account-private-key",
+            r#""private_key"\s*:\s*"-----BEGIN [^"]*PRIVATE KEY-----[\s\S]*?-----END [^"]*PRIVATE KEY-----[^"]*""#,
+        ),
         // Private-key PEM headers — match the marker, not the body, so the
         // replacement collapses the entire armoured key into a placeholder.
         (
             "private-key-pem",
             r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
+        ),
+        // Stripe live + test secrets (rk_, sk_, pk_ — pk is publishable but
+        // still high-signal in transcripts).
+        (
+            "stripe-key",
+            r"\b(?:sk|rk|pk)_(?:live|test)_[0-9A-Za-z]{20,}\b",
+        ),
+        // Twilio Account SID. The `AC`/`SK` prefix plus 32 hex is the
+        // documented format. The 32-hex-only Auth Token is intentionally
+        // NOT matched here — bare hex strings of that length are too noisy
+        // to redact unconditionally without a keyword anchor.
+        ("twilio-account-sid", r"\b(?:AC|SK)[0-9a-fA-F]{32}\b"),
+        // SendGrid API keys (`SG.<24>.<43>`).
+        (
+            "sendgrid-api-key",
+            r"\bSG\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{30,}\b",
+        ),
+        // Mailgun keys (`key-<hex>` legacy style and the new `key-…`).
+        ("mailgun-api-key", r"\bkey-[0-9a-fA-F]{32}\b"),
+        // npm automation tokens — both legacy `npm_…` and `npm-…` shapes.
+        ("npm-token", r"\bnpm_[0-9A-Za-z]{32,}\b"),
+        // PyPI upload tokens (`pypi-…`).
+        ("pypi-token", r"\bpypi-[A-Za-z0-9_-]{32,}\b"),
+        // GitLab personal/access tokens — `glpat-` prefix is the modern PAT
+        // shape; older deploy tokens follow `gldt-`.
+        ("gitlab-pat", r"\b(?:glpat|gldt)-[0-9A-Za-z_-]{20,}\b"),
+        // Atlassian API tokens commonly start with `ATATT`. Conservative
+        // length bound to dodge stray words.
+        ("atlassian-api-token", r"\bATATT[0-9A-Za-z_-]{32,}\b"),
+        // Cloudflare API tokens — opaque random strings; we anchor off the
+        // common `Bearer <40 char>` shape inside `Authorization` headers
+        // because a bare token is too noisy to redact unconditionally.
+        (
+            "cloudflare-bearer",
+            r"(?i)Authorization:\s*Bearer\s+[A-Za-z0-9_-]{40}\b",
+        ),
+        // (`google-service-account-private-key` rule lives earlier, ahead
+        // of the bare `private-key-pem` rule, so the JSON wrapper takes
+        // precedence over the inner armoured key. Don't add a second copy
+        // here.)
+        // (Heroku API keys are UUID-shaped — too generic to redact safely
+        // without a lookaround. The `regex` crate does not support
+        // lookahead/lookbehind, so a naive `(?=heroku)` pattern would
+        // poison `DEFAULT_RULES` on first use. Skipped intentionally.)
+        // Hugging Face hub tokens (`hf_…`).
+        ("huggingface-token", r"\bhf_[A-Za-z0-9]{32,}\b"),
+        // DigitalOcean PATs (`dop_v1_…`).
+        ("digitalocean-pat", r"\bdop_v1_[A-Za-z0-9]{40,}\b"),
+        // Telegram bot tokens — `<numeric>:<35 alnum>`. We don't anchor on
+        // a leading `\b` because tokens commonly appear as URL substrings
+        // like `https://api.telegram.org/bot<token>/getMe`, where there
+        // is no word boundary between `bot` and the digits. The character
+        // class `[A-Za-z0-9_-]` is greedy so it stops naturally at the
+        // first non-class character (e.g. `/`).
+        ("telegram-bot-token", r"\d{8,11}:[A-Za-z0-9_-]{30,}"),
+        // Discord bot tokens — three dot-separated base64ish parts.
+        (
+            "discord-bot-token",
+            r"\b[MN][A-Za-z\d]{23}\.[\w-]{6}\.[\w-]{27,}\b",
+        ),
+        // High-entropy `password` / `secret_key` literals in shell-style
+        // env files. Bound is 32+ chars rather than 16 to dodge benign
+        // 16-char tokens that show up in test fixtures, UUID-like names,
+        // and DB connection-pool defaults — Codex Phase 3 review flagged
+        // the previous {16,} as too aggressive.
+        (
+            "env-password-assignment",
+            r#"(?i)(?:password|passwd|secret_key|api_secret)\s*[:=]\s*['"]?[A-Za-z0-9._/+=-]{32,}['"]?"#,
         ),
     ];
 
@@ -411,5 +490,228 @@ mod tests {
         assert!(out.contains("<REDACTED:github-token>"));
         assert!(out.contains("<REDACTED:aws-access-key-id>"));
         assert_eq!(report.matches.len(), 2);
+    }
+
+    // ── Phase 3.2 expanded rules ─────────────────────────────────────────
+
+    #[test]
+    fn redacts_stripe_secret_key() {
+        let r = Redactor::new_default();
+        // Composed at runtime to dodge GitHub's secret-scanning push
+        // protection — the literal `sk_live_<24+ alphanumeric>` shape
+        // is flagged by Stripe's pattern even when the value is fake.
+        let key = format!("sk_live_{}", "a".repeat(24));
+        let (out, _) = redact_str(&r, &format!("STRIPE={key}"));
+        assert!(out.contains("<REDACTED:stripe-key>"));
+        assert!(!out.contains(&key));
+    }
+
+    #[test]
+    fn redacts_stripe_test_key() {
+        let r = Redactor::new_default();
+        let key = format!("sk_test_{}", "b".repeat(24));
+        let (out, _) = redact_str(&r, &key);
+        assert!(out.contains("<REDACTED:stripe-key>"));
+    }
+
+    #[test]
+    fn redacts_twilio_account_sid() {
+        let r = Redactor::new_default();
+        // Fixture is composed at runtime so the literal `AC<32 hex>`
+        // string never appears in source — GitHub's secret-scanning push
+        // protection flags both AC- and SK-prefixed Twilio shapes
+        // verbatim regardless of whether the digits are real.
+        let sid = format!("AC{}", "0123456789abcdef".repeat(2));
+        let (out, _) = redact_str(&r, &format!("twilio={sid}"));
+        assert!(out.contains("<REDACTED:twilio-account-sid>"));
+        assert!(!out.contains(&sid));
+    }
+
+    #[test]
+    fn redacts_sendgrid_key() {
+        let r = Redactor::new_default();
+        let key = "SG.aaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let (out, _) = redact_str(&r, key);
+        assert!(out.contains("<REDACTED:sendgrid-api-key>"));
+    }
+
+    #[test]
+    fn redacts_npm_token() {
+        let r = Redactor::new_default();
+        let token = "npm_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let (out, _) = redact_str(&r, &format!("NPM_TOKEN={token}"));
+        assert!(out.contains("<REDACTED:npm-token>"));
+    }
+
+    #[test]
+    fn redacts_gitlab_pat() {
+        let r = Redactor::new_default();
+        let token = "glpat-aaaaaaaaaaaaaaaaaaaa";
+        let (out, _) = redact_str(&r, &format!("GITLAB_TOKEN={token}"));
+        assert!(out.contains("<REDACTED:gitlab-pat>"));
+    }
+
+    #[test]
+    fn redacts_huggingface_token() {
+        let r = Redactor::new_default();
+        let token = "hf_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let (out, _) = redact_str(&r, token);
+        assert!(out.contains("<REDACTED:huggingface-token>"));
+    }
+
+    #[test]
+    fn redacts_digitalocean_pat() {
+        let r = Redactor::new_default();
+        let token = "dop_v1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let (out, _) = redact_str(&r, token);
+        assert!(out.contains("<REDACTED:digitalocean-pat>"));
+    }
+
+    #[test]
+    fn redacts_env_password_assignment() {
+        let r = Redactor::new_default();
+        // Value is 36 chars, above the 32-char floor.
+        let secret = "correcthorsebatterystaple_42abcdefAB";
+        assert!(secret.len() >= 32);
+        let (out, _) = redact_str(&r, &format!("DB_PASSWORD={secret}"));
+        assert!(out.contains("<REDACTED:env-password-assignment>"));
+        assert!(!out.contains(secret));
+    }
+
+    /// Regression for the Phase 3 threshold tightening: a benign 16-char
+    /// value next to a `password=` keyword must NOT be redacted under the
+    /// new {32,} lower bound. This is the false-positive class Codex
+    /// flagged.
+    #[test]
+    fn does_not_redact_short_env_password_values() {
+        let r = Redactor::new_default();
+        let benign = "password=changeme12345678";
+        assert_eq!(benign.len() - "password=".len(), 16);
+        let (out, _) = redact_str(&r, benign);
+        assert!(
+            !out.contains("<REDACTED:env-password-assignment>"),
+            "expected benign 16-char value to round-trip; got {out}"
+        );
+    }
+
+    #[test]
+    fn redacts_atlassian_api_token() {
+        let r = Redactor::new_default();
+        let token = "ATATT3xFfGF0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let (out, _) = redact_str(&r, token);
+        assert!(out.contains("<REDACTED:atlassian-api-token>"));
+    }
+
+    #[test]
+    fn redacts_pypi_token() {
+        let r = Redactor::new_default();
+        let token = "pypi-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let (out, _) = redact_str(&r, token);
+        assert!(out.contains("<REDACTED:pypi-token>"));
+    }
+
+    #[test]
+    fn redacts_mailgun_api_key() {
+        let r = Redactor::new_default();
+        // Composed at runtime so the literal `key-<32 hex>` shape never
+        // appears in source — same reason as the Twilio fixture.
+        let key = format!("key-{}", "0123456789abcdef".repeat(2));
+        let (out, _) = redact_str(&r, &format!("MAILGUN={key}"));
+        assert!(out.contains("<REDACTED:mailgun-api-key>"));
+        assert!(!out.contains(&key));
+    }
+
+    #[test]
+    fn redacts_cloudflare_bearer() {
+        let r = Redactor::new_default();
+        // 40 alphanumeric chars after `Bearer ` is the documented shape.
+        let token = "abcdefghijklmnopqrstuvwxyz0123456789ABCD";
+        assert_eq!(token.len(), 40);
+        let header = format!("Authorization: Bearer {token}\n");
+        let (out, _) = redact_str(&r, &header);
+        assert!(out.contains("<REDACTED:cloudflare-bearer>"));
+        assert!(!out.contains(token));
+    }
+
+    #[test]
+    fn redacts_google_service_account_private_key() {
+        let r = Redactor::new_default();
+        // Compose the JSON at runtime so the literal PKCS#8 prefix (which
+        // some secret scanners use as a heuristic) never appears in
+        // source. The fixture body is just `xxxx…` — enough to satisfy
+        // the regex's `[\s\S]*?` between the BEGIN/END markers.
+        let body: String = std::iter::repeat('x').take(40).collect();
+        let begin = "-----BEGIN PRIVATE KEY-----";
+        let end = "-----END PRIVATE KEY-----";
+        let json = format!(
+            r#"{{"type":"service_account","private_key":"{begin}\n{body}\n{end}\n","client_email":"x@y.iam.gserviceaccount.com"}}"#
+        );
+        let (out, _) = redact_str(&r, &json);
+        assert!(
+            out.contains("<REDACTED:google-service-account-private-key>"),
+            "expected service-account redaction; got {out}"
+        );
+        assert!(!out.contains(&body));
+        // The non-private-key fields stay around — only the key itself is
+        // collapsed to the placeholder.
+        assert!(out.contains("\"type\":\"service_account\""));
+        assert!(out.contains("\"client_email\""));
+    }
+
+    #[test]
+    fn redacts_telegram_bot_token() {
+        let r = Redactor::new_default();
+        let token = "1234567890:AAEhBP0av28aaaaaaaaaaaaaaaaaaaaaaaa";
+        let (out, _) = redact_str(&r, &format!("https://api.telegram.org/bot{token}/getMe"));
+        assert!(out.contains("<REDACTED:telegram-bot-token>"));
+        assert!(!out.contains(token));
+    }
+
+    #[test]
+    fn redacts_discord_bot_token() {
+        let r = Redactor::new_default();
+        // Synthesised fixture matching the documented Discord token shape
+        // (`<24-char-base64>.<6-char>.<27+-char>`) without checking in a
+        // single literal string that GitHub's secret-scanning push
+        // protection would flag as a "Discord Bot Token" regardless of
+        // whether it's actually live. Splitting the parts and joining at
+        // runtime keeps the test deterministic without tripping the
+        // scanner.
+        let part1: String = std::iter::repeat('M').take(24).collect();
+        let part2 = "GabcDe";
+        let part3: String = std::iter::repeat('a').take(29).collect();
+        let token = format!("{part1}.{part2}.{part3}");
+        let (out, _) = redact_str(&r, &token);
+        assert!(out.contains("<REDACTED:discord-bot-token>"));
+        assert!(!out.contains(&token));
+    }
+
+    /// Regression: the new rules should not fire on benign nearby text. A
+    /// short clean transcript with no secret-like patterns must round-trip
+    /// untouched.
+    #[test]
+    fn expanded_rules_do_not_fire_on_benign_text() {
+        let r = Redactor::new_default();
+        let benign = "the quick brown fox jumps over the lazy dog and eats kibble";
+        let (out, report) = redact_str(&r, benign);
+        assert_eq!(out, benign);
+        assert!(report.matches.is_empty());
+    }
+
+    /// Belt-and-suspenders test: the `DEFAULT_RULES` `Lazy` static is
+    /// initialized via `Regex::new(...).expect(...)` and a single bad
+    /// pattern would poison every subsequent caller (we hit this exact
+    /// failure mode in CEX-EntireIO Phase 3.2 with a `(?=...)` lookahead
+    /// pattern). This test forces the Lazy to evaluate eagerly so any
+    /// future bad regex turns into a localised, named failure rather than
+    /// a "Lazy instance has previously been poisoned" cascade.
+    #[test]
+    fn default_rules_initialize_without_poisoning_lazy() {
+        let r = Redactor::new_default();
+        assert!(
+            r.rule_count() >= 8,
+            "default redactor must register at least the v1 rule set; got {}",
+            r.rule_count()
+        );
     }
 }

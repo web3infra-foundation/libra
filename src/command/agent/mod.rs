@@ -14,7 +14,7 @@ use crate::{
             provider::{HookProvider, ProviderInstallOptions},
             providers::find_provider,
         },
-        observed_agents::AgentKind,
+        observed_agents::{AgentKind, is_preview},
     },
     utils::{
         error::{CliError, CliResult},
@@ -200,13 +200,22 @@ fn install_or_uninstall(agents: &[String], output: &OutputConfig, install: bool)
         let Some(provider) = find_provider(provider_name) else {
             // Preview-only adapter: surface a friendly diagnostic on stderr
             // (not stdout — this is informational, not program output) and
-            // don't fail the whole batch. Phase 3 lands the preview install
-            // paths.
+            // don't fail the whole batch. Phase 3.1 added the preview
+            // registry in `observed_agents::preview`; phase 4 will flesh
+            // out the install path for each one.
             if !output.quiet {
-                eprintln!(
-                    "libra agent {verb_present}: skipping '{slug}' \
-                     (preview adapter — landing in phase 3)"
-                );
+                if is_preview(kind) {
+                    eprintln!(
+                        "libra agent {verb_present}: skipping '{slug}' \
+                         (preview adapter — hook installation lands in phase 4; \
+                         see observed_agents::preview)"
+                    );
+                } else {
+                    eprintln!(
+                        "libra agent {verb_present}: skipping '{slug}' \
+                         (no HookProvider registered for this agent)"
+                    );
+                }
             }
             continue;
         };

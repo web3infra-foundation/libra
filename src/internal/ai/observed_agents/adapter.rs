@@ -100,7 +100,13 @@ impl AgentKind {
 /// through `libra agent` end-to-end. `Preview` means the agent is reachable
 /// from the CLI but its adapter returns `Err(AgentNotYetImplemented)` for the
 /// transcript/hook code paths.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+///
+/// `Serialize` is derived (lowercase via `#[serde(rename_all = "snake_case")]`)
+/// because `libra agent doctor --json` emits this enum verbatim. Renaming
+/// either variant changes a public CLI contract — bump the JSON schema if
+/// you must.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentStability {
     Stable,
     Preview,

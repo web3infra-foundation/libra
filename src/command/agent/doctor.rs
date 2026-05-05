@@ -12,7 +12,10 @@ use serde::Serialize;
 use super::DoctorArgs;
 use crate::{
     internal::{
-        ai::hooks::providers::{claude_provider, gemini_provider},
+        ai::{
+            hooks::providers::{claude_provider, gemini_provider},
+            observed_agents::{AgentStability, PREVIEW_SPECS},
+        },
         db::get_db_conn_instance,
     },
     utils::{
@@ -24,6 +27,10 @@ use crate::{
 #[derive(Debug, Serialize)]
 struct ProviderHookStatus {
     name: &'static str,
+    /// Adapter stability tier — `Stable` adapters carry a real
+    /// `HookProvider` and report installation status; `Preview` ones
+    /// (Phase 3.1) surface as "not yet installable".
+    tier: AgentStability,
     installed: Option<bool>,
     error: Option<String>,
 }
@@ -68,12 +75,26 @@ pub async fn execute_safe(_args: DoctorArgs, output: &OutputConfig) -> CliResult
         (0, 0, 0)
     };
 
-    // Hook installation status for the two stable providers. Other
-    // providers are preview and don't yet support inspection.
-    let provider_hooks = vec![
-        check_provider("claude-code", claude_provider()),
-        check_provider("gemini", gemini_provider()),
+    // Hook installation status for the two stable providers, followed by
+    // the five preview adapters from `observed_agents::preview`. Preview
+    // entries surface as `tier: AgentStability::Preview` with
+    // `installed: None` so operators can see the full v1 matrix from one
+    // command.
+    let mut provider_hooks = vec![
+        check_provider(
+            "claude-code",
+            AgentStability::Stable,
+            Some(claude_provider()),
+        ),
+        check_provider("gemini", AgentStability::Stable, Some(gemini_provider())),
     ];
+    for spec in PREVIEW_SPECS {
+        provider_hooks.push(check_provider(
+            spec.provider_name,
+            AgentStability::Preview,
+            None,
+        ));
+    }
 
     emit_report(
         &DoctorReport {
@@ -89,16 +110,29 @@ pub async fn execute_safe(_args: DoctorArgs, output: &OutputConfig) -> CliResult
 
 fn check_provider(
     name: &'static str,
-    provider: &dyn crate::internal::ai::hooks::provider::HookProvider,
+    tier: AgentStability,
+    provider: Option<&dyn crate::internal::ai::hooks::provider::HookProvider>,
 ) -> ProviderHookStatus {
+    let Some(provider) = provider else {
+        // Preview adapters don't carry a HookProvider yet. Surface them
+        // explicitly as preview/unknown so the report is still complete.
+        return ProviderHookStatus {
+            name,
+            tier,
+            installed: None,
+            error: None,
+        };
+    };
     match provider.hooks_are_installed() {
         Ok(installed) => ProviderHookStatus {
             name,
+            tier,
             installed: Some(installed),
             error: None,
         },
         Err(err) => ProviderHookStatus {
             name,
+            tier,
             installed: None,
             error: Some(err.to_string()),
         },
@@ -122,11 +156,15 @@ fn emit_report(report: &DoctorReport, output: &OutputConfig) -> CliResult<()> {
 
     println!("Provider hooks:");
     for ph in &report.provider_hooks {
+        let tier_tag = match ph.tier {
+            AgentStability::Preview => " [preview]",
+            AgentStability::Stable => "",
+        };
         match (ph.installed, &ph.error) {
-            (Some(true), _) => println!("  {}: installed", ph.name),
-            (Some(false), _) => println!("  {}: NOT installed", ph.name),
-            (None, Some(err)) => println!("  {}: error — {err}", ph.name),
-            (None, None) => println!("  {}: unknown", ph.name),
+            (Some(true), _) => println!("  {}{tier_tag}: installed", ph.name),
+            (Some(false), _) => println!("  {}{tier_tag}: NOT installed", ph.name),
+            (None, Some(err)) => println!("  {}{tier_tag}: error — {err}", ph.name),
+            (None, None) => println!("  {}{tier_tag}: not yet installable", ph.name),
         }
     }
 
