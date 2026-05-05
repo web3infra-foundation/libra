@@ -543,6 +543,18 @@ impl HistoryManager {
     ///   (SHA-256) — protection against malformed inputs that would
     ///   otherwise corrupt the object store.
     fn write_tree(&self, tree_items: &[TreeItem]) -> Result<ObjectHash> {
+        Ok(self.write_tree_with_size(tree_items)?.0)
+    }
+
+    /// Encode `tree_items` as a Git tree, write the object, and return
+    /// `(hash, encoded_size)`. The size is the *content* length (no Git
+    /// header) — same convention as `object_index.o_size`.
+    ///
+    /// Used by the agent capture path (Phase 3.5c) which needs the byte
+    /// count to pair with [`crate::utils::client_storage::enqueue_agent_blob_object_index_update`].
+    /// All other callers go through [`Self::write_tree`] and discard the
+    /// size.
+    fn write_tree_with_size(&self, tree_items: &[TreeItem]) -> Result<(ObjectHash, usize)> {
         let mut data = Vec::new();
         for item in tree_items {
             let mode_str = match item.mode {
@@ -567,7 +579,23 @@ impl HistoryManager {
             data.extend_from_slice(&hash_bytes);
         }
 
-        Ok(write_git_object(&self.repo_path, "tree", &data)?)
+        let size = data.len();
+        let hash = write_git_object(&self.repo_path, "tree", &data)?;
+        Ok((hash, size))
+    }
+
+    /// Write a tree object and stamp it into `object_index` with the
+    /// given `o_type`. Used by the agent capture path so cloud sync
+    /// uploads the trees that compose `refs/libra/agent-traces`.
+    fn write_tree_indexed(&self, tree_items: &[TreeItem], o_type: &str) -> Result<ObjectHash> {
+        let (hash, size) = self.write_tree_with_size(tree_items)?;
+        crate::utils::client_storage::enqueue_agent_blob_object_index_update(
+            &self.repo_path,
+            &hash.to_string(),
+            o_type,
+            size as i64,
+        );
+        Ok(hash)
     }
 
     fn create_append_commit(
@@ -864,12 +892,55 @@ impl HistoryManager {
             None => None,
         };
 
+        // CEX-EntireIO §14.3 phase-3 item 3: tag the just-written agent
+        // blobs in `object_index` so `libra cloud sync` uploads them to
+        // R2. Before this hook the orphan `refs/libra/agent-traces`
+        // history was "Git-side present, cloud-side invisible" — D1
+        // carried the catalogue (`agent_session` / `agent_checkpoint`)
+        // but R2 never saw the actual blob bytes, so a fresh
+        // `cloud restore` resolved commit OIDs against missing blobs.
+        //
+        // Only the transcript blob carries a distinguished o_type
+        // ("agent_transcript") per the spec line "object_index
+        // .o_type='agent_transcript' 走正常 R2 同步". The metadata and
+        // events JSON blobs use the standard "blob" tag because cloud
+        // sync doesn't filter by o_type — the sole motivation for a
+        // custom tag is downstream tooling that wants to enumerate
+        // captured transcripts.
+        crate::utils::client_storage::enqueue_agent_blob_object_index_update(
+            &self.repo_path,
+            &metadata_blob_oid.to_string(),
+            "blob",
+            params.metadata_json.len() as i64,
+        );
+        crate::utils::client_storage::enqueue_agent_blob_object_index_update(
+            &self.repo_path,
+            &transcript_blob_oid.to_string(),
+            "agent_transcript",
+            params.transcript_redacted.len() as i64,
+        );
+        if let (Some(oid), Some(bytes)) = (events_blob_oid.as_ref(), params.events_jsonl) {
+            crate::utils::client_storage::enqueue_agent_blob_object_index_update(
+                &self.repo_path,
+                &oid.to_string(),
+                "blob",
+                bytes.len() as i64,
+            );
+        }
+
         // Phase 2: build the leaf trees (transcript/, optional events/).
-        let transcript_subtree = self.write_tree(&[TreeItem::new(
-            TreeItemMode::Blob,
-            transcript_blob_oid,
-            params.provider_name.to_string(),
-        )])?;
+        // All trees written under the agent capture path go through
+        // `write_tree_indexed` so they reach `object_index` and the
+        // standard cloud sync path; otherwise the orphan ref's commits
+        // would dereference to missing trees on a fresh `cloud restore`.
+        let transcript_subtree = self.write_tree_indexed(
+            &[TreeItem::new(
+                TreeItemMode::Blob,
+                transcript_blob_oid,
+                params.provider_name.to_string(),
+            )],
+            "tree",
+        )?;
 
         let mut inner_items = vec![
             TreeItem::new(
@@ -884,11 +955,14 @@ impl HistoryManager {
             ),
         ];
         if let Some(events_oid) = events_blob_oid {
-            let events_subtree = self.write_tree(&[TreeItem::new(
-                TreeItemMode::Blob,
-                events_oid,
-                format!("{}.jsonl", params.provider_name),
-            )])?;
+            let events_subtree = self.write_tree_indexed(
+                &[TreeItem::new(
+                    TreeItemMode::Blob,
+                    events_oid,
+                    format!("{}.jsonl", params.provider_name),
+                )],
+                "tree",
+            )?;
             inner_items.push(TreeItem::new(
                 TreeItemMode::Tree,
                 events_subtree,
@@ -896,7 +970,7 @@ impl HistoryManager {
             ));
         }
         inner_items.sort_by(|a, b| a.name.cmp(&b.name));
-        let inner_tree = self.write_tree(&inner_items)?;
+        let inner_tree = self.write_tree_indexed(&inner_items, "tree")?;
 
         // Phase 3: CAS loop. Read parent, splice
         // `checkpoint/<prefix>/<rest>` into its tree, write the new commit,
@@ -934,6 +1008,17 @@ impl HistoryManager {
                 .to_data()
                 .context("failed to serialize checkpoint commit")?;
             let commit_hash = write_git_object(&self.repo_path, "commit", &commit_data)?;
+            // Phase 3.5c: agent capture commits must reach R2 too.
+            // Tagging at every CAS retry is idempotent because
+            // `update_object_index_once` does an existence check before
+            // inserting, and the same `commit_data` produces the same
+            // OID across retries.
+            crate::utils::client_storage::enqueue_agent_blob_object_index_update(
+                &self.repo_path,
+                &commit_hash.to_string(),
+                "commit",
+                commit_data.len() as i64,
+            );
 
             match self
                 .update_ref_if_matches(&self.ref_name, parent, commit_hash)
@@ -1015,7 +1100,9 @@ impl HistoryManager {
             rest.to_string(),
         ));
         prefix_items.sort_by(|a, b| a.name.cmp(&b.name));
-        let prefix_tree = self.write_tree(&prefix_items)?;
+        // Phase 3.5c: tag every tree spliced into the agent capture
+        // history so cloud sync uploads the full reachability set.
+        let prefix_tree = self.write_tree_indexed(&prefix_items, "tree")?;
 
         checkpoint_items.retain(|item| item.name != prefix);
         checkpoint_items.push(TreeItem::new(
@@ -1024,7 +1111,7 @@ impl HistoryManager {
             prefix.to_string(),
         ));
         checkpoint_items.sort_by(|a, b| a.name.cmp(&b.name));
-        let checkpoint_tree = self.write_tree(&checkpoint_items)?;
+        let checkpoint_tree = self.write_tree_indexed(&checkpoint_items, "tree")?;
 
         root_items.retain(|item| item.name != "checkpoint");
         root_items.push(TreeItem::new(
@@ -1033,7 +1120,7 @@ impl HistoryManager {
             "checkpoint".to_string(),
         ));
         root_items.sort_by(|a, b| a.name.cmp(&b.name));
-        self.write_tree(&root_items)
+        self.write_tree_indexed(&root_items, "tree")
     }
 
     #[cfg(test)]

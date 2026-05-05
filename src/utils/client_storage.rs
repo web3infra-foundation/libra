@@ -783,6 +783,71 @@ impl ClientStorage {
     }
 }
 
+/// Enqueue an `object_index` row for an object that was written outside the
+/// usual `ClientStorage::put` path — currently agent capture transcript and
+/// metadata blobs, which `HistoryManager::append_checkpoint_commit` writes
+/// directly via [`crate::utils::object::write_git_object`] for the orphan
+/// `refs/libra/agent-traces` history.
+///
+/// Why this exists: cloud sync uploads only the rows it finds in
+/// `object_index` — anything that bypasses `object_index` is invisible to
+/// `libra cloud sync`. Without this hook, agent transcripts written by the
+/// hook runtime would never reach R2, and the Phase 3.5b `cloud restore`
+/// catalogue would resolve commit OIDs that pointed at missing blobs on a
+/// fresh clone (entire.md §14.3 phase-3 item 3 — "走正常 R2 同步").
+///
+/// The function takes the `.libra` directory rather than the storage objects
+/// path because agent capture callers already hold a `repo_path` shaped that
+/// way; the db lives at `<libra_dir>/<DATABASE>`. Returns immediately when
+/// the database file is absent so legacy bootstrap and tempdir tests stay
+/// quiet.
+///
+/// `pub(crate)` — there is no validation that the (`o_id`, `o_type`,
+/// `o_size`) triple matches an actual on-disk Git object, so this is an
+/// internal escape hatch for callers that already hold the truth (only
+/// `HistoryManager` today). External crates / users must go through
+/// `ClientStorage::put`, which both writes the object and indexes it.
+pub(crate) fn enqueue_agent_blob_object_index_update(
+    libra_dir: &Path,
+    o_id: &str,
+    o_type: &str,
+    o_size: i64,
+) {
+    let db_path = libra_dir.join(DATABASE);
+    if !db_path.exists() {
+        return;
+    }
+    let msg = IndexUpdateMsg {
+        hash: o_id.to_string(),
+        obj_type: o_type.to_string(),
+        size: o_size,
+        db_path,
+    };
+    PENDING_TASKS.fetch_add(1, Ordering::Relaxed);
+    match INDEX_UPDATE_CHANNEL.try_send(msg) {
+        Ok(_) => {}
+        Err(TrySendError::Full(msg)) => {
+            // Bounded queue is full. Don't block the caller — spawn the
+            // send onto the storage runtime so the agent capture hook
+            // path keeps moving even when the foreground commit pipeline
+            // is producing index updates faster than the consumer can
+            // drain them. Mirrors the policy used by `ClientStorage::put`.
+            RUNTIME.spawn(async move {
+                if INDEX_UPDATE_CHANNEL.send(msg).await.is_err() {
+                    PENDING_TASKS.fetch_sub(1, Ordering::Relaxed);
+                    tracing::warn!(
+                        "Failed to queue agent blob object index update: channel closed"
+                    );
+                }
+            });
+        }
+        Err(TrySendError::Closed(_)) => {
+            PENDING_TASKS.fetch_sub(1, Ordering::Relaxed);
+            tracing::warn!("Failed to queue agent blob object index update: channel closed");
+        }
+    }
+}
+
 #[async_trait]
 impl Storage for ClientStorage {
     async fn get(&self, hash: &ObjectHash) -> Result<(Vec<u8>, ObjectType), GitError> {
@@ -1143,7 +1208,30 @@ async fn update_object_index_once(
         }
     };
 
-    if existing.is_some() {
+    if let Some(existing_row) = existing {
+        // Phase 3.5c codex review: a row may already exist with the
+        // generic `blob` tag (written by the standard storage path)
+        // before the agent capture runtime calls back with a more
+        // specific `agent_transcript` tag for the same content-addressed
+        // OID. Without this upgrade the `agent_transcript` tag would be
+        // silently dropped — first-writer-wins — and downstream tooling
+        // that filters by o_type would never see the captured
+        // transcripts. We promote a generic tag to the agent-specific
+        // one but never demote in the other direction (a row already
+        // tagged `agent_transcript` is left alone).
+        if existing_row.o_type != o_type
+            && o_type.starts_with("agent_")
+            && !existing_row.o_type.starts_with("agent_")
+        {
+            let mut active: object_index::ActiveModel = existing_row.into();
+            active.o_type = Set(o_type.to_string());
+            if let Err(err) = active.update(&db_conn).await {
+                if !db_path.exists() {
+                    return Ok(());
+                }
+                return Err(format!("Failed to upgrade object_index o_type: {}", err));
+            }
+        }
         return Ok(());
     }
 
@@ -1191,7 +1279,7 @@ mod tests {
     use tempfile::tempdir;
     use tokio::sync::mpsc;
 
-    use super::{ClientStorage, resolve_env_sync, update_object_index};
+    use super::{ClientStorage, resolve_env_sync, update_object_index, update_object_index_once};
     use crate::{
         internal::{
             config::ConfigKv,
@@ -1496,6 +1584,111 @@ mod tests {
 
         let result = update_object_index(&missing_db, "deadbeef", "blob", 12).await;
         assert!(result.is_ok());
+    }
+
+    /// Phase 3.5c codex round-2 follow-up: a row written first by the
+    /// standard storage path with `o_type='blob'` must be UPGRADED to
+    /// the agent-specific tag (`agent_transcript`) when the agent
+    /// capture call back arrives for the same content-addressed OID.
+    /// This is the regression case the round-1 review flagged: a naive
+    /// "skip if exists" silently kept the generic tag and downstream
+    /// tooling that filtered by o_type lost visibility on captured
+    /// transcripts. We exercise the upgrade branch directly here.
+    #[tokio::test]
+    #[serial]
+    async fn update_object_index_upgrades_generic_blob_to_agent_specific_o_type() {
+        use sea_orm::{ConnectionTrait, Database, Schema, Statement};
+
+        let tmp = tempdir().unwrap();
+        let db_path = tmp.path().join(crate::utils::util::DATABASE);
+        std::fs::File::create(&db_path).expect("touch db");
+        let url = format!("sqlite://{}", db_path.display());
+        let conn = Database::connect(&url).await.expect("connect");
+
+        // Build the minimum schema required by `update_object_index_once`:
+        // the `object_index` table.
+        let schema = Schema::new(conn.get_database_backend());
+        let mut create_stmt = schema.create_table_from_entity(object_index::Entity);
+        create_stmt.if_not_exists();
+        conn.execute(conn.get_database_backend().build(&create_stmt))
+            .await
+            .unwrap();
+
+        // Seed a generic-blob row that mimics the standard storage path.
+        // The repo_id matches the sentinel returned by
+        // `resolve_repo_id_for_index` when the config table is absent
+        // (which is the case in this minimal-schema fixture). That keeps
+        // the seeded row aligned with what `update_object_index_once`
+        // queries.
+        const OID: &str = "abcdef1234567890abcdef1234567890abcdef12";
+        let backend = conn.get_database_backend();
+        conn.execute(Statement::from_sql_and_values(
+            backend,
+            "INSERT INTO object_index (o_id, o_type, o_size, repo_id, created_at, is_synced) \
+             VALUES (?, 'blob', 42, 'unknown-repo', 0, 0)",
+            [OID.into()],
+        ))
+        .await
+        .unwrap();
+
+        // First call: agent-specific tag arrives. The row must be
+        // promoted in place; o_id stays unique.
+        update_object_index_once(&db_path, OID, "agent_transcript", 42)
+            .await
+            .expect("upgrade ok");
+
+        let row = conn
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                "SELECT o_type FROM object_index WHERE o_id = ? LIMIT 1",
+                [OID.into()],
+            ))
+            .await
+            .unwrap()
+            .expect("row exists");
+        assert_eq!(
+            row.try_get_by::<String, _>("o_type").unwrap(),
+            "agent_transcript",
+            "blob row must upgrade to agent_transcript"
+        );
+
+        // Second call: a *generic* tag arrives for an OID that is
+        // already agent-specific. The row must NOT demote — that would
+        // strip the spec-mandated tag from the catalogue.
+        update_object_index_once(&db_path, OID, "blob", 42)
+            .await
+            .expect("no-op ok");
+        let row_again = conn
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                "SELECT o_type FROM object_index WHERE o_id = ? LIMIT 1",
+                [OID.into()],
+            ))
+            .await
+            .unwrap()
+            .expect("row still exists");
+        assert_eq!(
+            row_again.try_get_by::<String, _>("o_type").unwrap(),
+            "agent_transcript",
+            "no demotion: agent_transcript stays sticky"
+        );
+
+        // Third call: same agent tag, same OID — idempotent no-op.
+        update_object_index_once(&db_path, OID, "agent_transcript", 42)
+            .await
+            .expect("idempotent ok");
+
+        let count_row = conn
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                "SELECT COUNT(*) AS n FROM object_index WHERE o_id = ?",
+                [OID.into()],
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        let count: i64 = count_row.try_get_by("n").unwrap();
+        assert_eq!(count, 1, "single row preserved through upgrade + no-op");
     }
 
     /// Scenario: when the system environment variable is unset, `resolve_env_sync`

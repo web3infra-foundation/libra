@@ -1291,7 +1291,11 @@ mod tests {
 
     async fn ingest_fresh_conn() -> (TempDir, DatabaseConnection) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("ingest.db");
+        // Use the canonical `libra.db` filename here so the Phase 3.5c
+        // object_index queue (`enqueue_agent_blob_object_index_update`)
+        // — which derives the database path from `repo_path.join(DATABASE)`
+        // — finds the same file the test fixture set up.
+        let path = dir.path().join(crate::utils::util::DATABASE);
         std::fs::File::create(&path).expect("touch sqlite file");
         let url = format!("sqlite://{}", path.display());
         let mut opts = ConnectOptions::new(url);
@@ -1660,5 +1664,139 @@ mod tests {
             .expect("agent-traces ref row exists");
         let head: String = ref_row.try_get_by("commit").unwrap();
         assert_eq!(head, traces_commit);
+
+        // Phase 3.5c acceptance: every object touched by the agent
+        // capture history must be tagged in `object_index` so cloud sync
+        // uploads them. Without this, `libra cloud restore` would
+        // resolve the orphan ref's commits to missing trees/blobs on a
+        // fresh clone. The transcript blob carries the distinguished
+        // `agent_transcript` o_type per entire.md §14.3.
+        //
+        // Codex round-1 follow-up: walk the *entire* reachability set
+        // (commit → root tree → … → leaf blobs) rather than spot-
+        // checking the root tree only. Walking the actual on-disk
+        // objects catches new code paths that forget to call
+        // `write_tree_indexed` for an intermediate tree.
+        crate::utils::client_storage::ClientStorage::wait_for_background_tasks();
+
+        verify_full_reachability_indexed(&conn, &repo_path, &traces_commit).await;
+
+        // Spot check the metadata blob OID (Phase 3.5b's
+        // `agent_checkpoint.metadata_blob_oid` column should join cleanly
+        // to `object_index`).
+        let metadata_count_row = conn
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                "SELECT COUNT(*) AS n FROM object_index WHERE o_id = ?",
+                [metadata_blob_oid.clone().into()],
+            ))
+            .await
+            .expect("query metadata count")
+            .expect("count row");
+        let metadata_count: i64 = metadata_count_row.try_get_by("n").unwrap();
+        assert_eq!(metadata_count, 1, "metadata blob is indexed");
+
+        // Spot check the distinctive `agent_transcript` tag — at least
+        // one row carries it (the transcript blob), per the spec.
+        let transcript_count_row = conn
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                "SELECT COUNT(*) AS n FROM object_index WHERE o_type = 'agent_transcript'",
+                [],
+            ))
+            .await
+            .expect("query agent_transcript count")
+            .expect("count row");
+        let transcript_count: i64 = transcript_count_row.try_get_by("n").unwrap();
+        assert_eq!(
+            transcript_count, 1,
+            "exactly one transcript blob carries the agent_transcript o_type"
+        );
+
+        let _ = tree_oid; // silence unused warning — assertions above
+        // already verified the root tree is indexed
+        // via the reachability walker
+    }
+
+    /// Walk every object reachable from the checkpoint commit (commit →
+    /// root tree → recursively trees/blobs) and assert each OID appears
+    /// in `object_index`. Used to guard against future regressions where
+    /// a write path forgets to route through `write_tree_indexed` or
+    /// the indexing helper.
+    async fn verify_full_reachability_indexed(
+        conn: &DatabaseConnection,
+        repo_path: &std::path::Path,
+        commit_oid: &str,
+    ) {
+        let mut to_walk: Vec<(String, &'static str)> = vec![(commit_oid.to_string(), "commit")];
+        let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        while let Some((oid, expected_type)) = to_walk.pop() {
+            if !visited.insert(oid.clone()) {
+                continue;
+            }
+            assert_object_index_has(conn, &oid, expected_type).await;
+            // Read the on-disk Git object to discover its references.
+            let object_path = repo_path.join("objects").join(&oid[..2]).join(&oid[2..]);
+            let raw =
+                std::fs::read(&object_path).unwrap_or_else(|e| panic!("read object {oid}: {e}"));
+            let mut decoder = flate2::read::ZlibDecoder::new(&raw[..]);
+            let mut decoded = Vec::new();
+            std::io::Read::read_to_end(&mut decoder, &mut decoded).unwrap();
+            let header_end = decoded.iter().position(|&b| b == 0).unwrap();
+            let header = std::str::from_utf8(&decoded[..header_end]).unwrap();
+            let body = &decoded[header_end + 1..];
+            if header.starts_with("commit ") {
+                let body_text = std::str::from_utf8(body).unwrap();
+                let tree_line = body_text.lines().next().expect("commit has tree line");
+                let tree_oid = tree_line.strip_prefix("tree ").expect("tree prefix");
+                to_walk.push((tree_oid.to_string(), "tree"));
+            } else if header.starts_with("tree ") {
+                // Tree entry: `<mode> <name>\0<20 raw bytes>` (SHA-1).
+                let mut cursor = 0;
+                while cursor < body.len() {
+                    let space_pos = cursor
+                        + body[cursor..]
+                            .iter()
+                            .position(|&b| b == b' ')
+                            .expect("mode terminator");
+                    let mode = std::str::from_utf8(&body[cursor..space_pos]).unwrap();
+                    let name_start = space_pos + 1;
+                    let null_pos = name_start
+                        + body[name_start..]
+                            .iter()
+                            .position(|&b| b == 0)
+                            .expect("name terminator");
+                    let hash_start = null_pos + 1;
+                    let hash_bytes = &body[hash_start..hash_start + 20];
+                    let child_oid = hex::encode(hash_bytes);
+                    let child_type = if mode == "40000" { "tree" } else { "blob" };
+                    to_walk.push((child_oid, child_type));
+                    cursor = hash_start + 20;
+                }
+            }
+        }
+    }
+
+    async fn assert_object_index_has(conn: &DatabaseConnection, oid: &str, expected_o_type: &str) {
+        let backend = conn.get_database_backend();
+        let row = conn
+            .query_one(Statement::from_sql_and_values(
+                backend,
+                "SELECT o_type FROM object_index WHERE o_id = ? LIMIT 1",
+                [oid.into()],
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("query object_index for {oid}: {e}"))
+            .unwrap_or_else(|| panic!("object {oid} missing from object_index"));
+        let actual: String = row.try_get_by("o_type").unwrap();
+        // A blob may be tagged with a more-specific agent o_type
+        // (`agent_transcript`); accept that as a valid upgrade.
+        let acceptable = expected_o_type == actual
+            || (expected_o_type == "blob" && actual.starts_with("agent_"));
+        assert!(
+            acceptable,
+            "object {oid} has o_type '{actual}', expected '{expected_o_type}' (or agent_* upgrade)"
+        );
     }
 }
