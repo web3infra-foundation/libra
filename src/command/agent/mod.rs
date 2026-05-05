@@ -23,7 +23,10 @@ use crate::{
 };
 
 mod checkpoint;
+mod clean;
+mod doctor;
 mod hooks;
+mod push;
 mod session;
 mod status;
 
@@ -155,9 +158,9 @@ pub async fn execute_safe(args: AgentArgs, output: &OutputConfig) -> CliResult<(
         AgentSubcommand::Disable(args) => disable_agents(&args.agents, output),
         AgentSubcommand::Session(cmd) => session::execute_safe(cmd, output).await,
         AgentSubcommand::Checkpoint(cmd) => checkpoint::execute_safe(cmd, output).await,
-        AgentSubcommand::Clean(_) => stub_phase2(output, "clean"),
-        AgentSubcommand::Doctor(_) => stub_phase2(output, "doctor"),
-        AgentSubcommand::Push(_) => stub_phase3(output, "push"),
+        AgentSubcommand::Clean(cmd) => clean::execute_safe(cmd, output).await,
+        AgentSubcommand::Doctor(cmd) => doctor::execute_safe(cmd, output).await,
+        AgentSubcommand::Push(cmd) => push::execute_safe(cmd, output).await,
         AgentSubcommand::Hooks(cmd) => hooks::execute_safe(cmd, output).await,
     }
 }
@@ -277,24 +280,9 @@ fn resolve_agent_slugs(agents: &[String]) -> CliResult<Vec<String>> {
     Ok(out)
 }
 
-fn stub_phase2(output: &OutputConfig, name: &str) -> CliResult<()> {
-    if !output.quiet {
-        println!("libra agent {name}: not yet implemented in v1 phase 1; landing in phase 2.");
-    }
-    Ok(())
-}
-
-fn stub_phase3(output: &OutputConfig, name: &str) -> CliResult<()> {
-    if !output.quiet {
-        println!("libra agent {name}: not yet implemented in v1 phase 1; landing in phase 3.");
-    }
-    Ok(())
-}
-
 /// Helper used by stubs that should still surface as a non-zero exit when
-/// called outside an interactive shell. Currently unused — every stub above
-/// short-circuits with `Ok(())`. Kept here so future expansions of the same
-/// pattern reuse a single helper.
+/// called outside an interactive shell. Reserved for future expansions of
+/// the agent CLI that need an explicit refuse path.
 #[allow(dead_code)]
 fn refuse(message: &str) -> CliResult<()> {
     Err(CliError::fatal(message.to_string()))
