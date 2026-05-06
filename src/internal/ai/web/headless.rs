@@ -75,6 +75,19 @@ pub fn headless_capabilities() -> CodeUiCapabilities {
 /// …) can plug in its own client. The model is held inside an `Arc<Mutex<…>>`
 /// so the spawned turn task can take exclusive access while the next submit
 /// waits in the queue.
+/// Bookkeeping for the active turn so the runtime can finalize its
+/// transcript entry on cancel and so the spawned task can avoid clobbering
+/// a successor turn's slot when it eventually clears itself out.
+struct InFlightTurn {
+    /// Stable id assigned per-turn; the spawned task uses it as a generation
+    /// counter when releasing its slot at the end of the turn.
+    id: u64,
+    /// Transcript entry that needs `streaming -> false` + `status` finalized
+    /// when the turn ends (success, error, or cancellation).
+    assistant_entry_id: String,
+    handle: JoinHandle<()>,
+}
+
 pub struct HeadlessCodeRuntime<M: CompletionModel + 'static> {
     session: Arc<CodeUiSession>,
     capabilities: CodeUiCapabilities,
@@ -84,9 +97,14 @@ pub struct HeadlessCodeRuntime<M: CompletionModel + 'static> {
     registry: Arc<ToolRegistry>,
     config_factory:
         Arc<dyn Fn() -> super::super::agent::runtime::tool_loop::ToolLoopConfig + Send + Sync>,
-    /// Currently-running turn task (if any). `cancel_turn` aborts whatever is
-    /// pinned here.
-    in_flight: Arc<Mutex<Option<JoinHandle<()>>>>,
+    /// Active turn slot. `submit_message` holds the lock while it spawns and
+    /// stores the new turn so two concurrent submits can never both see an
+    /// empty slot. `cancel_turn` and the spawned task itself acquire the
+    /// lock to release / finalize the slot.
+    in_flight: Arc<Mutex<Option<InFlightTurn>>>,
+    /// Monotonic turn id; used by spawned tasks to detect that a successor
+    /// turn has claimed the slot before they cleared their own entry.
+    next_turn_id: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl<M> HeadlessCodeRuntime<M>
@@ -116,6 +134,7 @@ where
             registry,
             config_factory,
             in_flight: Arc::new(Mutex::new(None)),
+            next_turn_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         })
     }
 }
@@ -146,16 +165,15 @@ where
             return Err(anyhow!("Empty messages are not accepted by libra code"));
         }
 
-        // Reject overlapping submits — the in-flight turn must complete or be
-        // cancelled before the next user prompt is accepted, mirroring the
-        // TUI's serialized turn semantics.
-        {
-            let in_flight = self.in_flight.lock().await;
-            if in_flight.as_ref().is_some_and(|task| !task.is_finished()) {
-                return Err(anyhow!(
-                    "A turn is already running; cancel it or wait for the assistant to finish before sending another message"
-                ));
-            }
+        // Hold the in_flight lock continuously across the check + spawn + slot
+        // assignment. Two concurrent submits cannot both observe an empty slot
+        // because the second waiter blocks on `lock().await` until the first
+        // finishes installing its task.
+        let mut slot = self.in_flight.lock().await;
+        if slot.as_ref().is_some_and(|turn| !turn.handle.is_finished()) {
+            return Err(anyhow!(
+                "A turn is already running; cancel it or wait for the assistant to finish before sending another message"
+            ));
         }
 
         let user_entry_id = format!("user-{}", uuid::Uuid::new_v4());
@@ -192,13 +210,17 @@ where
         let model = self.model.clone();
         let registry = self.registry.clone();
         let config = (self.config_factory)();
-        let in_flight = self.in_flight.clone();
+        let in_flight_for_task = self.in_flight.clone();
         let user_text = text;
+        let task_assistant_entry_id = assistant_entry_id.clone();
+        let turn_id = self
+            .next_turn_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let task = tokio::spawn(async move {
             let mut observer = HeadlessTurnObserver {
                 session: session.clone(),
-                assistant_entry_id: assistant_entry_id.clone(),
+                assistant_entry_id: task_assistant_entry_id.clone(),
             };
 
             let prior_history = {
@@ -224,28 +246,35 @@ where
                     }
                     finalize_assistant_entry(
                         &session,
-                        &assistant_entry_id,
+                        &task_assistant_entry_id,
                         &turn.final_text,
-                        false,
+                        "completed",
                     )
                     .await;
                     session.set_status(CodeUiSessionStatus::Idle).await;
                 }
                 Err(error) => {
                     let message = format_completion_error(&error);
-                    finalize_assistant_entry(&session, &assistant_entry_id, &message, true).await;
+                    finalize_assistant_entry(&session, &task_assistant_entry_id, &message, "error")
+                        .await;
                     session.set_status(CodeUiSessionStatus::Error).await;
                 }
             }
 
-            // Drop the join handle once the turn finishes so the next submit
-            // can claim the in_flight slot.
-            let mut slot = in_flight.lock().await;
-            *slot = None;
+            // Only clear the slot if it still holds *our* turn — a successor
+            // submit may have already claimed the slot via cancel + resubmit
+            // and we would otherwise wipe its handle out from under it.
+            let mut slot = in_flight_for_task.lock().await;
+            if slot.as_ref().is_some_and(|t| t.id == turn_id) {
+                *slot = None;
+            }
         });
 
-        let mut slot = self.in_flight.lock().await;
-        *slot = Some(task);
+        *slot = Some(InFlightTurn {
+            id: turn_id,
+            assistant_entry_id,
+            handle: task,
+        });
         Ok(())
     }
 
@@ -262,20 +291,42 @@ where
     }
 
     async fn cancel_turn(&self) -> anyhow::Result<()> {
-        let mut slot = self.in_flight.lock().await;
-        if let Some(task) = slot.take()
-            && !task.is_finished()
-        {
-            task.abort();
+        let active = {
+            let mut slot = self.in_flight.lock().await;
+            slot.take()
+        };
+        if let Some(turn) = active {
+            if !turn.handle.is_finished() {
+                turn.handle.abort();
+            }
+            // Finalize the streaming assistant entry so the browser sees a
+            // terminal state instead of a perpetually streaming row.
+            finalize_assistant_entry(
+                &self.session,
+                &turn.assistant_entry_id,
+                "(turn cancelled by user)",
+                "cancelled",
+            )
+            .await;
         }
         self.session.set_status(CodeUiSessionStatus::Idle).await;
         Ok(())
     }
 
     async fn shutdown(&self) -> anyhow::Result<()> {
-        let mut slot = self.in_flight.lock().await;
-        if let Some(task) = slot.take() {
-            task.abort();
+        let active = {
+            let mut slot = self.in_flight.lock().await;
+            slot.take()
+        };
+        if let Some(turn) = active {
+            turn.handle.abort();
+            finalize_assistant_entry(
+                &self.session,
+                &turn.assistant_entry_id,
+                "(libra code shutting down)",
+                "cancelled",
+            )
+            .await;
         }
         Ok(())
     }
@@ -287,21 +338,22 @@ where
 // `HeadlessCodeRuntime` itself implements both halves.
 
 /// Replace the streaming assistant entry with the finalized text, mark the
-/// streaming flag false, and stamp the right status.
+/// streaming flag false, and stamp the supplied status (`completed`,
+/// `error`, or `cancelled`).
 async fn finalize_assistant_entry(
     session: &Arc<CodeUiSession>,
     entry_id: &str,
     text: &str,
-    is_error: bool,
+    status: &str,
 ) {
     let entry_id = entry_id.to_string();
     let text = text.to_string();
-    let status = if is_error { "error" } else { "completed" };
+    let status = status.to_string();
     session
         .mutate("session_updated", |snapshot| {
             if let Some(entry) = snapshot.transcript.iter_mut().find(|e| e.id == entry_id) {
                 entry.content = Some(text.clone());
-                entry.status = Some(status.to_string());
+                entry.status = Some(status.clone());
                 entry.streaming = false;
                 entry.updated_at = Utc::now();
             }

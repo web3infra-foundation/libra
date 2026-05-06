@@ -166,6 +166,57 @@ fn headless_capabilities_match_phase3_v0_contract() {
     assert!(!caps.provider_session_resume);
 }
 
+/// `cancel_turn` must finalize the streaming assistant entry — leaving it
+/// flagged `streaming: true` would render as a perpetual typing indicator
+/// in the browser. The fixture's delay() lets us cancel mid-flight with
+/// a deterministic race window.
+#[tokio::test(flavor = "multi_thread")]
+async fn cancel_turn_finalizes_streaming_assistant_entry() {
+    let workdir = tempfile::tempdir().expect("tempdir for headless workdir");
+    let runtime = build_runtime("delayed_chat", workdir.path().to_path_buf());
+
+    runtime
+        .submit_message("slow".to_string())
+        .await
+        .expect("submit must accept the prompt before delay fires");
+
+    // Wait until the in-flight assistant entry shows up as streaming, then
+    // cancel before the fake provider's delay completes.
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let mut saw_streaming = false;
+    while std::time::Instant::now() < deadline {
+        let snapshot = runtime.snapshot().await;
+        if snapshot.transcript.iter().any(|entry| {
+            entry.kind
+                == libra::internal::ai::web::code_ui::CodeUiTranscriptEntryKind::AssistantMessage
+                && entry.streaming
+        }) {
+            saw_streaming = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        saw_streaming,
+        "assistant entry must be visible as streaming before cancel fires",
+    );
+
+    runtime.cancel_turn().await.expect("cancel must succeed");
+
+    let snapshot = runtime.snapshot().await;
+    assert_eq!(snapshot.status, CodeUiSessionStatus::Idle);
+    let assistant = snapshot
+        .transcript
+        .iter()
+        .find(|entry| {
+            entry.kind
+                == libra::internal::ai::web::code_ui::CodeUiTranscriptEntryKind::AssistantMessage
+        })
+        .expect("assistant entry must remain in the transcript after cancel");
+    assert!(!assistant.streaming, "cancel must clear the streaming flag",);
+    assert_eq!(assistant.status.as_deref(), Some("cancelled"));
+}
+
 /// Interaction routing through the InteractionPanel is explicitly out of
 /// scope for Phase 3 v0. Pin the error message so the surface change is
 /// loud once this gets wired up.

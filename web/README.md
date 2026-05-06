@@ -20,6 +20,7 @@ The browser only talks to its same-origin server. The Rust side enforces loopbac
 
 | Endpoint | Verb | Purpose |
 |----------|------|---------|
+| `/api/health` | GET | Liveness probe — returns plain `"ok"`. Cheapest sanity check that the embedded server is bound. |
 | `/api/repo` | GET | Repository identity (`id`, `name`, `description`). |
 | `/api/repo/status` | GET | Working-tree status — same JSON envelope as `libra status --json` (`{ ok, command: "status", data }`). |
 | `/api/code/session` | GET | Initial `CodeUiSessionSnapshot`. |

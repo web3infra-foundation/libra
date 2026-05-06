@@ -1595,11 +1595,18 @@ where
 }
 
 fn build_headless_tool_registry(working_dir: &Path) -> Arc<ToolRegistry> {
-    // Headless v0 ships the read-side tool surface plus apply_patch + shell so
-    // the browser-driven agent can read, search, and (with sandbox/approval
-    // policies enforced by the registry's runtime context) make changes.
-    // request_user_input / approval routing into the browser InteractionPanel
-    // is tracked as Phase 3 follow-up work.
+    // Headless v0 ships read-only tools.
+    //
+    // The TUI flow attaches a `ToolRuntimeContext` (sandbox policy, approval
+    // store, network policy, user-input channel) to every `ToolLoopConfig`
+    // so `apply_patch` / `shell` invocations route through `LibraSandbox`
+    // and the approval queues. The headless runtime does not yet wire those
+    // queues to the browser `CodeUiInteractionRequest` surface, so
+    // registering shell + apply_patch here would let the agent execute
+    // commands without any sandbox or approval prompt — a security
+    // regression vs. the TUI path. Until interaction routing lands, headless
+    // mode advertises reads only; mutations remain a TUI / managed-Codex
+    // feature.
     let trace_id = uuid::Uuid::new_v4();
     let builder = ToolRegistryBuilder::with_working_dir(working_dir.to_path_buf())
         .hardening(ToolBoundaryRuntime::system(
@@ -1610,9 +1617,7 @@ fn build_headless_tool_registry(working_dir: &Path) -> Arc<ToolRegistry> {
         .register("list_dir", Arc::new(ListDirHandler))
         .register("grep_files", Arc::new(GrepFilesHandler))
         .register("search_files", Arc::new(SearchFilesHandler))
-        .register("web_search", Arc::new(WebSearchHandler))
-        .register("apply_patch", Arc::new(ApplyPatchHandler))
-        .register("shell", Arc::new(ShellHandler));
+        .register("web_search", Arc::new(WebSearchHandler));
     Arc::new(register_semantic_handlers(builder).build())
 }
 

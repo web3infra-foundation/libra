@@ -100,7 +100,8 @@ Automation clients attach with `POST /api/code/controller/attach`, body `{ "clie
 Selecting `loopback` is rejected when `--host` is not a loopback address, and the flag conflicts with `--stdio`. The browser server-side endpoints are tagged in the `code_router()` audit matrix (`src/internal/ai/web/mod.rs`):
 
 - `/session`, `/events`, `/diagnostics`, `/threads`, `/repo`, `/repo/status` — loopback-only observe.
-- `/controller/attach`, `/controller/detach`, `/messages`, `/interactions/{id}` — loopback + `X-Code-Controller-Token`; `Automation` leases additionally require `X-Libra-Control-Token`.
+- `/controller/attach` — loopback. `kind: "automation"` requests additionally require `X-Libra-Control-Token`. The handler **issues** the lease's `controllerToken` (it does not expect the caller to send one).
+- `/controller/detach`, `/messages`, `/interactions/{id}` — loopback + `X-Code-Controller-Token`; `Automation` leases additionally require `X-Libra-Control-Token`.
 - `/control/cancel` — loopback + `X-Code-Controller-Token`. `Automation` leases also require `X-Libra-Control-Token`; this is the only difference from the TUI `Esc` cancel path.
 
 Browser write requests share the same 256 KiB body limit and audit-sink wiring as automation control. The browser persists the lease only in memory; reloading the page drops the lease and the next write reattaches.
