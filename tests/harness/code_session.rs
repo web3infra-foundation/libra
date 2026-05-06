@@ -424,6 +424,48 @@ impl CodeSession {
         Ok((status, body))
     }
 
+    /// Submit an oversized `/messages` payload as a browser controller — the
+    /// 256 KiB body limit middleware (`enforce_code_write_body_limit`) must
+    /// reject the request with `PAYLOAD_TOO_LARGE` before the runtime
+    /// observes it. Mirrors `submit_large_message` for the automation path.
+    pub fn browser_submit_large_message(
+        &self,
+        controller_token: &str,
+        bytes: usize,
+    ) -> Result<(StatusCode, Value)> {
+        let text = "x".repeat(bytes);
+        let response = self
+            .client
+            .post(self.url("/messages"))
+            .header("X-Code-Controller-Token", controller_token)
+            .json(&json!({ "text": text }))
+            .send()
+            .context("failed to submit oversized browser message")?;
+        let status = response.status();
+        let body = response.json().unwrap_or_else(|_| json!({}));
+        Ok((status, body))
+    }
+
+    /// POST `/interactions/{id}` as a browser controller — caller-supplied
+    /// id is intentionally unconstrained so tests can assert behaviour for
+    /// missing interactions (`INTERACTION_NOT_ACTIVE`).
+    pub fn browser_respond_interaction(
+        &self,
+        controller_token: &str,
+        interaction_id: &str,
+    ) -> Result<(StatusCode, Value)> {
+        let response = self
+            .client
+            .post(self.url(&format!("/interactions/{interaction_id}")))
+            .header("X-Code-Controller-Token", controller_token)
+            .json(&json!({ "approved": true }))
+            .send()
+            .context("failed to send browser interaction response")?;
+        let status = response.status();
+        let body = response.json().unwrap_or_else(|_| json!({}));
+        Ok((status, body))
+    }
+
     pub fn submit_message(&self, text: &str) -> Result<StatusCode> {
         let response = self
             .authorized_post("/messages")

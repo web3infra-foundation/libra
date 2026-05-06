@@ -194,6 +194,105 @@ fn browser_attach_rejected_when_control_disabled() -> Result<()> {
     session.shutdown()
 }
 
+/// Browser-side oversized payload must be rejected by the
+/// `enforce_code_write_body_limit` middleware before the runtime sees it.
+/// Confirms the 256 KiB cap applies uniformly to browser leases (not only
+/// automation), so a malicious or buggy browser cannot starve the agent.
+#[cfg(feature = "test-provider")]
+#[test]
+#[serial]
+fn browser_oversized_message_returns_payload_too_large() -> Result<()> {
+    let mut session = CodeSession::spawn(
+        CodeSessionOptions::new("browser-oversize", fixture("basic_chat"))
+            .with_browser_control_loopback(),
+    )?;
+
+    let token = session.attach_browser("scenario-browser-oversize")?;
+    session.wait_for_snapshot(Duration::from_secs(10), |snapshot| {
+        controller_kind(snapshot) == Some("browser")
+    })?;
+
+    let (status, body) = session.browser_submit_large_message(&token, 300 * 1024)?;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(error_code(&body), Some("PAYLOAD_TOO_LARGE"));
+
+    session.shutdown()
+}
+
+/// Browser-issued cancel must reach `code_cancel_handler` with only the
+/// lease token (no `X-Libra-Control-Token`) and successfully abort an
+/// in-flight turn — this is the surface the chat header's "Cancel turn"
+/// button drives. The `delayed_chat` fixture gives us a deterministic
+/// 10-second window to fire the cancel mid-stream.
+#[cfg(feature = "test-provider")]
+#[test]
+#[serial]
+fn browser_cancel_turn_aborts_in_flight_turn_without_automation_token() -> Result<()> {
+    let mut session = CodeSession::spawn(
+        CodeSessionOptions::new("browser-cancel", fixture("delayed_chat"))
+            .with_browser_control_loopback(),
+    )?;
+
+    let token = session.attach_browser("scenario-browser-cancel")?;
+    session.wait_for_snapshot(Duration::from_secs(10), |snapshot| {
+        controller_kind(snapshot) == Some("browser")
+    })?;
+
+    let (submit_status, submit_body) = session.browser_submit_message(&token, "/chat slow")?;
+    assert!(
+        submit_status.is_success(),
+        "submit must accept the prompt, got {submit_status}: {submit_body}",
+    );
+
+    // Wait for the turn to enter `thinking` so the cancel hits a live turn,
+    // not an idle session.
+    session.wait_for_snapshot(Duration::from_secs(10), |snapshot| {
+        status(snapshot) == Some("thinking")
+    })?;
+
+    let (cancel_status, cancel_body) = session.browser_cancel_turn(&token)?;
+    assert!(
+        cancel_status.is_success(),
+        "browser cancel must succeed with only the lease token, got {cancel_status}: {cancel_body}",
+    );
+
+    session.wait_for_snapshot(Duration::from_secs(10), |snapshot| {
+        status(snapshot) == Some("idle")
+    })?;
+
+    session.shutdown()
+}
+
+/// Posting to `/interactions/{id}` for an interaction that is not currently
+/// pending must surface `INTERACTION_NOT_ACTIVE` regardless of whether the
+/// caller is a browser or an automation client. Mirrors the automation
+/// scenario `unknown_interaction_id_is_rejected_without_state_change`.
+#[cfg(feature = "test-provider")]
+#[test]
+#[serial]
+fn browser_unknown_interaction_id_is_rejected_without_state_change() -> Result<()> {
+    let mut session = CodeSession::spawn(
+        CodeSessionOptions::new("browser-unknown-interaction", fixture("basic_chat"))
+            .with_browser_control_loopback(),
+    )?;
+
+    let token = session.attach_browser("scenario-browser-unknown-interaction")?;
+    session.wait_for_snapshot(Duration::from_secs(10), |snapshot| {
+        controller_kind(snapshot) == Some("browser")
+    })?;
+    let before = session.snapshot()?;
+
+    let (http_status, body) = session.browser_respond_interaction(&token, "missing-interaction")?;
+    assert_eq!(http_status, StatusCode::CONFLICT);
+    assert_eq!(error_code(&body), Some("INTERACTION_NOT_ACTIVE"));
+
+    let after = session.snapshot()?;
+    assert_eq!(status(&before), status(&after));
+    assert_eq!(controller_kind(&after), Some("browser"));
+
+    session.shutdown()
+}
+
 /// Once a browser holds the lease, a second browser attempting to attach
 /// with a different `clientId` must trip `CONTROLLER_CONFLICT` instead of
 /// kicking the first writer out — the lease must be released or expire
