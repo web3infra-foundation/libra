@@ -486,6 +486,19 @@ impl CodeUiSession {
                 .iter_mut()
                 .find(|item| item.id == entry_id)
             {
+                // Skip late-arriving deltas for entries that have already been
+                // finalized (e.g. by `cancel_turn` flipping the status to
+                // `cancelled`). Re-flagging a settled entry as `streaming`
+                // would resurrect the perpetual typing indicator we just
+                // cleared.
+                let still_streaming = entry
+                    .status
+                    .as_deref()
+                    .map(|status| status == "streaming")
+                    .unwrap_or(true);
+                if !still_streaming {
+                    return;
+                }
                 let content = entry.content.get_or_insert_with(String::new);
                 content.push_str(delta);
                 entry.streaming = true;

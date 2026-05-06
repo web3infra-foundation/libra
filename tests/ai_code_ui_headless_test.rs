@@ -217,6 +217,68 @@ async fn cancel_turn_finalizes_streaming_assistant_entry() {
     assert_eq!(assistant.status.as_deref(), Some("cancelled"));
 }
 
+/// Late-arriving stream deltas (e.g. from a still-pending tokio task spawned
+/// by `HeadlessTurnObserver::on_model_stream_event`) must not resurrect the
+/// `streaming: true` flag once the assistant entry has been finalized as
+/// `cancelled`. Without this, the browser would briefly clear its typing
+/// indicator and then see it return for any text delta that races past
+/// `cancel_turn`.
+#[tokio::test(flavor = "multi_thread")]
+async fn late_stream_delta_does_not_resurrect_cancelled_entry() {
+    use libra::internal::ai::web::code_ui::{
+        CodeUiCapabilities, CodeUiProviderInfo, CodeUiSession, CodeUiTranscriptEntry,
+        CodeUiTranscriptEntryKind, initial_snapshot,
+    };
+
+    let session = CodeUiSession::new(initial_snapshot(
+        "/tmp/late-delta",
+        CodeUiProviderInfo {
+            provider: "fake".to_string(),
+            model: None,
+            mode: None,
+            managed: false,
+        },
+        CodeUiCapabilities::default(),
+    ));
+    let now = chrono::Utc::now();
+    let entry_id = "assistant-1".to_string();
+    session
+        .upsert_transcript_entry(CodeUiTranscriptEntry {
+            id: entry_id.clone(),
+            kind: CodeUiTranscriptEntryKind::AssistantMessage,
+            title: None,
+            content: Some(String::from("partial")),
+            status: Some("cancelled".to_string()),
+            streaming: false,
+            metadata: serde_json::json!({}),
+            created_at: now,
+            updated_at: now,
+        })
+        .await;
+
+    // Late delta from an already-finalized turn arrives — it must be ignored.
+    session
+        .append_assistant_delta(&entry_id, " more text")
+        .await;
+
+    let snapshot = session.snapshot().await;
+    let entry = snapshot
+        .transcript
+        .iter()
+        .find(|e| e.id == entry_id)
+        .expect("entry must still exist");
+    assert!(
+        !entry.streaming,
+        "late delta must not flip a finalized entry back to streaming",
+    );
+    assert_eq!(entry.status.as_deref(), Some("cancelled"));
+    assert_eq!(
+        entry.content.as_deref(),
+        Some("partial"),
+        "late delta must not append to finalized content",
+    );
+}
+
 /// Interaction routing through the InteractionPanel is explicitly out of
 /// scope for Phase 3 v0. Pin the error message so the surface change is
 /// loud once this gets wired up.
