@@ -364,6 +364,7 @@ mod tests {
     /// scores, registration order wins (first-seen, not last-seen).
     #[test]
     fn test_router_tie_breaking_prefers_first() {
+        use super::super::spec::AgentMode;
         // When two profiles have the same score, the first one encountered wins
         let profiles = vec![
             AgentProfile {
@@ -372,6 +373,12 @@ mod tests {
                 tools: vec![],
                 model_preference: "default".to_string(),
                 system_prompt: "A".to_string(),
+                mode: AgentMode::Primary,
+                model_binding: None,
+                variant: None,
+                temperature: None,
+                top_p: None,
+                max_steps: None,
             },
             AgentProfile {
                 name: "agent_b".to_string(),
@@ -379,6 +386,12 @@ mod tests {
                 tools: vec![],
                 model_preference: "default".to_string(),
                 system_prompt: "B".to_string(),
+                mode: AgentMode::Primary,
+                model_binding: None,
+                variant: None,
+                temperature: None,
+                top_p: None,
+                max_steps: None,
             },
         ];
         let router = AgentProfileRouter::new(profiles);

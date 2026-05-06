@@ -70,6 +70,13 @@ impl ModelBinding {
     pub fn parse(s: &str) -> Option<Self> {
         let s = s.trim();
         let (provider_id, rest) = s.split_once('/')?;
+        // Trim each side of the `/` so input like `openai / gpt-4` (with
+        // whitespace around the separator) does not produce ids that carry
+        // a trailing/leading space. Inner whitespace inside an id is left
+        // untouched — model identifiers normally have no whitespace, but if
+        // a vendor ever uses one it survives verbatim.
+        let provider_id = provider_id.trim();
+        let rest = rest.trim();
         if provider_id.is_empty() || rest.is_empty() {
             return None;
         }
@@ -87,18 +94,23 @@ impl ModelBinding {
         };
 
         let (model_id, variant) = match last_segment.rsplit_once('@') {
-            Some((model_part, variant)) if !model_part.is_empty() && !variant.is_empty() => {
+            Some((model_part, variant)) => {
+                let model_part = model_part.trim();
+                let variant = variant.trim();
+                if model_part.is_empty() || variant.is_empty() {
+                    // Trailing `@` with empty variant (`foo/bar@`) or leading
+                    // `@` with empty model id in the final segment
+                    // (`foo/@variant`): both are half-formed and must not
+                    // silently produce a binding with `model_id = ""` or
+                    // `model_id = "@variant"`.
+                    return None;
+                }
                 let model_id = match path_prefix {
                     Some(prefix) => format!("{prefix}/{model_part}"),
                     None => model_part.to_string(),
                 };
                 (model_id, Some(variant.to_string()))
             }
-            // Trailing `@` with empty variant (`foo/bar@`) or leading `@`
-            // with empty model id in the final segment (`foo/@variant`):
-            // both are half-formed and must not silently produce a binding
-            // with `model_id = ""` or `model_id = "@variant"`.
-            Some(_) => return None,
             None => (rest.to_string(), None),
         };
 
