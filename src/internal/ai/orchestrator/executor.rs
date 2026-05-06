@@ -3741,6 +3741,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_gate_task_runs_cargo_checks_in_manifest_touch_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let linked = dir.path().join("linked");
+        std::fs::create_dir_all(linked.join("src")).unwrap();
+        std::fs::write(
+            linked.join("Cargo.toml"),
+            "[package]\nname = \"linked\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        std::fs::write(linked.join("src/lib.rs"), "").unwrap();
+
+        let task = TaskSpec {
+            kind: TaskKind::Gate,
+            gate_stage: Some(super::super::types::GateStage::Fast),
+            checks: vec![Check {
+                id: "cargo-metadata".into(),
+                kind: CheckKind::Command,
+                command: Some("cargo metadata --format-version=1 --no-deps >/dev/null".into()),
+                timeout_seconds: Some(30),
+                expected_exit_code: Some(0),
+                required: true,
+                artifacts_produced: vec![],
+            }],
+            scope_in: vec!["linked/".into()],
+            contract: TaskContract {
+                write_scope: vec!["linked/".into()],
+                forbidden_scope: vec![],
+                touch_files: vec!["linked/Cargo.toml".into(), "linked/src/lib.rs".into()],
+                touch_symbols: vec![],
+                touch_apis: vec![],
+                expected_outputs: vec!["cargo checks pass".into()],
+            },
+            ..implementation_task()
+        };
+
+        let result = execute_gate_task(&task, dir.path(), &spec(), None, None).await;
+
+        assert_eq!(
+            result.status,
+            TaskNodeStatus::Completed,
+            "{}",
+            result.agent_output.as_deref().unwrap_or("")
+        );
+        assert!(result.gate_report.unwrap().all_required_passed);
+    }
+
+    #[tokio::test]
     async fn test_execute_gate_task_emits_check_progress_events() {
         let task = TaskSpec {
             kind: TaskKind::Gate,

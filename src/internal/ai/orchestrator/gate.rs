@@ -4,7 +4,11 @@
 //! a pass/fail result; they do not modify objects or worktrees. Validation-decision
 //! tests cover accepted, rejected, and incomplete evidence outcomes.
 
-use std::{path::Path, time::Instant};
+use std::{
+    collections::BTreeSet,
+    path::{Component, Path, PathBuf},
+    time::Instant,
+};
 
 use serde_json::json;
 
@@ -93,9 +97,13 @@ async fn run_command_check(
         }
     };
 
+    let effective_working_dir = effective_check_working_dir(&command, working_dir, task)
+        .unwrap_or_else(|| working_dir.to_path_buf());
+
     if let (Some(spec), Some(task)) = (spec, task) {
         let args = json!({ "command": command });
-        if let Err(violation) = policy::evaluate_tool_call(spec, task, "shell", &args, working_dir)
+        if let Err(violation) =
+            policy::evaluate_tool_call(spec, task, "shell", &args, &effective_working_dir)
         {
             return GateResult {
                 check_id: check.id.clone(),
@@ -121,7 +129,7 @@ async fn run_command_check(
 
     let result = run_shell_command(
         &command,
-        working_dir,
+        &effective_working_dir,
         Some(timeout_secs.saturating_mul(1000)),
         max_output_bytes,
         sandbox,
@@ -152,6 +160,108 @@ async fn run_command_check(
         duration_ms,
         timed_out,
     }
+}
+
+fn effective_check_working_dir(
+    command: &str,
+    working_dir: &Path,
+    task: Option<&TaskSpec>,
+) -> Option<PathBuf> {
+    if !cargo_command_without_explicit_manifest(command) || working_dir.join("Cargo.toml").is_file()
+    {
+        return None;
+    }
+
+    let task = task?;
+    task_scoped_cargo_manifest_dir(working_dir, task)
+}
+
+fn cargo_command_without_explicit_manifest(command: &str) -> bool {
+    if command.contains("--manifest-path") {
+        return false;
+    }
+
+    first_shell_token_after_env_assignments(command) == Some("cargo")
+}
+
+fn first_shell_token_after_env_assignments(command: &str) -> Option<&str> {
+    command
+        .split_whitespace()
+        .find(|token| !is_env_assignment_token(token))
+}
+
+fn is_env_assignment_token(token: &str) -> bool {
+    let Some((name, _)) = token.split_once('=') else {
+        return false;
+    };
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn task_scoped_cargo_manifest_dir(working_dir: &Path, task: &TaskSpec) -> Option<PathBuf> {
+    let mut candidates = BTreeSet::new();
+
+    for raw_path in task
+        .contract
+        .touch_files
+        .iter()
+        .chain(task.contract.write_scope.iter())
+        .chain(task.scope_in.iter())
+    {
+        let Some(relative) = scoped_relative_path(working_dir, raw_path) else {
+            continue;
+        };
+
+        let manifest = if relative
+            .file_name()
+            .is_some_and(|name| name == "Cargo.toml")
+        {
+            working_dir.join(&relative)
+        } else {
+            working_dir.join(&relative).join("Cargo.toml")
+        };
+
+        if manifest.is_file()
+            && let Some(parent) = manifest.parent()
+        {
+            candidates.insert(parent.to_path_buf());
+        }
+    }
+
+    if candidates.len() == 1 {
+        candidates.into_iter().next()
+    } else {
+        None
+    }
+}
+
+fn scoped_relative_path(working_dir: &Path, raw_path: &str) -> Option<PathBuf> {
+    let trimmed = raw_path.trim().trim_start_matches("./");
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let path = Path::new(trimmed);
+    let relative = if path.is_absolute() {
+        path.strip_prefix(working_dir).ok()?.to_path_buf()
+    } else {
+        path.to_path_buf()
+    };
+
+    if relative.components().any(|component| {
+        matches!(
+            component,
+            Component::Prefix(_) | Component::RootDir | Component::ParentDir
+        )
+    }) {
+        return None;
+    }
+
+    Some(relative)
 }
 
 #[cfg(test)]
