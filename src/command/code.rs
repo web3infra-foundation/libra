@@ -2177,15 +2177,19 @@ where
         });
     }
 
-    let (code_control_tx, code_control_rx) = if control_runtime.is_write() {
+    let automation_write_enabled = control_runtime.is_write();
+    let browser_write_enabled = browser_control == BrowserControlMode::Loopback;
+    // The TUI control command channel is created whenever any writer
+    // (automation or browser) is enabled, so the runtime adapter can route
+    // submit/respond/cancel into the TUI app loop. Selecting the adapter
+    // based on `code_control_tx.is_some()` would gate browser writes behind
+    // `--control write`; gating on the explicit booleans avoids that.
+    let (code_control_tx, code_control_rx) = if automation_write_enabled || browser_write_enabled {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<TuiControlCommand>();
         (Some(tx), Some(rx))
     } else {
         (None, None)
     };
-    let automation_write_enabled = code_control_tx.is_some();
-
-    let browser_write_enabled = browser_control == BrowserControlMode::Loopback;
     let code_ui_runtime = if let Some(runtime) = managed_code_ui_runtime.clone() {
         if let Some(control_tx) = code_control_tx {
             let adapter = runtime.adapter();
@@ -2196,7 +2200,7 @@ where
             CodeUiRuntimeHandle::build_with_control(
                 tui_adapter,
                 browser_write_enabled,
-                true,
+                automation_write_enabled,
                 CodeUiInitialController::LocalTui {
                     owner_label: "Terminal UI".to_string(),
                     reason: Some("The terminal UI controls this live managed session".to_string()),
