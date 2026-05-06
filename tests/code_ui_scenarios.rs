@@ -256,9 +256,22 @@ fn browser_cancel_turn_aborts_in_flight_turn_without_automation_token() -> Resul
         "browser cancel must succeed with only the lease token, got {cancel_status}: {cancel_body}",
     );
 
-    session.wait_for_snapshot(Duration::from_secs(10), |snapshot| {
+    // Tighter than the fixture's 10 s response delay so we cannot pass by
+    // letting the provider settle naturally — a real cancel has to be the
+    // reason the snapshot returned to idle.
+    session.wait_for_snapshot(Duration::from_secs(3), |snapshot| {
         status(snapshot) == Some("idle")
     })?;
+
+    // Belt-and-braces: the deterministic fake provider response must NOT
+    // land in the transcript. If a regression makes cancel a no-op, the
+    // delayed response would eventually arrive and this assertion would
+    // catch it on shutdown even if the idle wait somehow lined up.
+    let final_snapshot = session.snapshot()?;
+    assert!(
+        !transcript_contains(&final_snapshot, "fake assistant: delayed response"),
+        "cancel must abort the provider before its delayed response lands; transcript: {final_snapshot}",
+    );
 
     session.shutdown()
 }
