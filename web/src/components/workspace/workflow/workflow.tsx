@@ -172,9 +172,20 @@ export function Workflow({ width }: Props) {
           <button
             type="button"
             disabled={!canContinue}
+            onClick={() => {
+              if (!canContinue) return;
+              // Scroll the chat-pane InteractionPanel into view rather than
+              // duplicating its controls in the workflow footer.
+              const panel = document.getElementById("libra-interaction-panel");
+              panel?.scrollIntoView({ behavior: "smooth", block: "center" });
+              const focusable = panel?.querySelector<HTMLElement>(
+                "button:not([disabled]), input:not([disabled])",
+              );
+              focusable?.focus();
+            }}
             title={
               canContinue
-                ? "Resolve the pending interaction in the chat panel"
+                ? "Jump to the pending interaction in the chat panel"
                 : "Continue activates only while waiting on an interaction"
             }
             className={cn(

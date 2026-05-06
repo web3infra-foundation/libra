@@ -17,6 +17,7 @@ import { Chat } from "./chat/chat";
 import { Sidebar } from "./sidebar/sidebar";
 import { Splitter } from "./splitter";
 import { Workflow } from "./workflow/workflow";
+import { BrowserControllerProvider } from "@/lib/code-ui/controller";
 import { CodeUiProvider } from "@/lib/code-ui/store";
 import { useStoredNumber } from "@/lib/persisted-state";
 import { clamp } from "@/lib/storage";
@@ -57,13 +58,15 @@ export function Workspace() {
 
   return (
     <CodeUiProvider>
-      <div className="flex h-screen w-full">
-        <Sidebar width={sidebarW} />
-        <Splitter value={sidebarW} onDrag={onDragSidebar} />
-        <Chat />
-        <Splitter value={workflowW} onDrag={onDragWorkflow} />
-        <Workflow width={workflowW} />
-      </div>
+      <BrowserControllerProvider>
+        <div className="flex h-screen w-full">
+          <Sidebar width={sidebarW} />
+          <Splitter value={sidebarW} onDrag={onDragSidebar} />
+          <Chat />
+          <Splitter value={workflowW} onDrag={onDragWorkflow} />
+          <Workflow width={workflowW} />
+        </div>
+      </BrowserControllerProvider>
     </CodeUiProvider>
   );
 }

@@ -46,7 +46,11 @@ export function InteractionPanel() {
   const canWrite = !!snapshot?.controller.canWrite || snapshot?.controller.kind === "none";
 
   return (
-    <div className="mb-4 rounded-md border border-accent-line bg-accent-soft px-4 py-3 text-[12.5px] text-ink">
+    <div
+      id="libra-interaction-panel"
+      data-libra-interaction-panel
+      className="mb-4 rounded-md border border-accent-line bg-accent-soft px-4 py-3 text-[12.5px] text-ink"
+    >
       <div className="mb-2 flex items-center gap-2">
         <span className="mono rounded-sm border border-accent-line bg-paper px-1.5 py-px text-[10px] font-semibold uppercase tracking-[0.06em] text-accent">
           {labelForKind(pending.kind)}

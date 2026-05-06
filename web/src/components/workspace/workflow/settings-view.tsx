@@ -9,10 +9,11 @@
  */
 "use client";
 
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
+import { getDiagnostics } from "@/lib/code-ui/client";
 import { useCodeUiStore } from "@/lib/code-ui/store";
-import type { CodeUiCapabilities } from "@/lib/code-ui/types";
+import type { CodeUiCapabilities, CodeUiDiagnostics } from "@/lib/code-ui/types";
 import { cn } from "@/lib/utils";
 
 const CAPABILITY_LABELS: { key: keyof CodeUiCapabilities; label: string }[] = [
@@ -28,6 +29,22 @@ const CAPABILITY_LABELS: { key: keyof CodeUiCapabilities; label: string }[] = [
 
 export function SettingsView() {
   const { snapshot } = useCodeUiStore();
+  const [diagnostics, setDiagnostics] = useState<CodeUiDiagnostics | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getDiagnostics()
+      .then((value) => {
+        if (!cancelled) setDiagnostics(value);
+      })
+      .catch(() => {
+        // diagnostics is a best-effort surface — the rest of the tab still
+        // renders without it.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   if (!snapshot) {
     return (
@@ -39,6 +56,37 @@ export function SettingsView() {
 
   return (
     <div className="px-[18px] pb-6 pt-4">
+      <Block label="Session">
+        <Row label="Working dir">
+          <span className="mono">{snapshot.workingDir || "—"}</span>
+        </Row>
+        {snapshot.threadId && (
+          <Row label="Thread id">
+            <span className="mono">{snapshot.threadId}</span>
+          </Row>
+        )}
+        {diagnostics?.ports?.web !== undefined && (
+          <Row label="Web port">
+            <span className="mono">{diagnostics.ports.web}</span>
+          </Row>
+        )}
+        {diagnostics?.ports?.mcp !== undefined && (
+          <Row label="MCP port">
+            <span className="mono">{diagnostics.ports.mcp}</span>
+          </Row>
+        )}
+        {diagnostics?.logFile && (
+          <Row label="Log file">
+            <span className="mono">{diagnostics.logFile}</span>
+          </Row>
+        )}
+        {diagnostics?.pid !== undefined && (
+          <Row label="PID">
+            <span className="mono">{diagnostics.pid}</span>
+          </Row>
+        )}
+      </Block>
+
       <Block label="Provider">
         <Row label="Provider">
           <span className="mono">{snapshot.provider.provider}</span>

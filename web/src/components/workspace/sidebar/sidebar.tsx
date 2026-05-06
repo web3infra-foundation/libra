@@ -7,7 +7,7 @@
  */
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { BrandMark } from "@/components/workspace/brand-mark";
 import { IconPlus, IconSearch, IconSettings } from "@/components/icons";
@@ -27,6 +27,28 @@ type Props = {
 export function Sidebar({ width }: Props) {
   const { snapshot, repo, status, threads, connection } = useCodeUiStore();
   const [toast, setToast] = useState<string | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
+
+  // Clear any previous toast timer before scheduling the next one so a rapid
+  // double-click cannot leave a stale timeout pending.
+  const showToast = useCallback((message: string) => {
+    setToast(message);
+    if (toastTimerRef.current != null) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+    toastTimerRef.current = window.setTimeout(() => {
+      setToast(null);
+      toastTimerRef.current = null;
+    }, 6_000);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current != null) {
+        window.clearTimeout(toastTimerRef.current);
+      }
+    };
+  }, []);
 
   const [query, setQuery] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
@@ -34,25 +56,29 @@ export function Sidebar({ width }: Props) {
 
   const activeThreadId = snapshot?.threadId ?? null;
 
-  // Active session row — synthesized when the snapshot has a thread but it
-  // hasn't yet shown up in the projection-backed list.
-  const activeThread: ThreadRow | null = useMemo(() => {
-    if (!snapshot?.threadId) return null;
-    return {
-      id: snapshot.threadId,
-      title: deriveSessionTitle(snapshot, repo?.name ?? null),
-      ago: deriveSessionAgo(snapshot.updatedAt),
-      phase: statusToPhaseIndex(snapshot.status),
-    };
-  }, [snapshot, repo]);
-
+  // Combine active session + projection rows. We prefer the projection
+  // payload (server-authoritative title) and fall back to the snapshot-derived
+  // title only when the projection list hasn't yet picked up the active
+  // thread, so search by title hits the same string the user sees.
   const allThreads: ThreadRow[] = useMemo(() => {
     const rows: ThreadRow[] = [];
     const seen = new Set<string>();
-    if (activeThread) {
-      rows.push(activeThread);
-      seen.add(activeThread.id);
+
+    if (activeThreadId) {
+      const projectionMatch = threads.find((t) => t.id === activeThreadId);
+      const title = projectionMatch?.title?.trim()
+        ? projectionMatch.title.trim()
+        : deriveSessionTitle(snapshot, repo?.name ?? null);
+      const updatedAt = projectionMatch?.updatedAt ?? snapshot?.updatedAt;
+      rows.push({
+        id: activeThreadId,
+        title,
+        ago: deriveSessionAgo(updatedAt),
+        phase: snapshot ? statusToPhaseIndex(snapshot.status) : undefined,
+      });
+      seen.add(activeThreadId);
     }
+
     for (const item of threads) {
       if (seen.has(item.id)) continue;
       seen.add(item.id);
@@ -66,7 +92,7 @@ export function Sidebar({ width }: Props) {
       });
     }
     return rows;
-  }, [activeThread, threads]);
+  }, [activeThreadId, threads, snapshot, repo]);
 
   const visibleThreads = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -115,10 +141,11 @@ export function Sidebar({ width }: Props) {
 
       <button
         type="button"
-        onClick={() => {
-          setToast("Start a new thread from the libra CLI: `libra code` (browser-side creation lands in a future iteration).");
-          window.setTimeout(() => setToast(null), 6_000);
-        }}
+        onClick={() =>
+          showToast(
+            "Start a new thread from the libra CLI: `libra code` (browser-side creation lands in a future iteration).",
+          )
+        }
         title="Start a new libra code thread from your terminal"
         className="mb-2.5 flex w-full items-center gap-2 rounded-md border border-rule-2 bg-paper px-2.5 py-2 text-[12.5px] font-medium text-ink"
       >
@@ -159,10 +186,9 @@ export function Sidebar({ width }: Props) {
             active={thread.id === activeThreadId}
             onSelect={() => {
               if (thread.id !== activeThreadId) {
-                setToast(
+                showToast(
                   `Switch threads with the libra CLI: \`libra code --resume ${thread.id}\` (browser-side switch lands later).`,
                 );
-                window.setTimeout(() => setToast(null), 6_000);
               }
             }}
           />

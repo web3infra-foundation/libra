@@ -17,9 +17,16 @@
  */
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-
-
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 
 import {
   attachController,
@@ -66,7 +73,35 @@ function generateClientId(): string {
   return `browser-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+/**
+ * Single browser-controller instance shared across the workspace through
+ * {@link BrowserControllerProvider}. Mounting `useBrowserController()`
+ * twice in the same workspace would create two competing client ids, so any
+ * second writer would race the first into `CONTROLLER_CONFLICT`. The provider
+ * pattern guarantees one client id and one lease.
+ */
+const BrowserControllerContext = createContext<BrowserControllerHook | null>(null);
+
+export function BrowserControllerProvider({ children }: { children: ReactNode }) {
+  const value = useBrowserControllerInternal();
+  return (
+    <BrowserControllerContext.Provider value={value}>
+      {children}
+    </BrowserControllerContext.Provider>
+  );
+}
+
 export function useBrowserController(): BrowserControllerHook {
+  const value = useContext(BrowserControllerContext);
+  if (!value) {
+    throw new Error(
+      "useBrowserController must be used inside <BrowserControllerProvider>",
+    );
+  }
+  return value;
+}
+
+function useBrowserControllerInternal(): BrowserControllerHook {
   const { snapshot } = useCodeUiStore();
   const [status, setStatus] = useState<BrowserControllerStatus>({ kind: "idle" });
 

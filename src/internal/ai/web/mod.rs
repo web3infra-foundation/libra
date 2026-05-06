@@ -299,11 +299,24 @@ async fn code_diagnostics_handler(
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ThreadsQuery {
+struct ThreadsRawQuery {
     /// Page size; clamped to `[1, MAX_THREAD_LIST_LIMIT]`. Defaults to 50.
-    limit: Option<u64>,
+    /// Parsed manually from string so invalid values surface as a Code UI
+    /// error envelope instead of axum's default 400 plaintext.
+    #[serde(default)]
+    limit: Option<String>,
     /// Page offset; defaults to 0.
-    offset: Option<u64>,
+    #[serde(default)]
+    offset: Option<String>,
+}
+
+fn parse_optional_u64(field: &str, value: Option<&str>) -> Result<Option<u64>, WebApiError> {
+    let Some(raw) = value else { return Ok(None) };
+    raw.parse::<u64>().map(Some).map_err(|_| WebApiError {
+        status: StatusCode::BAD_REQUEST,
+        code: "INVALID_QUERY_PARAM".to_string(),
+        message: format!("query parameter `{field}` must be a non-negative integer"),
+    })
 }
 
 const DEFAULT_THREAD_LIST_LIMIT: u64 = 50;
@@ -333,15 +346,14 @@ struct ThreadListResponse {
 async fn code_threads_handler(
     ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
     State(state): State<WebAppState>,
-    Query(query): Query<ThreadsQuery>,
+    Query(raw_query): Query<ThreadsRawQuery>,
 ) -> Result<Json<ThreadListResponse>, WebApiError> {
     ensure_loopback_api_request(remote_addr)?;
 
-    let limit = query
-        .limit
+    let limit = parse_optional_u64("limit", raw_query.limit.as_deref())?
         .unwrap_or(DEFAULT_THREAD_LIST_LIMIT)
         .clamp(1, MAX_THREAD_LIST_LIMIT);
-    let offset = query.offset.unwrap_or(0);
+    let offset = parse_optional_u64("offset", raw_query.offset.as_deref())?.unwrap_or(0);
 
     let storage_root = resolve_storage_root(state.working_dir.as_path());
     let db_path = storage_root.join("libra.db");
