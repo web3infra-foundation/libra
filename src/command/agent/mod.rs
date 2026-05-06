@@ -27,6 +27,7 @@ mod clean;
 mod doctor;
 mod hooks;
 mod push;
+mod rpc;
 mod session;
 mod status;
 
@@ -73,6 +74,11 @@ pub enum AgentSubcommand {
     /// Internal hook entry point (called by hook configs installed by `enable`).
     #[command(subcommand, about = "Hook entry point", hide = true)]
     Hooks(hooks::AgentHooksSubcommand),
+
+    /// Discover and invoke external `libra-agent-<name>` RPC binaries.
+    /// Phase 4.5 (entire.md §14.4 item 5).
+    #[command(subcommand, about = "External libra-agent-<name> RPC")]
+    Rpc(rpc::AgentRpcSubcommand),
 }
 
 #[derive(Args, Debug)]
@@ -162,6 +168,7 @@ pub async fn execute_safe(args: AgentArgs, output: &OutputConfig) -> CliResult<(
         AgentSubcommand::Doctor(cmd) => doctor::execute_safe(cmd, output).await,
         AgentSubcommand::Push(cmd) => push::execute_safe(cmd, output).await,
         AgentSubcommand::Hooks(cmd) => hooks::execute_safe(cmd, output).await,
+        AgentSubcommand::Rpc(cmd) => rpc::execute_safe(cmd, output).await,
     }
 }
 

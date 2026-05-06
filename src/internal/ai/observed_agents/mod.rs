@@ -25,6 +25,7 @@ pub mod builtin;
 pub mod derived;
 pub mod preview;
 pub mod redaction;
+pub mod rpc;
 
 pub use adapter::{
     AgentKind, AgentSessionCtx, AgentStability, ObservedAgent, ObservedAgentHooks,
@@ -38,4 +39,8 @@ pub use derived::derive_tool_call_records;
 pub use preview::{PREVIEW_SPECS, PreviewAgent, PreviewSpec, is_preview, preview_spec_for};
 pub use redaction::{
     RedactedBytes, RedactedSink, RedactionMatch, RedactionReport, RedactionRule, Redactor,
+};
+pub use rpc::{
+    RPC_BINARY_PREFIX, RPC_DEFAULT_TIMEOUT, RpcAgent, RpcAgentBinary, RpcError, RpcRequest,
+    RpcResponse, discover_rpc_agents,
 };
