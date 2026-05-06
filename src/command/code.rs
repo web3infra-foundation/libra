@@ -529,6 +529,17 @@ pub struct CodeArgs {
     #[arg(long = "kimi-stream", value_name = "BOOL")]
     pub kimi_stream: Option<bool>,
 
+    /// Select an agent profile by name. When the profile carries a structured
+    /// `model: provider/model[@variant]` binding, the agent's binding wins
+    /// **atomically** — provider, model id, and variant all come from the
+    /// agent's spec, and a separately-supplied `--model` is ignored to avoid
+    /// hybrid pairs (anthropic provider + OpenAI-shaped model id). Profiles
+    /// without a structured binding fall back to the CLI defaults verbatim.
+    /// Profiles are looked up via the same three-tier hierarchy used elsewhere
+    /// (project `.libra/agents/`, user `~/.config/libra/agents/`, embedded).
+    #[arg(long = "agent", value_name = "NAME")]
+    pub agent: Option<String>,
+
     /// Test-only fake provider fixture.
     #[cfg(feature = "test-provider")]
     #[arg(long = "fake-fixture", hide = true, value_name = "PATH")]
@@ -1009,12 +1020,30 @@ fn provider_env_value_with_lookup(
 /// a value defined in the env-file now wins over a stale process-env value
 /// for those providers.
 ///
-/// The function returns the resolved model name alongside the model so the
-/// caller can pass it into `run_tui_with_model` for usage tagging.
+/// The function returns the resolved model name AND the effective provider
+/// name string so the caller can tag usage / UI metadata against the agent's
+/// chosen provider (which may differ from `--provider` after an `--agent`
+/// override).
+///
+/// OC-Phase 2 P2.4 added the `--agent <name>` override path. When the flag
+/// is set the helper loads the profile via the same three-tier hierarchy
+/// the runtime uses, asserts the agent is primary-eligible, and — if the
+/// profile carries a structured `model: provider/model[@variant]` binding —
+/// uses that binding **atomically**: provider id, model id, and variant all
+/// come from the agent's spec. A separately-supplied `--model` is **ignored**
+/// when the binding wins, since mixing an explicit model id with the agent's
+/// provider can produce nonsense pairs (e.g. anthropic provider with an
+/// OpenAI-shaped model id). When the agent profile does NOT carry a binding,
+/// the CLI defaults stand verbatim.
 fn build_any_completion_model_for_args(
     args: &CodeArgs,
     env_file: &CodeEnvFile,
-) -> CliResult<(crate::internal::ai::providers::AnyCompletionModel, String)> {
+    working_dir: &std::path::Path,
+) -> CliResult<(
+    crate::internal::ai::providers::AnyCompletionModel,
+    String,
+    String,
+)> {
     use crate::internal::ai::{
         agent::profile::ModelBinding,
         providers::{
@@ -1022,16 +1051,18 @@ fn build_any_completion_model_for_args(
         },
     };
 
-    let provider_id_str = match args.provider {
-        CodeProvider::Gemini => provider_id::GEMINI,
-        CodeProvider::Openai => provider_id::OPENAI,
-        CodeProvider::Anthropic => provider_id::ANTHROPIC,
-        CodeProvider::Deepseek => provider_id::DEEPSEEK,
-        CodeProvider::Kimi => provider_id::KIMI,
-        CodeProvider::Zhipu => provider_id::ZHIPU,
-        CodeProvider::Ollama => provider_id::OLLAMA,
+    // 1. Map `--provider` to the canonical provider id string (the factory's
+    //    dispatch key). Codex bypasses this helper entirely.
+    let mut provider_id_str = match args.provider {
+        CodeProvider::Gemini => provider_id::GEMINI.to_string(),
+        CodeProvider::Openai => provider_id::OPENAI.to_string(),
+        CodeProvider::Anthropic => provider_id::ANTHROPIC.to_string(),
+        CodeProvider::Deepseek => provider_id::DEEPSEEK.to_string(),
+        CodeProvider::Kimi => provider_id::KIMI.to_string(),
+        CodeProvider::Zhipu => provider_id::ZHIPU.to_string(),
+        CodeProvider::Ollama => provider_id::OLLAMA.to_string(),
         #[cfg(feature = "test-provider")]
-        CodeProvider::Fake => provider_id::FAKE,
+        CodeProvider::Fake => provider_id::FAKE.to_string(),
         CodeProvider::Codex => {
             // Codex never reaches this helper — its dispatch path skips the
             // factory entirely. Treat as a programmer error rather than a
@@ -1043,45 +1074,68 @@ fn build_any_completion_model_for_args(
         }
     };
 
-    // Resolve default model per provider. Ollama and (gated) Fake have
-    // explicit error / fallback rules that match the pre-factory behavior.
-    let model_name = match (args.provider, args.model.clone()) {
-        (_, Some(m)) => m,
-        (CodeProvider::Gemini, None) => GEMINI_2_5_FLASH.to_string(),
-        (CodeProvider::Openai, None) => GPT_4O_MINI.to_string(),
-        (CodeProvider::Anthropic, None) => CLAUDE_3_5_SONNET.to_string(),
-        (CodeProvider::Deepseek, None) => "deepseek-chat".to_string(),
-        (CodeProvider::Kimi, None) => KIMI_K2_6.to_string(),
-        (CodeProvider::Zhipu, None) => GLM_5.to_string(),
-        (CodeProvider::Ollama, None) => {
-            return Err(CliError::command_usage(
-                "--model is required when using --provider ollama (e.g. --model llama3.2)",
-            ));
+    // 2. Resolve the default model id from the CLI provider. Ollama errors
+    //    if `--model` is omitted (no sensible local default); the rest fall
+    //    back to a flagship model constant. Honored only when the agent
+    //    override does not supply a binding model id below.
+    let cli_default_model = |provider: CodeProvider| -> CliResult<String> {
+        Ok(match provider {
+            CodeProvider::Gemini => GEMINI_2_5_FLASH.to_string(),
+            CodeProvider::Openai => GPT_4O_MINI.to_string(),
+            CodeProvider::Anthropic => CLAUDE_3_5_SONNET.to_string(),
+            CodeProvider::Deepseek => "deepseek-chat".to_string(),
+            CodeProvider::Kimi => KIMI_K2_6.to_string(),
+            CodeProvider::Zhipu => GLM_5.to_string(),
+            CodeProvider::Ollama => {
+                return Err(CliError::command_usage(
+                    "--model is required when using --provider ollama \
+                     (e.g. --model llama3.2)",
+                ));
+            }
+            #[cfg(feature = "test-provider")]
+            CodeProvider::Fake => FAKE_DEFAULT_MODEL.to_string(),
+            CodeProvider::Codex => unreachable!("Codex filtered above"),
+        })
+    };
+
+    let mut variant: Option<String> = None;
+    // 3. OC-Phase 2 P2.4: apply `--agent <name>` override atomically.
+    //    When the profile carries a structured binding, all three of
+    //    (provider_id, model_id, variant) come from the spec — `--model`
+    //    is ignored to avoid hybrid pairs like "anthropic + gpt-4o".
+    let agent_binding = resolve_agent_binding_override(args, working_dir)?;
+    let model_name: String = if let Some(binding) = agent_binding {
+        provider_id_str = binding.provider_id;
+        variant = binding.variant;
+        binding.model_id
+    } else {
+        match args.model.clone() {
+            Some(m) => m,
+            None => cli_default_model(args.provider)?,
         }
-        #[cfg(feature = "test-provider")]
-        (CodeProvider::Fake, None) => FAKE_DEFAULT_MODEL.to_string(),
-        (CodeProvider::Codex, None) => unreachable!("Codex was filtered above"),
     };
 
-    let api_key = match args.provider {
-        CodeProvider::Gemini => provider_env_value(env_file, "GEMINI_API_KEY"),
-        CodeProvider::Openai => provider_env_value(env_file, "OPENAI_API_KEY"),
-        CodeProvider::Anthropic => provider_env_value(env_file, "ANTHROPIC_API_KEY"),
-        CodeProvider::Deepseek => provider_env_value(env_file, "DEEPSEEK_API_KEY"),
-        CodeProvider::Kimi => provider_env_value(env_file, "MOONSHOT_API_KEY"),
-        CodeProvider::Zhipu => provider_env_value(env_file, "ZHIPU_API_KEY"),
-        CodeProvider::Ollama => provider_env_value(env_file, "OLLAMA_API_KEY"),
+    // 4. Resolve API key / base URL by provider id (string-keyed so the
+    //    agent override flows through to env-var lookup).
+    let api_key = match provider_id_str.as_str() {
+        provider_id::GEMINI => provider_env_value(env_file, "GEMINI_API_KEY"),
+        provider_id::OPENAI => provider_env_value(env_file, "OPENAI_API_KEY"),
+        provider_id::ANTHROPIC => provider_env_value(env_file, "ANTHROPIC_API_KEY"),
+        provider_id::DEEPSEEK => provider_env_value(env_file, "DEEPSEEK_API_KEY"),
+        provider_id::KIMI => provider_env_value(env_file, "MOONSHOT_API_KEY"),
+        provider_id::ZHIPU => provider_env_value(env_file, "ZHIPU_API_KEY"),
+        provider_id::OLLAMA => provider_env_value(env_file, "OLLAMA_API_KEY"),
         #[cfg(feature = "test-provider")]
-        CodeProvider::Fake => None,
-        CodeProvider::Codex => None,
+        provider_id::FAKE => None,
+        _ => None,
     };
 
-    let api_base = match args.provider {
-        CodeProvider::Anthropic => provider_env_value(env_file, "ANTHROPIC_BASE_URL"),
-        CodeProvider::Openai => provider_env_value(env_file, "OPENAI_BASE_URL"),
-        CodeProvider::Kimi => provider_env_value(env_file, "MOONSHOT_BASE_URL"),
-        CodeProvider::Zhipu => provider_env_value(env_file, "ZHIPU_BASE_URL"),
-        CodeProvider::Ollama => args
+    let api_base = match provider_id_str.as_str() {
+        provider_id::ANTHROPIC => provider_env_value(env_file, "ANTHROPIC_BASE_URL"),
+        provider_id::OPENAI => provider_env_value(env_file, "OPENAI_BASE_URL"),
+        provider_id::KIMI => provider_env_value(env_file, "MOONSHOT_BASE_URL"),
+        provider_id::ZHIPU => provider_env_value(env_file, "ZHIPU_BASE_URL"),
+        provider_id::OLLAMA => args
             .api_base
             .clone()
             .or_else(|| provider_env_value(env_file, "OLLAMA_BASE_URL")),
@@ -1089,7 +1143,7 @@ fn build_any_completion_model_for_args(
     };
 
     #[cfg(feature = "test-provider")]
-    let fake_fixture_path = if matches!(args.provider, CodeProvider::Fake) {
+    let fake_fixture_path = if provider_id_str == provider_id::FAKE {
         Some(args.fake_fixture.clone().ok_or_else(|| {
             CliError::command_usage("--fake-fixture is required with --provider=fake")
         })?)
@@ -1127,16 +1181,16 @@ fn build_any_completion_model_for_args(
     };
 
     let binding = ModelBinding {
-        provider_id: provider_id_str.to_string(),
+        provider_id: provider_id_str.clone(),
         model_id: model_name.clone(),
-        variant: None,
+        variant,
     };
 
     let model = ProviderFactory
         .build(&binding, options)
         .map_err(|err| match err {
             ProviderFactoryError::MissingApiKey { env_var, .. } => {
-                if matches!(args.provider, CodeProvider::Ollama) {
+                if provider_id_str == provider_id::OLLAMA {
                     // Ollama Cloud needs the api key only when the base URL points
                     // at ollama.com; preserve the pre-factory error wording so users
                     // who scripted against it do not see a regression.
@@ -1153,7 +1207,99 @@ fn build_any_completion_model_for_args(
             | ProviderFactoryError::UnknownModel { .. } => CliError::command_usage(err.to_string()),
         })?;
 
-    Ok((model, model_name))
+    Ok((model, model_name, provider_id_str))
+}
+
+/// Resolve the **effective** [`CodeProvider`] enum that downstream
+/// provider-specific helpers should dispatch on (OC-Phase 2 P2.4).
+///
+/// When `--agent <name>` is set and the agent's profile carries a structured
+/// `model: provider/model` binding, the effective provider is the one named
+/// by the binding's `provider_id`. Otherwise the effective provider is the
+/// CLI `--provider` default.
+///
+/// An agent binding whose `provider_id` does NOT map to a known
+/// [`CodeProvider`] variant is rejected with a `command_usage` error.
+/// Silently falling back to `args.provider` would leave the system prompt /
+/// context-budget / completion knobs computed against the CLI provider
+/// while the model is ultimately built for a different (or non-existent)
+/// provider — a partial-misconfiguration trap. The list of known provider
+/// ids stays in lock-step with [`provider_id::ALL_PRODUCTION`] (plus
+/// `FAKE` under the `test-provider` feature).
+fn effective_code_provider_for_args(
+    args: &CodeArgs,
+    working_dir: &std::path::Path,
+) -> CliResult<CodeProvider> {
+    use crate::internal::ai::providers::runtime::provider_id;
+
+    let Some(binding) = resolve_agent_binding_override(args, working_dir)? else {
+        return Ok(args.provider);
+    };
+    let mapped = match binding.provider_id.as_str() {
+        provider_id::GEMINI => Some(CodeProvider::Gemini),
+        provider_id::OPENAI => Some(CodeProvider::Openai),
+        provider_id::ANTHROPIC => Some(CodeProvider::Anthropic),
+        provider_id::DEEPSEEK => Some(CodeProvider::Deepseek),
+        provider_id::KIMI => Some(CodeProvider::Kimi),
+        provider_id::ZHIPU => Some(CodeProvider::Zhipu),
+        provider_id::OLLAMA => Some(CodeProvider::Ollama),
+        #[cfg(feature = "test-provider")]
+        provider_id::FAKE => Some(CodeProvider::Fake),
+        _ => None,
+    };
+    mapped.ok_or_else(|| {
+        CliError::command_usage(format!(
+            "agent '{}' selects provider '{}', which is not a known `--provider` value. \
+             Pick a binding whose provider id is one of: {}",
+            args.agent.as_deref().unwrap_or("?"),
+            binding.provider_id,
+            provider_id::ALL_PRODUCTION.join(", "),
+        ))
+    })
+}
+
+/// Look up the agent profile selected by `--agent <name>` and return its
+/// structured `ModelBinding` if the profile carries one (OC-Phase 2 P2.4).
+///
+/// Returns `Ok(None)` when:
+/// - `--agent` was not supplied; the helper is a no-op.
+/// - The agent exists but has no `model: provider/model` binding (legacy
+///   `model: default` / `fast` / etc.). The CLI defaults stand.
+///
+/// Returns `Err(_)` when:
+/// - The agent name does not match any profile in the three-tier hierarchy.
+/// - The agent's `mode` is not primary-eligible (sub-agents are dispatched
+///   via the `task` tool in OC-Phase 3, not as the session driver).
+fn resolve_agent_binding_override(
+    args: &CodeArgs,
+    working_dir: &std::path::Path,
+) -> CliResult<Option<crate::internal::ai::agent::profile::ModelBinding>> {
+    let Some(agent_name) = args.agent.as_deref() else {
+        return Ok(None);
+    };
+    let profiles = load_profiles(working_dir);
+    let router = AgentProfileRouter::new(profiles);
+    let spec = router.execution_spec(agent_name).ok_or_else(|| {
+        let mut suggestions: Vec<&str> =
+            router.profiles().iter().map(|p| p.name.as_str()).collect();
+        suggestions.sort();
+        let suggestion_hint = if suggestions.is_empty() {
+            String::from("(no profiles loaded)")
+        } else {
+            format!("known agents: {}", suggestions.join(", "))
+        };
+        CliError::command_usage(format!(
+            "unknown agent '{agent_name}' for --agent; {suggestion_hint}"
+        ))
+    })?;
+    if !spec.mode.is_primary_eligible() {
+        return Err(CliError::command_usage(format!(
+            "agent '{agent_name}' has mode '{:?}', which is not primary-eligible. \
+             Sub-agents are dispatched via the `task` tool, not selected with --agent.",
+            spec.mode
+        )));
+    }
+    Ok(spec.model)
 }
 
 /// Main TUI execution path: initializes the AI provider, builds the tool
@@ -1182,7 +1328,16 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
 
     // Validate --api-base: only honored for Ollama via CLI flag. Other providers
     // accept custom base URLs through their respective environment variables.
-    if args.api_base.is_some()
+    //
+    // The warning is keyed off `args.provider` because the agent override
+    // (OC-Phase 2 P2.4) is resolved later, inside the factory helper. When
+    // `--agent` is set we suppress the warning entirely — the effective
+    // provider may be Ollama via the agent's binding, in which case
+    // `--api-base` is meaningful, or it may be a non-Ollama provider that
+    // ignores the flag. Either way the user explicitly opted into the
+    // agent and is best served by silence here.
+    if args.agent.is_none()
+        && args.api_base.is_some()
         && !matches!(args.provider, CodeProvider::Ollama | CodeProvider::Codex)
     {
         eprintln!(
@@ -1209,17 +1364,34 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
     }
 
     let task_intent = task_intent_for_context(args.context);
+    // OC-Phase 2 P2.4: resolve `--agent <name>` once before any provider-
+    // specific knob (context budget, completion thinking / reasoning /
+    // stream, preamble) is computed. When the agent's spec carries a
+    // structured binding, the effective provider may differ from the CLI
+    // `--provider` default; downstream computations need the agent's
+    // provider, not the CLI one.
+    let effective_provider = effective_code_provider_for_args(&args, &working_dir)?;
+    let effective_model_for_preamble = if effective_provider == args.provider {
+        args.model.as_deref().map(str::to_string)
+    } else {
+        // The agent override path resolves the concrete model id later
+        // inside `build_any_completion_model_for_args`; here we only need
+        // it for `system_preamble`'s context budget defaulting, where
+        // `None` falls back to the provider's flagship via
+        // [`default_context_budget_model`].
+        None
+    };
     let preamble = system_preamble(
         &working_dir,
         args.context,
-        args.provider,
-        args.model.as_deref(),
+        effective_provider,
+        effective_model_for_preamble.as_deref(),
     );
     let temperature = args.temperature;
-    let thinking = completion_thinking_for_args(&args);
-    let reasoning_effort = completion_reasoning_effort_for_args(&args);
-    let stream = completion_stream_for_args(&args);
-    let preserve_reasoning_content = preserve_reasoning_content_for_provider(args.provider);
+    let thinking = completion_thinking_for_provider(effective_provider, &args);
+    let reasoning_effort = completion_reasoning_effort_for_provider(effective_provider, &args);
+    let stream = completion_stream_for_provider(effective_provider, &args);
+    let preserve_reasoning_content = preserve_reasoning_content_for_provider(effective_provider);
     let resume_thread_id = args.resume.clone();
     let host = args.host.clone();
     let trace_id = resume_thread_id
@@ -1365,8 +1537,13 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
             result?;
         }
         _ => {
-            let (model, model_name) = build_any_completion_model_for_args(&args, &env_file)?;
-            run_tui_with_model(model, launch_config, model_name, provider_name).await?;
+            // OC-Phase 2 P2.4: the helper returns the *effective* provider
+            // name so usage / UI metadata reports the agent-selected
+            // provider after a `--agent <name>` override, not the CLI
+            // `--provider` default that the helper started from.
+            let (model, model_name, effective_provider_name) =
+                build_any_completion_model_for_args(&args, &env_file, &working_dir)?;
+            run_tui_with_model(model, launch_config, model_name, effective_provider_name).await?;
         }
     }
 
@@ -1374,7 +1551,16 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
 }
 
 fn completion_thinking_for_args(args: &CodeArgs) -> Option<CompletionThinking> {
-    match args.provider {
+    completion_thinking_for_provider(args.provider, args)
+}
+
+/// Provider-explicit variant of [`completion_thinking_for_args`] used by the
+/// `--agent` override path so the resolved provider drives the dispatch.
+fn completion_thinking_for_provider(
+    provider: CodeProvider,
+    args: &CodeArgs,
+) -> Option<CompletionThinking> {
+    match provider {
         CodeProvider::Ollama => args.ollama_thinking.map(CompletionThinking::from),
         CodeProvider::Deepseek => args.deepseek_thinking.map(CompletionThinking::from),
         CodeProvider::Kimi => args.kimi_thinking.map(CompletionThinking::from),
@@ -1383,7 +1569,15 @@ fn completion_thinking_for_args(args: &CodeArgs) -> Option<CompletionThinking> {
 }
 
 fn completion_reasoning_effort_for_args(args: &CodeArgs) -> Option<CompletionReasoningEffort> {
-    match args.provider {
+    completion_reasoning_effort_for_provider(args.provider, args)
+}
+
+/// Provider-explicit variant of [`completion_reasoning_effort_for_args`].
+fn completion_reasoning_effort_for_provider(
+    provider: CodeProvider,
+    args: &CodeArgs,
+) -> Option<CompletionReasoningEffort> {
+    match provider {
         CodeProvider::Deepseek => args
             .deepseek_reasoning_effort
             .map(CompletionReasoningEffort::from),
@@ -1392,7 +1586,12 @@ fn completion_reasoning_effort_for_args(args: &CodeArgs) -> Option<CompletionRea
 }
 
 fn completion_stream_for_args(args: &CodeArgs) -> Option<bool> {
-    match args.provider {
+    completion_stream_for_provider(args.provider, args)
+}
+
+/// Provider-explicit variant of [`completion_stream_for_args`].
+fn completion_stream_for_provider(provider: CodeProvider, args: &CodeArgs) -> Option<bool> {
+    match provider {
         CodeProvider::Deepseek => args.deepseek_stream,
         CodeProvider::Kimi => Some(args.kimi_stream.unwrap_or(true)),
         _ => None,
@@ -3325,6 +3524,7 @@ mod tests {
             deepseek_stream: None,
             kimi_thinking: None,
             kimi_stream: None,
+            agent: None,
             #[cfg(feature = "test-provider")]
             fake_fixture: None,
             context: None,
@@ -4055,5 +4255,240 @@ no_cache_unknown_network = true
             let sandbox = runtime.sandbox.expect("sandbox context should be present");
             assert!(matches!(sandbox.policy, SandboxPolicy::ReadOnly));
         }
+    }
+
+    // ─── OC-Phase 2 P2.4: --agent override ────────────────────────────────
+
+    /// Build a working directory with a `.libra/agents/` profile that pins a
+    /// structured `provider/model` binding so the override path has
+    /// something to lift.
+    fn write_agent_profile(working_dir: &Path, name: &str, body: &str) {
+        let agents_dir = working_dir.join(".libra").join("agents");
+        std::fs::create_dir_all(&agents_dir).expect("create agents dir");
+        std::fs::write(agents_dir.join(format!("{name}.md")), body).expect("write profile");
+    }
+
+    /// Scenario: `--agent` is unset → helper is a no-op and returns `None`.
+    /// This is the flag-off baseline OC-Phase 2 P2.4 must preserve.
+    #[test]
+    fn resolve_agent_override_noop_when_flag_absent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let args = base_args();
+        let result = resolve_agent_binding_override(&args, tmp.path()).unwrap();
+        assert!(result.is_none());
+    }
+
+    /// Scenario: `--agent <name>` lifts a profile that carries
+    /// `model: anthropic/claude-3-5-sonnet-latest` into a structured
+    /// `ModelBinding`. The legacy `model_preference` form is irrelevant
+    /// here; only the binding goes through.
+    #[test]
+    fn resolve_agent_override_lifts_provider_slash_model_binding() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_agent_profile(
+            tmp.path(),
+            "planner",
+            "---\n\
+             name: planner\n\
+             description: Implementation planner\n\
+             tools: []\n\
+             model: anthropic/claude-3-5-sonnet-latest\n\
+             ---\n\
+             You plan.",
+        );
+        let mut args = base_args();
+        args.agent = Some("planner".to_string());
+
+        let binding = resolve_agent_binding_override(&args, tmp.path())
+            .unwrap()
+            .expect("binding lifts");
+        assert_eq!(binding.provider_id, "anthropic");
+        assert_eq!(binding.model_id, "claude-3-5-sonnet-latest");
+        assert!(binding.variant.is_none());
+    }
+
+    /// Scenario: an `--agent` profile that carries only a legacy alias
+    /// (`model: default`) yields `Ok(None)` — there is no structured
+    /// binding to override the CLI defaults with, so the rest of
+    /// `build_any_completion_model_for_args` falls through to the CLI
+    /// provider/model defaults.
+    #[test]
+    fn resolve_agent_override_returns_none_for_legacy_model_alias() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_agent_profile(
+            tmp.path(),
+            "planner",
+            "---\nname: planner\nmodel: default\n---\nbody",
+        );
+        let mut args = base_args();
+        args.agent = Some("planner".to_string());
+
+        let result = resolve_agent_binding_override(&args, tmp.path()).unwrap();
+        assert!(result.is_none());
+    }
+
+    /// Scenario: an unknown agent name surfaces a `command_usage` error
+    /// listing the known profiles. Embedded defaults always load, so the
+    /// suggestion list is never empty.
+    #[test]
+    fn resolve_agent_override_unknown_name_lists_known_profiles() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut args = base_args();
+        args.agent = Some("does-not-exist".to_string());
+
+        let err = resolve_agent_binding_override(&args, tmp.path())
+            .expect_err("unknown agent must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("does-not-exist"),
+            "error must mention the bad name: {msg}"
+        );
+        // Embedded `planner` is one of the catalogued profiles, so the
+        // suggestion list must include it.
+        assert!(
+            msg.contains("planner"),
+            "error must list known profiles: {msg}"
+        );
+    }
+
+    /// Scenario: a profile whose `mode: subagent` is selected by `--agent`
+    /// is rejected. Sub-agents are dispatched via the `task` tool in
+    /// OC-Phase 3, not as the session driver.
+    #[test]
+    fn resolve_agent_override_rejects_non_primary_eligible_mode() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_agent_profile(
+            tmp.path(),
+            "explorer",
+            "---\n\
+             name: explorer\n\
+             mode: subagent\n\
+             model: anthropic/claude-3-5-haiku-latest\n\
+             ---\n\
+             body",
+        );
+        let mut args = base_args();
+        args.agent = Some("explorer".to_string());
+
+        let err = resolve_agent_binding_override(&args, tmp.path())
+            .expect_err("subagent-only profile must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("explorer"),
+            "error must mention agent name: {msg}"
+        );
+        assert!(
+            msg.contains("Subagent") || msg.contains("subagent"),
+            "error must mention the offending mode: {msg}"
+        );
+    }
+
+    /// Scenario: a `mode: all` profile IS primary-eligible, so the override
+    /// surfaces the binding rather than erroring. This pins the doc rule
+    /// "Primary | All" → primary-eligible.
+    #[test]
+    fn resolve_agent_override_accepts_mode_all() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_agent_profile(
+            tmp.path(),
+            "swiss",
+            "---\n\
+             name: swiss\n\
+             mode: all\n\
+             model: openai/gpt-4o-mini\n\
+             ---\n\
+             body",
+        );
+        let mut args = base_args();
+        args.agent = Some("swiss".to_string());
+
+        let binding = resolve_agent_binding_override(&args, tmp.path())
+            .unwrap()
+            .expect("binding lifts");
+        assert_eq!(binding.provider_id, "openai");
+        assert_eq!(binding.model_id, "gpt-4o-mini");
+    }
+
+    /// Scenario: an agent binding whose `provider_id` does NOT match any
+    /// `CodeProvider` variant must be rejected at
+    /// `effective_code_provider_for_args` with a clear, actionable error.
+    /// Silent fallback to `args.provider` would leave system prompt and
+    /// context-budget computations pointed at the CLI provider while the
+    /// model itself was built (or refused) for a different provider —
+    /// a partial-misconfiguration trap. Pinning this gate prevents the
+    /// regression Codex flagged on the OC-Phase 2 P2.4 review.
+    #[test]
+    fn effective_provider_rejects_unknown_binding_provider_id() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_agent_profile(
+            tmp.path(),
+            "alien",
+            "---\n\
+             name: alien\n\
+             model: aleph-omega/some-model\n\
+             ---\n\
+             body",
+        );
+        let mut args = base_args();
+        args.agent = Some("alien".to_string());
+
+        let err = effective_code_provider_for_args(&args, tmp.path())
+            .expect_err("unknown binding provider must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("alien"),
+            "error must mention the agent name: {msg}"
+        );
+        assert!(
+            msg.contains("aleph-omega"),
+            "error must echo the offending provider id: {msg}"
+        );
+        assert!(
+            msg.contains("anthropic"),
+            "error must list the known provider ids: {msg}"
+        );
+    }
+
+    /// Scenario: `--provider gemini --model gpt-foo --agent planner`
+    /// (where `planner` carries `model: anthropic/claude-3-5-sonnet-latest`)
+    /// — the agent's binding wins **atomically**. The CLI `--model gpt-foo`
+    /// is dropped because it would otherwise pair an OpenAI-style model id
+    /// with the agent's anthropic provider. Smoke tests the integration of
+    /// `resolve_agent_binding_override` with the rest of
+    /// `build_any_completion_model_for_args`.
+    #[cfg(feature = "test-provider")]
+    #[test]
+    fn build_helper_treats_agent_binding_atomically() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_agent_profile(
+            tmp.path(),
+            "planner",
+            "---\n\
+             name: planner\n\
+             model: anthropic/claude-3-5-sonnet-latest\n\
+             ---\n\
+             body",
+        );
+        let mut args = base_args();
+        args.provider = CodeProvider::Gemini;
+        args.model = Some("gemini-2.0-flash".to_string()); // would-be hybrid
+        args.agent = Some("planner".to_string());
+        let env_file = CodeEnvFile::default();
+
+        // The build call would fail (no API key in CodeEnvFile), but the
+        // failure path tells us which provider we ended up dispatching to:
+        // an Anthropic build complains about ANTHROPIC_API_KEY, NOT
+        // GEMINI_API_KEY.
+        let err = build_any_completion_model_for_args(&args, &env_file, tmp.path())
+            .expect_err("missing api key path must fire");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ANTHROPIC_API_KEY"),
+            "agent override must point env-var lookup at anthropic, got: {msg}"
+        );
+        assert!(
+            !msg.contains("GEMINI_API_KEY"),
+            "CLI --provider gemini must NOT win after agent override, got: {msg}"
+        );
     }
 }
