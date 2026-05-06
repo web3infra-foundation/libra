@@ -8,7 +8,9 @@
 //! capability that `libra agent checkpoint rewind --apply` calls.
 
 pub mod claude_code;
+pub mod stable_promoted;
 
 pub use claude_code::{
     ClaudeCodeObservedAgent, rfc3339_boundary_for_unix_seconds, write_truncated_transcript,
 };
+pub use stable_promoted::{STABLE_PROMOTED_SPECS, StablePromotedAgent, stable_promoted_spec_for};

@@ -1,21 +1,20 @@
-//! Preview-tier `ObservedAgent` stubs for the five not-yet-stable agents
-//! (Cursor, Codex, OpenCode, GitHub Copilot CLI, Factory AI Droid). Each
-//! one returns hard-coded metadata, advertises itself as `Preview`, and
-//! refuses to read a transcript with the canonical
-//! [`AgentError::NotYetImplemented`] error.
+//! Preview-tier `ObservedAgent` stubs.
 //!
-//! Per `docs/improvement/entire.md` §5.2 these adapters exist mainly so
-//! `libra agent enable` can list every agent the plan recognises without
-//! lying about implementation status. The corresponding `HookProvider`
-//! integration lands in Phase 4 (or whenever the upstream agent ships hook
-//! support); until then `libra agent enable <slug>` skips them with a
-//! clearly-marked "preview adapter — landing in phase 3" message that
-//! `command::agent::install_or_uninstall` already handles.
+//! As of Phase 4.4 (entire.md §14.4 item 4), the original five preview
+//! adapters (Cursor, Codex, OpenCode, GitHub Copilot CLI, Factory AI
+//! Droid) have been **promoted to stable** under
+//! [`super::builtin::stable_promoted`]. [`PREVIEW_SPECS`] is therefore
+//! empty in the current build, and [`is_preview`] returns `false` for
+//! every `AgentKind`.
 //!
-//! The five stubs share a common shape — kind, provider name, and protected
-//! directories — so they go through one [`PreviewAgent`] generic struct
-//! rather than five hand-written near-duplicates. New preview agents drop
-//! into [`PreviewSpec::all()`] without any new file.
+//! The module is kept around for two reasons:
+//! 1. [`PreviewAgent`] / [`PreviewSpec`] remain a useful template for
+//!    landing future preview adapters (e.g. a new agent that joins
+//!    after the v1 matrix). Future additions append to
+//!    [`PREVIEW_SPECS`] without code churn elsewhere.
+//! 2. Downstream callers that branch on `is_preview` continue to
+//!    compile and behave correctly — the function now always returns
+//!    `false`, which means stable-only paths fire for every agent.
 
 use anyhow::Result;
 
@@ -57,37 +56,11 @@ impl ObservedAgent for PreviewAgent {
     }
 }
 
-/// All preview specs in stable order. Mirrors the v1 adapter matrix in
-/// `docs/improvement/entire.md` §5.2 — Cursor, Codex, OpenCode, Copilot,
-/// FactoryAi. The protected_dirs mirror each agent's well-known config
-/// directory so a future `clean` / `rewind --apply` won't trample them.
-pub static PREVIEW_SPECS: &[PreviewSpec] = &[
-    PreviewSpec {
-        kind: AgentKind::Cursor,
-        provider_name: "cursor",
-        protected_dirs: &[".cursor"],
-    },
-    PreviewSpec {
-        kind: AgentKind::Codex,
-        provider_name: "codex",
-        protected_dirs: &[".codex"],
-    },
-    PreviewSpec {
-        kind: AgentKind::OpenCode,
-        provider_name: "opencode",
-        protected_dirs: &[".opencode"],
-    },
-    PreviewSpec {
-        kind: AgentKind::Copilot,
-        provider_name: "copilot",
-        protected_dirs: &[".copilot"],
-    },
-    PreviewSpec {
-        kind: AgentKind::FactoryAi,
-        provider_name: "factory_ai",
-        protected_dirs: &[".factory"],
-    },
-];
+/// All preview specs in stable order. Empty after the Phase 4.4
+/// promotion — every kind that previously lived here is now a
+/// [`super::builtin::stable_promoted::StablePromotedSpec`]. New
+/// preview adapters added in future releases append here.
+pub static PREVIEW_SPECS: &[PreviewSpec] = &[];
 
 /// Look up a preview spec by `AgentKind`. Returns `None` for the stable
 /// agents (`ClaudeCode`, `Gemini`) — those are wired through
@@ -105,34 +78,42 @@ pub fn is_preview(kind: AgentKind) -> bool {
 mod tests {
     use super::*;
 
+    /// Phase 4.4 acceptance: PREVIEW_SPECS is empty after the promotion
+    /// (every previous preview kind moved to
+    /// `builtin::stable_promoted::STABLE_PROMOTED_SPECS`). New preview
+    /// adapters can land back here without code churn elsewhere.
     #[test]
-    fn preview_specs_cover_every_preview_kind() {
-        // The five agents listed in the §5.2 preview column must all be
-        // present, and stable kinds must NOT.
+    fn preview_specs_is_empty_after_phase_4_4_promotion() {
+        assert!(
+            PREVIEW_SPECS.is_empty(),
+            "PREVIEW_SPECS should be empty after Phase 4.4 — found {} entries",
+            PREVIEW_SPECS.len()
+        );
+    }
+
+    #[test]
+    fn is_preview_returns_false_for_every_kind_after_promotion() {
         for kind in AgentKind::all() {
-            let is_stable = matches!(kind, AgentKind::ClaudeCode | AgentKind::Gemini);
-            assert_eq!(
-                preview_spec_for(*kind).is_some(),
-                !is_stable,
-                "preview coverage mismatch for {kind:?}"
+            assert!(
+                !is_preview(*kind),
+                "is_preview({kind:?}) should be false after Phase 4.4 promotion"
             );
         }
     }
 
+    /// `PreviewAgent` itself remains buildable — it's the template for
+    /// any future preview adapter that lands after the v1 matrix.
     #[test]
-    fn preview_agent_reports_preview_stability() {
-        let spec = preview_spec_for(AgentKind::Cursor).unwrap();
-        let agent = PreviewAgent(spec);
+    fn preview_agent_template_is_still_constructible() {
+        // Synthesise a fresh spec since PREVIEW_SPECS is empty.
+        static FUTURE_SPEC: PreviewSpec = PreviewSpec {
+            kind: AgentKind::Cursor, // arbitrary placeholder
+            provider_name: "future-preview",
+            protected_dirs: &[],
+        };
+        let agent = PreviewAgent(&FUTURE_SPEC);
         assert_eq!(agent.stability(), AgentStability::Preview);
-        assert_eq!(agent.provider_kind(), AgentKind::Cursor);
-        assert_eq!(agent.provider_name(), "cursor");
-        assert_eq!(agent.protected_dirs(), &[".cursor"]);
-    }
-
-    #[test]
-    fn preview_read_transcript_returns_not_yet_implemented() {
-        let spec = preview_spec_for(AgentKind::Codex).unwrap();
-        let agent = PreviewAgent(spec);
+        assert_eq!(agent.provider_name(), "future-preview");
         let ctx = AgentSessionCtx {
             session_id: "s".to_string(),
             provider_session_id: "p".to_string(),
@@ -142,7 +123,7 @@ mod tests {
         let err = agent.read_transcript(&ctx).unwrap_err();
         assert!(
             err.to_string().contains("preview-only"),
-            "unexpected error: {err}"
+            "preview adapter still surfaces NotYetImplemented: {err}"
         );
     }
 }

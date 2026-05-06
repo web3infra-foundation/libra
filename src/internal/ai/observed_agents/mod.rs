@@ -31,7 +31,8 @@ pub use adapter::{
     TranscriptChunker, TranscriptTruncator,
 };
 pub use builtin::{
-    ClaudeCodeObservedAgent, rfc3339_boundary_for_unix_seconds, write_truncated_transcript,
+    ClaudeCodeObservedAgent, STABLE_PROMOTED_SPECS, StablePromotedAgent,
+    rfc3339_boundary_for_unix_seconds, stable_promoted_spec_for, write_truncated_transcript,
 };
 pub use derived::derive_tool_call_records;
 pub use preview::{PREVIEW_SPECS, PreviewAgent, PreviewSpec, is_preview, preview_spec_for};

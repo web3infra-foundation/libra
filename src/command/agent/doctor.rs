@@ -14,7 +14,7 @@ use crate::{
     internal::{
         ai::{
             hooks::providers::{claude_provider, gemini_provider},
-            observed_agents::{AgentStability, PREVIEW_SPECS},
+            observed_agents::{AgentStability, PREVIEW_SPECS, STABLE_PROMOTED_SPECS},
         },
         db::get_db_conn_instance,
     },
@@ -75,11 +75,16 @@ pub async fn execute_safe(_args: DoctorArgs, output: &OutputConfig) -> CliResult
         (0, 0, 0)
     };
 
-    // Hook installation status for the two stable providers, followed by
-    // the five preview adapters from `observed_agents::preview`. Preview
-    // entries surface as `tier: AgentStability::Preview` with
-    // `installed: None` so operators can see the full v1 matrix from one
-    // command.
+    // Hook installation status across the v1 adapter matrix.
+    // - Two adapters carry HookProvider impls (claude-code, gemini) and
+    //   report real install status.
+    // - The five Phase 4.4 stable-promoted adapters (Cursor, Codex,
+    //   OpenCode, Copilot, FactoryAi) report `tier: Stable` but
+    //   `installed: None` because they read transcripts via
+    //   `AgentSessionCtx.transcript_path` rather than through a
+    //   HookProvider — the install pathway is per-agent v2 work.
+    // - Any future preview adapters (PREVIEW_SPECS empty after Phase
+    //   4.4) would surface here too.
     let mut provider_hooks = vec![
         check_provider(
             "claude-code",
@@ -88,6 +93,13 @@ pub async fn execute_safe(_args: DoctorArgs, output: &OutputConfig) -> CliResult
         ),
         check_provider("gemini", AgentStability::Stable, Some(gemini_provider())),
     ];
+    for spec in STABLE_PROMOTED_SPECS {
+        provider_hooks.push(check_provider(
+            spec.provider_name,
+            AgentStability::Stable,
+            None,
+        ));
+    }
     for spec in PREVIEW_SPECS {
         provider_hooks.push(check_provider(
             spec.provider_name,
