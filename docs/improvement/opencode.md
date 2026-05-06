@@ -233,9 +233,9 @@ pub enum ApprovalRoutingSpec {
 }
 
 pub struct AgentPermissionSpec {
-    pub allowed_tools: Vec<String>,
-    pub denied_tools: Vec<String>,
-    pub allowed_source_slugs: Vec<String>,
+    pub allowed_tools: BTreeSet<String>,
+    pub denied_tools: BTreeSet<String>,
+    pub allowed_source_slugs: BTreeSet<String>,
     pub approval_routing: ApprovalRoutingSpec,
     pub may_spawn_sub_agents: bool,
 }

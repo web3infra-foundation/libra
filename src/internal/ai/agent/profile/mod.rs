@@ -11,9 +11,14 @@
 
 pub mod parser;
 pub mod router;
+pub mod spec;
 
 pub use parser::{AgentProfile, parse_agent_profile};
 pub use router::{AgentProfileRouter, load_embedded_profiles, load_profiles};
+pub use spec::{
+    AgentExecutionSpec, AgentMode, AgentPermissionSpec, ApprovalRoutingSpec, ModelBinding,
+    ToolSelection,
+};
 
 #[deprecated(note = "Use AgentProfileRouter instead.")]
 pub type AgentRouter = AgentProfileRouter;
