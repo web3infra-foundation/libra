@@ -238,12 +238,6 @@ fn browser_cancel_turn_aborts_in_flight_turn_without_automation_token() -> Resul
         controller_kind(snapshot) == Some("browser")
     })?;
 
-    // Time the submit so the post-cancel "no resurrection" window can be
-    // anchored to the fixture's `delayMs` (10 s). Without this anchor, a
-    // regression where cancel returns OK but leaves the provider task
-    // running could pass by checking the transcript before the delayed
-    // response had a chance to land.
-    let submitted_at = std::time::Instant::now();
     let (submit_status, submit_body) = session.browser_submit_message(&token, "/chat slow")?;
     assert!(
         submit_status.is_success(),
@@ -255,6 +249,13 @@ fn browser_cancel_turn_aborts_in_flight_turn_without_automation_token() -> Resul
     session.wait_for_snapshot(Duration::from_secs(10), |snapshot| {
         status(snapshot) == Some("thinking")
     })?;
+
+    // Anchor the post-cancel "no resurrection" window to the moment the
+    // provider task is observed running. Anchoring earlier (e.g. before
+    // submit) would let Axum routing + queuing latency eat into the safety
+    // margin on slow CI; the fixture's `delayMs` (10 s) starts ticking
+    // when the provider task begins, which is exactly here.
+    let provider_started_at = std::time::Instant::now();
 
     let (cancel_status, cancel_body) = session.browser_cancel_turn(&token)?;
     assert!(
@@ -269,11 +270,11 @@ fn browser_cancel_turn_aborts_in_flight_turn_without_automation_token() -> Resul
         status(snapshot) == Some("idle")
     })?;
 
-    // Sleep until past the fixture's natural completion window. If cancel
-    // only marked the session idle but left the provider task running, the
-    // delayed response would land here and the assertion below would catch
-    // it.
-    let elapsed = submitted_at.elapsed();
+    // Sleep until past the fixture's natural completion window measured
+    // from the moment the provider task started. If cancel only marked the
+    // session idle but left the provider task running, the delayed
+    // response would land here and the assertion below would catch it.
+    let elapsed = provider_started_at.elapsed();
     let provider_delay = Duration::from_millis(10_000);
     let safety_margin = Duration::from_millis(1_500);
     if elapsed < provider_delay + safety_margin {
