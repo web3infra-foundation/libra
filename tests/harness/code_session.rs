@@ -21,6 +21,10 @@ pub struct CodeSessionOptions {
     pub fixture: PathBuf,
     pub name: String,
     pub use_default_control_paths: bool,
+    /// Pass `--browser-control loopback` to the spawned `libra code` so the
+    /// browser controller surface is available in tests that exercise the
+    /// browser write path. Defaults to `false`.
+    pub browser_control_loopback: bool,
 }
 
 impl CodeSessionOptions {
@@ -29,11 +33,17 @@ impl CodeSessionOptions {
             fixture: fixture.into(),
             name: name.into(),
             use_default_control_paths: false,
+            browser_control_loopback: false,
         }
     }
 
     pub fn with_default_control_paths(mut self) -> Self {
         self.use_default_control_paths = true;
+        self
+    }
+
+    pub fn with_browser_control_loopback(mut self) -> Self {
+        self.browser_control_loopback = true;
         self
     }
 }
@@ -167,6 +177,9 @@ impl CodeSession {
                 "--control-info-file",
                 path_str(&info_path)?,
             ]);
+        }
+        if options.browser_control_loopback {
+            cmd.args(["--browser-control", "loopback"]);
         }
         cmd.cwd(&repo_dir);
         cmd.env("TERM", "xterm-256color");
@@ -310,6 +323,105 @@ impl CodeSession {
             .to_string();
         self.controller_token = Some(token.clone());
         Ok(token)
+    }
+
+    /// Attach as a `browser` controller. Unlike automation attach, the
+    /// browser path does **not** require `X-Libra-Control-Token` — only the
+    /// returned `controllerToken` is needed for follow-up writes. Caller is
+    /// responsible for spawning the session with
+    /// [`CodeSessionOptions::with_browser_control_loopback`] so the runtime
+    /// advertises the browser write surface.
+    pub fn attach_browser(&self, client_id: &str) -> Result<String> {
+        let response = self
+            .client
+            .post(self.url("/controller/attach"))
+            .json(&json!({ "clientId": client_id, "kind": "browser" }))
+            .send()
+            .context("failed to send browser attach request")?;
+        let status = response.status();
+        let text = response
+            .text()
+            .context("failed to read browser attach response body")?;
+        ensure_success(status, &text)?;
+        let value: Value =
+            serde_json::from_str(&text).context("failed to parse browser attach response")?;
+        let token = value
+            .get("controllerToken")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                anyhow!("browser attach response did not include controllerToken: {value}")
+            })?
+            .to_string();
+        Ok(token)
+    }
+
+    /// Variant of [`attach_browser`] that returns the raw error envelope when
+    /// the server rejects the attach (e.g. `BROWSER_CONTROL_DISABLED` or
+    /// `CONTROLLER_CONFLICT`).
+    pub fn attach_browser_expect_error(&self, client_id: &str) -> Result<(StatusCode, Value)> {
+        let response = self
+            .client
+            .post(self.url("/controller/attach"))
+            .json(&json!({ "clientId": client_id, "kind": "browser" }))
+            .send()
+            .context("failed to send browser attach request")?;
+        let status = response.status();
+        let body = response.json().unwrap_or_else(|_| json!({}));
+        Ok((status, body))
+    }
+
+    /// Submit a `/messages` request as a browser controller — only the lease
+    /// token is sent, **not** the automation control token. Mirrors the
+    /// frontend `useBrowserController()` write semantics.
+    pub fn browser_submit_message(
+        &self,
+        controller_token: &str,
+        text: &str,
+    ) -> Result<(StatusCode, Value)> {
+        let response = self
+            .client
+            .post(self.url("/messages"))
+            .header("X-Code-Controller-Token", controller_token)
+            .json(&json!({ "text": text }))
+            .send()
+            .context("failed to submit browser message")?;
+        let status = response.status();
+        let body = response.json().unwrap_or_else(|_| json!({}));
+        Ok((status, body))
+    }
+
+    /// Cancel the current turn via the browser write surface (browser leases
+    /// reach parity with the TUI Esc cancel and do not require
+    /// `X-Libra-Control-Token`).
+    pub fn browser_cancel_turn(&self, controller_token: &str) -> Result<(StatusCode, Value)> {
+        let response = self
+            .client
+            .post(self.url("/control/cancel"))
+            .header("X-Code-Controller-Token", controller_token)
+            .send()
+            .context("failed to send browser cancel request")?;
+        let status = response.status();
+        let body = response.json().unwrap_or_else(|_| json!({}));
+        Ok((status, body))
+    }
+
+    /// Detach a browser controller. The detach handler reads the lease from
+    /// the `X-Code-Controller-Token` header — no automation token required.
+    pub fn browser_detach(
+        &self,
+        controller_token: &str,
+        client_id: &str,
+    ) -> Result<(StatusCode, Value)> {
+        let response = self
+            .client
+            .post(self.url("/controller/detach"))
+            .header("X-Code-Controller-Token", controller_token)
+            .json(&json!({ "clientId": client_id }))
+            .send()
+            .context("failed to send browser detach request")?;
+        let status = response.status();
+        let body = response.json().unwrap_or_else(|_| json!({}));
+        Ok((status, body))
     }
 
     pub fn submit_message(&self, text: &str) -> Result<StatusCode> {

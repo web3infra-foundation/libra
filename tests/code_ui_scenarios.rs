@@ -136,6 +136,89 @@ fn default_control_paths_reject_second_live_instance() -> Result<()> {
     session.shutdown()
 }
 
+/// Browser-controller end-to-end smoke. Spawns `libra code` with
+/// `--browser-control loopback`, attaches as a browser (no automation
+/// control token), submits a chat through the browser write surface, and
+/// confirms the snapshot reflects the browser ownership + transcript turn.
+/// Ends with a clean detach.
+#[cfg(feature = "test-provider")]
+#[test]
+#[serial]
+fn browser_controller_attach_submit_detach_roundtrip() -> Result<()> {
+    let mut session = CodeSession::spawn(
+        CodeSessionOptions::new("browser-roundtrip", fixture("basic_chat"))
+            .with_browser_control_loopback(),
+    )?;
+
+    let token = session.attach_browser("scenario-browser-roundtrip")?;
+    session.wait_for_snapshot(Duration::from_secs(10), |snapshot| {
+        controller_kind(snapshot) == Some("browser")
+    })?;
+
+    let (status, body) = session.browser_submit_message(&token, "/chat hello")?;
+    assert!(
+        status.is_success(),
+        "browser submit must succeed, got {status}: {body}",
+    );
+
+    session.wait_for_snapshot(Duration::from_secs(10), |snapshot| {
+        status_eq(snapshot, "idle")
+            && transcript_contains(snapshot, "fake assistant: hello from the PTY harness")
+    })?;
+
+    let (detach_status, _) = session.browser_detach(&token, "scenario-browser-roundtrip")?;
+    assert!(detach_status.is_success());
+
+    session.shutdown()
+}
+
+/// `--browser-control` defaults to `off` for the harness's TUI fixture, so
+/// without `with_browser_control_loopback()` an attach must come back with
+/// `BROWSER_CONTROL_DISABLED` and the runtime stays controlled by the TUI.
+#[cfg(feature = "test-provider")]
+#[test]
+#[serial]
+fn browser_attach_rejected_when_control_disabled() -> Result<()> {
+    let mut session = CodeSession::spawn(CodeSessionOptions::new(
+        "browser-disabled",
+        fixture("basic_chat"),
+    ))?;
+
+    let (http_status, body) = session.attach_browser_expect_error("scenario-browser-disabled")?;
+    assert_eq!(http_status, StatusCode::FORBIDDEN);
+    assert_eq!(error_code(&body), Some("BROWSER_CONTROL_DISABLED"));
+
+    let snapshot = session.snapshot()?;
+    assert_ne!(controller_kind(&snapshot), Some("browser"));
+
+    session.shutdown()
+}
+
+/// Once a browser holds the lease, a second browser attempting to attach
+/// with a different `clientId` must trip `CONTROLLER_CONFLICT` instead of
+/// kicking the first writer out — the lease must be released or expire
+/// first. Mirrors the multi-tab scenario the frontend has to defend against.
+#[cfg(feature = "test-provider")]
+#[test]
+#[serial]
+fn second_browser_attach_with_different_client_returns_conflict() -> Result<()> {
+    let mut session = CodeSession::spawn(
+        CodeSessionOptions::new("browser-conflict", fixture("basic_chat"))
+            .with_browser_control_loopback(),
+    )?;
+
+    let _first_token = session.attach_browser("scenario-browser-first")?;
+    session.wait_for_snapshot(Duration::from_secs(10), |snapshot| {
+        controller_kind(snapshot) == Some("browser")
+    })?;
+
+    let (http_status, body) = session.attach_browser_expect_error("scenario-browser-second")?;
+    assert_eq!(http_status, StatusCode::CONFLICT);
+    assert_eq!(error_code(&body), Some("CONTROLLER_CONFLICT"));
+
+    session.shutdown()
+}
+
 #[cfg(not(feature = "test-provider"))]
 #[test]
 fn code_ui_scenarios_require_test_provider_feature() {
@@ -170,4 +253,22 @@ fn error_code(body: &Value) -> Option<&str> {
         .and_then(|error| error.get("code"))
         .or_else(|| body.get("code"))
         .and_then(Value::as_str)
+}
+
+#[cfg(feature = "test-provider")]
+fn status_eq(snapshot: &Value, expected: &str) -> bool {
+    status(snapshot) == Some(expected)
+}
+
+#[cfg(feature = "test-provider")]
+fn transcript_contains(snapshot: &Value, needle: &str) -> bool {
+    let Some(transcript) = snapshot.get("transcript").and_then(Value::as_array) else {
+        return false;
+    };
+    transcript.iter().any(|entry| {
+        entry
+            .get("content")
+            .and_then(Value::as_str)
+            .is_some_and(|content| content.contains(needle))
+    })
 }
