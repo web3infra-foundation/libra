@@ -22,6 +22,7 @@
 
 pub mod adapter;
 pub mod builtin;
+pub mod derived;
 pub mod preview;
 pub mod redaction;
 
@@ -32,6 +33,7 @@ pub use adapter::{
 pub use builtin::{
     ClaudeCodeObservedAgent, rfc3339_boundary_for_unix_seconds, write_truncated_transcript,
 };
+pub use derived::derive_tool_call_records;
 pub use preview::{PREVIEW_SPECS, PreviewAgent, PreviewSpec, is_preview, preview_spec_for};
 pub use redaction::{
     RedactedBytes, RedactedSink, RedactionMatch, RedactionReport, RedactionRule, Redactor,

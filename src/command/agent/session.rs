@@ -34,6 +34,11 @@ pub enum SessionSubcommand {
     /// `refs/libra/intent` so Libra's own AI tooling sees it.
     #[command(about = "Promote a captured session to libra/intent")]
     Promote(SessionPromoteArgs),
+    /// Walk the session's normalized events and emit one
+    /// `ToolCallRecord`-shaped JSON entry per pre/post tool use pair.
+    /// Phase 4.3 (entire.md §14.4 item 3).
+    #[command(about = "Derive ToolCallRecord entries from a captured session")]
+    DeriveToolCalls(SessionDeriveToolCallsArgs),
 }
 
 #[derive(Args, Debug)]
@@ -61,6 +66,13 @@ pub struct SessionStopArgs {
 
 #[derive(Args, Debug)]
 pub struct SessionResumeArgs {
+    pub session_id: String,
+}
+
+#[derive(Args, Debug)]
+pub struct SessionDeriveToolCallsArgs {
+    /// `agent_session.session_id` of the captured session whose
+    /// SessionStore JSONL we should walk.
     pub session_id: String,
 }
 
@@ -101,7 +113,63 @@ pub async fn execute_safe(cmd: SessionSubcommand, output: &OutputConfig) -> CliR
             Ok(())
         }
         SessionSubcommand::Promote(args) => promote(args, output).await,
+        SessionSubcommand::DeriveToolCalls(args) => derive_tool_calls(args, output).await,
     }
+}
+
+async fn derive_tool_calls(
+    args: SessionDeriveToolCallsArgs,
+    output: &OutputConfig,
+) -> CliResult<()> {
+    use crate::{
+        internal::ai::{observed_agents::derive_tool_call_records, session::SessionStore},
+        utils::util,
+    };
+
+    // Load the SessionState directly from the agent capture's SessionStore
+    // (Phase 3.4 partition: `<libra_dir>/sessions/agent/<session_id>/`).
+    let repo_path = util::try_get_storage_path(None).map_err(|_| CliError::repo_not_found())?;
+    let store = SessionStore::from_storage_path_with_subdir(&repo_path, "agent");
+    let session = store.load(&args.session_id).map_err(|e| {
+        CliError::fatal(format!(
+            "failed to load SessionStore JSONL for '{}': {e}. \
+             Was the session captured by the hook runtime under sessions/agent/?",
+            args.session_id
+        ))
+    })?;
+    let records = derive_tool_call_records(&session);
+
+    if output.is_json() {
+        return emit_json_data(
+            "agent_session_derive_tool_calls",
+            &serde_json::json!({
+                "session_id": args.session_id,
+                "records": records,
+                "count": records.len(),
+            }),
+            output,
+        );
+    }
+    if output.quiet {
+        return Ok(());
+    }
+    if records.is_empty() {
+        println!(
+            "(no tool_use events derived from session '{}')",
+            args.session_id
+        );
+        return Ok(());
+    }
+    println!(
+        "Derived {} tool call(s) from '{}':",
+        records.len(),
+        args.session_id
+    );
+    println!("{:<24}  {:<14}  success", "tool_name", "action");
+    for r in &records {
+        println!("{:<24}  {:<14}  {}", r.tool_name, r.action, r.success);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
