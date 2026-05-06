@@ -443,6 +443,7 @@ impl TaskMuxState {
                     break;
                 }
             }
+            TaskRuntimeEvent::UsageUpdated { .. } => {}
         }
     }
 

@@ -16,6 +16,7 @@ use super::{
 use crate::internal::ai::{
     libra_vcs::classify_run_libra_vcs_safety,
     mcp::{resource::*, server::LibraMcpServer},
+    sandbox::ToolRuntimeContext,
     tools::{
         context::{ToolInvocation, ToolOutput, ToolPayload},
         error::{ToolError, ToolResult},
@@ -23,6 +24,20 @@ use crate::internal::ai::{
         spec::{FunctionParameters, ToolSpec},
     },
 };
+
+const LIBRA_VCS_DEFAULT_APPROVAL_SCOPE: &str = "interactive";
+
+async fn libra_vcs_allow_all_active(runtime_context: Option<&ToolRuntimeContext>) -> bool {
+    let Some(approval) = runtime_context.and_then(|ctx| ctx.approval.as_ref()) else {
+        return false;
+    };
+    let scope = approval
+        .scope_key_prefix
+        .as_deref()
+        .unwrap_or(LIBRA_VCS_DEFAULT_APPROVAL_SCOPE);
+    let store = approval.store.lock().await;
+    store.allow_all_commands_for_scope(scope)
+}
 
 pub const BUILTIN_MCP_SOURCE_SLUG: &str = "libra_mcp";
 
@@ -445,6 +460,8 @@ impl Source for McpSource {
         _context: SourceCallContext,
         invocation: ToolInvocation,
     ) -> ToolResult<ToolOutput> {
+        let runtime_context = invocation.runtime_context.clone();
+        let tool_name = invocation.tool_name.clone();
         let arguments = match invocation.payload {
             ToolPayload::Function { arguments } => arguments,
             _ => {
@@ -453,6 +470,22 @@ impl Source for McpSource {
                 ));
             }
         };
-        call_mcp_tool(self.server.clone(), &invocation.tool_name, &arguments).await
+
+        if tool_name == "run_libra_vcs"
+            && let Ok(params) = parse_args::<RunLibraVcsParams>(&arguments)
+        {
+            let args = params.args.clone().unwrap_or_default();
+            let safety_decision = classify_run_libra_vcs_safety(&params.command, &args);
+            if safety_decision.is_needs_human()
+                && libra_vcs_allow_all_active(runtime_context.as_ref()).await
+            {
+                let result = self.server.run_libra_vcs_impl_unchecked(params).await;
+                return result
+                    .map(call_tool_result_to_output)
+                    .map_err(mcp_error_to_tool_error);
+            }
+        }
+
+        call_mcp_tool(self.server.clone(), &tool_name, &arguments).await
     }
 }

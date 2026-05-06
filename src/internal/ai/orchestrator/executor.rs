@@ -173,6 +173,19 @@ impl ToolLoopObserver for TaskExecutionObserver {
         self.model_usage.merge(usage);
     }
 
+    fn on_model_usage_recorded(&mut self, usage: &CompletionUsageSummary, wall_clock_ms: u64) {
+        self.model_usage.merge(usage);
+        if let Some(observer) = &self.observer {
+            observer.on_task_runtime_event(
+                &self.task,
+                TaskRuntimeEvent::UsageUpdated {
+                    usage: usage.clone(),
+                    wall_clock_ms,
+                },
+            );
+        }
+    }
+
     fn on_model_stream_event(&mut self, event: &CompletionStreamEvent) {
         if let CompletionStreamEvent::ThinkingDelta { delta, .. } = event
             && !delta.is_empty()

@@ -5941,6 +5941,18 @@ where
                                 },
                             });
                         }
+                        TaskRuntimeEvent::UsageUpdated {
+                            usage,
+                            wall_clock_ms,
+                        } => {
+                            let _ = self.tx.send(AppEvent::AgentEvent {
+                                turn_id: self.turn_id,
+                                event: AgentEvent::UsageUpdated {
+                                    usage: usage.clone(),
+                                    wall_clock_ms: *wall_clock_ms,
+                                },
+                            });
+                        }
                         _ => {}
                     }
 

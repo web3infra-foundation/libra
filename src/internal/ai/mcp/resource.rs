@@ -1364,8 +1364,34 @@ impl LibraMcpServer {
                 format_run_libra_vcs_safety_message(&params.command, &args, &safety_decision),
             )]));
         }
+        self.dispatch_libra_vcs(&params.command, args).await
+    }
 
-        let command = normalize_libra_vcs_command(&params.command)?;
+    /// Variant of [`run_libra_vcs_impl`] that runs `add`/`commit`/`switch` and
+    /// other `needs_human` commands without prompting, intended for callers
+    /// that have already confirmed the user granted a session-level
+    /// allow-all-commands decision. `deny` decisions are still rejected so
+    /// destructive commands (`reset`, `rm`, `push`, etc.) cannot leak through.
+    pub async fn run_libra_vcs_impl_unchecked(
+        &self,
+        params: RunLibraVcsParams,
+    ) -> Result<CallToolResult, ErrorData> {
+        let args = params.args.unwrap_or_default();
+        let safety_decision = classify_run_libra_vcs_safety(&params.command, &args);
+        if safety_decision.is_deny() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                format_run_libra_vcs_safety_message(&params.command, &args, &safety_decision),
+            )]));
+        }
+        self.dispatch_libra_vcs(&params.command, args).await
+    }
+
+    async fn dispatch_libra_vcs(
+        &self,
+        command: &str,
+        args: Vec<String>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let command = normalize_libra_vcs_command(command)?;
         validate_libra_vcs_args(&args)?;
         let args = normalize_tool_args(command, &args)
             .map_err(|message| ErrorData::invalid_params(message, None))?;
