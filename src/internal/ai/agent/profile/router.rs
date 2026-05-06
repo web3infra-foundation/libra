@@ -83,6 +83,25 @@ impl AgentProfileRouter {
         self.profiles.iter().find(|a| a.name == name)
     }
 
+    /// Get an [`AgentExecutionSpec`] by name.
+    ///
+    /// This is the OC-Phase 2 P2.2 entry point for callers that need the
+    /// runtime-shaped agent contract instead of the parser-shaped
+    /// [`AgentProfile`]. The two coexist deliberately:
+    ///
+    /// - [`Self::get`] returns the parsed profile so legacy callers (TUI
+    ///   prompt assembly, slash-command surfaces) keep working unchanged.
+    /// - [`Self::execution_spec`] materialises a fresh spec on every call.
+    ///   Materialising on demand keeps the router cheap to construct and
+    ///   avoids parallel storage that could drift out of sync with the
+    ///   parsed source.
+    ///
+    /// Returns `None` for unknown names. Case-sensitive comparison; matches
+    /// [`Self::get`] semantics.
+    pub fn execution_spec(&self, name: &str) -> Option<super::spec::AgentExecutionSpec> {
+        self.get(name).map(AgentProfile::to_execution_spec)
+    }
+
     /// Calculate a match score for a profile against user input.
     ///
     /// Functional scope: counts how many keywords extracted from the profile's
@@ -400,6 +419,57 @@ mod tests {
         let selected = router.select("review code quality");
         assert!(selected.is_some());
         assert_eq!(selected.unwrap().name, "agent_a");
+    }
+
+    /// Scenario: `execution_spec(name)` returns a freshly-built
+    /// [`AgentExecutionSpec`] for known names and `None` for unknown ones.
+    /// Calling it twice with the same name produces equal specs (the
+    /// router holds the source-of-truth profile and rematerialises on
+    /// every call).
+    #[test]
+    fn test_router_execution_spec_round_trip() {
+        use super::super::spec::{AgentExecutionSpec, AgentMode, ToolSelection};
+
+        let profile = AgentProfile {
+            name: "planner".to_string(),
+            description: "Implementation planner".to_string(),
+            tools: vec!["read_file".to_string()],
+            model_preference: "anthropic/claude-3-5-sonnet-latest".to_string(),
+            system_prompt: "You plan.".to_string(),
+            mode: AgentMode::Primary,
+            model_binding: super::super::spec::ModelBinding::parse(
+                "anthropic/claude-3-5-sonnet-latest",
+            ),
+            variant: None,
+            temperature: Some(0.4),
+            top_p: None,
+            max_steps: Some(20),
+        };
+        let router = AgentProfileRouter::new(vec![profile.clone()]);
+
+        // Unknown name: None.
+        assert!(router.execution_spec("nope").is_none());
+
+        // Known name: spec carries every parsed field.
+        let spec = router.execution_spec("planner").expect("planner spec");
+        let expected = AgentExecutionSpec {
+            name: "planner".to_string(),
+            description: "Implementation planner".to_string(),
+            mode: AgentMode::Primary,
+            model: super::super::spec::ModelBinding::parse("anthropic/claude-3-5-sonnet-latest"),
+            system_prompt: "You plan.".to_string(),
+            tools: ToolSelection::Allow(vec!["read_file".to_string()]),
+            permission: super::super::spec::AgentPermissionSpec::default(),
+            temperature: Some(0.4),
+            top_p: None,
+            max_steps: Some(20),
+        };
+        assert_eq!(spec, expected);
+
+        // Re-fetching produces an equal value (the router does not own
+        // the spec; it materialises one on every call).
+        let spec_again = router.execution_spec("planner").unwrap();
+        assert_eq!(spec, spec_again);
     }
 
     /// Scenario: a project-local `.libra/agents/planner.md` shadows the embedded

@@ -13,7 +13,9 @@
 
 use std::path::Path;
 
-use super::spec::{AgentMode, ModelBinding};
+use super::spec::{
+    AgentExecutionSpec, AgentMode, AgentPermissionSpec, ModelBinding, ToolSelection,
+};
 
 /// A parsed agent profile from a markdown file with YAML frontmatter.
 ///
@@ -70,6 +72,56 @@ pub struct AgentProfile {
     pub top_p: Option<f32>,
     /// Per-agent maximum tool-loop steps override (parsed from `steps:`).
     pub max_steps: Option<u32>,
+}
+
+impl AgentProfile {
+    /// Convert this parsed profile into an [`AgentExecutionSpec`].
+    ///
+    /// This is the OC-Phase 2 P2.2 entry point: the rest of the runtime
+    /// (factory, dispatcher, registry pre-filter) speaks the spec dialect,
+    /// while the parser keeps the legacy frontmatter shape for backward
+    /// compatibility. Conversion is purely structural — there is no I/O
+    /// and no defaulting beyond the rules below:
+    ///
+    /// - `mode`, `temperature`, `top_p`, `max_steps`, and `model_binding`
+    ///   round-trip verbatim.
+    /// - The top-level [`AgentProfile::variant`] field is **not** mirrored
+    ///   onto the spec: `AgentExecutionSpec` carries variants only inside
+    ///   [`ModelBinding::variant`]. When the parser captured a variant via
+    ///   the model-string form (`model: provider/model@variant`), it lives
+    ///   on the resulting `model_binding` and survives this conversion;
+    ///   stand-alone `variant:` lines without a `model:` binding are
+    ///   intentionally dropped here because the runtime has no place to
+    ///   apply them on a non-bound provider.
+    /// - `tools` becomes [`ToolSelection::Allow(_)`] when the parsed list
+    ///   is non-empty, [`ToolSelection::Inherit`] when empty (the runtime
+    ///   resolves "inherit" contextually — primary agents inherit the
+    ///   session allow-list, sub-agents fall back to deny-everything per
+    ///   S2-INV-05).
+    /// - `permission` is the default-deny [`AgentPermissionSpec`]; the
+    ///   parser does not yet read structured permission rules from the
+    ///   frontmatter (OC-Phase 2 P2.5 wires `ApprovedRuleset` and the
+    ///   ruleset frontmatter shape).
+    /// - `system_prompt`, `name`, and `description` round-trip verbatim
+    ///   so the TUI surface can render the same text it does today.
+    pub fn to_execution_spec(&self) -> AgentExecutionSpec {
+        AgentExecutionSpec {
+            name: self.name.clone(),
+            description: self.description.clone(),
+            mode: self.mode,
+            model: self.model_binding.clone(),
+            system_prompt: self.system_prompt.clone(),
+            tools: if self.tools.is_empty() {
+                ToolSelection::Inherit
+            } else {
+                ToolSelection::Allow(self.tools.clone())
+            },
+            permission: AgentPermissionSpec::default(),
+            temperature: self.temperature,
+            top_p: self.top_p,
+            max_steps: self.max_steps,
+        }
+    }
 }
 
 /// Parse a markdown string with YAML frontmatter into an AgentProfile.
@@ -661,5 +713,128 @@ You are an implementation planner.
         assert!(def.top_p.is_none(), "infinity must be rejected");
         // The resulting profile must equal itself (PartialEq reflexive).
         assert_eq!(def, def.clone());
+    }
+
+    /// Scenario: a fully-populated profile lifts into an `AgentExecutionSpec`
+    /// preserving every field. Tools convert to `ToolSelection::Allow(_)`
+    /// when non-empty; `permission` stays at default-deny because the
+    /// frontmatter does not yet carry structured rules.
+    #[test]
+    fn test_to_execution_spec_full_profile() {
+        let content = "---\n\
+                       name: planner\n\
+                       description: Implementation planning specialist\n\
+                       tools: [\"read_file\", \"list_dir\"]\n\
+                       model: anthropic/claude-3-5-sonnet-latest\n\
+                       mode: primary\n\
+                       temperature: 0.5\n\
+                       top_p: 0.95\n\
+                       steps: 30\n\
+                       ---\n\
+                       You are a planner.";
+        let def = parse_agent_profile(content).unwrap();
+        let spec = def.to_execution_spec();
+        assert_eq!(spec.name, "planner");
+        assert_eq!(spec.description, "Implementation planning specialist");
+        assert_eq!(spec.mode, AgentMode::Primary);
+        let binding = spec.model.expect("model binding");
+        assert_eq!(binding.provider_id, "anthropic");
+        assert_eq!(binding.model_id, "claude-3-5-sonnet-latest");
+        assert_eq!(spec.system_prompt, "You are a planner.");
+        match &spec.tools {
+            ToolSelection::Allow(tools) => {
+                assert_eq!(
+                    tools,
+                    &vec!["read_file".to_string(), "list_dir".to_string()]
+                );
+            }
+            other => panic!("expected Allow with two tools, got {other:?}"),
+        }
+        // Permission stays at default; OC-Phase 2 P2.5 wires the real shape.
+        assert_eq!(spec.permission, AgentPermissionSpec::default());
+        assert_eq!(spec.temperature, Some(0.5));
+        assert_eq!(spec.top_p, Some(0.95));
+        assert_eq!(spec.max_steps, Some(30));
+    }
+
+    /// Scenario: a profile with an empty `tools:` list lifts to
+    /// `ToolSelection::Inherit`, NOT `Allow(vec![])`. The runtime resolves
+    /// "inherit" contextually so a primary agent keeps the session allow-
+    /// list and a sub-agent falls back to deny-everything.
+    #[test]
+    fn test_to_execution_spec_empty_tools_becomes_inherit() {
+        let content = "---\nname: explorer\ntools: []\n---\nbody";
+        let def = parse_agent_profile(content).unwrap();
+        let spec = def.to_execution_spec();
+        assert_eq!(spec.tools, ToolSelection::Inherit);
+    }
+
+    /// Scenario: a profile with a legacy `model: default` produces a spec
+    /// whose `model` field is `None` (no binding). OC-Phase 1 P1.3 still
+    /// resolves the default model name from the legacy `model_preference`
+    /// string via the CLI / TUI surface; the spec just records "no
+    /// structured binding asked for".
+    #[test]
+    fn test_to_execution_spec_legacy_alias_carries_no_binding() {
+        let content = "---\nname: planner\nmodel: default\n---\nbody";
+        let def = parse_agent_profile(content).unwrap();
+        let spec = def.to_execution_spec();
+        assert!(spec.model.is_none());
+    }
+
+    /// Scenario: a profile that omits everything optional lifts to a spec
+    /// with `mode = Primary`, `tools = Inherit`, and every optional field
+    /// at `None`. This is the shape the TUI sees today for any embedded
+    /// profile that does not opt into OC-Phase 2 frontmatter keys.
+    #[test]
+    fn test_to_execution_spec_minimal_profile_uses_documented_defaults() {
+        let content = "---\nname: planner\n---\nbody";
+        let def = parse_agent_profile(content).unwrap();
+        let spec = def.to_execution_spec();
+        assert_eq!(spec.mode, AgentMode::Primary);
+        assert_eq!(spec.tools, ToolSelection::Inherit);
+        assert!(spec.model.is_none());
+        assert!(spec.temperature.is_none());
+        assert!(spec.top_p.is_none());
+        assert!(spec.max_steps.is_none());
+    }
+
+    /// Scenario: every documented `mode:` value round-trips through
+    /// `to_execution_spec()` so the conversion is not silently hard-coded
+    /// to `Primary`. Without this test a regression that overwrote
+    /// `self.mode` with `AgentMode::Primary` would still pass every other
+    /// converter test (the remaining cases all use the default mode).
+    #[test]
+    fn test_to_execution_spec_preserves_every_mode() {
+        for (raw, expected) in [
+            ("primary", AgentMode::Primary),
+            ("subagent", AgentMode::Subagent),
+            ("all", AgentMode::All),
+        ] {
+            let content = format!("---\nname: planner\nmode: {raw}\n---\nbody");
+            let def = parse_agent_profile(&content).unwrap();
+            assert_eq!(def.to_execution_spec().mode, expected);
+        }
+    }
+
+    /// Scenario: a `model: provider/model@variant` value lifts into the
+    /// spec's `model_binding` with the variant intact, while a stand-alone
+    /// `variant:` line with no `model:` binding does NOT surface anywhere
+    /// in the resulting spec (the spec has no top-level `variant` field).
+    /// This pins the doc-comment claim about variant handling.
+    #[test]
+    fn test_to_execution_spec_variant_only_via_model_binding() {
+        let with_binding = "---\nname: planner\nmodel: anthropic/claude-opus-4@thinking\n---\nbody";
+        let def = parse_agent_profile(with_binding).unwrap();
+        let spec = def.to_execution_spec();
+        let binding = spec.model.expect("variant binding lifts");
+        assert_eq!(binding.variant.as_deref(), Some("thinking"));
+
+        let standalone = "---\nname: planner\nvariant: thinking\n---\nbody";
+        let def = parse_agent_profile(standalone).unwrap();
+        let spec = def.to_execution_spec();
+        // No model binding means the variant has nowhere to land on the
+        // spec — it stays only on the parser-level AgentProfile.
+        assert!(spec.model.is_none());
     }
 }
