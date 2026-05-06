@@ -239,6 +239,35 @@ pub enum ControlMode {
     Write,
 }
 
+/// Browser write-control posture for `libra code`.
+///
+/// Controls whether `/api/code/controller/attach` will issue a `Browser`
+/// lease (allowing the embedded UI to drive `/messages`,
+/// `/interactions/{id}`, and `/control/cancel`). The `--host` is still
+/// forced to a loopback address whenever `loopback` is selected — see
+/// [`ensure_loopback_browser_control_host`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum, Default)]
+pub enum BrowserControlMode {
+    /// Browser controllers cannot attach. Default for normal TUI sessions and
+    /// for `--web-only` against non-Codex providers.
+    #[default]
+    Off,
+    /// Browser controllers may attach as long as the bound `--host` is
+    /// loopback. Default for `--web-only --provider codex`.
+    Loopback,
+}
+
+impl BrowserControlMode {
+    /// Returns the canonical wire-format string used in banners, info files,
+    /// and audit summaries — matches the clap value names exactly.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BrowserControlMode::Off => "off",
+            BrowserControlMode::Loopback => "loopback",
+        }
+    }
+}
+
 /// Ollama-specific thinking/reasoning mode.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum OllamaThinkingArg {
@@ -431,6 +460,18 @@ pub struct CodeArgs {
     /// Local TUI automation control mode.
     #[arg(long, value_enum, default_value_t = ControlMode::Observe)]
     pub control: ControlMode,
+
+    /// Browser write-control posture (`off` | `loopback`).
+    ///
+    /// Defaults are mode-specific:
+    /// - normal TUI session → `off`
+    /// - `--web-only --provider codex` → `loopback`
+    /// - `--web-only` with any other provider → `off`
+    ///
+    /// Selecting `loopback` is rejected when `--host` is not a loopback
+    /// address, and the flag is incompatible with `--stdio`.
+    #[arg(long = "browser-control", value_enum, conflicts_with = "stdio")]
+    pub browser_control: Option<BrowserControlMode>,
 
     /// Path to the local automation control token file.
     #[arg(long)]
@@ -665,19 +706,19 @@ impl McpServerHandle {
 /// selected host would expose loopback-only browser control.
 async fn execute_web_only(args: &CodeArgs) -> CliResult<()> {
     let working_dir = resolve_code_working_dir(args)?;
+    let browser_control = resolve_browser_control_mode(args)?;
     let control_runtime = prepare_control_runtime(args, &working_dir).await?;
     let mcp_server = init_mcp_server(&working_dir).await;
 
     let mut managed_codex_server = None;
     let code_ui_runtime = if args.provider == CodeProvider::Codex {
-        ensure_loopback_browser_control_host(&args.host)?;
-
         let server =
             start_managed_codex_server(&args.codex_bin, args.codex_port, &working_dir).await?;
         println!("Starting Libra Code Web UI with Codex provider");
         println!("Working directory: {}", working_dir.display());
         println!("Codex WebSocket: {}", server.ws_url);
         println!("Codex app-server: auto-started");
+        println!("Browser control: {}", browser_control.as_str());
         managed_codex_server = Some(server);
 
         let ws_url = managed_codex_server
@@ -689,11 +730,14 @@ async fn execute_web_only(args: &CodeArgs) -> CliResult<()> {
             &working_dir,
             ws_url,
             mcp_server.clone(),
-            true,
+            browser_control == BrowserControlMode::Loopback,
             CodeUiInitialController::Unclaimed,
         )
         .await?
     } else {
+        // The placeholder runtime ignores the requested browser-control posture
+        // because it has no working write surface — `attach` will return
+        // `BROWSER_CONTROL_DISABLED` regardless.
         build_placeholder_web_code_ui_runtime(args, &working_dir).await
     };
 
@@ -947,6 +991,7 @@ fn provider_env_value_with_lookup(
 async fn execute_tui(args: CodeArgs) -> CliResult<()> {
     let working_dir = resolve_code_working_dir(&args)?;
     let env_file = load_code_env_file(args.env_file.as_deref())?;
+    let browser_control = resolve_browser_control_mode(&args)?;
     let control_runtime = prepare_control_runtime(&args, &working_dir).await?;
 
     // Validate --api-base: only honored for Ollama via CLI flag. Other providers
@@ -1078,6 +1123,7 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
         exec_approval_tx,
         mcp_server,
         control_runtime,
+        browser_control,
     };
 
     // Create agent based on provider
@@ -1192,12 +1238,14 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
                     reason: Some("The terminal UI controls this live Codex run".to_string()),
                 }
             };
+            let browser_write_enabled =
+                launch_config.browser_control == BrowserControlMode::Loopback;
             let code_ui_runtime = match start_codex_code_ui_runtime(
                 &args,
                 &working_dir,
                 &server.ws_url,
                 launch_config.mcp_server.clone(),
-                false,
+                browser_write_enabled,
                 initial_controller,
             )
             .await
@@ -1422,6 +1470,36 @@ fn ensure_loopback_browser_control_host(host: &str) -> CliResult<()> {
     Err(CliError::command_usage(
         "interactive web control is restricted to loopback hosts in v1; use --host 127.0.0.1",
     ))
+}
+
+/// Resolve the effective [`BrowserControlMode`] for this invocation.
+///
+/// User-supplied `--browser-control` always wins. When the flag is omitted
+/// the default is mode-aware:
+///   - `--web-only --provider codex` → `loopback` (matches the existing
+///     "browser write enabled" default for managed Codex sessions),
+///   - all other entry points → `off` (TUI sessions and non-Codex
+///     `--web-only` placeholders).
+///
+/// `loopback` further requires that `--host` is a loopback address; this is
+/// validated up-front so we fail closed before any port is bound.
+pub fn resolve_browser_control_mode(args: &CodeArgs) -> CliResult<BrowserControlMode> {
+    let mode = match args.browser_control {
+        Some(mode) => mode,
+        None => default_browser_control_mode(args),
+    };
+    if mode == BrowserControlMode::Loopback {
+        ensure_loopback_browser_control_host(&args.host)?;
+    }
+    Ok(mode)
+}
+
+fn default_browser_control_mode(args: &CodeArgs) -> BrowserControlMode {
+    if args.web_only && matches!(args.provider, CodeProvider::Codex) {
+        BrowserControlMode::Loopback
+    } else {
+        BrowserControlMode::Off
+    }
 }
 
 async fn build_placeholder_web_code_ui_runtime(
@@ -1778,6 +1856,7 @@ struct TuiLaunchConfig {
     exec_approval_tx: tokio::sync::mpsc::UnboundedSender<ExecApprovalRequest>,
     mcp_server: Arc<LibraMcpServer>,
     control_runtime: ControlRuntimeConfig,
+    browser_control: BrowserControlMode,
 }
 
 #[derive(Clone)]
@@ -1850,6 +1929,7 @@ fn session_canonical_thread_id(session: &SessionState) -> Option<String> {
         })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn build_tui_code_ui_runtime(
     working_dir: &str,
     session: &SessionState,
@@ -1858,6 +1938,7 @@ async fn build_tui_code_ui_runtime(
     projection_bundle: Option<&ThreadBundle>,
     code_control_tx: Option<tokio::sync::mpsc::UnboundedSender<TuiControlCommand>>,
     automation_write_enabled: bool,
+    browser_write_enabled: bool,
 ) -> Arc<CodeUiRuntimeHandle> {
     let capabilities = build_tui_code_ui_capabilities();
     let provider = CodeUiProviderInfo {
@@ -1903,7 +1984,7 @@ async fn build_tui_code_ui_runtime(
     };
     CodeUiRuntimeHandle::build_with_control(
         adapter,
-        false,
+        browser_write_enabled,
         automation_write_enabled,
         initial_controller,
     )
@@ -1997,6 +2078,7 @@ where
 {
     let registry = params.registry;
     let control_runtime = params.control_runtime;
+    let browser_control = params.browser_control;
     let hook_runner = {
         let runner = HookRunner::load(registry.working_dir());
         if runner.has_hooks() {
@@ -2094,6 +2176,7 @@ where
     };
     let automation_write_enabled = code_control_tx.is_some();
 
+    let browser_write_enabled = browser_control == BrowserControlMode::Loopback;
     let code_ui_runtime = if let Some(runtime) = managed_code_ui_runtime.clone() {
         if let Some(control_tx) = code_control_tx {
             let adapter = runtime.adapter();
@@ -2103,7 +2186,7 @@ where
                 TuiCodeUiAdapter::new(code_ui_session, capabilities, control_tx);
             CodeUiRuntimeHandle::build_with_control(
                 tui_adapter,
-                false,
+                browser_write_enabled,
                 true,
                 CodeUiInitialController::LocalTui {
                     owner_label: "Terminal UI".to_string(),
@@ -2137,6 +2220,7 @@ where
             projection_bundle.as_ref(),
             code_control_tx,
             automation_write_enabled,
+            browser_write_enabled,
         )
         .await
     };
@@ -2938,6 +3022,7 @@ mod tests {
             repo: None,
             env_file: None,
             control: ControlMode::Observe,
+            browser_control: None,
             control_token_file: None,
             control_info_file: None,
             provider: CodeProvider::Gemini,
@@ -3538,6 +3623,7 @@ no_cache_unknown_network = true
             "gemma4:31b",
             Some(&bundle),
             None,
+            false,
             false,
         )
         .await;

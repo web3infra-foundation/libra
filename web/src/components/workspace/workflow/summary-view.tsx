@@ -3,15 +3,55 @@
 import type { ReactNode } from "react";
 
 import { IconCheck } from "@/components/icons";
-import { SUMMARY } from "@/lib/mock";
+import { useCodeUiStore } from "@/lib/code-ui/store";
 import { cn } from "@/lib/utils";
 
+type ProgressItem = { done: boolean; text: string };
+type ArtifactItem = { kind: string; id: string; meta: string };
+
 export function SummaryView() {
+  const { snapshot, status, refreshStatus } = useCodeUiStore();
+
+  const progress: ProgressItem[] = snapshot
+    ? buildProgress(snapshot)
+    : [];
+  const artifacts: ArtifactItem[] = snapshot
+    ? buildArtifacts(snapshot)
+    : [];
+  const todos: ProgressItem[] = snapshot
+    ? buildTodos(snapshot)
+    : [];
+
+  const branch = status?.head.type === "branch"
+    ? status.head.name
+    : status
+      ? `detached @ ${status.head.oid.slice(0, 7)}`
+      : "—";
+  const upstream = status?.upstream?.remote_ref ?? "no upstream";
+  const dirtyChanges =
+    status === null
+      ? "—"
+      : (() => {
+          const total =
+            status.staged.new.length +
+            status.staged.modified.length +
+            status.staged.deleted.length +
+            status.unstaged.modified.length +
+            status.unstaged.deleted.length +
+            status.untracked.length;
+          if (status.is_clean) return "clean";
+          return `${total} files`;
+        })();
+  const aheadBehind = status?.upstream
+    ? `↑${status.upstream.ahead} ↓${status.upstream.behind}`
+    : "—";
+
   return (
     <div className="px-[18px] pb-6 pt-4">
       <Block label="Progress">
         <ul className="m-0 list-none p-0">
-          {SUMMARY.progress.map((p, i) => (
+          {progress.length === 0 && <EmptyHint />}
+          {progress.map((p, i) => (
             <li
               key={i}
               className="flex items-start gap-2 py-[5px] text-[12.5px] leading-[1.5]"
@@ -25,23 +65,36 @@ export function SummaryView() {
         </ul>
       </Block>
 
-      <Block label="Branch state">
+      <Block
+        label="Branch state"
+        action={
+          <button
+            type="button"
+            onClick={() => void refreshStatus()}
+            className="text-[10.5px] text-ink-3 underline-offset-2 hover:underline"
+            title="Refresh repo status"
+          >
+            refresh
+          </button>
+        }
+      >
         <Row label="Branch">
-          <span className="mono">{SUMMARY.branch.name}</span>
+          <span className="mono">{branch}</span>
         </Row>
-        <Row label="Base">
-          <span className="mono">{SUMMARY.branch.base}</span>
+        <Row label="Upstream">
+          <span className="mono">{upstream}</span>
         </Row>
-        <Row label="PR">
-          <span>{SUMMARY.branch.pr}</span>
+        <Row label="Ahead / behind">
+          <span className="mono">{aheadBehind}</span>
         </Row>
         <Row label="Changes">
-          <span>{SUMMARY.branch.changes}</span>
+          <span>{dirtyChanges}</span>
         </Row>
       </Block>
 
       <Block label="Artifacts">
-        {SUMMARY.artifacts.map((a, i) => (
+        {artifacts.length === 0 && <EmptyHint />}
+        {artifacts.map((a, i) => (
           <div
             key={i}
             className="mb-1 flex items-center gap-2 rounded-md border border-rule bg-paper-2 px-2 py-1.5"
@@ -57,7 +110,8 @@ export function SummaryView() {
 
       <Block label="To-dos">
         <ul className="m-0 list-none p-0">
-          {SUMMARY.todo.map((t, i) => (
+          {todos.length === 0 && <EmptyHint />}
+          {todos.map((t, i) => (
             <li
               key={i}
               className="flex items-start gap-2 py-[5px] text-[12.5px] leading-[1.5]"
@@ -78,11 +132,52 @@ export function SummaryView() {
   );
 }
 
-function Block({ label, children }: { label: string; children: ReactNode }) {
+function buildProgress(
+  snapshot: NonNullable<ReturnType<typeof useCodeUiStore>["snapshot"]>,
+): ProgressItem[] {
+  return snapshot.plans.flatMap((plan) =>
+    plan.steps.map((step) => ({
+      done: step.status === "done" || step.status === "completed",
+      text: step.step,
+    })),
+  );
+}
+
+function buildArtifacts(
+  snapshot: NonNullable<ReturnType<typeof useCodeUiStore>["snapshot"]>,
+): ArtifactItem[] {
+  return snapshot.patchsets.map((patchset) => ({
+    kind: "PatchSet",
+    id: patchset.id,
+    meta: `${patchset.changes.length} files · ${patchset.status}`,
+  }));
+}
+
+function buildTodos(
+  snapshot: NonNullable<ReturnType<typeof useCodeUiStore>["snapshot"]>,
+): ProgressItem[] {
+  return snapshot.tasks.map((task) => ({
+    done: task.status === "done" || task.status === "completed",
+    text: task.title ?? task.id,
+  }));
+}
+
+function Block({
+  label,
+  children,
+  action,
+}: {
+  label: string;
+  children: ReactNode;
+  action?: ReactNode;
+}) {
   return (
     <div className="mb-5">
-      <div className="mb-2 text-[10px] font-medium uppercase tracking-[0.08em] text-ink-3">
-        {label}
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <span className="text-[10px] font-medium uppercase tracking-[0.08em] text-ink-3">
+          {label}
+        </span>
+        {action}
       </div>
       {children}
     </div>
@@ -108,5 +203,11 @@ function Tick({ on }: { on: boolean }) {
     >
       {on && <IconCheck size={9} sw={3} />}
     </span>
+  );
+}
+
+function EmptyHint() {
+  return (
+    <div className="text-[12px] italic text-ink-3">No data for this section yet.</div>
   );
 }

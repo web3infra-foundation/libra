@@ -340,6 +340,19 @@ fn load_status_index() -> CliResult<Index> {
 // Public entry points
 // ---------------------------------------------------------------------------
 
+/// Collect repository status and render it as the same JSON object that
+/// `libra status --json` prints. Used by the embedded web server's
+/// `/api/repo/status` handler so the browser sees a byte-compatible shape.
+///
+/// Internally re-uses [`collect_status_data`] + [`build_status_json`] with a
+/// default [`StatusArgs`] (untracked files in normal mode, no porcelain v2,
+/// no ignored files, no stash count).
+pub async fn collect_status_json_for_api() -> CliResult<serde_json::Value> {
+    let args = StatusArgs::default();
+    let data = collect_status_data(&args).await?;
+    Ok(build_status_json(&data, &args))
+}
+
 pub async fn execute(args: StatusArgs) {
     if let Err(err) = execute_to(args, &mut std::io::stdout()).await {
         err.print_stderr();

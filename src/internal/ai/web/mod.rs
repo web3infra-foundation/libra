@@ -123,6 +123,7 @@ fn api_router() -> Router<WebAppState> {
     Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/repo", get(repo_info_handler))
+        .route("/repo/status", get(repo_status_handler))
         .nest("/code", code_router())
 }
 
@@ -232,6 +233,20 @@ async fn repo_info_handler(
         "name": name,
         "description": description.trim(),
     })))
+}
+
+async fn repo_status_handler(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+) -> Result<Json<serde_json::Value>, WebApiError> {
+    ensure_loopback_api_request(remote_addr)?;
+    crate::command::status::collect_status_json_for_api()
+        .await
+        .map(Json)
+        .map_err(|err| WebApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "STATUS_UNAVAILABLE".to_string(),
+            message: format!("failed to collect repository status: {err}"),
+        })
 }
 
 async fn code_session_handler(
@@ -435,19 +450,30 @@ async fn code_cancel_handler(
     ensure_loopback_api_request(remote_addr)?;
     let runtime = code_ui_runtime(&state)?;
     let token = browser_controller_token_from_headers(&headers);
+    let mut audit_kind = CodeUiControllerKind::None;
     let mut audit_client_id = "unknown".to_string();
     let result = async {
         let lease = runtime
             .ensure_controller_write_access(token.as_deref())
             .await?;
+        audit_kind = lease.kind;
         audit_client_id = lease.client_id.clone();
-        if lease.kind != CodeUiControllerKind::Automation {
-            return Err(WebApiError::from(CodeUiApiError::forbidden(
-                "AUTOMATION_CONTROLLER_REQUIRED",
-                "Only an automation controller can cancel through /api/code/control/cancel",
-            )));
+        match lease.kind {
+            CodeUiControllerKind::Browser => {
+                // Browser controllers reach parity with the TUI `Esc` cancel
+                // path: the lease token alone is enough — no automation
+                // control token required.
+            }
+            CodeUiControllerKind::Automation => {
+                ensure_automation_control_token(&headers, state.automation_control_token.as_ref())?;
+            }
+            _ => {
+                return Err(WebApiError::from(CodeUiApiError::forbidden(
+                    "AUTOMATION_CONTROLLER_REQUIRED",
+                    "Only a browser or automation controller can cancel through /api/code/control/cancel",
+                )));
+            }
         }
-        ensure_automation_control_token(&headers, state.automation_control_token.as_ref())?;
         runtime
             .cancel_turn(token.as_deref())
             .await
@@ -458,7 +484,7 @@ async fn code_cancel_handler(
         &state,
         &runtime,
         "turn.cancel",
-        CodeUiControllerKind::Automation,
+        audit_kind,
         &audit_client_id,
         control_audit_outcome(&result),
     )

@@ -1,23 +1,46 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
 import { IconChev } from "@/components/icons";
-import { REVIEW, type DiffFile, type DiffLine } from "@/lib/mock";
+import { useCodeUiStore } from "@/lib/code-ui/store";
 import { cn } from "@/lib/utils";
 
+import { parseUnifiedDiff, type DiffFile, type DiffLine } from "./diff-parser";
+
 export function ReviewView() {
+  const { snapshot } = useCodeUiStore();
+  const files = useMemo<DiffFile[]>(() => {
+    if (!snapshot) return [];
+    return snapshot.patchsets.flatMap((patchset) =>
+      patchset.changes.map((change) =>
+        parseUnifiedDiff(change.path, change.diff ?? null, change.changeType),
+      ),
+    );
+  }, [snapshot]);
+
+  if (files.length === 0) {
+    return (
+      <div className="px-[18px] pb-6 pt-4 text-[12.5px] italic text-ink-3">
+        No PatchSet diffs to review yet.
+      </div>
+    );
+  }
+
+  const totals = files.reduce(
+    (acc, f) => ({ files: acc.files + 1, add: acc.add + f.add, del: acc.del + f.del }),
+    { files: 0, add: 0, del: 0 },
+  );
+
   return (
     <div className="px-[18px] pb-6 pt-4">
       <div className="mb-1 flex items-center gap-2.5 px-0.5 pb-2.5">
-        <span className="mono text-[11px] text-ink-3">
-          {REVIEW.stats.files} files
-        </span>
-        <span className="mono text-[11px] text-good">+{REVIEW.stats.add}</span>
-        <span className="mono text-[11px] text-bad">−{REVIEW.stats.del}</span>
+        <span className="mono text-[11px] text-ink-3">{totals.files} files</span>
+        <span className="mono text-[11px] text-good">+{totals.add}</span>
+        <span className="mono text-[11px] text-bad">−{totals.del}</span>
       </div>
-      {REVIEW.files.map((f) => (
-        <FileDiff key={f.path} file={f} />
+      {files.map((f) => (
+        <FileDiff key={`${f.path}-${f.changeType}`} file={f} />
       ))}
     </div>
   );
@@ -43,9 +66,15 @@ function FileDiff({ file }: { file: DiffFile }) {
         <span className="mono flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-left text-[11.5px]">
           {file.path}
         </span>
+        <span className="mono text-[10.5px] text-ink-3">{file.changeType}</span>
         <span className="mono text-[10.5px] text-good">+{file.add}</span>
         <span className="mono text-[10.5px] text-bad">−{file.del}</span>
       </button>
+      {open && file.parseError && (
+        <div className="mono border-b border-rule bg-paper-2 px-2.5 py-1 text-[10.5px] text-bad">
+          unable to parse diff: {file.parseError}
+        </div>
+      )}
       {open &&
         file.hunks.map((h, i) => (
           <div key={i}>
@@ -59,6 +88,16 @@ function FileDiff({ file }: { file: DiffFile }) {
             </div>
           </div>
         ))}
+      {open && file.hunks.length === 0 && file.rawDiff && (
+        <pre className="mono m-0 whitespace-pre-wrap break-words bg-paper-2 px-2.5 py-2 text-[11px] leading-[1.5] text-ink">
+          {file.rawDiff}
+        </pre>
+      )}
+      {open && file.hunks.length === 0 && !file.rawDiff && (
+        <div className="px-2.5 py-2 text-[11px] italic text-ink-3">
+          No inline diff for this change.
+        </div>
+      )}
     </div>
   );
 }

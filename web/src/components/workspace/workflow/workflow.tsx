@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 
 import {
   IconCheck,
@@ -11,7 +11,8 @@ import {
   IconSpark,
   IconTokens,
 } from "@/components/icons";
-import { WORKFLOW } from "@/lib/mock";
+import { useCodeUiStore } from "@/lib/code-ui/store";
+import { deriveWorkflowSummary } from "@/lib/code-ui/view-model";
 import { cn } from "@/lib/utils";
 
 import {
@@ -21,12 +22,13 @@ import {
   RunsCard,
   ValidationCard,
 } from "./cards";
+import { deriveWorkflow } from "./derive";
 import { DetailPanel } from "./detail-panel";
 import { GitTimeline } from "./git-timeline";
 import { PhaseStrip } from "./phase-strip";
 import { ReviewView } from "./review-view";
 import { SummaryView } from "./summary-view";
-import type { DetailState } from "./types";
+import type { DetailState, WorkflowState } from "./types";
 
 type Tab = "pipeline" | "summary" | "diff";
 
@@ -35,8 +37,18 @@ type Props = {
 };
 
 export function Workflow({ width }: Props) {
+  const { snapshot, status } = useCodeUiStore();
   const [tab, setTab] = useState<Tab>("pipeline");
   const [detail, setDetail] = useState<DetailState | null>(null);
+
+  const workflow = useMemo<WorkflowState>(() => deriveWorkflow(snapshot), [snapshot]);
+  const summary = useMemo(() => deriveWorkflowSummary(snapshot), [snapshot]);
+  const branchLabel =
+    status?.head.type === "branch"
+      ? status.head.name
+      : status
+        ? `detached @ ${status.head.oid.slice(0, 7)}`
+        : "—";
 
   return (
     <section
@@ -57,25 +69,32 @@ export function Workflow({ width }: Props) {
         </div>
         <div className="flex items-center gap-1.5 text-ink-3">
           <span
-            title="Tokens consumed in this thread"
+            title="No token usage data yet — wire up in Phase 4."
             className="inline-flex items-center gap-1.5 rounded-sm border border-rule-2 bg-paper-2 px-2 py-1 text-[11px] text-ink-2"
           >
             <IconTokens size={11} />
-            <span className="mono">48.2k</span>
-            <span className="text-[10px] tracking-[0.04em] text-ink-3">
-              Token
-            </span>
+            <span className="mono">—</span>
+            <span className="text-[10px] tracking-[0.04em] text-ink-3">Token</span>
           </span>
         </div>
       </header>
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {tab === "pipeline" && (
-          <GitTimeline onOpen={setDetail} activeDetail={detail} />
+          <GitTimeline
+            onOpen={setDetail}
+            activeDetail={detail}
+            workflow={workflow}
+            branchLabel={branchLabel}
+          />
         )}
         <div className="flex-1 overflow-y-auto px-4 pb-2 pt-3.5">
           {tab === "pipeline" && (
-            <PipelineView onOpen={setDetail} activeDetail={detail} />
+            <PipelineView
+              onOpen={setDetail}
+              activeDetail={detail}
+              workflow={workflow}
+            />
           )}
           {tab === "summary" && <SummaryView />}
           {tab === "diff" && <ReviewView />}
@@ -84,18 +103,46 @@ export function Workflow({ width }: Props) {
 
       <footer className="flex h-11 shrink-0 items-center justify-between border-t border-rule px-3.5">
         <div className="text-[11px] text-ink-3">
-          <span className="mono">thread-t1</span> · 5 events · 2 PatchSets
+          {snapshot?.threadId ? (
+            <span className="mono">{snapshot.threadId}</span>
+          ) : (
+            <span className="italic">no active thread</span>
+          )}
+          {summary.toolCallCount > 0 && (
+            <>
+              {" · "}
+              <span>{summary.toolCallCount} tool calls</span>
+            </>
+          )}
+          {summary.patchsetCount > 0 && (
+            <>
+              {" · "}
+              <span>{summary.patchsetCount} PatchSets</span>
+            </>
+          )}
+          {summary.pendingInteractions > 0 && (
+            <>
+              {" · "}
+              <span className="text-accent">
+                {summary.pendingInteractions} pending interaction{summary.pendingInteractions === 1 ? "" : "s"}
+              </span>
+            </>
+          )}
         </div>
         <div className="flex gap-1.5">
           <button
             type="button"
-            className="rounded-md border border-rule-2 bg-paper px-2.5 py-1 text-[11.5px] text-ink-2"
+            disabled
+            title="Pause is wired up in Phase 2 (browser write control)."
+            className="rounded-md border border-rule-2 bg-paper px-2.5 py-1 text-[11.5px] text-ink-3"
           >
             Pause
           </button>
           <button
             type="button"
-            className="inline-flex items-center gap-1.5 rounded-md bg-ink px-2.5 py-1 text-[11.5px] font-medium text-paper"
+            disabled
+            title="Continue is wired up in Phase 2 (browser write control)."
+            className="inline-flex items-center gap-1.5 rounded-md border border-rule bg-paper-2 px-2.5 py-1 text-[11.5px] font-medium text-ink-3"
           >
             <IconPlay size={11} /> Continue
           </button>
@@ -133,24 +180,22 @@ function TabBtn({
 function PipelineView({
   onOpen,
   activeDetail,
+  workflow,
 }: {
   onOpen: (d: DetailState) => void;
   activeDetail: DetailState | null;
+  workflow: WorkflowState;
 }) {
   return (
     <div>
-      <PhaseStrip current={WORKFLOW.currentPhase} />
-      <IntentCard
-        intent={WORKFLOW.intent}
-        onOpen={onOpen}
-        active={activeDetail}
-      />
+      <PhaseStrip current={workflow.currentPhase} />
+      <IntentCard intent={workflow.intent} onOpen={onOpen} active={activeDetail} />
       <PlanCard
         phaseBadge="Phase 1 · Exec"
         title="Execution Plan"
-        subtitle={WORKFLOW.plans.execution.id}
+        subtitle={workflow.plans.execution.id}
         icon={<IconSpark size={12} />}
-        plan={WORKFLOW.plans.execution}
+        plan={workflow.plans.execution}
         planKind="execution"
         active
         onOpen={onOpen}
@@ -159,15 +204,20 @@ function PipelineView({
       <PlanCard
         phaseBadge="Phase 1 · Test"
         title="Test Plan"
-        subtitle={WORKFLOW.plans.test.id}
+        subtitle={workflow.plans.test.id}
         icon={<IconFlask size={12} />}
-        plan={WORKFLOW.plans.test}
+        plan={workflow.plans.test}
         planKind="test"
         gated
         onOpen={onOpen}
         activeDetail={activeDetail}
       />
-      <RunsCard onOpen={onOpen} activeDetail={activeDetail} />
+      <RunsCard
+        onOpen={onOpen}
+        activeDetail={activeDetail}
+        execPlan={workflow.plans.execution}
+        runs={workflow.runs}
+      />
       <ValidationCard onOpen={onOpen} activeDetail={activeDetail} />
       <ReleaseCard onOpen={onOpen} activeDetail={activeDetail} />
     </div>

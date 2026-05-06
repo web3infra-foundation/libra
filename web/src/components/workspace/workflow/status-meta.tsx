@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 
 import { IconCheck, IconX } from "@/components/icons";
-import type { StepStatus } from "@/lib/mock";
+import type { StepStatus } from "./types";
 
 export type StatusMeta = {
   icon: ReactNode;
