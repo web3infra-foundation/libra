@@ -4,6 +4,7 @@
 //! `/api/code/*` protocol used by the browser UI.
 
 pub mod code_ui;
+pub mod headless;
 
 use std::{convert::Infallible, net::SocketAddr, path::PathBuf, sync::Arc};
 

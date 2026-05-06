@@ -54,6 +54,7 @@ When the TUI exits and Libra can derive the canonical thread ID, `libra code` pr
 | Codex binary | | `--codex-bin` | `codex` | Codex executable path. |
 | Codex port | | `--codex-port` | random | Override Codex app-server port. |
 | Plan mode | | `--plan-mode` | off | Require the agent to produce a plan before execution (Codex mode). |
+| Browser control | | `--browser-control <off\|loopback>` | provider-aware (see Web Browser Control) | Posture for `/api/code/controller/attach` browser leases. Conflicts with `--stdio`; `loopback` requires a loopback `--host`. |
 
 ### Provider Backends
 
@@ -85,6 +86,28 @@ Write control is local-only. `--control write` is rejected with `--stdio`, and i
 Automation clients attach with `POST /api/code/controller/attach`, body `{ "clientId": "...", "kind": "automation" }`, header `X-Libra-Control-Token`, and then use the returned `X-Code-Controller-Token` for writes. Automation-held leases require both tokens for `/api/code/messages`, `/api/code/interactions/{id}`, `/api/code/controller/detach`, and `/api/code/control/cancel`. The local TUI can reclaim control with `/control reclaim`, which invalidates the automation lease. Code UI write request bodies are capped at 256KiB.
 
 `GET /api/code/diagnostics` returns a redacted observe-only status summary for local tools. Control attach, detach, submit, respond, and cancel operations emit `local-tui-control/v1` audit events through the runtime audit sink. For stdio automation clients, use [`libra code-control --stdio`](code-control.md); `libra code --stdio` remains the MCP stdio server and does not control a live TUI.
+
+### Web Browser Control
+
+`--browser-control <off|loopback>` controls whether the embedded UI's lease-based write surface is available. The default is mode-aware:
+
+| Entry point | Default `--browser-control` |
+|-------------|-----------------------------|
+| TUI session (`libra code` without `--web-only`) | `off` |
+| `libra code --web-only --provider codex` | `loopback` |
+| `libra code --web-only` with any other provider | `off` |
+
+Selecting `loopback` is rejected when `--host` is not a loopback address, and the flag conflicts with `--stdio`. The browser server-side endpoints are tagged in the `code_router()` audit matrix (`src/internal/ai/web/mod.rs`):
+
+- `/session`, `/events`, `/diagnostics`, `/threads`, `/repo`, `/repo/status` — loopback-only observe.
+- `/controller/attach`, `/controller/detach`, `/messages`, `/interactions/{id}` — loopback + `X-Code-Controller-Token`; `Automation` leases additionally require `X-Libra-Control-Token`.
+- `/control/cancel` — loopback + `X-Code-Controller-Token`. `Automation` leases also require `X-Libra-Control-Token`; this is the only difference from the TUI `Esc` cancel path.
+
+Browser write requests share the same 256 KiB body limit and audit-sink wiring as automation control. The browser persists the lease only in memory; reloading the page drops the lease and the next write reattaches.
+
+When `--browser-control loopback` is requested and the browser holds the active lease, the TUI initial controller is `LocalTui` (visible owner, can be reclaimed) instead of `Fixed { Tui }` (permanently blocking). If the TUI also wants to drive writes, `--control write` must be supplied alongside `--browser-control loopback`; the two writers serialize through the same `TuiControlCommand` channel.
+
+For `--web-only` non-Codex providers (`--provider ollama` is the canonical Phase 3 verification path), Libra builds a [`HeadlessCodeRuntime`](../../src/internal/ai/web/headless.rs) that runs the agent's tool loop directly so the browser can drive a real session — no terminal required. Headless mode currently advertises `messageInput`, `streamingText`, and `toolCalls` capabilities; `interactiveApprovals`, `planUpdates`, and `patchsets` light up once the corresponding workflow integrations land.
 
 ### Web Search
 

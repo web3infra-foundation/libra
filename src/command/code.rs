@@ -150,6 +150,7 @@ use crate::{
                     CodeUiSessionStatus, CodeUiTranscriptEntry, CodeUiTranscriptEntryKind,
                     ReadOnlyCodeUiAdapter, initial_snapshot, snapshot_from_thread_bundle,
                 },
+                headless::{HeadlessCodeRuntime, headless_capabilities},
                 start as start_web_server,
             },
         },
@@ -735,10 +736,25 @@ async fn execute_web_only(args: &CodeArgs) -> CliResult<()> {
         )
         .await?
     } else {
-        // The placeholder runtime ignores the requested browser-control posture
-        // because it has no working write surface — `attach` will return
-        // `BROWSER_CONTROL_DISABLED` regardless.
-        build_placeholder_web_code_ui_runtime(args, &working_dir).await
+        // Phase 3 v0 routes the supported providers through the new
+        // headless runtime. Anything not yet hooked up keeps the read-only
+        // placeholder so we fail closed rather than panicking on attach.
+        match build_non_codex_headless_runtime(
+            args,
+            &working_dir,
+            browser_control == BrowserControlMode::Loopback,
+        )
+        .await?
+        {
+            Some(runtime) => {
+                println!("Starting Libra Code Web UI in headless mode");
+                println!("Working directory: {}", working_dir.display());
+                println!("Provider: {:?}", args.provider);
+                println!("Browser control: {}", browser_control.as_str());
+                runtime
+            }
+            None => build_placeholder_web_code_ui_runtime(args, &working_dir).await,
+        }
     };
 
     let web_handle = match start_web_server(
@@ -1504,6 +1520,158 @@ fn default_browser_control_mode(args: &CodeArgs) -> BrowserControlMode {
         BrowserControlMode::Loopback
     } else {
         BrowserControlMode::Off
+    }
+}
+
+/// Build a headless Code UI runtime for `--web-only` non-Codex providers.
+///
+/// Constructs a minimal [`ToolRegistry`] (read tools + apply_patch + shell)
+/// and wires it into a [`HeadlessCodeRuntime`] so the browser composer can
+/// drive a real agent turn against the supplied `model`. The result is
+/// exposed through [`CodeUiRuntimeHandle`] just like the TUI flow, so the
+/// rest of `start_web_server` can use it without per-mode special cases.
+///
+/// `browser_write_enabled` should mirror the resolved
+/// [`BrowserControlMode::Loopback`] so the runtime advertises browser writes
+/// in the snapshot capabilities. The initial controller is `Unclaimed` —
+/// the browser is the only writer in headless mode, no TUI to hand off from.
+pub async fn build_headless_web_code_ui_runtime<M>(
+    args: &CodeArgs,
+    working_dir: &Path,
+    model: M,
+    model_name: String,
+    browser_write_enabled: bool,
+) -> CliResult<Arc<CodeUiRuntimeHandle>>
+where
+    M: CompletionModel + Clone + Send + Sync + 'static,
+    M::Response: CompletionUsage,
+{
+    use crate::internal::ai::agent::runtime::tool_loop::ToolLoopConfig;
+
+    let provider_name = format!("{:?}", args.provider).to_lowercase();
+    let provider = CodeUiProviderInfo {
+        provider: provider_name.clone(),
+        model: Some(model_name.clone()),
+        mode: Some("web-headless".to_string()),
+        managed: false,
+    };
+    let capabilities = headless_capabilities();
+
+    let mut snapshot = initial_snapshot(
+        working_dir.to_string_lossy().to_string(),
+        provider,
+        capabilities.clone(),
+    );
+    snapshot.status = CodeUiSessionStatus::Idle;
+    let session = CodeUiSession::new(snapshot);
+
+    let registry = build_headless_tool_registry(working_dir);
+    let preamble = system_preamble(working_dir, args.context, args.provider, Some(&model_name));
+    let preserve_reasoning_content = preserve_reasoning_content_for_provider(args.provider);
+    let temperature = args.temperature;
+    let thinking = completion_thinking_for_args(args);
+    let reasoning_effort = completion_reasoning_effort_for_args(args);
+    let stream = completion_stream_for_args(args);
+
+    let config_factory: Arc<dyn Fn() -> ToolLoopConfig + Send + Sync> =
+        Arc::new(move || ToolLoopConfig {
+            preamble: Some(preamble.clone()),
+            temperature,
+            thinking,
+            reasoning_effort,
+            stream,
+            preserve_reasoning_content,
+            ..Default::default()
+        });
+
+    let adapter = HeadlessCodeRuntime::new(session, capabilities, model, registry, config_factory);
+
+    Ok(CodeUiRuntimeHandle::build(
+        adapter,
+        browser_write_enabled,
+        CodeUiInitialController::Unclaimed,
+    )
+    .await)
+}
+
+fn build_headless_tool_registry(working_dir: &Path) -> Arc<ToolRegistry> {
+    // Headless v0 ships the read-side tool surface plus apply_patch + shell so
+    // the browser-driven agent can read, search, and (with sandbox/approval
+    // policies enforced by the registry's runtime context) make changes.
+    // request_user_input / approval routing into the browser InteractionPanel
+    // is tracked as Phase 3 follow-up work.
+    let trace_id = uuid::Uuid::new_v4();
+    let builder = ToolRegistryBuilder::with_working_dir(working_dir.to_path_buf())
+        .hardening(ToolBoundaryRuntime::system(
+            trace_id,
+            Arc::new(TracingAuditSink),
+        ))
+        .register("read_file", Arc::new(ReadFileHandler))
+        .register("list_dir", Arc::new(ListDirHandler))
+        .register("grep_files", Arc::new(GrepFilesHandler))
+        .register("search_files", Arc::new(SearchFilesHandler))
+        .register("web_search", Arc::new(WebSearchHandler))
+        .register("apply_patch", Arc::new(ApplyPatchHandler))
+        .register("shell", Arc::new(ShellHandler));
+    Arc::new(register_semantic_handlers(builder).build())
+}
+
+/// Construct the appropriate provider client and wrap it in
+/// [`build_headless_web_code_ui_runtime`]. Returns `None` when the requested
+/// provider is not yet wired into the headless path so the caller can fall
+/// back to the read-only placeholder gracefully.
+///
+/// v0 supports `--provider ollama` (the canonical Phase 3 verification path
+/// in `docs/improvement/web.md`). Other non-Codex providers continue to
+/// receive the placeholder runtime until each provider's client is wired in.
+async fn build_non_codex_headless_runtime(
+    args: &CodeArgs,
+    working_dir: &Path,
+    browser_write_enabled: bool,
+) -> CliResult<Option<Arc<CodeUiRuntimeHandle>>> {
+    match args.provider {
+        CodeProvider::Ollama => {
+            let mut client = if let Some(base_url) = &args.api_base {
+                OllamaClient::with_base_url(base_url)
+            } else {
+                OllamaClient::from_env()
+            };
+            if args.ollama_compact_tools {
+                client = client.with_compact_tool_schema(true);
+            }
+            if client.missing_required_cloud_api_key() {
+                return Err(CliError::auth(
+                    "OLLAMA_API_KEY is required when using Ollama Cloud directly (set --api-base https://ollama.com or OLLAMA_BASE_URL=https://ollama.com)",
+                ));
+            }
+            let model_name = match args.model.clone() {
+                Some(m) => m,
+                None => {
+                    return Err(CliError::command_usage(
+                        "--model is required when using --provider ollama (e.g. --model llama3.2)",
+                    ));
+                }
+            };
+            let model = client.completion_model(&model_name);
+            Ok(Some(
+                build_headless_web_code_ui_runtime(
+                    args,
+                    working_dir,
+                    model,
+                    model_name,
+                    browser_write_enabled,
+                )
+                .await?,
+            ))
+        }
+        // Codex is handled by `start_codex_code_ui_runtime` in `execute_web_only`;
+        // it must never enter this dispatcher.
+        CodeProvider::Codex => Ok(None),
+        // Other providers (Gemini, OpenAI, Anthropic, DeepSeek, Kimi, Zhipu)
+        // can be added incrementally — each needs a `with_api_key`/`from_env`
+        // construction matching the TUI path. Until then, fall back to the
+        // placeholder.
+        _ => Ok(None),
     }
 }
 
