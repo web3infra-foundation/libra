@@ -6,7 +6,7 @@ use git_internal::hash::{HashKind, set_hash_kind_for_test};
 
 use super::*;
 
-fn create_two_commit_repo_with_direct_tip_update() -> tempfile::TempDir {
+fn create_two_commit_repo_with_direct_tip_update(timestamp_offset: usize) -> tempfile::TempDir {
     let _hash_guard = set_hash_kind_for_test(HashKind::Sha1);
     let repo = create_committed_repo_via_cli();
     let runtime = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
@@ -16,8 +16,8 @@ fn create_two_commit_repo_with_direct_tip_update() -> tempfile::TempDir {
         let parent: Commit = load_object(&parent_id).expect("failed to load parent commit");
         let mut author = parent.author.clone();
         let mut committer = parent.committer.clone();
-        author.timestamp = parent.committer.timestamp + 1;
-        committer.timestamp = parent.committer.timestamp + 1;
+        author.timestamp = parent.committer.timestamp + timestamp_offset;
+        committer.timestamp = parent.committer.timestamp + timestamp_offset;
         let commit = Commit::new(author, committer, parent.tree_id, vec![parent_id], "second");
         save_object(&commit, &commit.id).expect("failed to save second commit");
         Branch::update_branch("main", &commit.id.to_string(), None)
@@ -43,7 +43,7 @@ fn test_rev_list_defaults_to_head() {
 
 #[test]
 fn test_rev_list_head_lists_reachable_commits_newest_first() {
-    let repo = create_two_commit_repo_with_direct_tip_update();
+    let repo = create_two_commit_repo_with_direct_tip_update(1);
 
     let head = run_libra_command(&["rev-parse", "HEAD"], repo.path());
     assert_cli_success(&head, "rev-parse HEAD");
@@ -62,8 +62,28 @@ fn test_rev_list_head_lists_reachable_commits_newest_first() {
 }
 
 #[test]
+fn test_rev_list_preserves_traversal_order_for_equal_timestamps() {
+    let repo = create_two_commit_repo_with_direct_tip_update(0);
+
+    let head = run_libra_command(&["rev-parse", "HEAD"], repo.path());
+    assert_cli_success(&head, "rev-parse HEAD");
+    let head_hash = String::from_utf8_lossy(&head.stdout).trim().to_string();
+
+    let parent = run_libra_command(&["rev-parse", "HEAD~1"], repo.path());
+    assert_cli_success(&parent, "rev-parse HEAD~1");
+    let parent_hash = String::from_utf8_lossy(&parent.stdout).trim().to_string();
+
+    let output = run_libra_command(&["rev-list", "HEAD"], repo.path());
+    assert_cli_success(&output, "rev-list HEAD with equal timestamps");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines = stdout.lines().collect::<Vec<_>>();
+    assert_eq!(lines, vec![head_hash.as_str(), parent_hash.as_str()]);
+}
+
+#[test]
 fn test_rev_list_supports_revision_navigation() {
-    let repo = create_two_commit_repo_with_direct_tip_update();
+    let repo = create_two_commit_repo_with_direct_tip_update(1);
 
     let parent = run_libra_command(&["rev-parse", "HEAD~1"], repo.path());
     assert_cli_success(&parent, "rev-parse HEAD~1");
@@ -136,7 +156,7 @@ async fn test_rev_list_accepts_fully_qualified_remote_tracking_ref() {
 
 #[test]
 fn test_rev_list_json_returns_envelope() {
-    let repo = create_two_commit_repo_with_direct_tip_update();
+    let repo = create_two_commit_repo_with_direct_tip_update(1);
 
     let output = run_libra_command(&["--json", "rev-list", "HEAD"], repo.path());
     assert_cli_success(&output, "json rev-list HEAD");

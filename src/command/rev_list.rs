@@ -87,12 +87,9 @@ async fn resolve_rev_list(args: &RevListArgs) -> CliResult<RevListOutput> {
 }
 
 fn sort_rev_list_commits(commits: &mut [git_internal::internal::object::commit::Commit]) {
-    commits.sort_by(|a, b| {
-        b.committer
-            .timestamp
-            .cmp(&a.committer.timestamp)
-            .then_with(|| a.id.cmp(&b.id))
-    });
+    // `sort_by_key` is stable, so equal timestamps keep the traversal order
+    // returned by `get_reachable_commits` (HEAD before parent in linear history).
+    commits.sort_by_key(|commit| std::cmp::Reverse(commit.committer.timestamp));
 }
 
 fn rev_list_target_error(spec: &str, error: CommitBaseError) -> CliError {
@@ -186,15 +183,15 @@ mod tests {
     }
 
     #[test]
-    fn test_sort_rev_list_commits_uses_commit_id_tie_breaker() {
+    fn test_sort_rev_list_commits_preserves_equal_timestamp_order() {
         let high = test_hash(0xff);
         let low = test_hash(0x01);
         let mut commits = vec![test_commit(high, 1), test_commit(low, 1)];
 
         sort_rev_list_commits(&mut commits);
 
-        assert_eq!(commits[0].id, low);
-        assert_eq!(commits[1].id, high);
+        assert_eq!(commits[0].id, high);
+        assert_eq!(commits[1].id, low);
     }
 
     #[test]
