@@ -547,7 +547,6 @@ The following Git top-level commands are currently **not implemented** in Libra 
 - `fsck` – verify repository integrity
 - `maintenance` – periodic maintenance tasks
 - `hash-object` – compute object hash for raw data
-- `symbolic-ref` – read/write symbolic refs
 - `verify-pack` – validate pack files
 - `pack-objects` / `unpack-objects` – pack and unpack object collections
 - `ls-remote` – list remote references

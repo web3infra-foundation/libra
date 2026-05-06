@@ -270,14 +270,18 @@ impl Head {
         Self::current_commit_with_conn(&db_conn).await
     }
 
-    pub async fn update_with_conn<C>(db: &C, new_head: Self, remote: Option<&str>)
+    pub async fn update_result_with_conn<C>(
+        db: &C,
+        new_head: Self,
+        remote: Option<&str>,
+    ) -> Result<(), BranchStoreError>
     where
         C: ConnectionTrait,
     {
         for attempt in 0..=Self::SQLITE_BUSY_MAX_RETRIES {
             let head = match remote {
                 Some(remote) => Self::query_remote_head_with_conn(db, remote).await,
-                None => Some(Self::query_local_head_with_conn(db).await),
+                None => Some(Self::query_local_head_result_with_conn(db).await?),
             };
 
             let write_result = match head {
@@ -320,7 +324,7 @@ impl Head {
             };
 
             match write_result {
-                Ok(()) => return,
+                Ok(()) => return Ok(()),
                 Err(err)
                     if Self::is_sqlite_busy(&err) && attempt < Self::SQLITE_BUSY_MAX_RETRIES =>
                 {
@@ -329,21 +333,34 @@ impl Head {
                     ))
                     .await;
                 }
-                Err(err) => {
-                    tracing::error!(
-                        remote = ?remote,
-                        error = %err,
-                        "Failed to update HEAD reference"
-                    );
-                    return;
-                }
+                Err(err) => return Err(BranchStoreError::Query(err.to_string())),
             }
         }
 
-        tracing::error!(
-            remote = ?remote,
-            "Failed to update HEAD reference after sqlite busy retries"
-        );
+        Err(BranchStoreError::Query(
+            "failed to update HEAD reference after sqlite busy retries".to_string(),
+        ))
+    }
+
+    pub async fn update_with_conn<C>(db: &C, new_head: Self, remote: Option<&str>)
+    where
+        C: ConnectionTrait,
+    {
+        if let Err(error) = Self::update_result_with_conn(db, new_head, remote).await {
+            tracing::error!(
+                remote = ?remote,
+                error = %error,
+                "Failed to update HEAD reference"
+            );
+        }
+    }
+
+    pub async fn update_result(
+        new_head: Self,
+        remote: Option<&str>,
+    ) -> Result<(), BranchStoreError> {
+        let db_conn = get_db_conn_instance().await;
+        Self::update_result_with_conn(&db_conn, new_head, remote).await
     }
 
     // HEAD is unique, update if exists, insert if not
