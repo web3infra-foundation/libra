@@ -905,7 +905,7 @@ fn transition_phase(session: &mut SessionState, event_kind: LifecycleEventKind) 
 ///
 /// Boundary conditions: capped at `MAX_NORMALIZED_EVENTS`; oldest entries are
 /// dropped first.
-fn append_normalized_event(
+pub(crate) fn append_normalized_event(
     session: &mut SessionState,
     event: &LifecycleEvent,
     provider_name: &str,
