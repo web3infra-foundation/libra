@@ -279,6 +279,61 @@ async fn late_stream_delta_does_not_resurrect_cancelled_entry() {
     );
 }
 
+/// `append_assistant_delta` must keep accepting deltas while the entry is
+/// in any non-terminal state (e.g. the TUI flow flags entries as
+/// `thinking` rather than `streaming`). Only the terminal statuses
+/// (`completed` / `error` / `cancelled`) short-circuit the append. This
+/// regression test guards against tightening the guard back to a strict
+/// `status == "streaming"` check that breaks the TUI's live streaming.
+#[tokio::test(flavor = "multi_thread")]
+async fn append_assistant_delta_still_accepts_thinking_status() {
+    use libra::internal::ai::web::code_ui::{
+        CodeUiCapabilities, CodeUiProviderInfo, CodeUiSession, CodeUiTranscriptEntry,
+        CodeUiTranscriptEntryKind, initial_snapshot,
+    };
+
+    let session = CodeUiSession::new(initial_snapshot(
+        "/tmp/thinking-delta",
+        CodeUiProviderInfo {
+            provider: "fake".to_string(),
+            model: None,
+            mode: None,
+            managed: false,
+        },
+        CodeUiCapabilities::default(),
+    ));
+    let now = chrono::Utc::now();
+    let entry_id = "assistant-tui".to_string();
+    session
+        .upsert_transcript_entry(CodeUiTranscriptEntry {
+            id: entry_id.clone(),
+            kind: CodeUiTranscriptEntryKind::AssistantMessage,
+            title: None,
+            content: Some(String::new()),
+            // The TUI's live assistant row carries `status: "thinking"`
+            // alongside `streaming: true` until the model finishes —
+            // mirror that here.
+            status: Some("thinking".to_string()),
+            streaming: true,
+            metadata: serde_json::json!({}),
+            created_at: now,
+            updated_at: now,
+        })
+        .await;
+
+    session.append_assistant_delta(&entry_id, "hello ").await;
+    session.append_assistant_delta(&entry_id, "world").await;
+
+    let snapshot = session.snapshot().await;
+    let entry = snapshot
+        .transcript
+        .iter()
+        .find(|e| e.id == entry_id)
+        .expect("entry must exist");
+    assert!(entry.streaming);
+    assert_eq!(entry.content.as_deref(), Some("hello world"));
+}
+
 /// Interaction routing through the InteractionPanel is explicitly out of
 /// scope for Phase 3 v0. Pin the error message so the surface change is
 /// loud once this gets wired up.

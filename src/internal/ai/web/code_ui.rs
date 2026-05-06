@@ -490,13 +490,13 @@ impl CodeUiSession {
                 // finalized (e.g. by `cancel_turn` flipping the status to
                 // `cancelled`). Re-flagging a settled entry as `streaming`
                 // would resurrect the perpetual typing indicator we just
-                // cleared.
-                let still_streaming = entry
-                    .status
-                    .as_deref()
-                    .map(|status| status == "streaming")
-                    .unwrap_or(true);
-                if !still_streaming {
+                // cleared. The TUI flow uses live statuses like `thinking`
+                // alongside `streaming: true` while the agent is still
+                // producing output, so we only short-circuit on terminal
+                // statuses (`completed`, `error`, `cancelled`).
+                if let Some(status) = entry.status.as_deref()
+                    && matches!(status, "completed" | "error" | "cancelled")
+                {
                     return;
                 }
                 let content = entry.content.get_or_insert_with(String::new);
