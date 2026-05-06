@@ -92,6 +92,8 @@ pub mod orchestrator;
 pub mod observed_agents;
 // Read-only projections of session state for UI consumers.
 pub mod projection;
+// Permission ruleset machinery (OC-Phase 2 P2.3): types + evaluate / disabled algorithms.
+pub mod permission;
 // Prompt templates and rendering helpers.
 pub mod prompt;
 // One submodule per LLM backend; each implements CompletionModel.
