@@ -1,7 +1,8 @@
 //! Session persistence for saving and restoring conversation state.
 //!
 //! Sessions capture conversation history, working directory, context mode,
-//! and metadata. They are stored as JSON files in `.libra/sessions/`.
+//! and metadata. They are stored as append-only JSONL event streams in
+//! `.libra/sessions/{session_id}/events.jsonl`.
 //!
 //! ## Usage
 //!
@@ -21,6 +22,9 @@
 //! let restored = store.load_latest().unwrap();
 //! ```
 
+pub mod file_history;
+pub mod jsonl;
+pub mod migration;
 pub mod state;
 pub mod store;
 

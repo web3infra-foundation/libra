@@ -111,12 +111,12 @@ impl ToolSpec {
                 (
                     "workdir",
                     "string",
-                    "Working directory (must be absolute and within the sandbox)",
+                    "Working directory (absolute or sandbox-relative, and within the sandbox)",
                 ),
                 (
                     "timeout_ms",
                     "number",
-                    "Timeout in milliseconds (default: 10000)",
+                    "Timeout in milliseconds (default: 60000)",
                 ),
                 (
                     "sandbox_permissions",
@@ -274,7 +274,7 @@ impl ToolSpec {
                             "evidence".to_string(),
                             json!({
                                 "type": "array",
-                                "description": "Optional list of acceptance-check evidence. Provide one entry per shell command you ran to verify the task. Empty array is acceptable for 'no_changes_needed' or analysis-only tasks.",
+                                "description": "Optional list of acceptance-check evidence. Provide one entry per shell command you ran to verify the task. When result is 'pass', every evidence entry must have exit_code 0 and must not report blocked, failed, or unexecuted verification. Empty array is acceptable for 'no_changes_needed' or analysis-only tasks.",
                                 "items": {
                                     "type": "object",
                                     "required": ["command", "exit_code"],

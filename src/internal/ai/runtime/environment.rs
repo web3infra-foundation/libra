@@ -11,8 +11,9 @@ use crate::internal::ai::{
     orchestrator::{
         types::TaskWorkspaceBackend,
         workspace::{
-            FuseAttemptOutcome, FuseProvisionState, TaskWorktree, cleanup_task_worktree,
-            prepare_task_worktree, sync_task_worktree_back,
+            FuseAttemptOutcome, FuseProvisionState, SyncBackReport, TaskWorktree,
+            WorkspaceSyncError, cleanup_task_worktree, prepare_task_worktree,
+            sync_task_worktree_back,
         },
     },
     workspace_snapshot::WorkspaceSnapshot,
@@ -41,8 +42,8 @@ impl TaskExecutionEnvironment {
 
     /// Outcome of the FUSE mount attempt during provisioning. Callers use
     /// `JustDisabled` to emit a one-time TUI hint after the first failure.
-    pub fn fuse_outcome(&self) -> FuseAttemptOutcome {
-        self.fuse_outcome
+    pub fn fuse_outcome(&self) -> &FuseAttemptOutcome {
+        &self.fuse_outcome
     }
 }
 
@@ -72,11 +73,11 @@ impl ExecutionEnvironmentProvider {
         })
     }
 
-    pub async fn sync_back(
+    pub(crate) async fn sync_back(
         &self,
         environment: &TaskExecutionEnvironment,
         request: SyncBackRequest,
-    ) -> io::Result<()> {
+    ) -> Result<SyncBackReport, WorkspaceSyncError> {
         let task_worktree_dir = environment.root().to_path_buf();
         let baseline = environment.worktree.baseline.clone();
         tokio::task::spawn_blocking(move || {
@@ -90,7 +91,10 @@ impl ExecutionEnvironmentProvider {
             )
         })
         .await
-        .map_err(|err| io::Error::other(format!("sync worker failed: {err}")))?
+        .map_err(|err| WorkspaceSyncError::HardConflict {
+            path: None,
+            reason: format!("sync worker failed: {err}"),
+        })?
     }
 
     pub async fn cleanup(&self, environment: TaskExecutionEnvironment) -> io::Result<()> {

@@ -241,7 +241,16 @@ impl CompletionModelTrait for CompletionModel {
 
 impl CompletionUsage for GenerateContentResponse {
     fn usage_summary(&self) -> Option<CompletionUsageSummary> {
-        None
+        self.usage_metadata
+            .as_ref()
+            .map(|usage| CompletionUsageSummary {
+                input_tokens: usage.prompt_token_count.unwrap_or(0),
+                output_tokens: usage.candidates_token_count.unwrap_or(0),
+                cached_tokens: usage.cached_content_token_count,
+                reasoning_tokens: usage.thoughts_token_count,
+                total_tokens: usage.total_token_count,
+                cost_usd: None,
+            })
     }
 }
 

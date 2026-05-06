@@ -67,6 +67,12 @@ enum StashError {
     #[error("merge conflict during stash apply:\n  {0}")]
     MergeConflict(String),
 
+    #[error("a branch named '{0}' already exists")]
+    BranchExists(String),
+
+    #[error("clearing all stash entries requires --force in interactive mode")]
+    ClearRequiresForce,
+
     #[error("failed to read object: {0}")]
     ReadObject(String),
 
@@ -92,6 +98,8 @@ impl StashError {
             Self::InvalidStashRef(_) => StableErrorCode::CliInvalidArguments,
             Self::StashNotExist(_) => StableErrorCode::CliInvalidTarget,
             Self::MergeConflict(_) => StableErrorCode::ConflictUnresolved,
+            Self::BranchExists(_) => StableErrorCode::ConflictOperationBlocked,
+            Self::ClearRequiresForce => StableErrorCode::CliInvalidArguments,
             Self::ReadObject(_) => StableErrorCode::IoReadFailed,
             Self::WriteObject(_) => StableErrorCode::IoWriteFailed,
             Self::IndexSave(_) => StableErrorCode::IoWriteFailed,
@@ -122,6 +130,12 @@ impl From<StashError> for CliError {
             StashError::MergeConflict(_) => CliError::failure(message)
                 .with_stable_code(stable_code)
                 .with_hint("resolve conflicts manually, then use 'libra add'"),
+            StashError::BranchExists(_) => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_hint("use a different branch name or delete the existing branch first"),
+            StashError::ClearRequiresForce => CliError::fatal(message)
+                .with_stable_code(stable_code)
+                .with_hint("re-run with --force, or use --json / --machine for scripted use"),
             _ => CliError::fatal(message).with_stable_code(stable_code),
         }
     }
@@ -152,6 +166,29 @@ pub enum StashOutput {
     Drop { index: usize, stash_id: String },
     #[serde(rename = "list")]
     List { entries: Vec<StashListEntry> },
+    #[serde(rename = "show")]
+    Show {
+        stash: String,
+        stash_id: String,
+        files: Vec<StashFileChange>,
+        files_changed: StashFilesChangedStats,
+        // Human-render hints. Skipped in JSON because the structured output
+        // always carries the full file list with status.
+        #[serde(skip)]
+        name_only: bool,
+        #[serde(skip)]
+        name_status: bool,
+    },
+    #[serde(rename = "branch")]
+    Branch {
+        branch: String,
+        stash: String,
+        stash_id: String,
+        applied: bool,
+        dropped: bool,
+    },
+    #[serde(rename = "clear")]
+    Clear { cleared_count: usize },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -160,6 +197,32 @@ pub struct StashListEntry {
     pub message: String,
     pub stash_id: String,
 }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StashFileChange {
+    pub path: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct StashFilesChangedStats {
+    pub total: usize,
+    pub added: usize,
+    pub modified: usize,
+    pub deleted: usize,
+}
+
+/// `--help` examples shown in `libra stash --help` output.
+pub const STASH_EXAMPLES: &str = "\
+EXAMPLES:
+    libra stash push -m 'WIP'         Save current changes
+    libra stash list                  Show all stash entries
+    libra stash show                  File-level summary of stash@{0}
+    libra stash show stash@{1}        Inspect a specific stash entry
+    libra stash branch hotfix         Branch off the latest stash and drop it
+    libra stash apply                 Re-apply stash@{0} without dropping
+    libra stash pop                   Apply stash@{0} and drop it
+    libra stash clear --force         Remove every stash entry";
 
 // ── Entry points ─────────────────────────────────────────────────────
 
@@ -171,15 +234,15 @@ pub async fn execute(stash_cmd: Stash) {
 
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Dispatches to stash sub-commands (push, pop, list,
-/// apply, drop).
+/// apply, drop, show, branch, clear).
 pub async fn execute_safe(stash_cmd: Stash, output: &OutputConfig) -> CliResult<()> {
-    let result = run_stash(stash_cmd).await.map_err(CliError::from)?;
+    let result = run_stash(stash_cmd, output).await.map_err(CliError::from)?;
     render_stash_output(&result, output)
 }
 
 // ── Core execution ───────────────────────────────────────────────────
 
-async fn run_stash(stash_cmd: Stash) -> Result<StashOutput, StashError> {
+async fn run_stash(stash_cmd: Stash, output: &OutputConfig) -> Result<StashOutput, StashError> {
     util::require_repo().map_err(|_| StashError::NotInRepo)?;
 
     match stash_cmd {
@@ -188,6 +251,13 @@ async fn run_stash(stash_cmd: Stash) -> Result<StashOutput, StashError> {
         Stash::List => run_list().await,
         Stash::Apply { stash } => run_apply(stash).await,
         Stash::Drop { stash } => run_drop(stash).await,
+        Stash::Show {
+            stash,
+            name_only,
+            name_status,
+        } => run_show(stash, name_only, name_status).await,
+        Stash::Branch { branch, stash } => run_branch(branch, stash).await,
+        Stash::Clear { force } => run_clear(force, output).await,
     }
 }
 
@@ -351,6 +421,173 @@ async fn run_drop(stash: Option<String>) -> Result<StashOutput, StashError> {
     do_drop(stash)
 }
 
+async fn run_show(
+    stash: Option<String>,
+    name_only: bool,
+    name_status: bool,
+) -> Result<StashOutput, StashError> {
+    let (index, stash_id_str) = resolve_stash_to_commit_hash(stash)?;
+    let git_dir =
+        util::try_get_storage_path(None).map_err(|e| StashError::ReadObject(e.to_string()))?;
+
+    let stash_hash =
+        ObjectHash::from_str(&stash_id_str).map_err(|e| StashError::ReadObject(e.to_string()))?;
+    let stash_commit_data = object::read_git_object(&git_dir, &stash_hash)
+        .map_err(|e| StashError::ReadObject(e.to_string()))?;
+    let stash_commit = Commit::from_bytes(&stash_commit_data, stash_hash)
+        .map_err(|e| StashError::ReadObject(e.to_string()))?;
+
+    let base_hash = *stash_commit
+        .parent_commit_ids
+        .first()
+        .ok_or_else(|| StashError::ReadObject("stash commit is malformed".into()))?;
+    let base_commit_data = object::read_git_object(&git_dir, &base_hash)
+        .map_err(|e| StashError::ReadObject(e.to_string()))?;
+    let base_commit = Commit::from_bytes(&base_commit_data, base_hash)
+        .map_err(|e| StashError::ReadObject(e.to_string()))?;
+
+    let base_tree_data = object::read_git_object(&git_dir, &base_commit.tree_id)
+        .map_err(|e| StashError::ReadObject(e.to_string()))?;
+    let base_tree = Tree::from_bytes(&base_tree_data, base_commit.tree_id)
+        .map_err(|e| StashError::ReadObject(e.to_string()))?;
+    let stash_tree_data = object::read_git_object(&git_dir, &stash_commit.tree_id)
+        .map_err(|e| StashError::ReadObject(e.to_string()))?;
+    let stash_tree = Tree::from_bytes(&stash_tree_data, stash_commit.tree_id)
+        .map_err(|e| StashError::ReadObject(e.to_string()))?;
+
+    let base_files = tree::get_tree_files_recursive(&base_tree, &git_dir, &PathBuf::new())
+        .map_err(|e| StashError::ReadObject(e.to_string()))?;
+    let stash_files = tree::get_tree_files_recursive(&stash_tree, &git_dir, &PathBuf::new())
+        .map_err(|e| StashError::ReadObject(e.to_string()))?;
+
+    let mut files: Vec<StashFileChange> = Vec::new();
+    let mut stats = StashFilesChangedStats::default();
+    let mut seen = HashSet::new();
+
+    for (path, stash_item) in stash_files.iter() {
+        seen.insert(path.clone());
+        match base_files.get(path) {
+            Some(base_item) => {
+                if base_item.id != stash_item.id {
+                    files.push(StashFileChange {
+                        path: path.clone(),
+                        status: "modified".to_string(),
+                    });
+                    stats.modified += 1;
+                }
+            }
+            None => {
+                files.push(StashFileChange {
+                    path: path.clone(),
+                    status: "added".to_string(),
+                });
+                stats.added += 1;
+            }
+        }
+    }
+    for (path, _) in base_files.iter() {
+        if !seen.contains(path) {
+            files.push(StashFileChange {
+                path: path.clone(),
+                status: "deleted".to_string(),
+            });
+            stats.deleted += 1;
+        }
+    }
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    stats.total = files.len();
+
+    Ok(StashOutput::Show {
+        stash: format!("stash@{{{index}}}"),
+        stash_id: stash_id_str,
+        files,
+        files_changed: stats,
+        name_only,
+        name_status,
+    })
+}
+
+async fn run_branch(branch_name: String, stash: Option<String>) -> Result<StashOutput, StashError> {
+    use crate::internal::branch::Branch as InternalBranch;
+
+    if InternalBranch::exists(&branch_name).await {
+        return Err(StashError::BranchExists(branch_name));
+    }
+
+    // Resolve stash & metadata for the new branch base.
+    let (index, stash_id_str) = resolve_stash_to_commit_hash(stash.clone())?;
+    let stash_hash =
+        ObjectHash::from_str(&stash_id_str).map_err(|e| StashError::ReadObject(e.to_string()))?;
+    let git_dir =
+        util::try_get_storage_path(None).map_err(|e| StashError::ReadObject(e.to_string()))?;
+    let stash_commit_data = object::read_git_object(&git_dir, &stash_hash)
+        .map_err(|e| StashError::ReadObject(e.to_string()))?;
+    let stash_commit = Commit::from_bytes(&stash_commit_data, stash_hash)
+        .map_err(|e| StashError::ReadObject(e.to_string()))?;
+    let base_hash = *stash_commit
+        .parent_commit_ids
+        .first()
+        .ok_or_else(|| StashError::ReadObject("stash commit is malformed".into()))?;
+
+    InternalBranch::update_branch(&branch_name, &base_hash.to_string(), None)
+        .await
+        .map_err(|e| StashError::Other(format!("failed to create branch '{branch_name}': {e}")))?;
+
+    // Switch HEAD to the new branch so apply runs on the right tip.
+    Head::update(Head::Branch(branch_name.clone()), None).await;
+
+    let apply_result = do_apply(stash.clone()).await?;
+    let applied = matches!(apply_result, StashOutput::Apply { .. });
+    let dropped = if applied {
+        do_drop(stash).is_ok()
+    } else {
+        false
+    };
+
+    Ok(StashOutput::Branch {
+        branch: branch_name,
+        stash: format!("stash@{{{index}}}"),
+        stash_id: stash_id_str,
+        applied,
+        dropped,
+    })
+}
+
+async fn run_clear(force: bool, output: &OutputConfig) -> Result<StashOutput, StashError> {
+    if !force && !output.is_json() {
+        return Err(StashError::ClearRequiresForce);
+    }
+
+    if !has_stash() {
+        return Ok(StashOutput::Clear { cleared_count: 0 });
+    }
+
+    let git_dir =
+        util::try_get_storage_path(None).map_err(|e| StashError::ReadObject(e.to_string()))?;
+    let stash_ref_path = git_dir.join("refs/stash");
+    let stash_log_path = git_dir.join("logs/refs/stash");
+
+    let cleared = if stash_log_path.exists() {
+        let entries = parse_stash_log_entries(read_stash_log_lines(&stash_log_path)?)?;
+        entries.len()
+    } else {
+        0
+    };
+
+    if stash_log_path.exists() {
+        std::fs::remove_file(&stash_log_path)
+            .map_err(|e| StashError::WriteObject(e.to_string()))?;
+    }
+    if stash_ref_path.exists() {
+        std::fs::remove_file(&stash_ref_path)
+            .map_err(|e| StashError::WriteObject(e.to_string()))?;
+    }
+
+    Ok(StashOutput::Clear {
+        cleared_count: cleared,
+    })
+}
+
 // ── Rendering ────────────────────────────────────────────────────────
 
 fn render_stash_output(result: &StashOutput, output: &OutputConfig) -> CliResult<()> {
@@ -393,6 +630,62 @@ fn render_stash_output(result: &StashOutput, output: &OutputConfig) -> CliResult
         StashOutput::List { entries } => {
             for entry in entries {
                 println!("stash@{{{}}}: {}", entry.index, entry.message);
+            }
+        }
+        StashOutput::Show {
+            stash,
+            files,
+            files_changed,
+            name_only,
+            name_status,
+            ..
+        } => {
+            if *name_only {
+                for change in files {
+                    println!("{}", change.path);
+                }
+            } else {
+                println!("Files changed in {stash}:");
+                let prefix_len = if *name_status { 0 } else { 9 };
+                for change in files {
+                    if *name_status {
+                        println!("{}\t{}", change.status, change.path);
+                    } else {
+                        println!(
+                            "  {:<prefix_len$}{}",
+                            format!("{}:", change.status),
+                            change.path
+                        );
+                    }
+                }
+                println!(
+                    "{} files changed, {} insertions(+), {} deletions(-)",
+                    files_changed.total, files_changed.added, files_changed.deleted
+                );
+            }
+        }
+        StashOutput::Branch {
+            branch,
+            stash,
+            applied,
+            dropped,
+            ..
+        } => {
+            println!("Switched to a new branch '{branch}'");
+            if *applied {
+                println!("Applied {stash}");
+            }
+            if *dropped {
+                println!("Dropped {stash}");
+            }
+        }
+        StashOutput::Clear { cleared_count } => {
+            if *cleared_count == 0 {
+                println!("No stash entries to clear.");
+            } else if *cleared_count == 1 {
+                println!("Cleared 1 stash entry.");
+            } else {
+                println!("Cleared {cleared_count} stash entries.");
             }
         }
     }

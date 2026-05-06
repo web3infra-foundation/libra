@@ -30,6 +30,7 @@ are loaded automatically when configured via `vault.ssh.<remote>.privkey`.
 | `<repository>` | Remote name or URL to fetch from. When omitted, uses the current branch's upstream remote. | `libra fetch origin` |
 | `<refspec>` | Branch name to fetch. Requires `<repository>`. When omitted, all branches from the remote are fetched. | `libra fetch origin main` |
 | `-a`, `--all` | Fetch from every configured remote. Conflicts with `<repository>`. | `libra fetch --all` |
+| `--depth <N>` | Limit fetching to the specified number of commits from the tip of each remote branch (shallow fetch). Public stable flag. | `libra fetch origin --depth 1` |
 | `--json` | Emit structured JSON envelope to stdout (global flag). | `libra --json fetch origin` |
 | `--machine` | Compact single-line JSON; suppresses progress (global flag). | `libra --machine fetch origin` |
 | `--progress none` | Suppress NDJSON progress events on stderr in JSON mode. | `libra --json fetch origin --progress none` |
@@ -42,6 +43,8 @@ libra fetch
 libra fetch origin
 libra fetch origin main
 libra fetch --all
+libra fetch origin --depth 1               # shallow fetch
+libra fetch --all --depth 3                # shallow across all remotes
 libra --json fetch origin
 libra --json fetch origin --progress none
 ```
@@ -157,14 +160,27 @@ historical anchors for diffing against a previous remote state. When pruning is 
 `libra remote prune <name>` provides an explicit, auditable operation. This keeps `fetch`
 fast and predictable while giving users a deliberate pruning path.
 
-### Why no --depth/--shallow?
+### Shallow fetch (`--depth`) is exposed as a stable flag
 
-Shallow clones and fetches introduce a "shallow boundary" that breaks many operations
-(blame, log, merge-base computation) in subtle ways. Libra targets monorepo and AI-agent
-workflows where full history is essential for accurate code understanding. Rather than
-supporting a mode that silently degrades downstream commands, Libra omits shallow fetch
-entirely. For bandwidth-constrained environments, Libra's tiered cloud storage (S3/R2
-with LRU caching) provides a more robust solution than shallow history.
+`libra fetch --depth N` is a public stable flag (audited C3 in
+[`docs/improvement/compatibility/shallow.md`](../improvement/compatibility/shallow.md)).
+The internal `fetch_repository(..., depth)` plumbing has supported shallow fetch
+for some time; C3 surfaces it on the CLI and binds the contract:
+
+- `--depth N` limits fetching to the latest `N` commits per remote branch.
+- It composes with `--all`: a shallow fetch across all configured remotes is
+  `libra fetch --all --depth N`.
+- Re-fetching with the same depth on an already-shallow clone is idempotent.
+- Sparse checkout (`clone --sparse`) is **not** part of this contract — see
+  [`docs/improvement/compatibility/declined.md`](../improvement/compatibility/declined.md)
+  for why sparse-checkout is intentionally deferred.
+
+Shallow fetch does introduce the usual Git "shallow boundary" caveats (blame,
+log, merge-base computation may not see commits beyond the boundary). That
+trade-off is a user-visible knob, not a default — full-history fetch remains
+the default and the recommended posture for monorepo and AI-agent workflows.
+Tiered cloud storage (S3/R2 + LRU caching) remains the bandwidth solution for
+the cases where full history is wanted.
 
 ### Why JSON progress on stderr?
 
@@ -184,7 +200,7 @@ by default for maximum script friendliness.
 | Single branch | `libra fetch origin main` | `git fetch origin main` | `jj git fetch --remote origin --branch main` |
 | All remotes | `libra fetch --all` | `git fetch --all` | `jj git fetch --all-remotes` |
 | Prune stale refs | `libra remote prune <name>` | `git fetch --prune` | Automatic |
-| Shallow fetch | Not supported | `git fetch --depth N` | Not supported |
+| Shallow fetch | `libra fetch --depth N` | `git fetch --depth N` | Not supported |
 | Structured output | `--json` / `--machine` | No | No |
 | Progress events | NDJSON on stderr | Text on stderr | Text on stderr |
 

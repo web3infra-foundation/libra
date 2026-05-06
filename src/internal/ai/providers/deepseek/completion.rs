@@ -37,7 +37,7 @@ use crate::internal::ai::{
         openai_compat::{
             ChatChoice, ChatErrorResponse, ChatFunctionCall, ChatMessage, ChatResponse,
             ChatToolCall, ChatToolDefinition, ChatUsage, build_messages_with_reasoning_content,
-            choice_reasoning_content, parse_choice_content, parse_tools,
+            choice_reasoning_content, parse_choice_content_for_provider, parse_tools,
         },
     },
 };
@@ -474,12 +474,13 @@ impl DeepSeekStreamToolCallBuilder {
     ///
     /// Functional scope:
     /// - Requires a non-empty function name.
-    /// - Either the arguments buffer is empty (a zero-argument call), or it parses
-    ///   as valid JSON. Anything in between is treated as a partial fragment.
+    /// - Requires the arguments buffer to parse as valid JSON. An empty buffer is
+    ///   ambiguous during streaming and is treated as a partial fragment for
+    ///   body-error recovery.
     fn is_complete(&self) -> bool {
         !self.name.is_empty()
-            && (self.arguments.trim().is_empty()
-                || serde_json::from_str::<Value>(&self.arguments).is_ok())
+            && !self.arguments.trim().is_empty()
+            && serde_json::from_str::<Value>(&self.arguments).is_ok()
     }
 }
 
@@ -490,11 +491,14 @@ impl DeepSeekStreamAccumulator {
     /// success ("we got a usable response, log a warning and continue") versus
     /// surfaced to the caller as a hard failure.
     fn has_salvageable_response(&self) -> bool {
-        !self.content.trim().is_empty()
-            || self
-                .tool_calls
-                .values()
-                .any(DeepSeekStreamToolCallBuilder::is_complete)
+        !self.has_incomplete_tool_calls()
+            && (!self.content.trim().is_empty() || !self.tool_calls.is_empty())
+    }
+
+    fn has_incomplete_tool_calls(&self) -> bool {
+        self.tool_calls
+            .values()
+            .any(|builder| !builder.is_complete())
     }
 
     /// Has the stream emitted *any* fragment, even if it is not yet usable?
@@ -993,7 +997,7 @@ impl CompletionModelTrait for Model {
                 "DeepSeek returned no text or tool calls"
             );
         }
-        let content = parse_choice_content(choice)?;
+        let content = parse_choice_content_for_provider("deepseek", choice)?;
         let reasoning_content = choice_reasoning_content(choice);
         let text_parts = content
             .iter()
@@ -1324,7 +1328,7 @@ mod tests {
             response.usage.as_ref().map(|usage| usage.total_tokens),
             Some(5)
         );
-        let content = parse_choice_content(&response.choices[0]).unwrap();
+        let content = parse_choice_content_for_provider("deepseek", &response.choices[0]).unwrap();
         assert!(matches!(
             &content[0],
             crate::internal::ai::completion::AssistantContent::Text(text) if text.text == "Hello!"
@@ -1363,7 +1367,7 @@ mod tests {
         .unwrap();
 
         let response = accumulator.into_response("fallback-model").unwrap();
-        let content = parse_choice_content(&response.choices[0]).unwrap();
+        let content = parse_choice_content_for_provider("deepseek", &response.choices[0]).unwrap();
         assert!(matches!(
             &content[0],
             crate::internal::ai::completion::AssistantContent::ToolCall(tool_call)
@@ -1411,6 +1415,23 @@ mod tests {
         )
         .unwrap();
         assert!(with_tool_call.has_salvageable_response());
+    }
+
+    /// Scenario: a stream body error after only a tool name must not be treated
+    /// as a usable response; otherwise an incomplete call like `shell {}` can
+    /// reach the dispatcher and fail as a malformed tool invocation.
+    #[test]
+    fn test_deepseek_stream_name_only_tool_call_not_salvageable() {
+        let mut accumulator = DeepSeekStreamAccumulator::default();
+        process_deepseek_stream_line(
+            br#"data: {"id":"chunk_6","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"shell"}}]},"finish_reason":null}],"created":1718345018,"model":"deepseek-v4-pro","object":"chat.completion.chunk"}"#,
+            &mut accumulator,
+            None,
+        )
+        .unwrap();
+
+        assert!(accumulator.has_partial_output());
+        assert!(!accumulator.has_salvageable_response());
     }
 
     /// Scenario: the descriptive `ResponseError` produced when a stream ends
@@ -1503,7 +1524,7 @@ mod tests {
 
         let response: ChatResponse = serde_json::from_str(json).unwrap();
         let choice = &response.choices[0];
-        let content = parse_choice_content(choice).unwrap();
+        let content = parse_choice_content_for_provider("deepseek", choice).unwrap();
 
         assert_eq!(
             choice_reasoning_content(choice).as_deref(),
@@ -1514,6 +1535,44 @@ mod tests {
             crate::internal::ai::completion::AssistantContent::ToolCall(tool_call)
                 if tool_call.id == "call_1"
                     && tool_call.function.name == "read_file"
+        ));
+    }
+
+    #[test]
+    fn test_deepseek_repairs_malformed_tool_arguments() {
+        let json = r#"
+        {
+            "id": "chatcmpl-repair",
+            "object": "chat.completion",
+            "created": 1677652288,
+            "model": "deepseek-chat",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": "{file_path: 'Cargo.toml',}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": null
+        }
+        "#;
+
+        let response: ChatResponse = serde_json::from_str(json).unwrap();
+        let content = parse_choice_content_for_provider("deepseek", &response.choices[0]).unwrap();
+
+        assert!(matches!(
+            &content[0],
+            crate::internal::ai::completion::AssistantContent::ToolCall(tool_call)
+                if tool_call.function.arguments == serde_json::json!({"file_path": "Cargo.toml"})
         ));
     }
 

@@ -4,8 +4,13 @@ use std::path::{Path, PathBuf};
 
 use super::{
     context::ContextMode,
+    dynamic_context::build_dynamic_prompt_section_with_budget,
     loader::load_all_rules,
     rules::{RuleCategory, RuleFile},
+};
+use crate::internal::ai::{
+    agent::TaskIntent,
+    context_budget::{ContextBudget, MemoryAnchor, build_memory_anchor_prompt_section},
 };
 
 /// Builds a complete system prompt from modular rule files.
@@ -17,6 +22,10 @@ pub struct SystemPromptBuilder {
     working_dir: PathBuf,
     rules: Vec<RuleFile>,
     context: Option<ContextMode>,
+    intent: Option<TaskIntent>,
+    dynamic_context: bool,
+    context_budget: Option<ContextBudget>,
+    memory_anchors: Vec<MemoryAnchor>,
     extra_sections: Vec<(String, String)>,
 }
 
@@ -28,6 +37,10 @@ impl SystemPromptBuilder {
             working_dir: working_dir.to_path_buf(),
             rules,
             context: None,
+            intent: None,
+            dynamic_context: false,
+            context_budget: None,
+            memory_anchors: Vec::new(),
             extra_sections: Vec::new(),
         }
     }
@@ -49,6 +62,30 @@ impl SystemPromptBuilder {
         self
     }
 
+    /// Set the task intent used to shape dynamic prompt guidance and tool policy.
+    pub fn with_intent(mut self, intent: TaskIntent) -> Self {
+        self.intent = Some(intent);
+        self
+    }
+
+    /// Append a cached dynamic workspace context section to the prompt.
+    pub fn with_dynamic_context(mut self) -> Self {
+        self.dynamic_context = true;
+        self
+    }
+
+    /// Set the context budget profile rendered into the dynamic prompt section.
+    pub fn with_context_budget(mut self, budget: ContextBudget) -> Self {
+        self.context_budget = Some(budget);
+        self
+    }
+
+    /// Include active confirmed memory anchors as a high-priority prompt section.
+    pub fn with_memory_anchors(mut self, anchors: impl Into<Vec<MemoryAnchor>>) -> Self {
+        self.memory_anchors = anchors.into();
+        self
+    }
+
     /// Append a custom section to the end of the prompt.
     pub fn extra_section(mut self, heading: impl Into<String>, content: impl Into<String>) -> Self {
         self.extra_sections.push((heading.into(), content.into()));
@@ -59,7 +96,11 @@ impl SystemPromptBuilder {
     pub fn build(self) -> String {
         let working_dir_str = self.working_dir.display().to_string();
         let mut parts: Vec<String> = Vec::with_capacity(
-            self.rules.len() + self.extra_sections.len() + usize::from(self.context.is_some()),
+            self.rules.len()
+                + self.extra_sections.len()
+                + usize::from(self.context.is_some())
+                + usize::from(self.dynamic_context)
+                + usize::from(!self.memory_anchors.is_empty()),
         );
 
         for rule in &self.rules {
@@ -70,6 +111,21 @@ impl SystemPromptBuilder {
         if let Some(ref context) = self.context {
             let content = context.load_content(&self.working_dir);
             parts.push(content.replace("{working_dir}", &working_dir_str));
+        }
+
+        if self.dynamic_context {
+            let intent = self.intent.unwrap_or(TaskIntent::Unknown);
+            parts.push(build_dynamic_prompt_section_with_budget(
+                &self.working_dir,
+                intent,
+                self.context_budget.as_ref(),
+            ));
+        }
+
+        if let Some(section) =
+            build_memory_anchor_prompt_section(&self.memory_anchors, chrono::Utc::now())
+        {
+            parts.push(section);
         }
 
         for (heading, content) in &self.extra_sections {
@@ -136,6 +192,25 @@ mod tests {
         assert!(prompt.contains("Testing"), "missing testing section");
         assert!(prompt.contains("Security"), "missing security section");
         assert!(prompt.contains("Tool Use"), "missing tool use section");
+    }
+
+    #[test]
+    fn test_tool_use_mentions_semantic_tools() {
+        let tmp = TempDir::new().unwrap();
+        let prompt = SystemPromptBuilder::new(tmp.path()).build();
+
+        assert!(
+            prompt.contains("list_symbols"),
+            "prompt should mention semantic symbol listing"
+        );
+        assert!(
+            prompt.contains("trace_callers"),
+            "prompt should mention semantic caller tracing"
+        );
+        assert!(
+            prompt.contains("approximate"),
+            "prompt should warn that semantic relationship tools are approximate"
+        );
     }
 
     #[test]

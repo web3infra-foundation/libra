@@ -7,7 +7,7 @@ use git_internal::errors::GitError;
 use reqwest::{Body, RequestBuilder, Response, StatusCode, header::CONTENT_TYPE};
 use url::Url;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-network"))]
 use super::DiscRef;
 use super::{
     DiscoveryResult, FetchStream, ProtocolClient, generate_upload_pack_content,
@@ -214,11 +214,12 @@ impl HttpsClient {
         .await
     }
 }
-#[cfg(test)]
+#[cfg(all(test, feature = "test-network"))]
 mod tests {
     use super::*;
     use crate::{git_protocol::ServiceType::UploadPack, utils::test::init_debug_logger};
 
+    #[cfg(feature = "test-network")]
     #[tokio::test]
     async fn test_discover_reference_upload() {
         if std::env::var("LIBRA_TEST_GITHUB_TOKEN").map_or(true, |v| v.is_empty()) {
@@ -241,6 +242,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "test-network")]
     #[tokio::test]
     async fn test_post_git_upload_pack_() {
         if std::env::var("LIBRA_TEST_GITHUB_TOKEN").map_or(true, |v| v.is_empty()) {

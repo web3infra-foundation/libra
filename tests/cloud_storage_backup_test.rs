@@ -10,11 +10,11 @@
 //!    `cloud_sync_name_conflict`) hit production Cloudflare D1 + R2.
 //!
 //! **Layer:** Mock + error-path tests are L1. Live tests are L3 — require
-//! `LIBRA_D1_ACCOUNT_ID` and/or `LIBRA_STORAGE_ENDPOINT`. Skipped silently when
-//! unset. Live tests use `#[serial(cloud_live)]` to avoid trampling each other
-//! on shared D1/R2 resources.
+//! `--features test-live-cloud` plus `LIBRA_D1_*` and/or `LIBRA_STORAGE_*`.
+//! Skipped silently when the feature or credentials are unset. Live tests use
+//! `#[serial(cloud_live)]` to avoid trampling each other on shared D1/R2 resources.
 
-use std::{process::Command, str::FromStr, sync::Arc};
+use std::{path::Path, process::Command, str::FromStr, sync::Arc};
 
 use git_internal::internal::object::{ObjectTrait, blob::Blob};
 use libra::utils::{
@@ -25,6 +25,37 @@ use object_store::memory::InMemory;
 use serial_test::serial;
 use tempfile::tempdir;
 use uuid::Uuid;
+
+fn env_is_present(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| !value.is_empty())
+}
+
+fn live_d1_tests_enabled() -> bool {
+    cfg!(feature = "test-live-cloud")
+        && [
+            "LIBRA_D1_ACCOUNT_ID",
+            "LIBRA_D1_API_TOKEN",
+            "LIBRA_D1_DATABASE_ID",
+        ]
+        .iter()
+        .all(|name| env_is_present(name))
+}
+
+fn live_r2_tests_enabled() -> bool {
+    cfg!(feature = "test-live-cloud")
+        && [
+            "LIBRA_STORAGE_ENDPOINT",
+            "LIBRA_STORAGE_BUCKET",
+            "LIBRA_STORAGE_ACCESS_KEY",
+            "LIBRA_STORAGE_SECRET_KEY",
+        ]
+        .iter()
+        .all(|name| env_is_present(name))
+}
+
+fn live_cloud_tests_enabled() -> bool {
+    live_d1_tests_enabled() && live_r2_tests_enabled()
+}
 
 /// Read an env var or panic with a pointer to the file header for setup instructions.
 /// Used inside live-cloud tests after the gate condition has already confirmed the
@@ -68,20 +99,75 @@ fn r2_storage_from_env(repo_id: &str) -> RemoteStorage {
     RemoteStorage::new_with_prefix(Arc::new(s3), repo_id.to_string())
 }
 
+async fn assert_remote_object_available(
+    storage: &RemoteStorage,
+    hash: &git_internal::hash::ObjectHash,
+    description: &str,
+) {
+    let mut last_error = "object was not visible".to_string();
+
+    for attempt in 0..8 {
+        match storage.get(hash).await {
+            Ok((data, obj_type)) => {
+                let computed = git_internal::hash::ObjectHash::from_type_and_data(obj_type, &data);
+                assert_eq!(
+                    computed, *hash,
+                    "{} was readable but hashed to {} instead of {}",
+                    description, computed, hash
+                );
+                return;
+            }
+            Err(error) => {
+                last_error = error.to_string();
+                tokio::time::sleep(std::time::Duration::from_millis(250 * (attempt + 1))).await;
+            }
+        }
+    }
+
+    panic!(
+        "{} {} should be readable from remote storage after sync; last error: {}",
+        description, hash, last_error
+    );
+}
+
+fn isolated_libra_command(current_dir: &Path, home: &Path) -> Command {
+    let config_home = home.join(".config");
+    let global_config_db = home.join(".libra-global-config.db");
+    std::fs::create_dir_all(&config_home).unwrap();
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_libra"));
+    command
+        .current_dir(current_dir)
+        .env_clear()
+        .env(
+            "PATH",
+            std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin:/usr/sbin:/sbin".to_string()),
+        )
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("USERPROFILE", home)
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
+        .env("LIBRA_TEST", "1")
+        .env("LIBRA_TEST_ENV", "1")
+        .env("LIBRA_CONFIG_GLOBAL_DB", &global_config_db);
+    if let Some(systemroot) = std::env::var_os("SYSTEMROOT") {
+        command.env("SYSTEMROOT", systemroot);
+    }
+    if let Some(windir) = std::env::var_os("WINDIR") {
+        command.env("WINDIR", windir);
+    }
+    command
+}
+
 /// Initialize a new Libra repo in a temp dir using the actual binary, with a fully
 /// isolated HOME / XDG_CONFIG_HOME / USERPROFILE so global user config cannot leak
 /// in. Returns the `TempDir` (must stay alive — drop removes the on-disk repo).
 fn init_repo() -> tempfile::TempDir {
     let dir = tempdir().unwrap();
     let home = dir.path().join(".home");
-    let config_home = home.join(".config");
-    std::fs::create_dir_all(&config_home).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(dir.path())
+    let output = isolated_libra_command(dir.path(), &home)
         .args(["init"])
-        .env("HOME", &home)
-        .env("XDG_CONFIG_HOME", &config_home)
-        .env("USERPROFILE", &home)
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -197,15 +283,8 @@ async fn mock_remote_search() {
 fn cloud_sync_fails_without_r2_env() {
     let dir = init_repo();
     let home = dir.path().join(".home");
-    let config_home = home.join(".config");
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(dir.path())
+    let output = isolated_libra_command(dir.path(), &home)
         .args(["cloud", "sync"])
-        .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("HOME", &home)
-        .env("XDG_CONFIG_HOME", &config_home)
-        .env("USERPROFILE", &home)
         .env("LIBRA_D1_ACCOUNT_ID", "test-account")
         .env("LIBRA_D1_API_TOKEN", "test-token")
         .env("LIBRA_D1_DATABASE_ID", "test-db")
@@ -225,15 +304,8 @@ fn cloud_sync_fails_without_r2_env() {
 fn cloud_restore_fails_without_r2_env() {
     let dir = init_repo();
     let home = dir.path().join(".home");
-    let config_home = home.join(".config");
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(dir.path())
+    let output = isolated_libra_command(dir.path(), &home)
         .args(["cloud", "restore", "--repo-id", "test-repo"])
-        .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("HOME", &home)
-        .env("XDG_CONFIG_HOME", &config_home)
-        .env("USERPROFILE", &home)
         .env("LIBRA_D1_ACCOUNT_ID", "test-account")
         .env("LIBRA_D1_API_TOKEN", "test-token")
         .env("LIBRA_D1_DATABASE_ID", "test-db")
@@ -253,15 +325,8 @@ fn cloud_restore_fails_without_r2_env() {
 fn cloud_sync_fails_without_d1_env() {
     let dir = init_repo();
     let home = dir.path().join(".home");
-    let config_home = home.join(".config");
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(dir.path())
+    let output = isolated_libra_command(dir.path(), &home)
         .args(["cloud", "sync"])
-        .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("HOME", &home)
-        .env("XDG_CONFIG_HOME", &config_home)
-        .env("USERPROFILE", &home)
         .env("LIBRA_STORAGE_ENDPOINT", "https://example.invalid")
         .env("LIBRA_STORAGE_BUCKET", "test-bucket")
         .env("LIBRA_STORAGE_ACCESS_KEY", "test-access")
@@ -281,8 +346,8 @@ fn cloud_sync_fails_without_d1_env() {
 #[tokio::test]
 #[serial(cloud_live)]
 async fn d1_connection() {
-    if std::env::var("LIBRA_D1_ACCOUNT_ID").map_or(true, |v| v.is_empty()) {
-        eprintln!("skipped (LIBRA_D1_ACCOUNT_ID not set)");
+    if !live_d1_tests_enabled() {
+        eprintln!("skipped (set --features test-live-cloud and LIBRA_D1_*)");
         return;
     }
     let client = d1_client_from_env();
@@ -297,8 +362,8 @@ async fn d1_connection() {
 #[tokio::test]
 #[serial(cloud_live)]
 async fn d1_ensure_table() {
-    if std::env::var("LIBRA_D1_ACCOUNT_ID").map_or(true, |v| v.is_empty()) {
-        eprintln!("skipped (LIBRA_D1_ACCOUNT_ID not set)");
+    if !live_d1_tests_enabled() {
+        eprintln!("skipped (set --features test-live-cloud and LIBRA_D1_*)");
         return;
     }
     let client = d1_client_from_env();
@@ -313,8 +378,8 @@ async fn d1_ensure_table() {
 #[tokio::test]
 #[serial(cloud_live)]
 async fn d1_upsert_and_query() {
-    if std::env::var("LIBRA_D1_ACCOUNT_ID").map_or(true, |v| v.is_empty()) {
-        eprintln!("skipped (LIBRA_D1_ACCOUNT_ID not set)");
+    if !live_d1_tests_enabled() {
+        eprintln!("skipped (set --features test-live-cloud and LIBRA_D1_*)");
         return;
     }
     let client = d1_client_from_env();
@@ -343,8 +408,8 @@ async fn d1_upsert_and_query() {
 #[tokio::test]
 #[serial(cloud_live)]
 async fn d1_batch() {
-    if std::env::var("LIBRA_D1_ACCOUNT_ID").map_or(true, |v| v.is_empty()) {
-        eprintln!("skipped (LIBRA_D1_ACCOUNT_ID not set)");
+    if !live_d1_tests_enabled() {
+        eprintln!("skipped (set --features test-live-cloud and LIBRA_D1_*)");
         return;
     }
     let client = d1_client_from_env();
@@ -382,8 +447,8 @@ async fn d1_batch() {
 #[tokio::test]
 #[serial(cloud_live)]
 async fn r2_connection_basic() {
-    if std::env::var("LIBRA_STORAGE_ENDPOINT").map_or(true, |v| v.is_empty()) {
-        eprintln!("skipped (LIBRA_STORAGE_ENDPOINT not set)");
+    if !live_r2_tests_enabled() {
+        eprintln!("skipped (set --features test-live-cloud and LIBRA_STORAGE_*)");
         return;
     }
     let storage = r2_storage_from_env("cloud-backup-test");
@@ -416,10 +481,8 @@ async fn r2_connection_basic() {
 #[tokio::test]
 #[serial(cloud_live)]
 async fn cloud_full_workflow_end_to_end() {
-    if std::env::var("LIBRA_D1_ACCOUNT_ID").map_or(true, |v| v.is_empty())
-        || std::env::var("LIBRA_STORAGE_ENDPOINT").map_or(true, |v| v.is_empty())
-    {
-        eprintln!("skipped (LIBRA_D1_ACCOUNT_ID or LIBRA_STORAGE_ENDPOINT not set)");
+    if !live_cloud_tests_enabled() {
+        eprintln!("skipped (set --features test-live-cloud plus LIBRA_D1_* and LIBRA_STORAGE_*)");
         return;
     }
     // Setup - Initialize two separate local repos
@@ -564,21 +627,9 @@ async fn cloud_full_workflow_end_to_end() {
         "Repo A should have the binary blob in D1"
     );
 
-    assert!(
-        r2_a.exist(&blob_hash).await,
-        "Text Blob {} should be in Repo A storage",
-        blob_hash
-    );
-    assert!(
-        r2_a.exist(&bin_hash).await,
-        "Binary Blob {} should be in Repo A storage",
-        bin_hash
-    );
-    assert!(
-        r2_b.exist(&blob_hash).await,
-        "Text Blob {} should be in Repo B storage",
-        blob_hash
-    );
+    assert_remote_object_available(&r2_a, &blob_hash, "Text blob in Repo A").await;
+    assert_remote_object_available(&r2_a, &bin_hash, "Binary blob in Repo A").await;
+    assert_remote_object_available(&r2_b, &blob_hash, "Text blob in Repo B").await;
 
     // Restore Scenarios
 
@@ -710,10 +761,8 @@ async fn cloud_full_workflow_end_to_end() {
 #[tokio::test]
 #[serial(cloud_live)]
 async fn cloud_sync_name_conflict() {
-    if std::env::var("LIBRA_D1_ACCOUNT_ID").map_or(true, |v| v.is_empty())
-        || std::env::var("LIBRA_STORAGE_ENDPOINT").map_or(true, |v| v.is_empty())
-    {
-        eprintln!("skipped (LIBRA_D1_ACCOUNT_ID or LIBRA_STORAGE_ENDPOINT not set)");
+    if !live_cloud_tests_enabled() {
+        eprintln!("skipped (set --features test-live-cloud plus LIBRA_D1_* and LIBRA_STORAGE_*)");
         return;
     }
     let repo_a = init_repo();

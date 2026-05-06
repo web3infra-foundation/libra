@@ -1215,3 +1215,66 @@ async fn test_worktree_main_flag_remains_single_and_stable() {
         "main worktree entry should remain the original repo directory"
     );
 }
+
+// ── C5 surface tests: `worktree remove --delete-dir` ──────────────────────────────────────
+
+#[tokio::test]
+#[serial]
+/// Default `worktree remove` (no flag) preserves the directory on disk.
+async fn test_worktree_remove_default_keeps_disk_directory() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    exec_async(vec!["worktree", "add", "wt_keep"])
+        .await
+        .expect("worktree add should succeed");
+
+    let wt_path = repo_dir.path().join("wt_keep");
+    assert!(wt_path.is_dir());
+
+    exec_async(vec!["worktree", "remove", "wt_keep"])
+        .await
+        .expect("worktree remove (default) should succeed");
+
+    assert!(
+        wt_path.is_dir(),
+        "default remove must preserve the directory on disk"
+    );
+    let paths = worktree_paths();
+    assert!(
+        !paths.iter().any(|p| p.ends_with("wt_keep")),
+        "registry should no longer track wt_keep, paths: {paths:?}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+/// `worktree remove --delete-dir` removes both the registry entry and the
+/// on-disk directory when the worktree is clean.
+async fn test_worktree_remove_with_delete_dir_clean_path() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    exec_async(vec!["worktree", "add", "wt_delete"])
+        .await
+        .expect("worktree add should succeed");
+
+    let wt_path = repo_dir.path().join("wt_delete");
+    assert!(wt_path.is_dir());
+
+    exec_async(vec!["worktree", "remove", "--delete-dir", "wt_delete"])
+        .await
+        .expect("worktree remove --delete-dir on a clean worktree should succeed");
+
+    assert!(
+        !wt_path.exists(),
+        "--delete-dir must remove the directory on disk"
+    );
+    let paths = worktree_paths();
+    assert!(
+        !paths.iter().any(|p| p.ends_with("wt_delete")),
+        "registry should no longer track wt_delete, paths: {paths:?}"
+    );
+}

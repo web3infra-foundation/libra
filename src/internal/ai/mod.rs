@@ -8,8 +8,9 @@
 //!   [`ChatAgent`] types that wrap a provider's completion model with tools,
 //!   preamble injection, and message history.
 //! - **Providers** ([`providers`]): one submodule per LLM backend (`gemini`,
-//!   `openai`, `anthropic`, `deepseek`, `zhipu`, `ollama`, ...) — each implements
-//!   [`CompletionModel`] so the rest of the stack stays provider-agnostic.
+//!   `openai`, `anthropic`, `deepseek`, `kimi`, `zhipu`, `ollama`, ...) — each
+//!   implements [`CompletionModel`] so the rest of the stack stays
+//!   provider-agnostic.
 //! - **Completion contracts** ([`completion`]): the [`CompletionModel`], [`Chat`],
 //!   [`Prompt`], and [`Message`] traits/types that providers must satisfy.
 //! - **Tools** ([`tools`]): the registry and handlers (apply patch, shell, read
@@ -51,6 +52,13 @@
 
 // Agent framework: Agent, AgentBuilder, ChatAgent and their builders.
 pub mod agent;
+// Rule-driven automation MVP for hooks, cron, and source-triggered workflows.
+pub mod automation;
+// Step 2 sub-agent contracts (CEX-S2-10 schema-only scaffold).
+// Gated behind `subagent-scaffold` Cargo feature; off by default. See module
+// docs for CP-4 gate-violation note.
+#[cfg(feature = "subagent-scaffold")]
+pub mod agent_run;
 // Generic LLM client helpers shared across providers.
 pub mod client;
 // Adapter for the managed Codex provider runtime.
@@ -59,6 +67,8 @@ pub mod codex;
 pub mod commands;
 // Completion-model trait and request/response types every provider implements.
 pub mod completion;
+// Provider-aware prompt context budget planning and allocation.
+pub mod context_budget;
 // Crate-private helpers for capturing artifacts produced by tool calls.
 pub(crate) mod generated_artifacts;
 // Conversation history datastructures (compaction, persistence, replay).
@@ -87,10 +97,16 @@ pub mod providers;
 pub mod runtime;
 // Filesystem/network sandbox shared by every tool handler.
 pub mod sandbox;
+// Markdown skills with tool-policy metadata and scanner warnings.
+pub mod skills;
+// Source Pool for MCP / REST / local-doc capability providers.
+pub mod sources;
 // Per-session persistent state.
 pub mod session;
 // Tool registry + handlers (ApplyPatch, Shell, ReadFile, ...).
 pub mod tools;
+// Provider-neutral usage persistence, aggregation, and display helpers.
+pub mod usage;
 // Misc utilities used across the AI module.
 pub mod util;
 // Optional embedded web UI for collaboration.

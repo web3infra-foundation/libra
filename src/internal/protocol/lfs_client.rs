@@ -745,6 +745,7 @@ mod tests {
         println!("{:?}", serde_json::to_string(&vars).unwrap());
     }
 
+    #[cfg(feature = "test-network")]
     #[tokio::test]
     async fn test_github_batch() {
         if std::env::var("LIBRA_TEST_GITHUB_TOKEN").map_or(true, |v| v.is_empty()) {

@@ -1,28 +1,39 @@
-//! L3 integration test for stateful ChatAgent conversation with real Gemini API.
+//! L3 integration test for stateful ChatAgent conversation with the live DeepSeek API.
 //!
 //! Drives a `ChatAgent` (which wraps a base `Agent` plus a turn history) across two
 //! prompts to confirm history is forwarded into subsequent completion requests — the
 //! canonical test of the runtime's "memory" wiring against a live provider.
 //!
-//! **Layer:** L3 — opt-in live gate. Skipped unless `LIBRA_AI_LIVE_GEMINI=1`
-//! and `GEMINI_API_KEY` are both set so default tests do not depend on Google
-//! Cloud project API enablement.
+//! **Layer:** L3 — gated on `DEEPSEEK_API_KEY` being set in the environment. The
+//! key alone is sufficient because DeepSeek's API enablement is part of the
+//! account; there's no parallel project-API-enablement gate to worry about
+//! (unlike the previous Gemini setup, which needed a separate
+//! `LIBRA_AI_LIVE_GEMINI=1` opt-in to avoid running against a project where
+//! the Generative Language API was disabled). With `source .env.test` exporting
+//! `DEEPSEEK_API_KEY`, this test runs and is expected to pass.
 
 use libra::internal::ai::{
     agent::{AgentBuilder, ChatAgent},
-    providers::gemini::Client,
+    client::CompletionClient,
+    providers::deepseek::Client,
 };
 
-/// Return `true` only for an explicit live Gemini run.
+/// L3 model used by every DeepSeek-backed integration test in this crate.
 ///
-/// Boundary: a configured `GEMINI_API_KEY` alone is insufficient because `.env.test`
-/// may contain a key for a project where the Generative Language API is disabled.
-fn live_gemini_enabled() -> bool {
-    std::env::var("LIBRA_AI_LIVE_GEMINI").is_ok_and(|value| value == "1")
-        && std::env::var("GEMINI_API_KEY").is_ok_and(|value| !value.is_empty())
+/// `deepseek-v4-flash` is the cheap / fast tier that matches what
+/// `.env.test`-backed local runs and the GitHub Actions L3 nightly job pay
+/// for. Tests must not silently switch to a costlier tier (e.g.
+/// `deepseek-v4-pro`) without a deliberate per-test override.
+const DEEPSEEK_TEST_MODEL: &str = "deepseek-v4-flash";
+
+/// Return `true` when the DeepSeek live gate is satisfied — i.e. a non-empty
+/// `DEEPSEEK_API_KEY` is in the process environment. Sourcing `.env.test`
+/// before `cargo test --all` is the documented way to enable L3 AI tests.
+fn deepseek_live_enabled() -> bool {
+    std::env::var("DEEPSEEK_API_KEY").is_ok_and(|value| !value.trim().is_empty())
 }
 
-/// Integration test for ChatAgent state management with real Gemini API.
+/// Integration test for ChatAgent state management with the live DeepSeek API.
 ///
 /// Scenario: opens a two-turn conversation. Turn 1 establishes the user's name; Turn 2
 /// asks for it back. The test passes only when the second response references "libra",
@@ -30,27 +41,32 @@ fn live_gemini_enabled() -> bool {
 /// Also asserts the in-memory transcript is exactly four messages (user/asst x 2),
 /// catching regressions where history is dropped or duplicated.
 ///
-/// Boundary: skipped unless `LIBRA_AI_LIVE_GEMINI=1` and `GEMINI_API_KEY` are both
-/// set.
+/// Boundary: skipped when `DEEPSEEK_API_KEY` is unset. When the key is set the
+/// test reaches DeepSeek's `/v1/chat/completions` endpoint and is expected to
+/// pass — failure here represents a real regression in the provider client or
+/// the chat runtime.
 ///
 /// # Setup
-/// This test requires a valid `GEMINI_API_KEY` environment variable.
 ///
 /// ```bash
-/// export LIBRA_AI_LIVE_GEMINI=1
-/// export GEMINI_API_KEY="your_key_here"
-/// cargo test --test ai_chat_agent_test test_chat_agent_conversation
+/// source .env.test && cargo test --test ai_chat_agent_test test_chat_agent_conversation
+/// ```
+///
+/// or set the key inline:
+///
+/// ```bash
+/// DEEPSEEK_API_KEY=sk-... cargo test --test ai_chat_agent_test test_chat_agent_conversation
 /// ```
 #[tokio::test]
 async fn test_chat_agent_conversation() {
-    if !live_gemini_enabled() {
-        eprintln!("skipped (set LIBRA_AI_LIVE_GEMINI=1 and GEMINI_API_KEY to run Gemini gate)");
+    if !deepseek_live_enabled() {
+        eprintln!("skipped (set DEEPSEEK_API_KEY to run the DeepSeek L3 gate)");
         return;
     }
 
     // 1. Create Client and Model
-    let client = Client::from_env().expect("Failed to create client");
-    let model = client.completion_model("gemini-2.5-flash");
+    let client = Client::from_env().expect("DEEPSEEK_API_KEY missing despite gate");
+    let model = client.completion_model(DEEPSEEK_TEST_MODEL);
 
     // 2. Create Base Agent
     let agent = AgentBuilder::new(model)

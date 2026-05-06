@@ -48,6 +48,11 @@ pub struct Orchestrator<M: CompletionModel> {
     model: M,
     registry: Arc<ToolRegistry>,
     config: OrchestratorConfig,
+    /// Process-scoped FUSE provisioning gate. Persisted across `run()` calls so
+    /// that once a task fails to mount FUSE, every subsequent orchestrator
+    /// invocation in the same process skips FUSE without re-paying the
+    /// mount-and-fail cost or emitting another fallback warning.
+    fuse_state: workspace::FuseProvisionState,
 }
 
 struct FanoutObserver {
@@ -118,12 +123,41 @@ async fn confirm_phase(
     confirmer: Option<&dyn types::OrchestratorPhaseConfirmer>,
     prompt: PhaseConfirmationPrompt,
 ) -> Result<(), OrchestratorError> {
+    let phase_number = prompt.phase.number();
+    let phase_label = prompt.phase.label();
+    let title = prompt.title.clone();
+    let summary = prompt.summary.clone();
+    let detail_count = prompt.details.len();
+
     let Some(confirmer) = confirmer else {
+        tracing::info!(
+            phase = phase_number,
+            phase_label = %phase_label,
+            title = %title,
+            summary = %summary,
+            detail_count,
+            "orchestrator phase confirmation bypassed"
+        );
         return Ok(());
     };
 
-    let phase_label = prompt.phase.label();
-    match confirmer.confirm(prompt).await {
+    tracing::info!(
+        phase = phase_number,
+        phase_label = %phase_label,
+        title = %title,
+        summary = %summary,
+        detail_count,
+        "orchestrator phase confirmation requested"
+    );
+    let decision = confirmer.confirm(prompt).await;
+    tracing::info!(
+        phase = phase_number,
+        phase_label = %phase_label,
+        decision = ?decision,
+        "orchestrator phase confirmation resolved"
+    );
+
+    match decision {
         PhaseConfirmationDecision::Continue => Ok(()),
         PhaseConfirmationDecision::Reject => Err(OrchestratorError::PolicyViolation(format!(
             "{phase_label} was rejected by the user"
@@ -239,12 +273,56 @@ fn execution_complete_for_phase3(
         .all(|task| run_state.status_for(task.id()) == types::TaskNodeStatus::Completed)
 }
 
+fn task_status_count(
+    run_state: &run_state::RunStateSnapshot,
+    status: types::TaskNodeStatus,
+) -> usize {
+    run_state
+        .task_results
+        .iter()
+        .filter(|result| result.status == status)
+        .count()
+}
+
+fn log_phase3_entry(plan: &types::ExecutionPlanSpec, run_state: &run_state::RunStateSnapshot) {
+    tracing::info!(
+        phase = 3_u8,
+        revision = plan.revision,
+        completed = task_status_count(run_state, types::TaskNodeStatus::Completed),
+        failed = task_status_count(run_state, types::TaskNodeStatus::Failed),
+        total = plan.tasks.len(),
+        dagrs_completed = run_state.dagrs_runtime.completed_nodes,
+        dagrs_total = run_state.dagrs_runtime.total_nodes,
+        "orchestrator entering phase 3 system verification"
+    );
+}
+
+fn log_phase3_report(plan: &types::ExecutionPlanSpec, report: &types::SystemReport) {
+    tracing::info!(
+        phase = 3_u8,
+        revision = plan.revision,
+        overall_passed = report.overall_passed,
+        integration_passed = report.integration.all_required_passed,
+        integration_checks = report.integration.results.len(),
+        security_passed = report.security.all_required_passed,
+        security_checks = report.security.results.len(),
+        release_passed = report.release.all_required_passed,
+        release_checks = report.release.results.len(),
+        review_passed = report.review_passed,
+        review_findings = report.review_findings.len(),
+        artifacts_complete = report.artifacts_complete,
+        missing_artifacts = report.missing_artifacts.len(),
+        "orchestrator phase 3 system verification completed"
+    );
+}
+
 impl<M: CompletionModel + 'static> Orchestrator<M> {
     pub fn new(model: M, registry: Arc<ToolRegistry>, config: OrchestratorConfig) -> Self {
         Self {
             model,
             registry,
             config,
+            fuse_state: workspace::FuseProvisionState::default(),
         }
     }
 
@@ -276,11 +354,10 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
         let max_replans = replan::max_replans(&spec);
         let mut replan_count = 0_u32;
         let mut plan_revision_specs = Vec::new();
-        // Session-scoped FUSE provisioning gate. Created once and shared with
-        // every ExecutorConfig across replans so the first FUSE failure
-        // disables FUSE for the rest of this session and emits exactly one
-        // TUI note.
-        let fuse_state = workspace::FuseProvisionState::default();
+        // FUSE provisioning gate. Reused across orchestrator runs in the same
+        // process so the first failure disables FUSE for every subsequent task,
+        // not just for the current run's replans.
+        let fuse_state = self.fuse_state.clone();
         let downstream_observer = self.config.observer.clone();
         let persistence_session = if let Some(ref mcp_server) = self.config.mcp_server {
             Some(
@@ -385,6 +462,7 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
             let execution_complete = execution_complete_for_phase3(&plan_spec, &run_state);
             if execution_complete {
                 // Phase 3: System verification
+                log_phase3_entry(&plan_spec, &run_state);
                 confirm_phase(
                     self.config.phase_confirmer.as_deref(),
                     phase3_confirmation_prompt(&plan_spec, &run_state),
@@ -393,8 +471,15 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
                 if let Some(observer) = &observer {
                     observer.on_system_verification(&plan_spec, &system_report);
                 }
+                log_phase3_report(&plan_spec, &system_report);
 
                 // Phase 4: Decision
+                tracing::info!(
+                    phase = 4_u8,
+                    revision = plan_spec.revision,
+                    overall_passed = system_report.overall_passed,
+                    "orchestrator entering phase 4 decision"
+                );
                 confirm_phase(
                     self.config.phase_confirmer.as_deref(),
                     phase4_confirmation_prompt(&plan_spec, &system_report),
@@ -422,6 +507,14 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
             if let Some(observer) = &observer {
                 observer.on_decision(&plan_spec, &decision);
             }
+            tracing::info!(
+                phase = 4_u8,
+                revision = plan_spec.revision,
+                decision = ?decision,
+                risk_level = ?spec.risk.level,
+                human_in_loop_required = spec.risk.human_in_loop.required,
+                "orchestrator phase 4 decision made"
+            );
             plan_revision_specs.push(plan_spec.clone());
             break (plan_spec, run_state, system_report, decision);
         };

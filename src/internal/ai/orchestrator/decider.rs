@@ -14,6 +14,7 @@ use crate::internal::ai::intentspec::types::RiskLevel;
 ///
 /// Decision logic:
 /// - Any task failed → Abandon
+/// - Automated review infrastructure failed while gates/artifacts passed → HumanReviewRequired
 /// - System verification failed → Abandon
 /// - human_in_loop required → HumanReviewRequired
 /// - All pass + low/medium risk → Commit
@@ -33,6 +34,12 @@ pub fn make_decision(
         return DecisionOutcome::Abandon;
     }
 
+    if non_review_verification_passed(system_report)
+        && review_infrastructure_needs_human(system_report)
+    {
+        return DecisionOutcome::HumanReviewRequired;
+    }
+
     // System verification failed → abandon
     if !system_report.overall_passed {
         return DecisionOutcome::Abandon;
@@ -49,6 +56,21 @@ pub fn make_decision(
     }
 
     DecisionOutcome::Commit
+}
+
+fn non_review_verification_passed(system_report: &SystemReport) -> bool {
+    system_report.integration.all_required_passed
+        && system_report.security.all_required_passed
+        && system_report.release.all_required_passed
+        && system_report.artifacts_complete
+}
+
+fn review_infrastructure_needs_human(system_report: &SystemReport) -> bool {
+    !system_report.review_passed
+        && system_report.review_findings.iter().any(|finding| {
+            finding.contains("automated review did not complete")
+                || finding.contains("human review required")
+        })
 }
 
 #[cfg(test)]
@@ -167,6 +189,21 @@ mod tests {
         let report = failing_system_report();
         let decision = make_decision(&results, &report, &RiskLevel::Low, false);
         assert_eq!(decision, DecisionOutcome::Abandon);
+    }
+
+    #[test]
+    fn test_review_infrastructure_failure_requires_human_review() {
+        let results = run_state(vec![task_result(TaskNodeStatus::Completed)]);
+        let mut report = passing_system_report();
+        report.review_passed = false;
+        report.review_findings = vec![
+            "automated review did not complete; human review required [reviewer pass failed: Tool loop exceeded maximum turns (8)]".to_string(),
+        ];
+        report.overall_passed = false;
+
+        let decision = make_decision(&results, &report, &RiskLevel::Low, false);
+
+        assert_eq!(decision, DecisionOutcome::HumanReviewRequired);
     }
 
     #[test]

@@ -28,7 +28,7 @@ src/
 ├── internal/                    # Core logic
 │   ├── ai/                      # AI Agent Infrastructure
 │   │   ├── agent/               # Agent framework, builder, profiles, runtime
-│   │   ├── providers/           # LLM backends (gemini, openai, anthropic, deepseek, zhipu, ollama)
+│   │   ├── providers/           # LLM backends (gemini, openai, anthropic, deepseek, kimi, zhipu, ollama)
 │   │   ├── tools/               # Tool registry & handlers (ApplyPatch, Shell, ReadFile, Grep, etc.)
 │   │   ├── completion/          # CompletionModel trait, request/response types
 │   │   ├── mcp/                 # Model Context Protocol server
@@ -197,6 +197,7 @@ SQLite database at `.libra/libra.db` with tables: `config`, `reference`, `reflog
 | `openai` | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
 | `anthropic` | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
 | `deepseek` | `DEEPSEEK_API_KEY` | — |
+| `kimi` | `MOONSHOT_API_KEY` | `MOONSHOT_BASE_URL` |
 | `zhipu` | `ZHIPU_API_KEY` | `ZHIPU_BASE_URL` |
 | `ollama` | — | `OLLAMA_BASE_URL` or `--api-base` |
 

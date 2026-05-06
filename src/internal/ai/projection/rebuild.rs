@@ -330,15 +330,14 @@ impl<'a> ProjectionRebuilder<'a> {
         let active_run_id = latest_active_run(&selected_runs, &run_statuses);
         let active_plan_step_id = latest_active_plan_step(&selected_plan_step_events);
 
-        let selected_plan_id = selected_plan_id(&selected_runs, &selected_plans, &plan_heads);
-        let selected_plan_ids = selected_plan_id
-            .map(|plan_id| {
-                vec![PlanHeadRef {
-                    plan_id,
-                    ordinal: 0,
-                }]
-            })
-            .unwrap_or_default();
+        let fallback_selected_plan_id =
+            selected_plan_id(&selected_runs, &selected_plans, &plan_heads);
+        let selected_plan_ids =
+            selected_plan_refs(&selected_plans, &plan_heads, fallback_selected_plan_id);
+        let selected_plan_id = selected_plan_ids
+            .first()
+            .map(|plan| plan.plan_id)
+            .or(fallback_selected_plan_id);
 
         let scheduler = SchedulerState {
             thread_id: thread.thread_id,
@@ -415,6 +414,7 @@ impl<'a> ProjectionRebuilder<'a> {
             &selected_intents,
             &selected_plans,
             &selected_plan_step_events,
+            &selected_context_frames,
             &context_frame_map,
         );
 
@@ -1433,6 +1433,110 @@ fn selected_plan_id(runs: &[&Run], plans: &[&Plan], plan_heads: &[PlanHeadRef]) 
         })
 }
 
+fn selected_plan_refs(
+    plans: &[&Plan],
+    plan_heads: &[PlanHeadRef],
+    fallback_selected_plan_id: Option<Uuid>,
+) -> Vec<PlanHeadRef> {
+    let head_ids = plan_heads
+        .iter()
+        .map(|head| head.plan_id)
+        .collect::<HashSet<_>>();
+    let mut candidates = plans
+        .iter()
+        .copied()
+        .filter(|plan| head_ids.is_empty() || head_ids.contains(&plan.header().object_id()))
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        candidates = plans.to_vec();
+    }
+
+    let execution_plan = latest_plan_for_role(&candidates, PlanProjectionRole::Execution)
+        .or_else(|| fallback_selected_plan_id.and_then(|id| find_plan_by_id(&candidates, id)));
+    let test_plan = latest_plan_for_role(&candidates, PlanProjectionRole::Test);
+
+    let mut refs = Vec::new();
+    if let Some(plan) = execution_plan {
+        refs.push(PlanHeadRef {
+            plan_id: plan.header().object_id(),
+            ordinal: 0,
+        });
+    }
+    if let Some(plan) = test_plan
+        && refs
+            .iter()
+            .all(|selected| selected.plan_id != plan.header().object_id())
+    {
+        refs.push(PlanHeadRef {
+            plan_id: plan.header().object_id(),
+            ordinal: refs.len() as i64,
+        });
+    }
+    if refs.is_empty()
+        && let Some(plan_id) = fallback_selected_plan_id
+    {
+        refs.push(PlanHeadRef {
+            plan_id,
+            ordinal: 0,
+        });
+    }
+
+    refs
+}
+
+fn find_plan_by_id<'a>(plans: &[&'a Plan], plan_id: Uuid) -> Option<&'a Plan> {
+    plans
+        .iter()
+        .copied()
+        .find(|plan| plan.header().object_id() == plan_id)
+}
+
+fn latest_plan_for_role<'a>(plans: &[&'a Plan], role: PlanProjectionRole) -> Option<&'a Plan> {
+    plans
+        .iter()
+        .copied()
+        .filter(|plan| plan_projection_role(plan) == role)
+        .max_by_key(|plan| sort_key(plan.header().created_at(), plan.header().object_id()))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlanProjectionRole {
+    Execution,
+    Test,
+}
+
+fn plan_projection_role(plan: &Plan) -> PlanProjectionRole {
+    for step in plan.steps() {
+        if let Some(inputs) = step.inputs()
+            && let Some(role) = inputs.get("planRole").and_then(|value| value.as_str())
+        {
+            return if role == "test" {
+                PlanProjectionRole::Test
+            } else {
+                PlanProjectionRole::Execution
+            };
+        }
+    }
+
+    if !plan.steps().is_empty()
+        && plan.steps().iter().all(|step| {
+            step.inputs().is_some_and(|inputs| {
+                inputs
+                    .get("kind")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|kind| kind.eq_ignore_ascii_case("gate"))
+                    || inputs
+                        .get("gateStage")
+                        .is_some_and(|value| !value.is_null())
+            })
+        })
+    {
+        PlanProjectionRole::Test
+    } else {
+        PlanProjectionRole::Execution
+    }
+}
+
 fn build_task_run_index(runs: &[&Run]) -> Vec<TaskRunIndexRow> {
     let mut by_task = BTreeMap::<Uuid, Vec<&Run>>::new();
     for run in runs {
@@ -1516,6 +1620,7 @@ fn build_intent_context_frame_index(
     intents: &[&Intent],
     plans: &[&Plan],
     plan_step_events: &[&PlanStepEvent],
+    context_frames: &[&ContextFrame],
     context_frame_map: &HashMap<Uuid, &ContextFrame>,
 ) -> Vec<IntentContextFrameIndexRow> {
     let mut rows = Vec::new();
@@ -1555,6 +1660,27 @@ fn build_intent_context_frame_index(
         }
     }
 
+    for frame in context_frames {
+        let frame_id = frame.header().object_id();
+        let intent_id = frame.intent_id().or_else(|| {
+            frame
+                .plan_id()
+                .and_then(|plan_id| plan_intent.get(&plan_id).copied())
+        });
+        let Some(intent_id) = intent_id else {
+            continue;
+        };
+        let relation_kind = relation_kind_for_context_frame(frame);
+        if seen.insert((intent_id, frame_id, relation_kind)) {
+            rows.push(IntentContextFrameIndexRow {
+                intent_id,
+                context_frame_id: frame_id,
+                relation_kind: relation_kind.to_string(),
+                created_at: frame.header().created_at(),
+            });
+        }
+    }
+
     for event in plan_step_events {
         let Some(intent_id) = plan_intent.get(&event.plan_id()).copied() else {
             continue;
@@ -1578,6 +1704,24 @@ fn build_intent_context_frame_index(
     }
 
     rows
+}
+
+fn relation_kind_for_context_frame(frame: &ContextFrame) -> &'static str {
+    match frame.kind() {
+        FrameKind::IntentAnalysis => "intent_analysis",
+        FrameKind::SystemState if frame.plan_id().is_some() && frame.run_id().is_none() => {
+            "planning"
+        }
+        FrameKind::Checkpoint => "validation",
+        FrameKind::ErrorRecovery => "recovery",
+        _ => {
+            if frame.run_id().is_some() || frame.step_id().is_some() {
+                "execution"
+            } else {
+                "context"
+            }
+        }
+    }
 }
 
 fn projection_created_at(
@@ -1721,7 +1865,10 @@ mod tests {
         internal::{
             ai::{history::HistoryManager, projection::ThreadProjection},
             db,
-            model::{ai_index_task_run, ai_scheduler_state},
+            model::{
+                ai_index_intent_context_frame, ai_index_task_run, ai_scheduler_selected_plan,
+                ai_scheduler_state,
+            },
         },
         utils::{storage::local::LocalStorage, storage_ext::StorageExt, test},
     };
@@ -1944,13 +2091,26 @@ mod tests {
             .expect("store intent");
 
         let mut plan = Plan::new(actor.clone(), intent.header().object_id()).expect("plan");
-        let step = git_internal::internal::object::plan::PlanStep::new("execute");
+        let mut step = git_internal::internal::object::plan::PlanStep::new("execute");
+        step.set_inputs(Some(
+            json!({"planRole": "execution", "kind": "Implementation"}),
+        ));
         let step_id = step.step_id();
         plan.add_step(step);
         storage
             .put_tracked(&plan, &history)
             .await
             .expect("store plan");
+
+        let mut test_plan =
+            Plan::new(actor.clone(), intent.header().object_id()).expect("test plan");
+        let mut test_step = git_internal::internal::object::plan::PlanStep::new("test");
+        test_step.set_inputs(Some(json!({"planRole": "test", "kind": "Gate"})));
+        test_plan.add_step(test_step);
+        storage
+            .put_tracked(&test_plan, &history)
+            .await
+            .expect("store test plan");
 
         let mut task = Task::new(actor.clone(), "Execute materializer", None).expect("task");
         task.set_intent(Some(intent.header().object_id()));
@@ -2037,11 +2197,21 @@ mod tests {
             rebuild.scheduler.selected_plan_id,
             Some(plan.header().object_id())
         );
-        assert_eq!(rebuild.scheduler.current_plan_heads.len(), 1);
+        assert_eq!(
+            rebuild
+                .scheduler
+                .selected_plan_ids
+                .iter()
+                .map(|selected| selected.plan_id)
+                .collect::<Vec<_>>(),
+            vec![plan.header().object_id(), test_plan.header().object_id()]
+        );
+        assert_eq!(rebuild.scheduler.current_plan_heads.len(), 2);
         assert_eq!(rebuild.scheduler.live_context_window.len(), 1);
         assert_eq!(rebuild.plan_step_task_index.len(), 1);
         assert_eq!(rebuild.run_event_index.len(), 1);
         assert!(rebuild.run_event_index[0].is_latest);
+        assert_eq!(rebuild.intent_context_frame_index.len(), 1);
 
         let task_run_rows = ai_index_task_run::Entity::find()
             .all(db_conn.as_ref())
@@ -2049,5 +2219,15 @@ mod tests {
             .expect("task run rows");
         assert_eq!(task_run_rows.len(), 1);
         assert!(task_run_rows[0].is_latest);
+        let selected_plan_rows = ai_scheduler_selected_plan::Entity::find()
+            .all(db_conn.as_ref())
+            .await
+            .expect("selected plan rows");
+        assert_eq!(selected_plan_rows.len(), 2);
+        let context_frame_rows = ai_index_intent_context_frame::Entity::find()
+            .all(db_conn.as_ref())
+            .await
+            .expect("intent context frame rows");
+        assert_eq!(context_frame_rows.len(), 1);
     }
 }

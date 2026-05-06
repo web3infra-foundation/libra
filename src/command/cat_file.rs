@@ -152,12 +152,20 @@ fn is_known_ai_object_type(type_name: &str) -> bool {
     AI_OBJECT_TYPES.contains(&type_name)
 }
 
+fn canonical_ai_object_type(type_name: &str) -> &str {
+    match type_name {
+        "context_snapshot" => "snapshot",
+        "tool_invocation" => "invocation",
+        _ => type_name,
+    }
+}
+
 fn split_typed_ai_selector(selector: &str) -> Option<(&str, &str)> {
     let (type_name, object_id) = selector.split_once(':')?;
     if object_id.is_empty() || !is_known_ai_object_type(type_name) {
         return None;
     }
-    Some((type_name, object_id))
+    Some((canonical_ai_object_type(type_name), object_id))
 }
 
 async fn resolve_ai_object_with_history(
@@ -622,8 +630,9 @@ async fn ai_list_types_data() -> CliResult<Vec<serde_json::Value>> {
 async fn ai_list_objects_data(type_name: &str) -> CliResult<Vec<serde_json::Value>> {
     let hm = build_history_manager().await?;
     ensure_ai_listable_type(&hm, type_name).await?;
+    let canonical_type_name = canonical_ai_object_type(type_name);
     let objects = hm
-        .list_objects(type_name)
+        .list_objects(canonical_type_name)
         .await
         .map_err(|e| CliError::fatal(format!("failed to list {type_name} objects: {e}")))?;
 
@@ -910,7 +919,8 @@ async fn ai_list_objects(type_name: &str) {
     if let Err(err) = ensure_ai_listable_type(&hm, type_name).await {
         cat_file_exit(err.to_string());
     }
-    let objects = match hm.list_objects(type_name).await {
+    let canonical_type_name = canonical_ai_object_type(type_name);
+    let objects = match hm.list_objects(canonical_type_name).await {
         Ok(o) => o,
         Err(e) => cat_file_exit(format!(
             "fatal: failed to list {} objects: {}",

@@ -922,6 +922,9 @@ mod tests {
     fn restore_metadata_updates_existing_null_remote_references() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let repo = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _test_home = ScopedEnvVar::set("LIBRA_TEST_HOME", home.path());
         rt.block_on(setup_with_new_libra_in(repo.path()));
         let _cwd = ChangeDirGuard::new(repo.path());
 
@@ -978,6 +981,9 @@ mod tests {
     fn create_r2_storage_reads_values_from_local_config() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let repo = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _test_home = ScopedEnvVar::set("LIBRA_TEST_HOME", home.path());
         rt.block_on(setup_with_new_libra_in(repo.path()));
         let _cwd = ChangeDirGuard::new(repo.path());
         let _endpoint = ClearedEnvVarGuard::new("LIBRA_STORAGE_ENDPOINT");

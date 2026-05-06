@@ -55,6 +55,8 @@ EXAMPLES:
     libra fetch origin                     Fetch from a specific remote
     libra fetch origin main                Fetch only one branch from a remote
     libra fetch --all                      Fetch every configured remote
+    libra fetch origin --depth 1           Shallow fetch (latest commit only)
+    libra fetch --all --depth 3            Shallow fetch across all remotes
     libra --json fetch origin              Structured JSON output for agents";
 
 pub(crate) enum RemoteClient {
@@ -479,6 +481,10 @@ pub struct FetchArgs {
     /// Fetch all remotes.
     #[clap(long, short, conflicts_with("repository"))]
     pub all: bool,
+
+    /// Limit fetching to the specified number of commits from the tip of each remote branch
+    #[clap(long, value_name = "N")]
+    pub depth: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -706,6 +712,7 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         repository,
         refspec,
         all,
+        depth,
     } = args;
 
     if all {
@@ -717,7 +724,7 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
         let mut results = Vec::with_capacity(remotes.len());
         for remote in remotes {
             results.push(
-                fetch_repository_with_result(remote, None, false, None, output)
+                fetch_repository_with_result(remote, None, false, depth, output)
                     .await
                     .map_err(CliError::from)?,
             );
@@ -762,7 +769,7 @@ async fn run_fetch(args: FetchArgs, output: &OutputConfig) -> CliResult<FetchOut
                 .with_hint("use 'libra remote -v' to inspect configured remotes")
         })?;
 
-    let result = fetch_repository_with_result(remote_config, refspec.clone(), false, None, output)
+    let result = fetch_repository_with_result(remote_config, refspec.clone(), false, depth, output)
         .await
         .map_err(CliError::from)?;
 

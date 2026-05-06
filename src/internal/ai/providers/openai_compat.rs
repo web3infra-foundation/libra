@@ -1,6 +1,6 @@
 //! Shared wire types and helpers for OpenAI-compatible chat completion providers.
 //!
-//! Several AI providers (OpenAI, Ollama, DeepSeek, Zhipu) expose an
+//! Several AI providers (OpenAI, Ollama, DeepSeek, Kimi, Zhipu) expose an
 //! OpenAI-compatible `/chat/completions` endpoint. This module centralizes the
 //! common request/response types and conversion helpers so that each provider
 //! only needs to define its own `Request` struct (to accommodate minor API
@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 use crate::internal::ai::{
     completion::{
         AssistantContent, CompletionError, CompletionUsage, CompletionUsageSummary, Function,
-        Message, Text, ToolCall, UserContent, request::CompletionRequest,
+        Message, Text, ToolCall, UserContent, parse_tool_call_arguments_with_repair,
+        request::CompletionRequest,
     },
     tools::ToolDefinition,
 };
@@ -23,7 +24,7 @@ use crate::internal::ai::{
 
 /// A message in an OpenAI-compatible chat conversation, tagged by `role`.
 ///
-/// Used by all OpenAI-compatible providers (OpenAI, Ollama, DeepSeek, Zhipu).
+/// Used by all OpenAI-compatible providers (OpenAI, Ollama, DeepSeek, Kimi, Zhipu).
 /// The discriminant `role` is serialized as a lowercase string so it matches
 /// the on-the-wire JSON shape (`"role": "user"`, `"role": "assistant"`, etc.).
 #[derive(Debug, Serialize, Deserialize)]
@@ -35,9 +36,10 @@ pub enum ChatMessage {
     User { content: String },
     /// An assistant response, which may include both text and tool calls.
     ///
-    /// `reasoning_content` is only populated for providers that surface chain-of-thought
-    /// (currently DeepSeek's `reasoner` models). It is intentionally skipped during
-    /// serialisation when `None` so providers that reject the field do not see it.
+    /// `reasoning_content` is only populated for providers that surface
+    /// chain-of-thought, such as DeepSeek and Kimi thinking models. It is
+    /// intentionally skipped during serialisation when `None` so providers that
+    /// reject the field do not see it.
     Assistant {
         content: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -113,6 +115,20 @@ pub struct ChatUsage {
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
     pub total_tokens: usize,
+    #[serde(default)]
+    pub prompt_tokens_details: Option<ChatPromptTokensDetails>,
+    #[serde(default)]
+    pub completion_tokens_details: Option<ChatCompletionTokensDetails>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ChatPromptTokensDetails {
+    pub cached_tokens: Option<usize>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ChatCompletionTokensDetails {
+    pub reasoning_tokens: Option<usize>,
 }
 
 /// Top-level response from an OpenAI-compatible `/chat/completions` endpoint.
@@ -134,6 +150,17 @@ impl CompletionUsage for ChatResponse {
         self.usage.as_ref().map(|usage| CompletionUsageSummary {
             input_tokens: usage.prompt_tokens as u64,
             output_tokens: usage.completion_tokens as u64,
+            cached_tokens: usage
+                .prompt_tokens_details
+                .as_ref()
+                .and_then(|details| details.cached_tokens)
+                .map(|tokens| tokens as u64),
+            reasoning_tokens: usage
+                .completion_tokens_details
+                .as_ref()
+                .and_then(|details| details.reasoning_tokens)
+                .map(|tokens| tokens as u64),
+            total_tokens: Some(usage.total_tokens as u64),
             cost_usd: None,
         })
     }
@@ -206,9 +233,9 @@ pub fn build_messages(request: &CompletionRequest) -> Result<Vec<ChatMessage>, C
 /// Builds messages while preserving assistant `reasoning_content`.
 ///
 /// Functional scope:
-/// - Provider-specific helper for DeepSeek's thinking mode where the chain-of-thought
-///   tokens emitted by the previous turn must be echoed back to keep the model
-///   "thinking" coherent across turns.
+/// - Provider-specific helper for thinking modes where chain-of-thought tokens
+///   emitted by the previous turn must be echoed back to keep the model's
+///   reasoning coherent across turns.
 ///
 /// Boundary conditions:
 /// - Other OpenAI-compatible providers should use [`build_messages`] so they do not
@@ -333,15 +360,18 @@ fn build_messages_internal(
 /// - Non-empty text is emitted as [`AssistantContent::Text`]; whitespace-only
 ///   text is dropped so downstream consumers don't see meaningless blanks.
 /// - Each tool call has its JSON arguments string parsed back into a
-///   [`serde_json::Value`]; failure to parse falls back to a `Value::String`
-///   containing the original raw payload so a malformed tool call is still
-///   addressable.
+///   [`serde_json::Value`]; malformed arguments are first passed through the
+///   shared deterministic JSON repair helper, then fall back to a
+///   `Value::String` containing the original raw payload only if repair fails.
 ///
 /// Boundary conditions:
 /// - Returns [`CompletionError::ResponseError`] if the message is not an
 ///   `Assistant` variant — the OpenAI schema guarantees `Assistant` here, so
 ///   any other variant indicates a server-side protocol violation.
-pub fn parse_choice_content(choice: &ChatChoice) -> Result<Vec<AssistantContent>, CompletionError> {
+pub fn parse_choice_content_for_provider(
+    provider: &str,
+    choice: &ChatChoice,
+) -> Result<Vec<AssistantContent>, CompletionError> {
     match &choice.message {
         ChatMessage::Assistant {
             content,
@@ -357,8 +387,11 @@ pub fn parse_choice_content(choice: &ChatChoice) -> Result<Vec<AssistantContent>
             }
 
             for call in tool_calls {
-                let arguments: serde_json::Value = serde_json::from_str(&call.function.arguments)
-                    .unwrap_or_else(|_| serde_json::Value::String(call.function.arguments.clone()));
+                let arguments = parse_tool_call_arguments_with_repair(
+                    provider,
+                    &call.function.name,
+                    &call.function.arguments,
+                );
                 parts.push(AssistantContent::ToolCall(ToolCall {
                     id: call.id.clone(),
                     name: call.function.name.clone(),
@@ -380,7 +413,7 @@ pub fn parse_choice_content(choice: &ChatChoice) -> Result<Vec<AssistantContent>
 /// Extracts provider-specific reasoning content from an assistant choice.
 ///
 /// Functional scope:
-/// - Currently only DeepSeek's `reasoner` models populate this field.
+/// - DeepSeek and Kimi thinking models populate this field.
 ///
 /// Boundary conditions:
 /// - Whitespace-only `reasoning_content` is treated as absent so downstream code
@@ -574,5 +607,33 @@ mod tests {
 
         assert!(json[0].get("reasoning_content").is_none());
         assert_eq!(json[0]["content"], "visible answer");
+    }
+
+    #[test]
+    fn parse_choice_content_repairs_malformed_tool_arguments_before_raw_fallback() {
+        let choice = ChatChoice {
+            index: 0,
+            message: ChatMessage::Assistant {
+                content: None,
+                reasoning_content: None,
+                tool_calls: vec![ChatToolCall {
+                    id: "call_1".to_string(),
+                    r#type: "function".to_string(),
+                    function: ChatFunctionCall {
+                        name: "read_file".to_string(),
+                        arguments: "{file_path: 'Cargo.toml',}".to_string(),
+                    },
+                }],
+            },
+            finish_reason: Some("tool_calls".to_string()),
+        };
+
+        let content = parse_choice_content_for_provider("openai", &choice).unwrap();
+
+        assert!(matches!(
+            &content[0],
+            AssistantContent::ToolCall(call)
+                if call.function.arguments == serde_json::json!({"file_path": "Cargo.toml"})
+        ));
     }
 }

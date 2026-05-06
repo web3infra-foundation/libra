@@ -61,7 +61,7 @@ Every Libra command accepts the following global flags:
 | `libra branch` | `br` | Create, delete, rename, list, and inspect branches | [branch.md](branch.md) |
 | `libra tag` | | Create, list, or delete lightweight and annotated tags | [tag.md](tag.md) |
 | `libra switch` | `sw` | Switch branches, create new branches, or detach HEAD with fuzzy suggestions | [switch.md](switch.md) |
-| `libra checkout` | | Compatibility surface over `switch` + `restore` (hidden) | [checkout.md](checkout.md) |
+| `libra checkout` | | Branch compatibility surface; prefer `switch` for branches and `restore` for files | [checkout.md](checkout.md) |
 
 ### History Manipulation
 
@@ -72,7 +72,7 @@ Every Libra command accepts the following global flags:
 | `libra rebase` | `rb` | Reapply commits on top of another base tip with conflict resolution | [rebase.md](rebase.md) |
 | `libra cherry-pick` | `cp` | Apply changes from existing commits onto the current branch | [cherry-pick.md](cherry-pick.md) |
 | `libra revert` | | Create a new commit that undoes changes from a specified commit | [revert.md](revert.md) |
-| `libra bisect` | | Binary search to find the commit that introduced a bug (hidden) | [bisect.md](bisect.md) |
+| `libra bisect` | | Binary search to find the commit that introduced a bug; supports `start` / `bad` / `good` / `reset` / `skip` / `log` / `run` / `view` | [bisect.md](bisect.md) |
 
 ### Remote Operations
 
@@ -97,6 +97,7 @@ Every Libra command accepts the following global flags:
 | Command | Alias | Description | Doc |
 |---------|-------|-------------|-----|
 | `libra code` | | Interactive TUI with AI agent, web server, and MCP integration | [code.md](code.md) |
+| `libra code-control` | | Drive a local Libra Code TUI automation control session | [code-control.md](code-control.md) |
 | `libra graph` | | Inspect a Libra Code thread version graph in a dedicated TUI | [graph.md](graph.md) |
 
 ### Low-Level & Inspection

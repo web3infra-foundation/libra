@@ -664,8 +664,121 @@ fn summarize_tool_call(tool_name: &str, arguments: &Value) -> String {
         "request_user_input" => "Ask for input".to_string(),
         "submit_intent_draft" => "Submit intent draft".to_string(),
         "submit_plan_draft" => "Submit plan draft".to_string(),
-        _ => format!("Run {}", tool_name.replace('_', " ")),
+        _ => {
+            // For unrecognised tools, show a compact pretty-printed JSON
+            // signature so reviewers can see the actual argument shape rather
+            // than just the tool name.
+            let head = format!("Run {}", tool_name.replace('_', " "));
+            match format_arguments_inline(arguments, 96) {
+                Some(body) if !body.is_empty() => format!("{head} {body}"),
+                _ => head,
+            }
+        }
     }
+}
+
+/// Render a JSON value as a compact one-line summary (`{"key":"value", ...}`)
+/// while preserving pretty-printed JSON indentation for embedded multi-line
+/// strings. Returns `None` when the value is null or empty.
+fn format_arguments_inline(value: &Value, max_chars: usize) -> Option<String> {
+    if value.is_null() {
+        return None;
+    }
+    if let Some(obj) = value.as_object()
+        && obj.is_empty()
+    {
+        return None;
+    }
+    if let Some(arr) = value.as_array()
+        && arr.is_empty()
+    {
+        return None;
+    }
+    // serde_json::to_string never fails for `Value`.
+    let raw = serde_json::to_string(value).unwrap_or_default();
+    let collapsed = collapse_whitespace(&raw);
+    Some(truncate_chars(&collapsed, max_chars))
+}
+
+/// Char-based truncation that always respects code-point boundaries and
+/// appends `…` when the input is longer than `max_chars`. Used for JSON
+/// argument previews where the parameter is genuinely a character budget,
+/// not a byte budget — non-ASCII keys/values stay readable.
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let count = text.chars().count();
+    if count <= max_chars {
+        return text.to_string();
+    }
+    let mut truncated = String::with_capacity(text.len());
+    for ch in text.chars().take(max_chars.saturating_sub(1)) {
+        truncated.push(ch);
+    }
+    truncated.push('…');
+    truncated
+}
+
+fn collapse_whitespace(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut last_space = false;
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in s.chars() {
+        if escaped {
+            out.push(ch);
+            escaped = false;
+            continue;
+        }
+        if in_string {
+            if ch == '\\' {
+                escaped = true;
+                out.push(ch);
+                continue;
+            }
+            if ch == '"' {
+                in_string = false;
+            }
+            out.push(ch);
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+            out.push(ch);
+            last_space = false;
+            continue;
+        }
+        if ch.is_whitespace() {
+            if !last_space {
+                out.push(' ');
+                last_space = true;
+            }
+            continue;
+        }
+        last_space = false;
+        out.push(ch);
+    }
+    out
+}
+
+/// Pretty-print a JSON value with two-space indentation for use inside
+/// multi-line tool argument displays. Returns `None` for null / empty values.
+pub(super) fn format_arguments_pretty(value: &Value) -> Option<String> {
+    if value.is_null() {
+        return None;
+    }
+    if let Some(obj) = value.as_object()
+        && obj.is_empty()
+    {
+        return None;
+    }
+    if let Some(arr) = value.as_array()
+        && arr.is_empty()
+    {
+        return None;
+    }
+    serde_json::to_string_pretty(value).ok()
 }
 
 fn summarize_apply_patch(arguments: &Value) -> String {
@@ -708,12 +821,24 @@ fn summarize_tool_output_failure(output: &ToolOutput) -> String {
 }
 
 fn summarize_tool_output_success(tool_name: &str, output: &ToolOutput) -> Option<String> {
-    if tool_name != "shell" {
-        return None;
+    // MCP tool results carry structured JSON. Surface a pretty single-line
+    // preview so the TUI shows shape rather than `[object Object]`-style.
+    if let ToolOutput::Mcp { result } = output {
+        return format_arguments_inline(result, 180);
     }
 
     let text = output.as_text()?.trim();
     if text.is_empty() {
+        return None;
+    }
+
+    // If the output looks like JSON, prefer a compact pretty-printed preview
+    // so reviewers see structure rather than a long unindented blob.
+    if let Some(json_preview) = json_preview_from_text(text, 180) {
+        return Some(json_preview);
+    }
+
+    if tool_name != "shell" {
         return None;
     }
 
@@ -731,6 +856,24 @@ fn summarize_tool_output_success(tool_name: &str, output: &ToolOutput) -> Option
     } else {
         Some(lines.join(" | "))
     }
+}
+
+/// Detect JSON-shaped tool output and return a pretty-printed preview of the
+/// first few lines so structure shows up nicely in the chat history.
+fn json_preview_from_text(text: &str, max_chars: usize) -> Option<String> {
+    let trimmed = text.trim_start();
+    if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
+        return None;
+    }
+    let value: Value = serde_json::from_str(trimmed).ok()?;
+    let pretty = format_arguments_pretty(&value)?;
+    let preview = pretty
+        .lines()
+        .take(3)
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join(" ");
+    Some(truncate_chars(&collapse_whitespace(&preview), max_chars))
 }
 
 fn first_non_empty_line(text: &str) -> Option<&str> {
@@ -2221,6 +2364,72 @@ mod tests {
         assert!(!joined.contains("Args:"));
         assert!(!joined.contains("Result:"));
         assert!(!joined.contains("L1: fn main() {}"));
+    }
+
+    #[test]
+    fn unrecognised_tool_args_show_pretty_json_signature() {
+        let cell = ToolCallHistoryCell::new(
+            "1".to_string(),
+            "trade_execute_order".to_string(),
+            json!({
+                "symbol": "BTC-USD",
+                "side": "buy",
+                "size": 0.5,
+                "limit": 41250.0
+            }),
+        );
+        let rendered = to_strings(cell.display_lines(120));
+        let joined = rendered.join("\n");
+        assert!(
+            joined.contains("\"symbol\":\"BTC-USD\""),
+            "expected JSON signature, got:\n{joined}"
+        );
+        assert!(joined.contains("trade execute order"));
+    }
+
+    #[test]
+    fn json_signature_preserves_escaped_quotes_and_unicode() {
+        // Inputs with quoted-quotes and CJK content should round-trip
+        // through `format_arguments_inline` without splitting strings or
+        // mangling escape sequences.
+        let cell = ToolCallHistoryCell::new(
+            "1".to_string(),
+            "render_caption".to_string(),
+            json!({
+                "title": "He said \"hello\"",
+                "subtitle": "中文标题"
+            }),
+        );
+        let rendered = to_strings(cell.display_lines(160));
+        let joined = rendered.join("\n");
+        assert!(
+            joined.contains("\"He said \\\"hello\\\"\""),
+            "expected escaped quotes preserved in JSON preview, got:\n{joined}"
+        );
+        assert!(
+            joined.contains("中文标题"),
+            "expected CJK content preserved in JSON preview, got:\n{joined}"
+        );
+    }
+
+    #[test]
+    fn json_tool_output_is_previewed_in_summary() {
+        // Use a non-`shell` tool so the only way the assertion below can pass
+        // is via the JSON-preview branch (the shell fallback would simply
+        // forward the raw blob).
+        let mut cell = ToolCallHistoryCell::new(
+            "1".to_string(),
+            "fetch_inventory".to_string(),
+            json!({"limit": 1}),
+        );
+        let json_blob = "{\n  \"items\": [\n    {\"id\": 1, \"name\": \"alpha\"}\n  ]\n}";
+        cell.complete_call("1", Ok(ToolOutput::success(json_blob)));
+        let rendered = to_strings(cell.display_lines(160));
+        let joined = rendered.join("\n");
+        assert!(
+            joined.contains("\"items\""),
+            "expected JSON preview, got:\n{joined}"
+        );
     }
 
     #[test]

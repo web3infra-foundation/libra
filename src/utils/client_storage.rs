@@ -28,6 +28,7 @@ use std::{
     time::Duration,
 };
 
+use async_trait::async_trait;
 use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 use futures::FutureExt; // Import for catch_unwind
 use git_internal::{
@@ -779,6 +780,32 @@ impl ClientStorage {
         base_path
             .parent()
             .map(|storage_path| storage_path.join(DATABASE))
+    }
+}
+
+#[async_trait]
+impl Storage for ClientStorage {
+    async fn get(&self, hash: &ObjectHash) -> Result<(Vec<u8>, ObjectType), GitError> {
+        let storage = self.storage.clone();
+        let hash = *hash;
+        self.block_on_storage(async move { storage.get(&hash).await })
+    }
+
+    async fn put(
+        &self,
+        hash: &ObjectHash,
+        data: &[u8],
+        obj_type: ObjectType,
+    ) -> Result<String, GitError> {
+        ClientStorage::put(self, hash, data, obj_type).map_err(GitError::IOError)
+    }
+
+    async fn exist(&self, hash: &ObjectHash) -> bool {
+        ClientStorage::exist(self, hash)
+    }
+
+    async fn search(&self, prefix: &str) -> Vec<ObjectHash> {
+        ClientStorage::search(self, prefix).await
     }
 }
 

@@ -115,6 +115,11 @@ pub enum ShowOutput {
     Blob(ShowBlobData),
 }
 
+// Schema ownership: commit metadata 字段集（hash / author / committer / subject / body /
+// parents / refs / files）由 log.md 拥有定义权，详见 [README.md 跨命令契约约定 §4](README.md#4-json-schema-的所有权与重叠)。
+// 本结构体是该 schema 在 `show` 命令的复用（与 LogCommitEntry 字段一一对应），
+// 仅在 ShowOutput 包装层通过 `type: "commit"` 区分对象类型。
+// 添加新字段必须先在 log.md 的 LogCommitEntry 中落地，再同步到这里。
 #[derive(Debug, Clone, Serialize)]
 pub struct ShowCommitData {
     pub hash: String,

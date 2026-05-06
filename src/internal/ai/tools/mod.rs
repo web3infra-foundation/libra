@@ -16,6 +16,7 @@ pub mod context;
 pub mod error;
 pub mod handlers;
 pub mod registry;
+pub mod semantic;
 pub mod spec;
 pub mod utils;
 

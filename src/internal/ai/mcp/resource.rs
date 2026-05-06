@@ -67,7 +67,11 @@ use uuid::Uuid;
 use crate::{
     internal::{
         ai::{
-            libra_vcs::{ALLOWED_COMMANDS, normalize_tool_args, unsupported_command_message},
+            libra_vcs::{
+                ALLOWED_COMMANDS, classify_run_libra_vcs_safety,
+                format_run_libra_vcs_safety_message, normalize_tool_args,
+                unsupported_command_message,
+            },
             mcp::server::LibraMcpServer,
             util::normalize_commit_anchor,
         },
@@ -1353,8 +1357,15 @@ impl LibraMcpServer {
         &self,
         params: RunLibraVcsParams,
     ) -> Result<CallToolResult, ErrorData> {
-        let command = normalize_libra_vcs_command(&params.command)?;
         let args = params.args.unwrap_or_default();
+        let safety_decision = classify_run_libra_vcs_safety(&params.command, &args);
+        if !safety_decision.is_allow() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                format_run_libra_vcs_safety_message(&params.command, &args, &safety_decision),
+            )]));
+        }
+
+        let command = normalize_libra_vcs_command(&params.command)?;
         validate_libra_vcs_args(&args)?;
         let args = normalize_tool_args(command, &args)
             .map_err(|message| ErrorData::invalid_params(message, None))?;

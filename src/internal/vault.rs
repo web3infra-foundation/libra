@@ -45,6 +45,15 @@ const PGP_KEY_NAME: &str = "libra-signing";
 const SSH_ROLE_NAME: &str = "libra-ssh";
 const PKI_MOUNT_PATH: &str = "pki";
 
+fn vault_home_dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(path) = std::env::var_os("LIBRA_TEST_HOME") {
+        return Some(PathBuf::from(path));
+    }
+
+    dirs::home_dir()
+}
+
 // ── Encryption helpers for root token ──
 
 /// Derive a 256-bit AES key from the raw unseal key using HKDF-SHA256.
@@ -501,7 +510,7 @@ pub async fn get_gpg_public_key(root_dir: &Path, unseal_key: &[u8]) -> Result<St
 /// Get the path to the SSH private key file for the current repo.
 pub async fn ssh_key_path() -> Result<std::path::PathBuf> {
     use crate::internal::config::ConfigKv;
-    let home = dirs::home_dir().ok_or_else(|| anyhow!("cannot determine home directory"))?;
+    let home = vault_home_dir().ok_or_else(|| anyhow!("cannot determine home directory"))?;
     let repo_id = ConfigKv::get("libra.repoid")
         .await?
         .map(|e| e.value)
@@ -626,7 +635,7 @@ pub async fn load_unseal_key_for_db_path(db_path: &Path) -> Option<Vec<u8>> {
 
 /// Load global unseal key from `~/.libra/vault-unseal-key`.
 async fn load_global_unseal_key() -> Option<Vec<u8>> {
-    let home = dirs::home_dir()?;
+    let home = vault_home_dir()?;
     let path = home.join(".libra").join("vault-unseal-key");
     let hex_key = tokio::fs::read_to_string(&path).await.ok()?;
     hex::decode(hex_key.trim()).ok()
@@ -634,7 +643,7 @@ async fn load_global_unseal_key() -> Option<Vec<u8>> {
 
 /// Store global unseal key to `~/.libra/vault-unseal-key` with 0o600 permissions.
 async fn store_global_unseal_key(unseal_key: &[u8]) -> Result<()> {
-    let home = dirs::home_dir().ok_or_else(|| anyhow!("cannot determine home directory"))?;
+    let home = vault_home_dir().ok_or_else(|| anyhow!("cannot determine home directory"))?;
     let dir = home.join(".libra");
     tokio::fs::create_dir_all(&dir)
         .await
@@ -924,7 +933,7 @@ async fn repo_id_for_db_path(db_path: &Path) -> Result<String> {
 }
 
 fn unseal_key_path_for_repo_id(repo_id: &str) -> Result<std::path::PathBuf> {
-    let home = dirs::home_dir().ok_or_else(|| anyhow!("cannot determine home directory"))?;
+    let home = vault_home_dir().ok_or_else(|| anyhow!("cannot determine home directory"))?;
     Ok(home.join(".libra").join("vault-keys").join(repo_id))
 }
 

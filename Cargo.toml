@@ -1,6 +1,6 @@
 [package]
 name = "libra"
-version = "0.16.0"
+version = "0.16.2"
 edition = "2024"
 
 [features]
@@ -9,9 +9,11 @@ worktree-fuse  = []   # Unix FUSE-backed worktree commands (optional)
 test-network   = []   # L2: tests requiring outbound network but no secrets
 test-live-ai   = []   # L3: tests calling real LLM APIs
 test-live-cloud = []  # L3: tests hitting real D1/R2 endpoints
+test-provider  = []   # deterministic hidden provider for local TUI automation tests
+subagent-scaffold = []  # CEX-S2-10 schema-only scaffold (Step 2 sub-agent contracts; gated on CP-4 in production — see docs/improvement/agent.md "Step 2 audit closure")
 
 [dependencies]
-uuid = { version = "1.23.1", features = ["v4", "v7"] }
+uuid = { version = "1.23.1", features = ["v4", "v5", "v7"] }
 git-internal = "0.7.4"
 anyhow = "1.0.102"
 byte-unit = "5.2.0"
@@ -60,6 +62,7 @@ tokio = { version = "1.52.1", features = [
 ]}
 tokio-util = { version = "0.7.18", features = ["io"] }
 tokio-tungstenite = { version = "0.29.0", features = ["native-tls"] }
+toml = "0.8.23"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 url = "2.5.8"
@@ -99,6 +102,7 @@ diffy = "0.4.2"
 shlex = "1.3.0"
 tree-sitter = "0.26.8"
 tree-sitter-bash = "0.25"
+tree-sitter-rust = "0.24"
 
 # Markdown rendering
 pulldown-cmark = "0.13.3"
@@ -113,6 +117,10 @@ libfuse-fs = "0.1.12"
 pager = "0.16.1"
 libc = "0.2"
 rfuse3 = { version = "0.0.7", features = ["tokio-runtime", "unprivileged"] }
+
+[patch.crates-io]
+rfuse3 = { git = "https://github.com/rk8s-dev/rk8s", branch = "main" }
+libfuse-fs = { git = "https://github.com/rk8s-dev/rk8s", branch = "main" }
 
 [dev-dependencies]
 serial_test = { version = "3.4.0", default-features = false, features = ["async"] }
@@ -130,3 +138,23 @@ reqwest = { version = "0.13.2", default-features = false, features = ["blocking"
 assert_cmd = "2.2.1"
 pgp = "0.19.0"
 gag = "1.0.0"
+portable-pty = "0.9.0"
+
+# Compatibility-surface integration tests live under tests/compat/. Cargo's
+# default test discovery only picks up *.rs directly under tests/, so each
+# compat surface file must be registered here.
+[[test]]
+name = "compat_stash_subcommand_surface"
+path = "tests/compat/stash_subcommand_surface.rs"
+
+[[test]]
+name = "compat_bisect_subcommand_surface"
+path = "tests/compat/bisect_subcommand_surface.rs"
+
+[[test]]
+name = "compat_worktree_delete_dir"
+path = "tests/compat/worktree_delete_dir.rs"
+
+[[test]]
+name = "compat_checkout_alias_help"
+path = "tests/compat/checkout_alias_help.rs"

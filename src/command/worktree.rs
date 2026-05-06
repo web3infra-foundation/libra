@@ -13,6 +13,8 @@ use std::{
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 
+#[cfg(unix)]
+use crate::utils::fuse as fuse_utils;
 use crate::{
     command::restore::{self, RestoreArgs},
     internal::head::Head,
@@ -22,6 +24,21 @@ use crate::{
         util,
     },
 };
+
+/// `--help` examples shown in `libra worktree --help` output.
+pub const WORKTREE_EXAMPLES: &str = "\
+EXAMPLES:
+    libra worktree add ../feature-x                Create a linked worktree
+    libra worktree list                            List every registered worktree
+    libra worktree lock ../feature-x --reason wip  Lock a worktree to prevent prune/remove
+    libra worktree unlock ../feature-x             Release the lock
+    libra worktree move ../old ../new              Rename a worktree
+    libra worktree prune                           Drop entries whose paths vanished
+    libra worktree remove ../feature-x             Unregister, keep the directory on disk
+    libra worktree remove ../feature-x --delete-dir
+                                                   Unregister and delete the directory
+                                                   (refused on a dirty worktree)
+    libra worktree repair                          Fix stale or duplicate registry rows";
 
 /// CLI arguments for the `worktree` subcommand.
 ///
@@ -68,10 +85,26 @@ pub enum WorktreeSubcommand {
     },
     /// Prune worktrees that are no longer valid or reachable.
     Prune,
-    /// Unregister a worktree without deleting its directory on disk.
+    /// Unregister a worktree. By default the directory on disk is preserved;
+    /// pass `--delete-dir` for Git-style behavior that also removes the
+    /// directory after a dirty-state check.
     Remove {
         /// Filesystem path of the worktree to unregister.
         path: String,
+        /// Also delete the worktree directory on disk after unregistering it.
+        /// Refuses on a dirty worktree (uncommitted changes).
+        #[clap(long)]
+        delete_dir: bool,
+    },
+    /// Unmount a FUSE task worktree mountpoint.
+    #[cfg(unix)]
+    #[clap(alias = "unmount", about = "Unmount a FUSE worktree mountpoint")]
+    Umount {
+        /// Filesystem path of the FUSE mountpoint or its task worktree root.
+        path: String,
+        /// Remove the Libra task worktree root after unmounting its workspace mountpoint.
+        #[clap(long)]
+        cleanup: bool,
     },
     /// Repair worktree metadata, attempting to recover from inconsistencies.
     Repair,
@@ -133,18 +166,28 @@ pub async fn execute(args: WorktreeArgs) {
 
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Dispatches to the appropriate worktree sub-command
-/// (add, list, lock, unlock, move, prune, remove, repair).
+/// (add, list, lock, unlock, move, prune, remove, repair, and Unix umount).
 pub async fn execute_safe(args: WorktreeArgs, _output: &OutputConfig) -> CliResult<()> {
-    util::require_repo().map_err(|_| CliError::repo_not_found())?;
+    let command = args.command;
+    #[cfg(unix)]
+    let needs_repo = !matches!(&command, WorktreeSubcommand::Umount { .. });
+    #[cfg(not(unix))]
+    let needs_repo = true;
 
-    match args.command {
+    if needs_repo {
+        util::require_repo().map_err(|_| CliError::repo_not_found())?;
+    }
+
+    match command {
         WorktreeSubcommand::Add { path } => add_worktree(path).await,
         WorktreeSubcommand::List => list_worktrees(),
         WorktreeSubcommand::Lock { path, reason } => lock_worktree(path, reason),
         WorktreeSubcommand::Unlock { path } => unlock_worktree(path),
         WorktreeSubcommand::Move { src, dest } => move_worktree(src, dest),
         WorktreeSubcommand::Prune => prune_worktrees(),
-        WorktreeSubcommand::Remove { path } => remove_worktree(path),
+        WorktreeSubcommand::Remove { path, delete_dir } => remove_worktree(path, delete_dir).await,
+        #[cfg(unix)]
+        WorktreeSubcommand::Umount { path, cleanup } => umount_fuse_path(path, cleanup),
         WorktreeSubcommand::Repair => repair_worktrees(),
     }
     .map_err(|e| CliError::fatal(e.to_string()))
@@ -690,12 +733,15 @@ fn prune_worktrees() -> io::Result<()> {
     Ok(())
 }
 
-/// Implements `worktree remove <path>`.
+/// Implements `worktree remove <path> [--delete-dir]`.
 ///
-/// The specified worktree is removed from the registry, provided it is neither
-/// the main worktree nor locked. The directory on disk is intentionally left
-/// untouched to avoid destructive behavior.
-fn remove_worktree(path: String) -> io::Result<()> {
+/// Defaults to preserving the directory on disk (Libra's intentional
+/// non-destructive behavior — see [`COMPATIBILITY.md`](../../../COMPATIBILITY.md)).
+/// With `--delete-dir`, the worktree must be clean (no staged or unstaged
+/// changes) and the directory is removed after the registry entry is dropped.
+/// Order matters: registry first, then disk — a half-completed delete cannot
+/// leave an orphan registry pointer.
+async fn remove_worktree(path: String, delete_dir: bool) -> io::Result<()> {
     let mut state = load_state()?;
     let target = canonicalize(path)?;
 
@@ -713,8 +759,71 @@ fn remove_worktree(path: String) -> io::Result<()> {
         return Err(io::Error::other("cannot remove locked worktree"));
     }
 
+    if delete_dir {
+        // Dirty-check: refuse on staged or unstaged changes. The check runs
+        // inside the target worktree so the ignore policy and storage path
+        // resolution match what the user would see if they ran `libra status`
+        // there.
+        let _guard = DirGuard::change_to(&target).map_err(|e| {
+            io::Error::other(format!("cannot enter worktree '{}': {e}", target.display()))
+        })?;
+        let staged = crate::command::status::changes_to_be_committed_safe()
+            .await
+            .map_err(|e| io::Error::other(format!("failed to inspect worktree status: {e}")))?;
+        let unstaged = crate::command::status::changes_to_be_staged()
+            .map_err(|e| io::Error::other(format!("failed to inspect worktree status: {e}")))?;
+        if !staged.is_empty() || !unstaged.is_empty() {
+            return Err(io::Error::other(format!(
+                "cannot delete dirty worktree '{}' (uncommitted changes)\n\
+                 Hint: commit or stash changes, or remove without --delete-dir to keep the directory",
+                target.display()
+            )));
+        }
+        // Drop the guard so the cwd is restored before we rm -rf the target.
+        drop(_guard);
+        fs::remove_dir_all(&target).map_err(|e| {
+            io::Error::other(format!(
+                "failed to delete worktree directory '{}': {e}",
+                target.display()
+            ))
+        })?;
+    }
+
     state.worktrees.remove(index);
     save_state(&state)?;
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn umount_fuse_path(path: String, cleanup: bool) -> io::Result<()> {
+    let target = canonicalize(path)?;
+    let mountpoint = fuse_utils::resolve_task_worktree_mountpoint_arg(&target);
+    fuse_utils::force_unmount_path(&mountpoint).map_err(|err| {
+        io::Error::new(
+            err.kind(),
+            format!(
+                "failed to unmount FUSE path {}: {}",
+                mountpoint.display(),
+                err
+            ),
+        )
+    })?;
+    println!("unmounted {}", mountpoint.display());
+
+    if cleanup {
+        let cleanup_root =
+            fuse_utils::fuse_task_worktree_cleanup_root(&mountpoint).ok_or_else(|| {
+                io::Error::other(format!(
+                    "--cleanup only supports Libra task FUSE worktree paths ending in '/workspace': {}",
+                    mountpoint.display()
+                ))
+            })?;
+        if cleanup_root.exists() {
+            fs::remove_dir_all(&cleanup_root)?;
+        }
+        println!("removed {}", cleanup_root.display());
+    }
 
     Ok(())
 }
@@ -749,4 +858,27 @@ fn repair_worktrees() -> io::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn umount_fuse_path_cleans_task_worktree_root_without_repo() {
+        let temp = tempdir().expect("create temp dir");
+        let cleanup_root = temp
+            .path()
+            .join("libra-task-worktree-fuse-29353-019ddec6-de60-7383");
+        let workspace = cleanup_root.join("workspace");
+        fs::create_dir_all(&workspace).expect("create task workspace");
+
+        umount_fuse_path(cleanup_root.to_string_lossy().to_string(), true)
+            .expect("umount cleanup should succeed for inactive task workspace");
+
+        assert!(!cleanup_root.exists());
+    }
 }

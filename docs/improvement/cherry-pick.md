@@ -7,7 +7,7 @@
 ## 已完成前置条件与当前代码状态
 
 ### 已确认落地的基线
-- `CherryPickError` typed enum 已落地，detached HEAD / invalid commit / multi-commit + `--no-commit` / conflict / object / index / HEAD 更新失败均有显式 `StableErrorCode`
+- `CherryPickError` typed enum 已落地，含 `NotInRepo` / `DetachedHead` / `InvalidCommit` / `MultipleWithNoCommit` / `MergeCommitUnsupported` / `Conflict` / `LoadObject` / `SaveFailed` 共 8 变体，每个变体均有显式 `StableErrorCode`。其中 index 写入与 HEAD 更新失败统一归入通用 `SaveFailed(String)` 变体（映射为 `IoWriteFailed`），未单独建模
 - `run_cherry_pick()` + `render_cherry_pick_output()` 已完成执行层/渲染层拆分
 - `CherryPickOutput` 已覆盖多 commit 结果列表和 `no_commit` 状态
 - `docs/commands/cherry-pick.md` 已记录 JSON schema、错误码和常用示例
