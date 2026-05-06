@@ -232,12 +232,21 @@ function composerDisabledHint(
   if (!snapshot.capabilities.messageInput) {
     return "This provider does not support browser-driven messages";
   }
+  if (
+    snapshot.controller.loopbackOnly === false &&
+    !snapshot.controller.canWrite
+  ) {
+    return "Browser writes are disabled outside loopback";
+  }
   if (snapshot.controller.kind !== "none" && !snapshot.controller.canWrite) {
     return `Read-only — controlled by ${snapshot.controller.kind}${
       snapshot.controller.ownerLabel ? ` (${snapshot.controller.ownerLabel})` : ""
     }`;
   }
   if (controllerStatus.kind === "error") {
+    if (controllerStatus.code === "BROWSER_CONTROL_DISABLED") {
+      return "Browser control disabled — restart `libra code` with `--browser-control loopback`";
+    }
     return `${controllerStatus.code}: ${controllerStatus.message}`;
   }
   if (snapshot.status === "thinking" || snapshot.status === "executing_tool") {

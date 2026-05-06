@@ -10,7 +10,7 @@ use std::{convert::Infallible, net::SocketAddr, path::PathBuf, sync::Arc};
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
-    extract::{ConnectInfo, Path, Request, State},
+    extract::{ConnectInfo, Path, Query, Request, State},
     http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
     response::{
@@ -32,7 +32,13 @@ use self::code_ui::{
 };
 use crate::{
     command::code::resolve_storage_root,
-    internal::ai::runtime::hardening::{AuditEvent, AuditSink, SecretRedactor, TracingAuditSink},
+    internal::{
+        ai::{
+            projection::ThreadProjection,
+            runtime::hardening::{AuditEvent, AuditSink, SecretRedactor, TracingAuditSink},
+        },
+        db::establish_connection,
+    },
     utils::util::get_repo_name_from_url,
 };
 
@@ -132,6 +138,7 @@ fn code_router() -> Router<WebAppState> {
     //   /session          -> loopback only (observe)
     //   /events           -> loopback only (observe)
     //   /diagnostics      -> loopback only (observe)
+    //   /threads          -> loopback only (observe; lists active thread projections)
     //   /controller/attach  -> loopback; automation also needs X-Libra-Control-Token
     //   /controller/detach  -> loopback + controller-token; automation also needs control-token
     //   /messages         -> loopback + controller-token; automation also needs control-token
@@ -141,6 +148,7 @@ fn code_router() -> Router<WebAppState> {
         .route("/session", get(code_session_handler))
         .route("/events", get(code_events_handler))
         .route("/diagnostics", get(code_diagnostics_handler))
+        .route("/threads", get(code_threads_handler))
         .route("/controller/attach", post(code_controller_attach_handler))
         .route("/controller/detach", post(code_controller_detach_handler))
         .merge(code_write_router())
@@ -287,6 +295,97 @@ async fn code_diagnostics_handler(
     ensure_loopback_api_request(remote_addr)?;
     let runtime = code_ui_runtime(&state)?;
     Ok(Json(serde_json::to_value(runtime.diagnostics().await)?))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadsQuery {
+    /// Page size; clamped to `[1, MAX_THREAD_LIST_LIMIT]`. Defaults to 50.
+    limit: Option<u64>,
+    /// Page offset; defaults to 0.
+    offset: Option<u64>,
+}
+
+const DEFAULT_THREAD_LIST_LIMIT: u64 = 50;
+const MAX_THREAD_LIST_LIMIT: u64 = 200;
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadListItem {
+    id: String,
+    title: Option<String>,
+    archived: bool,
+    current_intent_id: Option<String>,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadListResponse {
+    items: Vec<ThreadListItem>,
+    /// Offset to pass for the next page; absent when this page returned fewer
+    /// items than the requested limit (the caller has reached the end).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_offset: Option<u64>,
+}
+
+async fn code_threads_handler(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    State(state): State<WebAppState>,
+    Query(query): Query<ThreadsQuery>,
+) -> Result<Json<ThreadListResponse>, WebApiError> {
+    ensure_loopback_api_request(remote_addr)?;
+
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_THREAD_LIST_LIMIT)
+        .clamp(1, MAX_THREAD_LIST_LIMIT);
+    let offset = query.offset.unwrap_or(0);
+
+    let storage_root = resolve_storage_root(state.working_dir.as_path());
+    let db_path = storage_root.join("libra.db");
+    let db_path_str = db_path.to_str().ok_or_else(|| WebApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        code: "STORAGE_PATH_INVALID".to_string(),
+        message: "libra database path is not valid UTF-8".to_string(),
+    })?;
+
+    let db = establish_connection(db_path_str)
+        .await
+        .map_err(|err| WebApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "DB_UNAVAILABLE".to_string(),
+            message: format!("failed to open libra database: {err}"),
+        })?;
+
+    let projections = ThreadProjection::list_active(&db, limit, offset)
+        .await
+        .map_err(|err| WebApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "THREAD_LIST_FAILED".to_string(),
+            message: format!("failed to list active threads: {err}"),
+        })?;
+
+    let next_offset = if (projections.len() as u64) < limit {
+        None
+    } else {
+        Some(offset + projections.len() as u64)
+    };
+
+    let items = projections
+        .into_iter()
+        .map(|p| ThreadListItem {
+            id: p.thread_id.to_string(),
+            title: p.title,
+            archived: p.archived,
+            current_intent_id: p.current_intent_id.map(|id| id.to_string()),
+            created_at: p.created_at,
+            updated_at: p.updated_at,
+        })
+        .collect();
+
+    Ok(Json(ThreadListResponse { items, next_offset }))
 }
 
 async fn code_controller_attach_handler(

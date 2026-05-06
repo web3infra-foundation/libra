@@ -30,9 +30,11 @@ import {
   getRepoInfo,
   getRepoStatus,
   getSession,
+  listThreads,
   subscribeEvents,
   type RepoInfo,
   type RepoStatus,
+  type ThreadListItem,
 } from "./client";
 import type { CodeUiEventEnvelope, CodeUiSessionSnapshot } from "./types";
 
@@ -46,6 +48,7 @@ export type CodeUiStoreState = {
   snapshot: CodeUiSessionSnapshot | null;
   repo: RepoInfo | null;
   status: RepoStatus | null;
+  threads: ThreadListItem[];
   connection: ConnectionState;
   lastError: string | null;
 };
@@ -54,6 +57,8 @@ export type CodeUiStoreApi = CodeUiStoreState & {
   /** Manual refresh — useful for the Summary refresh button. */
   refresh: () => Promise<void>;
   refreshStatus: () => Promise<void>;
+  /** Manually re-fetch the active thread list (Sidebar refresh). */
+  refreshThreads: () => Promise<void>;
 };
 
 const CodeUiContext = createContext<CodeUiStoreApi | null>(null);
@@ -66,6 +71,7 @@ export function CodeUiProvider({ children }: { children: ReactNode }) {
     snapshot: null,
     repo: null,
     status: null,
+    threads: [],
     connection: { kind: "loading" },
     lastError: null,
   });
@@ -74,6 +80,11 @@ export function CodeUiProvider({ children }: { children: ReactNode }) {
     attempt: 0,
     timer: null,
   });
+
+  // Debounce repo-status refreshes triggered by SSE events. The plan calls
+  // for a 5-second debounce so a burst of session_updated frames doesn't
+  // hammer the status endpoint while the agent is mid-turn.
+  const statusRefreshTimerRef = useRef<number | null>(null);
 
   const cancelReconnect = useCallback(() => {
     if (reconnectRef.current.timer != null) {
@@ -93,6 +104,28 @@ export function CodeUiProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const refreshThreads = useCallback(async () => {
+    try {
+      const response = await listThreads({ limit: 50 });
+      setState((s) => ({ ...s, threads: response.items }));
+    } catch (error) {
+      // Threads endpoint failure should not crash the UI — fall back to the
+      // active-thread-only sidebar with the last known list (often empty).
+      const message = error instanceof Error ? error.message : String(error);
+      setState((s) => ({ ...s, lastError: message }));
+    }
+  }, []);
+
+  const scheduleStatusRefresh = useCallback(() => {
+    if (statusRefreshTimerRef.current != null) {
+      return;
+    }
+    statusRefreshTimerRef.current = window.setTimeout(() => {
+      statusRefreshTimerRef.current = null;
+      void refreshStatus();
+    }, 5_000);
+  }, [refreshStatus]);
+
   const refresh = useCallback(async () => {
     try {
       const [snapshot, status] = await Promise.all([getSession(), getRepoStatus()]);
@@ -107,6 +140,27 @@ export function CodeUiProvider({ children }: { children: ReactNode }) {
       handleFetchError(error, setState);
     }
   }, []);
+
+  const handleEventRef = useRef<(event: CodeUiEventEnvelope) => void>(() => {});
+  // Keep the SSE handler closure in sync with the latest scheduler/state
+  // setters by writing the ref from an effect rather than during render —
+  // satisfies `react-hooks/refs` while preserving "always-latest" semantics.
+  useEffect(() => {
+    handleEventRef.current = (event: CodeUiEventEnvelope) => {
+      if (event.data && typeof event.data === "object") {
+        const next = event.data as CodeUiSessionSnapshot;
+        setState((s) => ({
+          ...s,
+          snapshot: next,
+          connection: { kind: "ready" },
+          lastError: null,
+        }));
+      }
+      if (event.type === "session_updated" || event.type === "status_changed") {
+        scheduleStatusRefresh();
+      }
+    };
+  }, [scheduleStatusRefresh]);
 
   useEffect(() => {
     let unsubscribe: (() => void) | null = null;
@@ -130,15 +184,9 @@ export function CodeUiProvider({ children }: { children: ReactNode }) {
 
     const handleEvent = (event: CodeUiEventEnvelope) => {
       // Every Rust event currently carries the full snapshot in `data`.
-      if (event.data && typeof event.data === "object") {
-        const next = event.data as CodeUiSessionSnapshot;
-        setState((s) => ({
-          ...s,
-          snapshot: next,
-          connection: { kind: "ready" },
-          lastError: null,
-        }));
-      }
+      // Indirect through a ref so the SSE handler keeps using the latest
+      // closure (e.g. when the debounce scheduler identity changes).
+      handleEventRef.current(event);
     };
 
     const connect = async () => {
@@ -147,10 +195,11 @@ export function CodeUiProvider({ children }: { children: ReactNode }) {
           unsubscribe();
           unsubscribe = null;
         }
-        const [repo, status, snapshot] = await Promise.all([
+        const [repo, status, snapshot, threads] = await Promise.all([
           getRepoInfo().catch(() => null),
           getRepoStatus().catch(() => null),
           getSession(),
+          listThreads({ limit: 50 }).catch(() => null),
         ]);
         if (cancelled) return;
         reconnectRef.current.attempt = 0;
@@ -159,6 +208,7 @@ export function CodeUiProvider({ children }: { children: ReactNode }) {
           snapshot,
           repo: repo ?? s.repo,
           status: status ?? s.status,
+          threads: threads?.items ?? s.threads,
           connection: { kind: "ready" },
           lastError: null,
         }));
@@ -194,12 +244,16 @@ export function CodeUiProvider({ children }: { children: ReactNode }) {
         unsubscribe();
         unsubscribe = null;
       }
+      if (statusRefreshTimerRef.current != null) {
+        window.clearTimeout(statusRefreshTimerRef.current);
+        statusRefreshTimerRef.current = null;
+      }
     };
   }, [cancelReconnect]);
 
   const api = useMemo<CodeUiStoreApi>(
-    () => ({ ...state, refresh, refreshStatus }),
-    [state, refresh, refreshStatus],
+    () => ({ ...state, refresh, refreshStatus, refreshThreads }),
+    [state, refresh, refreshStatus, refreshThreads],
   );
 
   return (

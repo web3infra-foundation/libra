@@ -70,6 +70,21 @@ export type RepoStatusEnvelope = {
   data: RepoStatus;
 };
 
+/** Single row returned by `GET /api/code/threads`. */
+export type ThreadListItem = {
+  id: string;
+  title: string | null;
+  archived: boolean;
+  currentIntentId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ThreadListResponse = {
+  items: ThreadListItem[];
+  nextOffset?: number;
+};
+
 export class CodeUiClientError extends Error {
   readonly code: string;
   readonly status: number;
@@ -118,6 +133,21 @@ export async function getSession(): Promise<CodeUiSessionSnapshot> {
 export async function getDiagnostics(): Promise<CodeUiDiagnostics> {
   return readJson<CodeUiDiagnostics>(
     await fetch("/api/code/diagnostics", { credentials: "same-origin" }),
+  );
+}
+
+export async function listThreads(
+  options: { limit?: number; offset?: number } = {},
+): Promise<ThreadListResponse> {
+  const params = new URLSearchParams();
+  if (options.limit !== undefined) params.set("limit", String(options.limit));
+  if (options.offset !== undefined) params.set("offset", String(options.offset));
+  const query = params.toString();
+  const url = query
+    ? `/api/code/threads?${query}`
+    : "/api/code/threads";
+  return readJson<ThreadListResponse>(
+    await fetch(url, { credentials: "same-origin" }),
   );
 }
 

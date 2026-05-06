@@ -358,7 +358,8 @@ pub async fn collect_status_json_envelope_for_api(
     use std::path::PathBuf;
 
     let args = StatusArgs::default();
-    let canon_working = std::fs::canonicalize(working_dir).unwrap_or_else(|_| PathBuf::from(working_dir));
+    let canon_working =
+        std::fs::canonicalize(working_dir).unwrap_or_else(|_| PathBuf::from(working_dir));
     let canon_cwd = std::env::current_dir()
         .ok()
         .and_then(|cwd| std::fs::canonicalize(&cwd).ok());

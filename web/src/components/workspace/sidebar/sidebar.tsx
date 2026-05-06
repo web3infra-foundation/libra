@@ -25,14 +25,17 @@ type Props = {
 };
 
 export function Sidebar({ width }: Props) {
-  const { snapshot, repo, status, connection } = useCodeUiStore();
+  const { snapshot, repo, status, threads, connection } = useCodeUiStore();
+  const [toast, setToast] = useState<string | null>(null);
 
   const [query, setQuery] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
   const avatarRef = useRef<HTMLDivElement | null>(null);
 
-  // Phase 1: only the active session is known. Historical thread list comes
-  // from `/api/code/threads` in Phase 4.
+  const activeThreadId = snapshot?.threadId ?? null;
+
+  // Active session row — synthesized when the snapshot has a thread but it
+  // hasn't yet shown up in the projection-backed list.
   const activeThread: ThreadRow | null = useMemo(() => {
     if (!snapshot?.threadId) return null;
     return {
@@ -43,12 +46,33 @@ export function Sidebar({ width }: Props) {
     };
   }, [snapshot, repo]);
 
+  const allThreads: ThreadRow[] = useMemo(() => {
+    const rows: ThreadRow[] = [];
+    const seen = new Set<string>();
+    if (activeThread) {
+      rows.push(activeThread);
+      seen.add(activeThread.id);
+    }
+    for (const item of threads) {
+      if (seen.has(item.id)) continue;
+      seen.add(item.id);
+      rows.push({
+        id: item.id,
+        title:
+          item.title?.trim() ||
+          (item.id.length > 8 ? `thread ${item.id.slice(0, 8)}` : item.id),
+        ago: deriveSessionAgo(item.updatedAt),
+        phase: undefined,
+      });
+    }
+    return rows;
+  }, [activeThread, threads]);
+
   const visibleThreads = useMemo(() => {
-    if (!activeThread) return [] as ThreadRow[];
     const q = query.trim().toLowerCase();
-    if (q && !activeThread.title.toLowerCase().includes(q)) return [];
-    return [activeThread];
-  }, [activeThread, query]);
+    if (!q) return allThreads;
+    return allThreads.filter((t) => t.title.toLowerCase().includes(q));
+  }, [allThreads, query]);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -91,6 +115,10 @@ export function Sidebar({ width }: Props) {
 
       <button
         type="button"
+        onClick={() => {
+          setToast("Start a new thread from the libra CLI: `libra code` (browser-side creation lands in a future iteration).");
+          window.setTimeout(() => setToast(null), 6_000);
+        }}
         title="Start a new libra code thread from your terminal"
         className="mb-2.5 flex w-full items-center gap-2 rounded-md border border-rule-2 bg-paper px-2.5 py-2 text-[12.5px] font-medium text-ink"
       >
@@ -99,6 +127,11 @@ export function Sidebar({ width }: Props) {
           ⌘N
         </span>
       </button>
+      {toast && (
+        <div className="mb-2 rounded-md border border-rule bg-paper px-2.5 py-1.5 text-[11px] leading-[1.45] text-ink-2">
+          {toast}
+        </div>
+      )}
 
       <div className="mb-3.5 flex items-center gap-1.5 rounded-md border border-rule bg-paper px-2.5 py-1.5 text-ink-3">
         <IconSearch size={14} />
@@ -123,8 +156,15 @@ export function Sidebar({ width }: Props) {
                 ? PHASES[thread.phase]?.label
                 : undefined
             }
-            active={true}
-            onSelect={() => undefined}
+            active={thread.id === activeThreadId}
+            onSelect={() => {
+              if (thread.id !== activeThreadId) {
+                setToast(
+                  `Switch threads with the libra CLI: \`libra code --resume ${thread.id}\` (browser-side switch lands later).`,
+                );
+                window.setTimeout(() => setToast(null), 6_000);
+              }
+            }}
           />
         ))}
         {visibleThreads.length === 0 && (

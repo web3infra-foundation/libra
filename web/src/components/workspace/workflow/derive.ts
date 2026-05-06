@@ -121,6 +121,8 @@ function relativeAgo(updatedAt: string | undefined): string {
 }
 
 function deriveCurrentPhase(snapshot: CodeUiSessionSnapshot): number {
+  // Live status takes precedence — the agent's own state machine is the
+  // strongest signal for which phase the workflow strip should highlight.
   switch (snapshot.status) {
     case "thinking":
       return 0;
@@ -133,11 +135,24 @@ function deriveCurrentPhase(snapshot: CodeUiSessionSnapshot): number {
     case "error":
       return 3;
     default:
-      // No active turn — keep the user on the most-recent meaningful phase.
-      return snapshot.toolCalls.length > 0
-        ? 2
-        : snapshot.plans.length > 0
-          ? 1
-          : 0;
+      break;
   }
+  // Idle / unknown — fall back to the highest phase backed by snapshot
+  // evidence (patchsets imply post-execution, tool calls imply execution,
+  // plans imply phase 1). Empty snapshots default to phase 0 (intent).
+  if (snapshot.patchsets.some((p) => isTerminalPatchsetStatus(p.status))) {
+    return 4;
+  }
+  if (snapshot.toolCalls.length > 0) {
+    return 2;
+  }
+  if (snapshot.plans.length > 0) {
+    return 1;
+  }
+  return 0;
+}
+
+function isTerminalPatchsetStatus(status: string): boolean {
+  const lower = status.toLowerCase();
+  return lower === "applied" || lower === "released" || lower === "completed";
 }

@@ -313,6 +313,39 @@ fn controller_attach_request_round_trip_pins_camel_case() {
     assert_eq!(ack_value, json!({ "accepted": true }));
 }
 
+/// `GET /api/code/threads` returns this envelope shape. Pin every field name
+/// the browser switches on so the Sidebar list cannot silently desync from
+/// the server payload (`items[].id/title/archived/currentIntentId/createdAt/
+/// updatedAt`, top-level `nextOffset`).
+#[test]
+fn thread_list_response_envelope_uses_camel_case_wire_shape() {
+    let envelope = serde_json::json!({
+        "items": [
+            {
+                "id": "11111111-1111-4111-8111-111111111111",
+                "title": "Demo thread",
+                "archived": false,
+                "currentIntentId": "22222222-2222-4222-8222-222222222222",
+                "createdAt": "2026-05-06T00:00:00Z",
+                "updatedAt": "2026-05-06T00:00:01Z",
+            },
+        ],
+        "nextOffset": 1,
+    });
+    let item = &envelope["items"][0];
+    for field in [
+        "id",
+        "title",
+        "archived",
+        "currentIntentId",
+        "createdAt",
+        "updatedAt",
+    ] {
+        assert!(item.get(field).is_some(), "{field} must be camelCase");
+    }
+    assert!(envelope.get("nextOffset").is_some());
+}
+
 /// Interaction-response payload — the only request body that has optional
 /// fields with mixed naming. Pins `selectedOption`, `applyToFuture`, and the
 /// `answers` map's plain string keys.

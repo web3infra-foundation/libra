@@ -8,9 +8,11 @@ import {
   IconFlask,
   IconGit,
   IconPlay,
+  IconSettings,
   IconSpark,
   IconTokens,
 } from "@/components/icons";
+import { useBrowserController } from "@/lib/code-ui/controller";
 import { useCodeUiStore } from "@/lib/code-ui/store";
 import { deriveWorkflowSummary } from "@/lib/code-ui/view-model";
 import { cn } from "@/lib/utils";
@@ -27,10 +29,11 @@ import { DetailPanel } from "./detail-panel";
 import { GitTimeline } from "./git-timeline";
 import { PhaseStrip } from "./phase-strip";
 import { ReviewView } from "./review-view";
+import { SettingsView } from "./settings-view";
 import { SummaryView } from "./summary-view";
 import type { DetailState, WorkflowState } from "./types";
 
-type Tab = "pipeline" | "summary" | "diff";
+type Tab = "pipeline" | "summary" | "diff" | "settings";
 
 type Props = {
   width: number;
@@ -38,6 +41,7 @@ type Props = {
 
 export function Workflow({ width }: Props) {
   const { snapshot, status } = useCodeUiStore();
+  const controller = useBrowserController();
   const [tab, setTab] = useState<Tab>("pipeline");
   const [detail, setDetail] = useState<DetailState | null>(null);
 
@@ -49,6 +53,16 @@ export function Workflow({ width }: Props) {
       : status
         ? `detached @ ${status.head.oid.slice(0, 7)}`
         : "—";
+
+  const canCancel =
+    !!snapshot &&
+    snapshot.controller.canWrite &&
+    ["thinking", "executing_tool", "awaiting_interaction"].includes(snapshot.status);
+  const canContinue =
+    !!snapshot &&
+    snapshot.controller.canWrite &&
+    snapshot.status === "awaiting_interaction" &&
+    snapshot.capabilities.interactiveApprovals;
 
   return (
     <section
@@ -65,6 +79,9 @@ export function Workflow({ width }: Props) {
           </TabBtn>
           <TabBtn active={tab === "diff"} onClick={() => setTab("diff")}>
             <IconDiff size={13} /> Diff
+          </TabBtn>
+          <TabBtn active={tab === "settings"} onClick={() => setTab("settings")}>
+            <IconSettings size={13} /> Settings
           </TabBtn>
         </div>
         <div className="flex items-center gap-1.5 text-ink-3">
@@ -98,6 +115,7 @@ export function Workflow({ width }: Props) {
           )}
           {tab === "summary" && <SummaryView />}
           {tab === "diff" && <ReviewView />}
+          {tab === "settings" && <SettingsView />}
         </div>
       </div>
 
@@ -132,17 +150,39 @@ export function Workflow({ width }: Props) {
         <div className="flex gap-1.5">
           <button
             type="button"
-            disabled
-            title="Pause is wired up in Phase 2 (browser write control)."
-            className="rounded-md border border-rule-2 bg-paper px-2.5 py-1 text-[11.5px] text-ink-3"
+            disabled={!canCancel}
+            onClick={() => {
+              if (!canCancel) return;
+              void controller.cancel().catch(() => undefined);
+            }}
+            title={
+              canCancel
+                ? "Cancel the active turn (Esc-equivalent)"
+                : "No active turn to cancel"
+            }
+            className={cn(
+              "rounded-md border px-2.5 py-1 text-[11.5px]",
+              canCancel
+                ? "border-bad/40 bg-paper text-bad hover:bg-paper-2"
+                : "border-rule bg-paper-2 text-ink-3",
+            )}
           >
-            Pause
+            Cancel
           </button>
           <button
             type="button"
-            disabled
-            title="Continue is wired up in Phase 2 (browser write control)."
-            className="inline-flex items-center gap-1.5 rounded-md border border-rule bg-paper-2 px-2.5 py-1 text-[11.5px] font-medium text-ink-3"
+            disabled={!canContinue}
+            title={
+              canContinue
+                ? "Resolve the pending interaction in the chat panel"
+                : "Continue activates only while waiting on an interaction"
+            }
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11.5px] font-medium",
+              canContinue
+                ? "border-accent-line bg-paper text-accent hover:bg-accent-soft"
+                : "border-rule bg-paper-2 text-ink-3",
+            )}
           >
             <IconPlay size={11} /> Continue
           </button>
