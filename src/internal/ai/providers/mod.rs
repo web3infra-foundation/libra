@@ -32,7 +32,9 @@
 //! | `ollama`    | Ollama (local)   | None                     | `http://127.0.0.1:11434/v1` |
 
 pub mod anthropic;
+pub mod capability;
 pub mod deepseek;
+pub mod factory;
 #[cfg(feature = "test-provider")]
 pub mod fake;
 pub mod gemini;
@@ -43,4 +45,6 @@ pub mod openai_compat;
 pub mod runtime;
 pub mod zhipu;
 
+pub use capability::{ModelCapability, ModelCost};
+pub use factory::{ProviderBuildOptions, ProviderFactory, ProviderFactoryError};
 pub use runtime::{AnyCompletionModel, AnyCompletionRawResponse};
