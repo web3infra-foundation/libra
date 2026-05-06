@@ -136,7 +136,7 @@ fn code_router() -> Router<WebAppState> {
     //   /controller/detach  -> loopback + controller-token; automation also needs control-token
     //   /messages         -> loopback + controller-token; automation also needs control-token
     //   /interactions/{id} -> loopback + controller-token; automation also needs control-token
-    //   /control/cancel   -> loopback + control-token + controller-token (automation only)
+    //   /control/cancel   -> loopback + controller-token (browser); also requires X-Libra-Control-Token for automation leases
     Router::new()
         .route("/session", get(code_session_handler))
         .route("/events", get(code_events_handler))
@@ -237,9 +237,10 @@ async fn repo_info_handler(
 
 async fn repo_status_handler(
     ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    State(state): State<WebAppState>,
 ) -> Result<Json<serde_json::Value>, WebApiError> {
     ensure_loopback_api_request(remote_addr)?;
-    crate::command::status::collect_status_json_for_api()
+    crate::command::status::collect_status_json_envelope_for_api(state.working_dir.as_path())
         .await
         .map(Json)
         .map_err(|err| WebApiError {

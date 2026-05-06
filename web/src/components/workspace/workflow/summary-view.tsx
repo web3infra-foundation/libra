@@ -43,7 +43,7 @@ export function SummaryView() {
           return `${total} files`;
         })();
   const aheadBehind = status?.upstream
-    ? `↑${status.upstream.ahead} ↓${status.upstream.behind}`
+    ? `↑${status.upstream.ahead ?? "—"} ↓${status.upstream.behind ?? "—"}`
     : "—";
 
   return (

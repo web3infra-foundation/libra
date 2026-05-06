@@ -223,8 +223,10 @@ function deriveRepoLine(
   const stateBits: string[] = [branch];
   stateBits.push(status.is_clean ? "clean" : "dirty");
   if (status.upstream) {
-    if (status.upstream.ahead > 0) stateBits.push(`↑${status.upstream.ahead}`);
-    if (status.upstream.behind > 0) stateBits.push(`↓${status.upstream.behind}`);
+    const ahead = status.upstream.ahead ?? 0;
+    const behind = status.upstream.behind ?? 0;
+    if (ahead > 0) stateBits.push(`↑${ahead}`);
+    if (behind > 0) stateBits.push(`↓${behind}`);
   }
   return { name, detail: stateBits.join(" · ") };
 }

@@ -1226,20 +1226,25 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
         CodeProvider::Codex => {
             let mut server =
                 start_managed_codex_server(&args.codex_bin, args.codex_port, &working_dir).await?;
-            let initial_controller = if launch_config.control_runtime.is_write() {
-                CodeUiInitialController::LocalTui {
-                    owner_label: "Terminal UI".to_string(),
-                    reason: Some("The terminal UI controls this live Codex run".to_string()),
-                }
-            } else {
-                CodeUiInitialController::Fixed {
-                    kind: CodeUiControllerKind::Tui,
-                    owner_label: "Terminal UI".to_string(),
-                    reason: Some("The terminal UI controls this live Codex run".to_string()),
-                }
-            };
             let browser_write_enabled =
                 launch_config.browser_control == BrowserControlMode::Loopback;
+            // `LocalTui` keeps the terminal as the visible owner while letting
+            // browser/automation leases attach when their writer is enabled.
+            // Fall back to `Fixed { Tui }` only when both writers are off
+            // (read-only observe).
+            let initial_controller =
+                if launch_config.control_runtime.is_write() || browser_write_enabled {
+                    CodeUiInitialController::LocalTui {
+                        owner_label: "Terminal UI".to_string(),
+                        reason: Some("The terminal UI controls this live Codex run".to_string()),
+                    }
+                } else {
+                    CodeUiInitialController::Fixed {
+                        kind: CodeUiControllerKind::Tui,
+                        owner_label: "Terminal UI".to_string(),
+                        reason: Some("The terminal UI controls this live Codex run".to_string()),
+                    }
+                };
             let code_ui_runtime = match start_codex_code_ui_runtime(
                 &args,
                 &working_dir,
@@ -1970,7 +1975,11 @@ async fn build_tui_code_ui_runtime(
     } else {
         ReadOnlyCodeUiAdapter::new(code_ui_session, capabilities)
     };
-    let initial_controller = if automation_write_enabled {
+    // `LocalTui` keeps the terminal as the visible owner but still lets
+    // browser/automation leases attach when their write surface is enabled.
+    // `Fixed { Tui }` is reserved for sessions where neither writer should
+    // ever be allowed to take control (read-only browser observe).
+    let initial_controller = if automation_write_enabled || browser_write_enabled {
         CodeUiInitialController::LocalTui {
             owner_label: "Terminal UI".to_string(),
             reason: Some("The terminal UI controls this live session".to_string()),

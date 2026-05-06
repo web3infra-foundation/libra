@@ -42,12 +42,17 @@ export type RepoStatus = {
     | { type: "branch"; name: string }
     | { type: "detached"; oid: string };
   has_commits: boolean;
+  /**
+   * `null` when the branch has no upstream, no remote-tracking ref, or the
+   * server cannot resolve the remote OID. `ahead` / `behind` are nullable
+   * for the same reason — libra serializes them via `Option<usize>`.
+   */
   upstream:
     | null
     | {
         remote_ref: string;
-        ahead: number;
-        behind: number;
+        ahead: number | null;
+        behind: number | null;
         gone: boolean;
       };
   staged: { new: string[]; modified: string[]; deleted: string[] };
@@ -56,6 +61,13 @@ export type RepoStatus = {
   ignored: string[];
   is_clean: boolean;
   stash_entries?: number;
+};
+
+/** CLI envelope returned by `libra status --json` and `/api/repo/status`. */
+export type RepoStatusEnvelope = {
+  ok: true;
+  command: "status";
+  data: RepoStatus;
 };
 
 export class CodeUiClientError extends Error {
@@ -91,9 +103,10 @@ export async function getRepoInfo(): Promise<RepoInfo> {
 }
 
 export async function getRepoStatus(): Promise<RepoStatus> {
-  return readJson<RepoStatus>(
+  const envelope = await readJson<RepoStatusEnvelope>(
     await fetch("/api/repo/status", { credentials: "same-origin" }),
   );
+  return envelope.data;
 }
 
 export async function getSession(): Promise<CodeUiSessionSnapshot> {

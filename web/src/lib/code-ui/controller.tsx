@@ -178,26 +178,26 @@ export function useBrowserController(): BrowserControllerHook {
   }, []);
 
   // Best-effort detach on unload / hidden tab so the next browser session can
-  // attach without bumping into our stale lease.
+  // attach without bumping into our stale lease. We use `fetch(..., { keepalive: true })`
+  // because the server requires the lease in the `X-Code-Controller-Token`
+  // header, and `navigator.sendBeacon` cannot set custom headers.
   useEffect(() => {
     const onUnload = () => {
       const lease = leaseRef.current;
       if (!lease) return;
       try {
-        const blob = new Blob(
-          [JSON.stringify({ clientId: clientIdRef.current! })],
-          { type: "application/json" },
-        );
-        // sendBeacon is fire-and-forget; we cannot pass headers, so the server
-        // accepts the lease token in the JSON body too — see Phase 2 docs.
-        // For now we just call detach() which uses fetch; if the page is
-        // unloading the call may be cancelled but it's a best-effort cleanup.
-        navigator.sendBeacon?.(
-          `/api/code/controller/detach?token=${encodeURIComponent(lease.controllerToken)}`,
-          blob,
-        );
+        void fetch("/api/code/controller/detach", {
+          method: "POST",
+          credentials: "same-origin",
+          keepalive: true,
+          headers: {
+            "Content-Type": "application/json",
+            [CONTROLLER_TOKEN_HEADER]: lease.controllerToken,
+          },
+          body: JSON.stringify({ clientId: clientIdRef.current! }),
+        });
       } catch {
-        /* ignore */
+        /* best-effort on unload */
       }
     };
     window.addEventListener("beforeunload", onUnload);

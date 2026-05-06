@@ -340,17 +340,46 @@ fn load_status_index() -> CliResult<Index> {
 // Public entry points
 // ---------------------------------------------------------------------------
 
-/// Collect repository status and render it as the same JSON object that
-/// `libra status --json` prints. Used by the embedded web server's
-/// `/api/repo/status` handler so the browser sees a byte-compatible shape.
+/// Collect repository status and render it inside the same `{ok, command,
+/// data}` envelope that `libra status --json` prints, so `/api/repo/status`
+/// stays byte-compatible with the CLI output.
 ///
 /// Internally re-uses [`collect_status_data`] + [`build_status_json`] with a
 /// default [`StatusArgs`] (untracked files in normal mode, no porcelain v2,
 /// no ignored files, no stash count).
-pub async fn collect_status_json_for_api() -> CliResult<serde_json::Value> {
+///
+/// Status collection currently resolves storage from the process working
+/// directory; the embedded web server expects to be launched from (or with
+/// `--cwd`/`--repo` already chdir'd to) the repository root. Callers that
+/// need to scope to a specific path should pass it via `working_dir`.
+pub async fn collect_status_json_envelope_for_api(
+    working_dir: &std::path::Path,
+) -> CliResult<serde_json::Value> {
+    use std::path::PathBuf;
+
     let args = StatusArgs::default();
+    let canon_working = std::fs::canonicalize(working_dir).unwrap_or_else(|_| PathBuf::from(working_dir));
+    let canon_cwd = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| std::fs::canonicalize(&cwd).ok());
+    if canon_cwd.as_deref() != Some(canon_working.as_path()) {
+        return Err(CliError::fatal(format!(
+            "/api/repo/status currently requires the libra process to run inside its repository root. Expected '{}', found '{}'. Re-launch `libra code` from the repo or open an issue if you need cross-directory status.",
+            canon_working.display(),
+            canon_cwd
+                .as_deref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "<unavailable>".to_string()),
+        )));
+    }
+
     let data = collect_status_data(&args).await?;
-    Ok(build_status_json(&data, &args))
+    let inner = build_status_json(&data, &args);
+    Ok(serde_json::json!({
+        "ok": true,
+        "command": "status",
+        "data": inner,
+    }))
 }
 
 pub async fn execute(args: StatusArgs) {
