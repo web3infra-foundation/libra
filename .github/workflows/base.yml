@@ -60,6 +60,42 @@ jobs:
       - name: Run cargo clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+  web-check:
+    name: compat-web-check
+    runs-on: [self-hosted]
+
+    env:
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Enable pnpm
+        run: corepack enable
+
+      # The Rust crate's `build.rs` skips the web build whenever
+      # `LIBRA_SKIP_WEB_BUILD=1` (set on every other job for speed). This
+      # dedicated job re-asserts that the Next.js source still type-checks,
+      # lints, and produces a clean static export so `web/out/` cannot
+      # silently drift away from `WebAssets` in main. Per
+      # docs/improvement/web.md Phase 5 verification.
+      - name: Install web dependencies
+        run: pnpm --dir web install --frozen-lockfile
+
+      - name: Lint web
+        run: pnpm --dir web lint
+
+      - name: Build web (static export → web/out/)
+        run: pnpm --dir web build
+
   redundancy:
     name: compat-redundancy
     runs-on: [self-hosted]

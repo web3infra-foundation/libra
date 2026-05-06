@@ -320,6 +320,45 @@ fn browser_unknown_interaction_id_is_rejected_without_state_change() -> Result<(
     session.shutdown()
 }
 
+/// `/control reclaim` from the TUI must clear an active browser lease and
+/// flip the controller back to `tui`. Subsequent writes from the browser's
+/// (now stale) lease token must be rejected. Browser counterpart of
+/// `automation_reclaim_returns_control_to_tui`.
+#[cfg(feature = "test-provider")]
+#[test]
+#[serial]
+fn local_tui_reclaim_invalidates_browser_lease() -> Result<()> {
+    let mut session = CodeSession::spawn(
+        CodeSessionOptions::new("browser-reclaim", fixture("basic_chat"))
+            .with_browser_control_loopback(),
+    )?;
+
+    let token = session.attach_browser("scenario-browser-reclaim")?;
+    session.wait_for_snapshot(Duration::from_secs(10), |snapshot| {
+        controller_kind(snapshot) == Some("browser")
+    })?;
+
+    session.write_tui_line("/control reclaim")?;
+    session.wait_for_snapshot(Duration::from_secs(10), |snapshot| {
+        controller_kind(snapshot) == Some("tui")
+    })?;
+
+    let (status, body) = session.browser_submit_message(&token, "/chat hello")?;
+    assert!(
+        !status.is_success(),
+        "stale browser lease must be rejected after TUI reclaim, got {status}: {body}",
+    );
+    assert!(
+        matches!(
+            error_code(&body),
+            Some("INVALID_CONTROLLER_TOKEN" | "CONTROLLER_CONFLICT")
+        ),
+        "expected INVALID_CONTROLLER_TOKEN or CONTROLLER_CONFLICT, got: {body}",
+    );
+
+    session.shutdown()
+}
+
 /// Once a browser holds the lease, a second browser attempting to attach
 /// with a different `clientId` must trip `CONTROLLER_CONFLICT` instead of
 /// kicking the first writer out — the lease must be released or expire
