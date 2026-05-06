@@ -166,10 +166,16 @@ fn needs_model_id_check(id: &str) -> bool {
 /// is enabled. This is what we surface in `UnknownProvider.available` so a
 /// caller running with fake support sees `fake` listed.
 fn available_provider_ids() -> Vec<&'static str> {
-    let mut ids = provider_id::ALL_PRODUCTION.to_vec();
     #[cfg(feature = "test-provider")]
-    ids.push(provider_id::FAKE);
-    ids
+    {
+        let mut ids = provider_id::ALL_PRODUCTION.to_vec();
+        ids.push(provider_id::FAKE);
+        ids
+    }
+    #[cfg(not(feature = "test-provider"))]
+    {
+        provider_id::ALL_PRODUCTION.to_vec()
+    }
 }
 
 fn require_api_key<'a>(

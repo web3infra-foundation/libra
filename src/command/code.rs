@@ -87,7 +87,7 @@ use url::Url;
 use uuid::Uuid;
 
 #[cfg(feature = "test-provider")]
-use crate::internal::ai::providers::fake::{Client as FakeClient, FAKE_DEFAULT_MODEL};
+use crate::internal::ai::providers::fake::FAKE_DEFAULT_MODEL;
 use crate::{
     cli_error,
     command::code_control_files::{
@@ -115,13 +115,17 @@ use crate::{
             projection::{ProjectionRebuilder, ProjectionResolver, ThreadBundle},
             prompt::{ContextMode, SystemPromptBuilder},
             providers::{
-                anthropic::{CLAUDE_3_5_SONNET, Client as AnthropicClient},
-                deepseek::client::Client as DeepSeekClient,
-                gemini::{Client as GeminiClient, GEMINI_2_5_FLASH},
-                kimi::{Client as KimiClient, KIMI_K2_6},
+                anthropic::CLAUDE_3_5_SONNET,
+                gemini::GEMINI_2_5_FLASH,
+                kimi::KIMI_K2_6,
+                // OllamaClient stays imported because the headless web
+                // runtime path (`build_non_codex_headless_runtime`) still
+                // constructs the client directly. The other provider Client
+                // aliases were dropped when the TUI dispatch migrated to
+                // `ProviderFactory`.
                 ollama::Client as OllamaClient,
-                openai::{Client as OpenAIClient, GPT_4O_MINI},
-                zhipu::{Client as ZhipuClient, GLM_5},
+                openai::GPT_4O_MINI,
+                zhipu::GLM_5,
             },
             runtime::{ToolBoundaryRuntime, TracingAuditSink},
             sandbox::{
@@ -146,9 +150,10 @@ use crate::{
                 WebServerHandle, WebServerOptions,
                 code_ui::{
                     CodeUiCapabilities, CodeUiControllerKind, CodeUiInitialController,
-                    CodeUiProviderAdapter, CodeUiProviderInfo, CodeUiRuntimeHandle, CodeUiSession,
-                    CodeUiSessionStatus, CodeUiTranscriptEntry, CodeUiTranscriptEntryKind,
-                    ReadOnlyCodeUiAdapter, initial_snapshot, snapshot_from_thread_bundle,
+                    CodeUiProviderAdapter, CodeUiProviderInfo, CodeUiRuntimeHandle,
+                    CodeUiRuntimeOptions, CodeUiSession, CodeUiSessionStatus,
+                    CodeUiTranscriptEntry, CodeUiTranscriptEntryKind, ReadOnlyCodeUiAdapter,
+                    initial_snapshot, snapshot_from_thread_bundle,
                 },
                 headless::{HeadlessCodeRuntime, headless_capabilities},
                 start as start_web_server,
@@ -986,6 +991,171 @@ fn provider_env_value_with_lookup(
         .or_else(|| lookup(key))
 }
 
+/// Build an [`AnyCompletionModel`] for every non-Codex provider through the
+/// shared [`ProviderFactory`].
+///
+/// This consolidates what used to be eight near-identical match arms
+/// (`Gemini`, `Openai`, `Anthropic`, `Deepseek`, `Kimi`, `Zhipu`, `Ollama`,
+/// `Fake`) into a single dispatch. The Codex provider stays on its own path
+/// because it bypasses `AnyCompletionModel` entirely (managed app-server
+/// runtime).
+///
+/// Env resolution flows through [`provider_env_value`] for **every** provider,
+/// not just Deepseek / Kimi as before. The precedence is `--env-file` first
+/// then process env (documented on `--env-file` itself), and applies to API
+/// keys, base URLs, and the boolean `OLLAMA_COMPACT_TOOLS` flag. Gemini /
+/// OpenAI / Anthropic / Zhipu used to read only from process env via
+/// `from_env()`; this widens them to consult `--env-file` first as well, so
+/// a value defined in the env-file now wins over a stale process-env value
+/// for those providers.
+///
+/// The function returns the resolved model name alongside the model so the
+/// caller can pass it into `run_tui_with_model` for usage tagging.
+fn build_any_completion_model_for_args(
+    args: &CodeArgs,
+    env_file: &CodeEnvFile,
+) -> CliResult<(crate::internal::ai::providers::AnyCompletionModel, String)> {
+    use crate::internal::ai::{
+        agent::profile::ModelBinding,
+        providers::{
+            ProviderBuildOptions, ProviderFactory, ProviderFactoryError, runtime::provider_id,
+        },
+    };
+
+    let provider_id_str = match args.provider {
+        CodeProvider::Gemini => provider_id::GEMINI,
+        CodeProvider::Openai => provider_id::OPENAI,
+        CodeProvider::Anthropic => provider_id::ANTHROPIC,
+        CodeProvider::Deepseek => provider_id::DEEPSEEK,
+        CodeProvider::Kimi => provider_id::KIMI,
+        CodeProvider::Zhipu => provider_id::ZHIPU,
+        CodeProvider::Ollama => provider_id::OLLAMA,
+        #[cfg(feature = "test-provider")]
+        CodeProvider::Fake => provider_id::FAKE,
+        CodeProvider::Codex => {
+            // Codex never reaches this helper — its dispatch path skips the
+            // factory entirely. Treat as a programmer error rather than a
+            // runtime failure so a future refactor cannot silently misroute.
+            return Err(CliError::command_usage(
+                "internal error: Codex provider must use the managed runtime path, \
+                 not the completion-model factory",
+            ));
+        }
+    };
+
+    // Resolve default model per provider. Ollama and (gated) Fake have
+    // explicit error / fallback rules that match the pre-factory behavior.
+    let model_name = match (args.provider, args.model.clone()) {
+        (_, Some(m)) => m,
+        (CodeProvider::Gemini, None) => GEMINI_2_5_FLASH.to_string(),
+        (CodeProvider::Openai, None) => GPT_4O_MINI.to_string(),
+        (CodeProvider::Anthropic, None) => CLAUDE_3_5_SONNET.to_string(),
+        (CodeProvider::Deepseek, None) => "deepseek-chat".to_string(),
+        (CodeProvider::Kimi, None) => KIMI_K2_6.to_string(),
+        (CodeProvider::Zhipu, None) => GLM_5.to_string(),
+        (CodeProvider::Ollama, None) => {
+            return Err(CliError::command_usage(
+                "--model is required when using --provider ollama (e.g. --model llama3.2)",
+            ));
+        }
+        #[cfg(feature = "test-provider")]
+        (CodeProvider::Fake, None) => FAKE_DEFAULT_MODEL.to_string(),
+        (CodeProvider::Codex, None) => unreachable!("Codex was filtered above"),
+    };
+
+    let api_key = match args.provider {
+        CodeProvider::Gemini => provider_env_value(env_file, "GEMINI_API_KEY"),
+        CodeProvider::Openai => provider_env_value(env_file, "OPENAI_API_KEY"),
+        CodeProvider::Anthropic => provider_env_value(env_file, "ANTHROPIC_API_KEY"),
+        CodeProvider::Deepseek => provider_env_value(env_file, "DEEPSEEK_API_KEY"),
+        CodeProvider::Kimi => provider_env_value(env_file, "MOONSHOT_API_KEY"),
+        CodeProvider::Zhipu => provider_env_value(env_file, "ZHIPU_API_KEY"),
+        CodeProvider::Ollama => provider_env_value(env_file, "OLLAMA_API_KEY"),
+        #[cfg(feature = "test-provider")]
+        CodeProvider::Fake => None,
+        CodeProvider::Codex => None,
+    };
+
+    let api_base = match args.provider {
+        CodeProvider::Anthropic => provider_env_value(env_file, "ANTHROPIC_BASE_URL"),
+        CodeProvider::Openai => provider_env_value(env_file, "OPENAI_BASE_URL"),
+        CodeProvider::Kimi => provider_env_value(env_file, "MOONSHOT_BASE_URL"),
+        CodeProvider::Zhipu => provider_env_value(env_file, "ZHIPU_BASE_URL"),
+        CodeProvider::Ollama => args
+            .api_base
+            .clone()
+            .or_else(|| provider_env_value(env_file, "OLLAMA_BASE_URL")),
+        _ => None,
+    };
+
+    #[cfg(feature = "test-provider")]
+    let fake_fixture_path = if matches!(args.provider, CodeProvider::Fake) {
+        Some(args.fake_fixture.clone().ok_or_else(|| {
+            CliError::command_usage("--fake-fixture is required with --provider=fake")
+        })?)
+    } else {
+        None
+    };
+    #[cfg(not(feature = "test-provider"))]
+    let fake_fixture_path: Option<std::path::PathBuf> = None;
+
+    // The Ollama client used to read `OLLAMA_COMPACT_TOOLS` from process env
+    // at construction time. The factory now sets the flag explicitly, so we
+    // need to fold that env var back in when the CLI flag is absent —
+    // otherwise users with `OLLAMA_COMPACT_TOOLS=1` in their environment
+    // would silently lose compact-schema mode after this migration.
+    let ollama_compact_tools = args.ollama_compact_tools
+        || provider_env_value(env_file, "OLLAMA_COMPACT_TOOLS")
+            .map(|raw| {
+                matches!(
+                    raw.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false);
+
+    let options = ProviderBuildOptions {
+        api_key,
+        api_base,
+        ollama_compact_tools,
+        fake_fixture_path,
+        // Preserve the pre-factory behaviour of accepting any model string
+        // the user passes via `--model`. The capability table is best-effort
+        // and the runtime will surface a real provider error if the model
+        // does not exist.
+        accept_unknown_models: true,
+    };
+
+    let binding = ModelBinding {
+        provider_id: provider_id_str.to_string(),
+        model_id: model_name.clone(),
+        variant: None,
+    };
+
+    let model = ProviderFactory
+        .build(&binding, options)
+        .map_err(|err| match err {
+            ProviderFactoryError::MissingApiKey { env_var, .. } => {
+                if matches!(args.provider, CodeProvider::Ollama) {
+                    // Ollama Cloud needs the api key only when the base URL points
+                    // at ollama.com; preserve the pre-factory error wording so users
+                    // who scripted against it do not see a regression.
+                    CliError::auth(
+                        "OLLAMA_API_KEY is required when using Ollama Cloud directly \
+                     (set --api-base https://ollama.com or OLLAMA_BASE_URL=https://ollama.com)",
+                    )
+                } else {
+                    CliError::auth(format!("{env_var} is not set"))
+                }
+            }
+            ProviderFactoryError::BuildFailed { reason, .. } => CliError::io(reason),
+            ProviderFactoryError::UnknownProvider { .. }
+            | ProviderFactoryError::UnknownModel { .. } => CliError::command_usage(err.to_string()),
+        })?;
+
+    Ok((model, model_name))
+}
+
 /// Main TUI execution path: initializes the AI provider, builds the tool
 /// registry, starts background web/MCP servers, and launches the interactive
 /// terminal application.
@@ -1142,103 +1312,9 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
         browser_control,
     };
 
-    // Create agent based on provider
+    // Create agent based on provider. Every non-Codex provider funnels
+    // through `ProviderFactory`; Codex keeps its own managed-runtime path.
     match args.provider {
-        CodeProvider::Gemini => {
-            let client = match GeminiClient::from_env() {
-                Ok(client) => client,
-                Err(_) => return Err(CliError::auth("GEMINI_API_KEY is not set")),
-            };
-            let model_name = args.model.unwrap_or_else(|| GEMINI_2_5_FLASH.to_string());
-            let model = client.completion_model(&model_name);
-            run_tui_with_model(model, launch_config, model_name, provider_name).await?;
-        }
-        CodeProvider::Openai => {
-            let client = match OpenAIClient::from_env() {
-                Ok(client) => client,
-                Err(_) => return Err(CliError::auth("OPENAI_API_KEY is not set")),
-            };
-            let model_name = args.model.unwrap_or_else(|| GPT_4O_MINI.to_string());
-            let model = client.completion_model(&model_name);
-            run_tui_with_model(model, launch_config, model_name, provider_name).await?;
-        }
-        CodeProvider::Anthropic => {
-            let client = match AnthropicClient::from_env() {
-                Ok(client) => client,
-                Err(_) => return Err(CliError::auth("ANTHROPIC_API_KEY is not set")),
-            };
-            let model_name = args.model.unwrap_or_else(|| CLAUDE_3_5_SONNET.to_string());
-            let model = client.completion_model(&model_name);
-            run_tui_with_model(model, launch_config, model_name, provider_name).await?;
-        }
-        CodeProvider::Deepseek => {
-            let api_key = provider_env_value(&env_file, "DEEPSEEK_API_KEY")
-                .ok_or_else(|| CliError::auth("DEEPSEEK_API_KEY is not set"))?;
-            let client = DeepSeekClient::with_api_key(api_key);
-            let model_name = args.model.unwrap_or_else(|| "deepseek-chat".to_string());
-            let model = client.completion_model(&model_name);
-            run_tui_with_model(model, launch_config, model_name, provider_name).await?;
-        }
-        CodeProvider::Kimi => {
-            let api_key = provider_env_value(&env_file, "MOONSHOT_API_KEY")
-                .ok_or_else(|| CliError::auth("MOONSHOT_API_KEY is not set"))?;
-            let client = match provider_env_value(&env_file, "MOONSHOT_BASE_URL") {
-                Some(base_url) => KimiClient::with_base_url(&base_url, api_key),
-                None => KimiClient::with_api_key(api_key),
-            };
-            let model_name = args.model.unwrap_or_else(|| KIMI_K2_6.to_string());
-            let model = client.completion_model(&model_name);
-            run_tui_with_model(model, launch_config, model_name, provider_name).await?;
-        }
-        CodeProvider::Zhipu => {
-            let client = match ZhipuClient::from_env() {
-                Ok(client) => client,
-                Err(_) => return Err(CliError::auth("ZHIPU_API_KEY is not set")),
-            };
-            let model_name = args.model.unwrap_or_else(|| GLM_5.to_string());
-            let model = client.completion_model(&model_name);
-            run_tui_with_model(model, launch_config, model_name, provider_name).await?;
-        }
-        CodeProvider::Ollama => {
-            let mut client = if let Some(base_url) = &args.api_base {
-                OllamaClient::with_base_url(base_url)
-            } else {
-                OllamaClient::from_env()
-            };
-            if args.ollama_compact_tools {
-                client = client.with_compact_tool_schema(true);
-            }
-            if client.missing_required_cloud_api_key() {
-                return Err(CliError::auth(
-                    "OLLAMA_API_KEY is required when using Ollama Cloud directly (set --api-base https://ollama.com or OLLAMA_BASE_URL=https://ollama.com)",
-                ));
-            }
-            let model_name = match args.model {
-                Some(m) => m,
-                None => {
-                    return Err(CliError::command_usage(
-                        "--model is required when using --provider ollama (e.g. --model llama3.2)",
-                    ));
-                }
-            };
-            let model = client.completion_model(&model_name);
-            run_tui_with_model(model, launch_config, model_name, provider_name).await?;
-        }
-        #[cfg(feature = "test-provider")]
-        CodeProvider::Fake => {
-            let fixture = args.fake_fixture.as_deref().ok_or_else(|| {
-                CliError::command_usage("--fake-fixture is required with --provider=fake")
-            })?;
-            let client = FakeClient::from_fixture_path(fixture).map_err(|error| {
-                CliError::io(format!(
-                    "failed to load fake provider fixture '{}': {error}",
-                    fixture.display()
-                ))
-            })?;
-            let model_name = args.model.unwrap_or_else(|| FAKE_DEFAULT_MODEL.to_string());
-            let model = client.completion_model(&model_name);
-            run_tui_with_model(model, launch_config, model_name, provider_name).await?;
-        }
         CodeProvider::Codex => {
             let mut server =
                 start_managed_codex_server(&args.codex_bin, args.codex_port, &working_dir).await?;
@@ -1287,6 +1363,10 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
             .await;
             server.shutdown().await;
             result?;
+        }
+        _ => {
+            let (model, model_name) = build_any_completion_model_for_args(&args, &env_file)?;
+            run_tui_with_model(model, launch_config, model_name, provider_name).await?;
         }
     }
 
@@ -1523,6 +1603,15 @@ fn default_browser_control_mode(args: &CodeArgs) -> BrowserControlMode {
     }
 }
 
+/// CLI-side wrapper around `code_ui::test_lease_duration_override` that maps
+/// the helper's `String` error into `CliError::command_usage` so a bad
+/// `LIBRA_CODE_LEASE_DURATION_MS` value fails the command at startup with
+/// a stable, user-readable message.
+fn code_ui_test_lease_duration_override() -> CliResult<Option<chrono::Duration>> {
+    crate::internal::ai::web::code_ui::test_lease_duration_override()
+        .map_err(CliError::command_usage)
+}
+
 /// Build a headless Code UI runtime for `--web-only` non-Codex providers.
 ///
 /// Constructs a minimal local-read-only [`ToolRegistry`]
@@ -1586,12 +1675,13 @@ where
 
     let adapter = HeadlessCodeRuntime::new(session, capabilities, model, registry, config_factory);
 
-    Ok(CodeUiRuntimeHandle::build(
-        adapter,
+    let mut runtime_options = CodeUiRuntimeOptions::new(
         browser_write_enabled,
+        false,
         CodeUiInitialController::Unclaimed,
-    )
-    .await)
+    );
+    runtime_options.lease_duration = code_ui_test_lease_duration_override()?;
+    Ok(CodeUiRuntimeHandle::build_with_options(adapter, runtime_options).await)
 }
 
 fn build_headless_tool_registry(working_dir: &Path) -> Arc<ToolRegistry> {
@@ -1634,6 +1724,13 @@ fn build_headless_tool_registry(working_dir: &Path) -> Arc<ToolRegistry> {
 /// v0 supports `--provider ollama` (the canonical Phase 3 verification path
 /// in `docs/improvement/web.md`). Other non-Codex providers continue to
 /// receive the placeholder runtime until each provider's client is wired in.
+///
+/// TODO(opencode OC-Phase 1+): converge this path on `ProviderFactory` so the
+/// headless and TUI flows share a single dispatch site. Today the headless
+/// flow still constructs the Ollama client directly, which means future
+/// non-Codex providers must be wired in twice (here and in
+/// [`build_any_completion_model_for_args`]) — a maintenance hazard the doc
+/// explicitly calls out as a divergence to fix.
 async fn build_non_codex_headless_runtime(
     args: &CodeArgs,
     working_dir: &Path,
@@ -2122,6 +2219,7 @@ async fn build_tui_code_ui_runtime(
     code_control_tx: Option<tokio::sync::mpsc::UnboundedSender<TuiControlCommand>>,
     automation_write_enabled: bool,
     browser_write_enabled: bool,
+    lease_duration_override: Option<chrono::Duration>,
 ) -> Arc<CodeUiRuntimeHandle> {
     let capabilities = build_tui_code_ui_capabilities();
     let provider = CodeUiProviderInfo {
@@ -2169,13 +2267,13 @@ async fn build_tui_code_ui_runtime(
             reason: Some("The terminal UI controls this live session".to_string()),
         }
     };
-    CodeUiRuntimeHandle::build_with_control(
-        adapter,
+    let mut runtime_options = CodeUiRuntimeOptions::new(
         browser_write_enabled,
         automation_write_enabled,
         initial_controller,
-    )
-    .await
+    );
+    runtime_options.lease_duration = lease_duration_override;
+    CodeUiRuntimeHandle::build_with_options(adapter, runtime_options).await
 }
 
 async fn load_code_ui_projection_bundle(
@@ -2375,16 +2473,16 @@ where
             let capabilities = adapter.capabilities();
             let tui_adapter: Arc<dyn CodeUiProviderAdapter> =
                 TuiCodeUiAdapter::new(code_ui_session, capabilities, control_tx);
-            CodeUiRuntimeHandle::build_with_control(
-                tui_adapter,
+            let mut runtime_options = CodeUiRuntimeOptions::new(
                 browser_write_enabled,
                 automation_write_enabled,
                 CodeUiInitialController::LocalTui {
                     owner_label: "Terminal UI".to_string(),
                     reason: Some("The terminal UI controls this live managed session".to_string()),
                 },
-            )
-            .await
+            );
+            runtime_options.lease_duration = code_ui_test_lease_duration_override()?;
+            CodeUiRuntimeHandle::build_with_options(tui_adapter, runtime_options).await
         } else {
             runtime
         }
@@ -2412,6 +2510,7 @@ where
             code_control_tx,
             automation_write_enabled,
             browser_write_enabled,
+            code_ui_test_lease_duration_override()?,
         )
         .await
     };
@@ -3816,6 +3915,7 @@ no_cache_unknown_network = true
             None,
             false,
             false,
+            None,
         )
         .await;
         let snapshot = runtime.snapshot().await;
