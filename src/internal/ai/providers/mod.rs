@@ -39,5 +39,8 @@ pub mod gemini;
 pub mod kimi;
 pub mod ollama;
 pub mod openai;
-pub(crate) mod openai_compat;
+pub mod openai_compat;
+pub mod runtime;
 pub mod zhipu;
+
+pub use runtime::{AnyCompletionModel, AnyCompletionRawResponse};
