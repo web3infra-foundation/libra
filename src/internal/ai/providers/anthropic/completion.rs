@@ -1064,4 +1064,107 @@ mod tests {
         let (system, _) = build_messages(&request).unwrap();
         assert!(system.is_none());
     }
+
+    /// Quirk (parse_response): whitespace-only Text blocks in an assistant
+    /// response are dropped. Anthropic occasionally emits a leading or
+    /// trailing whitespace block alongside meaningful content; preserving
+    /// it would surface as empty `AssistantContent::Text` to the agent
+    /// loop, which would then loop on the empty string trying to interpret
+    /// it.
+    #[test]
+    fn quirk_parse_response_drops_whitespace_only_text_blocks() {
+        let response = AnthropicResponse {
+            id: "msg_1".to_string(),
+            r#type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![
+                AnthropicContentBlock::Text {
+                    text: "   \n  ".to_string(),
+                },
+                AnthropicContentBlock::Text {
+                    text: "actual answer".to_string(),
+                },
+            ],
+            model: "claude-3-5-sonnet-latest".to_string(),
+            stop_reason: Some("end_turn".to_string()),
+            usage: AnthropicUsage {
+                input_tokens: 1,
+                output_tokens: 1,
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
+            },
+        };
+        let parts = parse_response(&response);
+        assert_eq!(parts.len(), 1, "whitespace-only block dropped");
+        match &parts[0] {
+            AssistantContent::Text(text) => assert_eq!(text.text, "actual answer"),
+            other => panic!("unexpected content {other:?}"),
+        }
+    }
+
+    /// Quirk (parse_response): `Image` and `ToolResult` content blocks are
+    /// request-only constructs and must be silently ignored if they ever
+    /// appear in an assistant response (defensive against a future API
+    /// change). This pins the current behaviour.
+    #[test]
+    fn quirk_parse_response_ignores_request_only_block_types() {
+        let response = AnthropicResponse {
+            id: "msg_1".to_string(),
+            r#type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![
+                AnthropicContentBlock::Image {
+                    source: AnthropicImageSource {
+                        r#type: "base64".to_string(),
+                        media_type: "image/png".to_string(),
+                        data: "ignored".to_string(),
+                    },
+                },
+                AnthropicContentBlock::ToolResult {
+                    tool_use_id: "call_x".to_string(),
+                    content: "ignored".to_string(),
+                    is_error: None,
+                },
+                AnthropicContentBlock::Text {
+                    text: "answer".to_string(),
+                },
+            ],
+            model: "claude-3-5-sonnet-latest".to_string(),
+            stop_reason: Some("end_turn".to_string()),
+            usage: AnthropicUsage {
+                input_tokens: 1,
+                output_tokens: 1,
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
+            },
+        };
+        let parts = parse_response(&response);
+        assert_eq!(parts.len(), 1, "only Text block survives");
+        assert!(matches!(&parts[0], AssistantContent::Text(t) if t.text == "answer"));
+    }
+
+    /// Quirk (parse_response): an empty content array (Anthropic returns
+    /// no blocks at all — extremely rare but possible at stop_reason
+    /// boundaries) yields an empty `AssistantContent` vec. The agent
+    /// loop interprets this as "no progress" and either retries or
+    /// terminates depending on its repeat-call detector.
+    #[test]
+    fn quirk_parse_response_handles_empty_content_array() {
+        let response = AnthropicResponse {
+            id: "msg_1".to_string(),
+            r#type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![],
+            model: "claude-3-5-sonnet-latest".to_string(),
+            stop_reason: Some("end_turn".to_string()),
+            usage: AnthropicUsage {
+                input_tokens: 1,
+                output_tokens: 0,
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
+            },
+        };
+        let parts = parse_response(&response);
+        assert!(parts.is_empty());
+    }
 }
