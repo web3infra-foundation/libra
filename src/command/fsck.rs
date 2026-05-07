@@ -39,12 +39,14 @@ const FSCK_LONG_ABOUT: &str =
 By default, checks all objects using refs, index, and reflogs as starting points.
 
 Dangling objects are those that exist but are not referenced by any ref, index, or reflog.
+By default, only dangling commits are reported (matching git fsck behavior).
 Unreachable objects include all dangling objects plus those only reachable from other unreachable objects.";
 
 const FSCK_AFTER_HELP: &str = "Examples:
   libra fsck
   libra fsck --no-reflogs
   libra fsck --unreachable
+  libra fsck --no-dangling
   libra fsck <object-id>";
 
 /// Verify repository integrity by checking objects, refs, and index
@@ -70,6 +72,30 @@ pub struct FsckArgs {
     /// Print unreachable objects (not just dangling)
     #[arg(long)]
     pub unreachable: bool,
+
+    /// Report dangling objects (default: dangling commits only)
+    #[arg(long, default_value = "true", num_args = 0..=1, require_equals = false, value_name = "BOOL", overrides_with = "no_dangling")]
+    pub dangling: Option<String>,
+
+    /// Hide dangling objects in output
+    #[arg(long, conflicts_with = "dangling")]
+    pub no_dangling: bool,
+}
+
+impl FsckArgs {
+    /// Returns whether dangling objects should be reported.
+    /// Default is true (only dangling commits).
+    /// Use --dangling or --dangling=true to enable, --no-dangling to disable.
+    fn dangling_enabled(&self) -> bool {
+        // --no-dangling alias takes precedence
+        if self.no_dangling {
+            return false;
+        }
+        match &self.dangling {
+            None => true,  // default
+            Some(s) => s != "false" && s != "no" && s != "0",
+        }
+    }
 }
 
 /// Result of verifying a single object
@@ -348,7 +374,7 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
     check_connectivity(&all_hashes, storage, &mut result, args.verbose).await?;
 
     // Stage 8: Find dangling and unreachable objects
-    find_dangling_unreachable(storage, &mut result, args.unreachable, args.no_reflogs).await?;
+    find_dangling_unreachable(storage, &mut result, args.unreachable, args.no_reflogs, args.dangling_enabled()).await?;
 
     // Print notices
     print_notices(head_is_unborn, &result);
@@ -758,13 +784,15 @@ fn bfs_mark_reachable(
 /// Note: Objects in reflog are NOT reported as dangling - reflog is a valid reference.
 /// Only objects that are completely unreachable (not in refs, reflog, or index) are reported.
 ///
-/// With --unreachable flag: prints all unreachable objects including those reachable from other unreachable objects.
-/// Default (dangling): only prints objects not reachable from any other object.
+/// With --unreachable flag: prints all unreachable objects.
+/// Default (dangling): only prints dangling commits (matching git fsck behavior).
+/// With --no-dangling: skips dangling object reporting entirely.
 async fn find_dangling_unreachable(
     storage: &ClientStorage,
     result: &mut FsckResult,
     unreachable: bool,
     no_reflogs: bool,
+    dangling: bool,
 ) -> CliResult<()> {
     let ctx = collect_reachability_context(storage).await?;
 
@@ -794,7 +822,7 @@ async fn find_dangling_unreachable(
         };
 
         if unreachable {
-            // --unreachable: report all unreachable objects (same as dangling for now)
+            // --unreachable: report all unreachable objects
             result.issues.push(IssueReport {
                 issue_type: "unreachable".to_string(),
                 severity: "info".to_string(),
@@ -804,18 +832,21 @@ async fn find_dangling_unreachable(
                 message: format!("{} {} is unreachable", hash, hash),
                 suggestion: None,
             });
-        } else {
-            // Default: only report dangling objects (not reachable from refs/reflog/index)
-            result.issues.push(IssueReport {
-                issue_type: "dangling".to_string(),
-                severity: "info".to_string(),
-                object_type: Some(obj_type),
-                object_id: Some(hash.to_string()),
-                ref_name: None,
-                message: format!("{} {} is dangling", hash, hash),
-                suggestion: None,
-            });
+        } else if dangling {
+            // --dangling (default): only report dangling commits (matching git fsck)
+            if obj_type == "commit" {
+                result.issues.push(IssueReport {
+                    issue_type: "dangling".to_string(),
+                    severity: "info".to_string(),
+                    object_type: Some(obj_type),
+                    object_id: Some(hash.to_string()),
+                    ref_name: None,
+                    message: format!("{} {} is dangling", hash, hash),
+                    suggestion: None,
+                });
+            }
         }
+        // --no-dangling: skip dangling reporting entirely
     }
 
     Ok(())
