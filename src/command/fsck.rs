@@ -813,59 +813,43 @@ fn bfs_mark_reachable(
 }
 
 /// Find dangling and unreachable objects
-/// - dangling: objects in reflog/index but not reachable from current refs
-/// - unreachable: objects not in reflog/index and not reachable from refs
+/// Note: Objects in reflog are NOT reported as dangling - reflog is a valid reference.
+/// Only objects that are completely unreachable (not in refs, reflog, or index) are reported.
 async fn find_dangling_unreachable(
     storage: &ClientStorage,
     result: &mut FsckResult,
 ) -> CliResult<()> {
     let ctx = collect_reachability_context(storage).await?;
 
-    // Mark all objects reachable from refs
-    let refs_reachable = bfs_mark_reachable(&ctx.refs_reachable, storage);
+    // Build the set of starting points: refs + reflog entries
+    // This matches git fsck behavior: objects reachable from reflog entries are not dangling
+    let mut starting_points = ctx.refs_reachable.clone();
+    starting_points.extend(ctx.reflog_objects.iter().copied());
+    starting_points.extend(ctx.index_objects.iter().copied());
 
-    // Find objects not reachable from refs
+    // Mark all objects reachable from refs + reflog + index
+    let all_reachable = bfs_mark_reachable(&starting_points, storage);
+
+    // Find objects not reachable from any starting point
     for hash in &ctx.all_objects {
-        if refs_reachable.contains(hash) {
-            continue; // Reachable from refs
+        if all_reachable.contains(hash) {
+            continue; // Reachable from refs, reflog, or index
         }
 
-        // Object is not reachable from current refs
-        // Check if it's in reflog or index (dangling) or completely isolated (unreachable)
-        let in_reflog = ctx.reflog_objects.contains(hash);
-        let in_index = ctx.index_objects.contains(hash);
-
-        if in_reflog || in_index {
-            // Dangling: was referenced but no longer is
-            let obj_type = match storage.get_object_type(hash) {
-                Ok(t) => t.to_string(),
-                Err(_) => "unknown".to_string(),
-            };
-            result.issues.push(IssueReport {
-                issue_type: "dangling".to_string(),
-                severity: "info".to_string(),
-                object_type: Some(obj_type),
-                object_id: Some(hash.to_string()),
-                ref_name: None,
-                message: format!("{} {} is dangling", hash, hash),
-                suggestion: None,
-            });
-        } else {
-            // Unreachable: completely isolated
-            let obj_type = match storage.get_object_type(hash) {
-                Ok(t) => t.to_string(),
-                Err(_) => "unknown".to_string(),
-            };
-            result.issues.push(IssueReport {
-                issue_type: "unreachable".to_string(),
-                severity: "info".to_string(),
-                object_type: Some(obj_type),
-                object_id: Some(hash.to_string()),
-                ref_name: None,
-                message: format!("{} {} is unreachable", hash, hash),
-                suggestion: None,
-            });
-        }
+        // Dangling: completely unreachable object
+        let obj_type = match storage.get_object_type(hash) {
+            Ok(t) => t.to_string(),
+            Err(_) => "unknown".to_string(),
+        };
+        result.issues.push(IssueReport {
+            issue_type: "dangling".to_string(),
+            severity: "info".to_string(),
+            object_type: Some(obj_type),
+            object_id: Some(hash.to_string()),
+            ref_name: None,
+            message: format!("{} {} is dangling", hash, hash),
+            suggestion: None,
+        });
     }
 
     Ok(())
