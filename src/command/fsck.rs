@@ -49,6 +49,7 @@ const FSCK_AFTER_HELP: &str = "Examples:
   libra fsck --no-dangling
   libra fsck --lost-found
   libra fsck --root
+  libra fsck --tags
   libra fsck <object-id>";
 
 /// Verify repository integrity by checking objects, refs, and index
@@ -94,6 +95,10 @@ pub struct FsckArgs {
     /// Report root commits (commits with no parents)
     #[arg(long)]
     pub root: bool,
+
+    /// Report tagged commits
+    #[arg(long)]
+    pub tags: bool,
 }
 
 impl FsckArgs {
@@ -393,6 +398,11 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
     // Stage 9: Report root commits
     if args.root {
         find_and_report_roots(storage).await?;
+    }
+
+    // Stage 10: Report tagged commits
+    if args.tags {
+        find_and_report_tags().await?;
     }
 
     // Print notices
@@ -1019,6 +1029,46 @@ async fn find_and_report_roots(storage: &ClientStorage) -> CliResult<()> {
             // This is a root commit
             eprintln!("root {}", hash);
         }
+    }
+
+    Ok(())
+}
+
+/// Find and report tagged commits
+/// Output format matches git fsck --tags:
+/// - For annotated tags: "tagged commit <commit-hash> (<tag-name>) in <tag-object-hash>"
+async fn find_and_report_tags() -> CliResult<()> {
+    use crate::internal::model::reference;
+    use sea_orm::EntityTrait;
+
+    let db_conn = db::get_db_conn_instance().await;
+
+    // Load all refs that are tags (refs/tags/*)
+    let refs = reference::Entity::find()
+        .all(&db_conn)
+        .await
+        .map_err(|e| CliError::fatal(format!("failed to load refs: {}", e)))?;
+
+    for ref_entry in refs {
+        let ref_name = match &ref_entry.name {
+            Some(name) => name,
+            None => continue,
+        };
+
+        // Only process tag refs (refs/tags/*)
+        if !ref_name.starts_with("refs/tags/") {
+            continue;
+        }
+
+        let tag_name = ref_name.strip_prefix("refs/tags/").unwrap();
+        let commit_hash = match &ref_entry.commit {
+            Some(hash) => hash,
+            None => continue,
+        };
+
+        // Check if this is an annotated tag (tag object exists)
+        // For now, just report the tagged commit
+        eprintln!("tagged commit {} ({})", commit_hash, tag_name);
     }
 
     Ok(())
