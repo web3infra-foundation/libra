@@ -4414,6 +4414,32 @@ no_cache_unknown_network = true
         assert_eq!(binding.model_id, "gpt-4o-mini");
     }
 
+    /// Scenario (OC-Phase 3 P3.1 flag-off invariant — production path):
+    /// the headless tool registry built by [`build_headless_tool_registry`]
+    /// MUST NOT register a `task` tool. P3.1 only ships the schema
+    /// constructor; runtime wiring lives in P3.2+ behind
+    /// `code.multi_agent.enabled` (OC-Phase 5). A regression that wires
+    /// the dispatcher unconditionally would fail this test by surfacing
+    /// `task` in the registry's `tool_names()`.
+    ///
+    /// The TUI path inlines its registry construction inside
+    /// `execute_tui` and is not testable in isolation; the unit-level
+    /// guard at
+    /// `internal::ai::tools::registry::tests::registry_does_not_expose_task_tool_in_flag_off_default`
+    /// covers the fixture-level invariant for that path.
+    #[test]
+    fn build_headless_tool_registry_omits_task_tool_in_flag_off_default() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let registry = build_headless_tool_registry(tmp.path());
+        let names = registry.tool_names();
+        assert!(
+            !names.contains(&"task".to_string()),
+            "OC-Phase 3 P3.1 invariant: `task` must not be registered in the \
+             headless registry until the dispatcher lands and is gated; \
+             got tool_names = {names:?}"
+        );
+    }
+
     /// Scenario: an agent binding whose `provider_id` does NOT match any
     /// `CodeProvider` variant must be rejected at
     /// `effective_code_provider_for_args` with a clear, actionable error.

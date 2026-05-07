@@ -1048,6 +1048,34 @@ mod tests {
         assert_eq!(surviving, vec!["read_file".to_string()]);
     }
 
+    /// Scenario (OC-Phase 3 P3.1 flag-off invariant): the registry does
+    /// not register the `task` tool by default. The schema lives on
+    /// `ToolSpec::task()` for future P3.2 wiring, but the registry stays
+    /// pre-dispatcher. This guard catches a regression where someone wires
+    /// the task tool unconditionally and bypasses the
+    /// `code.multi_agent.enabled` gate.
+    #[test]
+    fn registry_does_not_expose_task_tool_in_flag_off_default() {
+        let registry = available_for_registry();
+        let spec = inherit_spec();
+        let ruleset = Vec::new();
+        let surviving = names_of(&registry.available_for(&spec, &ruleset));
+        assert!(
+            !surviving.contains(&"task".to_string()),
+            "OC-Phase 3 P3.1 invariant: task must not appear until the \
+             dispatcher lands and is gated; got surviving = {surviving:?}"
+        );
+        // Also guard the unfiltered tool list — `available_for` could
+        // hide it via an early gate; the registry itself must never
+        // contain the handler in default builds.
+        let registered = registry.tool_names();
+        assert!(
+            !registered.contains(&"task".to_string()),
+            "registry must not register a `task` handler by default; \
+             got tool_names = {registered:?}"
+        );
+    }
+
     /// Scenario: `ToolSelection::Deny(["grep"])` exposes every tool except
     /// `grep`. Spec deny is independent of the ruleset; both layers must
     /// match for a tool to be visible.

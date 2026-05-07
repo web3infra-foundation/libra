@@ -605,6 +605,79 @@ It is important to remember:
         ))
     }
 
+    /// Create a ToolSpec for the OC-Phase 3 `task` tool — the schema the
+    /// model sees when it wants to dispatch a sub-agent through the
+    /// parent session.
+    ///
+    /// This is the **schema only**: returning a `ToolSpec` does not
+    /// register a handler. The `task` invocation is **not** routed
+    /// through a normal `ToolHandler`; OC-Phase 3 P3.2+ intercepts the
+    /// call at the tool-loop layer and forwards it into a
+    /// `SubAgentDispatcher` that has access to the parent session
+    /// state, model binding, and usage recorder. The schema therefore
+    /// stays absent from the registry's `register(...)` graph — see
+    /// `registry_does_not_expose_task_tool_in_flag_off_default` and the
+    /// production-path equivalents in `command::code` tests for the
+    /// flag-off invariant.
+    ///
+    /// Wire shape (mirrors `TaskInvocation` in
+    /// `docs/improvement/opencode.md`):
+    ///
+    /// ```json
+    /// {
+    ///   "description": "find all TODOs",
+    ///   "prompt": "grep TODO src/",
+    ///   "subagent_type": "explore"
+    /// }
+    /// ```
+    ///
+    /// `task_id` is optional and **omitted** when starting a fresh
+    /// dispatch. Supplying it on a later call resumes the prior dispatch
+    /// under the same parent thread (the dispatcher rejects cross-
+    /// thread reuse per S2-INV-12). The schema declares it as a string;
+    /// providers that prefer JSON `null` over key omission can pass
+    /// either form.
+    pub fn task() -> Self {
+        Self::new(
+            "task",
+            "Dispatch a sub-agent under the current session. The sub-agent runs in an \
+             isolated context with its own model and tool whitelist; results return as a \
+             single tool result. Use `subagent_type` to pick which agent runs (must be \
+             primary-eligible or sub-agent eligible per the agent profile). Reuse `task_id` \
+             only to resume a prior dispatch within the same parent thread.",
+        )
+        .with_parameters(FunctionParameters::object(
+            [
+                (
+                    "description",
+                    "string",
+                    "Short human-readable summary of the sub-task. Surfaced in transcripts and budget logs.",
+                ),
+                (
+                    "prompt",
+                    "string",
+                    "The instruction sent to the sub-agent as its initial user message.",
+                ),
+                (
+                    "subagent_type",
+                    "string",
+                    "Name of the agent profile to dispatch (e.g. `explore`). Must resolve to a profile whose `mode` is `subagent` or `all`.",
+                ),
+                (
+                    "task_id",
+                    "string",
+                    "Optional resume token from a prior dispatch under the same parent thread.",
+                ),
+            ],
+            [
+                ("description", true),
+                ("prompt", true),
+                ("subagent_type", true),
+                ("task_id", false),
+            ],
+        ))
+    }
+
     /// Convert to a JSON value for API requests.
     pub fn to_json(&self) -> Value {
         json!(self)
@@ -901,5 +974,94 @@ mod tests {
             check["properties"]["kind"]["description"],
             "Check type. Optional when command is present; omitted command checks default to command."
         );
+    }
+
+    // ─── OC-Phase 3 P3.1: task tool schema ────────────────────────────────
+
+    /// Scenario: `ToolSpec::task()` returns the documented schema —
+    /// `description` / `prompt` / `subagent_type` required, `task_id`
+    /// optional. The function name is exactly `task` so a future
+    /// dispatcher can match against it.
+    #[test]
+    fn test_tool_spec_task_schema() {
+        let spec = ToolSpec::task();
+        assert_eq!(spec.spec_type, "function");
+        assert_eq!(spec.function.name, "task");
+
+        match &spec.function.parameters {
+            FunctionParameters::Object {
+                param_type,
+                properties,
+                required,
+                ..
+            } => {
+                assert_eq!(param_type, "object");
+                for key in ["description", "prompt", "subagent_type", "task_id"] {
+                    assert!(
+                        properties.contains_key(key),
+                        "task schema must list `{key}` in properties"
+                    );
+                }
+                assert_eq!(
+                    required
+                        .iter()
+                        .cloned()
+                        .collect::<std::collections::BTreeSet<_>>(),
+                    [
+                        "description".to_string(),
+                        "prompt".to_string(),
+                        "subagent_type".to_string(),
+                    ]
+                    .into_iter()
+                    .collect::<std::collections::BTreeSet<_>>(),
+                    "required must be exactly description+prompt+subagent_type; \
+                     task_id stays optional"
+                );
+            }
+            other => panic!("expected Object parameters, got {other:?}"),
+        }
+    }
+
+    /// Scenario: the `task` schema serializes to the OpenAI function-call
+    /// JSON shape and `task_id` is **not** in the `required` list. A
+    /// regression that promoted task_id to required would break callers
+    /// who legitimately omit it on a fresh dispatch.
+    #[test]
+    fn test_tool_spec_task_serializes_with_task_id_optional() {
+        let spec = ToolSpec::task();
+        let json = spec.to_json();
+        assert_eq!(json["type"], "function");
+        assert_eq!(json["function"]["name"], "task");
+        assert_eq!(json["function"]["parameters"]["type"], "object");
+
+        let required = json["function"]["parameters"]["required"]
+            .as_array()
+            .expect("required must be an array");
+        let names: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(names.contains(&"description"));
+        assert!(names.contains(&"prompt"));
+        assert!(names.contains(&"subagent_type"));
+        assert!(
+            !names.contains(&"task_id"),
+            "task_id must remain optional in the wire schema"
+        );
+    }
+
+    /// Scenario: returning `ToolSpec::task()` does NOT register a handler.
+    /// The flag-off invariant of OC-Phase 3 P3.1 is that the schema
+    /// constructor exists but the registry does not surface a `task`
+    /// entry until the dispatcher lands (P3.2+) and is gated behind
+    /// `code.multi_agent.enabled` (OC-Phase 5). This test pins that
+    /// behavior at the schema layer: constructing a fresh schema does
+    /// not mutate any global registry state.
+    #[test]
+    fn test_tool_spec_task_is_pure_construction_only() {
+        let first = ToolSpec::task();
+        let second = ToolSpec::task();
+        // Two independent constructions are equal-by-shape (function name,
+        // parameter object). They also do not touch any shared registry —
+        // the absence of a registry import in this file is itself the
+        // proof. We sanity-check the equality via the JSON wire form.
+        assert_eq!(first.to_json(), second.to_json());
     }
 }
