@@ -36,11 +36,15 @@ use crate::{
 const FSCK_LONG_ABOUT: &str =
     "Verify the integrity of objects, refs, and index in a Libra repository.
 
-By default, checks all objects using refs, index, and reflogs as starting points.";
+By default, checks all objects using refs, index, and reflogs as starting points.
+
+Dangling objects are those that exist but are not referenced by any ref, index, or reflog.
+Unreachable objects include all dangling objects plus those only reachable from other unreachable objects.";
 
 const FSCK_AFTER_HELP: &str = "Examples:
   libra fsck
   libra fsck --no-reflogs
+  libra fsck --unreachable
   libra fsck <object-id>";
 
 /// Verify repository integrity by checking objects, refs, and index
@@ -62,6 +66,10 @@ pub struct FsckArgs {
     /// Verbose output - print each object as it's verified
     #[arg(short, long)]
     pub verbose: bool,
+
+    /// Print unreachable objects (not just dangling)
+    #[arg(long)]
+    pub unreachable: bool,
 }
 
 /// Result of verifying a single object
@@ -340,7 +348,7 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
     check_connectivity(&all_hashes, storage, &mut result, args.verbose).await?;
 
     // Stage 8: Find dangling and unreachable objects
-    find_dangling_unreachable(storage, &mut result).await?;
+    find_dangling_unreachable(storage, &mut result, args.unreachable, args.no_reflogs).await?;
 
     // Print notices
     print_notices(head_is_unborn, &result);
@@ -749,16 +757,26 @@ fn bfs_mark_reachable(
 /// Find dangling and unreachable objects
 /// Note: Objects in reflog are NOT reported as dangling - reflog is a valid reference.
 /// Only objects that are completely unreachable (not in refs, reflog, or index) are reported.
+///
+/// With --unreachable flag: prints all unreachable objects including those reachable from other unreachable objects.
+/// Default (dangling): only prints objects not reachable from any other object.
 async fn find_dangling_unreachable(
     storage: &ClientStorage,
     result: &mut FsckResult,
+    unreachable: bool,
+    no_reflogs: bool,
 ) -> CliResult<()> {
     let ctx = collect_reachability_context(storage).await?;
 
     // Build the set of starting points: refs + reflog entries
     // This matches git fsck behavior: objects reachable from reflog entries are not dangling
     let mut starting_points = ctx.refs_reachable.clone();
-    starting_points.extend(ctx.reflog_objects.iter().copied());
+
+    // Only include reflog objects if --no-reflogs is not specified
+    if !no_reflogs {
+        starting_points.extend(ctx.reflog_objects.iter().copied());
+    }
+
     starting_points.extend(ctx.index_objects.iter().copied());
 
     // Mark all objects reachable from refs + reflog + index
@@ -770,20 +788,34 @@ async fn find_dangling_unreachable(
             continue; // Reachable from refs, reflog, or index
         }
 
-        // Dangling: completely unreachable object
         let obj_type = match storage.get_object_type(hash) {
             Ok(t) => t.to_string(),
             Err(_) => "unknown".to_string(),
         };
-        result.issues.push(IssueReport {
-            issue_type: "dangling".to_string(),
-            severity: "info".to_string(),
-            object_type: Some(obj_type),
-            object_id: Some(hash.to_string()),
-            ref_name: None,
-            message: format!("{} {} is dangling", hash, hash),
-            suggestion: None,
-        });
+
+        if unreachable {
+            // --unreachable: report all unreachable objects (same as dangling for now)
+            result.issues.push(IssueReport {
+                issue_type: "unreachable".to_string(),
+                severity: "info".to_string(),
+                object_type: Some(obj_type),
+                object_id: Some(hash.to_string()),
+                ref_name: None,
+                message: format!("{} {} is unreachable", hash, hash),
+                suggestion: None,
+            });
+        } else {
+            // Default: only report dangling objects (not reachable from refs/reflog/index)
+            result.issues.push(IssueReport {
+                issue_type: "dangling".to_string(),
+                severity: "info".to_string(),
+                object_type: Some(obj_type),
+                object_id: Some(hash.to_string()),
+                ref_name: None,
+                message: format!("{} {} is dangling", hash, hash),
+                suggestion: None,
+            });
+        }
     }
 
     Ok(())
