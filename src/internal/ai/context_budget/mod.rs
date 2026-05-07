@@ -8,6 +8,7 @@
 pub mod allocator;
 pub mod budget;
 pub mod compaction;
+pub mod compaction_agent;
 pub mod frame;
 pub mod handoff;
 pub mod memory_anchor;
@@ -21,6 +22,10 @@ pub use budget::{
     ProviderContextCapability, TruncationPolicy,
 };
 pub use compaction::{CompactionEvent, CompactionReason};
+pub use compaction_agent::{
+    COMPACTION_AGENT_NAME, CompactionAgentError, EMBEDDED_COMPACTION_PROFILE,
+    embedded_compaction_system_prompt, run_compaction,
+};
 pub use frame::{
     ContextAttachmentRef, ContextAttachmentStore, ContextFrameBuilder, ContextFrameCandidate,
     ContextFrameEvent, ContextFrameKind, ContextFrameOmission, ContextFrameSegment,

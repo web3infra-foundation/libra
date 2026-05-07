@@ -163,6 +163,7 @@ pub fn load_embedded_profiles() -> Vec<AgentProfile> {
         include_str!("embedded/orchestrator.md"),
         include_str!("embedded/architect.md"),
         include_str!("embedded/build_error_resolver.md"),
+        include_str!("embedded/compaction.md"),
     ];
 
     sources
@@ -303,7 +304,7 @@ mod tests {
     #[test]
     fn test_load_embedded_profiles() {
         let profiles = load_embedded_profiles();
-        assert_eq!(profiles.len(), 6);
+        assert_eq!(profiles.len(), 7);
         let names: Vec<&str> = profiles.iter().map(|a| a.name.as_str()).collect();
         assert!(names.contains(&"planner"));
         assert!(names.contains(&"code_reviewer"));
@@ -311,6 +312,7 @@ mod tests {
         assert!(names.contains(&"orchestrator"));
         assert!(names.contains(&"architect"));
         assert!(names.contains(&"build_error_resolver"));
+        assert!(names.contains(&"compaction"));
     }
 
     /// Scenario: a planning-flavored prompt routes to the `planner` profile.
