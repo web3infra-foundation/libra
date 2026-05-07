@@ -34,6 +34,7 @@
 pub mod anthropic;
 pub mod capability;
 pub mod deepseek;
+pub mod error;
 pub mod factory;
 #[cfg(feature = "test-provider")]
 pub mod fake;
@@ -46,5 +47,8 @@ pub mod runtime;
 pub mod zhipu;
 
 pub use capability::{ModelCapability, ModelCost};
+pub use error::{
+    ProviderError, RetryPolicy, StreamErrorKind, parse_api_error, parse_stream_error_kind,
+};
 pub use factory::{ProviderBuildOptions, ProviderFactory, ProviderFactoryError};
 pub use runtime::{AnyCompletionModel, AnyCompletionRawResponse};
