@@ -27,9 +27,9 @@ use crate::{
     internal::{branch::Branch, db, head::Head, model::reference, model::reflog},
     utils::{
         client_storage::ClientStorage,
-        error::{CliError, CliResult, StableErrorCode},
-        output::{OutputConfig, emit_json_data},
-        path, util,
+        error::{CliError, CliResult},
+        output::OutputConfig,
+        path,
     },
 };
 
@@ -41,7 +41,6 @@ By default, checks all objects using refs, index, and reflogs as starting points
 const FSCK_AFTER_HELP: &str = "Examples:
   libra fsck
   libra fsck --no-reflogs
-  libra fsck --json
   libra fsck <object-id>";
 
 /// Verify repository integrity by checking objects, refs, and index
@@ -152,33 +151,10 @@ pub async fn execute(args: FsckArgs) {
     }
 }
 
-pub async fn execute_safe(args: FsckArgs, output: &OutputConfig) -> CliResult<()> {
-    util::require_repo().map_err(|_| CliError::repo_not_found())?;
-
-    if !output.is_json() {
-        execute(args).await;
-        return Ok(());
-    }
-
-    let storage = ClientStorage::init(path::objects());
-    let result = if let Some(ref object_id) = args.object {
-        check_single_object(object_id, &storage).await
-    } else {
-        check_all_objects(&args, &storage).await
-    }?;
-
-    emit_json_data(
-        "fsck",
-        &serde_json::to_value(&result)
-            .map_err(|e| CliError::fatal(format!("failed to serialize result: {}", e)))?,
-        output,
-    )?;
-
-    if !result.issues.is_empty() && result.issues.iter().any(|i| i.severity == "error") {
-        return Err(CliError::failure("repository integrity check failed")
-            .with_stable_code(StableErrorCode::RepoCorrupt));
-    }
-
+pub async fn execute_safe(args: FsckArgs, _output: &OutputConfig) -> CliResult<()> {
+    // execute_safe is called from cli.rs but currently just delegates to execute
+    // JSON output is not supported for fsck
+    execute(args).await;
     Ok(())
 }
 
