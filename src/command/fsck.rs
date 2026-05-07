@@ -50,6 +50,7 @@ const FSCK_AFTER_HELP: &str = "Examples:
   libra fsck --lost-found
   libra fsck --root
   libra fsck --tags
+  libra fsck --connectivity-only
   libra fsck <object-id>";
 
 /// Verify repository integrity by checking objects, refs, and index
@@ -99,6 +100,10 @@ pub struct FsckArgs {
     /// Report tagged commits
     #[arg(long)]
     pub tags: bool,
+
+    /// Only check connectivity, not object contents
+    #[arg(long)]
+    pub connectivity_only: bool,
 }
 
 impl FsckArgs {
@@ -316,7 +321,7 @@ async fn check_single_object(object_id: &str, storage: &ClientStorage) -> CliRes
     let hash = parse_object_hash(object_id)
         .ok_or_else(|| CliError::command_usage(format!("invalid object ID: {}", object_id)))?;
 
-    let check_result = verify_object(&hash, storage).await?;
+    let check_result = verify_object(&hash, storage, false).await?;
 
     let (overall_status, issues) = match check_result.status {
         CheckStatus::Ok => {
@@ -373,7 +378,7 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
     sorted_hashes.sort();
 
     // Stage 2: Check each object (sorted by hash)
-    check_objects(&sorted_hashes, storage, &mut result, args.verbose).await?;
+    check_objects(&sorted_hashes, storage, &mut result, args.verbose, args.connectivity_only).await?;
 
     // Stage 3: Check HEAD link
     let head_is_unborn = check_head().await;
@@ -384,13 +389,13 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
     }
 
     // Stage 5: Check refs point to valid objects
-    check_and_fix_refs(args, storage, &mut result).await?;
+    check_and_fix_refs(args, storage, &mut result, args.connectivity_only).await?;
 
     // Stage 6: Check index
     check_index(storage, &mut result, args.verbose)?;
 
     // Stage 7: Check connectivity (re-verify all objects in storage order)
-    check_connectivity(&all_hashes, storage, &mut result, args.verbose, args.name_objects).await?;
+    check_connectivity(&all_hashes, storage, &mut result, args.verbose, args.name_objects, args.connectivity_only).await?;
 
     // Stage 8: Find dangling and unreachable objects
     find_dangling_unreachable(storage, &mut result, args.unreachable, args.no_reflogs, args.dangling_enabled(), args.lost_found).await?;
@@ -485,6 +490,7 @@ async fn check_objects(
     storage: &ClientStorage,
     result: &mut FsckResult,
     verbose: bool,
+    connectivity_only: bool,
 ) -> CliResult<()> {
     for hash_str in sorted_hashes {
         let hash = match parse_object_hash(hash_str) {
@@ -508,7 +514,7 @@ async fn check_objects(
             println!("Checking {} {}", type_name, hash);
         }
 
-        let check_result = verify_object(&hash, storage).await?;
+        let check_result = verify_object(&hash, storage, connectivity_only).await?;
         result.objects_checked += 1;
 
         match check_result.status {
@@ -743,6 +749,7 @@ async fn check_connectivity(
     result: &mut FsckResult,
     verbose: bool,
     name_objects: bool,
+    connectivity_only: bool,
 ) -> CliResult<()> {
     let count = all_hashes.len();
     if verbose {
@@ -766,7 +773,7 @@ async fn check_connectivity(
                 println!("Checking {}", hash);
             }
         }
-        let check_result = verify_object(hash, storage).await?;
+        let check_result = verify_object(hash, storage, connectivity_only).await?;
         if check_result.status != CheckStatus::Ok && result.overall_status == CheckStatus::Ok {
             result.overall_status = check_result.status.clone();
         }
@@ -1180,8 +1187,9 @@ async fn check_and_fix_refs(
     _args: &FsckArgs,
     storage: &ClientStorage,
     result: &mut FsckResult,
+    connectivity_only: bool,
 ) -> CliResult<()> {
-    let ref_result = check_refs(storage).await?;
+    let ref_result = check_refs(storage, connectivity_only).await?;
     result.refs_checked = ref_result.checked;
     result.refs_ok = ref_result.ok;
     result.refs_broken = ref_result.broken;
@@ -1196,7 +1204,8 @@ async fn check_and_fix_refs(
 }
 
 /// Verify a single object's integrity
-async fn verify_object(hash: &ObjectHash, storage: &ClientStorage) -> CliResult<ObjectCheckResult> {
+/// If connectivity_only is true, only checks that objects exist (not their content)
+async fn verify_object(hash: &ObjectHash, storage: &ClientStorage, connectivity_only: bool) -> CliResult<ObjectCheckResult> {
     // Check if object exists
     if !storage.exist(hash) {
         return Ok(ObjectCheckResult {
@@ -1208,7 +1217,32 @@ async fn verify_object(hash: &ObjectHash, storage: &ClientStorage) -> CliResult<
         });
     }
 
-    // Get raw data
+    // Get object type
+    let obj_type = match storage.get_object_type(hash) {
+        Ok(t) => t,
+        Err(e) => {
+            return Ok(ObjectCheckResult {
+                object_id: hash.to_string(),
+                object_type: "unknown".to_string(),
+                status: CheckStatus::InvalidFormat,
+                error_message: Some(format!("Failed to determine object type: {}", e)),
+                size: 0,
+            });
+        }
+    };
+
+    // --connectivity-only: only check that objects exist, skip content validation
+    if connectivity_only {
+        return Ok(ObjectCheckResult {
+            object_id: hash.to_string(),
+            object_type: obj_type.to_string(),
+            status: CheckStatus::Ok,
+            error_message: None,
+            size: 0,
+        });
+    }
+
+    // Get raw data for full validation
     let data = match storage.get(hash) {
         Ok(d) => d,
         Err(e) => {
@@ -1223,20 +1257,6 @@ async fn verify_object(hash: &ObjectHash, storage: &ClientStorage) -> CliResult<
     };
 
     let size = data.len();
-
-    // Get object type
-    let obj_type = match storage.get_object_type(hash) {
-        Ok(t) => t,
-        Err(e) => {
-            return Ok(ObjectCheckResult {
-                object_id: hash.to_string(),
-                object_type: "unknown".to_string(),
-                status: CheckStatus::InvalidFormat,
-                error_message: Some(format!("Failed to determine object type: {}", e)),
-                size,
-            });
-        }
-    };
 
     // Verify hash integrity using ring crate.
     // Git/Libra computes hash as: SHAx(type + ' ' + size + '\0' + content)
@@ -1311,7 +1331,7 @@ struct RefCheckResult {
 }
 
 /// Check all refs point to valid objects
-async fn check_refs(storage: &ClientStorage) -> CliResult<RefCheckResult> {
+async fn check_refs(storage: &ClientStorage, connectivity_only: bool) -> CliResult<RefCheckResult> {
     let mut result = RefCheckResult {
         checked: 0,
         ok: 0,
@@ -1335,7 +1355,7 @@ async fn check_refs(storage: &ClientStorage) -> CliResult<RefCheckResult> {
             if let Some(hash) = parse_object_hash(commit_hash_str) {
                 if storage.exist(&hash) {
                     // Verify the object is actually valid
-                    match verify_object(&hash, storage).await {
+                    match verify_object(&hash, storage, connectivity_only).await {
                         Ok(check) if check.status == CheckStatus::Ok => {
                             result.ok += 1;
                         }
