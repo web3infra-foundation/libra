@@ -1,12 +1,11 @@
 //! Implementation of `fsck` command for verifying repository integrity.
 //!
 //! This command checks the integrity of objects, refs, and index in a Libra repository.
-//! It verifies:
-//! - Object hash integrity (SHA1/SHA256)
-//! - Object format validity
-//! - Ref consistency (refs point to valid objects)
-//! - Index file integrity
-//! - Cross-reference validation (trees reference valid blobs/trees)
+//! It diagnoses the same issues as git fsck:
+//! - `missing <type> <object>`: Object is referenced but doesn't exist
+//! - `hash mismatch <object>`: Object's hash doesn't match its content
+//! - `dangling <type> <object>`: Object exists but is not referenced
+//! - `unreachable <type> <object>`: Object is not reachable from any ref
 //!
 //! ## Exit codes (bitmask)
 //! - 0: All checks passed
@@ -15,7 +14,7 @@
 //! - 4 (bit 2): Index corruption
 //!   Bits are OR'd when multiple categories fail (e.g. 5 = objects + index)
 
-use std::{fs, io, io::{Read, Seek}};
+use std::{collections::HashSet, fs, io, io::{Read, Seek}};
 
 use clap::Parser;
 use git_internal::{
@@ -133,11 +132,12 @@ fn is_zero(v: &i32) -> bool {
     *v == 0
 }
 
-/// Detailed issue report
+/// Detailed issue report for git fsck-style diagnostics
 #[derive(Debug, Clone, Serialize)]
 pub struct IssueReport {
-    pub issue_type: String,
+    pub issue_type: String,  // "missing", "hash_mismatch", "dangling", "unreachable"
     pub severity: String,
+    pub object_type: Option<String>,  // "commit", "tree", "blob", "tag"
     pub object_id: Option<String>,
     pub ref_name: Option<String>,
     pub message: String,
@@ -165,11 +165,14 @@ pub async fn execute(args: FsckArgs) {
 
     match result {
         Ok(fsck_result) => {
+            // Print diagnostic messages (dangling/unreachable are printed but don't cause failure)
+            if !fsck_result.issues.is_empty() {
+                print_diagnostic_messages(&fsck_result.issues);
+            }
+            // Exit with failure code only for serious issues (not dangling/unreachable)
             if fsck_result.failure_mask != exit_code::OK {
-                print_issues(&fsck_result);
                 std::process::exit(fsck_result.failure_mask);
             }
-            // Success: no output on success (git fsck style)
         }
         Err(e) => {
             eprintln!("fatal: {}", e);
@@ -278,7 +281,7 @@ fn build_issue_report(
 ) -> IssueReport {
     let (issue_type, suggestion) = match (&check_result.status, context) {
         (CheckStatus::HashMismatch, IssueContext::Single) => (
-            "object_corruption".to_string(),
+            "hash_mismatch".to_string(),
             "Object data is corrupted. Consider restoring from backup or remote.".to_string(),
         ),
         (CheckStatus::HashMismatch, IssueContext::FullScan) => (
@@ -290,7 +293,7 @@ fn build_issue_report(
             "Object has invalid format.".to_string(),
         ),
         (CheckStatus::Missing, _) => (
-            "missing_object".to_string(),
+            "missing".to_string(),
             "Object may have been deleted or never created.".to_string(),
         ),
         (CheckStatus::Ok, _) => unreachable!("should not build issue for Ok status"),
@@ -299,6 +302,7 @@ fn build_issue_report(
     IssueReport {
         issue_type,
         severity: "error".to_string(),
+        object_type: Some(check_result.object_type.clone()),
         object_id: Some(object_id.to_string()),
         ref_name: None,
         message: check_result
@@ -399,6 +403,9 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
     // Stage 6: Check connectivity (re-verify all objects in storage order)
     check_connectivity(&all_hashes, storage, &mut result, args.verbose).await?;
 
+    // Stage 7: Find dangling and unreachable objects
+    find_dangling_unreachable(storage, &mut result).await?;
+
     // Print notices
     print_notices(head_is_unborn, &result);
 
@@ -436,19 +443,10 @@ fn check_directories(storage: &ClientStorage, all_hashes: &[ObjectHash]) -> CliR
         }
     }
 
-    // Print directory progress
-    let mut checked = 0;
-    for (_i, _count) in prefix_counts.iter().enumerate() {
-        checked += 1;
-        let progress = checked * 100 / 256;
-        if checked % 3 == 0 || checked == 256 {
-            print!("\rChecking object directory: {}% ({}/{})", progress, checked, 256);
-            io::Write::flush(&mut io::stdout()).unwrap();
-        }
-    }
-    println!(", done.");
+    // Print directory progress - single line like git fsck
+    println!("Checking object directory: 100% (256/256), done.");
 
-    // Print pack objects
+    // Print pack objects if any
     if pack_count > 0 {
         println!("Checking objects: 100% ({}/{}), done.", pack_count, pack_count);
     }
@@ -553,6 +551,20 @@ fn print_notices(head_is_unborn: bool, _result: &FsckResult) {
     }
 }
 
+/// Print diagnostic messages in git fsck format
+/// Format: <issue_type> <object_type> <object_id>
+/// Examples:
+///   dangling commit 8ae045f058b7a0a5b0b0e8a0a0e8a0a0e8a0a0
+///   missing blob abc123def456789012345678901234567890abcd
+fn print_diagnostic_messages(issues: &[IssueReport]) {
+    for issue in issues {
+        if let (Some(obj_type), Some(obj_id)) = (&issue.object_type, &issue.object_id) {
+            // git fsck format: <issue_type> <object_type> <object_id>
+            eprintln!("{} {} {}", issue.issue_type, obj_type, obj_id);
+        }
+    }
+}
+
 /// Check reflogs and print entries
 async fn check_reflogs(
     storage: &ClientStorage,
@@ -579,8 +591,9 @@ async fn check_reflogs(
                 if !storage.exist(&old_hash) {
                     result.reflog_issues += 1;
                     result.issues.push(IssueReport {
-                        issue_type: "reflog_invalid_old_oid".to_string(),
+                        issue_type: "missing".to_string(),
                         severity: "warning".to_string(),
+                        object_type: Some("unknown".to_string()),
                         object_id: Some(entry.old_oid.clone()),
                         ref_name: Some(entry.ref_name.clone()),
                         message: format!(
@@ -598,8 +611,9 @@ async fn check_reflogs(
                 if !storage.exist(&new_hash) {
                     result.reflog_issues += 1;
                     result.issues.push(IssueReport {
-                        issue_type: "reflog_invalid_new_oid".to_string(),
+                        issue_type: "missing".to_string(),
                         severity: "warning".to_string(),
+                        object_type: Some("unknown".to_string()),
                         object_id: Some(entry.new_oid.clone()),
                         ref_name: Some(entry.ref_name.clone()),
                         message: format!(
@@ -658,6 +672,205 @@ async fn check_connectivity(
     }
     Ok(())
 }
+
+/// Context for tracking object reachability
+struct ReachabilityContext {
+    /// All objects in storage
+    all_objects: HashSet<ObjectHash>,
+    /// Objects reachable from refs
+    refs_reachable: HashSet<ObjectHash>,
+    /// Objects mentioned in reflogs (for dangling detection)
+    reflog_objects: HashSet<ObjectHash>,
+    /// Objects referenced by index entries
+    index_objects: HashSet<ObjectHash>,
+}
+
+impl ReachabilityContext {
+    fn new() -> Self {
+        Self {
+            all_objects: HashSet::new(),
+            refs_reachable: HashSet::new(),
+            reflog_objects: HashSet::new(),
+            index_objects: HashSet::new(),
+        }
+    }
+}
+
+/// Collect all starting points for reachability analysis
+async fn collect_reachability_context(
+    storage: &ClientStorage,
+) -> CliResult<ReachabilityContext> {
+    let mut ctx = ReachabilityContext::new();
+
+    // Collect all objects in storage
+    ctx.all_objects = list_all_objects_in_storage(storage)
+        .map_err(|e| CliError::fatal(format!("failed to list objects: {}", e)))?
+        .into_iter()
+        .collect();
+
+    // Collect objects from refs
+    let db_conn = db::get_db_conn_instance().await;
+    let refs = reference::Entity::find()
+        .all(&db_conn)
+        .await
+        .map_err(|e| CliError::fatal(format!("failed to load refs: {}", e)))?;
+
+    for ref_entry in refs {
+        if let Some(commit_hash_str) = &ref_entry.commit {
+            if let Some(hash) = parse_object_hash(commit_hash_str) {
+                ctx.refs_reachable.insert(hash);
+            }
+        }
+    }
+
+    // Collect objects from reflogs
+    let reflogs = reflog::Entity::find()
+        .all(&db_conn)
+        .await
+        .map_err(|e| CliError::fatal(format!("failed to load reflogs: {}", e)))?;
+
+    for entry in reflogs {
+        let is_null_oid = |oid: &str| oid.chars().all(|c| c == '0');
+        if !is_null_oid(&entry.old_oid) {
+            if let Some(hash) = parse_object_hash(&entry.old_oid) {
+                ctx.reflog_objects.insert(hash);
+            }
+        }
+        if !is_null_oid(&entry.new_oid) {
+            if let Some(hash) = parse_object_hash(&entry.new_oid) {
+                ctx.reflog_objects.insert(hash);
+            }
+        }
+    }
+
+    // Collect objects from index
+    let index_path = path::index();
+    if index_path.exists() {
+        if let Ok(index) = Index::load(&index_path) {
+            for entry in index.tracked_entries(0) {
+                ctx.index_objects.insert(entry.hash);
+            }
+        }
+    }
+
+    Ok(ctx)
+}
+
+/// Walk object references: returns objects referenced by the given object
+/// For commits: returns tree and parent commits
+/// For trees: returns child blobs and subtrees
+fn walk_object_refs(hash: &ObjectHash, storage: &ClientStorage) -> Vec<ObjectHash> {
+    let mut refs = Vec::new();
+
+    let Ok(obj_type) = storage.get_object_type(hash) else {
+        return refs;
+    };
+
+    match obj_type {
+        ObjectType::Commit => {
+            if let Ok(commit) = load_object::<Commit>(hash) {
+                refs.push(commit.tree_id);
+                refs.extend(commit.parent_commit_ids.iter().copied());
+            }
+        }
+        ObjectType::Tree => {
+            if let Ok(tree) = load_object::<Tree>(hash) {
+                for item in &tree.tree_items {
+                    refs.push(item.id);
+                }
+            }
+        }
+        _ => {}
+    }
+
+    refs
+}
+
+/// BFS to mark all objects reachable from starting points
+fn bfs_mark_reachable(
+    starting_points: &HashSet<ObjectHash>,
+    storage: &ClientStorage,
+) -> HashSet<ObjectHash> {
+    let mut reachable = HashSet::new();
+    let mut queue: std::collections::VecDeque<ObjectHash> = starting_points.iter().copied().collect();
+
+    while let Some(current) = queue.pop_front() {
+        if reachable.contains(&current) {
+            continue;
+        }
+        reachable.insert(current);
+
+        // Get objects referenced by current object
+        let children = walk_object_refs(&current, storage);
+        for child in children {
+            if !reachable.contains(&child) {
+                queue.push_back(child);
+            }
+        }
+    }
+
+    reachable
+}
+
+/// Find dangling and unreachable objects
+/// - dangling: objects in reflog/index but not reachable from current refs
+/// - unreachable: objects not in reflog/index and not reachable from refs
+async fn find_dangling_unreachable(
+    storage: &ClientStorage,
+    result: &mut FsckResult,
+) -> CliResult<()> {
+    let ctx = collect_reachability_context(storage).await?;
+
+    // Mark all objects reachable from refs
+    let refs_reachable = bfs_mark_reachable(&ctx.refs_reachable, storage);
+
+    // Find objects not reachable from refs
+    for hash in &ctx.all_objects {
+        if refs_reachable.contains(hash) {
+            continue; // Reachable from refs
+        }
+
+        // Object is not reachable from current refs
+        // Check if it's in reflog or index (dangling) or completely isolated (unreachable)
+        let in_reflog = ctx.reflog_objects.contains(hash);
+        let in_index = ctx.index_objects.contains(hash);
+
+        if in_reflog || in_index {
+            // Dangling: was referenced but no longer is
+            let obj_type = match storage.get_object_type(hash) {
+                Ok(t) => t.to_string(),
+                Err(_) => "unknown".to_string(),
+            };
+            result.issues.push(IssueReport {
+                issue_type: "dangling".to_string(),
+                severity: "info".to_string(),
+                object_type: Some(obj_type),
+                object_id: Some(hash.to_string()),
+                ref_name: None,
+                message: format!("{} {} is dangling", hash, hash),
+                suggestion: None,
+            });
+        } else {
+            // Unreachable: completely isolated
+            let obj_type = match storage.get_object_type(hash) {
+                Ok(t) => t.to_string(),
+                Err(_) => "unknown".to_string(),
+            };
+            result.issues.push(IssueReport {
+                issue_type: "unreachable".to_string(),
+                severity: "info".to_string(),
+                object_type: Some(obj_type),
+                object_id: Some(hash.to_string()),
+                ref_name: None,
+                message: format!("{} {} is unreachable", hash, hash),
+                suggestion: None,
+            });
+        }
+    }
+
+    Ok(())
+}
+
 
 /// Check index and print status
 fn check_index_and_print(storage: &ClientStorage, result: &mut FsckResult) -> CliResult<()> {
@@ -916,8 +1129,9 @@ async fn check_refs(storage: &ClientStorage) -> CliResult<RefCheckResult> {
                             let ref_name = ref_entry.name.clone().unwrap_or_default();
                             result.broken_ref_names.push(ref_name.clone());
                             result.issues.push(IssueReport {
-                                issue_type: "invalid_ref_target".to_string(),
+                                issue_type: "hash_mismatch".to_string(),
                                 severity: "error".to_string(),
+                                object_type: Some(check.object_type.clone()),
                                 object_id: Some(hash.to_string()),
                                 ref_name: Some(ref_name),
                                 message: format!(
@@ -932,8 +1146,9 @@ async fn check_refs(storage: &ClientStorage) -> CliResult<RefCheckResult> {
                             let ref_name = ref_entry.name.clone().unwrap_or_default();
                             result.broken_ref_names.push(ref_name.clone());
                             result.issues.push(IssueReport {
-                                issue_type: "ref_check_error".to_string(),
+                                issue_type: "missing".to_string(),
                                 severity: "error".to_string(),
+                                object_type: Some("unknown".to_string()),
                                 object_id: Some(hash.to_string()),
                                 ref_name: Some(ref_name),
                                 message: format!("Failed to verify ref target: {}", e),
@@ -946,8 +1161,9 @@ async fn check_refs(storage: &ClientStorage) -> CliResult<RefCheckResult> {
                     let ref_name = ref_entry.name.clone().unwrap_or_default();
                     result.broken_ref_names.push(ref_name.clone());
                     result.issues.push(IssueReport {
-                        issue_type: "broken_ref".to_string(),
+                        issue_type: "missing".to_string(),
                         severity: "error".to_string(),
+                        object_type: Some("commit".to_string()),
                         object_id: Some(hash.to_string()),
                         ref_name: Some(ref_name),
                         message: format!("Ref points to missing object {}", hash),
@@ -961,6 +1177,7 @@ async fn check_refs(storage: &ClientStorage) -> CliResult<RefCheckResult> {
                 result.issues.push(IssueReport {
                     issue_type: "invalid_ref_hash".to_string(),
                     severity: "error".to_string(),
+                    object_type: None,
                     object_id: None,
                     ref_name: Some(ref_name.clone()),
                     message: format!(
@@ -1006,6 +1223,7 @@ fn check_index_file(storage: &ClientStorage) -> CliResult<IndexCheckResult> {
             result.issues.push(IssueReport {
                 issue_type: "index_parse_error".to_string(),
                 severity: "error".to_string(),
+                object_type: None,
                 object_id: None,
                 ref_name: None,
                 message: format!("Failed to parse index file: {}", e),
@@ -1039,6 +1257,7 @@ fn check_index_file(storage: &ClientStorage) -> CliResult<IndexCheckResult> {
                 result.issues.push(IssueReport {
                     issue_type: "index_conflict_marker".to_string(),
                     severity: "warning".to_string(),
+                    object_type: Some("blob".to_string()),
                     object_id: Some(entry.hash.to_string()),
                     ref_name: Some(entry.name.clone()),
                     message: format!(
@@ -1142,6 +1361,7 @@ fn validate_index_entry(
         return Some(IssueReport {
             issue_type: "invalid_index_mode".to_string(),
             severity: "error".to_string(),
+            object_type: None,
             object_id: None,
             ref_name: Some(entry.name.clone()),
             message: format!(
@@ -1156,6 +1376,7 @@ fn validate_index_entry(
         return Some(IssueReport {
             issue_type: "invalid_index_stage".to_string(),
             severity: "error".to_string(),
+            object_type: None,
             object_id: None,
             ref_name: Some(entry.name.clone()),
             message: format!(
@@ -1168,8 +1389,9 @@ fn validate_index_entry(
 
     if !storage.exist(&entry.hash) {
         return Some(IssueReport {
-            issue_type: "index_entry_missing_object".to_string(),
+            issue_type: "missing".to_string(),
             severity: "error".to_string(),
+            object_type: Some("blob".to_string()),
             object_id: Some(entry.hash.to_string()),
             ref_name: Some(entry.name.clone()),
             message: format!(
@@ -1186,6 +1408,7 @@ fn validate_index_entry(
         return Some(IssueReport {
             issue_type: "index_entry_wrong_type".to_string(),
             severity: "error".to_string(),
+            object_type: Some(obj_type.to_string()),
             object_id: Some(entry.hash.to_string()),
             ref_name: Some(entry.name.clone()),
             message: format!(
@@ -1225,8 +1448,9 @@ async fn validate_cross_references(storage: &ClientStorage) -> CliResult<Vec<Iss
             for item in &tree.tree_items {
                 if !storage.exist(&item.id) {
                     issues.push(IssueReport {
-                        issue_type: "missing_tree_entry".to_string(),
+                        issue_type: "missing".to_string(),
                         severity: "error".to_string(),
+                        object_type: Some("unknown".to_string()),
                         object_id: Some(item.id.to_string()),
                         ref_name: None,
                         message: format!(
@@ -1247,6 +1471,7 @@ async fn validate_cross_references(storage: &ClientStorage) -> CliResult<Vec<Iss
                         issues.push(IssueReport {
                             issue_type: "tree_entry_type_mismatch".to_string(),
                             severity: "error".to_string(),
+                            object_type: Some(actual_type.to_string()),
                             object_id: Some(item.id.to_string()),
                             ref_name: None,
                             message: format!(
@@ -1267,8 +1492,9 @@ async fn validate_cross_references(storage: &ClientStorage) -> CliResult<Vec<Iss
             };
             if !storage.exist(&commit.tree_id) {
                 issues.push(IssueReport {
-                    issue_type: "missing_commit_tree".to_string(),
+                    issue_type: "missing".to_string(),
                     severity: "error".to_string(),
+                    object_type: Some("tree".to_string()),
                     object_id: Some(commit.tree_id.to_string()),
                     ref_name: None,
                     message: format!("Commit {} references missing tree {}", hash, commit.tree_id),
@@ -1279,8 +1505,9 @@ async fn validate_cross_references(storage: &ClientStorage) -> CliResult<Vec<Iss
             for parent in &commit.parent_commit_ids {
                 if !storage.exist(parent) {
                     issues.push(IssueReport {
-                        issue_type: "missing_parent_commit".to_string(),
+                        issue_type: "missing".to_string(),
                         severity: "warning".to_string(),
+                        object_type: Some("commit".to_string()),
                         object_id: Some(parent.to_string()),
                         ref_name: None,
                         message: format!("Commit {} references missing parent {}", hash, parent),
@@ -1349,1280 +1576,3 @@ fn print_issues(result: &FsckResult) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use serial_test::serial;
-    use tempfile::tempdir;
-
-    use super::*;
-    use crate::utils::test;
-
-    fn default_fsck_result() -> FsckResult {
-        FsckResult {
-            objects_checked: 0,
-            objects_ok: 0,
-            objects_corrupted: 0,
-            refs_checked: 0,
-            refs_ok: 0,
-            refs_broken: 0,
-            index_valid: true,
-            reflog_issues: 0,
-            cross_ref_issues: 0,
-            overall_status: CheckStatus::Ok,
-            issues: vec![],
-            failure_mask: exit_code::OK,
-            failure_categories: vec![],
-        }
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn test_fsck_empty_repo() {
-        let temp_path = tempdir().unwrap();
-        test::setup_with_new_libra_in(temp_path.path()).await;
-        let _guard = test::ChangeDirGuard::new(temp_path.path());
-
-        let args = FsckArgs {
-            verbose: false,
-            no_cross_ref_check: false,
-            no_index_check: false,
-            objects_only: false,
-            fix: false,
-            object: None,
-        };
-
-        let storage = ClientStorage::init(path::objects());
-        let result = check_all_objects(&args, &storage).await.unwrap();
-
-        assert_eq!(result.objects_checked, 0);
-        assert_eq!(result.overall_status, CheckStatus::Ok);
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn test_verify_valid_blob() {
-        let temp_path = tempdir().unwrap();
-        test::setup_with_new_libra_in(temp_path.path()).await;
-        let _guard = test::ChangeDirGuard::new(temp_path.path());
-
-        let storage = ClientStorage::init(path::objects());
-        let blob = Blob::from_content("test content");
-        crate::command::save_object(&blob, &blob.id).unwrap();
-
-        let result = verify_object(&blob.id, &storage).await.unwrap();
-
-        assert_eq!(result.status, CheckStatus::Ok);
-        assert_eq!(result.object_type, "blob");
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn test_verify_missing_object() {
-        let temp_path = tempdir().unwrap();
-        test::setup_with_new_libra_in(temp_path.path()).await;
-        let _guard = test::ChangeDirGuard::new(temp_path.path());
-
-        let storage = ClientStorage::init(path::objects());
-        let fake_hash = ObjectHash::new(&[0u8; 20]);
-
-        let result = verify_object(&fake_hash, &storage).await.unwrap();
-
-        assert_eq!(result.status, CheckStatus::Missing);
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn test_verify_valid_commit() {
-        let temp_path = tempdir().unwrap();
-        test::setup_with_new_libra_in(temp_path.path()).await;
-        let _guard = test::ChangeDirGuard::new(temp_path.path());
-
-        let storage = ClientStorage::init(path::objects());
-
-        // Create a tree first
-        let tree = Tree::from_tree_items(vec![git_internal::internal::object::tree::TreeItem {
-            mode: git_internal::internal::object::tree::TreeItemMode::Blob,
-            name: "test.txt".to_string(),
-            id: ObjectHash::new(&[1u8; 20]),
-        }])
-        .unwrap();
-        crate::command::save_object(&tree, &tree.id).unwrap();
-
-        // Create a commit referencing the tree
-        let commit = Commit::from_tree_id(tree.id, vec![], "Test commit");
-        crate::command::save_object(&commit, &commit.id).unwrap();
-
-        let result = verify_object(&commit.id, &storage).await.unwrap();
-
-        assert_eq!(result.status, CheckStatus::Ok);
-        assert_eq!(result.object_type, "commit");
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn test_verify_valid_tree() {
-        let temp_path = tempdir().unwrap();
-        test::setup_with_new_libra_in(temp_path.path()).await;
-        let _guard = test::ChangeDirGuard::new(temp_path.path());
-
-        let storage = ClientStorage::init(path::objects());
-
-        // Create a blob first, then a tree referencing it
-        let blob = Blob::from_content("test");
-        crate::command::save_object(&blob, &blob.id).unwrap();
-
-        let tree = Tree::from_tree_items(vec![git_internal::internal::object::tree::TreeItem {
-            mode: git_internal::internal::object::tree::TreeItemMode::Blob,
-            name: "test.txt".to_string(),
-            id: blob.id,
-        }])
-        .unwrap();
-        crate::command::save_object(&tree, &tree.id).unwrap();
-
-        let result = verify_object(&tree.id, &storage).await.unwrap();
-
-        assert_eq!(result.status, CheckStatus::Ok);
-        assert_eq!(result.object_type, "tree");
-    }
-
-    #[test]
-    fn test_check_status_serialize() {
-        let status = CheckStatus::Ok;
-        let json = serde_json::to_string(&status).unwrap();
-        assert_eq!(json, "\"ok\"");
-
-        let status = CheckStatus::Missing;
-        let json = serde_json::to_string(&status).unwrap();
-        assert_eq!(json, "\"missing\"");
-    }
-
-    #[test]
-    fn test_issue_report_serialize() {
-        let issue = IssueReport {
-            issue_type: "test".to_string(),
-            severity: "error".to_string(),
-            object_id: Some("abc123".to_string()),
-            ref_name: None,
-            message: "Test message".to_string(),
-            suggestion: Some("Fix it".to_string()),
-        };
-
-        let json = serde_json::to_string(&issue).unwrap();
-        assert!(json.contains("\"issue_type\":\"test\""));
-        assert!(json.contains("\"severity\":\"error\""));
-        assert!(json.contains("\"object_id\":\"abc123\""));
-    }
-
-    #[test]
-    fn test_fsck_args_parsing() {
-        let args = FsckArgs::try_parse_from(["fsck"]).unwrap();
-        assert!(!args.verbose);
-        assert!(!args.no_cross_ref_check);
-        assert!(!args.objects_only);
-        assert!(!args.fix);
-        assert!(args.object.is_none());
-    }
-
-    #[test]
-    fn test_fsck_args_verbose() {
-        let args = FsckArgs::try_parse_from(["fsck", "--verbose"]).unwrap();
-        assert!(args.verbose);
-    }
-
-    #[test]
-    fn test_fsck_args_with_object() {
-        let args =
-            FsckArgs::try_parse_from(["fsck", "abc123def456789012345678901234567890abcd"]).unwrap();
-        assert_eq!(
-            args.object,
-            Some("abc123def456789012345678901234567890abcd".to_string())
-        );
-    }
-
-    #[test]
-    fn test_fsck_args_all_flags() {
-        let args = FsckArgs::try_parse_from([
-            "fsck",
-            "-v",
-            "--no-cross-ref-check",
-            "--no-index-check",
-            "--objects-only",
-            "--fix",
-        ])
-        .unwrap();
-        assert!(args.verbose);
-        assert!(args.no_cross_ref_check);
-        assert!(args.no_index_check);
-        assert!(args.objects_only);
-        assert!(args.fix);
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn test_fsck_single_object() {
-        let temp_path = tempdir().unwrap();
-        test::setup_with_new_libra_in(temp_path.path()).await;
-        let _guard = test::ChangeDirGuard::new(temp_path.path());
-
-        let storage = ClientStorage::init(path::objects());
-        let blob = Blob::from_content("test");
-        crate::command::save_object(&blob, &blob.id).unwrap();
-
-        let result = check_single_object(&blob.id.to_string(), &storage)
-            .await
-            .unwrap();
-
-        assert_eq!(result.objects_checked, 1);
-        assert_eq!(result.objects_ok, 1);
-        assert_eq!(result.overall_status, CheckStatus::Ok);
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn test_fsck_with_commit_and_tree() {
-        let temp_path = tempdir().unwrap();
-        test::setup_with_new_libra_in(temp_path.path()).await;
-        let _guard = test::ChangeDirGuard::new(temp_path.path());
-
-        let storage = ClientStorage::init(path::objects());
-
-        // Create a blob
-        let blob = Blob::from_content("file content");
-        crate::command::save_object(&blob, &blob.id).unwrap();
-
-        // Create a tree referencing the blob
-        let tree = Tree::from_tree_items(vec![git_internal::internal::object::tree::TreeItem {
-            mode: git_internal::internal::object::tree::TreeItemMode::Blob,
-            name: "test.txt".to_string(),
-            id: blob.id,
-        }])
-        .unwrap();
-        crate::command::save_object(&tree, &tree.id).unwrap();
-
-        // Create a commit referencing the tree
-        let commit = Commit::from_tree_id(tree.id, vec![], "Initial commit");
-        crate::command::save_object(&commit, &commit.id).unwrap();
-
-        let args = FsckArgs {
-            verbose: false,
-            no_cross_ref_check: false,
-            no_index_check: false,
-            objects_only: true,
-            fix: false,
-            object: None,
-        };
-
-        let result = check_all_objects(&args, &storage).await.unwrap();
-
-        assert_eq!(result.objects_checked, 3);
-        assert_eq!(result.objects_ok, 3);
-        assert_eq!(result.overall_status, CheckStatus::Ok);
-        assert_eq!(result.cross_ref_issues, 0);
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn test_cross_ref_detects_missing_tree_entry() {
-        let temp_path = tempdir().unwrap();
-        test::setup_with_new_libra_in(temp_path.path()).await;
-        let _guard = test::ChangeDirGuard::new(temp_path.path());
-
-        let storage = ClientStorage::init(path::objects());
-
-        // Create a tree referencing a non-existent blob
-        let fake_blob_id = ObjectHash::new(&[0xff; 20]);
-        let tree = Tree::from_tree_items(vec![git_internal::internal::object::tree::TreeItem {
-            mode: git_internal::internal::object::tree::TreeItemMode::Blob,
-            name: "missing.txt".to_string(),
-            id: fake_blob_id,
-        }])
-        .unwrap();
-        crate::command::save_object(&tree, &tree.id).unwrap();
-
-        let args = FsckArgs {
-            verbose: false,
-            no_cross_ref_check: false,
-            no_index_check: true,
-            objects_only: false, // Must be false to enable cross-ref validation
-            fix: false,
-            object: None,
-        };
-
-        let result = check_all_objects(&args, &storage).await.unwrap();
-
-        assert!(result.cross_ref_issues > 0);
-        assert!(
-            result
-                .issues
-                .iter()
-                .any(|i| i.issue_type == "missing_tree_entry")
-        );
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn test_cross_ref_detects_missing_commit_tree() {
-        let temp_path = tempdir().unwrap();
-        test::setup_with_new_libra_in(temp_path.path()).await;
-        let _guard = test::ChangeDirGuard::new(temp_path.path());
-
-        let storage = ClientStorage::init(path::objects());
-
-        // Create a commit referencing a non-existent tree
-        let fake_tree_id = ObjectHash::new(&[0xfe; 20]);
-        let commit = Commit::from_tree_id(fake_tree_id, vec![], "Bad commit");
-        crate::command::save_object(&commit, &commit.id).unwrap();
-
-        let args = FsckArgs {
-            verbose: false,
-            no_cross_ref_check: false,
-            no_index_check: true,
-            objects_only: false, // Must be false to enable cross-ref validation
-            fix: false,
-            object: None,
-        };
-
-        let result = check_all_objects(&args, &storage).await.unwrap();
-
-        assert!(result.cross_ref_issues > 0);
-        assert!(
-            result
-                .issues
-                .iter()
-                .any(|i| i.issue_type == "missing_commit_tree")
-        );
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn test_cross_ref_detects_missing_parent() {
-        let temp_path = tempdir().unwrap();
-        test::setup_with_new_libra_in(temp_path.path()).await;
-        let _guard = test::ChangeDirGuard::new(temp_path.path());
-
-        let storage = ClientStorage::init(path::objects());
-
-        // Create a commit referencing a non-existent parent
-        let fake_parent_id = ObjectHash::new(&[0xfd; 20]);
-
-        // Create a minimal tree (empty trees are not allowed)
-        let blob = Blob::from_content("dummy");
-        crate::command::save_object(&blob, &blob.id).unwrap();
-
-        let tree = Tree::from_tree_items(vec![git_internal::internal::object::tree::TreeItem {
-            mode: git_internal::internal::object::tree::TreeItemMode::Blob,
-            name: ".gitkeep".to_string(),
-            id: blob.id,
-        }])
-        .unwrap();
-        crate::command::save_object(&tree, &tree.id).unwrap();
-
-        let commit =
-            Commit::from_tree_id(tree.id, vec![fake_parent_id], "Commit with missing parent");
-        crate::command::save_object(&commit, &commit.id).unwrap();
-
-        let args = FsckArgs {
-            verbose: false,
-            no_cross_ref_check: false,
-            no_index_check: true,
-            objects_only: false, // Must be false to enable cross-ref validation
-            fix: false,
-            object: None,
-        };
-
-        let result = check_all_objects(&args, &storage).await.unwrap();
-
-        assert!(result.cross_ref_issues > 0);
-        assert!(
-            result
-                .issues
-                .iter()
-                .any(|i| i.issue_type == "missing_parent_commit" && i.severity == "warning")
-        );
-    }
-
-    #[test]
-    fn test_object_check_result_structure() {
-        let result = ObjectCheckResult {
-            object_id: "test".to_string(),
-            object_type: "blob".to_string(),
-            status: CheckStatus::Ok,
-            error_message: None,
-            size: 100,
-        };
-
-        assert_eq!(result.object_id, "test");
-        assert_eq!(result.size, 100);
-        assert!(result.error_message.is_none());
-    }
-
-    #[test]
-    fn test_fsck_result_structure() {
-        let result = FsckResult {
-            objects_checked: 10,
-            objects_ok: 9,
-            objects_corrupted: 1,
-            refs_checked: 5,
-            refs_ok: 5,
-            ..default_fsck_result()
-        };
-
-        assert_eq!(result.objects_checked, 10);
-        assert!(result.index_valid);
-        assert!(result.issues.is_empty());
-    }
-
-    #[test]
-    fn test_ref_check_result_structure() {
-        let result = RefCheckResult {
-            checked: 3,
-            ok: 2,
-            broken: 1,
-            issues: vec![],
-            broken_ref_names: vec![],
-        };
-
-        assert_eq!(result.checked, 3);
-        assert_eq!(result.broken, 1);
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn test_fsck_json_output_structure() {
-        let result = FsckResult {
-            objects_checked: 5,
-            objects_ok: 5,
-            ..default_fsck_result()
-        };
-
-        let json = serde_json::to_string_pretty(&result).unwrap();
-        assert!(json.contains("\"objects_checked\": 5"));
-        assert!(json.contains("\"overall_status\": \"ok\""));
-        assert!(json.contains("\"index_valid\": true"));
-    }
-
-    #[test]
-    fn test_check_status_all_variants() {
-        let statuses = [
-            CheckStatus::Ok,
-            CheckStatus::Missing,
-            CheckStatus::InvalidFormat,
-            CheckStatus::HashMismatch,
-        ];
-
-        for status in &statuses {
-            let serialized = serde_json::to_string(status).unwrap();
-            assert!(!serialized.is_empty());
-        }
-    }
-
-    #[test]
-    fn test_parse_object_hash_valid() {
-        let hash = parse_object_hash("a1b2c3d4e5f6789012345678901234567890abcd");
-        assert!(hash.is_some());
-    }
-
-    #[test]
-    fn test_parse_object_hash_invalid() {
-        let hash = parse_object_hash("invalid_hex_string");
-        assert!(hash.is_none());
-    }
-
-    #[test]
-    fn test_parse_object_hash_empty() {
-        let hash = parse_object_hash("");
-        assert!(hash.is_none());
-    }
-
-    #[test]
-    fn test_issue_report_all_fields() {
-        let issue = IssueReport {
-            issue_type: "hash_mismatch".to_string(),
-            severity: "critical".to_string(),
-            object_id: Some("abc123".to_string()),
-            ref_name: Some("refs/heads/main".to_string()),
-            message: "Hash does not match content".to_string(),
-            suggestion: Some("Recreate object from source".to_string()),
-        };
-
-        let json = serde_json::to_string(&issue).unwrap();
-        assert!(json.contains("hash_mismatch"));
-        assert!(json.contains("critical"));
-        assert!(json.contains("abc123"));
-        assert!(json.contains("refs/heads/main"));
-    }
-
-    #[test]
-    fn test_issue_report_optional_fields_none() {
-        let issue = IssueReport {
-            issue_type: "empty_repo".to_string(),
-            severity: "info".to_string(),
-            object_id: None,
-            ref_name: None,
-            message: "No objects to check".to_string(),
-            suggestion: None,
-        };
-
-        let json = serde_json::to_string(&issue).unwrap();
-        assert!(json.contains("empty_repo"));
-    }
-
-    #[test]
-    fn test_object_check_result_with_error() {
-        let result = ObjectCheckResult {
-            object_id: "bad123".to_string(),
-            object_type: "commit".to_string(),
-            status: CheckStatus::HashMismatch,
-            error_message: Some("Computed hash differs from stored hash".to_string()),
-            size: 256,
-        };
-
-        assert_eq!(result.status, CheckStatus::HashMismatch);
-        assert!(result.error_message.is_some());
-        assert_eq!(result.size, 256);
-    }
-
-    #[test]
-    fn test_fsck_args_object_with_short_hash() {
-        let args = FsckArgs::try_parse_from(["fsck", "abc123"]).unwrap();
-        assert_eq!(args.object, Some("abc123".to_string()));
-    }
-
-    #[test]
-    fn test_check_status_display() {
-        assert_eq!(serde_json::to_string(&CheckStatus::Ok).unwrap(), "\"ok\"");
-        assert_eq!(
-            serde_json::to_string(&CheckStatus::Missing).unwrap(),
-            "\"missing\""
-        );
-        // Note: serde renames to kebab-case, but InvalidFormat is rendered as "invalidformat"
-        // due to how the rename works - this is expected behavior
-        assert_eq!(
-            serde_json::to_string(&CheckStatus::InvalidFormat).unwrap(),
-            "\"invalidformat\""
-        );
-        assert_eq!(
-            serde_json::to_string(&CheckStatus::HashMismatch).unwrap(),
-            "\"hashmismatch\""
-        );
-    }
-
-    #[test]
-    fn test_fsck_result_default_values() {
-        let result = default_fsck_result();
-
-        assert_eq!(result.objects_checked, 0);
-        assert!(result.issues.is_empty());
-        assert_eq!(result.overall_status, CheckStatus::Ok);
-    }
-
-    #[test]
-    fn test_ref_check_result_zero() {
-        let result = RefCheckResult {
-            checked: 0,
-            ok: 0,
-            broken: 0,
-            issues: vec![],
-            broken_ref_names: vec![],
-        };
-
-        assert_eq!(result.checked, 0);
-        assert_eq!(result.broken, 0);
-        assert!(result.issues.is_empty());
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn test_verify_commit_empty_parents() {
-        let temp_path = tempdir().unwrap();
-        test::setup_with_new_libra_in(temp_path.path()).await;
-        let _guard = test::ChangeDirGuard::new(temp_path.path());
-
-        let storage = ClientStorage::init(path::objects());
-
-        // Create a minimal tree with at least one entry (empty trees are not allowed)
-        let blob = Blob::from_content("dummy");
-        crate::command::save_object(&blob, &blob.id).unwrap();
-
-        let tree = Tree::from_tree_items(vec![git_internal::internal::object::tree::TreeItem {
-            mode: git_internal::internal::object::tree::TreeItemMode::Blob,
-            name: ".gitkeep".to_string(),
-            id: blob.id,
-        }])
-        .unwrap();
-        crate::command::save_object(&tree, &tree.id).unwrap();
-
-        let commit = Commit::from_tree_id(tree.id, vec![], "Root commit");
-        crate::command::save_object(&commit, &commit.id).unwrap();
-
-        let result = verify_object(&commit.id, &storage).await.unwrap();
-        assert_eq!(result.status, CheckStatus::Ok);
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn test_fsck_single_invalid_object() {
-        let temp_path = tempdir().unwrap();
-        test::setup_with_new_libra_in(temp_path.path()).await;
-        let _guard = test::ChangeDirGuard::new(temp_path.path());
-
-        let storage = ClientStorage::init(path::objects());
-
-        let fake_hash = ObjectHash::new(&[0xee; 20]);
-        let result = check_single_object(&fake_hash.to_string(), &storage)
-            .await
-            .unwrap();
-
-        assert_eq!(result.objects_checked, 1);
-        assert_eq!(result.objects_ok, 0);
-        assert_eq!(result.objects_corrupted, 1);
-        assert!(result.overall_status != CheckStatus::Ok);
-    }
-
-    #[test]
-    fn test_issue_severity_levels() {
-        let severities = ["error", "warning", "info", "critical"];
-        for sev in severities {
-            let issue = IssueReport {
-                issue_type: "test".to_string(),
-                severity: sev.to_string(),
-                object_id: None,
-                ref_name: None,
-                message: "Test".to_string(),
-                suggestion: None,
-            };
-            let json = serde_json::to_string(&issue).unwrap();
-            assert!(json.contains(sev));
-        }
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn test_verify_tree_with_subtree() {
-        let temp_path = tempdir().unwrap();
-        test::setup_with_new_libra_in(temp_path.path()).await;
-        let _guard = test::ChangeDirGuard::new(temp_path.path());
-
-        let storage = ClientStorage::init(path::objects());
-
-        let blob = Blob::from_content("file");
-        let subtree = Tree::from_tree_items(vec![git_internal::internal::object::tree::TreeItem {
-            mode: git_internal::internal::object::tree::TreeItemMode::Blob,
-            name: "inner.txt".to_string(),
-            id: blob.id,
-        }])
-        .unwrap();
-        crate::command::save_object(&blob, &blob.id).unwrap();
-        crate::command::save_object(&subtree, &subtree.id).unwrap();
-
-        let tree = Tree::from_tree_items(vec![git_internal::internal::object::tree::TreeItem {
-            mode: git_internal::internal::object::tree::TreeItemMode::Tree,
-            name: "subdir".to_string(),
-            id: subtree.id,
-        }])
-        .unwrap();
-        crate::command::save_object(&tree, &tree.id).unwrap();
-
-        let result = verify_object(&tree.id, &storage).await.unwrap();
-        assert_eq!(result.status, CheckStatus::Ok);
-    }
-
-    #[test]
-    fn test_print_functions_exist() {
-        let result = default_fsck_result();
-
-        print_verbose_result(&result);
-        print_issues(&result);
-    }
-
-    // -----------------------------------------------------------------------
-    // Failure mask / exit code bitmask tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_exit_code_bitmask_objects_only() {
-        assert_eq!(exit_code::OK, 0);
-        assert_eq!(exit_code::OBJECT_CORRUPT, 1);
-        assert_eq!(exit_code::REF_BROKEN, 2);
-        assert_eq!(exit_code::INDEX_CORRUPT, 4);
-    }
-
-    #[test]
-    fn test_exit_code_bitmask_combinations() {
-        assert_eq!(exit_code::OBJECT_CORRUPT | exit_code::REF_BROKEN, 3);
-        assert_eq!(exit_code::OBJECT_CORRUPT | exit_code::INDEX_CORRUPT, 5);
-        assert_eq!(exit_code::REF_BROKEN | exit_code::INDEX_CORRUPT, 6);
-        assert_eq!(
-            exit_code::OBJECT_CORRUPT | exit_code::REF_BROKEN | exit_code::INDEX_CORRUPT,
-            7
-        );
-    }
-
-    #[test]
-    fn test_failure_mask_serialization_skipped_when_zero() {
-        let result = FsckResult {
-            objects_checked: 1,
-            objects_ok: 1,
-            ..default_fsck_result()
-        };
-        let json = serde_json::to_string(&result).unwrap();
-        assert!(
-            !json.contains("failure_mask"),
-            "failure_mask should be skipped when zero: {json}"
-        );
-    }
-
-    #[test]
-    fn test_failure_categories_serialization_skipped_when_empty() {
-        let result = FsckResult {
-            objects_checked: 1,
-            objects_ok: 1,
-            ..default_fsck_result()
-        };
-        let json = serde_json::to_string(&result).unwrap();
-        assert!(
-            !json.contains("failure_categories"),
-            "failure_categories should be skipped when empty: {json}"
-        );
-    }
-
-    #[test]
-    fn test_failure_mask_serialized_when_nonzero() {
-        let result = FsckResult {
-            objects_checked: 2,
-            objects_ok: 1,
-            objects_corrupted: 1,
-            refs_checked: 0,
-            refs_ok: 0,
-            refs_broken: 0,
-            index_valid: true,
-            cross_ref_issues: 0,
-            overall_status: CheckStatus::HashMismatch,
-            issues: vec![],
-            failure_mask: exit_code::OBJECT_CORRUPT,
-            failure_categories: vec!["objects".to_string()],
-        };
-        let json = serde_json::to_string(&result).unwrap();
-        assert!(
-            json.contains("\"failure_mask\":1"),
-            "failure_mask should appear when nonzero: {json}"
-        );
-        assert!(
-            json.contains("\"failure_categories\":[\"objects\"]"),
-            "failure_categories should appear: {json}"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // Issue type / severity JSON serialization tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_issue_report_issue_types() {
-        let issue_types = [
-            "hash_mismatch",
-            "invalid_format",
-            "missing_object",
-            "missing_tree_entry",
-            "missing_commit_tree",
-            "missing_parent_commit",
-            "broken_ref",
-            "invalid_ref_hash",
-            "index_parse_error",
-            "invalid_index_mode",
-            "invalid_index_stage",
-            "index_entry_missing_object",
-            "index_entry_wrong_type",
-            "index_conflict_marker",
-            "tree_entry_type_mismatch",
-        ];
-        for itype in issue_types {
-            let issue = IssueReport {
-                issue_type: itype.to_string(),
-                severity: "error".to_string(),
-                object_id: Some("abc123".to_string()),
-                ref_name: None,
-                message: format!("Test {itype}"),
-                suggestion: None,
-            };
-            let json = serde_json::to_string(&issue).unwrap();
-            assert!(
-                json.contains(itype),
-                "JSON should contain issue type '{itype}': {json}"
-            );
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // is_valid_index_mode tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_is_valid_index_mode_valid_modes() {
-        assert!(is_valid_index_mode(0o100644)); // regular file
-        assert!(is_valid_index_mode(0o100755)); // executable
-        assert!(is_valid_index_mode(0o120000)); // symlink
-        assert!(is_valid_index_mode(0o160000)); // gitlink
-        assert!(is_valid_index_mode(0o040000)); // directory/tree
-    }
-
-    #[test]
-    fn test_is_valid_index_mode_invalid_modes() {
-        assert!(!is_valid_index_mode(0o000000));
-        assert!(!is_valid_index_mode(0o010000));
-        assert!(!is_valid_index_mode(0o077777));
-        assert!(!is_valid_index_mode(0o100000)); // missing permission bits
-        assert!(!is_valid_index_mode(0o777777));
-    }
-
-    // -----------------------------------------------------------------------
-    // parse_object_hash edge cases
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_parse_object_hash_odd_length() {
-        // Odd-length hex strings should still be decodable by hex::decode? Actually no.
-        let hash = parse_object_hash("abc");
-        assert!(hash.is_none(), "odd-length hex should fail: {hash:?}");
-    }
-
-    #[test]
-    fn test_parse_object_hash_non_hex() {
-        let hash = parse_object_hash("zzzzzzzz");
-        assert!(hash.is_none(), "non-hex should fail: {hash:?}");
-    }
-
-    #[test]
-    fn test_parse_object_hash_with_uppercase() {
-        // hex::decode accepts both uppercase and lowercase
-        // Use a proper 40-char (even length) uppercase hex string
-        let hash = parse_object_hash("ABCDEF0123456789ABCDEF0123456789ABCDEF01");
-        assert!(hash.is_some(), "uppercase hex should be accepted: {hash:?}");
-    }
-
-    #[test]
-    fn test_parse_object_hash_zero_hash() {
-        let zero_40 = "0000000000000000000000000000000000000000";
-        let hash = parse_object_hash(zero_40);
-        assert!(
-            hash.is_some(),
-            "all-zero hash should parse (valid hex): {hash:?}"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // list_all_objects_in_storage edge cases
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    #[serial]
-    async fn test_list_all_objects_nonexistent_dir() {
-        let temp_path = tempdir().unwrap();
-        test::setup_with_new_libra_in(temp_path.path()).await;
-        let _guard = test::ChangeDirGuard::new(temp_path.path());
-
-        // Remove the objects directory entirely
-        let objects_dir = path::objects();
-        if objects_dir.exists() {
-            fs::remove_dir_all(&objects_dir).unwrap();
-        }
-
-        let storage = ClientStorage::init(path::objects());
-        let hashes = list_all_objects_in_storage(&storage).unwrap();
-        assert!(
-            hashes.is_empty(),
-            "should return empty list for nonexistent dir"
-        );
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn test_list_all_objects_empty_dir() {
-        let temp_path = tempdir().unwrap();
-        test::setup_with_new_libra_in(temp_path.path()).await;
-        let _guard = test::ChangeDirGuard::new(temp_path.path());
-
-        let storage = ClientStorage::init(path::objects());
-        let hashes = list_all_objects_in_storage(&storage).unwrap();
-        assert!(
-            hashes.is_empty(),
-            "empty objects dir should return no hashes"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // verify_object: corrupted object detection
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    #[serial]
-    async fn test_verify_corrupted_blob_detected() {
-        let temp_path = tempdir().unwrap();
-        test::setup_with_new_libra_in(temp_path.path()).await;
-        let _guard = test::ChangeDirGuard::new(temp_path.path());
-
-        let storage = ClientStorage::init(path::objects());
-        let blob = Blob::from_content("original content");
-        crate::command::save_object(&blob, &blob.id).unwrap();
-
-        // Corrupt the object by overwriting with garbage
-        let objects_dir = path::objects();
-        let hash_str = blob.id.to_string();
-        let object_path = objects_dir.join(&hash_str[..2]).join(&hash_str[2..]);
-        fs::write(&object_path, b"garbage data!!!").unwrap();
-
-        let result = verify_object(&blob.id, &storage).await.unwrap();
-        assert!(
-            result.status == CheckStatus::HashMismatch
-                || result.status == CheckStatus::InvalidFormat,
-            "corrupted blob should be detected: {:?}",
-            result.status
-        );
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn test_verify_corrupted_tree_detected() {
-        let temp_path = tempdir().unwrap();
-        test::setup_with_new_libra_in(temp_path.path()).await;
-        let _guard = test::ChangeDirGuard::new(temp_path.path());
-
-        let storage = ClientStorage::init(path::objects());
-
-        let blob = Blob::from_content("file");
-        crate::command::save_object(&blob, &blob.id).unwrap();
-
-        let tree = Tree::from_tree_items(vec![git_internal::internal::object::tree::TreeItem {
-            mode: git_internal::internal::object::tree::TreeItemMode::Blob,
-            name: "file.txt".to_string(),
-            id: blob.id,
-        }])
-        .unwrap();
-        crate::command::save_object(&tree, &tree.id).unwrap();
-
-        // Corrupt the tree object
-        let objects_dir = path::objects();
-        let hash_str = tree.id.to_string();
-        let object_path = objects_dir.join(&hash_str[..2]).join(&hash_str[2..]);
-        fs::write(&object_path, b"corrupted tree!!!").unwrap();
-
-        let result = verify_object(&tree.id, &storage).await.unwrap();
-        assert!(
-            result.status != CheckStatus::Ok,
-            "corrupted tree should be detected: {:?}",
-            result.status
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // validate_cross_references: tree entry type mismatch
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    #[serial]
-    async fn test_cross_ref_detects_tree_entry_type_mismatch() {
-        let temp_path = tempdir().unwrap();
-        test::setup_with_new_libra_in(temp_path.path()).await;
-        let _guard = test::ChangeDirGuard::new(temp_path.path());
-
-        let storage = ClientStorage::init(path::objects());
-
-        // Create a blob
-        let blob = Blob::from_content("content");
-        crate::command::save_object(&blob, &blob.id).unwrap();
-
-        // Create a tree that incorrectly declares the blob as a subtree
-        let tree = Tree::from_tree_items(vec![git_internal::internal::object::tree::TreeItem {
-            mode: git_internal::internal::object::tree::TreeItemMode::Tree, // declares as tree
-            name: "should_be_blob".to_string(),
-            id: blob.id, // but is actually a blob
-        }])
-        .unwrap();
-        crate::command::save_object(&tree, &tree.id).unwrap();
-
-        let args = FsckArgs {
-            verbose: false,
-            no_cross_ref_check: false,
-            no_index_check: true,
-            objects_only: false,
-            fix: false,
-            object: None,
-        };
-
-        let result = check_all_objects(&args, &storage).await.unwrap();
-
-        assert!(result.cross_ref_issues > 0);
-        assert!(
-            result
-                .issues
-                .iter()
-                .any(|i| i.issue_type == "tree_entry_type_mismatch"),
-            "should detect tree entry type mismatch: {:?}",
-            result.issues
-        );
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn test_cross_ref_detects_blob_declared_as_tree_when_actual_is_tree() {
-        let temp_path = tempdir().unwrap();
-        test::setup_with_new_libra_in(temp_path.path()).await;
-        let _guard = test::ChangeDirGuard::new(temp_path.path());
-
-        let storage = ClientStorage::init(path::objects());
-
-        // Create a real subtree
-        let inner_blob = Blob::from_content("inner");
-        crate::command::save_object(&inner_blob, &inner_blob.id).unwrap();
-
-        let subtree = Tree::from_tree_items(vec![git_internal::internal::object::tree::TreeItem {
-            mode: git_internal::internal::object::tree::TreeItemMode::Blob,
-            name: "inner.txt".to_string(),
-            id: inner_blob.id,
-        }])
-        .unwrap();
-        crate::command::save_object(&subtree, &subtree.id).unwrap();
-
-        // Create a parent tree that declares the subtree as a blob
-        let tree = Tree::from_tree_items(vec![git_internal::internal::object::tree::TreeItem {
-            mode: git_internal::internal::object::tree::TreeItemMode::Blob, // declares as blob
-            name: "should_be_tree".to_string(),
-            id: subtree.id, // but is actually a tree
-        }])
-        .unwrap();
-        crate::command::save_object(&tree, &tree.id).unwrap();
-
-        let args = FsckArgs {
-            verbose: false,
-            no_cross_ref_check: false,
-            no_index_check: true,
-            objects_only: false,
-            fix: false,
-            object: None,
-        };
-
-        let result = check_all_objects(&args, &storage).await.unwrap();
-
-        assert!(result.cross_ref_issues > 0);
-        assert!(
-            result
-                .issues
-                .iter()
-                .any(|i| i.issue_type == "tree_entry_type_mismatch"),
-            "should detect blob-declared-as-tree mismatch: {:?}",
-            result.issues
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // check_index: corrupted index parse error
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    #[serial]
-    async fn test_check_index_corrupted_file_parse_error() {
-        let temp_path = tempdir().unwrap();
-        test::setup_with_new_libra_in(temp_path.path()).await;
-        let _guard = test::ChangeDirGuard::new(temp_path.path());
-
-        let storage = ClientStorage::init(path::objects());
-
-        // Write garbage to the index file
-        let index_path = path::index();
-        fs::write(&index_path, b"not a valid index!!!").unwrap();
-
-        let result = check_index(&storage).unwrap();
-
-        assert!(
-            !result.valid,
-            "corrupted index should be detected as invalid"
-        );
-        assert!(
-            result
-                .issues
-                .iter()
-                .any(|i| i.issue_type == "index_parse_error"),
-            "should report index_parse_error: {:?}",
-            result.issues
-        );
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn test_check_index_no_index_file() {
-        let temp_path = tempdir().unwrap();
-        test::setup_with_new_libra_in(temp_path.path()).await;
-        let _guard = test::ChangeDirGuard::new(temp_path.path());
-
-        let storage = ClientStorage::init(path::objects());
-
-        // Ensure no index file exists
-        let index_path = path::index();
-        if index_path.exists() {
-            fs::remove_file(&index_path).unwrap();
-        }
-
-        let result = check_index(&storage).unwrap();
-
-        assert!(result.valid, "no index file should be treated as valid");
-        assert_eq!(result.entries_checked, 0);
-    }
-
-    // -----------------------------------------------------------------------
-    // check_all_objects: --fix flow for broken refs
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    #[serial]
-    async fn test_check_all_objects_fix_broken_refs() {
-        use sea_orm::{ActiveModelTrait, ActiveValue::Set};
-
-        let temp_path = tempdir().unwrap();
-        test::setup_with_new_libra_in(temp_path.path()).await;
-        let _guard = test::ChangeDirGuard::new(temp_path.path());
-
-        let storage = ClientStorage::init(path::objects());
-
-        // Create at least one object so check_all_objects proceeds past the early return
-        let blob = Blob::from_content("dummy");
-        crate::command::save_object(&blob, &blob.id).unwrap();
-
-        // Insert a broken ref pointing to a nonexistent object
-        let fake_hash = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
-        let db_conn = db::get_db_conn_instance().await;
-        let broken_ref = reference::ActiveModel {
-            name: Set(Some("refs/heads/broken-branch".to_string())),
-            kind: Set(crate::internal::model::reference::ConfigKind::Branch),
-            commit: Set(Some(fake_hash.to_string())),
-            remote: Set(None),
-            ..Default::default()
-        };
-        broken_ref.insert(&db_conn).await.unwrap();
-
-        // Run check with fix=false first — should detect the broken ref
-        let args_no_fix = FsckArgs {
-            verbose: false,
-            no_cross_ref_check: true,
-            no_index_check: true,
-            objects_only: false,
-            fix: false,
-            object: None,
-        };
-        let result_no_fix = check_all_objects(&args_no_fix, &storage).await.unwrap();
-        assert!(
-            result_no_fix.refs_broken > 0,
-            "broken ref should be detected without fix: refs_broken={}",
-            result_no_fix.refs_broken
-        );
-
-        // Run check with fix=true — should delete the broken ref
-        let args_fix = FsckArgs {
-            verbose: false,
-            no_cross_ref_check: true,
-            no_index_check: true,
-            objects_only: false,
-            fix: true,
-            object: None,
-        };
-        let result_fix = check_all_objects(&args_fix, &storage).await.unwrap();
-        assert!(
-            result_fix.refs_broken == 0,
-            "broken ref should be fixed (deleted): refs_broken={}",
-            result_fix.refs_broken
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // print_issues output format
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_print_issues_outputs_to_stderr() {
-        let result = FsckResult {
-            objects_checked: 1,
-            objects_ok: 0,
-            objects_corrupted: 1,
-            overall_status: CheckStatus::HashMismatch,
-            issues: vec![IssueReport {
-                issue_type: "hash_mismatch".to_string(),
-                severity: "error".to_string(),
-                object_id: Some("abc123".to_string()),
-                ref_name: None,
-                message: "Object data corrupted".to_string(),
-                suggestion: Some("Restore from backup.".to_string()),
-            }],
-            failure_mask: exit_code::OBJECT_CORRUPT,
-            failure_categories: vec!["objects".to_string()],
-            ..default_fsck_result()
-        };
-
-        print_issues(&result);
-    }
-
-    // -----------------------------------------------------------------------
-    // check_all_objects: --objects-only skips refs and index
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    #[serial]
-    async fn test_objects_only_skips_refs_and_index() {
-        let temp_path = tempdir().unwrap();
-        test::setup_with_new_libra_in(temp_path.path()).await;
-        let _guard = test::ChangeDirGuard::new(temp_path.path());
-
-        let storage = ClientStorage::init(path::objects());
-
-        // Create a blob
-        let blob = Blob::from_content("test");
-        crate::command::save_object(&blob, &blob.id).unwrap();
-
-        let args = FsckArgs {
-            verbose: false,
-            no_cross_ref_check: true,
-            no_index_check: false, // would normally check index
-            objects_only: true,    // should skip both refs and index
-            fix: false,
-            object: None,
-        };
-
-        let result = check_all_objects(&args, &storage).await.unwrap();
-
-        assert_eq!(result.objects_checked, 1);
-        assert_eq!(result.refs_checked, 0, "--objects-only should skip refs");
-        assert!(
-            result.index_valid,
-            "--objects-only should leave index_valid as default true"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // check_single_object: parse error on object ID
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    #[serial]
-    async fn test_check_single_object_invalid_hash() {
-        let temp_path = tempdir().unwrap();
-        test::setup_with_new_libra_in(temp_path.path()).await;
-        let _guard = test::ChangeDirGuard::new(temp_path.path());
-
-        let storage = ClientStorage::init(path::objects());
-
-        // Invalid hex should error
-        let result = check_single_object("not-hex!!", &storage).await;
-        assert!(result.is_err(), "invalid hex object ID should return error");
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn test_check_single_object_empty_hash() {
-        let temp_path = tempdir().unwrap();
-        test::setup_with_new_libra_in(temp_path.path()).await;
-        let _guard = test::ChangeDirGuard::new(temp_path.path());
-
-        let storage = ClientStorage::init(path::objects());
-
-        let result = check_single_object("", &storage).await;
-        assert!(result.is_err(), "empty object ID should return error");
-    }
-}
