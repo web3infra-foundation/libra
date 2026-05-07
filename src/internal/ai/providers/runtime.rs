@@ -44,6 +44,7 @@ use crate::internal::ai::{
         gemini::{self, gemini_api_types::GenerateContentResponse},
         kimi, ollama, openai,
         openai_compat::ChatResponse,
+        transform::transform_for,
         zhipu,
     },
 };
@@ -106,6 +107,25 @@ impl AnyCompletionModel {
             Self::Ollama(_) => provider_id::OLLAMA,
             #[cfg(feature = "test-provider")]
             Self::Fake(_) => provider_id::FAKE,
+        }
+    }
+
+    /// Model id this enum variant currently wraps. Used by the transform
+    /// pipeline to pick the right per-model variants and by usage tagging
+    /// when a request fails before the response carries a model field. The
+    /// value is the same string the caller supplied at construction time
+    /// (e.g. `"claude-sonnet-4-0"`, `"gpt-4o-mini"`).
+    pub fn model_id(&self) -> &str {
+        match self {
+            Self::Anthropic(m) => m.model_name(),
+            Self::OpenAi(m) => m.model_name(),
+            Self::DeepSeek(m) => m.model_name(),
+            Self::Gemini(m) => m.model_name(),
+            Self::Kimi(m) => m.model_name(),
+            Self::Zhipu(m) => m.model_name(),
+            Self::Ollama(m) => m.model_name(),
+            #[cfg(feature = "test-provider")]
+            Self::Fake(m) => m.model_name(),
         }
     }
 }
@@ -174,41 +194,58 @@ impl CompletionModel for AnyCompletionModel {
         &self,
         request: CompletionRequest,
     ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
-        match self {
+        // OC-Phase 4 P4.1: apply provider transform before/after the wire
+        // round-trip so per-provider quirks live in one auditable place
+        // instead of bleeding into every provider's `completion.rs`. The
+        // call is **outside** the per-variant `match` so a future provider
+        // does not silently bypass the transform pipeline by forgetting an
+        // arm — adding a new variant only requires extending the match
+        // below, while transform wiring stays untouched.
+        let transform = transform_for(self.provider_id());
+        let model_id = self.model_id().to_string();
+        let mut request = request;
+        transform.prepare_request(&model_id, &mut request)?;
+        let mut response = match self {
             Self::Anthropic(m) => {
                 let resp = m.completion(request).await?;
-                Ok(wrap_response(resp, AnyCompletionRawResponse::Anthropic))
+                wrap_response(resp, AnyCompletionRawResponse::Anthropic)
             }
             Self::OpenAi(m) => {
                 let resp = m.completion(request).await?;
-                Ok(wrap_response(resp, AnyCompletionRawResponse::OpenAi))
+                wrap_response(resp, AnyCompletionRawResponse::OpenAi)
             }
             Self::DeepSeek(m) => {
                 let resp = m.completion(request).await?;
-                Ok(wrap_response(resp, AnyCompletionRawResponse::DeepSeek))
+                wrap_response(resp, AnyCompletionRawResponse::DeepSeek)
             }
             Self::Gemini(m) => {
                 let resp = m.completion(request).await?;
-                Ok(wrap_response(resp, AnyCompletionRawResponse::Gemini))
+                wrap_response(resp, AnyCompletionRawResponse::Gemini)
             }
             Self::Kimi(m) => {
                 let resp = m.completion(request).await?;
-                Ok(wrap_response(resp, AnyCompletionRawResponse::Kimi))
+                wrap_response(resp, AnyCompletionRawResponse::Kimi)
             }
             Self::Zhipu(m) => {
                 let resp = m.completion(request).await?;
-                Ok(wrap_response(resp, AnyCompletionRawResponse::Zhipu))
+                wrap_response(resp, AnyCompletionRawResponse::Zhipu)
             }
             Self::Ollama(m) => {
                 let resp = m.completion(request).await?;
-                Ok(wrap_response(resp, AnyCompletionRawResponse::Ollama))
+                wrap_response(resp, AnyCompletionRawResponse::Ollama)
             }
             #[cfg(feature = "test-provider")]
             Self::Fake(m) => {
                 let resp = m.completion(request).await?;
-                Ok(wrap_response(resp, AnyCompletionRawResponse::Fake))
+                wrap_response(resp, AnyCompletionRawResponse::Fake)
             }
-        }
+        };
+        transform.finalize_response(
+            &model_id,
+            &mut response.content,
+            &mut response.reasoning_content,
+        )?;
+        Ok(response)
     }
 
     fn set_run_id(&self, run_id: String) {

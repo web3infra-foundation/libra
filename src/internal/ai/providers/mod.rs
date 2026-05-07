@@ -44,6 +44,7 @@ pub mod ollama;
 pub mod openai;
 pub mod openai_compat;
 pub mod runtime;
+pub mod transform;
 pub mod zhipu;
 
 pub use capability::{ModelCapability, ModelCost};
@@ -52,3 +53,4 @@ pub use error::{
 };
 pub use factory::{ProviderBuildOptions, ProviderFactory, ProviderFactoryError};
 pub use runtime::{AnyCompletionModel, AnyCompletionRawResponse};
+pub use transform::{ProviderTransform, TransformError, transform_for, variant};

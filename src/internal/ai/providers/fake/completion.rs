@@ -37,6 +37,15 @@ pub struct CompletionModel {
     model: String,
 }
 
+impl CompletionModel {
+    /// Model id this fake provider was constructed for. Mirrors the
+    /// `model_name()` accessor on every production provider so the
+    /// runtime adapter can fetch the id without branching on variant.
+    pub fn model_name(&self) -> &str {
+        &self.model
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct FakeRawResponse {
     pub model: String,
