@@ -241,15 +241,18 @@ fn drop_empty_assistant_turns(request: &mut CompletionRequest) {
 /// hard to trace back to the offending message; failing fast here points
 /// the caller at the exact `chat_history[i]` index.
 ///
-/// `System` messages are scanned because Libra's [`Message::System`] arm
-/// carries `OneOrMany<UserContent>` (the same content union as user
-/// messages), which can in principle hold a `ToolResult`. Anthropic's
-/// wire builder only forwards `UserContent::Text` from system messages,
-/// so an embedded `ToolResult` would otherwise vanish silently rather
-/// than fail loudly — mirror the user-arm guard so the runtime never
-/// silently drops tool results. `ToolCall` is only reachable via
-/// `AssistantContent`, so the system arm has no symmetric assistant-side
-/// duplicate check to perform.
+/// `System` messages get a stricter check: Anthropic's wire system
+/// extractor only forwards `UserContent::Text` from system messages, so
+/// any `ToolResult` embedded there would silently vanish on the wire —
+/// even when its id pairs with a prior `ToolCall`. A paired
+/// `Assistant(ToolCall) → System(ToolResult)` shape would therefore turn
+/// into an orphan `tool_use` on the wire and trigger an opaque 400. The
+/// validator rejects every System `ToolResult` unconditionally, regardless
+/// of pairing, so the contract violation surfaces with the offending id
+/// instead of vanishing.
+///
+/// `ToolCall` is only reachable via `AssistantContent`, so System
+/// messages have no symmetric assistant-side check to perform.
 ///
 /// Idempotent: the second pass over the same history reaches the same
 /// set of pairings.
@@ -279,21 +282,21 @@ fn require_anthropic_tool_pairing(request: &CompletionRequest) -> Result<(), Tra
                 }
             }
             Message::User { content } => {
-                check_tool_result_pairing(content.iter(), idx, &mut pending_calls)?;
+                check_user_tool_result_pairing(content.iter(), idx, &mut pending_calls)?;
             }
             Message::System { content } => {
-                check_tool_result_pairing(content.iter(), idx, &mut pending_calls)?;
+                reject_system_tool_results(content.iter(), idx)?;
             }
         }
     }
     Ok(())
 }
 
-/// Shared per-content-block check used by the User and System arms of
-/// [`require_anthropic_tool_pairing`]. Mutating `pending_calls` keeps the
-/// "each ToolCall id pairs with at most one ToolResult" invariant
-/// regardless of which message arm carried the result.
-fn check_tool_result_pairing<'a, I>(
+/// User-arm pairing check: every ToolResult must consume one pending
+/// ToolCall id; orphans and duplicates fail. Mutating `pending_calls`
+/// enforces the "each ToolCall id pairs with at most one ToolResult"
+/// invariant.
+fn check_user_tool_result_pairing<'a, I>(
     content: I,
     idx: usize,
     pending_calls: &mut std::collections::HashSet<String>,
@@ -312,6 +315,32 @@ where
                      preceding ToolCall with matching id; Anthropic \
                      requires every tool_result to follow the assistant \
                      tool_use that produced it (or to be paired only once)",
+                    result.id
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// System-arm guard: Anthropic's wire system extractor drops anything
+/// that is not `UserContent::Text`, so a `ToolResult` embedded in a
+/// System message would vanish silently on the wire — even when paired.
+/// Reject unconditionally to surface the contract violation with the
+/// offending tool-call id.
+fn reject_system_tool_results<'a, I>(content: I, idx: usize) -> Result<(), TransformError>
+where
+    I: IntoIterator<Item = &'a UserContent>,
+{
+    for part in content {
+        if let UserContent::ToolResult(result) = part {
+            return Err(TransformError::InvalidRequest {
+                provider: provider_id::ANTHROPIC,
+                reason: format!(
+                    "ToolResult at chat_history[{idx}] (id={}) is embedded in a \
+                     System message; Anthropic's system extractor only forwards \
+                     text content, so the tool_result would silently disappear on \
+                     the wire — move it to a User message",
                     result.id
                 ),
             });
@@ -912,6 +941,37 @@ mod tests {
             .prepare_request("claude-sonnet-4-0", &mut req)
             .expect_err("orphan ToolResult inside System must be rejected");
         assert!(err.to_string().contains("call_in_system"));
+    }
+
+    #[test]
+    fn anthropic_transform_rejects_paired_tool_result_inside_system_message() {
+        // Even when the ToolResult id pairs with a prior ToolCall, embedding
+        // it in a System message would let the Anthropic wire extractor
+        // silently drop the result and ship an orphan tool_use to the API.
+        // The validator must still reject so the contract violation
+        // surfaces with the offending id.
+        let mut req = request_with(vec![
+            assistant_tool_call("call_paired", "shell"),
+            Message::System {
+                content: OneOrMany::One(UserContent::ToolResult(ToolResult {
+                    id: "call_paired".to_string(),
+                    name: "shell".to_string(),
+                    result: serde_json::json!({"ok": true}),
+                })),
+            },
+        ]);
+        let err = AnthropicTransform
+            .prepare_request("claude-sonnet-4-0", &mut req)
+            .expect_err("paired ToolResult inside System must still be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("call_paired"),
+            "error must reference the paired id, got: {msg}"
+        );
+        assert!(
+            msg.contains("System") && msg.contains("silently"),
+            "error must explain the wire-side disappearance risk, got: {msg}"
+        );
     }
 
     #[test]
