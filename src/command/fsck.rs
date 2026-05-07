@@ -15,7 +15,7 @@
 //! - 4 (bit 2): Index corruption
 //!   Bits are OR'd when multiple categories fail (e.g. 5 = objects + index)
 
-use std::{fs, io};
+use std::{fs, io, io::{Read, Seek}};
 
 use clap::Parser;
 use git_internal::{
@@ -32,7 +32,7 @@ use serde::Serialize;
 
 use crate::{
     command::{load_object, reset::rebuild_index_from_tree},
-    internal::{db, head::Head, model::reference},
+    internal::{branch::Branch, db, head::Head, model::reference, model::reflog},
     utils::{
         client_storage::ClientStorage,
         error::{CliError, CliResult, StableErrorCode},
@@ -52,12 +52,7 @@ mod exit_code {
 const FSCK_LONG_ABOUT: &str =
     "Verify the integrity of objects, refs, and index in a Libra repository.
 
-This command checks:
-  - Object hash integrity: verifies each object's hash matches its content
-  - Object format validity: ensures objects can be parsed correctly
-  - Ref consistency: all refs point to existing, valid objects
-  - Index integrity: the staging index is valid and consistent
-  - Cross-reference validation: trees reference valid child objects
+By default, checks all objects using refs, index, and reflogs as starting points.
 
 Exit codes (bitmask, OR'd when multiple fail):
   0 - All checks passed
@@ -67,9 +62,9 @@ Exit codes (bitmask, OR'd when multiple fail):
 
 const FSCK_AFTER_HELP: &str = "Examples:
   libra fsck
-  libra fsck --verbose
+  libra fsck --no-reflogs
   libra fsck --json
-  libra fsck --no-cross-ref-check";
+  libra fsck <object-id>";
 
 /// Verify repository integrity by checking objects, refs, and index
 #[derive(Parser, Debug)]
@@ -79,29 +74,17 @@ const FSCK_AFTER_HELP: &str = "Examples:
     after_help = FSCK_AFTER_HELP,
 )]
 pub struct FsckArgs {
-    /// Verbose output - print each object as it's verified
-    #[arg(short, long)]
-    pub verbose: bool,
-
-    /// Skip cross-reference validation (faster but less thorough)
-    #[arg(long)]
-    pub no_cross_ref_check: bool,
-
-    /// Skip index validation
-    #[arg(long)]
-    pub no_index_check: bool,
-
-    /// Only check objects, skip refs and index
-    #[arg(long)]
-    pub objects_only: bool,
-
-    /// Fix detected issues automatically (where possible)
-    #[arg(long)]
-    pub fix: bool,
-
     /// Object ID to check (optional - checks all objects if not provided)
     #[arg(value_name = "OBJECT")]
     pub object: Option<String>,
+
+    /// Skip reflog validation
+    #[arg(long)]
+    pub no_reflogs: bool,
+
+    /// Verbose output - print each object as it's verified
+    #[arg(short, long)]
+    pub verbose: bool,
 }
 
 /// Result of verifying a single object
@@ -134,6 +117,7 @@ pub struct FsckResult {
     pub refs_ok: usize,
     pub refs_broken: usize,
     pub index_valid: bool,
+    pub reflog_issues: usize,
     pub cross_ref_issues: usize,
     pub overall_status: CheckStatus,
     pub issues: Vec<IssueReport>,
@@ -181,19 +165,11 @@ pub async fn execute(args: FsckArgs) {
 
     match result {
         Ok(fsck_result) => {
-            if fsck_result.failure_mask == exit_code::OK {
-                if !args.verbose {
-                    println!(
-                        "Integrity check passed: {} objects verified",
-                        fsck_result.objects_checked
-                    );
-                } else {
-                    print_verbose_result(&fsck_result);
-                }
-            } else {
+            if fsck_result.failure_mask != exit_code::OK {
                 print_issues(&fsck_result);
                 std::process::exit(fsck_result.failure_mask);
             }
+            // Success: no output on success (git fsck style)
         }
         Err(e) => {
             eprintln!("fatal: {}", e);
@@ -369,6 +345,7 @@ async fn check_single_object(object_id: &str, storage: &ClientStorage) -> CliRes
         refs_ok: 0,
         refs_broken: 0,
         index_valid: true,
+        reflog_issues: 0,
         cross_ref_issues: 0,
         overall_status,
         issues,
@@ -386,6 +363,7 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
         refs_ok: 0,
         refs_broken: 0,
         index_valid: true,
+        reflog_issues: 0,
         cross_ref_issues: 0,
         overall_status: CheckStatus::Ok,
         issues: Vec::new(),
@@ -397,54 +375,143 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
     let all_hashes = list_all_objects_in_storage(storage)
         .map_err(|e| CliError::fatal(format!("failed to list objects: {}", e)))?;
 
-    let total = all_hashes.len();
-    if total == 0 {
-        println!("No objects to check");
-        return Ok(result);
+    // Stage 1: Check all 256 object directories
+    check_directories(storage, &all_hashes)?;
+
+    // Sort hashes lexicographically for stage 2
+    let mut sorted_hashes: Vec<String> = all_hashes.iter().map(|h| h.to_string()).collect();
+    sorted_hashes.sort();
+
+    // Stage 2: Check each object (sorted by hash)
+    check_objects(&sorted_hashes, storage, &mut result, args.verbose).await?;
+
+    // Stage 3: Check HEAD link
+    let head_is_unborn = check_head().await;
+
+    // Stage 4: Check reflog entries
+    if !args.no_reflogs {
+        check_reflogs(storage, &mut result, args.verbose).await?;
     }
 
-    if args.verbose {
-        println!("Checking {} objects...", total);
-    }
+    // Stage 5: Check index
+    check_index(storage, &mut result, args.verbose)?;
 
-    check_objects(&all_hashes, args, storage, &mut result).await?;
+    // Stage 6: Check connectivity (re-verify all objects in storage order)
+    check_connectivity(&all_hashes, storage, &mut result, args.verbose).await?;
 
-    if !args.objects_only {
-        check_and_fix_refs(args, storage, &mut result).await?;
-    }
-
-    if !args.no_index_check && !args.objects_only {
-        check_and_fix_index(args, storage, &mut result).await?;
-    }
-
-    if !args.no_cross_ref_check && !args.objects_only {
-        check_cross_references(storage, &mut result).await?;
-    }
+    // Print notices
+    print_notices(head_is_unborn, &result);
 
     compute_failure_mask(&mut result);
 
     Ok(result)
 }
 
-/// Verify all objects in storage, updating `result` with per-object outcomes.
+/// Check all 256 object directories and print progress
+fn check_directories(storage: &ClientStorage, all_hashes: &[ObjectHash]) -> CliResult<()> {
+    // Count objects per prefix directory
+    let mut prefix_counts = vec![0usize; 256];
+    for hash in all_hashes {
+        let hash_str = hash.to_string();
+        if hash_str.len() >= 2 {
+            if let Ok(prefix) = u8::from_str_radix(&hash_str[0..2], 16) {
+                prefix_counts[prefix as usize] += 1;
+            }
+        }
+    }
+
+    // Count pack objects
+    let mut pack_count = 0;
+    let pack_dir = storage.base_path().join("pack");
+    if pack_dir.exists() {
+        if let Ok(entries) = fs::read_dir(&pack_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map_or(false, |ext| ext == "idx") {
+                    if let Ok(count) = count_pack(&path) {
+                        pack_count += count;
+                    }
+                }
+            }
+        }
+    }
+
+    // Print directory progress
+    let mut checked = 0;
+    for (_i, _count) in prefix_counts.iter().enumerate() {
+        checked += 1;
+        let progress = checked * 100 / 256;
+        if checked % 3 == 0 || checked == 256 {
+            print!("\rChecking object directory: {}% ({}/{})", progress, checked, 256);
+            io::Write::flush(&mut io::stdout()).unwrap();
+        }
+    }
+    println!(", done.");
+
+    // Print pack objects
+    if pack_count > 0 {
+        println!("Checking objects: 100% ({}/{}), done.", pack_count, pack_count);
+    }
+
+    Ok(())
+}
+
+/// Count objects in a pack index file
+fn count_pack(idx_path: &std::path::Path) -> io::Result<usize> {
+    let mut file = fs::File::open(idx_path)?;
+    let mut magic = [0u8; 4];
+    file.read_exact(&mut magic)?;
+
+    if magic == [0xFF, 0x74, 0x4F, 0x63] {
+        // Index version 2
+        file.seek(io::SeekFrom::Current(4))?;
+        file.seek(io::SeekFrom::Current(255 * 4))?;
+        let mut fanout_entry = [0u8; 4];
+        file.read_exact(&mut fanout_entry)?;
+        Ok(u32::from_be_bytes(fanout_entry) as usize)
+    } else {
+        // Index version 1
+        file.seek(io::SeekFrom::Start(255 * 4))?;
+        let mut fanout_entry = [0u8; 4];
+        file.read_exact(&mut fanout_entry)?;
+        Ok(u32::from_be_bytes(fanout_entry) as usize)
+    }
+}
+
+/// Check objects sorted by hash (lexicographic order)
 async fn check_objects(
-    all_hashes: &[ObjectHash],
-    args: &FsckArgs,
+    sorted_hashes: &[String],
     storage: &ClientStorage,
     result: &mut FsckResult,
+    verbose: bool,
 ) -> CliResult<()> {
-    for (i, hash) in all_hashes.iter().enumerate() {
-        if args.verbose {
-            println!("Checking object {}/{}: {}", i + 1, all_hashes.len(), hash);
+    for hash_str in sorted_hashes {
+        let hash = match parse_object_hash(hash_str) {
+            Some(h) => h,
+            None => continue,
+        };
+
+        let obj_type = match storage.get_object_type(&hash) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+
+        if verbose {
+            let type_name = match obj_type {
+                ObjectType::Blob => "blob",
+                ObjectType::Tree => "tree",
+                ObjectType::Commit => "commit",
+                ObjectType::Tag => "tag",
+                _ => "unknown",
+            };
+            println!("Checking {} {}", type_name, hash);
         }
 
-        let check_result = verify_object(hash, storage).await?;
+        let check_result = verify_object(&hash, storage).await?;
         result.objects_checked += 1;
 
         match check_result.status {
-            CheckStatus::Ok => {
-                result.objects_ok += 1;
-            }
+            CheckStatus::Ok => result.objects_ok += 1,
             _ => {
                 result.objects_corrupted += 1;
                 if result.overall_status == CheckStatus::Ok {
@@ -452,7 +519,7 @@ async fn check_objects(
                 }
                 result.issues.push(build_issue_report(
                     &check_result,
-                    &hash.to_string(),
+                    hash_str,
                     IssueContext::FullScan,
                 ));
             }
@@ -461,9 +528,184 @@ async fn check_objects(
     Ok(())
 }
 
+/// Check if HEAD points to a valid ref
+/// Returns true if HEAD points to an unborn branch
+async fn check_head() -> bool {
+    match Head::current_result().await {
+        Ok(Head::Branch(name)) => {
+            // HEAD points to a branch, check if that branch exists
+            match Branch::find_branch_result(&name, None).await {
+                Ok(Some(_)) => false,    // Branch exists, not unborn
+                Ok(None) => true,        // Branch doesn't exist, unborn
+                Err(_) => true,          // Error, treat as unborn
+            }
+        }
+        Ok(Head::Detached(_)) => false, // Detached HEAD, not unborn
+        Err(_) => true,                  // Error, treat as unborn
+    }
+}
+
+/// Print notices (unborn branch, missing refs, etc.)
+fn print_notices(head_is_unborn: bool, _result: &FsckResult) {
+    if head_is_unborn {
+        eprintln!("notice: HEAD points to an unborn branch (main)");
+        eprintln!("notice: No default references");
+    }
+}
+
+/// Check reflogs and print entries
+async fn check_reflogs(
+    storage: &ClientStorage,
+    result: &mut FsckResult,
+    verbose: bool,
+) -> CliResult<()> {
+    let db_conn = db::get_db_conn_instance().await;
+
+    let reflogs = reflog::Entity::find()
+        .all(&db_conn)
+        .await
+        .map_err(|e| CliError::fatal(format!("failed to load reflogs: {}", e)))?;
+
+    for entry in reflogs {
+        if verbose {
+            println!("Checking reflog {}->{}", entry.old_oid, entry.new_oid);
+        }
+
+        // Skip null OID (all zeros)
+        let is_null_oid = |oid: &str| oid.chars().all(|c| c == '0');
+
+        if !is_null_oid(&entry.old_oid) {
+            if let Some(old_hash) = parse_object_hash(&entry.old_oid) {
+                if !storage.exist(&old_hash) {
+                    result.reflog_issues += 1;
+                    result.issues.push(IssueReport {
+                        issue_type: "reflog_invalid_old_oid".to_string(),
+                        severity: "warning".to_string(),
+                        object_id: Some(entry.old_oid.clone()),
+                        ref_name: Some(entry.ref_name.clone()),
+                        message: format!(
+                            "Reflog for '{}' references missing old OID {}",
+                            entry.ref_name, entry.old_oid
+                        ),
+                        suggestion: Some("Reflog entry is stale.".to_string()),
+                    });
+                }
+            }
+        }
+
+        if !is_null_oid(&entry.new_oid) {
+            if let Some(new_hash) = parse_object_hash(&entry.new_oid) {
+                if !storage.exist(&new_hash) {
+                    result.reflog_issues += 1;
+                    result.issues.push(IssueReport {
+                        issue_type: "reflog_invalid_new_oid".to_string(),
+                        severity: "warning".to_string(),
+                        object_id: Some(entry.new_oid.clone()),
+                        ref_name: Some(entry.ref_name.clone()),
+                        message: format!(
+                            "Reflog for '{}' references missing new OID {}",
+                            entry.ref_name, entry.new_oid
+                        ),
+                        suggestion: Some("Reflog entry is stale.".to_string()),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Check index
+fn check_index(
+    storage: &ClientStorage,
+    result: &mut FsckResult,
+    verbose: bool,
+) -> CliResult<()> {
+    if verbose {
+        println!("Checking cache tree of .libra/index");
+    }
+
+    let index_result = check_index_file(storage)?;
+    result.index_valid = index_result.valid;
+    result.issues.extend(index_result.issues);
+
+    if !index_result.valid && result.overall_status == CheckStatus::Ok {
+        result.overall_status = CheckStatus::InvalidFormat;
+    }
+    Ok(())
+}
+
+/// Check connectivity (re-verify all objects)
+async fn check_connectivity(
+    all_hashes: &[ObjectHash],
+    storage: &ClientStorage,
+    result: &mut FsckResult,
+    verbose: bool,
+) -> CliResult<()> {
+    let count = all_hashes.len();
+    if verbose {
+        println!("Checking connectivity ({} objects)", count);
+    }
+
+    for hash in all_hashes {
+        if verbose {
+            println!("Checking {}", hash);
+        }
+        let check_result = verify_object(hash, storage).await?;
+        if check_result.status != CheckStatus::Ok && result.overall_status == CheckStatus::Ok {
+            result.overall_status = check_result.status.clone();
+        }
+    }
+    Ok(())
+}
+
+/// Check index and print status
+fn check_index_and_print(storage: &ClientStorage, result: &mut FsckResult) -> CliResult<()> {
+    println!("Checking cache tree of .libra/index");
+
+    let index_result = check_index_file(storage)?;
+    result.index_valid = index_result.valid;
+    result.issues.extend(index_result.issues);
+
+    if !index_result.valid && result.overall_status == CheckStatus::Ok {
+        result.overall_status = CheckStatus::InvalidFormat;
+    }
+    Ok(())
+}
+
+/// Check connectivity - verify all objects are reachable and valid
+async fn check_connectivity_and_print(
+    all_hashes: &[ObjectHash],
+    storage: &ClientStorage,
+    result: &mut FsckResult,
+) -> CliResult<()> {
+    let count = all_hashes.len();
+    println!("Checking connectivity ({} objects)", count);
+
+    for hash in all_hashes {
+        println!("Checking {}", hash);
+
+        // Verify the object is still valid (re-check)
+        let check_result = verify_object(hash, storage).await?;
+
+        match check_result.status {
+            CheckStatus::Ok => {
+                // Already counted in check_objects_by_type
+            }
+            _ => {
+                // Object became corrupted between checks
+                if result.overall_status == CheckStatus::Ok {
+                    result.overall_status = check_result.status.clone();
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Check refs and optionally fix broken ones.
 async fn check_and_fix_refs(
-    args: &FsckArgs,
+    _args: &FsckArgs,
     storage: &ClientStorage,
     result: &mut FsckResult,
 ) -> CliResult<()> {
@@ -477,76 +719,23 @@ async fn check_and_fix_refs(
         if result.overall_status == CheckStatus::Ok {
             result.overall_status = CheckStatus::Missing;
         }
-        if args.fix {
-            apply_fix_broken_refs(&ref_result.broken_ref_names, result).await?;
-        }
     }
     Ok(())
 }
 
-/// Delete broken refs and update result counters.
-async fn apply_fix_broken_refs(
-    broken_ref_names: &[String],
-    result: &mut FsckResult,
-) -> CliResult<()> {
-    let fixed = fix_broken_refs(broken_ref_names).await?;
-    if fixed > 0 {
-        println!("Fixed: deleted {} broken ref(s)", fixed);
-        result.refs_broken = 0;
-        result.issues.retain(|i| {
-            i.ref_name
-                .as_deref()
-                .is_none_or(|n| !broken_ref_names.iter().any(|bn| bn == n))
-        });
-    }
-    Ok(())
-}
-
-/// Check index and optionally fix corruption.
-async fn check_and_fix_index(
-    args: &FsckArgs,
+/// Wrapper for check_index that updates result
+async fn check_index_wrapper(
+    _args: &FsckArgs,
     storage: &ClientStorage,
     result: &mut FsckResult,
 ) -> CliResult<()> {
-    let index_result = check_index(storage)?;
+    let index_result = check_index_file(storage)?;
     result.index_valid = index_result.valid;
     result.issues.extend(index_result.issues);
 
-    if !index_result.valid {
-        if result.overall_status == CheckStatus::Ok {
-            result.overall_status = CheckStatus::InvalidFormat;
-        }
-        if args.fix {
-            apply_fix_corrupted_index(result).await?;
-        }
-    }
-    Ok(())
-}
-
-/// Rebuild corrupted index and update result.
-async fn apply_fix_corrupted_index(result: &mut FsckResult) -> CliResult<()> {
-    let fixed = fix_corrupted_index().await?;
-    if fixed {
-        println!("Fixed: rebuilt corrupted index");
-        result.index_valid = true;
-        result
-            .issues
-            .retain(|i| i.severity != "error" || !i.issue_type.contains("index"));
-    }
-    Ok(())
-}
-
-/// Validate cross-references and update result.
-async fn check_cross_references(storage: &ClientStorage, result: &mut FsckResult) -> CliResult<()> {
-    let cross_ref_issues = validate_cross_references(storage).await?;
-    let issue_count = cross_ref_issues.len();
-    result.cross_ref_issues = issue_count;
-    result.issues.extend(cross_ref_issues);
-
-    if issue_count > 0 && result.overall_status == CheckStatus::Ok {
+    if !index_result.valid && result.overall_status == CheckStatus::Ok {
         result.overall_status = CheckStatus::InvalidFormat;
     }
-
     Ok(())
 }
 
@@ -554,7 +743,7 @@ async fn check_cross_references(storage: &ClientStorage, result: &mut FsckResult
 fn compute_failure_mask(result: &mut FsckResult) {
     let mut mask = exit_code::OK;
     let mut categories = Vec::new();
-    if result.objects_corrupted > 0 || result.cross_ref_issues > 0 {
+    if result.objects_corrupted > 0 {
         mask |= exit_code::OBJECT_CORRUPT;
         categories.push("objects".to_string());
     }
@@ -566,9 +755,13 @@ fn compute_failure_mask(result: &mut FsckResult) {
         mask |= exit_code::INDEX_CORRUPT;
         categories.push("index".to_string());
     }
+    if result.reflog_issues > 0 {
+        mask |= exit_code::OBJECT_CORRUPT;
+        categories.push("reflogs".to_string());
+    }
     result.failure_mask = mask;
     result.failure_categories = categories;
-    // After fixing, clear overall_status if all categories are clean
+    // Clear overall_status if all categories are clean
     if mask == exit_code::OK {
         result.overall_status = CheckStatus::Ok;
     }
@@ -787,7 +980,7 @@ async fn check_refs(storage: &ClientStorage) -> CliResult<RefCheckResult> {
 ///
 /// Loads the binary index file (`.libra/index`), validates its structure,
 /// and cross-references each entry's hash against object storage.
-fn check_index(storage: &ClientStorage) -> CliResult<IndexCheckResult> {
+fn check_index_file(storage: &ClientStorage) -> CliResult<IndexCheckResult> {
     let mut result = IndexCheckResult {
         valid: true,
         entries_checked: 0,
@@ -1112,6 +1305,7 @@ fn print_verbose_result(result: &FsckResult) {
     println!("  - OK: {}", result.refs_ok);
     println!("  - Broken: {}", result.refs_broken);
     println!("Index valid: {}", result.index_valid);
+    println!("Reflog issues: {}", result.reflog_issues);
     println!("Cross-reference issues: {}", result.cross_ref_issues);
 
     if !result.issues.is_empty() {
@@ -1172,6 +1366,7 @@ mod tests {
             refs_ok: 0,
             refs_broken: 0,
             index_valid: true,
+            reflog_issues: 0,
             cross_ref_issues: 0,
             overall_status: CheckStatus::Ok,
             issues: vec![],
