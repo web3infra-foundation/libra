@@ -80,6 +80,10 @@ pub struct FsckArgs {
     /// Hide dangling objects in output
     #[arg(long, conflicts_with = "dangling")]
     pub no_dangling: bool,
+
+    /// Show object names (e.g., refs/heads/master, HEAD@{1234567890}~2^1:src/) in verbose output
+    #[arg(long)]
+    pub name_objects: bool,
 }
 
 impl FsckArgs {
@@ -347,7 +351,7 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
         .map_err(|e| CliError::fatal(format!("failed to list objects: {}", e)))?;
 
     // Stage 1: Check all 256 object directories
-    check_directories(storage, &all_hashes)?;
+    check_directories(storage, &all_hashes, args.verbose)?;
 
     // Sort hashes lexicographically for stage 2
     let mut sorted_hashes: Vec<String> = all_hashes.iter().map(|h| h.to_string()).collect();
@@ -371,7 +375,7 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
     check_index(storage, &mut result, args.verbose)?;
 
     // Stage 7: Check connectivity (re-verify all objects in storage order)
-    check_connectivity(&all_hashes, storage, &mut result, args.verbose).await?;
+    check_connectivity(&all_hashes, storage, &mut result, args.verbose, args.name_objects).await?;
 
     // Stage 8: Find dangling and unreachable objects
     find_dangling_unreachable(storage, &mut result, args.unreachable, args.no_reflogs, args.dangling_enabled()).await?;
@@ -383,7 +387,7 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
 }
 
 /// Check all 256 object directories and print progress
-fn check_directories(storage: &ClientStorage, all_hashes: &[ObjectHash]) -> CliResult<()> {
+fn check_directories(storage: &ClientStorage, all_hashes: &[ObjectHash], verbose: bool) -> CliResult<()> {
     // Count objects per prefix directory
     let mut prefix_counts = vec![0usize; 256];
     for hash in all_hashes {
@@ -411,8 +415,14 @@ fn check_directories(storage: &ClientStorage, all_hashes: &[ObjectHash]) -> CliR
         }
     }
 
-    // Print directory progress - single line like git fsck
-    println!("Checking object directory: 100% (256/256), done.");
+    // Print directory progress
+    if verbose {
+        // --verbose: match git fsck output
+        println!("Checking object directory");
+    } else {
+        // default: show progress
+        println!("Checking object directories: 100% (256/256), done.");
+    }
 
     // Print pack objects if any
     if pack_count > 0 {
@@ -509,6 +519,90 @@ async fn check_head() -> bool {
         Ok(Head::Detached(_)) => false, // Detached HEAD, not unborn
         Err(_) => true,                  // Error, treat as unborn
     }
+}
+
+/// Build a map from object hash to human-readable names
+/// Returns a map like: "abc123..." -> "refs/heads/master", "HEAD@{1234567890}~2^1:src/"
+async fn build_object_name_map() -> std::collections::HashMap<String, String> {
+    let mut name_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let db_conn = db::get_db_conn_instance().await;
+
+    // Collect names from refs (e.g., "refs/heads/master")
+    let refs = reference::Entity::find()
+        .all(&db_conn)
+        .await
+        .unwrap_or_default();
+
+    for ref_entry in refs {
+        if let Some(commit_hash) = &ref_entry.commit {
+            let ref_name = ref_entry.name.clone().unwrap_or_default();
+            // Store ref name (may have multiple names per object)
+            name_map
+                .entry(commit_hash.clone())
+                .and_modify(|e| *e = format!("{}, {}", e, ref_name))
+                .or_insert(ref_name);
+        }
+    }
+
+    // Collect names from reflogs (e.g., "HEAD@{1234567890}")
+    let reflogs = reflog::Entity::find()
+        .all(&db_conn)
+        .await
+        .unwrap_or_default();
+
+    // Group reflog entries by hash and ref_name, sorted by timestamp desc
+    use std::collections::BTreeMap;
+    let mut reflog_by_hash: BTreeMap<String, Vec<(i64, String)>> = BTreeMap::new();
+    for entry in reflogs {
+        let is_null_oid = |oid: &str| oid.chars().all(|c| c == '0');
+        if !is_null_oid(&entry.new_oid) {
+            reflog_by_hash
+                .entry(entry.new_oid.clone())
+                .or_default()
+                .push((entry.timestamp, entry.ref_name.clone()));
+        }
+    }
+
+    // For each hash, format the reflog names with timestamps and positions
+    for (hash, mut entries) in reflog_by_hash {
+        // Sort by timestamp descending (most recent first)
+        entries.sort_by(|a, b| b.0.cmp(&a.0));
+
+        let names: Vec<String> = entries
+            .iter()
+            .enumerate()
+            .map(|(i, (_, ref_name))| {
+                if i == 0 {
+                    format!("{}@{{{}}}", ref_name, entries[0].0)
+                } else {
+                    format!("{}@{{{}}}~{}", ref_name, entries[0].0, i)
+                }
+            })
+            .collect();
+
+        let combined = names.join(", ");
+        name_map
+            .entry(hash)
+            .and_modify(|e| *e = format!("{}, {}", e, combined))
+            .or_insert(combined);
+    }
+
+    // Collect names from index (e.g., ":src/main.rs" or "src/main.rs")
+    let index_path = path::index();
+    if index_path.exists() {
+        if let Ok(index) = Index::load(&index_path) {
+            for entry in index.tracked_entries(0) {
+                let hash_str = entry.hash.to_string();
+                let path_name = format!(":{}", entry.name);
+                name_map
+                    .entry(hash_str)
+                    .and_modify(|e| *e = format!("{}, {}", e, path_name))
+                    .or_insert(path_name);
+            }
+        }
+    }
+
+    name_map
 }
 
 /// Print notices (unborn branch, missing refs, etc.)
@@ -623,15 +717,29 @@ async fn check_connectivity(
     storage: &ClientStorage,
     result: &mut FsckResult,
     verbose: bool,
+    name_objects: bool,
 ) -> CliResult<()> {
     let count = all_hashes.len();
     if verbose {
         println!("Checking connectivity ({} objects)", count);
     }
 
+    // Build object name map if --name-objects is used
+    let object_names = if name_objects && verbose {
+        build_object_name_map().await
+    } else {
+        std::collections::HashMap::new()
+    };
+
     for hash in all_hashes {
         if verbose {
-            println!("Checking {}", hash);
+            let hash_str = hash.to_string();
+            if name_objects {
+                let name = object_names.get(hash_str.as_str()).map(|s| s.as_str()).unwrap_or(":");
+                println!("Checking {} ({})", hash, name);
+            } else {
+                println!("Checking {}", hash);
+            }
         }
         let check_result = verify_object(hash, storage).await?;
         if check_result.status != CheckStatus::Ok && result.overall_status == CheckStatus::Ok {
