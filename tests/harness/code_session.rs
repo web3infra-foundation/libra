@@ -25,6 +25,17 @@ pub struct CodeSessionOptions {
     /// browser controller surface is available in tests that exercise the
     /// browser write path. Defaults to `false`.
     pub browser_control_loopback: bool,
+    /// When `true`, spawn `libra code --control write` so the harness can
+    /// drive automation writes; when `false`, omit the flag so the runtime
+    /// keeps the default `observe` posture and automation attach is rejected
+    /// with `CONTROL_DISABLED`. Defaults to `true` for back-compat with
+    /// existing scenario tests.
+    pub control_write: bool,
+    /// Test-only override for the controller-lease TTL. When `Some(n)`, the
+    /// harness exports `LIBRA_CODE_LEASE_DURATION_MS=n` so the spawned
+    /// runtime issues short-TTL leases for expiry tests. Production
+    /// builds ignore this env var.
+    pub lease_duration_ms: Option<u64>,
 }
 
 impl CodeSessionOptions {
@@ -34,6 +45,8 @@ impl CodeSessionOptions {
             name: name.into(),
             use_default_control_paths: false,
             browser_control_loopback: false,
+            control_write: true,
+            lease_duration_ms: None,
         }
     }
 
@@ -44,6 +57,22 @@ impl CodeSessionOptions {
 
     pub fn with_browser_control_loopback(mut self) -> Self {
         self.browser_control_loopback = true;
+        self
+    }
+
+    /// Spawn the session in `--control observe` mode; suppresses the
+    /// process-level control token. Tests that need to exercise the
+    /// `CONTROL_DISABLED` rejection path call this.
+    pub fn with_control_observe(mut self) -> Self {
+        self.control_write = false;
+        self
+    }
+
+    /// Override the controller-lease TTL via `LIBRA_CODE_LEASE_DURATION_MS`.
+    /// Used by the lease-expiry matrix case so the test does not have to
+    /// sleep for the production 120 s.
+    pub fn with_lease_duration_ms(mut self, ms: u64) -> Self {
+        self.lease_duration_ms = Some(ms);
         self
     }
 }
@@ -58,6 +87,10 @@ pub struct CodeSession {
     base_url: String,
     control_token: String,
     controller_token: Option<String>,
+    /// Whether the session was spawned with `--control write`. Observe-mode
+    /// sessions never get a control token file, so the harness should not
+    /// look for one and authorized POSTs are limited to non-write routes.
+    control_write: bool,
     child: Option<Box<dyn Child + Send + Sync>>,
     writer: Option<Box<dyn Write + Send>>,
     reader_thread: Option<thread::JoinHandle<()>>,
@@ -163,13 +196,14 @@ impl CodeSession {
             path_str(&options.fixture)?,
             "--model",
             "fake-local",
-            "--control",
-            "write",
             "--port",
             "0",
             "--mcp-port",
             "0",
         ]);
+        if options.control_write {
+            cmd.args(["--control", "write"]);
+        }
         if !options.use_default_control_paths {
             cmd.args([
                 "--control-token-file",
@@ -186,6 +220,9 @@ impl CodeSession {
         cmd.env("LIBRA_ENABLE_TEST_PROVIDER", "1");
         cmd.env("LIBRA_LOG_FILE", path_str(&libra_log)?);
         cmd.env("LIBRA_LOG", "info,libra::internal::ai::web=debug");
+        if let Some(ms) = options.lease_duration_ms {
+            cmd.env("LIBRA_CODE_LEASE_DURATION_MS", ms.to_string());
+        }
 
         let child = pair
             .slave
@@ -203,6 +240,7 @@ impl CodeSession {
             base_url: String::new(),
             control_token: String::new(),
             controller_token: None,
+            control_write: options.control_write,
             child: Some(child),
             writer: Some(writer),
             reader_thread: Some(reader_thread),
@@ -466,6 +504,129 @@ impl CodeSession {
         Ok((status, body))
     }
 
+    // -------------------------------------------------------------------
+    // Matrix runner primitives
+    //
+    // These are deliberately lower-level than the `attach_*` / `submit_*`
+    // helpers above: each one lets the data-driven runner choose the auth
+    // and token state per-step without baking those decisions into the
+    // helper. The matrix module owns the `AuthMode` / `TokenSource` enums.
+    // -------------------------------------------------------------------
+
+    pub fn matrix_attach(
+        &mut self,
+        kind: &str,
+        client_id: &str,
+        auth: &super::matrix::AuthMode,
+    ) -> Result<(StatusCode, Value)> {
+        let mut request = self
+            .client
+            .post(self.url("/controller/attach"))
+            .json(&json!({ "clientId": client_id, "kind": kind }));
+        request = match auth {
+            super::matrix::AuthMode::ValidControl => {
+                request.header("X-Libra-Control-Token", &self.control_token)
+            }
+            super::matrix::AuthMode::InvalidControl => {
+                request.header("X-Libra-Control-Token", "00000000-deadbeef")
+            }
+            super::matrix::AuthMode::MissingControl | super::matrix::AuthMode::None => request,
+        };
+        let response = request
+            .send()
+            .with_context(|| format!("failed to send matrix attach (kind={kind})"))?;
+        let status = response.status();
+        let body = response.json().unwrap_or_else(|_| json!({}));
+        Ok((status, body))
+    }
+
+    pub fn matrix_detach(
+        &self,
+        client_id: &str,
+        token: &super::matrix::TokenSource,
+        auth: &super::matrix::AuthMode,
+        tokens: &std::collections::HashMap<super::matrix::TokenSlot, String>,
+    ) -> Result<(StatusCode, Value)> {
+        let mut request = self
+            .client
+            .post(self.url("/controller/detach"))
+            .json(&json!({ "clientId": client_id }));
+        request = self.apply_controller_token(request, token, tokens);
+        request = self.apply_control_auth(request, auth);
+        let response = request
+            .send()
+            .context("failed to send matrix detach request")?;
+        let status = response.status();
+        let body = response.json().unwrap_or_else(|_| json!({}));
+        Ok((status, body))
+    }
+
+    pub fn matrix_submit(
+        &self,
+        text: &str,
+        token: &super::matrix::TokenSource,
+        auth: &super::matrix::AuthMode,
+        tokens: &std::collections::HashMap<super::matrix::TokenSlot, String>,
+    ) -> Result<(StatusCode, Value)> {
+        let mut request = self
+            .client
+            .post(self.url("/messages"))
+            .json(&json!({ "text": text }));
+        request = self.apply_controller_token(request, token, tokens);
+        request = self.apply_control_auth(request, auth);
+        let response = request
+            .send()
+            .context("failed to send matrix submit request")?;
+        let status = response.status();
+        let body = response.json().unwrap_or_else(|_| json!({}));
+        Ok((status, body))
+    }
+
+    fn apply_controller_token(
+        &self,
+        request: reqwest::blocking::RequestBuilder,
+        token: &super::matrix::TokenSource,
+        tokens: &std::collections::HashMap<super::matrix::TokenSlot, String>,
+    ) -> reqwest::blocking::RequestBuilder {
+        match token {
+            super::matrix::TokenSource::None => request,
+            super::matrix::TokenSource::Current => {
+                if let Some(value) = tokens.get(&super::matrix::TokenSlot::Current) {
+                    request.header("X-Code-Controller-Token", value)
+                } else {
+                    request
+                }
+            }
+            super::matrix::TokenSource::Stale => {
+                if let Some(value) = tokens.get(&super::matrix::TokenSlot::Stale) {
+                    request.header("X-Code-Controller-Token", value)
+                } else {
+                    request
+                }
+            }
+            super::matrix::TokenSource::Forged => request.header(
+                "X-Code-Controller-Token",
+                super::matrix::forged_controller_token(),
+            ),
+        }
+    }
+
+    fn apply_control_auth(
+        &self,
+        request: reqwest::blocking::RequestBuilder,
+        auth: &super::matrix::AuthMode,
+    ) -> reqwest::blocking::RequestBuilder {
+        match auth {
+            super::matrix::AuthMode::ValidControl => {
+                request.header("X-Libra-Control-Token", &self.control_token)
+            }
+            super::matrix::AuthMode::InvalidControl => {
+                request.header("X-Libra-Control-Token", "00000000-deadbeef")
+            }
+            super::matrix::AuthMode::MissingControl | super::matrix::AuthMode::None => request,
+        }
+    }
+
     pub fn submit_message(&self, text: &str) -> Result<StatusCode> {
         let response = self
             .authorized_post("/messages")
@@ -612,10 +773,14 @@ impl CodeSession {
                 let info: ControlInfo =
                     serde_json::from_str(&info_text).context("failed to parse control info")?;
                 let _ = fs::write(self.logs_dir.join("control.json"), &info_text);
-                let token = fs::read_to_string(&self.token_path)
-                    .context("failed to read control token file")?;
                 self.base_url = info.base_url;
-                self.control_token = token.trim().to_string();
+                if self.control_write {
+                    // Token file is only written under `--control write`;
+                    // observe-mode sessions skip it on purpose.
+                    let token = fs::read_to_string(&self.token_path)
+                        .context("failed to read control token file")?;
+                    self.control_token = token.trim().to_string();
+                }
                 self.wait_for_snapshot(Duration::from_secs(10), |_| true)?;
                 return Ok(());
             }

@@ -1,6 +1,7 @@
 //! Cross-process test harness for Local TUI Automation Control.
 
 mod code_session;
+pub mod matrix;
 mod scenario;
 
 pub use code_session::{CodeSession, CodeSessionOptions};

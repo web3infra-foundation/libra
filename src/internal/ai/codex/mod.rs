@@ -2431,7 +2431,15 @@ pub async fn start_code_ui_runtime(
         approval_mode,
         pending_approvals,
     });
-    Ok(CodeUiRuntimeHandle::build(adapter, browser_write_enabled, initial_controller).await)
+    let mut runtime_options = crate::internal::ai::web::code_ui::CodeUiRuntimeOptions::new(
+        browser_write_enabled,
+        false,
+        initial_controller,
+    );
+    runtime_options.lease_duration =
+        crate::internal::ai::web::code_ui::test_lease_duration_override()
+            .map_err(|message| anyhow::anyhow!(message))?;
+    Ok(CodeUiRuntimeHandle::build_with_options(adapter, runtime_options).await)
 }
 
 // ---------------------------------------------------------------------------

@@ -682,6 +682,79 @@ pub struct CodeUiRuntimeHandle {
     controller_lease_duration: Duration,
 }
 
+/// Bag of constructor options for [`CodeUiRuntimeHandle::build_with_options`].
+///
+/// Existing call sites continue to use [`CodeUiRuntimeHandle::build`] /
+/// [`CodeUiRuntimeHandle::build_with_control`] with the default 120 s lease
+/// TTL. Tests that need to exercise lease expiry without sleeping for two
+/// minutes pass a custom `lease_duration` through this struct.
+#[derive(Debug, Clone)]
+pub struct CodeUiRuntimeOptions {
+    pub browser_write_enabled: bool,
+    pub automation_write_enabled: bool,
+    pub initial_controller: CodeUiInitialController,
+    /// Override for the controller-lease TTL. `None` keeps the production
+    /// default (`DEFAULT_BROWSER_CONTROLLER_LEASE_SECS` = 120 s). Only set
+    /// from `cfg(feature = "test-provider")` paths.
+    pub lease_duration: Option<Duration>,
+}
+
+impl CodeUiRuntimeOptions {
+    pub fn new(
+        browser_write_enabled: bool,
+        automation_write_enabled: bool,
+        initial_controller: CodeUiInitialController,
+    ) -> Self {
+        Self {
+            browser_write_enabled,
+            automation_write_enabled,
+            initial_controller,
+            lease_duration: None,
+        }
+    }
+}
+
+/// Test-only override for the controller-lease TTL.
+///
+/// Production builds always return `Ok(None)` so the runtime keeps the
+/// default 120 s lease. Under `cfg(feature = "test-provider")`, the helper
+/// reads `LIBRA_CODE_LEASE_DURATION_MS` from the environment and rejects
+/// bogus inputs (zero, negative, non-integer) so a typo'd test fixture
+/// fails loudly at session spawn instead of silently keeping the
+/// production default.
+///
+/// The error type is `String` so callers in both `CliResult` and
+/// `anyhow::Result` flows can wrap it — neither dependency is brought in
+/// by `code_ui.rs`.
+pub fn test_lease_duration_override() -> Result<Option<Duration>, String> {
+    #[cfg(feature = "test-provider")]
+    {
+        let raw = match std::env::var("LIBRA_CODE_LEASE_DURATION_MS") {
+            Ok(value) => value,
+            Err(_) => return Ok(None),
+        };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        let millis: i64 = trimmed.parse().map_err(|_| {
+            format!(
+                "LIBRA_CODE_LEASE_DURATION_MS must be a positive integer in milliseconds (got '{raw}')",
+            )
+        })?;
+        if millis <= 0 {
+            return Err(format!(
+                "LIBRA_CODE_LEASE_DURATION_MS must be greater than zero (got '{raw}')",
+            ));
+        }
+        Ok(Some(Duration::milliseconds(millis)))
+    }
+    #[cfg(not(feature = "test-provider"))]
+    {
+        Ok(None)
+    }
+}
+
 impl CodeUiRuntimeHandle {
     pub async fn build(
         adapter: Arc<dyn CodeUiProviderAdapter>,
@@ -697,7 +770,22 @@ impl CodeUiRuntimeHandle {
         automation_write_enabled: bool,
         initial_controller: CodeUiInitialController,
     ) -> Arc<Self> {
-        let (fixed, local_tui_owner) = match initial_controller {
+        Self::build_with_options(
+            adapter,
+            CodeUiRuntimeOptions::new(
+                browser_write_enabled,
+                automation_write_enabled,
+                initial_controller,
+            ),
+        )
+        .await
+    }
+
+    pub async fn build_with_options(
+        adapter: Arc<dyn CodeUiProviderAdapter>,
+        options: CodeUiRuntimeOptions,
+    ) -> Arc<Self> {
+        let (fixed, local_tui_owner) = match options.initial_controller {
             CodeUiInitialController::Unclaimed => (None, None),
             CodeUiInitialController::Fixed {
                 kind,
@@ -726,14 +814,16 @@ impl CodeUiRuntimeHandle {
 
         let handle = Arc::new(Self {
             adapter,
-            browser_write_enabled,
-            automation_write_enabled,
+            browser_write_enabled: options.browser_write_enabled,
+            automation_write_enabled: options.automation_write_enabled,
             controller_state: Arc::new(Mutex::new(CodeUiControllerRuntimeState {
                 fixed,
                 local_tui_owner,
                 active_lease: None,
             })),
-            controller_lease_duration: Duration::seconds(DEFAULT_BROWSER_CONTROLLER_LEASE_SECS),
+            controller_lease_duration: options
+                .lease_duration
+                .unwrap_or_else(|| Duration::seconds(DEFAULT_BROWSER_CONTROLLER_LEASE_SECS)),
         });
         handle.sync_controller_snapshot().await;
         handle

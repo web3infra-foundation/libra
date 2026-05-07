@@ -1,0 +1,189 @@
+{
+  "schemaVersion": 1,
+  "matrix": "code_ui_remote_security",
+  "defaults": {
+    "fixture": {
+      "path": "tests/fixtures/code_ui/basic_chat.json"
+    },
+    "options": {
+      "control": "write",
+      "browserControl": "off"
+    }
+  },
+  "cases": [
+    {
+      "name": "security_diagnostics_does_not_expose_control_or_controller_token",
+      "priority": "P1",
+      "steps": [
+        {
+          "name": "attach automation",
+          "op": "attach",
+          "kind": "automation",
+          "clientId": "security-diagnostics-token",
+          "auth": "valid_control",
+          "expect": {
+            "status": 200,
+            "saveToken": "current"
+          }
+        },
+        {
+          "name": "get diagnostics raw text",
+          "op": "diagnosticsRaw",
+          "expect": {
+            "assertions": [
+              "does_not_contain_control_token",
+              "does_not_contain_controller_token",
+              "does_not_contain:X-Libra-Control-Token",
+              "does_not_contain:X-Code-Controller-Token"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "security_diagnostics_redacts_secret_like_log_file_path",
+      "priority": "P1",
+      "options": {
+        "extraEnv": {
+          "LIBRA_LOG_FILE": "target/code-ui-scenarios/security-secret-token-12345/libra.log"
+        }
+      },
+      "steps": [
+        {
+          "name": "get diagnostics raw text",
+          "op": "diagnosticsRaw",
+          "expect": {
+            "assertions": [
+              "does_not_contain:secret-token-12345"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "security_attach_with_control_observe_is_403_control_disabled",
+      "priority": "P1",
+      "options": {
+        "control": "observe"
+      },
+      "steps": [
+        {
+          "name": "attach automation without write control enabled",
+          "op": "attach",
+          "kind": "automation",
+          "clientId": "security-control-observe",
+          "auth": "missing_control",
+          "expect": {
+            "status": 403,
+            "errorCode": "CONTROL_DISABLED"
+          }
+        }
+      ]
+    },
+    {
+      "name": "security_threads_invalid_limit_returns_invalid_query_param",
+      "priority": "P1",
+      "steps": [
+        {
+          "name": "get threads invalid limit",
+          "op": "getThreads",
+          "limit": "abc",
+          "offset": null,
+          "expect": {
+            "status": 400,
+            "errorCode": "INVALID_QUERY_PARAM",
+            "assertions": [
+              "error_message_contains:limit"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "security_threads_limit_clamped_to_200_max",
+      "priority": "P1",
+      "steps": [
+        {
+          "name": "get threads huge limit",
+          "op": "getThreads",
+          "limit": "99999",
+          "offset": "0",
+          "expect": {
+            "status": 200,
+            "assertions": [
+              "items_len_lte:200"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "security_audit_log_records_attach_with_redacted_client_id",
+      "priority": "P1",
+      "steps": [
+        {
+          "name": "attach with secret-like client id",
+          "op": "attach",
+          "kind": "automation",
+          "clientId": "local-script token:super-secret-999",
+          "auth": "valid_control",
+          "expect": {
+            "status": 200,
+            "saveToken": "current"
+          }
+        },
+        {
+          "name": "read libra log",
+          "op": "libraLogRaw",
+          "expect": {
+            "assertions": [
+              "contains:controller.attach",
+              "does_not_contain:super-secret-999"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "security_non_loopback_session_route_is_inline_unit",
+      "priority": "P1",
+      "testKind": "inline",
+      "target": "src/internal/ai/web/mod.rs",
+      "steps": [
+        {
+          "name": "GET /api/code/session from non-loopback",
+          "op": "oneshotRoute",
+          "method": "GET",
+          "path": "/api/code/session",
+          "remoteAddr": "192.0.2.10:4000",
+          "expect": {
+            "status": 403,
+            "errorCode": "LOOPBACK_REQUIRED"
+          }
+        }
+      ]
+    },
+    {
+      "name": "security_non_loopback_messages_route_rejects_before_controller_token",
+      "priority": "P1",
+      "testKind": "inline",
+      "target": "src/internal/ai/web/mod.rs",
+      "steps": [
+        {
+          "name": "POST /api/code/messages from non-loopback",
+          "op": "oneshotRoute",
+          "method": "POST",
+          "path": "/api/code/messages",
+          "remoteAddr": "192.0.2.10:4000",
+          "body": {
+            "text": "/chat hello"
+          },
+          "expect": {
+            "status": 403,
+            "errorCode": "LOOPBACK_REQUIRED"
+          }
+        }
+      ]
+    }
+  ]
+}
