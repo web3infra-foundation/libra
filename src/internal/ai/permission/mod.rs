@@ -32,8 +32,10 @@
 
 pub mod approved;
 pub mod evaluate;
+pub mod inheritance;
 pub mod rule;
 
 pub use approved::{ApprovedRuleset, ApprovedRulesetStore};
 pub use evaluate::{EDIT_TOOLS, disabled, edit_tools, evaluate, wildcard_match};
+pub use inheritance::{agent_permission_spec_to_ruleset, assert_no_escalation, child_ruleset};
 pub use rule::{PermissionAction, PermissionRule, PermissionRuleset};

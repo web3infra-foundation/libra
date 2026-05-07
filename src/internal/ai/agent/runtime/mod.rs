@@ -44,6 +44,12 @@ pub use sub_agent::{
     TaskEntryKind, TaskFailure, TaskInvocation, TaskResult, ToolLoopError,
 };
 
+// OC-Phase 3 P3.3: DefaultSubAgentDispatcher gate implementation
+// (steps 1-7). Steps 8-13 (permission ask, handoff, model build,
+// child loop) land in P3.4+.
+pub mod sub_agent_dispatcher;
+pub use sub_agent_dispatcher::{AgentSpecRegistry, DefaultSubAgentDispatcher, MultiAgentConfig};
+
 /// An AI Agent that manages interactions with a CompletionModel.
 ///
 /// This is a **stateless** agent (also known as a Simple Agent). It handles configuration

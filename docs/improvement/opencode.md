@@ -849,6 +849,7 @@ pub enum TaskEntryKind {
 }
 
 pub enum TaskFailure {
+    FeatureDisabled,                                      // step 1: code.multi_agent.enabled = false（Libra 新增）
     UnknownSubagent { name: String, suggestions: Vec<String> },
     DepthExceeded { current: u8, limit: u8 },
     ConcurrencyExceeded { current: u32, limit: u32 },

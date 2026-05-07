@@ -239,6 +239,15 @@ pub enum CancellationSource {
 /// copy. New variants must be added BOTH here AND to `opencode.md`.
 #[derive(Debug)]
 pub enum TaskFailure {
+    /// `code.multi_agent.enabled` is `false` and the dispatcher refused
+    /// the spawn at step 1 of the gate flow. Distinct from
+    /// [`Self::SafetyDenied`] (which is the step-5 SafetyDecision
+    /// rejection) so log analysis and error matchers can disambiguate
+    /// "feature off" from "sandbox said no". This variant is **not**
+    /// in opencode's original taxonomy — it is a Libra-specific addition
+    /// because the feature flag lives in `[code.multi_agent]` config
+    /// (OC-Phase 5) instead of being a deploy-time toggle.
+    FeatureDisabled,
     /// `subagent_type` did not resolve to a profile, or the profile's
     /// mode was `Primary` (not eligible for sub-agent dispatch).
     UnknownSubagent {
@@ -422,6 +431,7 @@ mod tests {
     #[test]
     fn task_failure_variants_match_doc_taxonomy() {
         let cases: Vec<TaskFailure> = vec![
+            TaskFailure::FeatureDisabled,
             TaskFailure::UnknownSubagent {
                 name: "?".to_string(),
                 suggestions: vec!["explore".to_string()],
