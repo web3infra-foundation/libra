@@ -35,6 +35,15 @@ pub use tool_loop::{
 pub mod chat;
 pub use chat::ChatAgent;
 
+// OC-Phase 3 P3.2: SubAgentDispatcher trait + DispatchContext + TaskFailure
+// vocabulary. Schema-only — no runtime implementation, no tool-loop wiring.
+pub mod sub_agent;
+pub use sub_agent::{
+    AbortToken, BudgetExceededReason, CancellationSource, ContextFrameLoader, ContextHandoffError,
+    DispatchContext, MessageId, PermissionService, SafetyDecisionDenial, SubAgentDispatcher,
+    TaskEntryKind, TaskFailure, TaskInvocation, TaskResult, ToolLoopError,
+};
+
 /// An AI Agent that manages interactions with a CompletionModel.
 ///
 /// This is a **stateless** agent (also known as a Simple Agent). It handles configuration
