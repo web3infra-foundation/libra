@@ -26,6 +26,10 @@ async fn test_clean_dry_run_keeps_files() {
     clean::execute(CleanArgs {
         dry_run: true,
         force: false,
+        directories: false,
+        ignored: false,
+        only_ignored: false,
+        exclude: vec![],
     })
     .await;
 
@@ -46,6 +50,10 @@ async fn test_clean_force_removes_files() {
     clean::execute(CleanArgs {
         dry_run: false,
         force: true,
+        directories: false,
+        ignored: false,
+        only_ignored: false,
+        exclude: vec![],
     })
     .await;
 
@@ -104,6 +112,10 @@ async fn test_clean_force_keeps_tracked_files() {
     clean::execute(CleanArgs {
         dry_run: false,
         force: true,
+        directories: false,
+        ignored: false,
+        only_ignored: false,
+        exclude: vec![],
     })
     .await;
 
@@ -125,6 +137,10 @@ async fn test_clean_force_removes_nested_untracked() {
     clean::execute(CleanArgs {
         dry_run: false,
         force: true,
+        directories: false,
+        ignored: false,
+        only_ignored: false,
+        exclude: vec![],
     })
     .await;
 
@@ -159,6 +175,10 @@ async fn test_clean_force_respects_ignore_rules() {
     clean::execute(CleanArgs {
         dry_run: false,
         force: true,
+        directories: false,
+        ignored: false,
+        only_ignored: false,
+        exclude: vec![],
     })
     .await;
 
@@ -194,6 +214,10 @@ async fn test_clean_force_multiple_untracked_with_tracked() {
     clean::execute(CleanArgs {
         dry_run: false,
         force: true,
+        directories: false,
+        ignored: false,
+        only_ignored: false,
+        exclude: vec![],
     })
     .await;
 
@@ -220,6 +244,10 @@ async fn test_clean_force_with_missing_index() {
     clean::execute(CleanArgs {
         dry_run: false,
         force: true,
+        directories: false,
+        ignored: false,
+        only_ignored: false,
+        exclude: vec![],
     })
     .await;
 
@@ -335,6 +363,10 @@ async fn test_clean_force_with_long_path() {
     clean::execute(CleanArgs {
         dry_run: false,
         force: true,
+        directories: false,
+        ignored: false,
+        only_ignored: false,
+        exclude: vec![],
     })
     .await;
 
@@ -359,6 +391,10 @@ async fn test_clean_force_does_not_follow_symlink_dirs() {
     clean::execute(CleanArgs {
         dry_run: false,
         force: true,
+        directories: false,
+        ignored: false,
+        only_ignored: false,
+        exclude: vec![],
     })
     .await;
 
@@ -420,4 +456,291 @@ async fn test_clean_json_dry_run_lists_candidates() {
         .expect("removed should be an array");
     assert!(removed.iter().any(|path| path == "alpha.txt"));
     assert!(removed.iter().any(|path| path == "beta.txt"));
+}
+
+#[tokio::test]
+#[serial]
+/// Tests -d flag removes untracked directories.
+async fn test_clean_d_flag_removes_untracked_dirs() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    // Create an untracked directory with files
+    fs::create_dir_all("untracked_dir/sub").unwrap();
+    fs::write("untracked_dir/file.txt", "content").unwrap();
+    fs::write("untracked_dir/sub/nested.txt", "nested").unwrap();
+
+    clean::execute(CleanArgs {
+        dry_run: false,
+        force: true,
+        directories: true,
+        ignored: false,
+        only_ignored: false,
+        exclude: vec![],
+    })
+    .await;
+
+    assert!(!std::path::Path::new("untracked_dir").exists());
+}
+
+#[tokio::test]
+#[serial]
+/// Tests -d flag does not remove directories with tracked files.
+async fn test_clean_d_flag_keeps_dirs_with_tracked_files() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    // Create a directory with a tracked file
+    fs::create_dir_all("mixed_dir").unwrap();
+    fs::write("mixed_dir/tracked.txt", "tracked").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec![String::from("mixed_dir/tracked.txt")],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+
+    // Add an untracked file in the same directory
+    fs::write("mixed_dir/untracked.txt", "untracked").unwrap();
+
+    clean::execute(CleanArgs {
+        dry_run: false,
+        force: true,
+        directories: true,
+        ignored: false,
+        only_ignored: false,
+        exclude: vec![],
+    })
+    .await;
+
+    // Directory should still exist because it has tracked files
+    assert!(std::path::Path::new("mixed_dir").exists());
+    assert!(std::path::Path::new("mixed_dir/tracked.txt").exists());
+    assert!(!std::path::Path::new("mixed_dir/untracked.txt").exists());
+}
+
+#[tokio::test]
+#[serial]
+/// Tests -x flag removes ignored files.
+async fn test_clean_x_flag_removes_ignored_files() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    // Create .libraignore and ignored files
+    fs::write(".libraignore", "ignored.txt\n*.log\n").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec![String::from(".libraignore")],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+
+    fs::write("ignored.txt", "ignored").unwrap();
+    fs::write("debug.log", "log content").unwrap();
+    fs::write("normal.txt", "normal").unwrap();
+
+    clean::execute(CleanArgs {
+        dry_run: false,
+        force: true,
+        directories: false,
+        ignored: true,
+        only_ignored: false,
+        exclude: vec![],
+    })
+    .await;
+
+    assert!(!std::path::Path::new("ignored.txt").exists());
+    assert!(!std::path::Path::new("debug.log").exists());
+    assert!(!std::path::Path::new("normal.txt").exists());
+}
+
+#[tokio::test]
+#[serial]
+/// Tests -X flag removes only ignored files.
+async fn test_clean_x_flag_removes_only_ignored_files() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    // Create .libraignore and ignored files
+    fs::write(".libraignore", "ignored.txt\n*.log\n").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec![String::from(".libraignore")],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+
+    fs::write("ignored.txt", "ignored").unwrap();
+    fs::write("debug.log", "log content").unwrap();
+    fs::write("normal.txt", "normal").unwrap();
+
+    clean::execute(CleanArgs {
+        dry_run: false,
+        force: true,
+        directories: false,
+        ignored: false,
+        only_ignored: true,
+        exclude: vec![],
+    })
+    .await;
+
+    assert!(!std::path::Path::new("ignored.txt").exists());
+    assert!(!std::path::Path::new("debug.log").exists());
+    assert!(std::path::Path::new("normal.txt").exists());
+}
+
+#[tokio::test]
+#[serial]
+/// Tests --exclude flag excludes matching patterns.
+async fn test_clean_exclude_flag_excludes_patterns() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    fs::write("important.txt", "important").unwrap();
+    fs::write("temp.log", "log").unwrap();
+    fs::write("data.csv", "data").unwrap();
+
+    clean::execute(CleanArgs {
+        dry_run: false,
+        force: true,
+        directories: false,
+        ignored: false,
+        only_ignored: false,
+        exclude: vec!["*.txt".to_string()],
+    })
+    .await;
+
+    assert!(std::path::Path::new("important.txt").exists());
+    assert!(!std::path::Path::new("temp.log").exists());
+    assert!(!std::path::Path::new("data.csv").exists());
+}
+
+#[tokio::test]
+#[serial]
+/// Tests --exclude with multiple patterns.
+async fn test_clean_exclude_multiple_patterns() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    fs::write("file.txt", "txt").unwrap();
+    fs::write("file.log", "log").unwrap();
+    fs::write("file.csv", "csv").unwrap();
+    fs::write("file.dat", "dat").unwrap();
+
+    clean::execute(CleanArgs {
+        dry_run: false,
+        force: true,
+        directories: false,
+        ignored: false,
+        only_ignored: false,
+        exclude: vec!["*.txt".to_string(), "*.log".to_string()],
+    })
+    .await;
+
+    assert!(std::path::Path::new("file.txt").exists());
+    assert!(std::path::Path::new("file.log").exists());
+    assert!(!std::path::Path::new("file.csv").exists());
+    assert!(!std::path::Path::new("file.dat").exists());
+}
+
+#[tokio::test]
+#[serial]
+/// Tests -x and -X together returns an error.
+async fn test_clean_x_and_x_together_returns_error() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    fs::write("file.txt", "content").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(test_dir.path())
+        .args(["clean", "-f", "-x", "-X"])
+        .output()
+        .expect("failed to execute `libra clean`");
+
+    assert_eq!(output.status.code(), Some(129));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("cannot use -x and -X together"));
+}
+
+#[tokio::test]
+#[serial]
+/// Tests -d with dry-run shows directories that would be removed.
+async fn test_clean_d_dry_run_shows_directories() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    fs::create_dir_all("untracked_dir").unwrap();
+    fs::write("untracked_dir/file.txt", "content").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(test_dir.path())
+        .args(["clean", "-n", "-d"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Would remove untracked_dir"));
+}
+
+#[tokio::test]
+#[serial]
+/// Tests -d with -x removes ignored directories.
+async fn test_clean_dx_removes_ignored_directories() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    // Create .libraignore with directory pattern
+    fs::write(".libraignore", "ignored_dir/\n").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec![String::from(".libraignore")],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+
+    fs::create_dir_all("ignored_dir").unwrap();
+    fs::write("ignored_dir/file.txt", "content").unwrap();
+
+    clean::execute(CleanArgs {
+        dry_run: false,
+        force: true,
+        directories: true,
+        ignored: true,
+        only_ignored: false,
+        exclude: vec![],
+    })
+    .await;
+
+    assert!(!std::path::Path::new("ignored_dir").exists());
 }
