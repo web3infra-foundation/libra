@@ -346,7 +346,18 @@ where
         let tool_loop_config = ToolLoopConfig {
             allowed_tools: Some(allowed_tools.clone()),
             runtime_context: Some(runtime_context.clone()),
-            max_turns: Some(config.tool_loop_config.max_turns.unwrap_or(24)),
+            // Reasoning models (DeepSeek v4-pro reasoning, OpenAI o-series, …)
+            // routinely need 30+ turns to scaffold a project, run verification
+            // commands, and submit a terminal handshake. The previous default
+            // of 24 was tripping the cap on otherwise-healthy implementation
+            // tasks (see Tool-loop-exceeded-maximum-turns clusters in libra.log
+            // 2026-05-05). Repeated-call detection (window=6, abort=3) below
+            // is the actual pathological-loop guard; this is just the outer
+            // safety net.
+            max_turns: Some(default_executor_max_turns(
+                task,
+                config.tool_loop_config.max_turns,
+            )),
             // Convergence safeguards: a successful `submit_task_complete` call
             // ends the loop immediately, and tighter repeat thresholds catch
             // pathological "re-run the same shell command every turn" loops
@@ -486,11 +497,18 @@ where
                         && !review.approved
                     {
                         last_review = Some(review.clone());
+                        // INVARIANT: agent_output records the *actual* failure
+                        // reason so a Failed TaskResult surfaces "review
+                        // rejected: …" through dagrs and observers, not the
+                        // agent's now-disproved success claim. The verbatim
+                        // final_text is preserved separately on retry via the
+                        // failure_reason → retry_feedback channel below.
+                        let reason = format!("review rejected: {}", review.summary);
                         (
-                            Some(turn.final_text),
+                            Some(reason.clone()),
                             tool_calls,
                             policy_violations,
-                            format!("review rejected: {}", review.summary),
+                            reason,
                             Some(review.clone()),
                         )
                     } else if let Some(violation_message) = workspace_contract_failure(task, config)
@@ -498,9 +516,11 @@ where
                         // Surface workspace contract violations (e.g. files
                         // modified outside the touch_files contract) to the LLM
                         // so it can correct course on the next attempt rather
-                        // than failing terminally during sync-back.
+                        // than failing terminally during sync-back. agent_output
+                        // mirrors the violation message — same rationale as the
+                        // review-rejected branch above.
                         (
-                            Some(turn.final_text),
+                            Some(violation_message.clone()),
                             tool_calls,
                             policy_violations,
                             violation_message,
@@ -523,14 +543,18 @@ where
                     }
                 }
             }
-            Ok(turn) => {
+            Ok(_turn) => {
                 let reason = policy_violations
                     .iter()
                     .map(|violation| violation.message.clone())
                     .collect::<Vec<_>>()
                     .join("; ");
+                // INVARIANT: this arm fires when policy violations blocked task
+                // completion. agent_output should reflect those violations so a
+                // terminally Failed TaskResult does not advertise the agent's
+                // pre-violation final text as the failure cause.
                 (
-                    Some(turn.final_text),
+                    Some(reason.clone()),
                     tool_calls,
                     policy_violations,
                     reason,
@@ -586,6 +610,28 @@ where
             ))
             .await;
         }
+    }
+}
+
+/// Per-attempt tool-loop turn cap for non-Gate tasks.
+///
+/// Honors an explicit override on `ExecutorConfig.tool_loop_config.max_turns`
+/// when present; otherwise picks a default sized to the task kind. Gates run
+/// through `execute_gate_task_in_task_worktree` and never reach this path, so
+/// only Implementation/Analysis cases need a bespoke default.
+const DEFAULT_IMPLEMENTATION_MAX_TURNS: usize = 48;
+const DEFAULT_ANALYSIS_MAX_TURNS: usize = 32;
+
+fn default_executor_max_turns(task: &TaskSpec, override_value: Option<usize>) -> usize {
+    if let Some(value) = override_value {
+        return value;
+    }
+    match task.kind {
+        TaskKind::Implementation => DEFAULT_IMPLEMENTATION_MAX_TURNS,
+        TaskKind::Analysis => DEFAULT_ANALYSIS_MAX_TURNS,
+        // Gate tasks take a separate execution path; default conservatively
+        // for any future caller that lands here.
+        TaskKind::Gate => DEFAULT_ANALYSIS_MAX_TURNS,
     }
 }
 
@@ -4109,6 +4155,148 @@ mod tests {
                 .iter()
                 .any(|call| call.tool_name == "submit_task_complete" && call.success)
         );
+    }
+
+    /// Regression: when the agent submits `submit_task_complete: pass` but the
+    /// reviewer rejects the result and retries are exhausted, `agent_output`
+    /// must carry the actual `review rejected: …` reason — not echo the
+    /// agent's now-disproved success claim. The previous behaviour produced
+    /// misleading dagrs error logs of the form
+    /// `[DgRun0006] Task complete: pass (N evidence entries)`.
+    #[derive(Clone)]
+    struct PatchThenSubmitPassModel;
+
+    impl CompletionModel for PatchThenSubmitPassModel {
+        type Response = ();
+
+        async fn completion(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+            let prompt = request
+                .chat_history
+                .iter()
+                .filter_map(|message| match message {
+                    Message::User { content } => Some(
+                        content
+                            .iter()
+                            .filter_map(|item| match item {
+                                UserContent::Text(text) => Some(text.text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    ),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if prompt.contains("## Review Task") {
+                return Ok(CompletionResponse {
+                    content: vec![AssistantContent::Text(Text {
+                        text: r#"{"approved":false,"summary":"missing test for new branch","issues":["no test"]}"#.into(),
+                    })],
+                    reasoning_content: None,
+                    raw_response: (),
+                });
+            }
+
+            let saw_apply_patch_result = request.chat_history.iter().any(|message| match message {
+                Message::User { content } => content.iter().any(|item| match item {
+                    UserContent::ToolResult(result) => result.name == "apply_patch",
+                    _ => false,
+                }),
+                _ => false,
+            });
+            if saw_apply_patch_result {
+                return Ok(CompletionResponse {
+                    content: vec![AssistantContent::ToolCall(ToolCall {
+                        id: "call_submit_pass".to_string(),
+                        name: "submit_task_complete".to_string(),
+                        function: Function {
+                            name: "submit_task_complete".to_string(),
+                            arguments: serde_json::json!({
+                                "result": "pass",
+                                "summary": "implementation done",
+                                "evidence": [
+                                    {"command": "cargo test", "exit_code": 0}
+                                ]
+                            }),
+                        },
+                    })],
+                    reasoning_content: None,
+                    raw_response: (),
+                });
+            }
+
+            Ok(CompletionResponse {
+                content: vec![AssistantContent::ToolCall(ToolCall {
+                    id: "call_patch_then_submit_pass".to_string(),
+                    name: "apply_patch".to_string(),
+                    function: Function {
+                        name: "apply_patch".to_string(),
+                        arguments: serde_json::json!({
+                            "input": "*** Begin Patch\n*** Update File: src/main.rs\n@@\n-fn main() {}\n+fn main() { println!(\"hello\"); }\n*** End Patch"
+                        }),
+                    },
+                })],
+                reasoning_content: None,
+                raw_response: (),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_implementation_task_carries_review_rejection_into_agent_output() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        let mut registry = ToolRegistry::with_working_dir(dir.path().to_path_buf());
+        registry.register("apply_patch", Arc::new(ApplyPatchHandler));
+        registry.register("submit_task_complete", Arc::new(SubmitTaskCompleteHandler));
+        let registry = Arc::new(registry);
+        let config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig::default(),
+            max_retries: 0,
+            backoff_seconds: 0,
+            working_dir: dir.path().to_path_buf(),
+            spec: spec(),
+            reviewer_preamble: Some("review the candidate and return JSON".into()),
+            dagrs_resume_checkpoint_id: None,
+            observer: None,
+            workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
+        };
+
+        let result = execute_task(
+            &implementation_task(),
+            &PatchThenSubmitPassModel,
+            &registry,
+            &config,
+        )
+        .await;
+
+        assert_eq!(result.status, TaskNodeStatus::Failed);
+        let agent_output = result
+            .agent_output
+            .as_deref()
+            .expect("failed task must carry an agent_output");
+        assert!(
+            agent_output.starts_with("review rejected:"),
+            "agent_output should reflect the rejection reason, got: {agent_output}",
+        );
+        assert!(
+            agent_output.contains("missing test for new branch"),
+            "agent_output should include the reviewer summary, got: {agent_output}",
+        );
+        assert!(
+            !agent_output.contains("Task complete: pass"),
+            "agent_output must not echo the agent's pre-rejection success claim, got: {agent_output}",
+        );
+        let review = result
+            .review
+            .expect("rejected review should be persisted on the result");
+        assert!(!review.approved);
     }
 
     #[tokio::test]
