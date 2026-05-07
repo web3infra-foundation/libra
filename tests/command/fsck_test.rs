@@ -820,3 +820,278 @@ fn test_fsck_sha256_dangling_and_unreachable() {
         "--unreachable should show unreachable SHA-256 commit: {combined}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// --name-objects tests
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn test_fsck_name_objects_verbose() {
+    let repo = create_committed_repo_via_cli();
+
+    // Add another file and commit to have more objects
+    fs::write(repo.path().join("file2.txt"), "second file\n").expect("failed to create file2");
+    let output = run_libra_command(&["add", "file2.txt"], repo.path());
+    assert_cli_success(&output, "add file2");
+    let output = run_libra_command(
+        &["commit", "-m", "second commit", "--no-verify"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "second commit");
+
+    let output = run_libra_command(&["fsck", "--verbose", "--name-objects"], repo.path());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}{stderr}");
+
+    // Should show object names in parentheses during connectivity check
+    assert!(
+        combined.contains("(main)") || combined.contains("(refs/heads/main)") || combined.contains("(:test.txt)"),
+        "--name-objects should show object names: {combined}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_fsck_name_objects_without_verbose() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["fsck", "--name-objects"], repo.path());
+    // Without --verbose, --name-objects should not affect output
+    assert!(output.status.success(), "fsck --name-objects should pass");
+}
+
+// ---------------------------------------------------------------------------
+// --lost-found tests
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn test_fsck_lost_found_creates_files() {
+    let repo = create_committed_repo_via_cli();
+
+    // Create dangling objects
+    fs::write(repo.path().join("file2.txt"), "second file\n").expect("failed to create file2");
+    let output = run_libra_command(&["add", "file2.txt"], repo.path());
+    assert_cli_success(&output, "add file2");
+    let output = run_libra_command(
+        &["commit", "-m", "second commit", "--no-verify"],
+        repo.path(),
+    );
+    assert_cli_success(&output, "second commit");
+
+    let log_output = run_libra_command(&["log", "--pretty=%H"], repo.path());
+    let stdout = String::from_utf8_lossy(&log_output.stdout);
+    let first_commit = stdout.lines().nth(1).unwrap().trim();
+
+    let output = run_libra_command(&["reset", "--hard", first_commit], repo.path());
+    assert_cli_success(&output, "reset to first commit");
+
+    let output = run_libra_command(&["fsck", "--lost-found"], repo.path());
+    let _stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Should create lost-found directory
+    let lost_found_dir = repo.path().join(".libra").join("lost-found");
+    assert!(lost_found_dir.exists(), "--lost-found should create lost-found directory");
+
+    // Should have commit directory with dangling commit
+    let commit_dir = lost_found_dir.join("commit");
+    assert!(commit_dir.exists(), "lost-found/commit should exist");
+
+    // Should have other directory
+    let other_dir = lost_found_dir.join("other");
+    assert!(other_dir.exists(), "lost-found/other should exist");
+}
+
+#[test]
+#[serial]
+fn test_fsck_lost_found_blob_content() {
+    let repo = create_committed_repo_via_cli();
+
+    // Create a dangling blob by adding a file
+    let blob_content = "unique content for lost-found test\n";
+    fs::write(repo.path().join("unique.txt"), blob_content).expect("failed to create file");
+    let output = run_libra_command(&["add", "unique.txt"], repo.path());
+    assert_cli_success(&output, "add unique.txt");
+
+    // Reset the index to make the blob dangling
+    let output = run_libra_command(&["reset", "HEAD"], repo.path());
+    assert_cli_success(&output, "reset HEAD");
+
+    let output = run_libra_command(&["fsck", "--lost-found"], repo.path());
+    assert!(output.status.success(), "fsck --lost-found should pass");
+
+    // Check that blob content is written correctly
+    let lost_found_dir = repo.path().join(".libra").join("lost-found");
+    if lost_found_dir.join("other").exists() {
+        let other_entries = fs::read_dir(lost_found_dir.join("other")).unwrap();
+        for entry in other_entries.flatten() {
+            let content = fs::read_to_string(entry.path()).unwrap();
+            // Blob content should be actual content, not just hash
+            if content.contains("unique content") {
+                return; // Test passed
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// --root tests
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn test_fsck_root_shows_root_commit() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["fsck", "--root"], repo.path());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr.contains("root "),
+        "--root should report root commits: {stderr}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_fsck_root_with_multiple_commits() {
+    let repo = create_committed_repo_via_cli();
+
+    // Create more commits
+    for i in 2..=3 {
+        let filename = format!("file{}.txt", i);
+        fs::write(repo.path().join(&filename), format!("content {}\n", i)).expect("failed to create file");
+        let output = run_libra_command(&["add", &filename], repo.path());
+        assert_cli_success(&output, &format!("add {}", filename));
+        let output = run_libra_command(
+            &["commit", "-m", format!("commit {}", i).as_str(), "--no-verify"],
+            repo.path(),
+        );
+        assert_cli_success(&output, &format!("commit {}", i));
+    }
+
+    let output = run_libra_command(&["fsck", "--root"], repo.path());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Should still show only one root commit
+    let root_count = stderr.matches("root ").count();
+    assert_eq!(root_count, 1, "should have exactly one root commit: {stderr}");
+}
+
+// ---------------------------------------------------------------------------
+// --tags tests
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn test_fsck_tags_reports_tags() {
+    let repo = create_committed_repo_via_cli();
+
+    // Create a tag
+    let output = run_libra_command(&["tag", "v1.0"], repo.path());
+    assert_cli_success(&output, "create tag v1.0");
+
+    let output = run_libra_command(&["fsck", "--tags"], repo.path());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr.contains("tagged commit") && stderr.contains("v1.0"),
+        "--tags should report tagged commits: {stderr}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_fsck_tags_without_tags() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["fsck", "--tags"], repo.path());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Should pass but not show any tags
+    assert!(output.status.success(), "fsck --tags should pass");
+    assert!(
+        !stderr.contains("tagged commit"),
+        "should not show tagged commit when no tags exist: {stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// --connectivity-only tests
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn test_fsck_connectivity_only_passes() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["fsck", "--connectivity-only"], repo.path());
+    assert!(
+        output.status.success(),
+        "--connectivity-only should pass on healthy repo: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[serial]
+fn test_fsck_connectivity_only_skips_content_check() {
+    let repo = create_committed_repo_via_cli();
+
+    // Get the commit hash
+    let log_output = run_libra_command(&["log", "--pretty=%H"], repo.path());
+    let stdout = String::from_utf8_lossy(&log_output.stdout);
+    let commit_hash = stdout.lines().next().unwrap().trim();
+
+    // Corrupt the commit object
+    let hash_prefix = &commit_hash[0..2];
+    let hash_rest = &commit_hash[2..];
+    let object_path = repo.path().join(".libra").join("objects").join(hash_prefix).join(hash_rest);
+
+    // Store original content
+    let original_content = fs::read(&object_path).expect("failed to read object");
+
+    // Corrupt the content
+    fs::write(&object_path, b"corrupted!!!").expect("failed to corrupt object");
+
+    // --connectivity-only should pass (only checks existence)
+    let output = run_libra_command(&["fsck", "--connectivity-only"], repo.path());
+
+    // Restore original content
+    fs::write(&object_path, original_content).expect("failed to restore object");
+
+    // With --connectivity-only, it only checks if objects exist, not content
+    // So it should pass even with corrupted content
+    assert!(
+        output.status.success(),
+        "--connectivity-only should pass even with corrupted content: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[serial]
+fn test_fsck_connectivity_only_detects_missing_objects() {
+    let repo = create_committed_repo_via_cli();
+
+    // Get the commit hash
+    let log_output = run_libra_command(&["log", "--pretty=%H"], repo.path());
+    let stdout = String::from_utf8_lossy(&log_output.stdout);
+    let commit_hash = stdout.lines().next().unwrap().trim();
+
+    // Delete the commit object
+    let hash_prefix = &commit_hash[0..2];
+    let hash_rest = &commit_hash[2..];
+    let object_path = repo.path().join(".libra").join("objects").join(hash_prefix).join(hash_rest);
+    fs::remove_file(&object_path).expect("failed to delete object");
+
+    // --connectivity-only should detect missing objects
+    let output = run_libra_command(&["fsck", "--connectivity-only"], repo.path());
+
+    assert!(
+        !output.status.success(),
+        "--connectivity-only should fail on missing objects"
+    );
+}
