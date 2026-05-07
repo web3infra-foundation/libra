@@ -50,6 +50,7 @@ pub mod revert;
 pub mod shortlog;
 pub mod show;
 pub mod show_ref;
+pub mod symbolic_ref;
 pub mod tag;
 pub mod usage;
 #[cfg(all(unix, feature = "worktree-fuse"))]
