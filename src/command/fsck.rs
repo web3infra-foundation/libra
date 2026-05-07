@@ -6,13 +6,6 @@
 //! - `hash mismatch <object>`: Object's hash doesn't match its content
 //! - `dangling <type> <object>`: Object exists but is not referenced
 //! - `unreachable <type> <object>`: Object is not reachable from any ref
-//!
-//! ## Exit codes (bitmask)
-//! - 0: All checks passed
-//! - 1 (bit 0): Object corruption
-//! - 2 (bit 1): Broken refs
-//! - 4 (bit 2): Index corruption
-//!   Bits are OR'd when multiple categories fail (e.g. 5 = objects + index)
 
 use std::{collections::HashSet, fs, io, io::{Read, Seek}};
 
@@ -26,11 +19,11 @@ use git_internal::{
 };
 use hex;
 use ring::digest::{Context, SHA1_FOR_LEGACY_USE_ONLY, SHA256};
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+use sea_orm::{EntityTrait};
 use serde::Serialize;
 
 use crate::{
-    command::{load_object, reset::rebuild_index_from_tree},
+    command::{load_object},
     internal::{branch::Branch, db, head::Head, model::reference, model::reflog},
     utils::{
         client_storage::ClientStorage,
@@ -40,24 +33,10 @@ use crate::{
     },
 };
 
-/// Bitmask flags for fsck exit codes. Multiple failure categories are OR'd together.
-mod exit_code {
-    pub const OK: i32 = 0;
-    pub const OBJECT_CORRUPT: i32 = 1; // bit 0
-    pub const REF_BROKEN: i32 = 2; // bit 1
-    pub const INDEX_CORRUPT: i32 = 4; // bit 2
-}
-
 const FSCK_LONG_ABOUT: &str =
     "Verify the integrity of objects, refs, and index in a Libra repository.
 
-By default, checks all objects using refs, index, and reflogs as starting points.
-
-Exit codes (bitmask, OR'd when multiple fail):
-  0 - All checks passed
-  1 (bit 0) - Object corruption
-  2 (bit 1) - Broken refs
-  4 (bit 2) - Index corruption";
+By default, checks all objects using refs, index, and reflogs as starting points.";
 
 const FSCK_AFTER_HELP: &str = "Examples:
   libra fsck
@@ -120,16 +99,6 @@ pub struct FsckResult {
     pub cross_ref_issues: usize,
     pub overall_status: CheckStatus,
     pub issues: Vec<IssueReport>,
-    /// Bitmask of failure categories (see `exit_code` module).
-    #[serde(skip_serializing_if = "is_zero")]
-    pub failure_mask: i32,
-    /// Human-readable names for the set bits in `failure_mask`.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub failure_categories: Vec<String>,
-}
-
-fn is_zero(v: &i32) -> bool {
-    *v == 0
 }
 
 /// Detailed issue report for git fsck-style diagnostics
@@ -170,8 +139,10 @@ pub async fn execute(args: FsckArgs) {
                 print_diagnostic_messages(&fsck_result.issues);
             }
             // Exit with failure code only for serious issues (not dangling/unreachable)
-            if fsck_result.failure_mask != exit_code::OK {
-                std::process::exit(fsck_result.failure_mask);
+            if !fsck_result.issues.is_empty()
+                && fsck_result.issues.iter().any(|i| i.severity == "error")
+            {
+                std::process::exit(1);
             }
         }
         Err(e) => {
@@ -203,10 +174,9 @@ pub async fn execute_safe(args: FsckArgs, output: &OutputConfig) -> CliResult<()
         output,
     )?;
 
-    if result.failure_mask != exit_code::OK {
+    if !result.issues.is_empty() && result.issues.iter().any(|i| i.severity == "error") {
         return Err(CliError::failure("repository integrity check failed")
-            .with_stable_code(StableErrorCode::RepoCorrupt)
-            .with_exit_code(result.failure_mask));
+            .with_stable_code(StableErrorCode::RepoCorrupt));
     }
 
     Ok(())
@@ -313,14 +283,6 @@ fn build_issue_report(
     }
 }
 
-/// Compute failure mask and categories for a single-object check.
-fn failure_for_single_status(status: &CheckStatus) -> (i32, Vec<String>) {
-    match status {
-        CheckStatus::Ok => (exit_code::OK, vec![]),
-        _ => (exit_code::OBJECT_CORRUPT, vec!["objects".to_string()]),
-    }
-}
-
 async fn check_single_object(object_id: &str, storage: &ClientStorage) -> CliResult<FsckResult> {
     let hash = parse_object_hash(object_id)
         .ok_or_else(|| CliError::command_usage(format!("invalid object ID: {}", object_id)))?;
@@ -338,7 +300,6 @@ async fn check_single_object(object_id: &str, storage: &ClientStorage) -> CliRes
         }
     };
 
-    let (failure_mask, failure_categories) = failure_for_single_status(&overall_status);
     let is_ok = overall_status == CheckStatus::Ok;
 
     Ok(FsckResult {
@@ -353,8 +314,6 @@ async fn check_single_object(object_id: &str, storage: &ClientStorage) -> CliRes
         cross_ref_issues: 0,
         overall_status,
         issues,
-        failure_mask,
-        failure_categories,
     })
 }
 
@@ -371,8 +330,6 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
         cross_ref_issues: 0,
         overall_status: CheckStatus::Ok,
         issues: Vec::new(),
-        failure_mask: exit_code::OK,
-        failure_categories: Vec::new(),
     };
 
     // Get all object hashes
@@ -411,8 +368,6 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
 
     // Print notices
     print_notices(head_is_unborn, &result);
-
-    compute_failure_mask(&mut result);
 
     Ok(result)
 }
@@ -858,51 +813,6 @@ async fn find_dangling_unreachable(
     Ok(())
 }
 
-
-/// Check index and print status
-fn check_index_and_print(storage: &ClientStorage, result: &mut FsckResult) -> CliResult<()> {
-    println!("Checking cache tree of .libra/index");
-
-    let index_result = check_index_file(storage)?;
-    result.index_valid = index_result.valid;
-    result.issues.extend(index_result.issues);
-
-    if !index_result.valid && result.overall_status == CheckStatus::Ok {
-        result.overall_status = CheckStatus::InvalidFormat;
-    }
-    Ok(())
-}
-
-/// Check connectivity - verify all objects are reachable and valid
-async fn check_connectivity_and_print(
-    all_hashes: &[ObjectHash],
-    storage: &ClientStorage,
-    result: &mut FsckResult,
-) -> CliResult<()> {
-    let count = all_hashes.len();
-    println!("Checking connectivity ({} objects)", count);
-
-    for hash in all_hashes {
-        println!("Checking {}", hash);
-
-        // Verify the object is still valid (re-check)
-        let check_result = verify_object(hash, storage).await?;
-
-        match check_result.status {
-            CheckStatus::Ok => {
-                // Already counted in check_objects_by_type
-            }
-            _ => {
-                // Object became corrupted between checks
-                if result.overall_status == CheckStatus::Ok {
-                    result.overall_status = check_result.status.clone();
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Check refs and optionally fix broken ones.
 async fn check_and_fix_refs(
     _args: &FsckArgs,
@@ -921,50 +831,6 @@ async fn check_and_fix_refs(
         }
     }
     Ok(())
-}
-
-/// Wrapper for check_index that updates result
-async fn check_index_wrapper(
-    _args: &FsckArgs,
-    storage: &ClientStorage,
-    result: &mut FsckResult,
-) -> CliResult<()> {
-    let index_result = check_index_file(storage)?;
-    result.index_valid = index_result.valid;
-    result.issues.extend(index_result.issues);
-
-    if !index_result.valid && result.overall_status == CheckStatus::Ok {
-        result.overall_status = CheckStatus::InvalidFormat;
-    }
-    Ok(())
-}
-
-/// Compute failure bitmask and human-readable categories from current result state.
-fn compute_failure_mask(result: &mut FsckResult) {
-    let mut mask = exit_code::OK;
-    let mut categories = Vec::new();
-    if result.objects_corrupted > 0 {
-        mask |= exit_code::OBJECT_CORRUPT;
-        categories.push("objects".to_string());
-    }
-    if result.refs_broken > 0 {
-        mask |= exit_code::REF_BROKEN;
-        categories.push("refs".to_string());
-    }
-    if !result.index_valid {
-        mask |= exit_code::INDEX_CORRUPT;
-        categories.push("index".to_string());
-    }
-    if result.reflog_issues > 0 {
-        mask |= exit_code::OBJECT_CORRUPT;
-        categories.push("reflogs".to_string());
-    }
-    result.failure_mask = mask;
-    result.failure_categories = categories;
-    // Clear overall_status if all categories are clean
-    if mask == exit_code::OK {
-        result.overall_status = CheckStatus::Ok;
-    }
 }
 
 /// Verify a single object's integrity
@@ -1263,70 +1129,6 @@ fn check_index_file(storage: &ClientStorage) -> CliResult<IndexCheckResult> {
     Ok(result)
 }
 
-/// Delete broken refs that point to nonexistent or invalid objects.
-async fn fix_broken_refs(broken_ref_names: &[String]) -> CliResult<usize> {
-    let db_conn = db::get_db_conn_instance().await;
-    let mut fixed = 0;
-
-    for name in broken_ref_names {
-        let deleted = reference::Entity::delete_many()
-            .filter(reference::Column::Name.eq(name))
-            .exec(&db_conn)
-            .await
-            .map_err(|e| CliError::fatal(format!("failed to delete ref '{}': {}", name, e)))?;
-
-        if deleted.rows_affected > 0 {
-            eprintln!("Deleted broken ref '{}'", name);
-            fixed += 1;
-        }
-    }
-
-    Ok(fixed)
-}
-
-/// Rebuild a corrupted index from HEAD's tree.
-///
-/// Deletes the corrupted index file and constructs a new one
-/// by walking the tree that HEAD points to.
-async fn fix_corrupted_index() -> CliResult<bool> {
-    let index_path = path::index();
-
-    // Try to get HEAD commit
-    let head_commit = match Head::current_commit().await {
-        Some(commit) => commit,
-        None => {
-            // No HEAD commit yet (unborn branch) — just delete the corrupted index
-            if index_path.exists() {
-                fs::remove_file(&index_path).map_err(|e| {
-                    CliError::fatal(format!("failed to remove corrupted index: {}", e))
-                })?;
-                return Ok(true);
-            }
-            return Ok(false);
-        }
-    };
-
-    // Load the commit's tree
-    let commit: Commit = load_object(&head_commit).map_err(|e| {
-        CliError::fatal(format!("failed to load HEAD commit {}: {}", head_commit, e))
-    })?;
-
-    let tree: Tree = load_object(&commit.tree_id)
-        .map_err(|e| CliError::fatal(format!("failed to load tree {}: {}", commit.tree_id, e)))?;
-
-    // Build a new index from the tree
-    let mut new_index = Index::new();
-    rebuild_index_from_tree(&tree, &mut new_index, "")
-        .map_err(|e| CliError::fatal(format!("failed to rebuild index: {}", e)))?;
-
-    // Save the new index
-    new_index
-        .save(&index_path)
-        .map_err(|e| CliError::fatal(format!("failed to save rebuilt index: {}", e)))?;
-
-    Ok(true)
-}
-
 /// Valid git index file modes.
 fn is_valid_index_mode(mode: u32) -> bool {
     matches!(
@@ -1407,159 +1209,5 @@ fn validate_index_entry(
     }
 
     None
-}
-
-/// Validate cross-references between objects (trees reference valid blobs/trees)
-///
-/// Checks that:
-/// - Every tree entry's referenced object exists and has the correct type
-/// - Every commit's tree reference exists
-/// - Every commit's parent references exist
-async fn validate_cross_references(storage: &ClientStorage) -> CliResult<Vec<IssueReport>> {
-    use git_internal::internal::object::tree::TreeItemMode;
-
-    let mut issues = Vec::new();
-
-    let all_hashes = list_all_objects_in_storage(storage)
-        .map_err(|e| CliError::fatal(format!("failed to list objects: {}", e)))?;
-
-    for hash in &all_hashes {
-        let Ok(obj_type) = storage.get_object_type(hash) else {
-            continue;
-        };
-
-        if obj_type == ObjectType::Tree {
-            let Ok(tree) = load_object::<Tree>(hash) else {
-                continue;
-            };
-            for item in &tree.tree_items {
-                if !storage.exist(&item.id) {
-                    issues.push(IssueReport {
-                        issue_type: "missing".to_string(),
-                        severity: "error".to_string(),
-                        object_type: Some("unknown".to_string()),
-                        object_id: Some(item.id.to_string()),
-                        ref_name: None,
-                        message: format!(
-                            "Tree {} references missing object {} ({})",
-                            hash, item.id, item.name
-                        ),
-                        suggestion: Some(
-                            "The tree references an object that doesn't exist.".to_string(),
-                        ),
-                    });
-                    continue;
-                }
-                // Verify the referenced object type matches the declaration
-                if let Ok(actual_type) = storage.get_object_type(&item.id) {
-                    let declared_is_tree = item.mode == TreeItemMode::Tree;
-                    if declared_is_tree != (actual_type == ObjectType::Tree) {
-                        let declared_kind = if declared_is_tree { "subtree" } else { "blob" };
-                        issues.push(IssueReport {
-                            issue_type: "tree_entry_type_mismatch".to_string(),
-                            severity: "error".to_string(),
-                            object_type: Some(actual_type.to_string()),
-                            object_id: Some(item.id.to_string()),
-                            ref_name: None,
-                            message: format!(
-                                "Tree {} declares {} as a {declared_kind} but it is a {}",
-                                hash, item.name, actual_type
-                            ),
-                            suggestion: Some(
-                                "The tree entry type does not match the actual object type."
-                                    .to_string(),
-                            ),
-                        });
-                    }
-                }
-            }
-        } else if obj_type == ObjectType::Commit {
-            let Ok(commit) = load_object::<Commit>(hash) else {
-                continue;
-            };
-            if !storage.exist(&commit.tree_id) {
-                issues.push(IssueReport {
-                    issue_type: "missing".to_string(),
-                    severity: "error".to_string(),
-                    object_type: Some("tree".to_string()),
-                    object_id: Some(commit.tree_id.to_string()),
-                    ref_name: None,
-                    message: format!("Commit {} references missing tree {}", hash, commit.tree_id),
-                    suggestion: Some("The commit's tree is missing.".to_string()),
-                });
-            }
-
-            for parent in &commit.parent_commit_ids {
-                if !storage.exist(parent) {
-                    issues.push(IssueReport {
-                        issue_type: "missing".to_string(),
-                        severity: "warning".to_string(),
-                        object_type: Some("commit".to_string()),
-                        object_id: Some(parent.to_string()),
-                        ref_name: None,
-                        message: format!("Commit {} references missing parent {}", hash, parent),
-                        suggestion: Some(
-                            "Parent commit is missing - history may be incomplete.".to_string(),
-                        ),
-                    });
-                }
-            }
-        }
-    }
-
-    Ok(issues)
-}
-
-fn print_verbose_result(result: &FsckResult) {
-    println!("\n=== Fsck Summary ===");
-    println!("Objects checked: {}", result.objects_checked);
-    println!("  - OK: {}", result.objects_ok);
-    println!("  - Corrupted: {}", result.objects_corrupted);
-    println!("Refs checked: {}", result.refs_checked);
-    println!("  - OK: {}", result.refs_ok);
-    println!("  - Broken: {}", result.refs_broken);
-    println!("Index valid: {}", result.index_valid);
-    println!("Reflog issues: {}", result.reflog_issues);
-    println!("Cross-reference issues: {}", result.cross_ref_issues);
-
-    if !result.issues.is_empty() {
-        println!("\n=== Issues Found ===");
-        for issue in &result.issues {
-            println!(
-                "[{}] {}: {}",
-                issue.severity.to_uppercase(),
-                issue.issue_type,
-                issue.message
-            );
-            if let Some(ref obj) = issue.object_id {
-                println!("  Object: {}", obj);
-            }
-            if let Some(ref r#ref) = issue.ref_name {
-                println!("  Ref: {}", r#ref);
-            }
-            if let Some(ref suggestion) = issue.suggestion {
-                println!("  Suggestion: {}", suggestion);
-            }
-        }
-    }
-}
-
-fn print_issues(result: &FsckResult) {
-    eprintln!("Integrity check FAILED");
-    eprintln!(
-        "Objects: {} checked, {} OK, {} corrupted",
-        result.objects_checked, result.objects_ok, result.objects_corrupted
-    );
-    eprintln!(
-        "Refs: {} checked, {} OK, {} broken",
-        result.refs_checked, result.refs_ok, result.refs_broken
-    );
-
-    if !result.issues.is_empty() {
-        eprintln!("\nIssues:");
-        for issue in &result.issues {
-            eprintln!("  [{}] {}", issue.severity.to_uppercase(), issue.message);
-        }
-    }
 }
 
