@@ -16,9 +16,13 @@
 use libra::internal::ai::{
     completion::{
         AssistantContent, CompletionRequest, Function, Message, OneOrMany, Text, ToolCall,
-        ToolResult, UserContent,
+        ToolResult, UserContent, message::Image,
     },
-    providers::{runtime::provider_id, transform::variant, transform_for},
+    providers::{
+        runtime::provider_id,
+        transform::{reject_non_text_system_content, variant},
+        transform_for,
+    },
 };
 
 fn assistant_with_reasoning(text: &str, reasoning: &str) -> Message {
@@ -316,5 +320,66 @@ fn prepare_request_is_idempotent_for_every_provider() {
             request.chat_history, snapshot,
             "{id}.prepare_request is not idempotent"
         );
+    }
+}
+
+/// `reject_non_text_system_content` is the cross-provider canonical
+/// invariant the runtime enforces before any provider-specific
+/// `prepare_request` runs. Every production provider folds System
+/// messages down to text on the wire, so a `ToolResult` or `Image` part
+/// inside `Message::System.content` would silently disappear. The check
+/// rejects it with the offending index in the error message.
+#[test]
+fn reject_non_text_system_content_rejects_tool_result_for_every_provider() {
+    let request = request_with(vec![Message::System {
+        content: OneOrMany::One(UserContent::ToolResult(ToolResult {
+            id: "call_in_system".to_string(),
+            name: "shell".to_string(),
+            result: serde_json::json!({}),
+        })),
+    }]);
+    for &id in provider_id::ALL_PRODUCTION {
+        let err = reject_non_text_system_content(&request, id)
+            .expect_err(&format!("{id} must reject ToolResult inside System"));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("call_in_system"),
+            "{id}: error must reference offending tool id, got: {msg}"
+        );
+        assert!(
+            msg.contains("System"),
+            "{id}: error must mention System, got: {msg}"
+        );
+    }
+}
+
+#[test]
+fn reject_non_text_system_content_rejects_image_for_every_provider() {
+    let request = request_with(vec![Message::System {
+        content: OneOrMany::One(UserContent::Image(Image {
+            data: "base64-bytes".to_string(),
+            mime_type: Some("image/png".to_string()),
+        })),
+    }]);
+    for &id in provider_id::ALL_PRODUCTION {
+        let err = reject_non_text_system_content(&request, id)
+            .expect_err(&format!("{id} must reject Image inside System"));
+        assert!(
+            err.to_string().contains("Image"),
+            "{id}: error must reference Image kind, got: {err}"
+        );
+    }
+}
+
+#[test]
+fn reject_non_text_system_content_accepts_text_only_system() {
+    let request = request_with(vec![Message::System {
+        content: OneOrMany::One(UserContent::Text(Text {
+            text: "you are a helpful assistant".to_string(),
+        })),
+    }]);
+    for &id in provider_id::ALL_PRODUCTION {
+        reject_non_text_system_content(&request, id)
+            .expect("text-only System must pass for every provider");
     }
 }

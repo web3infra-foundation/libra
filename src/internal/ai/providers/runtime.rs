@@ -201,9 +201,18 @@ impl CompletionModel for AnyCompletionModel {
         // does not silently bypass the transform pipeline by forgetting an
         // arm — adding a new variant only requires extending the match
         // below, while transform wiring stays untouched.
+        //
+        // Cross-provider canonical-invariant checks
+        // (`reject_non_text_system_content`) run *before* the provider's
+        // own `prepare_request` so a contract violation that every
+        // provider would silently truncate on the wire fails loud and
+        // early with the offending message index. Provider-specific
+        // checks (e.g. Anthropic tool_use/tool_result pairing) layer on
+        // top inside `prepare_request`.
         let transform = transform_for(self.provider_id());
         let model_id = self.model_id().to_string();
         let mut request = request;
+        super::transform::reject_non_text_system_content(&request, self.provider_id())?;
         transform.prepare_request(&model_id, &mut request)?;
         let mut response = match self {
             Self::Anthropic(m) => {

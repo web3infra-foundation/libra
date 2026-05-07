@@ -198,6 +198,56 @@ fn matches_any(model_id: &str, ids: &[&str]) -> bool {
     ids.iter().any(|s| normalised.contains(s))
 }
 
+/// Reject any `Message::System` whose content carries a non-Text part
+/// (`UserContent::Image`, `UserContent::ToolResult`). Every production
+/// provider's wire builder forwards only `UserContent::Text` from System
+/// messages — the other variants would silently disappear on the wire,
+/// turning a documented data-bearing message into nothing. Failing fast
+/// here surfaces the schema misuse with the offending index instead of
+/// letting it vanish.
+///
+/// Called unconditionally by [`AnyCompletionModel::completion`](
+/// crate::internal::ai::providers::AnyCompletionModel) before any
+/// provider-specific [`ProviderTransform::prepare_request`], so providers
+/// do not need to repeat the check inside their own transform.
+pub fn reject_non_text_system_content(
+    request: &CompletionRequest,
+    provider: &'static str,
+) -> Result<(), TransformError> {
+    for (idx, message) in request.chat_history.iter().enumerate() {
+        if let Message::System { content } = message {
+            for part in content.iter() {
+                let kind = match part {
+                    UserContent::Text(_) => continue,
+                    UserContent::Image(_) => "Image",
+                    UserContent::ToolResult(result) => {
+                        return Err(TransformError::InvalidRequest {
+                            provider,
+                            reason: format!(
+                                "ToolResult at chat_history[{idx}] (id={}) is embedded \
+                                 in a System message; provider {provider} forwards only \
+                                 text content from System, so the tool_result would \
+                                 silently disappear on the wire — move it to a User message",
+                                result.id
+                            ),
+                        });
+                    }
+                };
+                return Err(TransformError::InvalidRequest {
+                    provider,
+                    reason: format!(
+                        "{kind} at chat_history[{idx}] is embedded in a System message; \
+                         provider {provider} forwards only text content from System, so \
+                         the {kind} would silently disappear on the wire — move it to a \
+                         User message"
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Strip `reasoning_content` from every assistant turn in `request.chat_history`.
 /// Used by providers (OpenAI, Zhipu, Ollama) that reject the field.
 fn strip_assistant_reasoning(request: &mut CompletionRequest) {
