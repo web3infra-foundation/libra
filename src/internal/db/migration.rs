@@ -602,6 +602,18 @@ DROP TABLE IF EXISTS `agent_usage_stats`;
                 "../../../sql/migrations/2026050501_agent_checkpoint_parent_nullable_down.sql"
             )),
         },
+        // OC-Phase 2 P2.5: persistent `Always`-reply ruleset, populated when
+        // a user clicks "Always" on a permission prompt and reloaded on the
+        // next session. See docs/improvement/opencode.md "Permission Ruleset
+        // 与 Approval 反馈协议".
+        Migration {
+            version: 2026050601,
+            name: "approved_permission",
+            up: include_str!("../../../sql/migrations/2026050601_approved_permission.sql"),
+            down: Some(include_str!(
+                "../../../sql/migrations/2026050601_approved_permission_down.sql"
+            )),
+        },
     ]
 }
 
@@ -704,9 +716,9 @@ mod tests {
         // `builtin_migrations()` so silent registry regressions surface
         // here in addition to `tests/db_migration_test.rs`.
         let runner = builtin_runner().expect("CEX-12.5 builtin registry must build clean");
-        assert_eq!(runner.len(), 4);
+        assert_eq!(runner.len(), 5);
         assert!(!runner.is_empty());
-        assert_eq!(runner.max_registered_version(), Some(2026050501));
+        assert_eq!(runner.max_registered_version(), Some(2026050601));
     }
 
     #[test]

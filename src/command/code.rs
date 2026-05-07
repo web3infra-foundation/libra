@@ -3148,6 +3148,10 @@ fn approval_config_from_project_config(working_dir: &Path) -> ApprovalRuntimeCon
                 .unwrap_or(default_cache_policy.protected_branches),
             allowed_network_domains: approval.allowed_network_domains.unwrap_or_default(),
             no_cache_unknown_network: approval.no_cache_unknown_network,
+            // OC-Phase 2 P2.5: the persistent ruleset is loaded lazily by
+            // the runtime once it has a `DatabaseConnection`; the project-
+            // config-derived policy starts with no projection attached.
+            approved_ruleset: None,
         },
     }
 }
@@ -3725,6 +3729,7 @@ no_cache_unknown_network = true
                 protected_branches: vec!["main".to_string(), "release".to_string()],
                 allowed_network_domains: vec!["github.com".to_string()],
                 no_cache_unknown_network: true,
+                approved_ruleset: None,
             }
         );
     }
