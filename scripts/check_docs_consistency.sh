@@ -55,7 +55,7 @@ require_doc "test-provider" "docs/automation/local-tui-control.md"
 require_doc "code_ui_scenarios" "docs/automation/local-tui-control.md"
 require_doc "target/code-ui-scenarios" "docs/automation/local-tui-control.md"
 require_doc "Scenario::new" "docs/automation/local-tui-control.md"
-require_doc "diagnostics_redaction_test" "docs/improvement/tui.md"
+require_doc "diagnostics_redaction_test" "docs/improvement/agent.md"
 require_doc "Run TUI automation scenarios" ".github/workflows/base.yml"
 
 for required_file in \

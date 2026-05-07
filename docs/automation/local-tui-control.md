@@ -2,6 +2,8 @@
 
 Local TUI Automation Control lets scripts and test harnesses discover and authenticate to the `libra code` web control surface running on the same machine. It is not a remote collaboration protocol and must stay loopback-only.
 
+Design source of truth: the former `docs/improvement/tui.md` plan has been merged into [docs/improvement/agent.md](../improvement/agent.md), where it is tracked as the Local TUI Automation Control section. Do not recreate `tui.md`; update `agent.md` for implementation planning changes and keep this file as the user-facing control-surface reference.
+
 ## Security Model
 
 `--control observe` is the default. It preserves the existing behavior: loopback clients can read the current Code UI snapshot and SSE stream without a token, and Libra does not create token, info, or lock files unless `--control-info-file` is explicitly supplied.
