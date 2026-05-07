@@ -40,13 +40,16 @@ pub use chat::ChatAgent;
 pub mod sub_agent;
 pub use sub_agent::{
     AbortToken, BudgetExceededReason, CancellationSource, ContextFrameLoader, ContextHandoffError,
-    DispatchContext, MessageId, PermissionService, SafetyDecisionDenial, SubAgentDispatcher,
-    TaskEntryKind, TaskFailure, TaskInvocation, TaskResult, ToolLoopError,
+    DispatchContext, MessageId, PermissionAskRequest, PermissionAskSource, PermissionAsker,
+    PermissionReply, PermissionService, SafetyDecisionDenial, SubAgentDispatcher, TaskEntryKind,
+    TaskFailure, TaskInvocation, TaskResult, ToolLoopError,
 };
 
-// OC-Phase 3 P3.3: DefaultSubAgentDispatcher gate implementation
-// (steps 1-7). Steps 8-13 (permission ask, handoff, model build,
-// child loop) land in P3.4+.
+// OC-Phase 3 P3.3 + P3.4: DefaultSubAgentDispatcher gate + ask
+// implementation (steps 1-8 minus the safety-policy hook in step 5,
+// which stays a TODO until a `SubAgentSpawn` ToolOperation variant
+// lands). Steps 9-13 (handoff, model build, child loop, events,
+// AgentRunEvent::Spawned wiring) follow in P3.4+ sub-PRs.
 pub mod sub_agent_dispatcher;
 pub use sub_agent_dispatcher::{AgentSpecRegistry, DefaultSubAgentDispatcher, MultiAgentConfig};
 

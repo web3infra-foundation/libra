@@ -1,39 +1,41 @@
-//! Default `SubAgentDispatcher` implementation — gates only (steps 1–7).
+//! Default `SubAgentDispatcher` implementation — gates 1–4, 6–8.
 //!
-//! This module is the OC-Phase 3 P3.3 deliverable from
-//! `docs/improvement/opencode.md`. It implements the **gate half** of
-//! the 14-step dispatcher main flow:
+//! This module ships the dispatcher across OC-Phase 3 P3.3 and P3.4 from
+//! `docs/improvement/opencode.md`. It implements the **gate + ask** half
+//! of the 14-step dispatcher main flow:
 //!
-//! 1. validate feature flag (`code.multi_agent.enabled`) — implemented
-//! 2. validate `ctx.depth + 1 <= max_subagent_depth` — implemented
+//! 1. validate feature flag (`code.multi_agent.enabled`) — P3.3 implemented
+//! 2. validate `ctx.depth + 1 <= max_subagent_depth` — P3.3 implemented
 //! 3. validate `concurrent_count + 1 <= max_concurrent_subagents`
-//!    via atomic `fetch_add` claim — implemented
+//!    via atomic `fetch_add` claim — P3.3 implemented
 //! 4. resolve `subagent_type` via the spec registry; reject `Primary`
-//!    profiles — implemented
+//!    profiles — P3.3 implemented
 //! 5. `SafetyDecision::evaluate(SubAgentSpawn { name, prompt_digest })`
-//!    — **DEFERRED** to P3.4. Today the call is a marked TODO no-op
-//!    that always accepts. The P3.4 wire-up needs a `SubAgentSpawn`
+//!    — still a TODO no-op. Needs a `SubAgentSpawn`
 //!    [`crate::internal::ai::runtime::ToolOperation`] variant before
-//!    `ToolBoundaryPolicy::decide` can take it. Documenting the
-//!    deferral here so the surrounding gate ordering is correct;
-//!    callers see no semantic gap because no real safety policy is
-//!    configured against `SubAgentSpawn` today.
+//!    `ToolBoundaryPolicy::decide` can take it. Today the dispatcher
+//!    accepts every sub-spec that survived the prior gates; no
+//!    semantic gap exists because Libra has no `SubAgentSpawn`
+//!    policy configured.
 //! 6. compute `effective_ruleset` via `child_ruleset(parent, sub_spec)`
-//!    — implemented
+//!    — P3.3 implemented
 //! 7. assert no permission escalation (Permission Escalation Gate)
-//!    — implemented
+//!    — P3.3 implemented
+//! 8. `PermissionService.ask(...)` for `LlmInitiated` only;
+//!    `UserInitiated { bypass_permission_ask: true }` skips the
+//!    dialog. `Reject{feedback}` surfaces as
+//!    [`TaskFailure::ApprovalRejected`]. — P3.4 implemented
 //!
-//! Steps 8–13 (permission ask, handoff, model build, child loop) are
-//! P3.4+. In this PR the dispatcher returns a placeholder
-//! [`TaskResult`] **only when every gate passes** — the call cannot
-//! reach a real sub-agent run yet. Callers who hit the success path
-//! will see an empty `final_text` and `steps_used = 0`; that is by
-//! design and tests pin it.
-//!
-//! The gates are tested in isolation. The placeholder tail makes it
-//! possible for the steps-1-through-7 checks to land with their full
-//! cleanup story (concurrency counter decrement, SafetyDecision call)
-//! without coupling P3.3 to the still-unwritten P3.4 services.
+//! Steps 9–13 (model build, handoff, child JSONL session,
+//! `AgentRunEvent::Spawned`, child run_tool_loop) stay deferred to
+//! P3.4+ follow-ups: each needs a dependency that has not landed yet
+//! (the OC-Phase 4 context handoff builder, the `agent_run`
+//! schema's child run plumbing, and the tool-loop integration).
+//! Callers that pass step 8 still see the placeholder
+//! [`TaskResult`] from P3.3 — empty `final_text`, zero `steps_used`,
+//! the spec-derived agent / provider / model identities. Tests pin
+//! that shape so a future regression that drops the placeholder
+//! before steps 9–13 land is loud.
 
 use std::sync::{
     Arc,
@@ -43,7 +45,8 @@ use std::sync::{
 use futures::future::BoxFuture;
 
 use super::sub_agent::{
-    DispatchContext, SubAgentDispatcher, TaskEntryKind, TaskFailure, TaskInvocation, TaskResult,
+    DispatchContext, PermissionAskRequest, PermissionAskSource, PermissionReply,
+    SubAgentDispatcher, TaskEntryKind, TaskFailure, TaskInvocation, TaskResult,
 };
 use crate::internal::ai::{
     agent::profile::AgentExecutionSpec,
@@ -274,9 +277,45 @@ impl SubAgentDispatcher for DefaultSubAgentDispatcher {
             let (sub_spec, _effective) =
                 self.run_capability_gates(&ctx, &invocation, entry_kind)?;
 
-            // Steps 8-13 land in P3.4. Today the placeholder tail
-            // produces a TaskResult shaped from the resolved spec so
-            // gate-success is observable end-to-end.
+            // Step 8: permission ask. Per the doc's "Two Entry Points"
+            // table, only `LlmInitiated` triggers the ask. **All**
+            // `UserInitiated` variants — both `bypass_permission_ask:
+            // true` and `false` — currently skip the dialog because
+            // today's only `UserInitiated` call sites (slash command,
+            // Code Control RPC, SubtaskPart payload arriving in P3.6)
+            // set `bypass: true` by construction. P3.6 reviews
+            // whether a `bypass: false` slash-command path is
+            // actually meaningful; if so, this match arm widens to
+            // include it.
+            if let TaskEntryKind::LlmInitiated = entry_kind {
+                let prompt_digest = digest_for_prompt(&invocation.prompt);
+                let patterns = vec![invocation.subagent_type.clone()];
+                let request = PermissionAskRequest {
+                    permission: "task",
+                    patterns: &patterns,
+                    thread_id: ctx.parent_thread_id,
+                    session_id: ctx.parent_session_id,
+                    source: PermissionAskSource::SubAgentSpawn {
+                        name: invocation.subagent_type.clone(),
+                        prompt_digest,
+                    },
+                };
+                match ctx.permission_service.ask(request).await {
+                    PermissionReply::Once | PermissionReply::Always { .. } => {
+                        // The dispatcher itself does not persist
+                        // `Always` patterns — that is the responsibility
+                        // of the asker implementation, which has access
+                        // to the project's `ApprovedRulesetStore`.
+                    }
+                    PermissionReply::Reject { feedback } => {
+                        return Err(TaskFailure::ApprovalRejected { feedback });
+                    }
+                }
+            }
+
+            // Steps 9-13 land in subsequent OC-Phase 3 PRs. Today the
+            // placeholder tail produces a TaskResult shaped from the
+            // resolved spec so gate-success is observable end-to-end.
             let result = TaskResult {
                 task_id: invocation.task_id.clone().unwrap_or_else(|| {
                     // P3.5 will mint a real id from the AgentRunEvent
@@ -350,6 +389,21 @@ fn collect_permission_keys(
     set.into_iter().collect()
 }
 
+/// Produce a short, human-readable preview of a prompt for the
+/// permission ask UI. Cap at the first line and 80 characters so the
+/// digest fits in a one-line prompt header. Not a cryptographic hash —
+/// the goal is "enough to recognise the dispatch in a log", not
+/// uniqueness.
+fn digest_for_prompt(prompt: &str) -> String {
+    let first_line = prompt.lines().next().unwrap_or("").trim();
+    if first_line.chars().count() <= 80 {
+        first_line.to_string()
+    } else {
+        let truncated: String = first_line.chars().take(77).collect();
+        format!("{truncated}…")
+    }
+}
+
 /// Collect every pattern referenced by a sub-spec's converted ruleset,
 /// always including `"*"` as a defense-in-depth sample. The doc
 /// requires `("*" ∪ child_spec.permission.iter().map(|r| &r.pattern))`
@@ -376,6 +430,7 @@ mod tests {
         sync::Mutex,
     };
 
+    use futures::future::BoxFuture;
     use sea_orm::Database;
 
     use super::*;
@@ -386,8 +441,9 @@ mod tests {
                 ModelBinding, ToolSelection,
             },
             runtime::sub_agent::{
-                AbortToken, ContextFrameLoader, DispatchContext, MessageId, PermissionService,
-                SubAgentDispatcher, TaskEntryKind, TaskFailure, TaskInvocation,
+                AbortToken, ContextFrameLoader, DispatchContext, MessageId, PermissionAskRequest,
+                PermissionAsker, PermissionReply, PermissionService, SubAgentDispatcher,
+                TaskEntryKind, TaskFailure, TaskInvocation,
             },
         },
         permission::{PermissionAction, PermissionRule, PermissionRuleset},
@@ -395,6 +451,43 @@ mod tests {
         session::SessionId,
         usage::UsageRecorder,
     };
+
+    /// Test asker that replies with a pre-canned [`PermissionReply`]
+    /// and counts how many times `ask()` was invoked. The counter
+    /// pins the doc's "ask only on `LlmInitiated`" rule.
+    struct TestAsker {
+        reply: PermissionReply,
+        ask_calls: Mutex<u32>,
+    }
+
+    impl TestAsker {
+        fn always(reply: PermissionReply) -> Self {
+            Self {
+                reply,
+                ask_calls: Mutex::new(0),
+            }
+        }
+        fn ask_call_count(&self) -> u32 {
+            *self.ask_calls.lock().unwrap()
+        }
+    }
+
+    impl PermissionAsker for TestAsker {
+        fn ask<'a>(&'a self, _request: PermissionAskRequest<'a>) -> BoxFuture<'a, PermissionReply> {
+            *self.ask_calls.lock().unwrap() += 1;
+            let reply = self.reply.clone();
+            Box::pin(async move { reply })
+        }
+    }
+
+    /// Build a [`PermissionService`] backed by a fresh `TestAsker` and
+    /// hand back a clone of the asker so the test can assert the call
+    /// count after dispatch.
+    fn allow_once_service() -> (PermissionService, Arc<TestAsker>) {
+        let asker = Arc::new(TestAsker::always(PermissionReply::Once));
+        let service = PermissionService::new(asker.clone());
+        (service, asker)
+    }
 
     /// Test-only registry storing specs in a HashMap; the doc says any
     /// registry works as long as it implements the trait.
@@ -541,7 +634,7 @@ mod tests {
         let parent = parent_spec();
         let parent_ruleset: PermissionRuleset = Vec::new();
         let parent_binding = parent_binding();
-        let permission_service = PermissionService::default();
+        let (permission_service, _asker) = allow_once_service();
         let provider_factory = ProviderFactory;
         let context_frame_loader = ContextFrameLoader::default();
         let parent_thread = "thread-1".to_string();
@@ -586,7 +679,7 @@ mod tests {
         let parent = parent_spec();
         let parent_ruleset: PermissionRuleset = Vec::new();
         let parent_binding = parent_binding();
-        let permission_service = PermissionService::default();
+        let (permission_service, _asker) = allow_once_service();
         let provider_factory = ProviderFactory;
         let context_frame_loader = ContextFrameLoader::default();
         let parent_thread = "thread-1".to_string();
@@ -636,7 +729,7 @@ mod tests {
         let parent = parent_spec();
         let parent_ruleset: PermissionRuleset = Vec::new();
         let parent_binding = parent_binding();
-        let permission_service = PermissionService::default();
+        let (permission_service, _asker) = allow_once_service();
         let provider_factory = ProviderFactory;
         let context_frame_loader = ContextFrameLoader::default();
         let parent_thread = "thread-1".to_string();
@@ -687,7 +780,7 @@ mod tests {
         let parent = parent_spec();
         let parent_ruleset: PermissionRuleset = Vec::new();
         let parent_binding = parent_binding();
-        let permission_service = PermissionService::default();
+        let (permission_service, _asker) = allow_once_service();
         let provider_factory = ProviderFactory;
         let context_frame_loader = ContextFrameLoader::default();
         let parent_thread = "thread-1".to_string();
@@ -755,7 +848,7 @@ mod tests {
             vec![PermissionRule::new("edit", "*", PermissionAction::Deny)];
         let parent = parent_spec();
         let parent_binding = parent_binding();
-        let permission_service = PermissionService::default();
+        let (permission_service, _asker) = allow_once_service();
         let provider_factory = ProviderFactory;
         let context_frame_loader = ContextFrameLoader::default();
         let parent_thread = "thread-1".to_string();
@@ -818,7 +911,7 @@ mod tests {
         let parent = parent_spec();
         let parent_ruleset: PermissionRuleset = Vec::new();
         let parent_binding = parent_binding();
-        let permission_service = PermissionService::default();
+        let (permission_service, _asker) = allow_once_service();
         let provider_factory = ProviderFactory;
         let context_frame_loader = ContextFrameLoader::default();
         let parent_thread = "thread-1".to_string();
@@ -882,6 +975,169 @@ mod tests {
         assert_eq!(dispatcher.in_flight(), 1);
     }
 
+    /// Scenario (OC-Phase 3 P3.4 step 8 — Reject path): a
+    /// `LlmInitiated` dispatch whose permission ask returns `Reject`
+    /// surfaces `TaskFailure::ApprovalRejected`, with the user's
+    /// optional feedback forwarded so the caller can show it to the
+    /// model. The concurrency counter releases via the RAII guard.
+    #[tokio::test]
+    async fn dispatch_returns_approval_rejected_when_asker_rejects() {
+        let config = MultiAgentConfig {
+            enabled: true,
+            max_subagent_depth: 4,
+            max_concurrent_subagents: 4,
+        };
+        let (dispatcher, registry, usage, store) = dispatcher_test_harness(config).await;
+        registry.insert(explore_subagent());
+
+        let asker = Arc::new(TestAsker::always(PermissionReply::Reject {
+            feedback: Some("budget concerns".to_string()),
+        }));
+        let permission_service = PermissionService::new(asker.clone());
+
+        let parent = parent_spec();
+        let parent_ruleset: PermissionRuleset = Vec::new();
+        let parent_binding = parent_binding();
+        let provider_factory = ProviderFactory;
+        let context_frame_loader = ContextFrameLoader::default();
+        let parent_thread = "thread-1".to_string();
+        let parent_session: SessionId = "session-1".to_string();
+
+        let context = ctx(
+            &parent_thread,
+            &parent_session,
+            &parent,
+            &parent_ruleset,
+            &parent_binding,
+            &permission_service,
+            &store,
+            &provider_factory,
+            &usage,
+            &context_frame_loader,
+            0,
+        );
+
+        let result = dispatcher
+            .dispatch(context, invocation("explore"), TaskEntryKind::LlmInitiated)
+            .await;
+        match result {
+            Err(TaskFailure::ApprovalRejected { feedback }) => {
+                assert_eq!(feedback.as_deref(), Some("budget concerns"));
+            }
+            other => panic!("expected ApprovalRejected, got {other:?}"),
+        }
+        assert_eq!(asker.ask_call_count(), 1);
+        // RAII guard must have released the slot.
+        assert_eq!(dispatcher.in_flight(), 0);
+    }
+
+    /// Scenario (P3.4 step 8 — Once allow path): an asker that replies
+    /// `Once` lets the dispatch through to the placeholder tail. The
+    /// asker is invoked exactly once, regardless of `Once` vs
+    /// `Always` (the asker, not the dispatcher, persists `Always`
+    /// rules).
+    #[tokio::test]
+    async fn dispatch_proceeds_when_asker_replies_once() {
+        let config = MultiAgentConfig {
+            enabled: true,
+            max_subagent_depth: 4,
+            max_concurrent_subagents: 4,
+        };
+        let (dispatcher, registry, usage, store) = dispatcher_test_harness(config).await;
+        registry.insert(explore_subagent());
+
+        let (permission_service, asker) = allow_once_service();
+        let parent = parent_spec();
+        let parent_ruleset: PermissionRuleset = Vec::new();
+        let parent_binding = parent_binding();
+        let provider_factory = ProviderFactory;
+        let context_frame_loader = ContextFrameLoader::default();
+        let parent_thread = "thread-1".to_string();
+        let parent_session: SessionId = "session-1".to_string();
+
+        let context = ctx(
+            &parent_thread,
+            &parent_session,
+            &parent,
+            &parent_ruleset,
+            &parent_binding,
+            &permission_service,
+            &store,
+            &provider_factory,
+            &usage,
+            &context_frame_loader,
+            0,
+        );
+
+        let result = dispatcher
+            .dispatch(context, invocation("explore"), TaskEntryKind::LlmInitiated)
+            .await
+            .expect("Once should let the dispatch through");
+        assert_eq!(result.agent_name, "explore");
+        assert_eq!(asker.ask_call_count(), 1, "ask must fire on LlmInitiated");
+    }
+
+    /// Scenario (P3.4 step 8 — UserInitiated bypass path): a
+    /// `UserInitiated { bypass_permission_ask: true }` dispatch
+    /// MUST NOT call the asker. The user already chose the dispatch
+    /// (slash command, Code Control RPC, SubtaskPart payload), so the
+    /// dialog would be redundant. Even an asker that always rejects
+    /// would not fire.
+    #[tokio::test]
+    async fn dispatch_user_initiated_bypass_skips_permission_ask() {
+        let config = MultiAgentConfig {
+            enabled: true,
+            max_subagent_depth: 4,
+            max_concurrent_subagents: 4,
+        };
+        let (dispatcher, registry, usage, store) = dispatcher_test_harness(config).await;
+        registry.insert(explore_subagent());
+
+        let asker = Arc::new(TestAsker::always(PermissionReply::Reject {
+            feedback: Some("would have rejected".to_string()),
+        }));
+        let permission_service = PermissionService::new(asker.clone());
+
+        let parent = parent_spec();
+        let parent_ruleset: PermissionRuleset = Vec::new();
+        let parent_binding = parent_binding();
+        let provider_factory = ProviderFactory;
+        let context_frame_loader = ContextFrameLoader::default();
+        let parent_thread = "thread-1".to_string();
+        let parent_session: SessionId = "session-1".to_string();
+
+        let context = ctx(
+            &parent_thread,
+            &parent_session,
+            &parent,
+            &parent_ruleset,
+            &parent_binding,
+            &permission_service,
+            &store,
+            &provider_factory,
+            &usage,
+            &context_frame_loader,
+            0,
+        );
+
+        let result = dispatcher
+            .dispatch(
+                context,
+                invocation("explore"),
+                TaskEntryKind::UserInitiated {
+                    bypass_permission_ask: true,
+                },
+            )
+            .await
+            .expect("UserInitiated bypass must not fail at step 8");
+        assert_eq!(result.agent_name, "explore");
+        assert_eq!(
+            asker.ask_call_count(),
+            0,
+            "UserInitiated bypass must NOT call the asker"
+        );
+    }
+
     /// Scenario: every gate passes → the placeholder TaskResult flows
     /// through with the resolved provider/model bound to the agent's
     /// spec. The concurrency counter returns to 0 after the call.
@@ -901,7 +1157,7 @@ mod tests {
         let parent = parent_spec();
         let parent_ruleset: PermissionRuleset = Vec::new();
         let parent_binding = parent_binding();
-        let permission_service = PermissionService::default();
+        let (permission_service, _asker) = allow_once_service();
         let provider_factory = ProviderFactory;
         let context_frame_loader = ContextFrameLoader::default();
         let parent_thread = "thread-1".to_string();
@@ -929,7 +1185,9 @@ mod tests {
         assert_eq!(result.agent_name, "explore");
         assert_eq!(result.provider_id, "anthropic");
         assert_eq!(result.model_id, "claude-3-5-haiku-latest");
-        // P3.3 placeholder tail leaves these empty/zero — P3.4 fills.
+        // Placeholder tail still leaves these empty/zero — steps
+        // 9–13 (handoff + model build + child loop) fill them in
+        // subsequent OC-Phase 3 sub-PRs.
         assert_eq!(result.final_text, "");
         assert_eq!(result.steps_used, 0);
 

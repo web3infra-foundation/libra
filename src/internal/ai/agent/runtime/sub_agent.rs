@@ -89,19 +89,103 @@ impl AbortToken {
     }
 }
 
-// ─── Runtime service placeholders ───────────────────────────────────────
+// ─── Permission service: real trait-shaped contract (OC-Phase 3 P3.4) ──
 
-/// Placeholder for the permission service that mediates the three-state
-/// `Once` / `Always` / `Reject` reply flow. Real shape arrives in P3.4
-/// when the dispatcher wires `permission.ask()` for `LlmInitiated`
-/// dispatches.
-#[derive(Debug, Default)]
-pub struct PermissionService {
-    /// Intentionally empty — future fields land in P3.4. Marked `_marker`
-    /// so the placeholder cannot accidentally be constructed and used as a
-    /// real service in production code today.
-    _marker: (),
+/// User reply to a `permission.ask(...)` prompt. Mirrors the doc's
+/// three-state reply (`Once` / `Always` / `Reject`) so a future opencode
+/// interchange is a structural copy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PermissionReply {
+    /// Allow this single call. Do not persist.
+    Once,
+    /// Allow this call and persist `(permission, pattern)` rows for the
+    /// listed patterns into the project's `approved_permission` table
+    /// (OC-Phase 2 P2.5). The patterns are typically the request's
+    /// declared patterns, but the user-facing surface may narrow them
+    /// (e.g. only the path the assistant is acting on).
+    Always { patterns: Vec<String> },
+    /// Refuse this call. Optional `feedback` is forwarded to the model
+    /// as a tool-result error so it can adjust subsequent behaviour.
+    Reject { feedback: Option<String> },
 }
+
+/// Where a permission ask originated. The dispatcher passes
+/// `SubAgentSpawn` for the LlmInitiated step-8 ask; future call sites
+/// (shell escalation, edit on protected files) will append more
+/// variants without breaking the trait surface.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PermissionAskSource {
+    /// The parent agent is about to dispatch a sub-agent via the
+    /// `task` tool. `prompt_digest` is a short hash / preview of the
+    /// outgoing prompt so the user can recognise the dispatch in logs.
+    SubAgentSpawn { name: String, prompt_digest: String },
+}
+
+/// One permission request flowing through the service.
+///
+/// Borrowed shape so the caller does not have to clone the parent's
+/// thread / session ids per ask. Extending the request later is a
+/// non-breaking change as long as new fields are appended.
+pub struct PermissionAskRequest<'a> {
+    pub permission: &'a str,
+    pub patterns: &'a [String],
+    pub thread_id: &'a str,
+    pub session_id: &'a SessionId,
+    pub source: PermissionAskSource,
+}
+
+/// Object-safe trait the [`PermissionService`] delegates to.
+///
+/// Implementations land in P3.4+ (interactive TUI prompt, automation
+/// API, programmatic always-allow / always-reject for tests). Today the
+/// trait is the contract the dispatcher's step-8 call site speaks.
+pub trait PermissionAsker: Send + Sync {
+    fn ask<'a>(
+        &'a self,
+        request: PermissionAskRequest<'a>,
+    ) -> futures::future::BoxFuture<'a, PermissionReply>;
+}
+
+/// Permission service handed into [`DispatchContext`].
+///
+/// A thin wrapper around an `Arc<dyn PermissionAsker>` so the dispatcher
+/// holds a stable reference type while the underlying asker can be
+/// swapped without touching the dispatch signature. Constructors that
+/// take an explicit asker reflect the doc's contract: there is no safe
+/// default, every production caller must supply an asker that matches
+/// its surface (TUI prompt, automation queue, etc.).
+pub struct PermissionService {
+    asker: std::sync::Arc<dyn PermissionAsker>,
+}
+
+impl PermissionService {
+    /// Wrap an asker. Use [`Self::with_asker`] for `Arc` convenience.
+    pub fn new(asker: std::sync::Arc<dyn PermissionAsker>) -> Self {
+        Self { asker }
+    }
+
+    /// Convenience constructor that takes any concrete asker type and
+    /// boxes it into the service. Useful for tests.
+    pub fn with_asker<A: PermissionAsker + 'static>(asker: A) -> Self {
+        Self::new(std::sync::Arc::new(asker))
+    }
+
+    /// Forward an ask through the underlying asker.
+    pub async fn ask(&self, request: PermissionAskRequest<'_>) -> PermissionReply {
+        self.asker.ask(request).await
+    }
+}
+
+impl std::fmt::Debug for PermissionService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The asker is opaque; surface only the wrapper's identity so a
+        // production debug log does not accidentally include sensitive
+        // state from a concrete asker.
+        f.debug_struct("PermissionService").finish_non_exhaustive()
+    }
+}
+
+// ─── Other runtime service placeholders ─────────────────────────────────
 
 /// Placeholder for the context-frame loader the dispatcher uses to
 /// materialise a [`ContextHandoff`]-style summary from the parent session
