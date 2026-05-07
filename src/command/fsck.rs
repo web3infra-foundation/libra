@@ -47,6 +47,7 @@ const FSCK_AFTER_HELP: &str = "Examples:
   libra fsck --no-reflogs
   libra fsck --unreachable
   libra fsck --no-dangling
+  libra fsck --lost-found
   libra fsck <object-id>";
 
 /// Verify repository integrity by checking objects, refs, and index
@@ -84,6 +85,10 @@ pub struct FsckArgs {
     /// Show object names (e.g., refs/heads/master, HEAD@{1234567890}~2^1:src/) in verbose output
     #[arg(long)]
     pub name_objects: bool,
+
+    /// Write dangling objects to .libra/lost-found/
+    #[arg(long)]
+    pub lost_found: bool,
 }
 
 impl FsckArgs {
@@ -378,7 +383,7 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
     check_connectivity(&all_hashes, storage, &mut result, args.verbose, args.name_objects).await?;
 
     // Stage 8: Find dangling and unreachable objects
-    find_dangling_unreachable(storage, &mut result, args.unreachable, args.no_reflogs, args.dangling_enabled()).await?;
+    find_dangling_unreachable(storage, &mut result, args.unreachable, args.no_reflogs, args.dangling_enabled(), args.lost_found).await?;
 
     // Print notices
     print_notices(head_is_unborn, &result);
@@ -895,21 +900,26 @@ fn bfs_mark_reachable(
 /// With --unreachable flag: prints all unreachable objects.
 /// Default (dangling): only prints dangling commits (matching git fsck behavior).
 /// With --no-dangling: skips dangling object reporting entirely.
+/// With --lost-found: writes dangling/unreachable objects to .libra/lost-found/ (implies --no-reflogs for dangling detection)
 async fn find_dangling_unreachable(
     storage: &ClientStorage,
     result: &mut FsckResult,
     unreachable: bool,
     no_reflogs: bool,
     dangling: bool,
+    lost_found: bool,
 ) -> CliResult<()> {
     let ctx = collect_reachability_context(storage).await?;
+
+    // --lost-found implies --no-reflogs for dangling detection (matching git fsck behavior)
+    let effective_no_reflogs = no_reflogs || lost_found;
 
     // Build the set of starting points: refs + reflog entries
     // This matches git fsck behavior: objects reachable from reflog entries are not dangling
     let mut starting_points = ctx.refs_reachable.clone();
 
     // Only include reflog objects if --no-reflogs is not specified
-    if !no_reflogs {
+    if !effective_no_reflogs {
         starting_points.extend(ctx.reflog_objects.iter().copied());
     }
 
@@ -917,6 +927,9 @@ async fn find_dangling_unreachable(
 
     // Mark all objects reachable from refs + reflog + index
     let all_reachable = bfs_mark_reachable(&starting_points, storage);
+
+    // Collect dangling/unreachable objects for lost-found
+    let mut lost_found_objects: Vec<(ObjectHash, String)> = Vec::new();  // (hash, obj_type)
 
     // Find objects not reachable from any starting point
     for hash in &ctx.all_objects {
@@ -928,6 +941,11 @@ async fn find_dangling_unreachable(
             Ok(t) => t.to_string(),
             Err(_) => "unknown".to_string(),
         };
+
+        // Collect objects for lost-found
+        if lost_found {
+            lost_found_objects.push((hash.clone(), obj_type.clone()));
+        }
 
         if unreachable {
             // --unreachable: report all unreachable objects
@@ -955,6 +973,112 @@ async fn find_dangling_unreachable(
             }
         }
         // --no-dangling: skip dangling reporting entirely
+    }
+
+    // Write lost-found objects if --lost-found is specified
+    if lost_found && !lost_found_objects.is_empty() {
+        write_lost_found_objects(storage, &lost_found_objects).await?;
+    }
+
+    Ok(())
+}
+
+/// Write dangling/unreachable objects to .libra/lost-found/
+/// - commit/tree objects: written to lost-found/commit/<hash> with hash as content
+/// - blob objects: written to lost-found/other/<hash> with blob content
+async fn write_lost_found_objects(
+    storage: &ClientStorage,
+    objects: &[(ObjectHash, String)],  // (hash, object_type)
+) -> CliResult<()> {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
+    let lost_found_dir = storage.base_path().parent()
+        .expect("storage should have parent")
+        .join("lost-found");
+
+    // Create lost-found directory structure
+    let commit_dir = lost_found_dir.join("commit");
+    let other_dir = lost_found_dir.join("other");
+    fs::create_dir_all(&commit_dir).map_err(|e| {
+        CliError::fatal(format!("failed to create lost-found/commit: {}", e))
+    })?;
+    fs::create_dir_all(&other_dir).map_err(|e| {
+        CliError::fatal(format!("failed to create lost-found/other: {}", e))
+    })?;
+
+    for (hash, obj_type) in objects {
+        let hash_str = hash.to_string();
+
+        match obj_type.as_str() {
+            "commit" => {
+                // Write commit hash to lost-found/commit/<hash>
+                let file_path = commit_dir.join(&hash_str);
+                let mut file = OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(true)
+                    .open(&file_path)
+                    .map_err(|e| {
+                        CliError::fatal(format!("failed to create {}: {}", file_path.display(), e))
+                    })?;
+                writeln!(file, "{}", hash_str)
+                    .map_err(|e| {
+                        CliError::fatal(format!("failed to write {}: {}", file_path.display(), e))
+                    })?;
+            }
+            "tree" => {
+                // Write tree hash to lost-found/other/<hash>
+                let file_path = other_dir.join(&hash_str);
+                let mut file = OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(true)
+                    .open(&file_path)
+                    .map_err(|e| {
+                        CliError::fatal(format!("failed to create {}: {}", file_path.display(), e))
+                    })?;
+                writeln!(file, "{}", hash_str)
+                    .map_err(|e| {
+                        CliError::fatal(format!("failed to write {}: {}", file_path.display(), e))
+                    })?;
+            }
+            "blob" => {
+                // Write blob content to lost-found/other/<hash>
+                let file_path = other_dir.join(&hash_str);
+                let data = storage.get(hash).map_err(|e| {
+                    CliError::fatal(format!("failed to read blob {}: {}", hash_str, e))
+                })?;
+                let mut file = OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(true)
+                    .open(&file_path)
+                    .map_err(|e| {
+                        CliError::fatal(format!("failed to create {}: {}", file_path.display(), e))
+                    })?;
+                file.write_all(&data)
+                    .map_err(|e| {
+                        CliError::fatal(format!("failed to write {}: {}", file_path.display(), e))
+                    })?;
+            }
+            _ => {
+                // Unknown type: write hash to other
+                let file_path = other_dir.join(&hash_str);
+                let mut file = OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(true)
+                    .open(&file_path)
+                    .map_err(|e| {
+                        CliError::fatal(format!("failed to create {}: {}", file_path.display(), e))
+                    })?;
+                writeln!(file, "{}", hash_str)
+                    .map_err(|e| {
+                        CliError::fatal(format!("failed to write {}: {}", file_path.display(), e))
+                    })?;
+            }
+        }
     }
 
     Ok(())
