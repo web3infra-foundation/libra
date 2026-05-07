@@ -219,7 +219,9 @@ fn strip_assistant_reasoning(request: &mut CompletionRequest) {
 /// block, but it tolerates assistant turns with at least one non-empty
 /// content part. Tool calls are *never* empty in the canonical sense, so a
 /// turn carrying a ToolCall is preserved even when its accompanying Text is
-/// empty.
+/// empty — this also makes the operation safe for tool_use/tool_result
+/// pairing: only turns with no `ToolCall` parts are eligible for removal,
+/// so dropping one cannot orphan a downstream `ToolResult`.
 fn drop_empty_assistant_turns(request: &mut CompletionRequest) {
     request.chat_history.retain(|message| match message {
         Message::Assistant { content, .. } => content.iter().any(|part| match part {
@@ -228,6 +230,51 @@ fn drop_empty_assistant_turns(request: &mut CompletionRequest) {
         }),
         _ => true,
     });
+}
+
+/// Validate Anthropic's tool_use / tool_result pairing rule: every
+/// `UserContent::ToolResult{ id }` must be preceded earlier in the
+/// transcript by an `AssistantContent::ToolCall { id }` with the same id,
+/// and each tool-call id can only be paired with one tool result. Anthropic
+/// rejects orphaned or duplicated tool_results with a 400 that is hard to
+/// trace back to the offending message; failing fast here points the caller
+/// at the exact `chat_history[i]` index. Idempotent: the second pass over
+/// the same history reaches the same set of pairings.
+fn require_anthropic_tool_pairing(request: &CompletionRequest) -> Result<(), TransformError> {
+    use std::collections::HashSet;
+
+    let mut pending_calls: HashSet<String> = HashSet::new();
+    for (idx, message) in request.chat_history.iter().enumerate() {
+        match message {
+            Message::Assistant { content, .. } => {
+                for part in content.iter() {
+                    if let AssistantContent::ToolCall(call) = part {
+                        pending_calls.insert(call.id.clone());
+                    }
+                }
+            }
+            Message::User { content } => {
+                for part in content.iter() {
+                    if let UserContent::ToolResult(result) = part
+                        && !pending_calls.remove(&result.id)
+                    {
+                        return Err(TransformError::InvalidRequest {
+                            provider: provider_id::ANTHROPIC,
+                            reason: format!(
+                                "ToolResult at chat_history[{idx}] (id={}) has no \
+                                 preceding ToolCall with matching id; Anthropic \
+                                 requires every tool_result to follow the assistant \
+                                 tool_use that produced it",
+                                result.id
+                            ),
+                        });
+                    }
+                }
+            }
+            Message::System { .. } => {}
+        }
+    }
+    Ok(())
 }
 
 /// Validate that every `UserContent::ToolResult` in `chat_history` has a
@@ -308,6 +355,12 @@ impl ProviderTransform for AnthropicTransform {
         request: &mut CompletionRequest,
     ) -> Result<(), TransformError> {
         drop_empty_assistant_turns(request);
+        // Pairing check after the drop so the validator sees the exact
+        // shape Anthropic will receive on the wire. Drop is documented to
+        // never introduce orphans (it cannot remove a turn that carries a
+        // ToolCall) — running the check on the post-drop history is
+        // therefore equivalent to running it before, and idempotent.
+        require_anthropic_tool_pairing(request)?;
         Ok(())
     }
 
@@ -347,6 +400,14 @@ impl ProviderTransform for OpenAiTransform {
         // and `reasoning_content` is only emitted by reasoning-mode SDKs
         // through a different envelope. Strip it so a model upgrade to a
         // non-reasoning OpenAI model does not regress with a 400.
+        //
+        // Note: redundant on the canonical → wire path because
+        // `openai_compat::build_messages()` already drops `reasoning_content`
+        // for callers that pick the non-reasoning variant. The transform
+        // is kept as defense-in-depth — it expresses the policy at the
+        // canonical level so a future consumer of `CompletionRequest`
+        // (observability hooks, retry middleware, additional wire
+        // adapters) cannot accidentally surface stale chain-of-thought.
         strip_assistant_reasoning(request);
         Ok(())
     }
@@ -689,6 +750,101 @@ mod tests {
             .prepare_request("claude-sonnet-4-0", &mut req)
             .unwrap();
         assert_eq!(req.chat_history.len(), 2);
+    }
+
+    #[test]
+    fn anthropic_transform_rejects_orphan_tool_result() {
+        // ToolResult appears with no preceding ToolCall of the same id.
+        let mut req = request_with(vec![
+            Message::user("hi"),
+            user_with_tool_result("call_orphan", "shell", serde_json::json!({})),
+        ]);
+        let err = AnthropicTransform
+            .prepare_request("claude-sonnet-4-0", &mut req)
+            .expect_err("orphan ToolResult must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("call_orphan"),
+            "error must reference offending tool result id, got: {msg}"
+        );
+        assert!(
+            msg.contains("ToolResult") && msg.contains("ToolCall"),
+            "error must reference both halves of the pairing, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn anthropic_transform_rejects_tool_result_with_mismatched_id() {
+        let mut req = request_with(vec![
+            Message::user("hi"),
+            assistant_tool_call("call_1", "shell"),
+            user_with_tool_result("call_2", "shell", serde_json::json!({})),
+        ]);
+        let err = AnthropicTransform
+            .prepare_request("claude-sonnet-4-0", &mut req)
+            .expect_err("mismatched tool_result id must be rejected");
+        assert!(err.to_string().contains("call_2"));
+    }
+
+    #[test]
+    fn anthropic_transform_accepts_paired_tool_call_and_result() {
+        let mut req = request_with(vec![
+            Message::user("hi"),
+            assistant_tool_call("call_1", "shell"),
+            user_with_tool_result("call_1", "shell", serde_json::json!({"ok": true})),
+        ]);
+        AnthropicTransform
+            .prepare_request("claude-sonnet-4-0", &mut req)
+            .expect("matched tool pair must pass");
+    }
+
+    #[test]
+    fn anthropic_transform_drops_empty_assistant_between_paired_tool_messages() {
+        // The empty assistant turn between ToolCall and ToolResult is
+        // safe to drop because the ToolCall is in the *previous* assistant
+        // turn (its id remains visible to the pairing validator).
+        let mut req = request_with(vec![
+            assistant_tool_call("call_1", "shell"),
+            assistant_empty(),
+            user_with_tool_result("call_1", "shell", serde_json::json!({"ok": true})),
+        ]);
+        AnthropicTransform
+            .prepare_request("claude-sonnet-4-0", &mut req)
+            .expect("dropping the empty turn must preserve pairing");
+        assert_eq!(req.chat_history.len(), 2, "empty turn dropped");
+    }
+
+    #[test]
+    fn anthropic_transform_rejects_duplicate_tool_result_for_same_id() {
+        // Anthropic rejects two tool_results for the same tool_use; the
+        // pairing validator must catch the duplicate.
+        let mut req = request_with(vec![
+            assistant_tool_call("call_1", "shell"),
+            user_with_tool_result("call_1", "shell", serde_json::json!({"first": true})),
+            user_with_tool_result("call_1", "shell", serde_json::json!({"second": true})),
+        ]);
+        let err = AnthropicTransform
+            .prepare_request("claude-sonnet-4-0", &mut req)
+            .expect_err("duplicate tool_result for same id must be rejected");
+        assert!(err.to_string().contains("call_1"));
+    }
+
+    #[test]
+    fn anthropic_transform_pairing_validator_is_idempotent() {
+        let mut req = request_with(vec![
+            assistant_tool_call("call_1", "shell"),
+            user_with_tool_result("call_1", "shell", serde_json::json!({"ok": true})),
+            assistant_tool_call("call_2", "shell"),
+            user_with_tool_result("call_2", "shell", serde_json::json!({"ok": true})),
+        ]);
+        AnthropicTransform
+            .prepare_request("claude-sonnet-4-0", &mut req)
+            .unwrap();
+        let snapshot = req.chat_history.clone();
+        AnthropicTransform
+            .prepare_request("claude-sonnet-4-0", &mut req)
+            .unwrap();
+        assert_eq!(req.chat_history, snapshot);
     }
 
     #[test]

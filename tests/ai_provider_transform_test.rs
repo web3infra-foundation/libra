@@ -126,6 +126,75 @@ fn openai_strips_reasoning_but_deepseek_and_kimi_preserve_it() {
     }
 }
 
+/// Anthropic rejects orphan `ToolResult` parts (a `tool_result` block with
+/// no preceding `tool_use`) with a 400 that is hard to trace back to the
+/// offending message. The transform pairing validator points the caller at
+/// the exact tool call id so tooling can fix the transcript.
+#[test]
+fn anthropic_rejects_orphan_tool_result_through_wired_pipeline() {
+    let mut request = request_with(vec![
+        Message::user("hi"),
+        user_with_tool_result("call_orphan", "shell", serde_json::json!({"ok": true})),
+    ]);
+    let err = transform_for(provider_id::ANTHROPIC)
+        .prepare_request("claude-sonnet-4-0", &mut request)
+        .expect_err("orphan ToolResult must be rejected via the wired pipeline");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("call_orphan"),
+        "error must name the offending ToolResult id, got: {msg}"
+    );
+}
+
+/// Two tool_results for the same tool_use is also a 400; the pairing
+/// validator catches it instead of letting Anthropic emit an opaque error.
+#[test]
+fn anthropic_rejects_duplicate_tool_result_through_wired_pipeline() {
+    let assistant_tool_call_msg = |id: &str| -> Message { assistant_tool_call(id, "shell") };
+    let mut request = request_with(vec![
+        assistant_tool_call_msg("call_1"),
+        user_with_tool_result("call_1", "shell", serde_json::json!({})),
+        user_with_tool_result("call_1", "shell", serde_json::json!({})),
+    ]);
+    let err = transform_for(provider_id::ANTHROPIC)
+        .prepare_request("claude-sonnet-4-0", &mut request)
+        .expect_err("duplicate ToolResult must be rejected");
+    assert!(err.to_string().contains("call_1"));
+}
+
+/// `finalize_response` must be idempotent across every provider — the
+/// runtime applies the transform on every turn and the retry middleware
+/// can re-apply it on a second attempt; mutation drift would otherwise
+/// surface as silently-different reasoning text on retry.
+#[test]
+fn finalize_response_is_idempotent_for_every_provider() {
+    use libra::internal::ai::completion::{AssistantContent, Text};
+
+    for &id in provider_id::ALL_PRODUCTION {
+        let transform = transform_for(id);
+        let mut content: Vec<AssistantContent> = vec![AssistantContent::Text(Text {
+            text: "hello".into(),
+        })];
+        let mut reasoning = Some("trace\n\n".to_string());
+        transform
+            .finalize_response("model-x", &mut content, &mut reasoning)
+            .unwrap();
+        let snapshot_content = content.clone();
+        let snapshot_reasoning = reasoning.clone();
+        transform
+            .finalize_response("model-x", &mut content, &mut reasoning)
+            .unwrap();
+        assert_eq!(
+            content, snapshot_content,
+            "{id}.finalize_response is not idempotent for content"
+        );
+        assert_eq!(
+            reasoning, snapshot_reasoning,
+            "{id}.finalize_response is not idempotent for reasoning_content"
+        );
+    }
+}
+
 /// Anthropic's transform drops *fully empty* assistant turns but preserves
 /// turns that carry tool calls — those are non-empty in the wire sense
 /// even if their accompanying Text part is missing.
