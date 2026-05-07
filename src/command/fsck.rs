@@ -48,6 +48,7 @@ const FSCK_AFTER_HELP: &str = "Examples:
   libra fsck --unreachable
   libra fsck --no-dangling
   libra fsck --lost-found
+  libra fsck --root
   libra fsck <object-id>";
 
 /// Verify repository integrity by checking objects, refs, and index
@@ -89,6 +90,10 @@ pub struct FsckArgs {
     /// Write dangling objects to .libra/lost-found/
     #[arg(long)]
     pub lost_found: bool,
+
+    /// Report root commits (commits with no parents)
+    #[arg(long)]
+    pub root: bool,
 }
 
 impl FsckArgs {
@@ -384,6 +389,11 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
 
     // Stage 8: Find dangling and unreachable objects
     find_dangling_unreachable(storage, &mut result, args.unreachable, args.no_reflogs, args.dangling_enabled(), args.lost_found).await?;
+
+    // Stage 9: Report root commits
+    if args.root {
+        find_and_report_roots(storage).await?;
+    }
 
     // Print notices
     print_notices(head_is_unborn, &result);
@@ -978,6 +988,37 @@ async fn find_dangling_unreachable(
     // Write lost-found objects if --lost-found is specified
     if lost_found && !lost_found_objects.is_empty() {
         write_lost_found_objects(storage, &lost_found_objects).await?;
+    }
+
+    Ok(())
+}
+
+/// Find and report root commits (commits with no parents)
+async fn find_and_report_roots(storage: &ClientStorage) -> CliResult<()> {
+    use git_internal::internal::object::commit::Commit;
+
+    let all_hashes = list_all_objects_in_storage(storage)
+        .map_err(|e| CliError::fatal(format!("failed to list objects: {}", e)))?;
+
+    for hash in all_hashes {
+        // Only check commit objects
+        let Ok(obj_type) = storage.get_object_type(&hash) else {
+            continue;
+        };
+
+        if obj_type != ObjectType::Commit {
+            continue;
+        }
+
+        // Load the commit and check if it has no parents
+        let Ok(commit) = load_object::<Commit>(&hash) else {
+            continue;
+        };
+
+        if commit.parent_commit_ids.is_empty() {
+            // This is a root commit
+            eprintln!("root {}", hash);
+        }
     }
 
     Ok(())
