@@ -9,6 +9,7 @@ pub mod allocator;
 pub mod budget;
 pub mod compaction;
 pub mod frame;
+pub mod handoff;
 pub mod memory_anchor;
 
 pub use allocator::{
@@ -24,6 +25,9 @@ pub use frame::{
     ContextAttachmentRef, ContextAttachmentStore, ContextFrameBuilder, ContextFrameCandidate,
     ContextFrameEvent, ContextFrameKind, ContextFrameOmission, ContextFrameSegment,
     ContextFrameSource, ContextFrameSourceKind, ContextTrustLevel,
+};
+pub use handoff::{
+    ContextHandoff, ContextHandoffParseError, ParsedSection, ParsedSummary, parse_handoff_template,
 };
 pub use memory_anchor::{
     MemoryAnchor, MemoryAnchorAction, MemoryAnchorConfidence, MemoryAnchorDraft, MemoryAnchorEvent,
