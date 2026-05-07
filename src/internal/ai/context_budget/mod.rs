@@ -20,7 +20,7 @@ pub use allocator::{
 };
 pub use budget::{
     ContextBudget, ContextBudgetError, ContextPriority, ContextSegmentBudget, ContextSegmentKind,
-    ProviderContextCapability, TruncationPolicy,
+    ProviderContextCapability, SAFETY_MARGIN_TOKENS, TruncationPolicy,
 };
 pub use compaction::{
     CompactionEvent, CompactionReason, DEFAULT_TAIL_TURNS, MAX_PRESERVE_RECENT_TOKENS,
@@ -29,7 +29,7 @@ pub use compaction::{
 };
 pub use compaction_agent::{
     COMPACTION_AGENT_NAME, CompactionAgentError, EMBEDDED_COMPACTION_PROFILE,
-    embedded_compaction_system_prompt, run_compaction,
+    compaction_event_for_handoff, embedded_compaction_system_prompt, run_compaction,
 };
 pub use frame::{
     ContextAttachmentRef, ContextAttachmentStore, ContextFrameBuilder, ContextFrameCandidate,
@@ -45,5 +45,6 @@ pub use memory_anchor::{
     MemoryAnchorScope, build_memory_anchor_prompt_section,
 };
 pub use projection::{
-    MessageProjection, ProjectionKind, PruneResult, filter_compacted, prune_inline_tool_output,
+    MessageProjection, ProjectionKind, PruneResult, compaction_event_to_projection,
+    filter_compacted, prune_inline_tool_output,
 };

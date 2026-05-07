@@ -8,6 +8,11 @@ use thiserror::Error;
 const DEFAULT_PROVIDER: &str = "runtime";
 const DEFAULT_MODEL: &str = "default";
 
+/// Token cushion subtracted from `max_prompt_tokens` when computing
+/// [`ContextBudget::usable`]. Mirrors opencode's
+/// `session/overflow.ts` `safety_margin = 1024`.
+pub const SAFETY_MARGIN_TOKENS: u64 = 1024;
+
 /// The seven context segments in the CEX-13a budget contract.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -272,6 +277,31 @@ impl ContextBudget {
 
     pub fn max_prompt_tokens(&self) -> u64 {
         self.max_prompt_tokens
+    }
+
+    /// Tokens the runtime considers safely usable for a single
+    /// input prompt. Mirrors opencode's `session/overflow.ts`
+    /// `usable(model)` formula:
+    /// `window - output_reserve - safety_margin`. Already encoded
+    /// in [`Self::max_prompt_tokens`] is `window - output_reserve`,
+    /// so the only delta is the safety margin — a fixed 1024-token
+    /// cushion to avoid rounding errors in token estimators
+    /// pushing a request over the actual provider window.
+    /// `saturating_sub` keeps the result non-negative for tiny
+    /// budgets configured in tests.
+    pub fn usable(&self) -> u64 {
+        self.max_prompt_tokens.saturating_sub(SAFETY_MARGIN_TOKENS)
+    }
+
+    /// `true` when the supplied input-token count crosses the
+    /// usable budget — the trigger condition for an OC-Phase 4
+    /// compaction pass. Matches opencode's `tokens.input >=
+    /// usable(model)` rule (P4.5 #Compaction-触发判定 in the
+    /// improvement doc): equality counts as overflow because the
+    /// next request would necessarily exceed the window after the
+    /// model emits any output.
+    pub fn is_overflow(&self, input_tokens: u64) -> bool {
+        input_tokens >= self.usable()
     }
 
     pub fn provider(&self) -> &ProviderContextCapability {

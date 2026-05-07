@@ -281,6 +281,29 @@ fn first_tool_call(
     })
 }
 
+/// Build a [`super::CompactionEvent`] from a successful
+/// [`run_compaction`] outcome. Centralises the frame → event
+/// conversion the dispatcher (OC-Phase 3) needs to apply on the
+/// `Ok` path of the compaction agent. Calling this helper from the
+/// `Err` path would be a logic error — the caller's responsibility
+/// is to gate on the `Result`, not to construct an event for a
+/// failed run. Keeping the conversion here means tests and the
+/// production dispatcher exercise the same code, and the doc rule
+/// "失败时不写入 CompactionEvent" stays a property of the helper's
+/// signature (it requires a successful `ContextHandoff` as input).
+pub fn compaction_event_for_handoff(
+    frame: &super::ContextFrameEvent,
+    handoff: &ContextHandoff,
+    reason: super::CompactionReason,
+    tail_start_id: Option<&str>,
+) -> super::CompactionEvent {
+    let event = super::CompactionEvent::from_frame(frame, reason, handoff.summary.clone());
+    match tail_start_id {
+        Some(id) => event.with_tail_start_id(id),
+        None => event,
+    }
+}
+
 /// Concatenate every text part in the assistant content list into a
 /// single owned `String`. Returns `None` when the list is empty or
 /// when every part is a tool call (the [`first_tool_call`] gate

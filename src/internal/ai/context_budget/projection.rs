@@ -32,7 +32,7 @@
 //!   bytes stay untouched and only the projection sent to the
 //!   model is rewritten.
 
-use super::compaction::{PRUNE_PROTECTED_TOOLS, TOOL_OUTPUT_MAX_CHARS};
+use super::compaction::{CompactionEvent, PRUNE_PROTECTED_TOOLS, TOOL_OUTPUT_MAX_CHARS};
 
 /// Discriminant the projection algorithm needs to identify each
 /// transcript entry. The dispatcher (P3 / P4) maps its richer
@@ -97,6 +97,27 @@ impl MessageProjection {
             _ => None,
         }
     }
+}
+
+/// Lift a persisted [`CompactionEvent`] into the lightweight
+/// projection input the reorder rule consumes. This defines the
+/// canonical id space used by the dispatcher: a compaction's
+/// `MessageProjection.id` is `event.event_id.to_string()`, and the
+/// matching `Summary.parent_compaction_id` MUST use the same
+/// stringified UUID so the search at
+/// [`filter_compacted`] can pair the two by string equality.
+///
+/// The dispatcher (OC-Phase 3) uses this helper instead of
+/// constructing the projection inline so the id-space contract
+/// stays in one place and any future migration (e.g. to a
+/// session-row-id space) lands here too.
+pub fn compaction_event_to_projection(event: &CompactionEvent) -> MessageProjection {
+    MessageProjection::new(
+        event.event_id.to_string(),
+        ProjectionKind::Compaction {
+            tail_start_id: event.tail_start_id.clone(),
+        },
+    )
 }
 
 /// Apply the PR #25851 compaction reorder rule.
