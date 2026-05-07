@@ -347,6 +347,9 @@ impl Head {
         C: ConnectionTrait,
     {
         if let Err(error) = Self::update_result_with_conn(db, new_head, remote).await {
+            if remote.is_none() {
+                panic!("fatal: failed to update HEAD reference: {error}");
+            }
             tracing::error!(
                 remote = ?remote,
                 error = %error,
@@ -434,5 +437,24 @@ mod tests {
                 .contains("invalid detached HEAD commit hash"),
             "unexpected error: {error}"
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    #[should_panic(expected = "fatal: failed to update HEAD reference")]
+    async fn update_with_conn_panics_when_local_head_row_missing() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = ChangeDirGuard::new(repo.path());
+
+        let db = get_db_conn_instance().await;
+        reference::Entity::delete_many()
+            .filter(reference::Column::Kind.eq(reference::ConfigKind::Head))
+            .filter(reference::Column::Remote.is_null())
+            .exec(&db)
+            .await
+            .unwrap();
+
+        Head::update_with_conn(&db, Head::Branch("main".to_string()), None).await;
     }
 }

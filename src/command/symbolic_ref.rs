@@ -11,6 +11,7 @@ use crate::{
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
+        util,
     },
 };
 
@@ -51,6 +52,7 @@ pub async fn execute(args: SymbolicRefArgs) -> Result<(), String> {
 }
 
 pub async fn execute_safe(args: SymbolicRefArgs, output: &OutputConfig) -> CliResult<()> {
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
     let result = run_symbolic_ref(&args).await?;
 
     if output.is_json() {
@@ -84,8 +86,7 @@ async fn run_symbolic_ref(args: &SymbolicRefArgs) -> CliResult<SymbolicRefOutput
     let branch_name = match Head::current_result().await.map_err(map_head_error)? {
         Head::Branch(branch_name) => branch_name,
         Head::Detached(_) if args.quiet => {
-            return Err(CliError::failure("HEAD is not a symbolic ref")
-                .with_stable_code(StableErrorCode::CliInvalidTarget));
+            return Err(CliError::silent_exit(1));
         }
         Head::Detached(_) => {
             return Err(CliError::failure("HEAD is not a symbolic ref")
