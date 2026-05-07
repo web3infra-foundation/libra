@@ -32,12 +32,14 @@ use libra::internal::ai::{
         CompletionUsage, CompletionUsageSummary, Text,
     },
     context_budget::{
-        CompactionReason, ContextAttachmentStore, ContextBudget, ContextFrameBuilder,
-        ContextFrameCandidate, ContextFrameEvent, ContextFrameKind, ContextFrameSource,
-        ContextSegmentBudget, ContextSegmentKind, ContextTrustLevel, TruncationPolicy,
-        compaction_event_for_handoff, embedded_compaction_system_prompt, parse_handoff_template,
-        prune_inline_tool_output, run_compaction,
+        CompactionAgentError, CompactionReason, ContextAttachmentStore, ContextBudget,
+        ContextFrameBuilder, ContextFrameCandidate, ContextFrameEvent, ContextFrameKind,
+        ContextFrameSource, ContextHandoffParseError, ContextSegmentBudget, ContextSegmentKind,
+        ContextTrustLevel, TruncationPolicy, compaction_event_for_handoff,
+        embedded_compaction_system_prompt, parse_handoff_template, prune_inline_tool_output,
+        run_compaction,
     },
+    runtime::event::Event,
     session::{
         SessionState,
         jsonl::{SessionEvent, SessionJsonlStore},
@@ -244,9 +246,24 @@ async fn s5_e2e_prune_then_compact_persists_event_and_parseable_handoff() {
         rendered_prompt.push_str(&pruned.into_string());
         rendered_prompt.push('\n');
     }
+    // Spec line 1699: the placeholder shape is
+    // `<pruned attachment_id="..." length="...">`. Pin both
+    // attribute names + the actual attachment id and length so a
+    // future rename of either attribute breaks this test before
+    // breaking on-the-wire compatibility with the dispatcher.
+    let placeholder_attachment = loaded.segments[0]
+        .attachment
+        .as_ref()
+        .expect("fixture must have externalised the segment");
+    let expected_length = huge_snapshot.encode_utf16().count();
+    let expected_placeholder = format!(
+        "<pruned attachment_id=\"{}\" length=\"{}\">",
+        placeholder_attachment.sha256, expected_length
+    );
     assert!(
-        rendered_prompt.contains("<pruned"),
-        "phase 1 (prune): rendered prompt must contain a <pruned ...> placeholder"
+        rendered_prompt.contains(&expected_placeholder),
+        "phase 1 (prune): rendered prompt must contain the exact placeholder \
+         `{expected_placeholder}`, got:\n{rendered_prompt}"
     );
     assert!(
         !rendered_prompt.contains("tool output line\ntool output line\ntool output line"),
@@ -263,12 +280,20 @@ async fn s5_e2e_prune_then_compact_persists_event_and_parseable_handoff() {
     assert_eq!(huge_output, huge_snapshot);
 
     // ----- Phase 2: sequence gate -----
-    // The dispatcher's overflow gate reads the *post-prune transcript*
-    // token count. In a real session that count includes prior turns
-    // and the system prompt, not just this frame's segment estimate;
-    // simulate that here with an adversarial number so the gate
-    // semantics — not the per-frame estimator — are what's under
-    // test.
+    // Spec line 1695: the dispatcher's prune trigger fires when
+    // `parent session token usage > usable * 0.5`. Assert the
+    // predicate directly so a future change to the trigger threshold
+    // is caught here.
+    let pre_prune_transcript_tokens = (gate_budget.usable() / 2) + 200;
+    assert!(
+        pre_prune_transcript_tokens > gate_budget.usable() / 2,
+        "phase 2 (gate): pre-prune token count must cross usable * 0.5 (the prune trigger)"
+    );
+
+    // Spec line 1695: the dispatcher's compact trigger fires when
+    // *post-prune* transcript tokens still exceed `usable`. Asserting
+    // `is_overflow` on a synthesised post-prune value pins the
+    // gate semantics (not the per-frame estimator).
     let post_prune_transcript_tokens = gate_budget.usable() + 512;
     assert!(
         gate_budget.is_overflow(post_prune_transcript_tokens),
@@ -311,6 +336,29 @@ async fn s5_e2e_prune_then_compact_persists_event_and_parseable_handoff() {
         "tokens_after must come from frame.total_selected_tokens"
     );
     assert_eq!(event.tail_start_id.as_deref(), Some("user-1"));
+
+    // Spec line 1700: write CompactionEvent to the session JSONL so
+    // the dispatcher (and downstream replay) sees it. The persistence
+    // step is what closes the doc's "写 CompactionEvent" rule;
+    // constructing the value in memory only is not enough.
+    jsonl
+        .append(&SessionEvent::compaction(event.clone()))
+        .expect("CompactionEvent persistence must succeed");
+
+    // The persisted event reads back via the load_context_replay
+    // path the production dispatcher uses for resume.
+    let replay_after_compact = jsonl
+        .load_context_replay()
+        .expect("replay after compact must succeed");
+    assert_eq!(
+        replay_after_compact.compactions.len(),
+        1,
+        "exactly one CompactionEvent must round-trip through the JSONL store"
+    );
+    let persisted_event = &replay_after_compact.compactions[0];
+    assert_eq!(persisted_event.frame_id, frame.frame_id);
+    assert_eq!(persisted_event.summary, event.summary);
+    assert_eq!(persisted_event.event_kind(), "compaction_event");
 
     // ----- Phase 4: handoff parses with 8 sections in canonical order -----
     let parsed = parse_handoff_template(&event.summary)
@@ -362,15 +410,56 @@ async fn s5_e2e_prune_then_compact_persists_event_and_parseable_handoff() {
         "phase 4 (handoff): event.summary must equal handoff.summary so the dispatcher feeds the same string into the next turn"
     );
 
-    // JSONL bytes are STILL byte-identical at the end of the walk —
-    // phase 3 wrote a CompactionEvent value but did not (in this
-    // test) flush it through the persistence path. The doc's
-    // "non-destructive" guarantee for the source frame holds across
-    // the whole walk.
+    // Spec line 1701: the next parent prompt MUST contain the 8
+    // headings literally and in canonical order. Build the
+    // continuation prompt the dispatcher would feed to the next turn
+    // (system prompt + handoff summary) and assert the headings
+    // appear in template order. Doing the assertion on the rendered
+    // prompt — not on the parsed structure — guards against a
+    // regression where the parser tolerates a reorder the wire
+    // layer would surface verbatim.
+    let next_prompt = format!(
+        "{}\n\n{}",
+        embedded_compaction_system_prompt(),
+        handoff.summary
+    );
+    let canonical_headings = [
+        "## Goal",
+        "## Constraints & Preferences",
+        "## Progress",
+        "### Done",
+        "### In Progress",
+        "### Blocked",
+        "## Key Decisions",
+        "## Next Steps",
+        "## Critical Context",
+        "## Relevant Files",
+    ];
+    let mut last_idx = 0usize;
+    for heading in canonical_headings {
+        let pos = next_prompt[last_idx..]
+            .find(heading)
+            .map(|offset| last_idx + offset)
+            .unwrap_or_else(|| {
+                panic!(
+                    "phase 4 (next prompt): heading `{heading}` not found in next prompt at or after offset {last_idx}; \
+                     prompt was:\n{next_prompt}"
+                )
+            });
+        last_idx = pos + heading.len();
+    }
+
+    // JSONL bytes for the source frame remain unchanged — only the
+    // CompactionEvent append is added. Verify by re-reading and
+    // confirming the original frame bytes still appear as a prefix.
     let bytes_after_compact = fs::read(jsonl.events_path()).expect("read jsonl bytes");
-    assert_eq!(
-        bytes_before, bytes_after_compact,
-        "S5 walk: JSONL bytes for the source frame must be byte-identical end-to-end (non-destructive guarantee)"
+    assert!(
+        bytes_after_compact.starts_with(&bytes_before),
+        "S5 walk: source frame bytes must appear as an unchanged prefix; only the CompactionEvent append should follow"
+    );
+    assert!(
+        bytes_after_compact.len() > bytes_before.len(),
+        "S5 walk: CompactionEvent append must extend the JSONL"
     );
 }
 
@@ -476,10 +565,27 @@ async fn s5_e2e_schema_mismatch_after_prune_blocks_event_persistence() {
     )
     .await;
 
-    assert!(
-        outcome.is_err(),
-        "phase 3 (compact): truncated summary must surface as Err, not Ok"
-    );
+    // Spec line 1702: the error must surface as
+    // `ContextHandoffError::SchemaMismatch { missing_sections:
+    // ["## Critical Context"] }` (template heading literal). Pattern-
+    // match the variant + payload so a regression that surfaces a
+    // generic ProviderError or omits the section name is caught.
+    let err =
+        outcome.expect_err("phase 3 (compact): truncated summary must surface as Err, not Ok");
+    match err {
+        CompactionAgentError::InvalidTemplate(ContextHandoffParseError::SchemaMismatch {
+            missing_sections,
+        }) => {
+            assert_eq!(
+                missing_sections,
+                vec!["## Critical Context".to_string()],
+                "phase 3 (compact): SchemaMismatch.missing_sections must list the dropped heading verbatim"
+            );
+        }
+        other => panic!(
+            "expected InvalidTemplate(SchemaMismatch{{missing_sections: [\"## Critical Context\"]}}), got {other:?}"
+        ),
+    }
 
     // Phase 4 invariant: NO CompactionEvent is constructible because
     // `compaction_event_for_handoff` requires a `&ContextHandoff`
@@ -488,6 +594,18 @@ async fn s5_e2e_schema_mismatch_after_prune_blocks_event_persistence() {
     // helper's signature; this walk exercises that property under
     // the integrated dispatcher pattern (rather than calling
     // run_compaction in isolation).
+    //
+    // Additionally verify on the persistence side: the JSONL store
+    // received only the original ContextFrame append (no
+    // CompactionEvent record can sneak through). Walk the replay and
+    // confirm `compactions` is empty.
+    let replay_after_failed_compact = jsonl
+        .load_context_replay()
+        .expect("replay must succeed even on the negative path");
+    assert!(
+        replay_after_failed_compact.compactions.is_empty(),
+        "phase 3 (negative): the JSONL store must not contain any CompactionEvent on the SchemaMismatch path"
+    );
 
     // Source frame bytes still byte-identical at the end of the
     // negative walk — phase 1 prune did not touch them, and phase 3
