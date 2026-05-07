@@ -45,6 +45,7 @@ pub mod openai;
 pub mod openai_compat;
 pub mod runtime;
 pub mod transform;
+pub mod wire_helpers;
 pub mod zhipu;
 
 pub use capability::{ModelCapability, ModelCost};

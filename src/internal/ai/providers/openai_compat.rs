@@ -274,11 +274,13 @@ fn build_messages_internal(
                             content: t.text.clone(),
                         }),
                         UserContent::ToolResult(tool_result) => {
-                            // Tool results must be JSON-encoded strings; fall back to
-                            // the raw display form if serialization fails so the model
-                            // still sees something rather than an empty content field.
-                            let content = serde_json::to_string(&tool_result.result)
-                                .unwrap_or_else(|_| tool_result.result.to_string());
+                            // Tool results must be JSON-encoded strings. Shared with
+                            // anthropic via wire_helpers so the fallback rule (raw
+                            // display form on serialization failure — vanishingly
+                            // rare in practice) cannot drift between providers.
+                            let content = crate::internal::ai::providers::wire_helpers::serialize_tool_result_content(
+                                &tool_result.result,
+                            );
                             messages.push(ChatMessage::Tool {
                                 tool_call_id: tool_result.id.clone(),
                                 name: tool_result.name.clone(),
@@ -607,6 +609,164 @@ mod tests {
 
         assert!(json[0].get("reasoning_content").is_none());
         assert_eq!(json[0]["content"], "visible answer");
+    }
+
+    // ---------------------------------------------------------------------
+    // OC-Phase 4 P4.2 — wire-level quirk tests
+    // ---------------------------------------------------------------------
+
+    use crate::internal::ai::completion::{
+        Function, ToolCall, ToolResult, UserContent, message::OneOrMany,
+    };
+
+    /// Quirk: a `ToolResult` in the canonical chat history becomes a
+    /// `ChatMessage::Tool` with `tool_call_id` linking it back to the
+    /// originating assistant `tool_calls[i].id`. Shared with anthropic
+    /// via `wire_helpers::serialize_tool_result_content` for the JSON
+    /// stringification step.
+    #[test]
+    fn quirk_tool_result_emits_tool_role_with_call_id() {
+        let request = CompletionRequest {
+            chat_history: vec![Message::User {
+                content: OneOrMany::One(UserContent::ToolResult(ToolResult {
+                    id: "call_42".to_string(),
+                    name: "shell".to_string(),
+                    result: serde_json::json!({"stdout": "hi"}),
+                })),
+            }],
+            ..Default::default()
+        };
+        let messages = build_messages(&request).unwrap();
+        let json = serde_json::to_value(&messages).unwrap();
+        assert_eq!(json[0]["role"], "tool");
+        assert_eq!(json[0]["tool_call_id"], "call_42");
+        assert_eq!(json[0]["name"], "shell");
+        // Content is a JSON-encoded string.
+        let parsed: serde_json::Value =
+            serde_json::from_str(json[0]["content"].as_str().unwrap()).unwrap();
+        assert_eq!(parsed, serde_json::json!({"stdout": "hi"}));
+    }
+
+    /// Quirk: an assistant turn with a tool call but no Text part emits
+    /// `content: None` plus a populated `tool_calls` array. The
+    /// chat-completions schema accepts this shape — content is optional
+    /// when tool_calls is non-empty.
+    #[test]
+    fn quirk_assistant_tool_call_only_omits_content() {
+        let request = CompletionRequest {
+            chat_history: vec![Message::Assistant {
+                id: None,
+                reasoning_content: None,
+                content: OneOrMany::One(AssistantContent::ToolCall(ToolCall {
+                    id: "call_1".to_string(),
+                    name: "shell".to_string(),
+                    function: Function {
+                        name: "shell".to_string(),
+                        arguments: serde_json::json!({"cmd": "ls"}),
+                    },
+                })),
+            }],
+            ..Default::default()
+        };
+        let messages = build_messages(&request).unwrap();
+        let json = serde_json::to_value(&messages).unwrap();
+        // `content` is serialised as `null` when None and `tool_calls`
+        // carries the call; some providers reject the field's absence
+        // entirely so the explicit null is the safe shape.
+        assert!(json[0].get("content").is_some_and(|v| v.is_null()));
+        assert_eq!(json[0]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(json[0]["tool_calls"][0]["function"]["name"], "shell");
+    }
+
+    /// Quirk: assistant tool-call `arguments` is always a *string* per the
+    /// OpenAI schema, not an object. The wire builder JSON-stringifies a
+    /// canonical `serde_json::Value::Object`.
+    #[test]
+    fn quirk_tool_call_arguments_serialise_as_string() {
+        let request = CompletionRequest {
+            chat_history: vec![Message::Assistant {
+                id: None,
+                reasoning_content: None,
+                content: OneOrMany::One(AssistantContent::ToolCall(ToolCall {
+                    id: "call_1".to_string(),
+                    name: "read_file".to_string(),
+                    function: Function {
+                        name: "read_file".to_string(),
+                        arguments: serde_json::json!({"path": "Cargo.toml"}),
+                    },
+                })),
+            }],
+            ..Default::default()
+        };
+        let messages = build_messages(&request).unwrap();
+        let json = serde_json::to_value(&messages).unwrap();
+        let args = &json[0]["tool_calls"][0]["function"]["arguments"];
+        assert!(
+            args.is_string(),
+            "arguments must serialise as a string per the OpenAI schema, got {args:?}"
+        );
+    }
+
+    /// Quirk: the request preamble is hoisted to a leading `system`
+    /// message so the builder can be used uniformly even when the caller
+    /// supplied the system prompt out-of-band.
+    #[test]
+    fn quirk_preamble_hoisted_as_leading_system_message() {
+        let request = CompletionRequest {
+            preamble: Some("you are helpful".to_string()),
+            chat_history: vec![Message::user("hi")],
+            ..Default::default()
+        };
+        let messages = build_messages(&request).unwrap();
+        let json = serde_json::to_value(&messages).unwrap();
+        assert_eq!(json[0]["role"], "system");
+        assert_eq!(json[0]["content"], "you are helpful");
+        assert_eq!(json[1]["role"], "user");
+    }
+
+    /// Quirk: a `Message::System` carrying multiple Text parts joins
+    /// them with `\n` into a single content field — the wire format
+    /// has only one `system` content slot per message.
+    #[test]
+    fn quirk_system_message_joins_multiple_text_parts() {
+        let request = CompletionRequest {
+            chat_history: vec![Message::System {
+                content: OneOrMany::Many(vec![
+                    UserContent::Text(Text {
+                        text: "first".to_string(),
+                    }),
+                    UserContent::Text(Text {
+                        text: "second".to_string(),
+                    }),
+                ]),
+            }],
+            ..Default::default()
+        };
+        let messages = build_messages(&request).unwrap();
+        let json = serde_json::to_value(&messages).unwrap();
+        assert_eq!(json[0]["role"], "system");
+        assert_eq!(json[0]["content"], "first\nsecond");
+    }
+
+    /// Quirk: image content in a user message returns NotImplemented from
+    /// the OpenAI-compat builder — vision requires a structured `content`
+    /// array and is not yet wired through. Failing here surfaces the
+    /// limitation early instead of silently dropping the image.
+    #[test]
+    fn quirk_image_content_returns_not_implemented() {
+        use crate::internal::ai::completion::message::Image;
+        let request = CompletionRequest {
+            chat_history: vec![Message::User {
+                content: OneOrMany::One(UserContent::Image(Image {
+                    data: "base64".to_string(),
+                    mime_type: Some("image/png".to_string()),
+                })),
+            }],
+            ..Default::default()
+        };
+        let err = build_messages(&request).expect_err("image must error");
+        assert!(matches!(err, CompletionError::NotImplemented(_)));
+        assert!(err.to_string().to_lowercase().contains("image"));
     }
 
     #[test]
