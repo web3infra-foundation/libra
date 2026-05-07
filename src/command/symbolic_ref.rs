@@ -53,7 +53,7 @@ pub async fn execute(args: SymbolicRefArgs) -> Result<(), String> {
 
 pub async fn execute_safe(args: SymbolicRefArgs, output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
-    let result = run_symbolic_ref(&args).await?;
+    let result = run_symbolic_ref(&args, !output.is_json()).await?;
 
     if output.is_json() {
         emit_json_data("symbolic-ref", &result, output)
@@ -69,7 +69,10 @@ pub async fn execute_safe(args: SymbolicRefArgs, output: &OutputConfig) -> CliRe
     }
 }
 
-async fn run_symbolic_ref(args: &SymbolicRefArgs) -> CliResult<SymbolicRefOutput> {
+async fn run_symbolic_ref(
+    args: &SymbolicRefArgs,
+    quiet_detached_head_is_silent: bool,
+) -> CliResult<SymbolicRefOutput> {
     let name = args.name.as_deref().unwrap_or(HEAD_REF);
     validate_name(name)?;
 
@@ -85,13 +88,18 @@ async fn run_symbolic_ref(args: &SymbolicRefArgs) -> CliResult<SymbolicRefOutput
 
     let branch_name = match Head::current_result().await.map_err(map_head_error)? {
         Head::Branch(branch_name) => branch_name,
-        Head::Detached(_) if args.quiet => {
+        Head::Detached(_) if args.quiet && quiet_detached_head_is_silent => {
             return Err(CliError::silent_exit(1));
         }
         Head::Detached(_) => {
-            return Err(CliError::failure("HEAD is not a symbolic ref")
-                .with_stable_code(StableErrorCode::CliInvalidTarget)
-                .with_hint("switch to a branch before reading HEAD as a symbolic ref."));
+            let error = CliError::failure("HEAD is not a symbolic ref")
+                .with_stable_code(StableErrorCode::CliInvalidTarget);
+            let error = if args.quiet {
+                error.with_exit_code(1)
+            } else {
+                error.with_hint("switch to a branch before reading HEAD as a symbolic ref.")
+            };
+            return Err(error);
         }
     };
 
