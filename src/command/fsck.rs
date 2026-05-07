@@ -397,13 +397,16 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
         check_reflogs(storage, &mut result, args.verbose).await?;
     }
 
-    // Stage 5: Check index
+    // Stage 5: Check refs point to valid objects
+    check_and_fix_refs(args, storage, &mut result).await?;
+
+    // Stage 6: Check index
     check_index(storage, &mut result, args.verbose)?;
 
-    // Stage 6: Check connectivity (re-verify all objects in storage order)
+    // Stage 7: Check connectivity (re-verify all objects in storage order)
     check_connectivity(&all_hashes, storage, &mut result, args.verbose).await?;
 
-    // Stage 7: Find dangling and unreachable objects
+    // Stage 8: Find dangling and unreachable objects
     find_dangling_unreachable(storage, &mut result).await?;
 
     // Print notices
