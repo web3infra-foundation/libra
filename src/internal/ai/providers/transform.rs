@@ -235,43 +235,86 @@ fn drop_empty_assistant_turns(request: &mut CompletionRequest) {
 /// Validate Anthropic's tool_use / tool_result pairing rule: every
 /// `UserContent::ToolResult{ id }` must be preceded earlier in the
 /// transcript by an `AssistantContent::ToolCall { id }` with the same id,
-/// and each tool-call id can only be paired with one tool result. Anthropic
-/// rejects orphaned or duplicated tool_results with a 400 that is hard to
-/// trace back to the offending message; failing fast here points the caller
-/// at the exact `chat_history[i]` index. Idempotent: the second pass over
-/// the same history reaches the same set of pairings.
+/// each tool-call id appears at most once across the transcript, and each
+/// tool-call id is paired with at most one tool result. Anthropic rejects
+/// orphan, duplicate, or mismatched-id tool_results with a 400 that is
+/// hard to trace back to the offending message; failing fast here points
+/// the caller at the exact `chat_history[i]` index.
+///
+/// `System` messages are scanned because Libra's [`Message::System`] arm
+/// carries `OneOrMany<UserContent>` (the same content union as user
+/// messages), which can in principle hold a `ToolResult`. Anthropic's
+/// wire builder only forwards `UserContent::Text` from system messages,
+/// so an embedded `ToolResult` would otherwise vanish silently rather
+/// than fail loudly — mirror the user-arm guard so the runtime never
+/// silently drops tool results. `ToolCall` is only reachable via
+/// `AssistantContent`, so the system arm has no symmetric assistant-side
+/// duplicate check to perform.
+///
+/// Idempotent: the second pass over the same history reaches the same
+/// set of pairings.
 fn require_anthropic_tool_pairing(request: &CompletionRequest) -> Result<(), TransformError> {
     use std::collections::HashSet;
 
     let mut pending_calls: HashSet<String> = HashSet::new();
+    let mut seen_call_ids: HashSet<String> = HashSet::new();
     for (idx, message) in request.chat_history.iter().enumerate() {
         match message {
             Message::Assistant { content, .. } => {
                 for part in content.iter() {
                     if let AssistantContent::ToolCall(call) = part {
+                        if !seen_call_ids.insert(call.id.clone()) {
+                            return Err(TransformError::InvalidRequest {
+                                provider: provider_id::ANTHROPIC,
+                                reason: format!(
+                                    "ToolCall at chat_history[{idx}] (id={}) reuses an \
+                                     id that already appeared earlier in the transcript; \
+                                     Anthropic requires every tool_use id to be unique",
+                                    call.id
+                                ),
+                            });
+                        }
                         pending_calls.insert(call.id.clone());
                     }
                 }
             }
             Message::User { content } => {
-                for part in content.iter() {
-                    if let UserContent::ToolResult(result) = part
-                        && !pending_calls.remove(&result.id)
-                    {
-                        return Err(TransformError::InvalidRequest {
-                            provider: provider_id::ANTHROPIC,
-                            reason: format!(
-                                "ToolResult at chat_history[{idx}] (id={}) has no \
-                                 preceding ToolCall with matching id; Anthropic \
-                                 requires every tool_result to follow the assistant \
-                                 tool_use that produced it",
-                                result.id
-                            ),
-                        });
-                    }
-                }
+                check_tool_result_pairing(content.iter(), idx, &mut pending_calls)?;
             }
-            Message::System { .. } => {}
+            Message::System { content } => {
+                check_tool_result_pairing(content.iter(), idx, &mut pending_calls)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Shared per-content-block check used by the User and System arms of
+/// [`require_anthropic_tool_pairing`]. Mutating `pending_calls` keeps the
+/// "each ToolCall id pairs with at most one ToolResult" invariant
+/// regardless of which message arm carried the result.
+fn check_tool_result_pairing<'a, I>(
+    content: I,
+    idx: usize,
+    pending_calls: &mut std::collections::HashSet<String>,
+) -> Result<(), TransformError>
+where
+    I: IntoIterator<Item = &'a UserContent>,
+{
+    for part in content {
+        if let UserContent::ToolResult(result) = part
+            && !pending_calls.remove(&result.id)
+        {
+            return Err(TransformError::InvalidRequest {
+                provider: provider_id::ANTHROPIC,
+                reason: format!(
+                    "ToolResult at chat_history[{idx}] (id={}) has no \
+                     preceding ToolCall with matching id; Anthropic \
+                     requires every tool_result to follow the assistant \
+                     tool_use that produced it (or to be paired only once)",
+                    result.id
+                ),
+            });
         }
     }
     Ok(())
@@ -827,6 +870,48 @@ mod tests {
             .prepare_request("claude-sonnet-4-0", &mut req)
             .expect_err("duplicate tool_result for same id must be rejected");
         assert!(err.to_string().contains("call_1"));
+    }
+
+    #[test]
+    fn anthropic_transform_rejects_duplicate_tool_call_ids() {
+        // Two assistant turns sharing the same tool_use id is an Anthropic
+        // 400; the validator must catch it instead of silently overwriting.
+        let mut req = request_with(vec![
+            assistant_tool_call("call_dup", "shell"),
+            user_with_tool_result("call_dup", "shell", serde_json::json!({"ok": true})),
+            assistant_tool_call("call_dup", "shell"),
+        ]);
+        let err = AnthropicTransform
+            .prepare_request("claude-sonnet-4-0", &mut req)
+            .expect_err("duplicate ToolCall id must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("call_dup"),
+            "error must reference duplicate id, got: {msg}"
+        );
+        assert!(
+            msg.contains("ToolCall") && msg.contains("unique"),
+            "error must explain the uniqueness requirement, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn anthropic_transform_rejects_orphan_tool_result_inside_system_message() {
+        // System messages carry OneOrMany<UserContent>; a ToolResult
+        // embedded there is not forwarded by Anthropic's system extractor
+        // (it only pulls UserContent::Text), so it must fail loudly here
+        // rather than vanish silently.
+        let mut req = request_with(vec![Message::System {
+            content: OneOrMany::One(UserContent::ToolResult(ToolResult {
+                id: "call_in_system".to_string(),
+                name: "shell".to_string(),
+                result: serde_json::json!({}),
+            })),
+        }]);
+        let err = AnthropicTransform
+            .prepare_request("claude-sonnet-4-0", &mut req)
+            .expect_err("orphan ToolResult inside System must be rejected");
+        assert!(err.to_string().contains("call_in_system"));
     }
 
     #[test]
