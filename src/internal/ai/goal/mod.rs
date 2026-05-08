@@ -43,7 +43,8 @@ pub use event::{
     GoalProgressRecord,
 };
 pub use spec::{
-    GoalActor, GoalBudget, GoalCriterion, GoalEvidencePolicy, GoalSpec, MAX_OBJECTIVE_LEN,
+    GoalActor, GoalBudget, GoalCriterion, GoalEvidencePolicy, GoalSpec, GoalSpecError,
+    MAX_OBJECTIVE_LEN,
 };
 pub use state::{
     GoalBlocker, GoalEvidenceRef, GoalEvidenceTarget, GoalPlanStep, GoalState, GoalStatus,

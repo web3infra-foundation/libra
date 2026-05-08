@@ -78,6 +78,24 @@ pub enum GoalBlockReason {
     /// supervisor includes a single concrete question in the matching
     /// `Blocked` event.
     AwaitingScopeChange { question: String },
+    /// Single-turn `max_turns` cap reached without forward progress.
+    /// The supervisor parks the Goal so the user can decide whether
+    /// to extend `max_turns`, change scope, or cancel.
+    MaxTurnsReached { turns: u32 },
+    /// Repeat-abort kicked in (the model kept calling the same
+    /// tool/argument signature). The supervisor stops auto-progress
+    /// rather than burning tokens on a stalled loop.
+    RepeatAborted { signature: String, repetitions: u32 },
+    /// Context overflow that compaction failed to resolve. The
+    /// supervisor surfaces this so the user can shrink scope or
+    /// pick a model with a larger window.
+    ContextOverflowExhausted { attempts: u32, last_error: String },
+    /// Forward-compatibility catch-all for variants emitted by future
+    /// Libra versions — same role as `GoalEvent::Future` but for the
+    /// nested blocker discriminator. Keeps a Goal envelope replayable
+    /// even when its embedded `Blocked` carries a tomorrow-only kind.
+    #[serde(other)]
+    Future,
 }
 
 /// Payload accompanying `update_goal_progress` invocations. Echoed
@@ -134,6 +152,18 @@ pub enum GoalEvent {
     Created(GoalSpec),
     /// Plan refreshed (initial draft, replan, pruned dead steps).
     PlanUpdated { steps: Vec<GoalPlanStep> },
+    /// User-driven criteria revision — `docs/improvement/opencode.md`
+    /// line 690's `/goal criteria add <text>` entry point. The full
+    /// post-revision criteria list is carried inline so replay can
+    /// produce a self-consistent state without consulting prior
+    /// events. The supervisor also accepts revisions that **add**
+    /// new criteria; **removing** criteria mid-Goal is intentionally
+    /// allowed at the schema layer (the gate lives in the user
+    /// interface, not here).
+    CriteriaRevised {
+        criteria: Vec<super::spec::GoalCriterion>,
+        revised_by: GoalActor,
+    },
     /// Supervisor entered a step (drives `GoalStepStatus::InProgress`).
     StepStarted { step_id: String },
     /// Supervisor finished a step with at least one evidence ref.
@@ -212,9 +242,14 @@ impl GoalEventEnvelope {
 
 impl Event for GoalEventEnvelope {
     fn event_kind(&self) -> &'static str {
-        // Stable wire kind for SessionEvent::Goal — must match the
-        // `kind` discriminator the JSONL reader dispatches on.
-        "goal_event"
+        // Stable wire kind for SessionEvent::Goal — MUST match the
+        // `kind` discriminator the JSONL reader dispatches on
+        // (see `parse_session_event_value` in
+        // `crate::internal::ai::session::jsonl`). The discriminator
+        // is `"goal"` because that is what the serde-driven
+        // `SessionEvent::Goal` variant serialises as
+        // (`#[serde(rename_all = "snake_case")]`).
+        "goal"
     }
 
     fn event_id(&self) -> Uuid {
@@ -224,6 +259,7 @@ impl Event for GoalEventEnvelope {
     fn event_summary(&self) -> String {
         let inner = match &self.event {
             GoalEvent::Created(_) => "created",
+            GoalEvent::CriteriaRevised { .. } => "criteria_revised",
             GoalEvent::PlanUpdated { .. } => "plan_updated",
             GoalEvent::StepStarted { .. } => "step_started",
             GoalEvent::StepCompleted { .. } => "step_completed",

@@ -39,7 +39,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    event::{GoalBlockReason, GoalCompletionReport, GoalEvent, GoalEventEnvelope},
+    event::{
+        GoalBlockReason, GoalCompletionClaim, GoalCompletionReport, GoalEvent, GoalEventEnvelope,
+    },
     spec::GoalSpec,
 };
 
@@ -123,6 +125,18 @@ pub enum GoalEvidenceTarget {
     /// Gated to the `subagent-scaffold` feature path; the verifier
     /// silently treats this as `Unrecognised` when the gate is off.
     AgentRun { event_id: String },
+    /// Goal completed without any code/file change being necessary
+    /// (e.g. a research-only or analysis-only Goal where the right
+    /// answer is "no change required"). The verifier accepts this
+    /// as evidence in lieu of a `git status` artefact when the
+    /// matching criterion's `evidence_policy` permits it.
+    NoChangesNeeded { rationale: String },
+    /// Forward-compatibility catch-all so an envelope carrying an
+    /// evidence target shape we have not seen yet still replays
+    /// cleanly. Cannot be constructed by hand; only emerges from
+    /// serde when the `kind` discriminator is unknown.
+    #[serde(other)]
+    Future,
 }
 
 /// A piece of evidence supporting a completion claim. The supervisor
@@ -181,6 +195,14 @@ pub struct GoalState {
     pub blockers: Vec<GoalBlocker>,
     #[serde(default)]
     pub last_assistant_summary: Option<String>,
+    /// Most recent unverified completion claim. Populated when the
+    /// model invokes `submit_goal_complete` and cleared when the
+    /// claim is either accepted (-> `completion_report`) or
+    /// rejected (-> rolled back). The deterministic verifier (P6.2)
+    /// reads this directly so a `--resume` can pick up a pending
+    /// verification without re-running the model.
+    #[serde(default)]
+    pub pending_claim: Option<GoalCompletionClaim>,
     /// Final completion report once `status == Completed`.
     #[serde(default)]
     pub completion_report: Option<GoalCompletionReport>,
@@ -199,6 +221,7 @@ impl GoalState {
             evidence_refs: Vec::new(),
             blockers: Vec::new(),
             last_assistant_summary: None,
+            pending_claim: None,
             completion_report: None,
             updated_at,
         }
@@ -221,11 +244,40 @@ pub fn apply(state: &mut GoalState, envelope: &GoalEventEnvelope) -> bool {
         // session JSONL entry from corrupting an unrelated Goal's state.
         return false;
     }
+    // Terminal-state guard: once a Goal hits `Completed` or
+    // `Cancelled`, no subsequent event in the same JSONL slice may
+    // reanimate it. The doc's "terminal boundary" semantics (line
+    // 665) require this so a late-arriving event from a racy
+    // supervisor (or a corrupted log replayed twice) cannot
+    // surreptitiously walk a cancelled Goal back into `Running`.
+    // The event is not silently discarded — `updated_at` advances
+    // so the audit log still records the timestamp of the late
+    // event — but the status field is frozen.
+    if state.status.is_terminal() {
+        state.updated_at = envelope.recorded_at;
+        return false;
+    }
     state.updated_at = envelope.recorded_at;
     match &envelope.event {
         GoalEvent::Created(_) => {
             // `from_spec` already seeded the state; receiving a second
             // Created for the same goal_id is a no-op (replay safety).
+            true
+        }
+        GoalEvent::CriteriaRevised { criteria, .. } => {
+            // Replace the spec's acceptance criteria — replay sees
+            // the most recent revision as the source of truth. Any
+            // criterion already present in `completed_criteria` but
+            // missing from the revised list is dropped (the user
+            // explicitly removed it from scope). We keep evidence
+            // refs because they are factual records of what
+            // happened, not declarative scope.
+            state.spec.acceptance_criteria = criteria.clone();
+            let revised_ids: std::collections::HashSet<&str> =
+                criteria.iter().map(|c| c.id.as_str()).collect();
+            state
+                .completed_criteria
+                .retain(|id| revised_ids.contains(id.as_str()));
             true
         }
         GoalEvent::PlanUpdated { steps } => {
@@ -306,18 +358,28 @@ pub fn apply(state: &mut GoalState, envelope: &GoalEventEnvelope) -> bool {
             true
         }
         GoalEvent::CompletionClaimed(claim) => {
-            for crit in &claim.completed_criteria {
-                state.completed_criteria.insert(crit.clone());
-            }
+            // Retain the full claim payload — the verifier (P6.2) reads
+            // `pending_claim.verification` and `residual_risks`
+            // directly. Without this, a `--resume` that lands on a
+            // pending claim would have to re-prompt the model.
+            state.pending_claim = Some(claim.clone());
+            // Evidence accumulates immediately so the audit log shows
+            // exactly what the model attached. Criteria, however,
+            // are NOT stamped into `completed_criteria` until the
+            // verifier accepts — a rejection rolls back without
+            // having to remember which criteria the rejected claim
+            // tried to introduce.
             state.evidence_refs.extend(claim.evidence_refs.clone());
             state.status = GoalStatus::CompletionClaimed;
             true
         }
         GoalEvent::CompletionRejected { missing, reason } => {
-            // Verifier said no — the Goal goes back to active progress.
-            // Record the rejection as a blocker so the TUI can surface
-            // the missing pieces; the next continuation prompt reads
-            // from this list.
+            // Verifier said no — drop the pending claim so future
+            // events do not see stale rejected work as
+            // "claimed". The accompanying blocker carries the
+            // verifier's rejection reason for the TUI / continuation
+            // prompt.
+            state.pending_claim = None;
             state.blockers.push(GoalBlocker {
                 reason: GoalBlockReason::CompletionRejected {
                     missing: missing.clone(),
@@ -330,10 +392,15 @@ pub fn apply(state: &mut GoalState, envelope: &GoalEventEnvelope) -> bool {
             true
         }
         GoalEvent::Completed(report) => {
+            // Verifier accepted: NOW stamp the report's criteria
+            // into `completed_criteria` (the deterministic set the
+            // verifier itself produced after gating the claim).
+            // Clear `pending_claim` since it has been resolved.
             for crit in &report.completed_criteria {
                 state.completed_criteria.insert(crit.clone());
             }
             state.evidence_refs.extend(report.evidence_refs.clone());
+            state.pending_claim = None;
             state.completion_report = Some(report.clone());
             state.status = GoalStatus::Completed;
             true

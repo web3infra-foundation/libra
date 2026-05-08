@@ -217,10 +217,13 @@ fn replay_drives_full_happy_path_to_completed() {
 }
 
 /// Scenario: cancellation is terminal regardless of prior state. A
-/// regression that allowed re-entry into `Running` after `Cancelled`
-/// would break the audit trail's "this Goal is over" guarantee.
+/// late-arriving event (racy supervisor write, corrupted log
+/// replayed twice, out-of-order JSONL slice) must NOT walk a
+/// cancelled Goal back into `Running`. The schema layer enforces
+/// this with the terminal-state guard at the top of `apply`; the
+/// supervisor (P6.3) sees `applied == false` and logs the gap.
 #[test]
-fn cancelled_state_is_terminal_and_not_resumable() {
+fn cancelled_state_is_terminal_and_freezes_replay() {
     let spec = fixture_spec();
     let goal_id = spec.goal_id;
     let envelopes = [
@@ -232,9 +235,6 @@ fn cancelled_state_is_terminal_and_not_resumable() {
                 cancelled_by: GoalActor::User { id: None },
             },
         ),
-        // Even if a step start sneaks in after cancellation (e.g. a
-        // race where the supervisor's last-event-write loses to a
-        // user cancel), the replay must keep the terminal status.
         envelope(
             goal_id,
             GoalEvent::StepStarted {
@@ -243,13 +243,12 @@ fn cancelled_state_is_terminal_and_not_resumable() {
         ),
     ];
     let state = replay(envelopes.iter()).expect("replay must succeed");
-    // The current behaviour: `StepStarted` after `Cancelled` flips
-    // status back to `Running` because `apply` does not gate on
-    // terminality. The supervisor (P6.3) is responsible for refusing
-    // to emit further events post-cancel; the schema layer is purely
-    // descriptive. This test pins that contract — if a future change
-    // adds gate logic to `apply`, this assertion must also flip.
-    assert_eq!(state.status, GoalStatus::Running);
+    assert_eq!(
+        state.status,
+        GoalStatus::Cancelled,
+        "terminal status must NOT flip back to Running on a late event"
+    );
+    assert!(state.status.is_terminal());
 }
 
 /// Scenario: a future-only variant from a newer Libra version
@@ -440,4 +439,163 @@ fn resume_replay_handles_claim_rejection_then_completion() {
         rejection_count, 1,
         "exactly one rejection blocker must be recorded across resume"
     );
+    assert!(
+        state.pending_claim.is_none(),
+        "pending_claim must be cleared once the verifier accepts"
+    );
+}
+
+/// Scenario: `CriteriaRevised` (the `/goal criteria add <text>`
+/// entry from `docs/improvement/opencode.md` line 690) replaces the
+/// spec's acceptance criteria, and any `completed_criteria` no
+/// longer in scope are dropped from the state. This guards the
+/// verifier (P6.2) from accepting completion based on a stale
+/// criterion the user has since removed.
+#[test]
+fn criteria_revised_drops_out_of_scope_completed_entries() {
+    let spec = fixture_spec();
+    let goal_id = spec.goal_id;
+    let envelopes = [
+        envelope(goal_id, GoalEvent::Created(spec)),
+        envelope(
+            goal_id,
+            GoalEvent::ProgressRecorded(GoalProgressRecord {
+                summary: "compiled".to_string(),
+                completed_criteria: vec!["compiles".to_string(), "tests".to_string()],
+                evidence_refs: vec![],
+                next_steps: vec![],
+            }),
+        ),
+        // User narrows the scope: `tests` removed, `audit` added.
+        envelope(
+            goal_id,
+            GoalEvent::CriteriaRevised {
+                criteria: vec![
+                    GoalCriterion {
+                        id: "compiles".to_string(),
+                        description: "cargo check passes".to_string(),
+                        required: true,
+                        verifier_hint: None,
+                    },
+                    GoalCriterion {
+                        id: "audit".to_string(),
+                        description: "security audit attached".to_string(),
+                        required: true,
+                        verifier_hint: None,
+                    },
+                ],
+                revised_by: GoalActor::User {
+                    id: Some("alice".to_string()),
+                },
+            },
+        ),
+    ];
+    let state = replay(envelopes.iter()).expect("replay must succeed");
+    assert!(
+        state.completed_criteria.contains("compiles"),
+        "`compiles` must remain in completed_criteria (still in scope)"
+    );
+    assert!(
+        !state.completed_criteria.contains("tests"),
+        "`tests` must be dropped after the revision removes it from scope"
+    );
+    let revised_ids: std::collections::BTreeSet<&str> = state
+        .spec
+        .acceptance_criteria
+        .iter()
+        .map(|c| c.id.as_str())
+        .collect();
+    assert!(
+        revised_ids.contains("audit"),
+        "revised criteria must include audit"
+    );
+    assert!(
+        !revised_ids.contains("tests"),
+        "revised criteria must NOT include tests"
+    );
+}
+
+/// Scenario: a rejected completion claim must NOT leave its claimed
+/// criteria visible in `completed_criteria` — those were the
+/// model's unverified assertions, and the verifier said no. The
+/// `pending_claim` field is also cleared so a `--resume` does not
+/// see stale claim payload.
+#[test]
+fn completion_rejected_rolls_back_pending_claim() {
+    let spec = fixture_spec();
+    let goal_id = spec.goal_id;
+    let envelopes = [
+        envelope(goal_id, GoalEvent::Created(spec)),
+        envelope(
+            goal_id,
+            GoalEvent::CompletionClaimed(GoalCompletionClaim {
+                summary: "first try".to_string(),
+                completed_criteria: vec!["compiles".to_string(), "tests".to_string()],
+                evidence_refs: vec![],
+                verification: vec![],
+                residual_risks: vec![],
+            }),
+        ),
+        envelope(
+            goal_id,
+            GoalEvent::CompletionRejected {
+                missing: vec!["tests".to_string()],
+                reason: "no test evidence attached".to_string(),
+            },
+        ),
+    ];
+    let state = replay(envelopes.iter()).expect("replay must succeed");
+    assert!(
+        state.pending_claim.is_none(),
+        "pending_claim must be dropped after rejection"
+    );
+    assert!(
+        !state.completed_criteria.contains("compiles"),
+        "claimed criteria must NOT pollute completed_criteria when rejected"
+    );
+    assert_eq!(state.status, GoalStatus::Active);
+}
+
+/// Scenario: a `SessionEvent::Goal` envelope carrying an unknown
+/// nested variant inside a known `GoalEvent` (e.g. an unknown
+/// `GoalBlockReason::kind` inside a known `Blocked` envelope) must
+/// also deserialise cleanly via the nested `Future` catch-alls. A
+/// regression that re-tightens the inner enums would surface as a
+/// SessionEvent decode failure instead of skipping the unknown
+/// inner variant.
+#[test]
+fn session_event_goal_with_unknown_nested_variant_deserialises() {
+    use libra::internal::ai::session::jsonl::SessionEvent;
+
+    let spec = fixture_spec();
+    let payload = serde_json::json!({
+        "kind": "goal",
+        "payload": {
+            "envelope_id": "00000000-0000-0000-0000-000000000abc",
+            "goal_id": spec.goal_id,
+            "recorded_at": fixture_now().to_rfc3339(),
+            "event": {
+                "kind": "blocked",
+                "reason": {
+                    "kind": "future_blocker_kind_not_yet_known",
+                    "payload": {"foo": "bar"}
+                },
+                "requested_input": null
+            }
+        }
+    });
+    let session: SessionEvent = serde_json::from_value(payload)
+        .expect("SessionEvent::Goal with unknown nested variant must deserialise");
+    match session {
+        SessionEvent::Goal(envelope) => match envelope.event {
+            GoalEvent::Blocked { reason, .. } => {
+                assert!(
+                    matches!(reason, GoalBlockReason::Future),
+                    "unknown nested reason must surface as GoalBlockReason::Future, got {reason:?}"
+                );
+            }
+            other => panic!("expected GoalEvent::Blocked, got {other:?}"),
+        },
+        other => panic!("expected SessionEvent::Goal, got {other:?}"),
+    }
 }
