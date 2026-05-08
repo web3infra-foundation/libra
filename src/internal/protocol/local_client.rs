@@ -13,7 +13,7 @@ use bytes::Bytes;
 use futures_util::stream::{self, StreamExt};
 use git_internal::{
     errors::GitError,
-    hash::get_hash_kind,
+    hash::{HashKind, get_hash_kind, set_hash_kind},
     internal::{
         metadata::{EntryMeta, MetaAttached},
         object::{
@@ -34,8 +34,14 @@ use super::{
 use crate::{
     command::{load_object, log::get_reachable_commits},
     git_protocol::ServiceType,
-    internal::{branch::Branch, config::ConfigKv, head::Head, protocol::DiscRef, reflog, tag},
-    utils::{object_ext::TreeExt, util::cur_dir},
+    internal::{
+        branch::Branch, config::ConfigKv, db::get_db_conn_instance_for_path, head::Head,
+        protocol::DiscRef, reflog, tag,
+    },
+    utils::{
+        object_ext::TreeExt,
+        util::{DATABASE, cur_dir},
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -107,6 +113,24 @@ impl Drop for RepoCurrentDirGuard {
                 "failed to restore working directory after local protocol operation"
             );
         }
+    }
+}
+
+struct HashKindRestoreGuard {
+    previous: HashKind,
+}
+
+impl HashKindRestoreGuard {
+    fn switch_to(hash_kind: HashKind) -> Self {
+        let previous = get_hash_kind();
+        set_hash_kind(hash_kind);
+        Self { previous }
+    }
+}
+
+impl Drop for HashKindRestoreGuard {
+    fn drop(&mut self) {
+        set_hash_kind(self.previous);
     }
 }
 
@@ -217,6 +241,37 @@ impl LocalClient {
         &self.repo_path
     }
 
+    async fn repo_hash_kind(&self) -> Result<HashKind, String> {
+        let db_path = self.repo_path.join(DATABASE);
+        let db_conn = get_db_conn_instance_for_path(&db_path)
+            .await
+            .map_err(|error| {
+                format!(
+                    "failed to open local repository database '{}': {error}",
+                    db_path.display()
+                )
+            })?;
+        let object_format = ConfigKv::get_with_conn(&db_conn, "core.objectformat")
+            .await
+            .map_err(|error| {
+                format!(
+                    "failed to read core.objectformat from local repository '{}': {error}",
+                    db_path.display()
+                )
+            })?
+            .map(|entry| entry.value)
+            .unwrap_or_else(|| "sha1".to_string());
+
+        match object_format.as_str() {
+            "sha1" => Ok(HashKind::Sha1),
+            "sha256" => Ok(HashKind::Sha256),
+            _ => Err(format!(
+                "unsupported object format '{object_format}' in local repository '{}'",
+                db_path.display()
+            )),
+        }
+    }
+
     pub async fn discovery_reference(
         &self,
         service: ServiceType,
@@ -250,6 +305,10 @@ impl LocalClient {
             }
             RepoType::LibraRepo => {
                 self.with_repo_current_dir(|| async {
+                    let repo_hash_kind =
+                        self.repo_hash_kind().await.map_err(GitError::CustomError)?;
+                    let _hash_guard = HashKindRestoreGuard::switch_to(repo_hash_kind);
+
                     let local_branches = Branch::list_branches_result(None)
                         .await
                         .map_err(|error| GitError::CustomError(error.to_string()))?;
@@ -283,7 +342,7 @@ impl LocalClient {
                             }))
                             .collect::<Vec<_>>(),
                         capabilities: vec![],
-                        hash_kind: get_hash_kind(),
+                        hash_kind: repo_hash_kind,
                     })
                 })
                 .await
@@ -333,6 +392,9 @@ impl LocalClient {
             }
             RepoType::LibraRepo => {
                 self.with_repo_current_dir(|| async {
+                    let repo_hash_kind = self.repo_hash_kind().await.map_err(IoError::other)?;
+                    let _hash_guard = HashKindRestoreGuard::switch_to(repo_hash_kind);
+
                     let mut seen = HashSet::new();
                     have.iter().for_each(|hash| {
                         seen.insert(hash.clone());

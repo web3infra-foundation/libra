@@ -24,6 +24,39 @@ fn ls_remote_local_path_lists_head_and_branch_outside_repo() {
 }
 
 #[test]
+fn ls_remote_local_sha256_repo_lists_refs_outside_repo() {
+    let remote = tempdir().expect("failed to create remote repository root");
+    let output = run_libra_command(&["init", "--object-format", "sha256"], remote.path());
+    assert_cli_success(&output, "failed to initialize sha256 repository");
+    configure_identity_via_cli(remote.path());
+
+    std::fs::write(remote.path().join("tracked.txt"), "tracked\n")
+        .expect("failed to create tracked file");
+    let output = run_libra_command(&["add", ".libraignore", "tracked.txt"], remote.path());
+    assert_cli_success(&output, "failed to add tracked file");
+    let output = run_libra_command(&["commit", "-m", "base", "--no-verify"], remote.path());
+    assert_cli_success(&output, "failed to create initial commit");
+
+    let outside = tempdir().expect("failed to create outside cwd");
+    let remote_path = remote.path().to_string_lossy().to_string();
+    let output = run_libra_command(&["ls-remote", &remote_path], outside.path());
+    assert_cli_success(
+        &output,
+        "ls-remote local sha256 path should succeed outside a repo",
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let main_line = stdout
+        .lines()
+        .find(|line| line.ends_with("\trefs/heads/main"))
+        .unwrap_or_else(|| panic!("expected main branch in ls-remote output, got: {stdout}"));
+    let (hash, _) = main_line
+        .split_once('\t')
+        .expect("ls-remote ref line should be tab-separated");
+    assert_eq!(hash.len(), 64, "expected sha256 ref hash, got: {stdout}");
+}
+
+#[test]
 fn ls_remote_resolves_configured_remote_name() {
     let remote = create_committed_repo_via_cli();
     let local = create_committed_repo_via_cli();
