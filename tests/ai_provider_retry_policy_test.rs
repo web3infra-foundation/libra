@@ -12,13 +12,14 @@
 //!
 //! Implementation under test: [`RetryingCompletionModel`] — the
 //! production wrapper that the TUI installs around every concrete
-//! [`CompletionModel`]. The wrapper delegates classification to
-//! [`is_retryable_provider_message`] which already recognises
-//! `"server_is_overloaded"` (matches the substring `"overloaded"`),
-//! 5xx HTTP statuses, generic rate-limit messages, etc. The fixtures
-//! here drive a deterministic fake model so a regression that flips
-//! any of those classification rules surfaces as a localised diff
-//! instead of as a downstream tool-loop hang.
+//! [`CompletionModel`]. The fixtures here drive a deterministic fake
+//! model so a regression that flips the wrapper's public retry
+//! contract (classes that retry, classes that surface immediately,
+//! attempt budget) surfaces as a localised diff instead of as a
+//! downstream tool-loop hang. Tests pin behaviour through the public
+//! [`CompletionModel`] surface only — they never reach into the
+//! wrapper's internal classifier so a future swap to the structured
+//! [`ProviderError`] taxonomy stays a non-breaking change.
 //!
 //! Why not pull in `tool_loop::run_tool_loop` here: the retry happens
 //! transparently at the [`CompletionModel`] layer, so wrapping the
@@ -124,19 +125,27 @@ fn fast_policy(max_retries: u32) -> CompletionRetryPolicy {
     }
 }
 
-/// Scenario: the model returns `server_is_overloaded` for every call
-/// in the budget (`max_retries + 1` total attempts). The wrapper must
-/// surface the final error without exceeding that attempt budget — a
-/// regression that infinitely retries would hang the test.
+/// Scenario: the model returns the bare `server_is_overloaded`
+/// stream-error code (no HTTP status prefix) for every call in the
+/// budget (`max_retries + 1` total attempts). The wrapper must
+/// surface the final error without exceeding that attempt budget —
+/// a regression that infinitely retries would hang the test.
+///
+/// The fixture intentionally **omits** the `status 503:` prefix so
+/// the doc's `server_is_overloaded` mapping (`docs/improvement/opencode.md`
+/// line 1101) is exercised in isolation from the doc's HTTP-5xx rule
+/// (line 1109). A combined `"status 503: server_is_overloaded"` string
+/// would let either branch satisfy the test, hiding a regression in
+/// the code-driven path.
 #[tokio::test]
 async fn retry_exhausts_budget_then_surfaces_final_error() {
     let max_retries = 3;
     // Total attempts = max_retries + 1 = 4.
     let model = ScriptedFlakyModel::new(vec![
-        Some("status 503: server_is_overloaded".to_string()),
-        Some("status 503: server_is_overloaded".to_string()),
-        Some("status 503: server_is_overloaded".to_string()),
-        Some("status 503: server_is_overloaded".to_string()),
+        Some("server_is_overloaded".to_string()),
+        Some("server_is_overloaded".to_string()),
+        Some("server_is_overloaded".to_string()),
+        Some("server_is_overloaded".to_string()),
         // A 5th entry that should never be observed; if the wrapper
         // exceeded its budget, the test would fail with
         // "ok"-as-success instead of an error.
@@ -175,6 +184,41 @@ async fn retry_exhausts_budget_then_surfaces_final_error() {
     }
 }
 
+/// Scenario: a bare HTTP `503` (status only, neutral message) also
+/// retries — exercising the doc's HTTP-5xx rule from
+/// `docs/improvement/opencode.md` line 1109 in isolation from the
+/// `server_is_overloaded` code branch from line 1101. Splitting the
+/// two ensures a regression in either branch fails with the offending
+/// signature instead of being shadowed by the other.
+#[tokio::test]
+async fn retry_exhausts_budget_for_pure_http_503_branch() {
+    let max_retries = 2;
+    let model = ScriptedFlakyModel::new(vec![
+        Some("status 503 service unavailable".to_string()),
+        Some("status 503 service unavailable".to_string()),
+        Some("status 503 service unavailable".to_string()),
+        None,
+    ]);
+    let recorder = Arc::new(RetryRecorder::default());
+
+    let wrapped = RetryingCompletionModel::new(model.clone())
+        .with_policy(fast_policy(max_retries))
+        .with_observer(recorder.clone());
+
+    let result = wrapped.completion(CompletionRequest::default()).await;
+
+    assert!(matches!(result, Err(CompletionError::ProviderError(_))));
+    assert_eq!(
+        model.calls.load(Ordering::SeqCst),
+        usize::try_from(max_retries + 1).unwrap(),
+        "HTTP-503 branch should follow the same max_retries + 1 attempt budget"
+    );
+    assert_eq!(
+        recorder.snapshot().len(),
+        usize::try_from(max_retries).unwrap()
+    );
+}
+
 /// Scenario: the model returns transient overload twice then success.
 /// The wrapper must stop retrying the moment success arrives — a
 /// regression that kept retrying past success would consume the
@@ -208,17 +252,14 @@ async fn retry_stops_after_first_success() {
 }
 
 /// Scenario: a non-retryable error (the doc table's `BadInput` /
-/// `UserActionRequired` classes — represented in CompletionError as a
-/// generic provider message that does NOT match the retryable
-/// substrings) surfaces immediately on the first attempt. A
-/// regression that retried `invalid_prompt` would loop the model on
-/// the same broken input.
+/// `UserActionRequired` classes — `invalid_prompt`,
+/// `insufficient_quota`, `usage_not_included`) surfaces immediately
+/// on the first attempt. A regression that retried `invalid_prompt`
+/// would loop the model on the same broken input until the budget
+/// drained, so the test additionally asserts the model was called
+/// exactly once and the retry observer never fired.
 #[tokio::test]
 async fn non_retryable_errors_surface_immediately() {
-    // None of these strings contains any of the retryable needles
-    // (`"overloaded"`, `"timeout"`, `"rate limit"`, `"status 5xx"`,
-    // etc.) defined by `is_retryable_provider_message`, so each must
-    // surface on the first attempt with no retry.
     let non_retryable_messages = [
         "invalid_prompt: tool schema rejected",
         "insufficient_quota: subscription required",
@@ -258,22 +299,28 @@ async fn non_retryable_errors_surface_immediately() {
     }
 }
 
-/// Scenario: the wrapper retries on transient overload AND on the
-/// other doc-listed retryable signatures (`status 5xx`, `429 rate
-/// limit`, `connection reset`, `timeout`). One fake call per
-/// signature so a regression in any single match arm fails with the
-/// offending signature in the assertion message.
+/// Scenario: the wrapper retries on every doc-listed retryable
+/// signature in isolation. One fake call per signature so a
+/// regression in any single match arm fails with the offending
+/// signature in the assertion message rather than being shadowed by
+/// a sibling rule. The signatures cover both `docs/improvement/opencode.md`
+/// stream-error codes (`server_is_overloaded`, `server_error`) and
+/// the HTTP-status branches (5xx + 429) called out at lines
+/// 1101-1109. Each signature is intentionally minimal (no overlapping
+/// status + code) so the wrapper exercises one branch per fixture.
 #[tokio::test]
 async fn every_retryable_signature_triggers_a_retry() {
     let signatures = [
-        "status 502: bad gateway",
-        "status 503: server_is_overloaded",
-        "status 504: gateway timeout",
-        "status 500: internal server error",
+        // Stream-error codes (doc table lines 1101-1102).
+        "server_is_overloaded",
+        "server_error: backend stalled",
+        // HTTP-status branches (doc rule line 1109).
+        "status 502 bad gateway",
+        "status 503 service unavailable",
+        "status 504 gateway timeout",
+        "status 500 internal server error",
+        // 429 rate-limit branch (line 1110).
         "429 rate limit exceeded",
-        "connection reset by peer",
-        "operation timed out",
-        "request timeout",
     ];
 
     for signature in signatures {

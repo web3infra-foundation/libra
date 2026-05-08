@@ -426,3 +426,167 @@ async fn context_overflow_drives_compaction_then_retry_without_burning_budget() 
          the doc's `not counted against retry budget` invariant"
     );
 }
+
+/// Companion provider for the budget-isolation scenario: overflows
+/// once, then on every subsequent call emits a stream of transient
+/// `server_is_overloaded` errors before finally succeeding. The test
+/// uses this to prove that an overflow + compaction round leaves the
+/// FULL transient retry budget available for any future calls.
+#[derive(Clone)]
+struct OverflowThenTransientModel {
+    calls: Arc<AtomicUsize>,
+    /// Number of transient overload responses to emit AFTER the
+    /// initial overflow. Sized to consume the entire 3-retry budget.
+    transient_count: usize,
+}
+
+impl OverflowThenTransientModel {
+    fn new(transient_count: usize) -> Self {
+        Self {
+            calls: Arc::new(AtomicUsize::new(0)),
+            transient_count,
+        }
+    }
+}
+
+impl CompletionModel for OverflowThenTransientModel {
+    type Response = ();
+
+    async fn completion(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+        let attempt = self.calls.fetch_add(1, Ordering::SeqCst);
+        if attempt == 0 {
+            return Err(CompletionError::ProviderError(
+                "context_length_exceeded — transcript over the model's window".to_string(),
+            ));
+        }
+        // Every subsequent call up to `transient_count` returns a
+        // retryable transient. The wrapper's retry budget kicks in
+        // here. The (transient_count + 1)-th call returns success.
+        if attempt <= self.transient_count {
+            return Err(CompletionError::ProviderError(
+                "server_is_overloaded".to_string(),
+            ));
+        }
+        Ok(CompletionResponse {
+            content: vec![AssistantContent::Text(Text {
+                text: "ok-after-budgeted-retries".to_string(),
+            })],
+            reasoning_content: None,
+            raw_response: (),
+        })
+    }
+}
+
+/// Scenario: ContextOverflow + recovery does **not** consume the
+/// transient retry budget — the budget is still fully available for
+/// real transient retries that happen later in the same session.
+///
+/// The doc's invariant at `docs/improvement/opencode.md` line 1129:
+///
+/// > `ContextOverflow` → 调 compaction agent，重建 transcript 后重试一次
+/// > （一次，不计入 max_retries）
+///
+/// Verification strategy:
+///
+/// 1. The same wrapper handles overflow recovery (manual orchestrator
+///    step) and transient retries (built-in budget). After the
+///    overflow path completes, fire a follow-up call against a
+///    provider that returns `max_retries` consecutive transient
+///    errors before succeeding. If the budget had been decremented
+///    by the overflow, the follow-up would fail; instead, the full
+///    `max_retries + 1` attempt budget is available, so the call
+///    succeeds and the retry observer fires exactly `max_retries`
+///    times — proving budget isolation.
+/// 2. The combined scenario also verifies the wrapper resets its
+///    internal attempt counter between independent `completion()`
+///    invocations (a regression that kept a global counter would
+///    fail this test even without the overflow round).
+#[tokio::test]
+async fn context_overflow_recovery_leaves_transient_budget_fully_available() {
+    let max_retries = 3;
+    // The follow-up provider needs to consume the entire transient
+    // budget plus a final success — total `max_retries + 1` calls.
+    let provider = OverflowThenTransientModel::new(usize::try_from(max_retries).unwrap());
+    let recorder = Arc::new(RetryRecorder::default());
+    let wrapped = RetryingCompletionModel::new(provider.clone())
+        .with_policy(CompletionRetryPolicy {
+            max_retries,
+            base_delay_ms: 1,
+            max_delay_ms: 4,
+        })
+        .with_observer(recorder.clone());
+
+    // ----- Round 1: overflow surfaces immediately (no budget burn) ---
+    let first = wrapped.completion(CompletionRequest::default()).await;
+    assert!(
+        matches!(first, Err(CompletionError::ProviderError(_))),
+        "round 1 must surface ContextOverflow without retrying"
+    );
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        1,
+        "round 1 must not have consumed any retry attempts"
+    );
+    assert_eq!(
+        recorder.count(),
+        0,
+        "round 1 must not have fired the retry observer"
+    );
+
+    // ----- Round 1 recovery: orchestrator runs compaction -----
+    // (Equivalent to the production tool-loop calling `run_compaction`
+    // and rebuilding the request. The fact that the recovery call is
+    // fully owned by the orchestrator — not the wrapper — is what
+    // makes budget isolation a property of the wrapper's design.)
+    let compaction_model = CannedSummaryModel::new();
+    let _handoff = run_compaction(
+        &compaction_model,
+        embedded_compaction_system_prompt(),
+        "synthetic over-budget transcript",
+        Uuid::new_v4(),
+        Vec::new(),
+        Vec::new(),
+        4_096,
+    )
+    .await
+    .expect("compaction must succeed against the canonical template");
+
+    // ----- Round 2: full transient retry budget must still be available ---
+    let second = wrapped
+        .completion(CompletionRequest::default())
+        .await
+        .expect(
+            "round 2 must consume the full transient budget and recover; \
+             a regression that decremented the budget during overflow \
+             would surface here as `ProviderError(server_is_overloaded)` \
+             instead of an Ok response",
+        );
+    let text = second
+        .content
+        .iter()
+        .find_map(|c| match c {
+            AssistantContent::Text(t) => Some(t.text.clone()),
+            AssistantContent::ToolCall(_) => None,
+        })
+        .expect("round 2 must contain a text part");
+    assert_eq!(text, "ok-after-budgeted-retries");
+    // Total provider invocations:
+    //   1 (round 1 overflow)
+    // + max_retries (transient retries during round 2)
+    // + 1 (round 2 final success)
+    let expected_total = 1 + usize::try_from(max_retries).unwrap() + 1;
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        expected_total,
+        "exactly 1 (overflow) + {max_retries} (transient) + 1 (success) provider calls"
+    );
+    assert_eq!(
+        recorder.count(),
+        usize::try_from(max_retries).unwrap(),
+        "round 2 must have fired the retry observer exactly max_retries times — \
+         proving the full budget was available after the overflow round"
+    );
+}
