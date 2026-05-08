@@ -113,6 +113,40 @@ fn ls_remote_tags_lists_local_libra_tags() {
 }
 
 #[test]
+fn ls_remote_tags_lists_peeled_annotated_tag_for_local_libra_remote() {
+    let remote = create_committed_repo_via_cli();
+    let outside = tempdir().expect("failed to create outside cwd");
+    let tag_output = run_libra_command(&["tag", "-m", "Release v1.0", "v1.0"], remote.path());
+    assert_cli_success(&tag_output, "annotated tag creation should succeed");
+    let remote_path = remote.path().to_string_lossy().to_string();
+
+    let output = run_libra_command(&["ls-remote", "--tags", &remote_path], outside.path());
+    assert_cli_success(&output, "ls-remote --tags should succeed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\trefs/tags/v1.0\n"),
+        "expected annotated tag object ref, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("\trefs/tags/v1.0^{}\n"),
+        "expected peeled annotated tag ref, got: {stdout}"
+    );
+
+    let refs_output = run_libra_command(
+        &["ls-remote", "--tags", "--refs", &remote_path],
+        outside.path(),
+    );
+    assert_cli_success(&refs_output, "ls-remote --tags --refs should succeed");
+
+    let refs_stdout = String::from_utf8_lossy(&refs_output.stdout);
+    assert!(
+        !refs_stdout.contains("\trefs/tags/v1.0^{}\n"),
+        "--refs should suppress peeled annotated tag refs, got: {refs_stdout}"
+    );
+}
+
+#[test]
 fn ls_remote_json_reports_entries() {
     let remote = create_committed_repo_via_cli();
     let outside = tempdir().expect("failed to create outside cwd");

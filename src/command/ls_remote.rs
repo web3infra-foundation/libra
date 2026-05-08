@@ -110,6 +110,7 @@ pub async fn execute_safe(args: LsRemoteArgs, output: &OutputConfig) -> CliResul
 
 async fn run_ls_remote(args: LsRemoteArgs) -> Result<LsRemoteOutput, LsRemoteError> {
     let (remote_display, remote_url, remote_name) = resolve_remote(&args.repository).await?;
+    let visible_remote = visible_remote_display(&remote_display, remote_name.as_deref());
     let client = RemoteClient::from_spec_with_remote(&remote_url, remote_name.as_deref()).map_err(
         |reason| LsRemoteError::InvalidRemote {
             spec: args.repository.clone(),
@@ -120,7 +121,7 @@ async fn run_ls_remote(args: LsRemoteArgs) -> Result<LsRemoteOutput, LsRemoteErr
         .discovery_reference(UploadPack)
         .await
         .map_err(|source| LsRemoteError::Discovery {
-            remote: remote_display.clone(),
+            remote: visible_remote.clone(),
             source,
         })?;
     let patterns = compile_patterns(&args.patterns)?;
@@ -135,7 +136,7 @@ async fn run_ls_remote(args: LsRemoteArgs) -> Result<LsRemoteOutput, LsRemoteErr
         .collect();
 
     Ok(LsRemoteOutput {
-        remote: remote_display,
+        remote: visible_remote,
         url: visible_remote_url(&remote_url),
         heads_only: args.heads,
         tags_only: args.tags,
@@ -169,6 +170,14 @@ fn compile_patterns(patterns: &[String]) -> Result<Vec<CompiledPattern>, LsRemot
 
 fn visible_remote_url(remote_url: &str) -> String {
     redact_url_credentials(remote_url)
+}
+
+fn visible_remote_display(remote_display: &str, remote_name: Option<&str>) -> String {
+    if remote_name.is_some() {
+        remote_display.to_string()
+    } else {
+        redact_url_credentials(remote_display)
+    }
 }
 
 struct CompiledPattern {
@@ -259,7 +268,10 @@ fn render_ls_remote_output(data: &LsRemoteOutput, output: &OutputConfig) -> CliR
 
 #[cfg(test)]
 mod tests {
-    use super::{CompiledPattern, LsRemoteArgs, include_reference, visible_remote_url};
+    use super::{
+        CompiledPattern, LsRemoteArgs, include_reference, visible_remote_display,
+        visible_remote_url,
+    };
     use crate::internal::protocol::DiscRef;
 
     fn disc_ref(refname: &str) -> DiscRef {
@@ -318,5 +330,14 @@ mod tests {
             visible_remote_url("https://user:secret@example.com/repo.git"),
             "https://example.com/repo.git"
         );
+    }
+
+    #[test]
+    fn visible_remote_display_redacts_direct_url_but_preserves_remote_name() {
+        assert_eq!(
+            visible_remote_display("https://token@example.com/repo.git", None),
+            "https://example.com/repo.git"
+        );
+        assert_eq!(visible_remote_display("origin", Some("origin")), "origin");
     }
 }

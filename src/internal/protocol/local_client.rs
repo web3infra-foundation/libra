@@ -276,10 +276,7 @@ impl LocalClient {
                             .into_iter()
                             .chain(remote_branches)
                             .map(Into::into)
-                            .chain(tags.into_iter().map(|tag| DiscRef {
-                                _hash: tag_object_hash(&tag.object),
-                                _ref: format!("refs/tags/{}", tag.name),
-                            }))
+                            .chain(tags.into_iter().flat_map(tag_refs))
                             .chain(head_commit.map(|x| x.to_string()).map(|hash| DiscRef {
                                 _hash: hash,
                                 _ref: reflog::HEAD.to_string(),
@@ -510,6 +507,23 @@ fn tag_object_hash(object: &tag::TagObject) -> String {
         tag::TagObject::Tree(tree) => tree.id.to_string(),
         tag::TagObject::Blob(blob) => blob.id.to_string(),
     }
+}
+
+fn tag_refs(tag: tag::Tag) -> Vec<DiscRef> {
+    let refname = format!("refs/tags/{}", tag.name);
+    let mut refs = vec![DiscRef {
+        _hash: tag_object_hash(&tag.object),
+        _ref: refname.clone(),
+    }];
+
+    if let tag::TagObject::Tag(tag_object) = tag.object {
+        refs.push(DiscRef {
+            _hash: tag_object.object_hash.to_string(),
+            _ref: format!("{refname}^{{}}"),
+        });
+    }
+
+    refs
 }
 
 #[cfg(test)]
