@@ -218,6 +218,8 @@ enum Commands {
     Show(command::show::ShowArgs),
     #[command(about = "List references in a local repository")]
     ShowRef(command::show_ref::ShowRefArgs),
+    #[command(about = "List references in a remote repository")]
+    LsRemote(command::ls_remote::LsRemoteArgs),
     #[command(about = "Read or update the symbolic HEAD ref")]
     SymbolicRef(command::symbolic_ref::SymbolicRefArgs),
     #[command(about = "List, create, or delete branches", alias = "br")]
@@ -678,9 +680,11 @@ fn repo_not_found_error(path: Option<&Path>) -> CliError {
 
 fn command_preflight_storage(command: &Commands) -> CliResult<Option<std::path::PathBuf>> {
     match command {
-        Commands::Init(_) | Commands::Clone(_) | Commands::Open(_) | Commands::CodeControl(_) => {
-            Ok(None)
-        }
+        Commands::Init(_)
+        | Commands::Clone(_)
+        | Commands::Open(_)
+        | Commands::CodeControl(_)
+        | Commands::LsRemote(_) => Ok(None),
         #[cfg(unix)]
         Commands::Worktree(command::worktree::WorktreeArgs {
             command: command::worktree::WorktreeSubcommand::Umount { .. },
@@ -893,6 +897,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Shortlog(cmd_args) => command::shortlog::execute_safe(cmd_args, &output).await?,
         Commands::Show(cmd_args) => command::show::execute_safe(cmd_args, &output).await?,
         Commands::ShowRef(cmd_args) => command::show_ref::execute_safe(cmd_args, &output).await?,
+        Commands::LsRemote(cmd_args) => command::ls_remote::execute_safe(cmd_args, &output).await?,
         Commands::SymbolicRef(cmd_args) => {
             command::symbolic_ref::execute_safe(cmd_args, &output).await?
         }

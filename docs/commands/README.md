@@ -80,6 +80,7 @@ Every Libra command accepts the following global flags:
 |---------|-------|-------------|-----|
 | `libra remote` | | Manage remote repositories: add, remove, rename, inspect URLs, prune stale refs | [remote.md](remote.md) |
 | `libra fetch` | | Download objects and update remote-tracking refs from one or all remotes | [fetch.md](fetch.md) |
+| `libra ls-remote` | | List references advertised by a remote repository without fetching objects | [ls-remote.md](ls-remote.md) |
 | `libra push` | | Send local commits and objects to a remote with LFS integration | [push.md](push.md) |
 | `libra pull` | | Fetch and fast-forward merge into the current branch | [pull.md](pull.md) |
 | `libra open` | | Open the repository's remote URL in the system browser | [open.md](open.md) |

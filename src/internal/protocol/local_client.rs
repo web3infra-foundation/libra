@@ -34,7 +34,7 @@ use super::{
 use crate::{
     command::{load_object, log::get_reachable_commits},
     git_protocol::ServiceType,
-    internal::{branch::Branch, config::ConfigKv, head::Head, protocol::DiscRef, reflog},
+    internal::{branch::Branch, config::ConfigKv, head::Head, protocol::DiscRef, reflog, tag},
     utils::{object_ext::TreeExt, util::cur_dir},
 };
 
@@ -268,11 +268,18 @@ impl LocalClient {
                     let head_commit = Head::current_commit_result()
                         .await
                         .map_err(|error| GitError::CustomError(error.to_string()))?;
+                    let tags = tag::list()
+                        .await
+                        .map_err(|error| GitError::CustomError(error.to_string()))?;
                     Ok(DiscoveryResult {
                         refs: local_branches
                             .into_iter()
                             .chain(remote_branches)
                             .map(Into::into)
+                            .chain(tags.into_iter().map(|tag| DiscRef {
+                                _hash: tag_object_hash(&tag.object),
+                                _ref: format!("refs/tags/{}", tag.name),
+                            }))
                             .chain(head_commit.map(|x| x.to_string()).map(|hash| DiscRef {
                                 _hash: hash,
                                 _ref: reflog::HEAD.to_string(),
@@ -493,6 +500,15 @@ impl LocalClient {
                 .await
             }
         }
+    }
+}
+
+fn tag_object_hash(object: &tag::TagObject) -> String {
+    match object {
+        tag::TagObject::Commit(commit) => commit.id.to_string(),
+        tag::TagObject::Tag(tag) => tag.id.to_string(),
+        tag::TagObject::Tree(tree) => tree.id.to_string(),
+        tag::TagObject::Blob(blob) => blob.id.to_string(),
     }
 }
 
