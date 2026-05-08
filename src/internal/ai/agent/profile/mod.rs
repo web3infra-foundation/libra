@@ -17,7 +17,7 @@ pub mod spec;
 pub use config::{
     AgentConfigEntry, AgentsConfig, AgentsConfigValidationError, AgentsConfigValidationErrors,
     BudgetConfig, CompactionConfig, GoalBudgetConfig, GoalConfig, MultiAgentConfig,
-    PerAgentBudgetConfig, parse_agent_mode,
+    PerAgentBudgetConfig, PermissionPolicy, parse_agent_mode,
 };
 pub use parser::{AgentProfile, parse_agent_profile};
 pub use router::{AgentProfileRouter, load_embedded_profiles, load_profiles};

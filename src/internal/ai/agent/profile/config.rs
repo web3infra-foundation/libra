@@ -49,7 +49,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::spec::{AgentMode, AgentPermissionSpec, ModelBinding, ToolSelection};
+use super::spec::{AgentMode, ModelBinding, ToolSelection};
 
 /// Top-level config. Every subsection is optional so a partial
 /// `agents.toml` (e.g. only `[code.multi_agent]`) parses cleanly and
@@ -154,6 +154,19 @@ fn default_require_completion_evidence() -> bool {
 /// is a validation error.
 const ALLOWED_AUTO_CONTINUE_VALUES: &[&str] = &["ask", "auto", "never"];
 
+/// Policy attached to a per-agent permission category in
+/// `[code.agents.<name>].permission`. Mirrors the opencode tri-state
+/// (`allow` / `deny` / `ask`) the doc's permission ruleset uses
+/// elsewhere; serialised as the bare lowercase string the TOML form
+/// expects (`permission = { write = "deny", shell = "deny" }`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PermissionPolicy {
+    Allow,
+    Deny,
+    Ask,
+}
+
 /// `[code.agents.<name>]`. Mirrors the runtime
 /// [`AgentExecutionSpec`](super::spec::AgentExecutionSpec) shape but
 /// keeps the model id as a raw string (validated separately) so
@@ -181,11 +194,17 @@ pub struct AgentConfigEntry {
     #[serde(default)]
     pub tools: Vec<String>,
 
-    /// Per-agent permission overrides. Validation does not currently
-    /// inspect this — the runtime treats unknown keys defensively per
-    /// the AgentPermissionSpec contract.
+    /// Per-agent permission overrides keyed by permission *category*
+    /// name (`write`, `shell`, `edit`, `read`, `webfetch`, …) — NOT by
+    /// tool name. Doc form is `{ write = "deny", shell = "deny" }`
+    /// (opencode.md:1381). The OC-Phase 3 dispatcher translates each
+    /// category into the runtime `AgentPermissionSpec` ruleset; the
+    /// configuration layer keeps the category map opaque so a future
+    /// category addition does not require a schema change here.
+    /// Validation rejects policy values that are not in
+    /// [`PermissionPolicy`].
     #[serde(default)]
-    pub permission: AgentPermissionSpec,
+    pub permission: BTreeMap<String, PermissionPolicy>,
 
     /// Override for the per-agent step cap. `None` means "inherit
     /// runtime default for this agent's mode".
@@ -519,6 +538,7 @@ steps = 30
 mode = "subagent"
 model = "deepseek/deepseek-chat"
 tools = ["read_file", "list_dir", "grep_files"]
+permission = { write = "deny", shell = "deny" }
 steps = 20
 
 [code.compaction]
@@ -554,6 +574,10 @@ max_steps = 20
             "anthropic/claude-3-5-sonnet-latest"
         );
         assert_eq!(cfg.agents["explorer"].mode, "subagent");
+        // Doc fixture line 1385: permission categories carry tri-state policy.
+        let explorer_perm = &cfg.agents["explorer"].permission;
+        assert_eq!(explorer_perm.get("write"), Some(&PermissionPolicy::Deny));
+        assert_eq!(explorer_perm.get("shell"), Some(&PermissionPolicy::Deny));
         assert_eq!(cfg.budget.max_session_cost_usd, Some(5.0));
         assert_eq!(cfg.budget.per_agent["explorer"].max_steps, Some(20));
         assert_eq!(
@@ -812,7 +836,7 @@ max_session_cost_usd = 5.0
             model: "openai/gpt-4o".to_string(),
             mode: "primary".to_string(),
             tools: Vec::new(),
-            permission: AgentPermissionSpec::default(),
+            permission: BTreeMap::new(),
             steps: None,
         };
         assert!(matches!(inherit.tool_selection(), ToolSelection::Inherit));
@@ -821,7 +845,7 @@ max_session_cost_usd = 5.0
             model: "openai/gpt-4o".to_string(),
             mode: "primary".to_string(),
             tools: vec!["read_file".to_string(), "  list_dir  ".to_string()],
-            permission: AgentPermissionSpec::default(),
+            permission: BTreeMap::new(),
             steps: None,
         };
         match allow.tool_selection() {
@@ -852,5 +876,57 @@ max_session_cost_usd = 5.0
         let serialised = cfg.to_toml_string().expect("serialise must succeed");
         let cfg2 = AgentsConfig::from_toml_str(&serialised).expect("re-parse must succeed");
         assert_eq!(cfg, cfg2);
+    }
+
+    /// Permission policies that fall outside the `allow|deny|ask`
+    /// tri-state must fail at deserialisation (serde enum check) so a
+    /// typo'd policy is loud at load time, not a silent fallback.
+    #[test]
+    fn invalid_permission_policy_string_fails_load() {
+        let toml_str = r#"
+[code.agents.x]
+model = "openai/gpt-4o"
+mode = "primary"
+permission = { write = "yolo" }
+"#;
+        let err = AgentsConfig::from_toml_str(toml_str).expect_err("bad policy must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.to_lowercase().contains("yolo") || msg.contains("variant"),
+            "error must surface the offending policy or its rejected variant, got: {msg}"
+        );
+    }
+
+    /// Empty permission map (the common case for a default-allow
+    /// agent) parses cleanly and validates.
+    #[test]
+    fn permission_map_defaults_to_empty_when_omitted() {
+        let toml_str = r#"
+[code.agents.x]
+model = "openai/gpt-4o"
+mode = "primary"
+"#;
+        let cfg = AgentsConfig::from_toml_str(toml_str).unwrap();
+        cfg.validate().expect("default permission must validate");
+        assert!(cfg.agents["x"].permission.is_empty());
+    }
+
+    /// Mixed permission categories — `allow` / `deny` / `ask` — all
+    /// round-trip through serde so the runtime translator (OC-Phase 3)
+    /// receives the operator's exact intent.
+    #[test]
+    fn permission_map_carries_each_tri_state_value() {
+        let toml_str = r#"
+[code.agents.x]
+model = "openai/gpt-4o"
+mode = "primary"
+permission = { write = "deny", read = "allow", shell = "ask" }
+"#;
+        let cfg = AgentsConfig::from_toml_str(toml_str).unwrap();
+        cfg.validate().expect("tri-state permission must validate");
+        let perm = &cfg.agents["x"].permission;
+        assert_eq!(perm.get("write"), Some(&PermissionPolicy::Deny));
+        assert_eq!(perm.get("read"), Some(&PermissionPolicy::Allow));
+        assert_eq!(perm.get("shell"), Some(&PermissionPolicy::Ask));
     }
 }
