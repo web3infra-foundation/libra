@@ -41,6 +41,13 @@ pub enum BuiltinCommand {
     Anchors,
     /// `/undo` — roll back the latest uncommitted AI file-edit batch.
     Undo,
+    /// `/agents` — show declarative `[code.agents.<name>]` table from
+    /// `agents.toml` (OC-Phase 5 P5.4).
+    Agents,
+    /// `/budget` — show running session/per-agent/goal budget totals
+    /// against the configured `[code.budget]` thresholds (OC-Phase 5
+    /// P5.4).
+    Budget,
     /// `/quit` — exit the application cleanly.
     Quit,
 }
@@ -67,6 +74,8 @@ impl BuiltinCommand {
             Self::Approvals => "approvals",
             Self::Anchors => "anchors",
             Self::Undo => "undo",
+            Self::Agents => "agents",
+            Self::Budget => "budget",
             Self::Quit => "quit",
         }
     }
@@ -92,6 +101,8 @@ impl BuiltinCommand {
             Self::Approvals => "List or revoke cached approvals",
             Self::Anchors => "List, draft, confirm, revoke memory anchors",
             Self::Undo => "Undo latest AI file edit batch",
+            Self::Agents => "Show declarative agents.toml table",
+            Self::Budget => "Show running budget totals vs configured caps",
             Self::Quit => "Quit the application",
         }
     }
@@ -118,6 +129,8 @@ impl BuiltinCommand {
             Self::Approvals,
             Self::Anchors,
             Self::Undo,
+            Self::Agents,
+            Self::Budget,
             Self::Quit,
         ]
     }
@@ -229,6 +242,12 @@ mod tests {
             Some((BuiltinCommand::Model, "gemini"))
         );
         assert_eq!(parse_builtin("/usage"), Some((BuiltinCommand::Usage, "")));
+        assert_eq!(parse_builtin("/agents"), Some((BuiltinCommand::Agents, "")));
+        assert_eq!(parse_builtin("/budget"), Some((BuiltinCommand::Budget, "")));
+        assert_eq!(
+            parse_builtin("/usage --by=agent"),
+            Some((BuiltinCommand::Usage, "--by=agent"))
+        );
     }
 
     /// Scenario: command names are matched case-insensitively because users
@@ -256,7 +275,7 @@ mod tests {
     #[test]
     fn all_hints_returns_all() {
         let hints = BuiltinCommand::all_hints();
-        assert_eq!(hints.len(), 15);
+        assert_eq!(hints.len(), 17);
         assert!(hints.iter().any(|(n, _)| n == "help"));
         assert!(hints.iter().any(|(n, _)| n == "chat"));
         assert!(hints.iter().any(|(n, _)| n == "usage"));
@@ -269,5 +288,7 @@ mod tests {
         assert!(hints.iter().any(|(n, _)| n == "approvals"));
         assert!(hints.iter().any(|(n, _)| n == "anchors"));
         assert!(hints.iter().any(|(n, _)| n == "undo"));
+        assert!(hints.iter().any(|(n, _)| n == "agents"));
+        assert!(hints.iter().any(|(n, _)| n == "budget"));
     }
 }

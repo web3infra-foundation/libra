@@ -4497,6 +4497,30 @@ where
                 self.sync_mux_input_context();
                 self.schedule_draw();
             }
+            BuiltinCommand::Agents => {
+                // OC-Phase 5 P5.4: declarative agents.toml is not yet wired
+                // through the TUI session config (lands with the dispatcher
+                // integration in P5.5 + later). Until then, surface an
+                // actionable placeholder so the slash command exists as a
+                // discoverable UX surface.
+                self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                    "Multi-agent declarative config (`agents.toml`) is not yet loaded by this \
+                     session. See `docs/improvement/opencode.md` OC-Phase 5 for the rollout \
+                     plan."
+                        .to_string(),
+                )));
+            }
+            BuiltinCommand::Budget => {
+                // Same gating as Agents — budget enforcement is implemented
+                // (`src/internal/ai/agent/budget.rs`) but the runtime tracker
+                // is not yet plumbed into the TUI session.
+                self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                    "Per-session / per-agent budget tracker is not yet plumbed through this \
+                     TUI session. The `[code.budget]` config schema and enforcement primitive \
+                     are in place; runtime wiring lands in OC-Phase 5 P5.5."
+                        .to_string(),
+                )));
+            }
             BuiltinCommand::Quit => {
                 self.request_user_exit();
             }
