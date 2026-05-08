@@ -27,7 +27,7 @@ use libra::internal::ai::{
         GoalActor, GoalApplyReject, GoalBlockReason, GoalCompletionClaim, GoalCompletionReport,
         GoalCompletionShapeError, GoalCriterion, GoalEvent, GoalEventEnvelope, GoalEvidencePolicy,
         GoalEvidenceRef, GoalEvidenceTarget, GoalPlanStep, GoalProgressRecord, GoalSpec, GoalState,
-        GoalStatus, GoalStepStatus, GoalVerificationRecord, apply, replay,
+        GoalStatus, GoalStepStatus, GoalVerificationRecord, MAX_REPLAY_REJECTIONS, apply, replay,
     },
     session::jsonl::SessionEvent,
 };
@@ -188,7 +188,24 @@ fn replay_drives_full_happy_path_to_completed() {
             GoalEvent::Completed(GoalCompletionReport {
                 summary: "shipped".to_string(),
                 completed_criteria: vec!["compiles".to_string(), "tests".to_string()],
-                evidence_refs: vec![],
+                evidence_refs: vec![
+                    GoalEvidenceRef {
+                        criterion_id: Some("compiles".to_string()),
+                        target: GoalEvidenceTarget::File {
+                            path: "src/feature.rs".to_string(),
+                            sha256: "deadbeef".to_string(),
+                        },
+                        description: "edit landed".to_string(),
+                    },
+                    GoalEvidenceRef {
+                        criterion_id: Some("tests".to_string()),
+                        target: GoalEvidenceTarget::File {
+                            path: "tests/feature.rs".to_string(),
+                            sha256: "cafef00d".to_string(),
+                        },
+                        description: "test landed".to_string(),
+                    },
+                ],
                 verification: vec![],
                 residual_risks: vec![],
                 changed_files: vec!["src/feature.rs".to_string()],
@@ -218,8 +235,11 @@ fn replay_drives_full_happy_path_to_completed() {
             .all(|s| *s == GoalStepStatus::Completed),
         "all planned steps must be Completed, got {step_statuses:?}"
     );
-    // 2 step-completion + 0 progress + 0 claim/report evidence refs.
-    assert_eq!(state.evidence_refs.len(), 2);
+    // 2 step-completion + 0 progress + 0 claim refs (claim's
+    // evidence list is empty in this fixture) + 2 report refs
+    // (one File evidence per required criterion, since Standard
+    // policy + requires_workspace_change=true on both demands it).
+    assert_eq!(state.evidence_refs.len(), 4);
 }
 
 /// Scenario: cancellation is terminal regardless of prior state. A
@@ -449,7 +469,24 @@ fn resume_replay_handles_claim_rejection_then_completion() {
             GoalEvent::Completed(GoalCompletionReport {
                 summary: "shipped after rework".to_string(),
                 completed_criteria: vec!["compiles".to_string(), "tests".to_string()],
-                evidence_refs: vec![],
+                evidence_refs: vec![
+                    GoalEvidenceRef {
+                        criterion_id: Some("compiles".to_string()),
+                        target: GoalEvidenceTarget::File {
+                            path: "src/feature.rs".to_string(),
+                            sha256: "deadbeef".to_string(),
+                        },
+                        description: "edit landed".to_string(),
+                    },
+                    GoalEvidenceRef {
+                        criterion_id: Some("tests".to_string()),
+                        target: GoalEvidenceTarget::File {
+                            path: "tests/feature.rs".to_string(),
+                            sha256: "cafef00d".to_string(),
+                        },
+                        description: "test landed".to_string(),
+                    },
+                ],
                 verification: vec![],
                 residual_risks: vec![],
                 changed_files: vec![],
@@ -939,8 +976,22 @@ fn session_event_goal_with_unknown_nested_variant_deserialises() {
 fn replay_rejects_forged_completed_envelope_without_required_criteria() {
     let spec = fixture_spec();
     let goal_id = spec.goal_id;
+    // Pre-claim with a legitimate `CompletionClaimed` so
+    // `pending_claim` is `Some` — this isolates the schema-layer
+    // shape gate from the `MissingCompletionClaim` state-machine
+    // guard (a separate Codex pass-7 P1 finding). The forged
+    // `Completed` then claims only one of the two required
+    // criteria, which the floor must refuse.
+    let legit_claim = GoalCompletionClaim {
+        summary: "claim".to_string(),
+        completed_criteria: vec!["compiles".to_string(), "tests".to_string()],
+        evidence_refs: vec![],
+        verification: vec![],
+        residual_risks: vec![],
+    };
     let envelopes = [
         envelope(goal_id, GoalEvent::Created(spec)),
+        envelope(goal_id, GoalEvent::CompletionClaimed(legit_claim)),
         envelope(
             goal_id,
             GoalEvent::Completed(GoalCompletionReport {
@@ -967,7 +1018,7 @@ fn replay_rejects_forged_completed_envelope_without_required_criteria() {
         replay(envelopes.iter()).expect("replay must succeed even when Completed rejected");
     assert_eq!(
         outcome.state.status,
-        GoalStatus::Active,
+        GoalStatus::CompletionClaimed,
         "forged Completed must NOT transition the Goal to terminal — \
          the verifier (P6.2) is the only legitimate path to `Completed`",
     );
@@ -1002,8 +1053,19 @@ fn replay_rejects_forged_completed_envelope_without_required_criteria() {
 fn replay_rejects_forged_completed_envelope_with_unknown_criterion_id() {
     let spec = fixture_spec();
     let goal_id = spec.goal_id;
+    // Same isolation as the missing-required-criterion test:
+    // pre-claim so `pending_claim` is `Some`, then ship a
+    // forged Completed that claims a fabricated id.
+    let legit_claim = GoalCompletionClaim {
+        summary: "claim".to_string(),
+        completed_criteria: vec!["compiles".to_string(), "tests".to_string()],
+        evidence_refs: vec![],
+        verification: vec![],
+        residual_risks: vec![],
+    };
     let envelopes = [
         envelope(goal_id, GoalEvent::Created(spec)),
+        envelope(goal_id, GoalEvent::CompletionClaimed(legit_claim)),
         envelope(
             goal_id,
             GoalEvent::Completed(GoalCompletionReport {
@@ -1028,7 +1090,7 @@ fn replay_rejects_forged_completed_envelope_with_unknown_criterion_id() {
         ),
     ];
     let outcome = replay(envelopes.iter()).expect("replay must succeed");
-    assert_eq!(outcome.state.status, GoalStatus::Active);
+    assert_eq!(outcome.state.status, GoalStatus::CompletionClaimed);
     assert_eq!(outcome.rejected.len(), 1);
     match &outcome.rejected[0].reason {
         GoalApplyReject::InvalidCompletionReport { source } => {
@@ -1134,5 +1196,216 @@ fn completion_report_budget_summary_round_trips() {
         assert_eq!(r.continuation_loops_used, 7);
     } else {
         panic!("expected GoalEvent::Completed");
+    }
+}
+
+/// Scenario (Codex pass-7 P2): a forged JSONL stream with thousands
+/// of cross-goal envelopes after the legitimate `Created` must not
+/// turn replay diagnostics into an unbounded memory sink. The cap
+/// at [`MAX_REPLAY_REJECTIONS`] retains the first N entries and
+/// records the overflow count separately so the supervisor can
+/// render "and N more rejections" without amplifying the attack.
+#[test]
+fn replay_caps_rejection_vec_at_max_replay_rejections() {
+    let spec = fixture_spec();
+    let goal_id = spec.goal_id;
+    let other_goal = Uuid::parse_str("00000000-0000-0000-0000-0000abcd0000").unwrap();
+    // Build the legitimate `Created` plus
+    // MAX_REPLAY_REJECTIONS + 50 cross-goal envelopes (well past
+    // the cap so we exercise the saturating overflow counter).
+    let bad_count = MAX_REPLAY_REJECTIONS + 50;
+    let mut envelopes: Vec<GoalEventEnvelope> = Vec::with_capacity(bad_count + 1);
+    envelopes.push(envelope(goal_id, GoalEvent::Created(spec)));
+    for i in 0..bad_count {
+        envelopes.push(envelope(
+            other_goal,
+            GoalEvent::StepStarted {
+                step_id: format!("foreign-step-{i}"),
+            },
+        ));
+    }
+    let outcome = replay(envelopes.iter()).expect("replay must succeed");
+    assert_eq!(
+        outcome.rejected.len(),
+        MAX_REPLAY_REJECTIONS,
+        "rejected vec must be capped at MAX_REPLAY_REJECTIONS",
+    );
+    assert_eq!(
+        outcome.truncated_rejection_count,
+        bad_count - MAX_REPLAY_REJECTIONS,
+        "truncated_rejection_count must record the overflow exactly",
+    );
+    // Every retained rejection is a CrossGoal — pins that the cap
+    // does not skip the wrong reasons silently.
+    assert!(
+        outcome
+            .rejected
+            .iter()
+            .all(|r| matches!(r.reason, GoalApplyReject::CrossGoal { .. })),
+        "all retained rejections must be CrossGoal",
+    );
+}
+
+/// Scenario (Codex pass-7 P3): a duplicate `Created` envelope after
+/// the seed surfaces as `DuplicateCreated` — a corrupted stream
+/// would previously no-op the duplicate and silently advance
+/// `updated_at` past a non-mutation, masking the corruption from
+/// the supervisor's snapshot diff.
+#[test]
+fn replay_surfaces_duplicate_created_envelope_as_rejection() {
+    let spec = fixture_spec();
+    let goal_id = spec.goal_id;
+    let envelopes = [
+        envelope(goal_id, GoalEvent::Created(spec.clone())),
+        // Second Created — must be rejected.
+        envelope(goal_id, GoalEvent::Created(spec)),
+    ];
+    let outcome = replay(envelopes.iter()).expect("replay must succeed");
+    assert_eq!(outcome.rejected.len(), 1);
+    assert_eq!(
+        outcome.rejected[0].reason,
+        GoalApplyReject::DuplicateCreated
+    );
+}
+
+/// Scenario (Codex pass-7 P1): a `Completed` envelope that arrives
+/// without a prior `CompletionClaimed` — i.e. the verifier never
+/// ran — surfaces as `MissingCompletionClaim`, not as a successful
+/// transition. Pins the doc state machine
+/// `Created -> ... -> CompletionClaimed -> verifier -> Completed`.
+#[test]
+fn replay_rejects_completed_without_pending_claim() {
+    let spec = fixture_spec();
+    let goal_id = spec.goal_id;
+    let report = GoalCompletionReport {
+        summary: "shipped".to_string(),
+        completed_criteria: vec!["compiles".to_string(), "tests".to_string()],
+        evidence_refs: vec![
+            GoalEvidenceRef {
+                criterion_id: Some("compiles".to_string()),
+                target: GoalEvidenceTarget::File {
+                    path: "src/feature.rs".to_string(),
+                    sha256: "deadbeef".to_string(),
+                },
+                description: "edit landed".to_string(),
+            },
+            GoalEvidenceRef {
+                criterion_id: Some("tests".to_string()),
+                target: GoalEvidenceTarget::File {
+                    path: "tests/feature.rs".to_string(),
+                    sha256: "cafef00d".to_string(),
+                },
+                description: "test landed".to_string(),
+            },
+        ],
+        verification: vec![],
+        residual_risks: vec![],
+        changed_files: vec![],
+        total_spent_micro_usd: 0,
+        elapsed_wall_clock_seconds: 0,
+        continuation_loops_used: 0,
+        finalised_at: fixture_now(),
+        finalised_by: GoalActor::System {
+            reason: "no claim ever filed".to_string(),
+        },
+    };
+    let envelopes = [
+        envelope(goal_id, GoalEvent::Created(spec)),
+        envelope(goal_id, GoalEvent::Completed(report)),
+    ];
+    let outcome = replay(envelopes.iter()).expect("replay must succeed");
+    assert_eq!(
+        outcome.state.status,
+        GoalStatus::Active,
+        "Completed without a prior CompletionClaimed must NOT transition the Goal",
+    );
+    assert!(outcome.state.completion_report.is_none());
+    assert_eq!(
+        outcome.rejected.len(),
+        1,
+        "the unclaimed Completed must surface as a rejection diagnostic",
+    );
+    assert_eq!(
+        outcome.rejected[0].reason,
+        GoalApplyReject::MissingCompletionClaim,
+        "rejection reason must be MissingCompletionClaim",
+    );
+}
+
+/// Scenario (Codex pass-7 P1#4): a `Completed` envelope whose
+/// reported total_spent exceeds the spec's hard cap surfaces as
+/// `BudgetSpendOverrun` — the doc forbids transitioning to
+/// `Completed` once a budget cap is exhausted.
+#[test]
+fn replay_rejects_completed_with_budget_overrun() {
+    let mut spec = fixture_spec();
+    // Override the fixture's default budget so we exercise the
+    // overrun gate without pulling in spec construction
+    // boilerplate.
+    spec.budget = libra::internal::ai::goal::GoalBudget {
+        hard_cap_micro_usd: 1_000_000,
+        warn_threshold_micro_usd: 500_000,
+        wall_clock_seconds: 0,
+        max_continuation_loops: 16,
+    };
+    let goal_id = spec.goal_id;
+    let legit_claim = GoalCompletionClaim {
+        summary: "claim".to_string(),
+        completed_criteria: vec!["compiles".to_string(), "tests".to_string()],
+        evidence_refs: vec![],
+        verification: vec![],
+        residual_risks: vec![],
+    };
+    let report = GoalCompletionReport {
+        summary: "over budget".to_string(),
+        completed_criteria: vec!["compiles".to_string(), "tests".to_string()],
+        evidence_refs: vec![
+            GoalEvidenceRef {
+                criterion_id: Some("compiles".to_string()),
+                target: GoalEvidenceTarget::File {
+                    path: "src/feature.rs".to_string(),
+                    sha256: "deadbeef".to_string(),
+                },
+                description: "edit landed".to_string(),
+            },
+            GoalEvidenceRef {
+                criterion_id: Some("tests".to_string()),
+                target: GoalEvidenceTarget::File {
+                    path: "tests/feature.rs".to_string(),
+                    sha256: "cafef00d".to_string(),
+                },
+                description: "test landed".to_string(),
+            },
+        ],
+        verification: vec![],
+        residual_risks: vec![],
+        changed_files: vec![],
+        total_spent_micro_usd: 5_000_000,
+        elapsed_wall_clock_seconds: 0,
+        continuation_loops_used: 0,
+        finalised_at: fixture_now(),
+        finalised_by: GoalActor::System {
+            reason: "forged terminal at over-budget".to_string(),
+        },
+    };
+    let envelopes = [
+        envelope(goal_id, GoalEvent::Created(spec)),
+        envelope(goal_id, GoalEvent::CompletionClaimed(legit_claim)),
+        envelope(goal_id, GoalEvent::Completed(report)),
+    ];
+    let outcome = replay(envelopes.iter()).expect("replay must succeed");
+    assert_eq!(outcome.state.status, GoalStatus::CompletionClaimed);
+    assert_eq!(outcome.rejected.len(), 1);
+    match &outcome.rejected[0].reason {
+        GoalApplyReject::InvalidCompletionReport { source } => {
+            assert_eq!(
+                source,
+                &GoalCompletionShapeError::BudgetSpendOverrun {
+                    reported: 5_000_000,
+                    cap: 1_000_000,
+                },
+            );
+        }
+        other => panic!("expected InvalidCompletionReport(BudgetSpendOverrun), got {other:?}"),
     }
 }

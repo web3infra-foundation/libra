@@ -278,6 +278,26 @@ pub enum GoalApplyReject {
     /// Libra version that the current binary cannot interpret.
     #[error("event uses a future variant this binary cannot apply (semver gap)")]
     UnknownFutureVariant,
+    /// A `GoalEvent::Completed` envelope arrived while
+    /// `state.pending_claim` was `None` — the doc state machine
+    /// (opencode.md:1465-1467) requires `Created` →
+    /// `CompletionClaimed` → verifier → `Completed`. A direct
+    /// `Created` → `Completed` jump is always a forged stream or a
+    /// corrupted log; the verifier could never have produced a
+    /// report without a prior claim.
+    #[error(
+        "Completed envelope arrived without a prior CompletionClaimed — the doc state \
+         machine forbids transitioning to terminal `Completed` without the verifier \
+         (P6.2) accepting a pending claim"
+    )]
+    MissingCompletionClaim,
+    /// A second `Created` envelope appeared after the seed Created
+    /// already constructed the state. Replay seeds from the first
+    /// envelope; any subsequent `Created` is conclusive evidence of
+    /// a corrupted or forged stream (the supervisor only ever
+    /// emits exactly one Created per Goal lifetime).
+    #[error("duplicate Created envelope after the seed — only one Created is permitted per Goal")]
+    DuplicateCreated,
 }
 
 /// Apply one envelope to `state`. Idempotent only when applied to the
@@ -341,8 +361,15 @@ pub fn apply(state: &mut GoalState, envelope: &GoalEventEnvelope) -> Result<(), 
     }
     match &envelope.event {
         GoalEvent::Created(_) => {
-            // `from_spec` already seeded the state; receiving a second
-            // Created for the same goal_id is a no-op (replay safety).
+            // `from_spec` already seeded the state from the first
+            // envelope at the replay seam. A *second* Created
+            // envelope is conclusive evidence of a corrupted or
+            // forged stream — the supervisor only ever writes one
+            // Created per Goal lifetime, and silently no-op'ing the
+            // dupe (the prior behavior) advanced `updated_at` to a
+            // timestamp that did not correspond to a real state
+            // mutation, masking the corruption.
+            return Err(GoalApplyReject::DuplicateCreated);
         }
         GoalEvent::CriteriaRevised { criteria, .. } => {
             // Validate the revised list with the same rules
@@ -475,19 +502,28 @@ pub fn apply(state: &mut GoalState, envelope: &GoalEventEnvelope) -> Result<(), 
             state.status = GoalStatus::Active;
         }
         GoalEvent::Completed(report) => {
-            // Schema-layer floor: a `Completed` envelope is only
-            // legitimate when the verifier (P6.2) accepted the
-            // claim, and the verifier's accept-path always produces
-            // a report whose `completed_criteria` covers every
-            // required criterion in the spec, with no fabricated
-            // ids. A forged JSONL stream (or a corrupted log) that
-            // ships a `Created` followed by a `Completed` without
-            // the verifier ever running would otherwise walk
-            // replay straight into terminal `Completed`,
-            // bypassing P6.3's verifier hook entirely. Refusing
-            // here surfaces the gap at the resume seam — the
-            // supervisor logs the `InvalidCompletionReport` reject
-            // reason and the Goal stays active.
+            // State-machine guard: the doc's supervisor flow
+            // (opencode.md:1465-1467) always passes through
+            // `Created -> ... -> CompletionClaimed -> verifier ->
+            // Completed`. A Completed envelope arriving while
+            // `pending_claim` is `None` is conclusive evidence
+            // the verifier never ran — a forged stream cannot
+            // dodge this gate by emitting a well-formed report
+            // because there is no claim for the verifier to have
+            // accepted. Closing this here means a `--resume`
+            // landing on a corrupt stream surfaces the gap as
+            // `MissingCompletionClaim` instead of silently
+            // transitioning the Goal to terminal.
+            if state.pending_claim.is_none() {
+                return Err(GoalApplyReject::MissingCompletionClaim);
+            }
+            // Schema-layer shape floor: even with a pending claim,
+            // a forged Completed report must satisfy the same
+            // invariants every verifier accept-path produces
+            // (claimed-id sanity, required coverage, evidence
+            // floor under Standard policy, verification id
+            // sanity, budget vs. spec caps). The verifier (P6.2)
+            // does the rich semantic check on top.
             validate_completion_report_shape(&state.spec, report)
                 .map_err(|source| GoalApplyReject::InvalidCompletionReport { source })?;
             // Verifier-equivalent shape passed: NOW stamp the
@@ -536,6 +572,15 @@ pub struct GoalReplayRejection {
     pub reason: GoalApplyReject,
 }
 
+/// Hard cap on the number of [`GoalReplayRejection`] entries an
+/// [`GoalReplayOutcome`] retains. Beyond this threshold the rejection
+/// detail is dropped on the floor and only the count is kept (in
+/// [`GoalReplayOutcome::truncated_rejection_count`]). The cap exists
+/// so a forged or corrupted JSONL stream containing thousands of
+/// cross-goal / future / terminal-guard envelopes cannot turn replay
+/// diagnostics into an unbounded memory sink.
+pub const MAX_REPLAY_REJECTIONS: usize = 64;
+
 /// Outcome of replaying a sequence of envelopes against a freshly
 /// seeded state. Carries both the projected `state` and the list of
 /// per-envelope rejections [`apply`] surfaced. The supervisor's
@@ -546,9 +591,15 @@ pub struct GoalReplayOutcome {
     /// The projected state after folding every envelope (rejected
     /// ones excepted) into the `Created` seed.
     pub state: GoalState,
-    /// Envelopes [`apply`] refused, in the order they appeared. May
+    /// Envelopes [`apply`] refused, in the order they appeared,
+    /// truncated to at most [`MAX_REPLAY_REJECTIONS`] entries. May
     /// be empty for a clean replay.
     pub rejected: Vec<GoalReplayRejection>,
+    /// Number of rejection entries dropped on the floor because the
+    /// `rejected` cap was reached. The supervisor surfaces this as
+    /// "and {n} more" so a forged stream's full size is still
+    /// observable without retaining every diagnostic.
+    pub truncated_rejection_count: usize,
 }
 
 /// Replay a sequence of envelopes against a freshly-seeded state.
@@ -598,16 +649,25 @@ pub fn replay<'a>(
     }
     let mut state = GoalState::from_spec(spec.clone());
     state.updated_at = first.recorded_at;
-    let mut rejected = Vec::new();
+    let mut rejected: Vec<GoalReplayRejection> = Vec::new();
+    let mut truncated_rejection_count: usize = 0;
     for envelope in iter {
         if let Err(reason) = apply(&mut state, envelope) {
-            rejected.push(GoalReplayRejection {
-                envelope_id: envelope.envelope_id,
-                reason,
-            });
+            if rejected.len() < MAX_REPLAY_REJECTIONS {
+                rejected.push(GoalReplayRejection {
+                    envelope_id: envelope.envelope_id,
+                    reason,
+                });
+            } else {
+                truncated_rejection_count = truncated_rejection_count.saturating_add(1);
+            }
         }
     }
-    Some(GoalReplayOutcome { state, rejected })
+    Some(GoalReplayOutcome {
+        state,
+        rejected,
+        truncated_rejection_count,
+    })
 }
 
 fn promote_step(plan: &mut Vec<GoalPlanStep>, step_id: &str, target: GoalStepStatus) {
@@ -812,16 +872,56 @@ mod tests {
         assert_eq!(state.blockers.len(), 1);
     }
 
-    #[test]
-    fn completed_event_is_terminal_and_records_report() {
-        let spec = fixture_spec();
-        let goal_id = spec.spec_goal_id_for_tests();
-        let mut state = GoalState::from_spec(spec);
+    /// Build the canonical claim + report pair the fixture spec
+    /// expects: both required criteria claimed, each backed by a
+    /// `File` evidence (the fixture marks both
+    /// `requires_workspace_change = true`), plus a passed
+    /// verification per criterion.
+    fn fixture_legitimate_claim_and_report() -> (GoalCompletionClaim, GoalCompletionReport) {
+        let evidence_refs = vec![
+            GoalEvidenceRef {
+                criterion_id: Some("compiles".to_string()),
+                target: GoalEvidenceTarget::File {
+                    path: "src/main.rs".to_string(),
+                    sha256: "deadbeef".to_string(),
+                },
+                description: "edit compiles".to_string(),
+            },
+            GoalEvidenceRef {
+                criterion_id: Some("tests".to_string()),
+                target: GoalEvidenceTarget::File {
+                    path: "tests/feature.rs".to_string(),
+                    sha256: "cafef00d".to_string(),
+                },
+                description: "test landed".to_string(),
+            },
+        ];
+        let verification = vec![
+            GoalVerificationRecord {
+                criterion_id: "compiles".to_string(),
+                method: "cargo check".to_string(),
+                passed: true,
+                output_summary: Some("clean".to_string()),
+            },
+            GoalVerificationRecord {
+                criterion_id: "tests".to_string(),
+                method: "cargo test --lib".to_string(),
+                passed: true,
+                output_summary: Some("ok".to_string()),
+            },
+        ];
+        let claim = GoalCompletionClaim {
+            summary: "all green".to_string(),
+            completed_criteria: vec!["compiles".to_string(), "tests".to_string()],
+            evidence_refs: evidence_refs.clone(),
+            verification: verification.clone(),
+            residual_risks: vec![],
+        };
         let report = GoalCompletionReport {
             summary: "shipped".to_string(),
             completed_criteria: vec!["compiles".to_string(), "tests".to_string()],
-            evidence_refs: vec![],
-            verification: vec![],
+            evidence_refs,
+            verification,
             residual_risks: vec![],
             changed_files: vec!["src/main.rs".to_string()],
             total_spent_micro_usd: 1_500_000,
@@ -832,6 +932,20 @@ mod tests {
                 reason: "deterministic verifier accepted".to_string(),
             },
         };
+        (claim, report)
+    }
+
+    #[test]
+    fn completed_event_is_terminal_and_records_report() {
+        let spec = fixture_spec();
+        let goal_id = spec.spec_goal_id_for_tests();
+        let mut state = GoalState::from_spec(spec);
+        let (claim, report) = fixture_legitimate_claim_and_report();
+        apply(
+            &mut state,
+            &envelope(goal_id, GoalEvent::CompletionClaimed(claim)),
+        )
+        .expect("CompletionClaimed must apply before Completed");
         apply(
             &mut state,
             &envelope(goal_id, GoalEvent::Completed(report.clone())),
@@ -849,11 +963,21 @@ mod tests {
     /// the verifier surfaces here as
     /// `GoalApplyReject::InvalidCompletionReport` instead of
     /// silently transitioning to terminal `Completed`.
+    ///
+    /// The test pre-claims with a valid claim (so
+    /// `pending_claim` is `Some`, isolating the shape gate) and
+    /// then submits a forged Completed report.
     #[test]
     fn completed_event_with_missing_required_criterion_is_rejected() {
         let spec = fixture_spec();
         let goal_id = spec.spec_goal_id_for_tests();
         let mut state = GoalState::from_spec(spec);
+        let (claim, _) = fixture_legitimate_claim_and_report();
+        apply(
+            &mut state,
+            &envelope(goal_id, GoalEvent::CompletionClaimed(claim)),
+        )
+        .expect("legitimate claim must seed pending_claim");
         let bogus_report = GoalCompletionReport {
             summary: "forged".to_string(),
             completed_criteria: vec!["compiles".to_string()], // missing "tests"
@@ -886,10 +1010,55 @@ mod tests {
         }
         assert_eq!(
             state.status,
-            GoalStatus::Active,
-            "rejected Completed must NOT transition the Goal to terminal",
+            GoalStatus::CompletionClaimed,
+            "rejected Completed must NOT transition the Goal to terminal — \
+             the pending claim remains visible to the supervisor",
         );
         assert!(state.completion_report.is_none());
+    }
+
+    /// A `Completed` envelope arriving with `pending_claim = None`
+    /// (no prior `CompletionClaimed`) is rejected with
+    /// `MissingCompletionClaim` — the doc state machine forbids a
+    /// direct `Created -> Completed` jump.
+    #[test]
+    fn completed_event_without_pending_claim_is_rejected() {
+        let spec = fixture_spec();
+        let goal_id = spec.spec_goal_id_for_tests();
+        let mut state = GoalState::from_spec(spec);
+        let (_, report) = fixture_legitimate_claim_and_report();
+        let result = apply(&mut state, &envelope(goal_id, GoalEvent::Completed(report)));
+        assert_eq!(
+            result,
+            Err(GoalApplyReject::MissingCompletionClaim),
+            "Completed without a prior CompletionClaimed must surface \
+             MissingCompletionClaim, not transition to terminal",
+        );
+        assert_eq!(state.status, GoalStatus::Active);
+        assert!(state.completion_report.is_none());
+    }
+
+    /// A second `Created` envelope after the seed surfaces as
+    /// `DuplicateCreated` — the supervisor only ever writes one
+    /// Created per Goal, so duplicates are conclusive evidence of
+    /// a forged or corrupted stream.
+    #[test]
+    fn duplicate_created_envelope_is_rejected() {
+        let spec = fixture_spec();
+        let goal_id = spec.spec_goal_id_for_tests();
+        let baseline_ts = spec.created_at;
+        let mut state = GoalState::from_spec(spec.clone());
+        // A duplicate Created arriving later must NOT no-op silently.
+        let later = chrono::DateTime::parse_from_rfc3339("2099-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let dup = GoalEventEnvelope::new(goal_id, later, GoalEvent::Created(spec));
+        let result = apply(&mut state, &dup);
+        assert_eq!(result, Err(GoalApplyReject::DuplicateCreated));
+        assert_eq!(
+            state.updated_at, baseline_ts,
+            "DuplicateCreated must NOT advance updated_at",
+        );
     }
 
     #[test]

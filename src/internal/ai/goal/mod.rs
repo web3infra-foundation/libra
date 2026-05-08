@@ -49,5 +49,5 @@ pub use spec::{
 pub use state::{
     GoalApplyReject, GoalBlocker, GoalEvidenceRef, GoalEvidenceTarget, GoalPlanStep,
     GoalReplayOutcome, GoalReplayRejection, GoalState, GoalStatus, GoalStepStatus,
-    GoalVerificationRecord, apply, replay,
+    GoalVerificationRecord, MAX_REPLAY_REJECTIONS, apply, replay,
 };

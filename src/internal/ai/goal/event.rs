@@ -27,8 +27,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::{
-    spec::{GoalActor, GoalSpec},
-    state::{GoalEvidenceRef, GoalPlanStep, GoalVerificationRecord},
+    spec::{GoalActor, GoalEvidencePolicy, GoalSpec},
+    state::{GoalEvidenceRef, GoalEvidenceTarget, GoalPlanStep, GoalVerificationRecord},
 };
 use crate::internal::ai::runtime::event::Event;
 
@@ -177,15 +177,17 @@ pub struct GoalCompletionReport {
 /// (evidence quality, file-hash matching, tool-call success). This
 /// schema-layer error type encodes the *minimum floor* every Completed
 /// envelope must satisfy regardless of policy: claimed criterion ids
-/// must exist in the spec, every required criterion must be claimed.
+/// must exist in the spec, every required criterion must be claimed,
+/// the report's evidence and verification must reference real spec
+/// ids, and the report's budget summary must not contradict the
+/// spec's budget caps.
 ///
 /// `apply`'s `GoalEvent::Completed` arm runs
 /// [`validate_completion_report_shape`] before transitioning to
 /// `GoalStatus::Completed`. The check is strictly weaker than the
 /// verifier's check, so a verifier-blessed report always passes; a
-/// forged or corrupted JSONL stream that ships a `Created` →
-/// `Completed` pair without ever invoking the verifier is rejected
-/// here.
+/// forged or corrupted JSONL stream that bypassed the verifier is
+/// rejected here.
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 pub enum GoalCompletionShapeError {
     #[error(
@@ -206,15 +208,73 @@ pub enum GoalCompletionShapeError {
          claim satisfy multiple required criteria"
     )]
     DuplicateClaimedCriterion { id: String },
+    #[error(
+        "required criterion `{id}` has no matching evidence ref under \
+         GoalEvidencePolicy::Standard — every required criterion must be backed by at \
+         least one `GoalEvidenceRef` whose `criterion_id` equals the criterion's id"
+    )]
+    MissingEvidenceForRequiredCriterion { id: String },
+    #[error(
+        "required criterion `{id}` is marked `requires_workspace_change = true` but no \
+         matching evidence ref carries a workspace-bound target \
+         (`GoalEvidenceTarget::File`) — Standard policy mandates VCS state evidence for \
+         workspace-change criteria"
+    )]
+    MissingWorkspaceEvidenceForCriterion { id: String },
+    #[error(
+        "GoalVerificationRecord references id `{id}` which does not exist in \
+         GoalSpec.acceptance_criteria — verification records cannot attest to criteria \
+         the spec never declared"
+    )]
+    UnknownVerificationCriterionId { id: String },
+    #[error(
+        "GoalCompletionReport.total_spent_micro_usd ({reported}) exceeds the spec's \
+         hard budget cap ({cap}) — the doc rules at opencode.md:660-661 require a \
+         budget overrun to transition to `Blocked {{ BudgetApprovalRequired }}`, never \
+         `Completed`"
+    )]
+    BudgetSpendOverrun { reported: u64, cap: u64 },
+    #[error(
+        "GoalCompletionReport.elapsed_wall_clock_seconds ({reported}) exceeds the \
+         spec's wall-clock cap ({cap}) — wall-clock overrun must transition the Goal \
+         to `Blocked {{ WallClockExpired }}`, never `Completed`"
+    )]
+    BudgetWallClockOverrun { reported: u64, cap: u64 },
+    #[error(
+        "GoalCompletionReport.continuation_loops_used ({reported}) exceeds the spec's \
+         max_continuation_loops cap ({cap}) — loop overrun must transition the Goal to \
+         `Blocked {{ LoopLimitNeedsUser }}`, never `Completed`"
+    )]
+    BudgetLoopOverrun { reported: u32, cap: u32 },
 }
 
 /// Schema-layer shape gate run on every `Completed` envelope before the
 /// state transitions to terminal `Completed`. Pinned by the doc's
-/// "submit_goal_complete" rules at lines 1474-1476: `Completed` is only
-/// emitted after the verifier accepts. This function enforces the
-/// minimum invariants every verifier accept-path must also produce, so
-/// a corrupted or forged JSONL stream that bypassed the verifier is
-/// rejected at the resume seam.
+/// "submit_goal_complete" rules at opencode.md:1474-1476 (`Completed`
+/// is only emitted after the verifier accepts) and the budget /
+/// evidence rules at opencode.md:660-661 + 677-680. This function
+/// enforces the minimum invariants every verifier accept-path must
+/// also produce, so a corrupted or forged JSONL stream that bypassed
+/// the verifier is rejected at the resume seam.
+///
+/// Floors enforced:
+///
+/// 1. **Claimed-id sanity** — every entry in `report.completed_criteria`
+///    is a real spec id; no duplicates.
+/// 2. **Required-coverage** — every `required = true` criterion in
+///    the spec appears in `report.completed_criteria`.
+/// 3. **Standard-policy evidence floor** — under
+///    [`GoalEvidencePolicy::Standard`], every required criterion has
+///    at least one matching evidence ref; criteria with
+///    [`super::spec::GoalCriterion::requires_workspace_change`] also
+///    carry a workspace-bound `GoalEvidenceTarget::File` evidence.
+///    `DocumentationOnly` policy relaxes both checks (the verifier
+///    accepts human-written explanations in `verification`).
+/// 4. **Verification-id sanity** — every verification record points
+///    at a real spec id (no fabricated attestations).
+/// 5. **Budget summary vs. spec caps** — reported spend / wall-clock /
+///    loop counters do not exceed the spec's caps; an overrun must
+///    have transitioned the Goal to `Blocked`, not `Completed`.
 ///
 /// The function is **read-only** — it never mutates either argument.
 /// Callers that hold a mutable state borrow can run this safely
@@ -247,6 +307,81 @@ pub fn validate_completion_report_shape(
                 id: criterion.id.clone(),
             });
         }
+    }
+    // Verification record ids must be real spec ids — a forged
+    // attestation that names a fabricated criterion would otherwise
+    // sail through the floor.
+    for record in &report.verification {
+        if !spec_ids.contains(record.criterion_id.as_str()) {
+            return Err(GoalCompletionShapeError::UnknownVerificationCriterionId {
+                id: record.criterion_id.clone(),
+            });
+        }
+    }
+    // Standard policy mandates per-required-criterion evidence and
+    // workspace evidence for workspace-change criteria
+    // (opencode.md:677-680, mirrored in the doc comment on
+    // `GoalEvidencePolicy::Standard`). DocumentationOnly relaxes
+    // both checks: the verifier accepts narrative `verification`
+    // records as evidence in lieu of structured refs.
+    if matches!(spec.evidence_policy, GoalEvidencePolicy::Standard) {
+        for criterion in &spec.acceptance_criteria {
+            if !criterion.required {
+                continue;
+            }
+            let matching_refs: Vec<&GoalEvidenceRef> = report
+                .evidence_refs
+                .iter()
+                .filter(|r| r.criterion_id.as_deref() == Some(criterion.id.as_str()))
+                .collect();
+            if matching_refs.is_empty() {
+                return Err(
+                    GoalCompletionShapeError::MissingEvidenceForRequiredCriterion {
+                        id: criterion.id.clone(),
+                    },
+                );
+            }
+            if criterion.requires_workspace_change {
+                let has_workspace_ref = matching_refs
+                    .iter()
+                    .any(|r| matches!(r.target, GoalEvidenceTarget::File { .. }));
+                if !has_workspace_ref {
+                    return Err(
+                        GoalCompletionShapeError::MissingWorkspaceEvidenceForCriterion {
+                            id: criterion.id.clone(),
+                        },
+                    );
+                }
+            }
+        }
+    }
+    // Budget summary cannot contradict the spec's caps. `0` on a cap
+    // means "unset / unmetered"; only enforce the comparison when
+    // the cap is non-zero. The doc forbids transitioning to
+    // `Completed` once any cap is exhausted (opencode.md:660-667).
+    if spec.budget.hard_cap_micro_usd > 0
+        && report.total_spent_micro_usd > spec.budget.hard_cap_micro_usd
+    {
+        return Err(GoalCompletionShapeError::BudgetSpendOverrun {
+            reported: report.total_spent_micro_usd,
+            cap: spec.budget.hard_cap_micro_usd,
+        });
+    }
+    if spec.budget.wall_clock_seconds > 0
+        && report.elapsed_wall_clock_seconds > spec.budget.wall_clock_seconds
+    {
+        return Err(GoalCompletionShapeError::BudgetWallClockOverrun {
+            reported: report.elapsed_wall_clock_seconds,
+            cap: spec.budget.wall_clock_seconds,
+        });
+    }
+    if spec.budget.max_continuation_loops > 0
+        && report.continuation_loops_used > spec.budget.max_continuation_loops
+    {
+        return Err(GoalCompletionShapeError::BudgetLoopOverrun {
+            reported: report.continuation_loops_used,
+            cap: spec.budget.max_continuation_loops,
+        });
     }
     Ok(())
 }
@@ -495,10 +630,26 @@ mod tests {
     }
 
     fn shape_fixture_report(completed_criteria: Vec<String>) -> GoalCompletionReport {
+        // Under Standard policy the floor demands matching evidence
+        // for every required criterion. The fixture criteria are
+        // authored without `requires_workspace_change`, so a
+        // non-workspace evidence ref (a `ToolCall` here) suffices —
+        // the floor's File-target requirement only kicks in for
+        // workspace-change criteria.
+        let evidence_refs = completed_criteria
+            .iter()
+            .map(|id| GoalEvidenceRef {
+                criterion_id: Some(id.clone()),
+                target: GoalEvidenceTarget::ToolCall {
+                    call_id: format!("call-for-{id}"),
+                },
+                description: format!("evidence for {id}"),
+            })
+            .collect();
         GoalCompletionReport {
             summary: "shipped".to_string(),
             completed_criteria,
-            evidence_refs: vec![],
+            evidence_refs,
             verification: vec![],
             residual_risks: vec![],
             changed_files: vec![],
@@ -659,5 +810,266 @@ mod tests {
         assert_eq!(report.total_spent_micro_usd, 0);
         assert_eq!(report.elapsed_wall_clock_seconds, 0);
         assert_eq!(report.continuation_loops_used, 0);
+    }
+
+    /// Under `GoalEvidencePolicy::Standard` a required criterion
+    /// without any matching evidence ref fails the floor — pinned
+    /// by Codex pass-7 P1#2.
+    #[test]
+    fn shape_check_rejects_required_criterion_without_evidence() {
+        let spec = shape_fixture_spec(vec![super::super::spec::GoalCriterion {
+            id: "compiles".to_string(),
+            description: "cargo check".to_string(),
+            required: true,
+            verifier_hint: None,
+            requires_workspace_change: false,
+        }]);
+        let mut report = shape_fixture_report(vec!["compiles".to_string()]);
+        report.evidence_refs.clear();
+        let err = validate_completion_report_shape(&spec, &report)
+            .expect_err("required criterion without evidence must fail");
+        assert_eq!(
+            err,
+            GoalCompletionShapeError::MissingEvidenceForRequiredCriterion {
+                id: "compiles".to_string(),
+            },
+        );
+    }
+
+    /// A required criterion marked `requires_workspace_change = true`
+    /// needs a `GoalEvidenceTarget::File` evidence ref, not just
+    /// any evidence — pinned by Codex pass-7 P1#2.
+    #[test]
+    fn shape_check_rejects_workspace_change_criterion_without_file_target() {
+        let spec = shape_fixture_spec(vec![super::super::spec::GoalCriterion {
+            id: "patch-applied".to_string(),
+            description: "the source file was edited".to_string(),
+            required: true,
+            verifier_hint: None,
+            requires_workspace_change: true,
+        }]);
+        // ToolCall evidence is non-workspace — must not satisfy a
+        // workspace-change criterion.
+        let report = shape_fixture_report(vec!["patch-applied".to_string()]);
+        let err = validate_completion_report_shape(&spec, &report)
+            .expect_err("workspace-change criterion without File evidence must fail");
+        assert_eq!(
+            err,
+            GoalCompletionShapeError::MissingWorkspaceEvidenceForCriterion {
+                id: "patch-applied".to_string(),
+            },
+        );
+    }
+
+    /// A workspace-change criterion accompanied by a `File` evidence
+    /// passes the floor — confirms the symmetric happy path.
+    #[test]
+    fn shape_check_accepts_workspace_change_criterion_with_file_evidence() {
+        let spec = shape_fixture_spec(vec![super::super::spec::GoalCriterion {
+            id: "patch-applied".to_string(),
+            description: "the source file was edited".to_string(),
+            required: true,
+            verifier_hint: None,
+            requires_workspace_change: true,
+        }]);
+        let report = GoalCompletionReport {
+            summary: "shipped".to_string(),
+            completed_criteria: vec!["patch-applied".to_string()],
+            evidence_refs: vec![GoalEvidenceRef {
+                criterion_id: Some("patch-applied".to_string()),
+                target: GoalEvidenceTarget::File {
+                    path: "src/feature.rs".to_string(),
+                    sha256: "deadbeef".to_string(),
+                },
+                description: "edit landed".to_string(),
+            }],
+            verification: vec![],
+            residual_risks: vec![],
+            changed_files: vec!["src/feature.rs".to_string()],
+            total_spent_micro_usd: 0,
+            elapsed_wall_clock_seconds: 0,
+            continuation_loops_used: 0,
+            finalised_at: fixture_now(),
+            finalised_by: GoalActor::System {
+                reason: "verifier accepted".to_string(),
+            },
+        };
+        assert!(validate_completion_report_shape(&spec, &report).is_ok());
+    }
+
+    /// `DocumentationOnly` policy relaxes both the per-required
+    /// evidence requirement and the workspace-change check. Pinned
+    /// by the doc on `GoalEvidencePolicy::DocumentationOnly`.
+    #[test]
+    fn shape_check_documentation_only_policy_relaxes_evidence_floor() {
+        let mut spec = shape_fixture_spec(vec![super::super::spec::GoalCriterion {
+            id: "decision-recorded".to_string(),
+            description: "ADR drafted".to_string(),
+            required: true,
+            verifier_hint: None,
+            requires_workspace_change: true,
+        }]);
+        spec.evidence_policy = super::super::spec::GoalEvidencePolicy::DocumentationOnly;
+        // No evidence_refs at all — under DocumentationOnly the
+        // floor accepts.
+        let report = GoalCompletionReport {
+            summary: "research note attached in verification".to_string(),
+            completed_criteria: vec!["decision-recorded".to_string()],
+            evidence_refs: vec![],
+            verification: vec![],
+            residual_risks: vec![],
+            changed_files: vec![],
+            total_spent_micro_usd: 0,
+            elapsed_wall_clock_seconds: 0,
+            continuation_loops_used: 0,
+            finalised_at: fixture_now(),
+            finalised_by: GoalActor::System {
+                reason: "verifier accepted".to_string(),
+            },
+        };
+        assert!(validate_completion_report_shape(&spec, &report).is_ok());
+    }
+
+    /// A verification record naming a criterion id the spec never
+    /// declared is rejected — pinned by Codex pass-7 P1#3 (lighter
+    /// schema-floor variant).
+    #[test]
+    fn shape_check_rejects_verification_with_unknown_criterion_id() {
+        let spec = shape_fixture_spec(vec![super::super::spec::GoalCriterion {
+            id: "compiles".to_string(),
+            description: "cargo check".to_string(),
+            required: true,
+            verifier_hint: None,
+            requires_workspace_change: false,
+        }]);
+        let mut report = shape_fixture_report(vec!["compiles".to_string()]);
+        report.verification.push(GoalVerificationRecord {
+            criterion_id: "fabricated-id".to_string(),
+            method: "manual".to_string(),
+            passed: true,
+            output_summary: None,
+        });
+        let err = validate_completion_report_shape(&spec, &report)
+            .expect_err("verification with fabricated id must fail");
+        assert_eq!(
+            err,
+            GoalCompletionShapeError::UnknownVerificationCriterionId {
+                id: "fabricated-id".to_string(),
+            },
+        );
+    }
+
+    /// Reported total spend exceeding the spec's hard cap is
+    /// rejected — pinned by Codex pass-7 P1#4. The doc forbids
+    /// transitioning to `Completed` once a budget cap is exhausted.
+    #[test]
+    fn shape_check_rejects_completed_report_with_budget_overrun() {
+        let mut spec = shape_fixture_spec(vec![super::super::spec::GoalCriterion {
+            id: "compiles".to_string(),
+            description: "cargo check".to_string(),
+            required: true,
+            verifier_hint: None,
+            requires_workspace_change: false,
+        }]);
+        spec.budget = super::super::spec::GoalBudget {
+            hard_cap_micro_usd: 1_000_000,
+            warn_threshold_micro_usd: 500_000,
+            wall_clock_seconds: 0,
+            max_continuation_loops: 0,
+        };
+        let mut report = shape_fixture_report(vec!["compiles".to_string()]);
+        report.total_spent_micro_usd = 2_000_000;
+        let err = validate_completion_report_shape(&spec, &report)
+            .expect_err("budget overrun in Completed report must fail");
+        assert_eq!(
+            err,
+            GoalCompletionShapeError::BudgetSpendOverrun {
+                reported: 2_000_000,
+                cap: 1_000_000,
+            },
+        );
+    }
+
+    /// Reported wall-clock exceeding the spec's cap is rejected.
+    #[test]
+    fn shape_check_rejects_completed_report_with_wall_clock_overrun() {
+        let mut spec = shape_fixture_spec(vec![super::super::spec::GoalCriterion {
+            id: "compiles".to_string(),
+            description: "cargo check".to_string(),
+            required: true,
+            verifier_hint: None,
+            requires_workspace_change: false,
+        }]);
+        spec.budget = super::super::spec::GoalBudget {
+            hard_cap_micro_usd: 0,
+            warn_threshold_micro_usd: 0,
+            wall_clock_seconds: 600,
+            max_continuation_loops: 0,
+        };
+        let mut report = shape_fixture_report(vec!["compiles".to_string()]);
+        report.elapsed_wall_clock_seconds = 1_200;
+        let err = validate_completion_report_shape(&spec, &report)
+            .expect_err("wall-clock overrun in Completed report must fail");
+        assert_eq!(
+            err,
+            GoalCompletionShapeError::BudgetWallClockOverrun {
+                reported: 1_200,
+                cap: 600,
+            },
+        );
+    }
+
+    /// Reported continuation loops exceeding the spec's cap is
+    /// rejected.
+    #[test]
+    fn shape_check_rejects_completed_report_with_loop_overrun() {
+        let mut spec = shape_fixture_spec(vec![super::super::spec::GoalCriterion {
+            id: "compiles".to_string(),
+            description: "cargo check".to_string(),
+            required: true,
+            verifier_hint: None,
+            requires_workspace_change: false,
+        }]);
+        spec.budget = super::super::spec::GoalBudget {
+            hard_cap_micro_usd: 0,
+            warn_threshold_micro_usd: 0,
+            wall_clock_seconds: 0,
+            max_continuation_loops: 8,
+        };
+        let mut report = shape_fixture_report(vec!["compiles".to_string()]);
+        report.continuation_loops_used = 32;
+        let err = validate_completion_report_shape(&spec, &report)
+            .expect_err("loop overrun in Completed report must fail");
+        assert_eq!(
+            err,
+            GoalCompletionShapeError::BudgetLoopOverrun {
+                reported: 32,
+                cap: 8,
+            },
+        );
+    }
+
+    /// `0` on a budget cap means "unmetered / unset"; the floor must
+    /// not enforce against a zero cap. Otherwise every Goal with
+    /// the default `GoalBudget` (all-zero) would refuse a non-zero
+    /// reported spend.
+    #[test]
+    fn shape_check_skips_budget_caps_when_unset() {
+        let spec = shape_fixture_spec(vec![super::super::spec::GoalCriterion {
+            id: "compiles".to_string(),
+            description: "cargo check".to_string(),
+            required: true,
+            verifier_hint: None,
+            requires_workspace_change: false,
+        }]);
+        // Default GoalBudget has every cap = 0 except
+        // max_continuation_loops = 16, so set something > 16 only
+        // to confirm we *do* still enforce non-zero caps.
+        let mut report = shape_fixture_report(vec!["compiles".to_string()]);
+        report.total_spent_micro_usd = 999_999_999;
+        report.elapsed_wall_clock_seconds = 999_999;
+        // Stay at or below the default loop cap of 16.
+        report.continuation_loops_used = 8;
+        assert!(validate_completion_report_shape(&spec, &report).is_ok());
     }
 }
