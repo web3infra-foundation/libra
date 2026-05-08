@@ -272,18 +272,42 @@ mod tests {
     /// Scenario: OC-Phase 5 P5.4 introduced `/agents` and `/budget`. The
     /// dedicated tests pin the canonical name + description as the
     /// autocomplete popup contract — a typo in either field would be
-    /// silently shipped if only the parser side were tested.
+    /// silently shipped if only the parser side were tested. Iteration
+    /// order is also pinned positionally because the autocomplete
+    /// popup renders entries top-to-bottom in the order produced by
+    /// `all()`; reordering would shuffle the user-facing list silently.
     #[test]
     fn agents_and_budget_commands_have_documented_name_and_description() {
         assert_eq!(BuiltinCommand::Agents.name(), "agents");
         assert!(BuiltinCommand::Agents.description().contains("agents.toml"));
         assert_eq!(BuiltinCommand::Budget.name(), "budget");
         assert!(BuiltinCommand::Budget.description().contains("budget"));
-        // Both must appear in the canonical iteration order so the
-        // autocomplete popup actually lists them.
-        let all = BuiltinCommand::all();
-        assert!(all.contains(&BuiltinCommand::Agents));
-        assert!(all.contains(&BuiltinCommand::Budget));
+
+        // Pin the canonical `all()` order via slice equality so a
+        // future reorder of the iteration list is caught by this
+        // test, not by a confused user.
+        assert_eq!(
+            BuiltinCommand::all(),
+            &[
+                BuiltinCommand::Help,
+                BuiltinCommand::Clear,
+                BuiltinCommand::Chat,
+                BuiltinCommand::Model,
+                BuiltinCommand::Status,
+                BuiltinCommand::Usage,
+                BuiltinCommand::Plan,
+                BuiltinCommand::Skill,
+                BuiltinCommand::Intent,
+                BuiltinCommand::Mux,
+                BuiltinCommand::Control,
+                BuiltinCommand::Approvals,
+                BuiltinCommand::Anchors,
+                BuiltinCommand::Undo,
+                BuiltinCommand::Agents,
+                BuiltinCommand::Budget,
+                BuiltinCommand::Quit,
+            ]
+        );
     }
 
     /// Scenario: the autocomplete popup must list every built-in command. This
