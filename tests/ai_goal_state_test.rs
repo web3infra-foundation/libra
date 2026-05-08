@@ -85,6 +85,24 @@ fn envelope(goal_id: Uuid, event: GoalEvent) -> GoalEventEnvelope {
     GoalEventEnvelope::new(goal_id, fixture_now(), event)
 }
 
+/// Stable claim-envelope id used across tests that pre-claim a
+/// completion (so the corresponding `Completed` report's
+/// `claim_envelope_id` can match deterministically).
+fn fixture_claim_envelope_id() -> Uuid {
+    Uuid::parse_str("00000000-0000-0000-0000-0000c1a10042").unwrap()
+}
+
+/// Construct a `CompletionClaimed` envelope whose `envelope_id` is
+/// fixed (so a matching report's `claim_envelope_id` aligns).
+fn fixture_claim_envelope(goal_id: Uuid, claim: GoalCompletionClaim) -> GoalEventEnvelope {
+    GoalEventEnvelope {
+        envelope_id: fixture_claim_envelope_id(),
+        goal_id,
+        recorded_at: fixture_now(),
+        event: GoalEvent::CompletionClaimed(claim),
+    }
+}
+
 /// Scenario: full happy-path replay produces a `Completed` state
 /// carrying the report and accumulated evidence. This pins the
 /// state-machine "shape" the supervisor will rely on.
@@ -160,9 +178,9 @@ fn replay_drives_full_happy_path_to_completed() {
                 }],
             },
         ),
-        envelope(
+        fixture_claim_envelope(
             goal_id,
-            GoalEvent::CompletionClaimed(GoalCompletionClaim {
+            GoalCompletionClaim {
                 summary: "all green".to_string(),
                 completed_criteria: vec!["compiles".to_string(), "tests".to_string()],
                 evidence_refs: vec![],
@@ -181,7 +199,7 @@ fn replay_drives_full_happy_path_to_completed() {
                     },
                 ],
                 residual_risks: vec![],
-            }),
+            },
         ),
         envelope(
             goal_id,
@@ -209,6 +227,7 @@ fn replay_drives_full_happy_path_to_completed() {
                 verification: vec![],
                 residual_risks: vec![],
                 changed_files: vec!["src/feature.rs".to_string()],
+                claim_envelope_id: fixture_claim_envelope_id(),
                 total_spent_micro_usd: 2_400_000,
                 elapsed_wall_clock_seconds: 1_350,
                 continuation_loops_used: 5,
@@ -454,15 +473,15 @@ fn resume_replay_handles_claim_rejection_then_completion() {
                 reason: "no test evidence".to_string(),
             },
         ),
-        envelope(
+        fixture_claim_envelope(
             goal_id,
-            GoalEvent::CompletionClaimed(GoalCompletionClaim {
+            GoalCompletionClaim {
                 summary: "second attempt with tests".to_string(),
                 completed_criteria: vec!["compiles".to_string(), "tests".to_string()],
                 evidence_refs: vec![],
                 verification: vec![],
                 residual_risks: vec![],
-            }),
+            },
         ),
         envelope(
             goal_id,
@@ -490,6 +509,7 @@ fn resume_replay_handles_claim_rejection_then_completion() {
                 verification: vec![],
                 residual_risks: vec![],
                 changed_files: vec![],
+                claim_envelope_id: fixture_claim_envelope_id(),
                 total_spent_micro_usd: 0,
                 elapsed_wall_clock_seconds: 0,
                 continuation_loops_used: 0,
@@ -991,7 +1011,7 @@ fn replay_rejects_forged_completed_envelope_without_required_criteria() {
     };
     let envelopes = [
         envelope(goal_id, GoalEvent::Created(spec)),
-        envelope(goal_id, GoalEvent::CompletionClaimed(legit_claim)),
+        fixture_claim_envelope(goal_id, legit_claim),
         envelope(
             goal_id,
             GoalEvent::Completed(GoalCompletionReport {
@@ -1004,6 +1024,7 @@ fn replay_rejects_forged_completed_envelope_without_required_criteria() {
                 verification: vec![],
                 residual_risks: vec![],
                 changed_files: vec![],
+                claim_envelope_id: fixture_claim_envelope_id(),
                 total_spent_micro_usd: 0,
                 elapsed_wall_clock_seconds: 0,
                 continuation_loops_used: 0,
@@ -1065,7 +1086,7 @@ fn replay_rejects_forged_completed_envelope_with_unknown_criterion_id() {
     };
     let envelopes = [
         envelope(goal_id, GoalEvent::Created(spec)),
-        envelope(goal_id, GoalEvent::CompletionClaimed(legit_claim)),
+        fixture_claim_envelope(goal_id, legit_claim),
         envelope(
             goal_id,
             GoalEvent::Completed(GoalCompletionReport {
@@ -1079,6 +1100,7 @@ fn replay_rejects_forged_completed_envelope_with_unknown_criterion_id() {
                 verification: vec![],
                 residual_risks: vec![],
                 changed_files: vec![],
+                claim_envelope_id: fixture_claim_envelope_id(),
                 total_spent_micro_usd: 0,
                 elapsed_wall_clock_seconds: 0,
                 continuation_loops_used: 0,
@@ -1178,6 +1200,7 @@ fn completion_report_budget_summary_round_trips() {
         verification: vec![],
         residual_risks: vec!["coverage report still pending".to_string()],
         changed_files: vec!["src/feature.rs".to_string()],
+        claim_envelope_id: fixture_claim_envelope_id(),
         total_spent_micro_usd: 4_750_000,
         elapsed_wall_clock_seconds: 1_810,
         continuation_loops_used: 7,
@@ -1301,6 +1324,9 @@ fn replay_rejects_completed_without_pending_claim() {
         verification: vec![],
         residual_risks: vec![],
         changed_files: vec![],
+        // Value here is irrelevant — MissingCompletionClaim
+        // fires before the binding gate runs. Use nil for clarity.
+        claim_envelope_id: Uuid::nil(),
         total_spent_micro_usd: 0,
         elapsed_wall_clock_seconds: 0,
         continuation_loops_used: 0,
@@ -1380,6 +1406,7 @@ fn replay_rejects_completed_with_budget_overrun() {
         verification: vec![],
         residual_risks: vec![],
         changed_files: vec![],
+        claim_envelope_id: fixture_claim_envelope_id(),
         total_spent_micro_usd: 5_000_000,
         elapsed_wall_clock_seconds: 0,
         continuation_loops_used: 0,
@@ -1390,7 +1417,7 @@ fn replay_rejects_completed_with_budget_overrun() {
     };
     let envelopes = [
         envelope(goal_id, GoalEvent::Created(spec)),
-        envelope(goal_id, GoalEvent::CompletionClaimed(legit_claim)),
+        fixture_claim_envelope(goal_id, legit_claim),
         envelope(goal_id, GoalEvent::Completed(report)),
     ];
     let outcome = replay(envelopes.iter()).expect("replay must succeed");
@@ -1407,5 +1434,285 @@ fn replay_rejects_completed_with_budget_overrun() {
             );
         }
         other => panic!("expected InvalidCompletionReport(BudgetSpendOverrun), got {other:?}"),
+    }
+}
+
+/// Scenario (Codex pass-8 P1): a forged report whose only matching
+/// evidence ref is a `GoalEvidenceTarget::Future` (unknown to this
+/// binary, deserialised from a tomorrow-only variant) must NOT
+/// satisfy the Standard-policy evidence floor — the verifier
+/// cannot deterministically validate an unknown target kind, so
+/// future-variant evidence cannot be allowed to count.
+#[test]
+fn replay_rejects_completed_with_only_future_target_evidence() {
+    let spec = fixture_spec();
+    let goal_id = spec.goal_id;
+    let legit_claim = GoalCompletionClaim {
+        summary: "claim".to_string(),
+        completed_criteria: vec!["compiles".to_string(), "tests".to_string()],
+        evidence_refs: vec![],
+        verification: vec![],
+        residual_risks: vec![],
+    };
+    // Hand-craft an envelope whose evidence_refs include a
+    // `GoalEvidenceTarget::Future` ref for "compiles" (but a real
+    // File ref for "tests"). The non-required `docs` is not
+    // claimed. Future-only matches must NOT count toward the
+    // floor — pass-8 P1 closure.
+    let future_evidence_payload = serde_json::json!({
+        "envelope_id": Uuid::new_v4().to_string(),
+        "goal_id": goal_id,
+        "recorded_at": fixture_now().to_rfc3339(),
+        "event": {
+            "kind": "completed",
+            "summary": "forged with future evidence",
+            "completed_criteria": ["compiles", "tests"],
+            "evidence_refs": [
+                {
+                    "criterion_id": "compiles",
+                    "target": {"kind": "tomorrow_evidence_kind"},
+                    "description": "future-variant evidence"
+                },
+                {
+                    "criterion_id": "tests",
+                    "target": {
+                        "kind": "file",
+                        "path": "tests/feature.rs",
+                        "sha256": "cafef00d"
+                    },
+                    "description": "test landed"
+                }
+            ],
+            "verification": [],
+            "residual_risks": [],
+            "changed_files": [],
+            "claim_envelope_id": fixture_claim_envelope_id(),
+            "total_spent_micro_usd": 0,
+            "elapsed_wall_clock_seconds": 0,
+            "continuation_loops_used": 0,
+            "finalised_at": fixture_now().to_rfc3339(),
+            "finalised_by": {"kind": "user", "id": null}
+        }
+    });
+    let forged_envelope: GoalEventEnvelope = serde_json::from_value(future_evidence_payload)
+        .expect("hand-crafted Completed with Future evidence target must deserialise");
+    let envelopes = [
+        envelope(goal_id, GoalEvent::Created(spec)),
+        fixture_claim_envelope(goal_id, legit_claim),
+        forged_envelope,
+    ];
+    let outcome = replay(envelopes.iter()).expect("replay must succeed");
+    assert_eq!(outcome.state.status, GoalStatus::CompletionClaimed);
+    assert_eq!(outcome.rejected.len(), 1);
+    match &outcome.rejected[0].reason {
+        GoalApplyReject::InvalidCompletionReport { source } => {
+            // The required "compiles" criterion has only Future
+            // evidence — the floor must reject it as missing.
+            assert_eq!(
+                source,
+                &GoalCompletionShapeError::MissingEvidenceForRequiredCriterion {
+                    id: "compiles".to_string(),
+                },
+            );
+        }
+        other => panic!("expected InvalidCompletionReport, got {other:?}"),
+    }
+}
+
+/// Scenario (Codex pass-8 P2): a forged Completed report claims an
+/// optional `requires_workspace_change` criterion (`docs`, marked
+/// non-required + workspace-change=false in fixture) — confirm that
+/// the validator iterates **claimed** criteria, not just `required`
+/// ones. The fixture's `docs` is `requires_workspace_change=false`
+/// so it just needs evidence; we strip the matching ref and assert
+/// the floor catches it.
+#[test]
+fn replay_rejects_completed_when_optional_claimed_criterion_has_no_evidence() {
+    let spec = fixture_spec();
+    let goal_id = spec.goal_id;
+    let legit_claim = GoalCompletionClaim {
+        summary: "claim including optional".to_string(),
+        completed_criteria: vec![
+            "compiles".to_string(),
+            "tests".to_string(),
+            "docs".to_string(),
+        ],
+        evidence_refs: vec![],
+        verification: vec![],
+        residual_risks: vec![],
+    };
+    // Report claims `docs` (optional) but only ships evidence for
+    // the two required ones. Pass-7 would have accepted this; the
+    // pass-8 floor refuses because `docs` is claimed.
+    let report = GoalCompletionReport {
+        summary: "shipped including optional".to_string(),
+        completed_criteria: vec![
+            "compiles".to_string(),
+            "tests".to_string(),
+            "docs".to_string(),
+        ],
+        evidence_refs: vec![
+            GoalEvidenceRef {
+                criterion_id: Some("compiles".to_string()),
+                target: GoalEvidenceTarget::File {
+                    path: "src/feature.rs".to_string(),
+                    sha256: "deadbeef".to_string(),
+                },
+                description: "edit landed".to_string(),
+            },
+            GoalEvidenceRef {
+                criterion_id: Some("tests".to_string()),
+                target: GoalEvidenceTarget::File {
+                    path: "tests/feature.rs".to_string(),
+                    sha256: "cafef00d".to_string(),
+                },
+                description: "test landed".to_string(),
+            },
+        ],
+        verification: vec![],
+        residual_risks: vec![],
+        changed_files: vec![],
+        claim_envelope_id: fixture_claim_envelope_id(),
+        total_spent_micro_usd: 0,
+        elapsed_wall_clock_seconds: 0,
+        continuation_loops_used: 0,
+        finalised_at: fixture_now(),
+        finalised_by: GoalActor::System {
+            reason: "forged optional claim without evidence".to_string(),
+        },
+    };
+    let envelopes = [
+        envelope(goal_id, GoalEvent::Created(spec)),
+        fixture_claim_envelope(goal_id, legit_claim),
+        envelope(goal_id, GoalEvent::Completed(report)),
+    ];
+    let outcome = replay(envelopes.iter()).expect("replay must succeed");
+    assert_eq!(outcome.rejected.len(), 1);
+    match &outcome.rejected[0].reason {
+        GoalApplyReject::InvalidCompletionReport { source } => {
+            assert_eq!(
+                source,
+                &GoalCompletionShapeError::MissingEvidenceForRequiredCriterion {
+                    id: "docs".to_string(),
+                },
+            );
+        }
+        other => panic!("expected InvalidCompletionReport, got {other:?}"),
+    }
+}
+
+/// Scenario (Codex pass-8 P2): a forged Completed report references
+/// a different claim envelope id than the one
+/// `CompletionClaimed` actually opened. Surfaces as
+/// `MismatchedClaimEnvelope` — a forged stream cannot piggy-back a
+/// well-formed report on an unrelated active claim.
+#[test]
+fn replay_rejects_completed_with_mismatched_claim_envelope_id() {
+    let spec = fixture_spec();
+    let goal_id = spec.goal_id;
+    let legit_claim = GoalCompletionClaim {
+        summary: "claim".to_string(),
+        completed_criteria: vec!["compiles".to_string(), "tests".to_string()],
+        evidence_refs: vec![],
+        verification: vec![],
+        residual_risks: vec![],
+    };
+    let foreign_claim_id = Uuid::parse_str("00000000-0000-0000-0000-0000beefbabe").unwrap();
+    let report = GoalCompletionReport {
+        summary: "report bound to a different claim".to_string(),
+        completed_criteria: vec!["compiles".to_string(), "tests".to_string()],
+        evidence_refs: vec![
+            GoalEvidenceRef {
+                criterion_id: Some("compiles".to_string()),
+                target: GoalEvidenceTarget::File {
+                    path: "src/feature.rs".to_string(),
+                    sha256: "deadbeef".to_string(),
+                },
+                description: "edit landed".to_string(),
+            },
+            GoalEvidenceRef {
+                criterion_id: Some("tests".to_string()),
+                target: GoalEvidenceTarget::File {
+                    path: "tests/feature.rs".to_string(),
+                    sha256: "cafef00d".to_string(),
+                },
+                description: "test landed".to_string(),
+            },
+        ],
+        verification: vec![],
+        residual_risks: vec![],
+        changed_files: vec![],
+        claim_envelope_id: foreign_claim_id,
+        total_spent_micro_usd: 0,
+        elapsed_wall_clock_seconds: 0,
+        continuation_loops_used: 0,
+        finalised_at: fixture_now(),
+        finalised_by: GoalActor::System {
+            reason: "verifier accepted (forged binding)".to_string(),
+        },
+    };
+    let envelopes = [
+        envelope(goal_id, GoalEvent::Created(spec)),
+        fixture_claim_envelope(goal_id, legit_claim),
+        envelope(goal_id, GoalEvent::Completed(report)),
+    ];
+    let outcome = replay(envelopes.iter()).expect("replay must succeed");
+    assert_eq!(outcome.rejected.len(), 1);
+    match &outcome.rejected[0].reason {
+        GoalApplyReject::MismatchedClaimEnvelope { expected, actual } => {
+            assert_eq!(*expected, fixture_claim_envelope_id());
+            assert_eq!(*actual, foreign_claim_id);
+        }
+        other => panic!("expected MismatchedClaimEnvelope, got {other:?}"),
+    }
+}
+
+/// Scenario (Codex pass-8 P2): a forged successful envelope whose
+/// `recorded_at` is older than `state.updated_at` would otherwise
+/// rewind the state's monotonic clock once the mutation lands. The
+/// new TimestampNonMonotonic guard refuses any backward-going
+/// successful envelope.
+#[test]
+fn replay_rejects_envelope_with_non_monotonic_timestamp() {
+    let spec = fixture_spec();
+    let goal_id = spec.goal_id;
+    let later = Utc.with_ymd_and_hms(2027, 5, 8, 13, 0, 0).unwrap();
+    let earlier = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+    // First a step at `later`, then a step at `earlier` — the
+    // second must be refused.
+    let envelopes = [
+        envelope(goal_id, GoalEvent::Created(spec)),
+        GoalEventEnvelope {
+            envelope_id: Uuid::new_v4(),
+            goal_id,
+            recorded_at: later,
+            event: GoalEvent::StepStarted {
+                step_id: "step-1".to_string(),
+            },
+        },
+        GoalEventEnvelope {
+            envelope_id: Uuid::new_v4(),
+            goal_id,
+            recorded_at: earlier,
+            event: GoalEvent::StepStarted {
+                step_id: "step-2".to_string(),
+            },
+        },
+    ];
+    let outcome = replay(envelopes.iter()).expect("replay must succeed");
+    assert_eq!(
+        outcome.state.updated_at, later,
+        "monotonic guard must keep updated_at at the latest accepted timestamp",
+    );
+    assert_eq!(outcome.rejected.len(), 1);
+    match &outcome.rejected[0].reason {
+        GoalApplyReject::TimestampNonMonotonic {
+            envelope_recorded_at,
+            state_updated_at,
+        } => {
+            assert_eq!(*envelope_recorded_at, earlier);
+            assert_eq!(*state_updated_at, later);
+        }
+        other => panic!("expected TimestampNonMonotonic, got {other:?}"),
     }
 }

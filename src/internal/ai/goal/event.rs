@@ -139,6 +139,16 @@ pub struct GoalCompletionClaim {
 /// against it. All three default to `0` so older logs (which never
 /// existed: P6.1 has not shipped) and forged streams that omit them
 /// surface as "unmetered" rather than crashing replay.
+///
+/// `claim_envelope_id` binds a report to the specific
+/// `GoalEvent::CompletionClaimed` envelope the verifier accepted.
+/// `apply` checks it against `GoalState::pending_claim_envelope_id`
+/// before transitioning to `Completed`, so a forged stream cannot
+/// claim under one envelope and then ship a different report
+/// against an unrelated active claim (Codex pass-8 P2). The field
+/// is required: legacy logs do not exist (P6.1 has not shipped) and
+/// every verifier-emitted report knows the claim envelope it just
+/// resolved.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct GoalCompletionReport {
     pub summary: String,
@@ -149,6 +159,11 @@ pub struct GoalCompletionReport {
     pub residual_risks: Vec<String>,
     #[serde(default)]
     pub changed_files: Vec<String>,
+    /// Envelope id of the [`GoalEvent::CompletionClaimed`] this
+    /// report resolves. Pinned by the verifier so the schema can
+    /// confirm the claim being completed is the one the supervisor
+    /// has open in `pending_claim`.
+    pub claim_envelope_id: Uuid,
     /// Total Goal-loop spend at the moment the verifier accepted, in
     /// micro-USD. Mirrors [`super::spec::GoalBudget::hard_cap_micro_usd`]
     /// units so a `/goal status` view can compute "{spent}/{cap}"
@@ -318,21 +333,43 @@ pub fn validate_completion_report_shape(
             });
         }
     }
-    // Standard policy mandates per-required-criterion evidence and
+    // Standard policy mandates per-claimed-criterion evidence and
     // workspace evidence for workspace-change criteria
     // (opencode.md:677-680, mirrored in the doc comment on
     // `GoalEvidencePolicy::Standard`). DocumentationOnly relaxes
     // both checks: the verifier accepts narrative `verification`
     // records as evidence in lieu of structured refs.
+    //
+    // Iterate **claimed** criteria (not just `required` ones): an
+    // optional criterion claimed in `completed_criteria` still
+    // gets stamped into `state.completed_criteria` by `apply()`,
+    // so its evidence floor must run too. The `required` flag
+    // governs whether a criterion *must be claimed*, not what
+    // evidence depth is required *when it is claimed* (Codex
+    // pass-8 P2). Evidence refs whose target is the unknown
+    // `GoalEvidenceTarget::Future` catch-all are excluded from
+    // the count: the verifier cannot deterministically validate
+    // an unknown target kind, so a forged ref of that variant
+    // would otherwise satisfy a non-workspace floor (Codex pass-8
+    // P1).
     if matches!(spec.evidence_policy, GoalEvidencePolicy::Standard) {
+        let mut spec_by_id: std::collections::BTreeMap<&str, &super::spec::GoalCriterion> =
+            std::collections::BTreeMap::new();
         for criterion in &spec.acceptance_criteria {
-            if !criterion.required {
+            spec_by_id.insert(criterion.id.as_str(), criterion);
+        }
+        for claimed_id in &report.completed_criteria {
+            // `UnknownCriterionId` already rejected above; skip if
+            // the lookup somehow fails (impossible after the prior
+            // pass).
+            let Some(criterion) = spec_by_id.get(claimed_id.as_str()) else {
                 continue;
-            }
+            };
             let matching_refs: Vec<&GoalEvidenceRef> = report
                 .evidence_refs
                 .iter()
                 .filter(|r| r.criterion_id.as_deref() == Some(criterion.id.as_str()))
+                .filter(|r| !matches!(r.target, GoalEvidenceTarget::Future))
                 .collect();
             if matching_refs.is_empty() {
                 return Err(
@@ -653,6 +690,12 @@ mod tests {
             verification: vec![],
             residual_risks: vec![],
             changed_files: vec![],
+            // Stable claim envelope id so shape-only tests (which
+            // exercise the validator without involving `apply`)
+            // round-trip without churn. The shape validator does
+            // NOT inspect this field; it is checked exclusively
+            // by `apply()`'s claim-binding gate.
+            claim_envelope_id: Uuid::nil(),
             total_spent_micro_usd: 0,
             elapsed_wall_clock_seconds: 0,
             continuation_loops_used: 0,
@@ -803,6 +846,7 @@ mod tests {
             "completed_criteria": [],
             "evidence_refs": [],
             "verification": [],
+            "claim_envelope_id": "00000000-0000-0000-0000-000000000000",
             "finalised_at": "2026-05-08T13:00:00Z",
             "finalised_by": {"kind":"user","id":null}
         }"#;
@@ -886,6 +930,7 @@ mod tests {
             verification: vec![],
             residual_risks: vec![],
             changed_files: vec!["src/feature.rs".to_string()],
+            claim_envelope_id: Uuid::nil(),
             total_spent_micro_usd: 0,
             elapsed_wall_clock_seconds: 0,
             continuation_loops_used: 0,
@@ -919,6 +964,7 @@ mod tests {
             verification: vec![],
             residual_risks: vec![],
             changed_files: vec![],
+            claim_envelope_id: Uuid::nil(),
             total_spent_micro_usd: 0,
             elapsed_wall_clock_seconds: 0,
             continuation_loops_used: 0,

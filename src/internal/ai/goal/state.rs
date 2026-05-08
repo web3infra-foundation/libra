@@ -182,20 +182,25 @@ pub struct GoalBlocker {
 /// Snapshot of a Goal at a point in event-stream time.
 ///
 /// Always derived from a [`GoalSpec`] + an event sequence — never
-/// constructed standalone. The supervisor (P6.3) holds at most one
-/// `GoalState` per session.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+/// constructed standalone, and **never** rebuilt from arbitrary JSON.
+/// The supervisor (P6.3) holds at most one `GoalState` per session
+/// and rebuilds it via [`replay`] on resume; persisted snapshots are
+/// advisory only (e.g. for debug dumps) and must NOT be trusted as a
+/// completion-decision authority. The struct deliberately implements
+/// `Serialize` (for snapshots / `Debug` rendering) but **not**
+/// `Deserialize` — Codex pass-8 P2 flagged that a forged JSON
+/// `GoalState` could pre-populate `pending_claim` /
+/// `completion_report` / `status` and bypass every event-derived
+/// guard. Forcing all state construction through `from_spec` +
+/// `apply` / `replay` closes that surface at the type level.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct GoalState {
     pub spec: GoalSpec,
     pub status: GoalStatus,
-    #[serde(default)]
     pub plan: Vec<GoalPlanStep>,
     pub completed_criteria: BTreeSet<String>,
-    #[serde(default)]
     pub evidence_refs: Vec<GoalEvidenceRef>,
-    #[serde(default)]
     pub blockers: Vec<GoalBlocker>,
-    #[serde(default)]
     pub last_assistant_summary: Option<String>,
     /// Most recent unverified completion claim. Populated when the
     /// model invokes `submit_goal_complete` and cleared when the
@@ -203,10 +208,16 @@ pub struct GoalState {
     /// rejected (-> rolled back). The deterministic verifier (P6.2)
     /// reads this directly so a `--resume` can pick up a pending
     /// verification without re-running the model.
-    #[serde(default)]
     pub pending_claim: Option<GoalCompletionClaim>,
+    /// Envelope id of the [`super::event::GoalEvent::CompletionClaimed`]
+    /// that produced [`Self::pending_claim`]. Used by the
+    /// `Completed`-arm shape gate to bind a completion report to
+    /// the specific claim it resolves — a forged report carrying
+    /// any other `claim_envelope_id` is refused (Codex pass-8 P2).
+    /// Always `Some` while `pending_claim` is `Some`; the two
+    /// fields move together.
+    pub pending_claim_envelope_id: Option<Uuid>,
     /// Final completion report once `status == Completed`.
-    #[serde(default)]
     pub completion_report: Option<GoalCompletionReport>,
     pub updated_at: DateTime<Utc>,
 }
@@ -224,6 +235,7 @@ impl GoalState {
             blockers: Vec::new(),
             last_assistant_summary: None,
             pending_claim: None,
+            pending_claim_envelope_id: None,
             completion_report: None,
             updated_at,
         }
@@ -298,6 +310,30 @@ pub enum GoalApplyReject {
     /// emits exactly one Created per Goal lifetime).
     #[error("duplicate Created envelope after the seed — only one Created is permitted per Goal")]
     DuplicateCreated,
+    /// `report.claim_envelope_id` does not match the
+    /// `pending_claim_envelope_id` recorded when the active claim
+    /// was opened. A forged stream can only ship a report against
+    /// the one claim the supervisor has open; a mismatch is
+    /// conclusive evidence the verifier never accepted **this**
+    /// claim (Codex pass-8 P2).
+    #[error(
+        "Completed report claim_envelope_id {actual} does not match the active pending claim's \
+         envelope id {expected} — the verifier (P6.2) only ever emits a report bound to the \
+         claim it just accepted"
+    )]
+    MismatchedClaimEnvelope { expected: Uuid, actual: Uuid },
+    /// Successful envelope's `recorded_at` is older than
+    /// `state.updated_at`, which would rewind the state's
+    /// monotonic clock. Forged streams cannot reorder timestamps
+    /// without surfacing here (Codex pass-8 P2).
+    #[error(
+        "envelope recorded_at {envelope_recorded_at} predates state updated_at \
+         {state_updated_at} — Goal events must be monotonic on the timeline"
+    )]
+    TimestampNonMonotonic {
+        envelope_recorded_at: DateTime<Utc>,
+        state_updated_at: DateTime<Utc>,
+    },
 }
 
 /// Apply one envelope to `state`. Idempotent only when applied to the
@@ -357,6 +393,22 @@ pub fn apply(state: &mut GoalState, envelope: &GoalEventEnvelope) -> Result<(), 
     if state.status.is_terminal() {
         return Err(GoalApplyReject::TerminalGuard {
             status: state.status,
+        });
+    }
+    // Monotonic-time guard: a successful envelope must have a
+    // `recorded_at` >= the current `state.updated_at`. A forged
+    // stream that ships an envelope with an older timestamp would
+    // otherwise rewind the state's clock once the mutation lands,
+    // muddying snapshot diffs and audit ordering (Codex pass-8 P2).
+    // Equality (envelope.recorded_at == state.updated_at) is
+    // permitted: events emitted in the same instant by the
+    // supervisor are legitimate (e.g. the seed Created sets
+    // updated_at = spec.created_at, and a same-tick PlanUpdated
+    // can follow).
+    if envelope.recorded_at < state.updated_at {
+        return Err(GoalApplyReject::TimestampNonMonotonic {
+            envelope_recorded_at: envelope.recorded_at,
+            state_updated_at: state.updated_at,
         });
     }
     match &envelope.event {
@@ -475,6 +527,11 @@ pub fn apply(state: &mut GoalState, envelope: &GoalEventEnvelope) -> Result<(), 
             // directly. Without this, a `--resume` that lands on a
             // pending claim would have to re-prompt the model.
             state.pending_claim = Some(claim.clone());
+            // Stamp the claim's envelope id so the `Completed` arm
+            // can confirm the report it eventually receives is
+            // bound to **this** claim, not an unrelated one
+            // (Codex pass-8 P2). The two fields move together.
+            state.pending_claim_envelope_id = Some(envelope.envelope_id);
             // Evidence accumulates immediately so the audit log shows
             // exactly what the model attached. Criteria, however,
             // are NOT stamped into `completed_criteria` until the
@@ -485,12 +542,13 @@ pub fn apply(state: &mut GoalState, envelope: &GoalEventEnvelope) -> Result<(), 
             state.status = GoalStatus::CompletionClaimed;
         }
         GoalEvent::CompletionRejected { missing, reason } => {
-            // Verifier said no — drop the pending claim so future
-            // events do not see stale rejected work as
-            // "claimed". The accompanying blocker carries the
-            // verifier's rejection reason for the TUI / continuation
-            // prompt.
+            // Verifier said no — drop the pending claim and its
+            // envelope id so future events do not see stale
+            // rejected work as "claimed". The accompanying blocker
+            // carries the verifier's rejection reason for the TUI /
+            // continuation prompt.
             state.pending_claim = None;
+            state.pending_claim_envelope_id = None;
             state.blockers.push(GoalBlocker {
                 reason: GoalBlockReason::CompletionRejected {
                     missing: missing.clone(),
@@ -517,9 +575,26 @@ pub fn apply(state: &mut GoalState, envelope: &GoalEventEnvelope) -> Result<(), 
             if state.pending_claim.is_none() {
                 return Err(GoalApplyReject::MissingCompletionClaim);
             }
-            // Schema-layer shape floor: even with a pending claim,
-            // a forged Completed report must satisfy the same
-            // invariants every verifier accept-path produces
+            // Claim binding: `pending_claim_envelope_id` is set by
+            // `CompletionClaimed` apply and moves with
+            // `pending_claim`, so an active pending claim always
+            // has a known envelope id. Reject any report that
+            // names a *different* claim — a forged stream cannot
+            // claim under one envelope and ship a report against
+            // an unrelated active claim (Codex pass-8 P2).
+            let expected_envelope_id = state.pending_claim_envelope_id.expect(
+                "INVARIANT: pending_claim_envelope_id is Some whenever pending_claim is Some \
+                 — see the CompletionClaimed apply arm",
+            );
+            if report.claim_envelope_id != expected_envelope_id {
+                return Err(GoalApplyReject::MismatchedClaimEnvelope {
+                    expected: expected_envelope_id,
+                    actual: report.claim_envelope_id,
+                });
+            }
+            // Schema-layer shape floor: even with a bound pending
+            // claim, a forged Completed report must satisfy the
+            // same invariants every verifier accept-path produces
             // (claimed-id sanity, required coverage, evidence
             // floor under Standard policy, verification id
             // sanity, budget vs. spec caps). The verifier (P6.2)
@@ -536,6 +611,7 @@ pub fn apply(state: &mut GoalState, envelope: &GoalEventEnvelope) -> Result<(), 
             }
             state.evidence_refs.extend(report.evidence_refs.clone());
             state.pending_claim = None;
+            state.pending_claim_envelope_id = None;
             state.completion_report = Some(report.clone());
             state.status = GoalStatus::Completed;
         }
@@ -872,11 +948,22 @@ mod tests {
         assert_eq!(state.blockers.len(), 1);
     }
 
+    /// Stable claim-envelope id reused across the legitimate
+    /// claim / report fixtures so the test can construct a
+    /// `CompletionClaimed` envelope with this id and a matching
+    /// `Completed` report whose `claim_envelope_id` agrees.
+    fn fixture_claim_envelope_id() -> Uuid {
+        Uuid::parse_str("00000000-0000-0000-0000-0000c1a10000").unwrap()
+    }
+
     /// Build the canonical claim + report pair the fixture spec
     /// expects: both required criteria claimed, each backed by a
     /// `File` evidence (the fixture marks both
     /// `requires_workspace_change = true`), plus a passed
-    /// verification per criterion.
+    /// verification per criterion. The report's
+    /// `claim_envelope_id` is bound to
+    /// [`fixture_claim_envelope_id`] so the caller can pre-claim
+    /// with that envelope id and the binding check passes.
     fn fixture_legitimate_claim_and_report() -> (GoalCompletionClaim, GoalCompletionReport) {
         let evidence_refs = vec![
             GoalEvidenceRef {
@@ -924,6 +1011,7 @@ mod tests {
             verification,
             residual_risks: vec![],
             changed_files: vec!["src/main.rs".to_string()],
+            claim_envelope_id: fixture_claim_envelope_id(),
             total_spent_micro_usd: 1_500_000,
             elapsed_wall_clock_seconds: 1_200,
             continuation_loops_used: 4,
@@ -935,17 +1023,27 @@ mod tests {
         (claim, report)
     }
 
+    /// Construct a `CompletionClaimed` envelope whose
+    /// `envelope_id` matches [`fixture_claim_envelope_id`] so the
+    /// `Completed` arm's claim-binding check accepts a matching
+    /// report.
+    fn fixture_claim_envelope(goal_id: Uuid, claim: GoalCompletionClaim) -> GoalEventEnvelope {
+        GoalEventEnvelope {
+            envelope_id: fixture_claim_envelope_id(),
+            goal_id,
+            recorded_at: fixture_now(),
+            event: GoalEvent::CompletionClaimed(claim),
+        }
+    }
+
     #[test]
     fn completed_event_is_terminal_and_records_report() {
         let spec = fixture_spec();
         let goal_id = spec.spec_goal_id_for_tests();
         let mut state = GoalState::from_spec(spec);
         let (claim, report) = fixture_legitimate_claim_and_report();
-        apply(
-            &mut state,
-            &envelope(goal_id, GoalEvent::CompletionClaimed(claim)),
-        )
-        .expect("CompletionClaimed must apply before Completed");
+        apply(&mut state, &fixture_claim_envelope(goal_id, claim))
+            .expect("CompletionClaimed must apply before Completed");
         apply(
             &mut state,
             &envelope(goal_id, GoalEvent::Completed(report.clone())),
@@ -973,11 +1071,8 @@ mod tests {
         let goal_id = spec.spec_goal_id_for_tests();
         let mut state = GoalState::from_spec(spec);
         let (claim, _) = fixture_legitimate_claim_and_report();
-        apply(
-            &mut state,
-            &envelope(goal_id, GoalEvent::CompletionClaimed(claim)),
-        )
-        .expect("legitimate claim must seed pending_claim");
+        apply(&mut state, &fixture_claim_envelope(goal_id, claim))
+            .expect("legitimate claim must seed pending_claim");
         let bogus_report = GoalCompletionReport {
             summary: "forged".to_string(),
             completed_criteria: vec!["compiles".to_string()], // missing "tests"
@@ -985,6 +1080,10 @@ mod tests {
             verification: vec![],
             residual_risks: vec![],
             changed_files: vec![],
+            // Bind to the pending claim's envelope id so the
+            // binding gate passes — we want the shape gate to be
+            // the one that fires.
+            claim_envelope_id: fixture_claim_envelope_id(),
             total_spent_micro_usd: 0,
             elapsed_wall_clock_seconds: 0,
             continuation_loops_used: 0,
