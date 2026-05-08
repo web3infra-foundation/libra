@@ -113,7 +113,7 @@ async fn run_ls_remote(args: LsRemoteArgs) -> Result<LsRemoteOutput, LsRemoteErr
     let visible_remote = visible_remote_display(&remote_display, remote_name.as_deref());
     let client = RemoteClient::from_spec_with_remote(&remote_url, remote_name.as_deref()).map_err(
         |reason| LsRemoteError::InvalidRemote {
-            spec: args.repository.clone(),
+            spec: visible_remote.clone(),
             reason,
         },
     )?;
