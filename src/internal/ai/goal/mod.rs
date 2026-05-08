@@ -40,7 +40,8 @@ pub mod state;
 
 pub use event::{
     GoalBlockReason, GoalCompletionClaim, GoalCompletionReport, GoalCompletionShapeError,
-    GoalEvent, GoalEventEnvelope, GoalProgressRecord, validate_completion_report_shape,
+    GoalEvent, GoalEventEnvelope, GoalProgressRecord, validate_completion_claim_shape,
+    validate_completion_report_shape,
 };
 pub use spec::{
     GoalActor, GoalBudget, GoalCriterion, GoalEvidencePolicy, GoalSpec, GoalSpecError,
@@ -49,5 +50,5 @@ pub use spec::{
 pub use state::{
     GoalApplyReject, GoalBlocker, GoalEvidenceRef, GoalEvidenceTarget, GoalPlanStep,
     GoalReplayOutcome, GoalReplayRejection, GoalState, GoalStatus, GoalStepStatus,
-    GoalVerificationRecord, MAX_REPLAY_REJECTIONS, apply, replay,
+    GoalVerificationRecord, MAX_REPLAY_REJECTIONS, PendingGoalClaim, apply, replay,
 };

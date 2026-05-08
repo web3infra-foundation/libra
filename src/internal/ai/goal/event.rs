@@ -186,6 +186,62 @@ pub struct GoalCompletionReport {
     pub finalised_by: GoalActor,
 }
 
+/// Schema-layer shape gate for a [`GoalCompletionClaim`] before it
+/// is stored in `state.pending_claim`. The verifier (P6.2) is the
+/// authority on whether a claim *passes* — but a claim must at
+/// minimum reference real spec ids, with no duplicates and no
+/// fabricated verification / evidence cross-references. Without this
+/// gate a forged stream can poison `pending_claim` and
+/// `state.evidence_refs` (which apply() merges immediately) before
+/// the verifier ever sees the claim.
+///
+/// Reuses [`GoalCompletionShapeError`] — the duplicate-id, unknown-id,
+/// and unknown-verification-id variants apply equally to claims and
+/// reports. Variants specific to the report (required-coverage,
+/// evidence floors, budget overruns) do **not** fire here: a claim is
+/// an attempt to complete, not an assertion of completion.
+pub fn validate_completion_claim_shape(
+    spec: &GoalSpec,
+    claim: &GoalCompletionClaim,
+) -> Result<(), GoalCompletionShapeError> {
+    use std::collections::BTreeSet;
+    let mut spec_ids: BTreeSet<&str> = BTreeSet::new();
+    for criterion in &spec.acceptance_criteria {
+        spec_ids.insert(criterion.id.as_str());
+    }
+    let mut seen_in_claim: BTreeSet<&str> = BTreeSet::new();
+    for claimed in &claim.completed_criteria {
+        if !seen_in_claim.insert(claimed.as_str()) {
+            return Err(GoalCompletionShapeError::DuplicateClaimedCriterion {
+                id: claimed.clone(),
+            });
+        }
+        if !spec_ids.contains(claimed.as_str()) {
+            return Err(GoalCompletionShapeError::UnknownCriterionId {
+                id: claimed.clone(),
+            });
+        }
+    }
+    for record in &claim.verification {
+        if !spec_ids.contains(record.criterion_id.as_str()) {
+            return Err(GoalCompletionShapeError::UnknownVerificationCriterionId {
+                id: record.criterion_id.clone(),
+            });
+        }
+    }
+    // Evidence refs that name a `criterion_id` must point at a real
+    // spec id. Refs with `criterion_id: None` are kept (they may
+    // belong to ambient context, not a specific criterion).
+    for evidence in &claim.evidence_refs {
+        if let Some(id) = evidence.criterion_id.as_deref()
+            && !spec_ids.contains(id)
+        {
+            return Err(GoalCompletionShapeError::UnknownCriterionId { id: id.to_string() });
+        }
+    }
+    Ok(())
+}
+
 /// Schema-layer reasons a [`GoalCompletionReport`] cannot be honoured.
 ///
 /// The deterministic verifier (P6.2) does the rich semantic check
@@ -467,7 +523,16 @@ pub enum GoalEvent {
     CompletionClaimed(GoalCompletionClaim),
     /// Verifier rejected the most recent claim. The supervisor keeps
     /// the Goal active and continues the loop.
+    ///
+    /// `claim_envelope_id` binds the rejection to the
+    /// `CompletionClaimed` envelope it concerns, mirroring
+    /// [`GoalCompletionReport::claim_envelope_id`]. `apply()` refuses
+    /// the event when no pending claim is open or the binding does
+    /// not match — a forged stream cannot otherwise clear an
+    /// unrelated active claim or fabricate rejection blockers from
+    /// thin air (Codex pass-9 P1).
     CompletionRejected {
+        claim_envelope_id: Uuid,
         missing: Vec<String>,
         reason: String,
     },
@@ -610,6 +675,7 @@ mod tests {
             },
             GoalEvent::CompletionClaimed(claim.clone()),
             GoalEvent::CompletionRejected {
+                claim_envelope_id: Uuid::nil(),
                 missing: vec!["tests-pass".to_string()],
                 reason: "no test evidence".to_string(),
             },

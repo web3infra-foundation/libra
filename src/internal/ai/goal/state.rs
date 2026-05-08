@@ -42,7 +42,8 @@ use uuid::Uuid;
 use super::{
     event::{
         GoalBlockReason, GoalCompletionClaim, GoalCompletionReport, GoalCompletionShapeError,
-        GoalEvent, GoalEventEnvelope, validate_completion_report_shape,
+        GoalEvent, GoalEventEnvelope, validate_completion_claim_shape,
+        validate_completion_report_shape,
     },
     spec::{GoalSpec, GoalSpecError},
 };
@@ -131,7 +132,10 @@ pub enum GoalEvidenceTarget {
     /// (e.g. a research-only or analysis-only Goal where the right
     /// answer is "no change required"). The verifier accepts this
     /// as evidence in lieu of a `git status` artefact when the
-    /// matching criterion's `evidence_policy` permits it.
+    /// Goal's [`super::spec::GoalEvidencePolicy`] is
+    /// `DocumentationOnly`, or when the matching criterion's
+    /// [`super::spec::GoalCriterion::requires_workspace_change`]
+    /// is `false` under `Standard` policy.
     NoChangesNeeded { rationale: String },
     /// Forward-compatibility catch-all so an envelope carrying an
     /// evidence target shape we have not seen yet still replays
@@ -179,6 +183,25 @@ pub struct GoalBlocker {
     pub requested_input: Option<String>,
 }
 
+/// The active completion claim plus the envelope that opened it,
+/// bundled so the two values can never drift apart. The
+/// `Completed` and `CompletionRejected` arms use `envelope_id` to
+/// confirm the verifier's response refers to **this** claim, not an
+/// unrelated one (Codex pass-8 P2 / pass-9 P1). Bundling at the type
+/// level removes the previous `Option<...>` pair that an external
+/// caller could split (Codex pass-9 P2).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PendingGoalClaim {
+    /// Envelope id of the [`super::event::GoalEvent::CompletionClaimed`]
+    /// that opened this claim.
+    pub envelope_id: Uuid,
+    /// The claim payload itself — passed through to P6.2 so the
+    /// verifier reads `verification` and `residual_risks` directly,
+    /// and a `--resume` can pick up the pending verification
+    /// without re-prompting the model.
+    pub claim: GoalCompletionClaim,
+}
+
 /// Snapshot of a Goal at a point in event-stream time.
 ///
 /// Always derived from a [`GoalSpec`] + an event sequence — never
@@ -202,21 +225,16 @@ pub struct GoalState {
     pub evidence_refs: Vec<GoalEvidenceRef>,
     pub blockers: Vec<GoalBlocker>,
     pub last_assistant_summary: Option<String>,
-    /// Most recent unverified completion claim. Populated when the
-    /// model invokes `submit_goal_complete` and cleared when the
-    /// claim is either accepted (-> `completion_report`) or
-    /// rejected (-> rolled back). The deterministic verifier (P6.2)
-    /// reads this directly so a `--resume` can pick up a pending
-    /// verification without re-running the model.
-    pub pending_claim: Option<GoalCompletionClaim>,
-    /// Envelope id of the [`super::event::GoalEvent::CompletionClaimed`]
-    /// that produced [`Self::pending_claim`]. Used by the
-    /// `Completed`-arm shape gate to bind a completion report to
-    /// the specific claim it resolves — a forged report carrying
-    /// any other `claim_envelope_id` is refused (Codex pass-8 P2).
-    /// Always `Some` while `pending_claim` is `Some`; the two
-    /// fields move together.
-    pub pending_claim_envelope_id: Option<Uuid>,
+    /// Most recent unverified completion claim with its opening
+    /// envelope id. Populated when the model invokes
+    /// `submit_goal_complete` and cleared when the claim is either
+    /// accepted (-> `completion_report`) or rejected (->
+    /// rolled back). The deterministic verifier (P6.2) reads this
+    /// directly so a `--resume` can pick up a pending verification
+    /// without re-running the model. Bundling the envelope id with
+    /// the claim payload at the type level seals the
+    /// "they always move together" invariant (Codex pass-9 P2).
+    pub pending_claim: Option<PendingGoalClaim>,
     /// Final completion report once `status == Completed`.
     pub completion_report: Option<GoalCompletionReport>,
     pub updated_at: DateTime<Utc>,
@@ -235,7 +253,6 @@ impl GoalState {
             blockers: Vec::new(),
             last_assistant_summary: None,
             pending_claim: None,
-            pending_claim_envelope_id: None,
             completion_report: None,
             updated_at,
         }
@@ -334,6 +351,27 @@ pub enum GoalApplyReject {
         envelope_recorded_at: DateTime<Utc>,
         state_updated_at: DateTime<Utc>,
     },
+    /// `CompletionClaimed` payload failed
+    /// [`super::event::validate_completion_claim_shape`] —
+    /// duplicate / unknown criterion ids or fabricated
+    /// verification / evidence cross-references would otherwise
+    /// poison `state.pending_claim` and `state.evidence_refs`
+    /// before P6.2 sees the claim (Codex pass-9 P1).
+    #[error("CompletionClaimed payload failed validation: {source}")]
+    InvalidCompletionClaim {
+        #[source]
+        source: GoalCompletionShapeError,
+    },
+    /// `CompletionRejected` arrived without an open pending
+    /// claim. The doc state machine forbids a rejection without
+    /// a prior `CompletionClaimed`; a forged stream cannot
+    /// fabricate rejection blockers from thin air (Codex pass-9
+    /// P1).
+    #[error(
+        "CompletionRejected envelope arrived without an open pending claim — \
+         the verifier (P6.2) only ever rejects an active CompletionClaimed"
+    )]
+    RejectedWithoutPendingClaim,
 }
 
 /// Apply one envelope to `state`. Idempotent only when applied to the
@@ -348,30 +386,32 @@ pub enum GoalApplyReject {
 /// snapshots can distinguish a real mutation from a rejected envelope
 /// without a second timestamp source.
 ///
-/// Returns `Err(GoalApplyReject::...)` in any of these documented cases:
+/// # Guard order
 ///
-/// - [`GoalApplyReject::CrossGoal`] — `envelope.goal_id` does not
-///   match the spec's `goal_id`. Protects against a misrouted JSONL
-///   entry.
-/// - [`GoalApplyReject::TerminalGuard`] — `state.status` is already
-///   terminal (`Completed` or `Cancelled`). A late-arriving event
-///   from a racy supervisor or a replayed-twice log cannot walk a
-///   finished Goal back into `Running`.
-/// - [`GoalApplyReject::InvalidCriteriaRevised`] — the embedded
-///   criteria list fails [`super::spec::validate_criteria`]
-///   (duplicate or blank id). The verifier keys completion off
-///   `completed_criteria: BTreeSet<String>`, so a duplicate id would
-///   let one claim satisfy multiple required criteria.
-/// - [`GoalApplyReject::InvalidCompletionReport`] — the `Completed`
-///   payload fails the schema-layer floor enforced by
-///   [`super::event::validate_completion_report_shape`]: the
-///   verifier (P6.2) is the only legitimate path to a `Completed`
-///   envelope, so a stream that ships one without satisfying the
-///   shape rules every verifier accept-path also produces is
-///   refused at the resume seam.
-/// - [`GoalApplyReject::UnknownFutureVariant`] — an unknown future
-///   variant from a newer Libra version that the current binary
-///   cannot interpret.
+/// Pre-mutation checks fire in this fixed order so a forged or
+/// corrupted stream surfaces the *most specific* reason first:
+///
+/// 1. [`GoalApplyReject::CrossGoal`] — `envelope.goal_id` mismatch.
+/// 2. [`GoalApplyReject::TerminalGuard`] — `state.status` already
+///    terminal.
+/// 3. [`GoalApplyReject::TimestampNonMonotonic`] — successful
+///    envelopes must have `recorded_at >= state.updated_at`.
+/// 4. Per-event guards (run only inside the matching arm):
+///    - [`GoalApplyReject::DuplicateCreated`] for any post-seed
+///      `Created`.
+///    - [`GoalApplyReject::InvalidCriteriaRevised`] for a malformed
+///      `CriteriaRevised` payload.
+///    - [`GoalApplyReject::InvalidCompletionClaim`] for a malformed
+///      `CompletionClaimed` payload.
+///    - [`GoalApplyReject::RejectedWithoutPendingClaim`] +
+///      [`GoalApplyReject::MismatchedClaimEnvelope`] for a stray /
+///      misbound `CompletionRejected`.
+///    - [`GoalApplyReject::MissingCompletionClaim`] +
+///      [`GoalApplyReject::MismatchedClaimEnvelope`] +
+///      [`GoalApplyReject::InvalidCompletionReport`] for a stray /
+///      misbound / shape-bad `Completed`.
+///    - [`GoalApplyReject::UnknownFutureVariant`] for any unknown
+///      `kind` from a newer Libra version.
 ///
 /// In every `Err`-returning case the caller (typically the
 /// supervisor's replay loop) is expected to log the gap and proceed.
@@ -522,16 +562,29 @@ pub fn apply(state: &mut GoalState, envelope: &GoalEventEnvelope) -> Result<(), 
             };
         }
         GoalEvent::CompletionClaimed(claim) => {
-            // Retain the full claim payload — the verifier (P6.2) reads
-            // `pending_claim.verification` and `residual_risks`
-            // directly. Without this, a `--resume` that lands on a
-            // pending claim would have to re-prompt the model.
-            state.pending_claim = Some(claim.clone());
-            // Stamp the claim's envelope id so the `Completed` arm
-            // can confirm the report it eventually receives is
-            // bound to **this** claim, not an unrelated one
-            // (Codex pass-8 P2). The two fields move together.
-            state.pending_claim_envelope_id = Some(envelope.envelope_id);
+            // Schema-layer claim shape gate: a forged stream that
+            // ships a `CompletionClaimed` with duplicate / unknown
+            // criterion ids or fabricated verification / evidence
+            // cross-references would otherwise poison
+            // `pending_claim` and `state.evidence_refs` before
+            // P6.2 ever sees the claim. The verifier still owns
+            // accept/reject; the floor only refuses payloads that
+            // could not have come from any verifier-emitted accept
+            // path (Codex pass-9 P1).
+            validate_completion_claim_shape(&state.spec, claim)
+                .map_err(|source| GoalApplyReject::InvalidCompletionClaim { source })?;
+            // Retain the full claim payload alongside its
+            // opening envelope id — bundled so they cannot drift
+            // apart. The verifier (P6.2) reads
+            // `pending_claim.claim.verification` /
+            // `residual_risks` directly; the
+            // `pending_claim.envelope_id` is checked by the
+            // `Completed` / `CompletionRejected` arms to bind the
+            // verifier's response to **this** claim.
+            state.pending_claim = Some(PendingGoalClaim {
+                envelope_id: envelope.envelope_id,
+                claim: claim.clone(),
+            });
             // Evidence accumulates immediately so the audit log shows
             // exactly what the model attached. Criteria, however,
             // are NOT stamped into `completed_criteria` until the
@@ -541,14 +594,32 @@ pub fn apply(state: &mut GoalState, envelope: &GoalEventEnvelope) -> Result<(), 
             state.evidence_refs.extend(claim.evidence_refs.clone());
             state.status = GoalStatus::CompletionClaimed;
         }
-        GoalEvent::CompletionRejected { missing, reason } => {
-            // Verifier said no — drop the pending claim and its
-            // envelope id so future events do not see stale
-            // rejected work as "claimed". The accompanying blocker
-            // carries the verifier's rejection reason for the TUI /
-            // continuation prompt.
+        GoalEvent::CompletionRejected {
+            claim_envelope_id,
+            missing,
+            reason,
+        } => {
+            // State-machine guard: rejection must reference an
+            // open pending claim. A forged stream cannot
+            // fabricate a rejection blocker out of thin air
+            // (Codex pass-9 P1).
+            let Some(pending) = state.pending_claim.as_ref() else {
+                return Err(GoalApplyReject::RejectedWithoutPendingClaim);
+            };
+            // Bind the rejection to the right claim — same
+            // protection `Completed` already enjoys via
+            // `MismatchedClaimEnvelope`.
+            if pending.envelope_id != *claim_envelope_id {
+                return Err(GoalApplyReject::MismatchedClaimEnvelope {
+                    expected: pending.envelope_id,
+                    actual: *claim_envelope_id,
+                });
+            }
+            // Verifier said no — drop the pending claim so future
+            // events do not see stale rejected work as "claimed".
+            // The accompanying blocker carries the verifier's
+            // rejection reason for the TUI / continuation prompt.
             state.pending_claim = None;
-            state.pending_claim_envelope_id = None;
             state.blockers.push(GoalBlocker {
                 reason: GoalBlockReason::CompletionRejected {
                     missing: missing.clone(),
@@ -572,23 +643,22 @@ pub fn apply(state: &mut GoalState, envelope: &GoalEventEnvelope) -> Result<(), 
             // landing on a corrupt stream surfaces the gap as
             // `MissingCompletionClaim` instead of silently
             // transitioning the Goal to terminal.
-            if state.pending_claim.is_none() {
+            // Pattern-match on the bundled pending claim — if
+            // there is no open claim, the doc state machine is
+            // violated (Codex pass-7 P1). Otherwise extract the
+            // bound envelope id directly; bundling at the type
+            // level removes the `Option<envelope_id>` pair the
+            // previous design required (Codex pass-9 P2).
+            let Some(pending) = state.pending_claim.as_ref() else {
                 return Err(GoalApplyReject::MissingCompletionClaim);
-            }
-            // Claim binding: `pending_claim_envelope_id` is set by
-            // `CompletionClaimed` apply and moves with
-            // `pending_claim`, so an active pending claim always
-            // has a known envelope id. Reject any report that
-            // names a *different* claim — a forged stream cannot
-            // claim under one envelope and ship a report against
-            // an unrelated active claim (Codex pass-8 P2).
-            let expected_envelope_id = state.pending_claim_envelope_id.expect(
-                "INVARIANT: pending_claim_envelope_id is Some whenever pending_claim is Some \
-                 — see the CompletionClaimed apply arm",
-            );
-            if report.claim_envelope_id != expected_envelope_id {
+            };
+            // Claim binding: refuse any report that names a
+            // *different* claim — a forged stream cannot claim
+            // under one envelope and ship a report against an
+            // unrelated active claim (Codex pass-8 P2).
+            if report.claim_envelope_id != pending.envelope_id {
                 return Err(GoalApplyReject::MismatchedClaimEnvelope {
-                    expected: expected_envelope_id,
+                    expected: pending.envelope_id,
                     actual: report.claim_envelope_id,
                 });
             }
@@ -611,7 +681,6 @@ pub fn apply(state: &mut GoalState, envelope: &GoalEventEnvelope) -> Result<(), 
             }
             state.evidence_refs.extend(report.evidence_refs.clone());
             state.pending_claim = None;
-            state.pending_claim_envelope_id = None;
             state.completion_report = Some(report.clone());
             state.status = GoalStatus::Completed;
         }
@@ -918,17 +987,18 @@ mod tests {
         let spec = fixture_spec();
         let goal_id = spec.spec_goal_id_for_tests();
         let mut state = GoalState::from_spec(spec);
+        let claim_envelope_id = fixture_claim_envelope_id();
         apply(
             &mut state,
-            &envelope(
+            &fixture_claim_envelope(
                 goal_id,
-                GoalEvent::CompletionClaimed(GoalCompletionClaim {
+                GoalCompletionClaim {
                     summary: "done".to_string(),
                     completed_criteria: vec!["compiles".to_string()],
                     evidence_refs: vec![],
                     verification: vec![],
                     residual_risks: vec![],
-                }),
+                },
             ),
         )
         .expect("CompletionClaimed apply must succeed");
@@ -938,6 +1008,7 @@ mod tests {
             &envelope(
                 goal_id,
                 GoalEvent::CompletionRejected {
+                    claim_envelope_id,
                     missing: vec!["tests".to_string()],
                     reason: "no test evidence".to_string(),
                 },

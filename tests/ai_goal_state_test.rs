@@ -454,21 +454,25 @@ fn session_event_goal_apply_to_legacy_state_is_no_op() {
 fn resume_replay_handles_claim_rejection_then_completion() {
     let spec = fixture_spec();
     let goal_id = spec.goal_id;
+    let first_claim_envelope_id = Uuid::parse_str("00000000-0000-0000-0000-0000c1a10001").unwrap();
     let envelopes = [
         envelope(goal_id, GoalEvent::Created(spec)),
-        envelope(
+        GoalEventEnvelope {
+            envelope_id: first_claim_envelope_id,
             goal_id,
-            GoalEvent::CompletionClaimed(GoalCompletionClaim {
+            recorded_at: fixture_now(),
+            event: GoalEvent::CompletionClaimed(GoalCompletionClaim {
                 summary: "first attempt".to_string(),
                 completed_criteria: vec!["compiles".to_string()],
                 evidence_refs: vec![],
                 verification: vec![],
                 residual_risks: vec![],
             }),
-        ),
+        },
         envelope(
             goal_id,
             GoalEvent::CompletionRejected {
+                claim_envelope_id: first_claim_envelope_id,
                 missing: vec!["tests".to_string()],
                 reason: "no test evidence".to_string(),
             },
@@ -903,19 +907,20 @@ fn completion_rejected_rolls_back_pending_claim() {
     let goal_id = spec.goal_id;
     let envelopes = [
         envelope(goal_id, GoalEvent::Created(spec)),
-        envelope(
+        fixture_claim_envelope(
             goal_id,
-            GoalEvent::CompletionClaimed(GoalCompletionClaim {
+            GoalCompletionClaim {
                 summary: "first try".to_string(),
                 completed_criteria: vec!["compiles".to_string(), "tests".to_string()],
                 evidence_refs: vec![],
                 verification: vec![],
                 residual_risks: vec![],
-            }),
+            },
         ),
         envelope(
             goal_id,
             GoalEvent::CompletionRejected {
+                claim_envelope_id: fixture_claim_envelope_id(),
                 missing: vec!["tests".to_string()],
                 reason: "no test evidence attached".to_string(),
             },
@@ -1714,5 +1719,134 @@ fn replay_rejects_envelope_with_non_monotonic_timestamp() {
             assert_eq!(*state_updated_at, later);
         }
         other => panic!("expected TimestampNonMonotonic, got {other:?}"),
+    }
+}
+
+/// Scenario (Codex pass-9 P1): a forged `CompletionClaimed`
+/// envelope whose payload claims duplicate criterion ids must be
+/// refused at apply-time so the bogus claim never lands in
+/// `state.pending_claim` (and its evidence never seeps into
+/// `state.evidence_refs`). Pinned by the new
+/// `validate_completion_claim_shape` floor.
+#[test]
+fn replay_rejects_completion_claim_with_duplicate_ids() {
+    let spec = fixture_spec();
+    let goal_id = spec.goal_id;
+    let bogus_claim = GoalCompletionClaim {
+        summary: "duplicate-id claim".to_string(),
+        completed_criteria: vec!["compiles".to_string(), "compiles".to_string()],
+        evidence_refs: vec![GoalEvidenceRef {
+            criterion_id: Some("compiles".to_string()),
+            target: GoalEvidenceTarget::ToolCall {
+                call_id: "tool-1".to_string(),
+            },
+            description: "evidence".to_string(),
+        }],
+        verification: vec![],
+        residual_risks: vec![],
+    };
+    let envelopes = [
+        envelope(goal_id, GoalEvent::Created(spec)),
+        envelope(goal_id, GoalEvent::CompletionClaimed(bogus_claim)),
+    ];
+    let outcome = replay(envelopes.iter()).expect("replay must succeed");
+    assert_eq!(
+        outcome.state.status,
+        GoalStatus::Active,
+        "rejected CompletionClaimed must NOT seed pending_claim or transition status",
+    );
+    assert!(outcome.state.pending_claim.is_none());
+    assert!(
+        outcome.state.evidence_refs.is_empty(),
+        "rejected claim's evidence_refs must NOT leak into state",
+    );
+    assert_eq!(outcome.rejected.len(), 1);
+    match &outcome.rejected[0].reason {
+        GoalApplyReject::InvalidCompletionClaim { source } => {
+            assert_eq!(
+                source,
+                &GoalCompletionShapeError::DuplicateClaimedCriterion {
+                    id: "compiles".to_string(),
+                },
+            );
+        }
+        other => panic!("expected InvalidCompletionClaim, got {other:?}"),
+    }
+}
+
+/// Scenario (Codex pass-9 P1): a `CompletionRejected` envelope
+/// arriving without an open pending claim is refused with
+/// `RejectedWithoutPendingClaim` — a forged stream cannot
+/// fabricate rejection blockers from thin air.
+#[test]
+fn replay_rejects_completion_rejected_without_pending_claim() {
+    let spec = fixture_spec();
+    let goal_id = spec.goal_id;
+    let envelopes = [
+        envelope(goal_id, GoalEvent::Created(spec)),
+        envelope(
+            goal_id,
+            GoalEvent::CompletionRejected {
+                claim_envelope_id: Uuid::nil(),
+                missing: vec!["tests".to_string()],
+                reason: "no claim was open".to_string(),
+            },
+        ),
+    ];
+    let outcome = replay(envelopes.iter()).expect("replay must succeed");
+    assert_eq!(outcome.state.status, GoalStatus::Active);
+    assert!(
+        outcome.state.blockers.is_empty(),
+        "rejected CompletionRejected must NOT push a blocker",
+    );
+    assert_eq!(outcome.rejected.len(), 1);
+    assert_eq!(
+        outcome.rejected[0].reason,
+        GoalApplyReject::RejectedWithoutPendingClaim,
+    );
+}
+
+/// Scenario (Codex pass-9 P1): a `CompletionRejected` whose
+/// `claim_envelope_id` does not match the active pending claim
+/// surfaces as `MismatchedClaimEnvelope` — symmetric to the
+/// `Completed` binding gate.
+#[test]
+fn replay_rejects_completion_rejected_with_mismatched_claim_envelope_id() {
+    let spec = fixture_spec();
+    let goal_id = spec.goal_id;
+    let legit_claim = GoalCompletionClaim {
+        summary: "claim".to_string(),
+        completed_criteria: vec!["compiles".to_string(), "tests".to_string()],
+        evidence_refs: vec![],
+        verification: vec![],
+        residual_risks: vec![],
+    };
+    let foreign_claim_id = Uuid::parse_str("00000000-0000-0000-0000-0000beefb0b0").unwrap();
+    let envelopes = [
+        envelope(goal_id, GoalEvent::Created(spec)),
+        fixture_claim_envelope(goal_id, legit_claim),
+        envelope(
+            goal_id,
+            GoalEvent::CompletionRejected {
+                claim_envelope_id: foreign_claim_id,
+                missing: vec!["tests".to_string()],
+                reason: "rejection bound to a different claim".to_string(),
+            },
+        ),
+    ];
+    let outcome = replay(envelopes.iter()).expect("replay must succeed");
+    assert_eq!(
+        outcome.state.status,
+        GoalStatus::CompletionClaimed,
+        "mismatched-binding rejection must NOT clear the active claim",
+    );
+    assert!(outcome.state.pending_claim.is_some());
+    assert_eq!(outcome.rejected.len(), 1);
+    match &outcome.rejected[0].reason {
+        GoalApplyReject::MismatchedClaimEnvelope { expected, actual } => {
+            assert_eq!(*expected, fixture_claim_envelope_id());
+            assert_eq!(*actual, foreign_claim_id);
+        }
+        other => panic!("expected MismatchedClaimEnvelope, got {other:?}"),
     }
 }
