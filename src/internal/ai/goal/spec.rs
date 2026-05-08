@@ -57,6 +57,16 @@ pub enum GoalActor {
 /// `verifier_hint` is opt-in advisory text shown to the supervisor so it
 /// can craft a precise continuation prompt when the criterion is still
 /// pending — e.g. `"check that tests pass via cargo test --lib"`.
+///
+/// `requires_workspace_change` is the **typed** signal that distinguishes
+/// criteria that demand a code/file mutation from criteria satisfied by
+/// research, analysis, or external action only. The deterministic
+/// verifier (P6.2) keys off this field — **not** off natural-language
+/// parsing of `description` — when the active [`GoalEvidencePolicy`] is
+/// `Standard` and decides whether VCS state evidence is required for
+/// the criterion. Default `false` so a criterion authored without
+/// thinking about evidence shape gets the lighter check; criteria that
+/// mutate the workspace must opt in explicitly.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct GoalCriterion {
     pub id: String,
@@ -64,6 +74,17 @@ pub struct GoalCriterion {
     pub required: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verifier_hint: Option<String>,
+    /// Whether satisfying this criterion requires a mutation of the
+    /// working tree (file edit, file creation, removal). The verifier
+    /// (P6.2) consults this typed signal under
+    /// [`GoalEvidencePolicy::Standard`] to decide whether VCS state
+    /// evidence is required, instead of natural-language parsing of
+    /// `description`. Default `false` for forward-compat — older logs
+    /// missing the field deserialise as "no workspace change", which
+    /// is the lighter-weight check; the supervisor must set this
+    /// `true` for criteria like "add a unit test" or "rename module".
+    #[serde(default)]
+    pub requires_workspace_change: bool,
 }
 
 /// What kinds of evidence the verifier accepts for a Goal.
@@ -77,7 +98,11 @@ pub struct GoalCriterion {
 #[serde(rename_all = "snake_case")]
 pub enum GoalEvidencePolicy {
     /// Default: at least one evidence ref per required criterion AND
-    /// (if any criterion describes a code change) a VCS state evidence.
+    /// (for any criterion whose
+    /// [`GoalCriterion::requires_workspace_change`] is `true`) a VCS
+    /// state evidence. The "describes a code change" decision is made
+    /// off the typed `requires_workspace_change` field, never off the
+    /// criterion's natural-language `description`.
     #[default]
     Standard,
     /// Documentation-only or analysis-only Goals: human-written
@@ -133,7 +158,7 @@ impl Default for GoalBudget {
 /// Pure data validation — anything that depends on the surrounding
 /// session, registered tools, or the budget config lives in the
 /// supervisor / control entry points.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 pub enum GoalSpecError {
     #[error(
         "GoalSpec.objective must not be blank — Goal mode requires an explicit objective string"
@@ -343,6 +368,7 @@ mod tests {
             description: "x".to_string(),
             required: true,
             verifier_hint: None,
+            requires_workspace_change: false,
         };
         let err = GoalSpec::new(
             Uuid::new_v4(),
@@ -377,6 +403,7 @@ mod tests {
                 description: "x".to_string(),
                 required: true,
                 verifier_hint: None,
+                requires_workspace_change: false,
             }],
             Vec::new(),
             GoalEvidencePolicy::Standard,
@@ -404,6 +431,7 @@ mod tests {
                 description: "cargo test --lib green".to_string(),
                 required: true,
                 verifier_hint: Some("cargo test --lib".to_string()),
+                requires_workspace_change: true,
             }],
             vec!["no destructive git ops".to_string()],
             GoalEvidencePolicy::Standard,
@@ -426,10 +454,21 @@ mod tests {
     /// `verifier_hint` deserialises as `None` (skip_serializing_if +
     /// serde default for Option). This protects upgrades that add a
     /// criterion with no hint from breaking older consumers.
+    ///
+    /// Also pins the forward-compat default for
+    /// `requires_workspace_change`: legacy logs that predate the
+    /// typed change-kind signal must deserialise as `false` so the
+    /// verifier (P6.2) applies the lighter check rather than
+    /// rejecting old criteria for missing VCS evidence they were
+    /// never authored against.
     #[test]
     fn criterion_deserializes_without_optional_hint() {
         let json = r#"{"id":"c1","description":"x","required":true}"#;
         let crit: GoalCriterion = serde_json::from_str(json).expect("deserialize");
         assert!(crit.verifier_hint.is_none());
+        assert!(
+            !crit.requires_workspace_change,
+            "legacy criterion missing the field must default to no-workspace-change",
+        );
     }
 }

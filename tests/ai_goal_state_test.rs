@@ -24,10 +24,10 @@
 use chrono::{DateTime, TimeZone, Utc};
 use libra::internal::ai::{
     goal::{
-        GoalActor, GoalBlockReason, GoalCompletionClaim, GoalCompletionReport, GoalCriterion,
-        GoalEvent, GoalEventEnvelope, GoalEvidencePolicy, GoalEvidenceRef, GoalEvidenceTarget,
-        GoalPlanStep, GoalProgressRecord, GoalSpec, GoalState, GoalStatus, GoalStepStatus,
-        GoalVerificationRecord, apply, replay,
+        GoalActor, GoalApplyReject, GoalBlockReason, GoalCompletionClaim, GoalCompletionReport,
+        GoalCompletionShapeError, GoalCriterion, GoalEvent, GoalEventEnvelope, GoalEvidencePolicy,
+        GoalEvidenceRef, GoalEvidenceTarget, GoalPlanStep, GoalProgressRecord, GoalSpec, GoalState,
+        GoalStatus, GoalStepStatus, GoalVerificationRecord, apply, replay,
     },
     session::jsonl::SessionEvent,
 };
@@ -53,18 +53,21 @@ fn fixture_spec() -> GoalSpec {
                 description: "cargo check passes".to_string(),
                 required: true,
                 verifier_hint: Some("cargo check".to_string()),
+                requires_workspace_change: true,
             },
             GoalCriterion {
                 id: "tests".to_string(),
                 description: "cargo test passes".to_string(),
                 required: true,
                 verifier_hint: Some("cargo test --lib".to_string()),
+                requires_workspace_change: true,
             },
             GoalCriterion {
                 id: "docs".to_string(),
                 description: "module docs updated".to_string(),
                 required: false,
                 verifier_hint: None,
+                requires_workspace_change: false,
             },
         ],
         vec!["no destructive git ops".to_string()],
@@ -189,6 +192,9 @@ fn replay_drives_full_happy_path_to_completed() {
                 verification: vec![],
                 residual_risks: vec![],
                 changed_files: vec!["src/feature.rs".to_string()],
+                total_spent_micro_usd: 2_400_000,
+                elapsed_wall_clock_seconds: 1_350,
+                continuation_loops_used: 5,
                 finalised_at: fixture_now(),
                 finalised_by: GoalActor::System {
                     reason: "deterministic verifier accepted".to_string(),
@@ -197,7 +203,7 @@ fn replay_drives_full_happy_path_to_completed() {
         ),
     ];
 
-    let state = replay(envelopes.iter()).expect("replay must succeed");
+    let state = replay(envelopes.iter()).expect("replay must succeed").state;
     assert_eq!(state.status, GoalStatus::Completed);
     assert!(state.status.is_terminal());
     assert!(state.completed_criteria.contains("compiles"));
@@ -221,7 +227,8 @@ fn replay_drives_full_happy_path_to_completed() {
 /// replayed twice, out-of-order JSONL slice) must NOT walk a
 /// cancelled Goal back into `Running`. The schema layer enforces
 /// this with the terminal-state guard at the top of `apply`; the
-/// supervisor (P6.3) sees `applied == false` and logs the gap.
+/// supervisor (P6.3) reads the rejection diagnostic from the
+/// replay outcome and logs the gap.
 #[test]
 fn cancelled_state_is_terminal_and_freezes_replay() {
     let spec = fixture_spec();
@@ -242,13 +249,28 @@ fn cancelled_state_is_terminal_and_freezes_replay() {
             },
         ),
     ];
-    let state = replay(envelopes.iter()).expect("replay must succeed");
+    let outcome = replay(envelopes.iter()).expect("replay must succeed");
     assert_eq!(
-        state.status,
+        outcome.state.status,
         GoalStatus::Cancelled,
         "terminal status must NOT flip back to Running on a late event"
     );
-    assert!(state.status.is_terminal());
+    assert!(outcome.state.status.is_terminal());
+    assert_eq!(
+        outcome.rejected.len(),
+        1,
+        "the post-Cancelled StepStarted must surface as a rejection diagnostic",
+    );
+    assert!(
+        matches!(
+            outcome.rejected[0].reason,
+            GoalApplyReject::TerminalGuard {
+                status: GoalStatus::Cancelled,
+            }
+        ),
+        "rejection reason must be TerminalGuard{{Cancelled}}, got {:?}",
+        outcome.rejected[0].reason
+    );
 }
 
 /// Scenario: a future-only variant from a newer Libra version
@@ -282,8 +304,18 @@ fn unknown_future_variant_does_not_panic_replay() {
             },
         ),
     ];
-    let state = replay(envelopes.iter()).expect("replay must survive unknown future variant");
-    assert_eq!(state.status, GoalStatus::Running);
+    let outcome = replay(envelopes.iter()).expect("replay must survive unknown future variant");
+    assert_eq!(outcome.state.status, GoalStatus::Running);
+    assert_eq!(
+        outcome.rejected.len(),
+        1,
+        "the unknown future variant must surface as exactly one rejection diagnostic",
+    );
+    assert_eq!(
+        outcome.rejected[0].reason,
+        GoalApplyReject::UnknownFutureVariant,
+        "rejection reason for an unknown variant must be UnknownFutureVariant",
+    );
 }
 
 /// Scenario: blocker accumulation. Multiple blockers can coexist;
@@ -308,7 +340,8 @@ fn multiple_blockers_accumulate_in_order() {
                 requested_input: None,
             },
         ),
-    );
+    )
+    .expect("first Blocked apply must succeed");
     apply(
         &mut state,
         &envelope(
@@ -321,7 +354,8 @@ fn multiple_blockers_accumulate_in_order() {
                 requested_input: Some("Approve $0.50 more?".to_string()),
             },
         ),
-    );
+    )
+    .expect("second Blocked apply must succeed");
     assert_eq!(state.blockers.len(), 2);
     assert_eq!(state.status, GoalStatus::Blocked);
     // Order matters: the first-recorded blocker is the one the user
@@ -419,6 +453,9 @@ fn resume_replay_handles_claim_rejection_then_completion() {
                 verification: vec![],
                 residual_risks: vec![],
                 changed_files: vec![],
+                total_spent_micro_usd: 0,
+                elapsed_wall_clock_seconds: 0,
+                continuation_loops_used: 0,
                 finalised_at: fixture_now(),
                 finalised_by: GoalActor::System {
                     reason: "verifier accepted on second attempt".to_string(),
@@ -426,7 +463,7 @@ fn resume_replay_handles_claim_rejection_then_completion() {
             }),
         ),
     ];
-    let state = replay(envelopes.iter()).expect("replay must succeed");
+    let state = replay(envelopes.iter()).expect("replay must succeed").state;
     assert_eq!(state.status, GoalStatus::Completed);
     // The blocker from the rejection still appears in the state — the
     // audit log must show the supervisor's hard work.
@@ -476,12 +513,14 @@ fn criteria_revised_drops_out_of_scope_completed_entries() {
                         description: "cargo check passes".to_string(),
                         required: true,
                         verifier_hint: None,
+                        requires_workspace_change: true,
                     },
                     GoalCriterion {
                         id: "audit".to_string(),
                         description: "security audit attached".to_string(),
                         required: true,
                         verifier_hint: None,
+                        requires_workspace_change: false,
                     },
                 ],
                 revised_by: GoalActor::User {
@@ -490,7 +529,7 @@ fn criteria_revised_drops_out_of_scope_completed_entries() {
             },
         ),
     ];
-    let state = replay(envelopes.iter()).expect("replay must succeed");
+    let state = replay(envelopes.iter()).expect("replay must succeed").state;
     assert!(
         state.completed_criteria.contains("compiles"),
         "`compiles` must remain in completed_criteria (still in scope)"
@@ -539,22 +578,38 @@ fn criteria_revised_with_duplicate_ids_is_rejected() {
                         description: "first".to_string(),
                         required: true,
                         verifier_hint: None,
+                        requires_workspace_change: true,
                     },
                     GoalCriterion {
                         id: "compiles".to_string(),
                         description: "duplicate id".to_string(),
                         required: true,
                         verifier_hint: None,
+                        requires_workspace_change: true,
                     },
                 ],
                 revised_by: GoalActor::User { id: None },
             },
         ),
     ];
-    let state = replay(envelopes.iter()).expect("replay must succeed even when revision rejected");
+    let outcome =
+        replay(envelopes.iter()).expect("replay must succeed even when revision rejected");
     assert_eq!(
-        state.spec.acceptance_criteria, original_criteria,
+        outcome.state.spec.acceptance_criteria, original_criteria,
         "duplicate-id revision must NOT replace the original acceptance_criteria"
+    );
+    assert_eq!(
+        outcome.rejected.len(),
+        1,
+        "duplicate-id CriteriaRevised must surface as a rejection diagnostic",
+    );
+    assert!(
+        matches!(
+            outcome.rejected[0].reason,
+            GoalApplyReject::InvalidCriteriaRevised { .. }
+        ),
+        "rejection reason must be InvalidCriteriaRevised, got {:?}",
+        outcome.rejected[0].reason
     );
 }
 
@@ -581,7 +636,11 @@ fn rejected_envelopes_do_not_leak_updated_at() {
             step_id: "noop".to_string(),
         },
     );
-    assert!(!apply(&mut state, &env));
+    let result = apply(&mut state, &env);
+    assert!(
+        matches!(result, Err(GoalApplyReject::CrossGoal { .. })),
+        "cross-goal envelope must surface CrossGoal reject reason, got {result:?}",
+    );
     assert_eq!(
         state.updated_at, baseline_ts,
         "cross-goal rejection must not advance updated_at"
@@ -598,18 +657,24 @@ fn rejected_envelopes_do_not_leak_updated_at() {
                     description: "x".to_string(),
                     required: true,
                     verifier_hint: None,
+                    requires_workspace_change: true,
                 },
                 GoalCriterion {
                     id: "dup".to_string(),
                     description: "y".to_string(),
                     required: true,
                     verifier_hint: None,
+                    requires_workspace_change: true,
                 },
             ],
             revised_by: GoalActor::User { id: None },
         },
     );
-    assert!(!apply(&mut state, &env));
+    let result = apply(&mut state, &env);
+    assert!(
+        matches!(result, Err(GoalApplyReject::InvalidCriteriaRevised { .. })),
+        "invalid CriteriaRevised must surface InvalidCriteriaRevised reason, got {result:?}",
+    );
     assert_eq!(
         state.updated_at, baseline_ts,
         "invalid CriteriaRevised must not advance updated_at"
@@ -627,7 +692,7 @@ fn rejected_envelopes_do_not_leak_updated_at() {
             cancelled_by: GoalActor::User { id: None },
         },
     );
-    assert!(apply(&mut state, &cancel_env));
+    apply(&mut state, &cancel_env).expect("Cancelled apply must succeed");
     assert_eq!(state.updated_at, cancel_ts);
     let late = libra::internal::ai::goal::GoalEventEnvelope::new(
         goal_id,
@@ -636,7 +701,11 @@ fn rejected_envelopes_do_not_leak_updated_at() {
             step_id: "late".to_string(),
         },
     );
-    assert!(!apply(&mut state, &late));
+    let result = apply(&mut state, &late);
+    assert!(
+        matches!(result, Err(GoalApplyReject::TerminalGuard { .. })),
+        "post-Cancelled event must surface TerminalGuard reason, got {result:?}",
+    );
     assert_eq!(
         state.updated_at, cancel_ts,
         "terminal-state guard must not advance updated_at"
@@ -739,15 +808,30 @@ fn criteria_revised_with_blank_id_is_rejected() {
                     description: "blank id".to_string(),
                     required: true,
                     verifier_hint: None,
+                    requires_workspace_change: false,
                 }],
                 revised_by: GoalActor::User { id: None },
             },
         ),
     ];
-    let state = replay(envelopes.iter()).expect("replay must succeed even when revision rejected");
+    let outcome =
+        replay(envelopes.iter()).expect("replay must succeed even when revision rejected");
     assert_eq!(
-        state.spec.acceptance_criteria, original_criteria,
+        outcome.state.spec.acceptance_criteria, original_criteria,
         "blank-id revision must NOT replace the original acceptance_criteria"
+    );
+    assert_eq!(
+        outcome.rejected.len(),
+        1,
+        "blank-id CriteriaRevised must surface as a rejection diagnostic",
+    );
+    assert!(
+        matches!(
+            outcome.rejected[0].reason,
+            GoalApplyReject::InvalidCriteriaRevised { .. }
+        ),
+        "rejection reason must be InvalidCriteriaRevised, got {:?}",
+        outcome.rejected[0].reason
     );
 }
 
@@ -780,7 +864,7 @@ fn completion_rejected_rolls_back_pending_claim() {
             },
         ),
     ];
-    let state = replay(envelopes.iter()).expect("replay must succeed");
+    let state = replay(envelopes.iter()).expect("replay must succeed").state;
     assert!(
         state.pending_claim.is_none(),
         "pending_claim must be dropped after rejection"
@@ -833,5 +917,222 @@ fn session_event_goal_with_unknown_nested_variant_deserialises() {
             other => panic!("expected GoalEvent::Blocked, got {other:?}"),
         },
         other => panic!("expected SessionEvent::Goal, got {other:?}"),
+    }
+}
+
+/// Scenario (Codex pass-6 P1#1): a forged JSONL stream ships a
+/// `Created` envelope followed directly by a `Completed` envelope
+/// whose report omits a required spec criterion. The supervisor's
+/// resume seam reads the stream verbatim and (per
+/// `docs/improvement/opencode.md` lines 1463-1467) returns idle the
+/// moment it sees `Completed` — the verifier (P6.2) is not invoked
+/// on replay. Without the schema-layer floor enforced by
+/// `validate_completion_report_shape`, the forged Goal would
+/// transition straight to terminal `Completed`, bypassing the
+/// verifier path entirely.
+///
+/// `apply` must refuse the forged `Completed`, leaving the Goal
+/// `Active`, and the replay outcome must surface
+/// `GoalApplyReject::InvalidCompletionReport` so the supervisor can
+/// log the gap.
+#[test]
+fn replay_rejects_forged_completed_envelope_without_required_criteria() {
+    let spec = fixture_spec();
+    let goal_id = spec.goal_id;
+    let envelopes = [
+        envelope(goal_id, GoalEvent::Created(spec)),
+        envelope(
+            goal_id,
+            GoalEvent::Completed(GoalCompletionReport {
+                summary: "forged".to_string(),
+                // Spec demands "compiles" + "tests" required; report
+                // claims only "compiles". The deterministic verifier
+                // (P6.2) would never have produced this report.
+                completed_criteria: vec!["compiles".to_string()],
+                evidence_refs: vec![],
+                verification: vec![],
+                residual_risks: vec![],
+                changed_files: vec![],
+                total_spent_micro_usd: 0,
+                elapsed_wall_clock_seconds: 0,
+                continuation_loops_used: 0,
+                finalised_at: fixture_now(),
+                finalised_by: GoalActor::System {
+                    reason: "forged log entry".to_string(),
+                },
+            }),
+        ),
+    ];
+    let outcome =
+        replay(envelopes.iter()).expect("replay must succeed even when Completed rejected");
+    assert_eq!(
+        outcome.state.status,
+        GoalStatus::Active,
+        "forged Completed must NOT transition the Goal to terminal — \
+         the verifier (P6.2) is the only legitimate path to `Completed`",
+    );
+    assert!(outcome.state.completion_report.is_none());
+    assert_eq!(
+        outcome.rejected.len(),
+        1,
+        "the forged Completed envelope must surface as a rejection diagnostic",
+    );
+    match &outcome.rejected[0].reason {
+        GoalApplyReject::InvalidCompletionReport { source } => {
+            assert_eq!(
+                source,
+                &GoalCompletionShapeError::MissingRequiredCriterion {
+                    id: "tests".to_string(),
+                },
+            );
+        }
+        other => panic!(
+            "rejection reason must be InvalidCompletionReport(MissingRequiredCriterion), got {other:?}",
+        ),
+    }
+}
+
+/// Scenario (Codex pass-6 P1#1, related): a forged `Completed`
+/// envelope whose report claims a criterion id that the spec never
+/// declared (e.g. "fabricated") is also refused at the schema-layer
+/// floor. Symmetric to the missing-required case: a verifier
+/// accept-path can never produce an unknown-id claim, so seeing one
+/// in the JSONL is conclusive evidence the verifier was bypassed.
+#[test]
+fn replay_rejects_forged_completed_envelope_with_unknown_criterion_id() {
+    let spec = fixture_spec();
+    let goal_id = spec.goal_id;
+    let envelopes = [
+        envelope(goal_id, GoalEvent::Created(spec)),
+        envelope(
+            goal_id,
+            GoalEvent::Completed(GoalCompletionReport {
+                summary: "forged with phantom id".to_string(),
+                completed_criteria: vec![
+                    "compiles".to_string(),
+                    "tests".to_string(),
+                    "fabricated".to_string(),
+                ],
+                evidence_refs: vec![],
+                verification: vec![],
+                residual_risks: vec![],
+                changed_files: vec![],
+                total_spent_micro_usd: 0,
+                elapsed_wall_clock_seconds: 0,
+                continuation_loops_used: 0,
+                finalised_at: fixture_now(),
+                finalised_by: GoalActor::System {
+                    reason: "forged log entry".to_string(),
+                },
+            }),
+        ),
+    ];
+    let outcome = replay(envelopes.iter()).expect("replay must succeed");
+    assert_eq!(outcome.state.status, GoalStatus::Active);
+    assert_eq!(outcome.rejected.len(), 1);
+    match &outcome.rejected[0].reason {
+        GoalApplyReject::InvalidCompletionReport { source } => {
+            assert_eq!(
+                source,
+                &GoalCompletionShapeError::UnknownCriterionId {
+                    id: "fabricated".to_string(),
+                },
+            );
+        }
+        other => panic!(
+            "rejection reason must be InvalidCompletionReport(UnknownCriterionId), got {other:?}",
+        ),
+    }
+}
+
+/// Scenario (Codex pass-6 P2#3): a JSONL slice that interleaves
+/// envelopes from two different Goals — the kind a buggy
+/// control-plane copy or a concatenated log rotation could produce
+/// — must not "look successful" to the resume seam. The cross-goal
+/// envelopes are still rejected inside `apply`, but now the
+/// rejection diagnostic surfaces in
+/// `GoalReplayOutcome::rejected` so the supervisor can render a
+/// concrete error instead of treating the post-Created stream as a
+/// clean replay.
+#[test]
+fn replay_surfaces_cross_goal_envelopes_as_rejection_diagnostics() {
+    let spec = fixture_spec();
+    let goal_id = spec.goal_id;
+    let other_goal = Uuid::parse_str("00000000-0000-0000-0000-0000abcd0000").unwrap();
+    let envelopes = [
+        envelope(goal_id, GoalEvent::Created(spec)),
+        // Legitimate envelope for the active Goal — must apply.
+        envelope(
+            goal_id,
+            GoalEvent::StepStarted {
+                step_id: "step-1".to_string(),
+            },
+        ),
+        // Foreign Goal — must surface as a rejection diagnostic.
+        envelope(
+            other_goal,
+            GoalEvent::StepStarted {
+                step_id: "step-foreign".to_string(),
+            },
+        ),
+    ];
+    let outcome = replay(envelopes.iter()).expect("replay must succeed");
+    assert_eq!(
+        outcome.state.status,
+        GoalStatus::Running,
+        "the in-Goal StepStarted must still apply",
+    );
+    assert_eq!(
+        outcome.rejected.len(),
+        1,
+        "the foreign-Goal envelope must surface as a rejection diagnostic, \
+         not be silently dropped",
+    );
+    match &outcome.rejected[0].reason {
+        GoalApplyReject::CrossGoal {
+            envelope_goal_id,
+            state_goal_id,
+        } => {
+            assert_eq!(*envelope_goal_id, other_goal);
+            assert_eq!(*state_goal_id, goal_id);
+        }
+        other => panic!("expected CrossGoal reject reason, got {other:?}"),
+    }
+}
+
+/// Scenario (Codex pass-6 P2#4): the doc-required budget summary
+/// (`docs/improvement/opencode.md` line 1519) is now part of the
+/// completion-report wire shape. A round-trip through serde keeps
+/// every field — pinning regressions that drop one of the three
+/// budget-summary fields.
+#[test]
+fn completion_report_budget_summary_round_trips() {
+    let spec = fixture_spec();
+    let goal_id = spec.goal_id;
+    let report = GoalCompletionReport {
+        summary: "shipped with budget metrics".to_string(),
+        completed_criteria: vec!["compiles".to_string(), "tests".to_string()],
+        evidence_refs: vec![],
+        verification: vec![],
+        residual_risks: vec!["coverage report still pending".to_string()],
+        changed_files: vec!["src/feature.rs".to_string()],
+        total_spent_micro_usd: 4_750_000,
+        elapsed_wall_clock_seconds: 1_810,
+        continuation_loops_used: 7,
+        finalised_at: fixture_now(),
+        finalised_by: GoalActor::System {
+            reason: "verifier accepted".to_string(),
+        },
+    };
+    let env = envelope(goal_id, GoalEvent::Completed(report.clone()));
+    let json = serde_json::to_string(&env).expect("serialize");
+    let back: GoalEventEnvelope = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(env, back);
+    if let GoalEvent::Completed(r) = back.event {
+        assert_eq!(r.total_spent_micro_usd, 4_750_000);
+        assert_eq!(r.elapsed_wall_clock_seconds, 1_810);
+        assert_eq!(r.continuation_loops_used, 7);
+    } else {
+        panic!("expected GoalEvent::Completed");
     }
 }

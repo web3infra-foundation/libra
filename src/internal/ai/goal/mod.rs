@@ -39,14 +39,15 @@ pub mod spec;
 pub mod state;
 
 pub use event::{
-    GoalBlockReason, GoalCompletionClaim, GoalCompletionReport, GoalEvent, GoalEventEnvelope,
-    GoalProgressRecord,
+    GoalBlockReason, GoalCompletionClaim, GoalCompletionReport, GoalCompletionShapeError,
+    GoalEvent, GoalEventEnvelope, GoalProgressRecord, validate_completion_report_shape,
 };
 pub use spec::{
     GoalActor, GoalBudget, GoalCriterion, GoalEvidencePolicy, GoalSpec, GoalSpecError,
     MAX_OBJECTIVE_LEN,
 };
 pub use state::{
-    GoalBlocker, GoalEvidenceRef, GoalEvidenceTarget, GoalPlanStep, GoalState, GoalStatus,
-    GoalStepStatus, GoalVerificationRecord, apply, replay,
+    GoalApplyReject, GoalBlocker, GoalEvidenceRef, GoalEvidenceTarget, GoalPlanStep,
+    GoalReplayOutcome, GoalReplayRejection, GoalState, GoalStatus, GoalStepStatus,
+    GoalVerificationRecord, apply, replay,
 };
