@@ -1850,3 +1850,131 @@ fn replay_rejects_completion_rejected_with_mismatched_claim_envelope_id() {
         other => panic!("expected MismatchedClaimEnvelope, got {other:?}"),
     }
 }
+
+/// Codex pass-10 P1: a `Cancelled` event arriving while a claim
+/// is in flight must clear `pending_claim` so the resume seam
+/// (P6.2 / P6.3) cannot misread a cancelled Goal as still having
+/// active verifier work.
+#[test]
+fn replay_cancelled_during_completion_claimed_clears_pending_claim() {
+    let spec = fixture_spec();
+    let goal_id = spec.goal_id;
+    let claim = GoalCompletionClaim {
+        summary: "claim".to_string(),
+        completed_criteria: vec!["compiles".to_string(), "tests".to_string()],
+        evidence_refs: vec![],
+        verification: vec![],
+        residual_risks: vec![],
+    };
+    let envelopes = [
+        envelope(goal_id, GoalEvent::Created(spec)),
+        fixture_claim_envelope(goal_id, claim),
+        envelope(
+            goal_id,
+            GoalEvent::Cancelled {
+                reason: "user changed their mind mid-claim".to_string(),
+                cancelled_by: GoalActor::User { id: None },
+            },
+        ),
+    ];
+    let outcome = replay(envelopes.iter()).expect("replay must succeed");
+    assert_eq!(outcome.state.status, GoalStatus::Cancelled);
+    assert!(
+        outcome.state.pending_claim.is_none(),
+        "Cancelled must drop the open pending claim",
+    );
+}
+
+/// Codex pass-10 P3: the existing rejection-cap test only feeds
+/// `CrossGoal` envelopes. Pin the cap's behaviour with a *mixed*
+/// stream — `CrossGoal` + `UnknownFutureVariant` +
+/// `InvalidCriteriaRevised` — so a future refactor that skews
+/// retention order or counter semantics is caught. We avoid
+/// `TerminalGuard` here because once the Goal is `Cancelled` the
+/// terminal guard pre-empts every per-event check, hiding any
+/// other rejection kind we want to observe in the same pass.
+#[test]
+fn replay_caps_mixed_rejection_kinds_and_records_overflow() {
+    let spec = fixture_spec();
+    let goal_id = spec.goal_id;
+    let other_goal = Uuid::parse_str("00000000-0000-0000-0000-0000abcd1111").unwrap();
+    let bad_count = MAX_REPLAY_REJECTIONS + 30;
+    let mut envelopes: Vec<GoalEventEnvelope> = Vec::with_capacity(bad_count + 1);
+    envelopes.push(envelope(goal_id, GoalEvent::Created(spec)));
+    for i in 0..bad_count {
+        match i % 3 {
+            0 => {
+                // CrossGoal — wrong goal_id.
+                envelopes.push(envelope(
+                    other_goal,
+                    GoalEvent::StepStarted {
+                        step_id: format!("foreign-{i}"),
+                    },
+                ));
+            }
+            1 => {
+                // UnknownFutureVariant — handcrafted unknown
+                // `kind`, deserialised into GoalEvent::Future.
+                let payload = serde_json::json!({
+                    "envelope_id": Uuid::new_v4().to_string(),
+                    "goal_id": goal_id,
+                    "recorded_at": fixture_now().to_rfc3339(),
+                    "event": {
+                        "kind": format!("future_kind_{i}"),
+                        "payload": {"i": i}
+                    }
+                });
+                envelopes.push(
+                    serde_json::from_value(payload).expect("future-kind envelope must deserialise"),
+                );
+            }
+            _ => {
+                // InvalidCriteriaRevised — duplicate id triggers
+                // the per-event `validate_criteria` check.
+                envelopes.push(envelope(
+                    goal_id,
+                    GoalEvent::CriteriaRevised {
+                        criteria: vec![
+                            GoalCriterion {
+                                id: "dup".to_string(),
+                                description: "first".to_string(),
+                                required: true,
+                                verifier_hint: None,
+                                requires_workspace_change: false,
+                            },
+                            GoalCriterion {
+                                id: "dup".to_string(),
+                                description: "second".to_string(),
+                                required: true,
+                                verifier_hint: None,
+                                requires_workspace_change: false,
+                            },
+                        ],
+                        revised_by: GoalActor::User { id: None },
+                    },
+                ));
+            }
+        }
+    }
+    let outcome = replay(envelopes.iter()).expect("replay must succeed");
+    assert_eq!(outcome.rejected.len(), MAX_REPLAY_REJECTIONS);
+    assert_eq!(
+        outcome.truncated_rejection_count,
+        bad_count - MAX_REPLAY_REJECTIONS,
+    );
+    let mut saw_cross = false;
+    let mut saw_future = false;
+    let mut saw_invalid_criteria = false;
+    for r in &outcome.rejected {
+        match &r.reason {
+            GoalApplyReject::CrossGoal { .. } => saw_cross = true,
+            GoalApplyReject::UnknownFutureVariant => saw_future = true,
+            GoalApplyReject::InvalidCriteriaRevised { .. } => saw_invalid_criteria = true,
+            other => panic!("unexpected rejection reason in mixed cap test: {other:?}"),
+        }
+    }
+    assert!(
+        saw_cross && saw_future && saw_invalid_criteria,
+        "retained prefix must include all three rejection kinds",
+    );
+}

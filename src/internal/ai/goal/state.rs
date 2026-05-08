@@ -685,6 +685,12 @@ pub fn apply(state: &mut GoalState, envelope: &GoalEventEnvelope) -> Result<(), 
             state.status = GoalStatus::Completed;
         }
         GoalEvent::Cancelled { .. } => {
+            // Drop any open pending claim — P6.2/P6.3 read
+            // `pending_claim` directly to decide whether the
+            // verifier still has work, and a terminal Cancelled
+            // must not look like "verifier in flight" on resume
+            // (Codex pass-10 P1).
+            state.pending_claim = None;
             state.status = GoalStatus::Cancelled;
         }
         GoalEvent::Future => {
@@ -1249,6 +1255,37 @@ mod tests {
         .expect("Cancelled apply must succeed");
         assert_eq!(state.status, GoalStatus::Cancelled);
         assert!(state.status.is_terminal());
+    }
+
+    /// Codex pass-10 P1: a `Cancelled` event arriving while a claim
+    /// is in flight must clear `pending_claim` so a snapshot reader
+    /// (P6.2 / P6.3) cannot see "Cancelled but with pending
+    /// verification work".
+    #[test]
+    fn cancelled_clears_pending_claim() {
+        let spec = fixture_spec();
+        let goal_id = spec.spec_goal_id_for_tests();
+        let mut state = GoalState::from_spec(spec);
+        let (claim, _) = fixture_legitimate_claim_and_report();
+        apply(&mut state, &fixture_claim_envelope(goal_id, claim))
+            .expect("CompletionClaimed must seed pending_claim");
+        assert!(state.pending_claim.is_some());
+        apply(
+            &mut state,
+            &envelope(
+                goal_id,
+                GoalEvent::Cancelled {
+                    reason: "user changed their mind mid-claim".to_string(),
+                    cancelled_by: GoalActor::User { id: None },
+                },
+            ),
+        )
+        .expect("Cancelled apply must succeed");
+        assert_eq!(state.status, GoalStatus::Cancelled);
+        assert!(
+            state.pending_claim.is_none(),
+            "Cancelled must drop the open pending claim",
+        );
     }
 
     #[test]
