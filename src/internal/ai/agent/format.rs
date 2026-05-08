@@ -213,22 +213,20 @@ pub fn format_usage_table(rows: &[UsageAggregate]) -> String {
 // ---------------------------------------------------------------------------
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else if max <= 1 {
-        s.chars().take(max).collect()
-    } else {
-        // Use char-boundary safe truncation so a UTF-8 string does not
-        // panic when sliced mid-codepoint.
-        let mut end = 0;
-        for (i, _) in s.char_indices() {
-            if i + 1 > max - 1 {
-                break;
-            }
-            end = i + 1;
-        }
-        format!("{}…", &s[..end])
+    // Char-count based, NOT byte-length based, so a UTF-8 string with
+    // multi-byte codepoints (e.g. a CJK model name slug) cannot panic
+    // by slicing mid-codepoint. The 48-char column limit in the
+    // agents-table renderer counts characters, which is also closer to
+    // what the operator sees in a monospace TUI cell than byte count.
+    let char_count = s.chars().count();
+    if char_count <= max {
+        return s.to_string();
     }
+    if max <= 1 {
+        return s.chars().take(max).collect();
+    }
+    let truncated: String = s.chars().take(max - 1).collect();
+    format!("{truncated}…")
 }
 
 fn format_permission_summary(perm: &BTreeMap<String, PermissionPolicy>) -> String {
@@ -371,6 +369,25 @@ mod tests {
         let cfg = config_with(vec![("solo", entry(&long_model, "primary"))]);
         let out = format_agents_table(&cfg);
         assert!(out.contains('…'), "expected ellipsis in truncated cell");
+    }
+
+    /// Char-boundary safety: a model name containing multi-byte UTF-8
+    /// codepoints (e.g. a CJK slug) must not panic when truncated.
+    /// Regression guard against the byte-index slicing bug Codex
+    /// flagged on the first version of `truncate`.
+    #[test]
+    fn agents_table_truncate_handles_multibyte_codepoints_without_panic() {
+        // `测试` is two CJK codepoints (3 bytes each in UTF-8); chain
+        // many of them so the resulting string crosses the 48-char
+        // column limit and forces the truncate path.
+        let long_cjk: String = "测试".repeat(60);
+        let cfg = config_with(vec![("cn", entry(&long_cjk, "primary"))]);
+        let out = format_agents_table(&cfg);
+        assert!(out.contains('…'));
+        // The truncated cell still ends on a valid char boundary —
+        // proven by the fact that we got here without a panic and
+        // the output is valid UTF-8 (it must be, it's a `String`).
+        assert!(out.is_char_boundary(out.len()));
     }
 
     #[test]

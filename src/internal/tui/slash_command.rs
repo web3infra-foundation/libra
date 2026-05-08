@@ -269,6 +269,23 @@ mod tests {
         assert!(parse_builtin("").is_none());
     }
 
+    /// Scenario: OC-Phase 5 P5.4 introduced `/agents` and `/budget`. The
+    /// dedicated tests pin the canonical name + description as the
+    /// autocomplete popup contract — a typo in either field would be
+    /// silently shipped if only the parser side were tested.
+    #[test]
+    fn agents_and_budget_commands_have_documented_name_and_description() {
+        assert_eq!(BuiltinCommand::Agents.name(), "agents");
+        assert!(BuiltinCommand::Agents.description().contains("agents.toml"));
+        assert_eq!(BuiltinCommand::Budget.name(), "budget");
+        assert!(BuiltinCommand::Budget.description().contains("budget"));
+        // Both must appear in the canonical iteration order so the
+        // autocomplete popup actually lists them.
+        let all = BuiltinCommand::all();
+        assert!(all.contains(&BuiltinCommand::Agents));
+        assert!(all.contains(&BuiltinCommand::Budget));
+    }
+
     /// Scenario: the autocomplete popup must list every built-in command. This
     /// test pins both the count (catches accidental dropouts when the enum is
     /// extended) and the inclusion of the most-used entries.
