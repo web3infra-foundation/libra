@@ -32,6 +32,16 @@ pub struct DiscoveredReference {
     pub(crate) _ref: String,
 }
 
+impl DiscoveredReference {
+    pub fn hash(&self) -> &str {
+        &self._hash
+    }
+
+    pub fn name(&self) -> &str {
+        &self._ref
+    }
+}
+
 pub type DiscRef = DiscoveredReference;
 
 pub type FetchStream = futures_util::stream::BoxStream<'static, Result<Bytes, std::io::Error>>;

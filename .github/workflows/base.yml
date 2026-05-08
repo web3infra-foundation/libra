@@ -208,4 +208,4 @@ jobs:
       # the `compat-live-*` (workflow_dispatch) jobs, which are intentionally not
       # GitHub required-checks.
       - name: Run network-remote tests
-        run: cargo test --all --features test-network
+        run: cargo test --features test-network --test network_remotes_test -- --test-threads=1
