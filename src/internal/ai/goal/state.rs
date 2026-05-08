@@ -265,6 +265,19 @@ pub fn apply(state: &mut GoalState, envelope: &GoalEventEnvelope) -> bool {
             true
         }
         GoalEvent::CriteriaRevised { criteria, .. } => {
+            // Validate the revised list with the same rules
+            // `GoalSpec::new` enforces on construction — duplicate
+            // or blank ids would let a single completion claim
+            // satisfy multiple required criteria, which the
+            // verifier (P6.2) cannot detect from
+            // `completed_criteria: BTreeSet<String>`. Reject the
+            // event silently (`return false`) and leave `state`
+            // unchanged so the supervisor's "applied == false"
+            // path surfaces the gap. The audit trail still
+            // records the timestamp.
+            if super::spec::validate_criteria(criteria).is_err() {
+                return false;
+            }
             // Replace the spec's acceptance criteria — replay sees
             // the most recent revision as the source of truth. Any
             // criterion already present in `completed_criteria` but

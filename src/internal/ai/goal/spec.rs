@@ -240,7 +240,17 @@ fn validate_objective(objective: &str) -> Result<(), GoalSpecError> {
     Ok(())
 }
 
-fn validate_criteria(criteria: &[GoalCriterion]) -> Result<(), GoalSpecError> {
+/// Validate a slice of acceptance criteria for the same shape rules
+/// [`GoalSpec::new`] enforces on construction:
+///
+/// 1. No blank id (after trimming whitespace).
+/// 2. No duplicate id within the slice.
+///
+/// Re-exported as [`validate_criteria`] for downstream consumers
+/// (`apply` in `state.rs` runs this on every
+/// [`super::event::GoalEvent::CriteriaRevised`] payload so a
+/// malformed revision cannot land in `GoalState`).
+pub(super) fn validate_criteria(criteria: &[GoalCriterion]) -> Result<(), GoalSpecError> {
     use std::collections::HashSet;
     let mut seen: HashSet<&str> = HashSet::new();
     for (index, criterion) in criteria.iter().enumerate() {

@@ -515,6 +515,79 @@ fn criteria_revised_drops_out_of_scope_completed_entries() {
     );
 }
 
+/// Scenario: a `CriteriaRevised` event carrying duplicate criterion
+/// ids is silently dropped — `apply` validates with the same rules
+/// `GoalSpec::new` uses on construction. Without this, the
+/// verifier (P6.2) keys completion through
+/// `completed_criteria: BTreeSet<String>`, so a single claim could
+/// satisfy multiple required criteria when the spec carries
+/// duplicate ids. Pinned by an explicit replay assertion that the
+/// state's spec criteria remain unchanged.
+#[test]
+fn criteria_revised_with_duplicate_ids_is_rejected() {
+    let spec = fixture_spec();
+    let goal_id = spec.goal_id;
+    let original_criteria = spec.acceptance_criteria.clone();
+    let envelopes = [
+        envelope(goal_id, GoalEvent::Created(spec)),
+        envelope(
+            goal_id,
+            GoalEvent::CriteriaRevised {
+                criteria: vec![
+                    GoalCriterion {
+                        id: "compiles".to_string(),
+                        description: "first".to_string(),
+                        required: true,
+                        verifier_hint: None,
+                    },
+                    GoalCriterion {
+                        id: "compiles".to_string(),
+                        description: "duplicate id".to_string(),
+                        required: true,
+                        verifier_hint: None,
+                    },
+                ],
+                revised_by: GoalActor::User { id: None },
+            },
+        ),
+    ];
+    let state = replay(envelopes.iter()).expect("replay must succeed even when revision rejected");
+    assert_eq!(
+        state.spec.acceptance_criteria, original_criteria,
+        "duplicate-id revision must NOT replace the original acceptance_criteria"
+    );
+}
+
+/// Scenario: a `CriteriaRevised` event carrying a blank criterion id
+/// is rejected for the same reason as the duplicate-id case — both
+/// are shape errors `validate_criteria` enforces on construction.
+#[test]
+fn criteria_revised_with_blank_id_is_rejected() {
+    let spec = fixture_spec();
+    let goal_id = spec.goal_id;
+    let original_criteria = spec.acceptance_criteria.clone();
+    let envelopes = [
+        envelope(goal_id, GoalEvent::Created(spec)),
+        envelope(
+            goal_id,
+            GoalEvent::CriteriaRevised {
+                criteria: vec![GoalCriterion {
+                    id: "  ".to_string(),
+                    description: "blank id".to_string(),
+                    required: true,
+                    verifier_hint: None,
+                }],
+                revised_by: GoalActor::User { id: None },
+            },
+        ),
+    ];
+    let state = replay(envelopes.iter()).expect("replay must succeed even when revision rejected");
+    assert_eq!(
+        state.spec.acceptance_criteria, original_criteria,
+        "blank-id revision must NOT replace the original acceptance_criteria"
+    );
+}
+
 /// Scenario: a rejected completion claim must NOT leave its claimed
 /// criteria visible in `completed_criteria` — those were the
 /// model's unverified assertions, and the verifier said no. The
