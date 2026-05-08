@@ -860,13 +860,12 @@ fn repair_worktrees() -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use tempfile::tempdir;
 
     use super::*;
 
-    #[cfg(unix)]
     #[test]
     fn umount_fuse_path_cleans_task_worktree_root_without_repo() {
         let temp = tempdir().expect("create temp dir");

@@ -106,7 +106,6 @@ fn apply_fuse_workspace_env_overrides(
     #[cfg(not(unix))]
     {
         let _ = (cwd, env, ambient_cargo_target_dir_is_set);
-        return;
     }
 
     #[cfg(unix)]

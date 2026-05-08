@@ -15,7 +15,7 @@ libra ls-remote [OPTIONS] <repository> [patterns...]
 | `--heads` | Show only `refs/heads/*` branch refs | `libra ls-remote --heads origin` |
 | `-t`, `--tags` | Show only `refs/tags/*` tag refs | `libra ls-remote --tags origin` |
 | `--refs` | Omit `HEAD` and peeled tag refs ending in `^{}` | `libra ls-remote --refs origin` |
-| `patterns...` | Match full ref names or trailing path components; `*` and `?` are supported per path component | `libra ls-remote origin main 'release-*'` |
+| `patterns...` | Match full ref names or trailing path components; `*` and `?` follow Git-style glob behavior and can match `/` | `libra ls-remote origin main 'refs/heads/*'` |
 
 ## Human Output
 

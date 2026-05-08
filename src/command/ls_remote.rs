@@ -1,16 +1,20 @@
 //! Implements `ls-remote` to list refs advertised by a remote repository.
 
-use std::io::Write;
+use std::{io::Write, path::Path};
 
 use clap::Parser;
 use git_internal::errors::GitError;
 use regex::Regex;
 use serde::Serialize;
+use url::Url;
 
 use crate::{
     command::fetch::{RemoteClient, redact_url_credentials},
     git_protocol::ServiceType::UploadPack,
-    internal::{config::ConfigKv, protocol::DiscRef},
+    internal::{
+        config::ConfigKv,
+        protocol::{DiscRef, ssh_client::is_ssh_spec},
+    },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
@@ -149,6 +153,10 @@ async fn run_ls_remote(args: LsRemoteArgs) -> Result<LsRemoteOutput, LsRemoteErr
 async fn resolve_remote(
     repository: &str,
 ) -> Result<(String, String, Option<String>), LsRemoteError> {
+    if is_explicit_remote_spec(repository) {
+        return Ok((repository.to_string(), repository.to_string(), None));
+    }
+
     if util::try_get_storage_path(None).is_ok() {
         let configured = ConfigKv::remote_config(repository)
             .await
@@ -159,6 +167,20 @@ async fn resolve_remote(
     }
 
     Ok((repository.to_string(), repository.to_string(), None))
+}
+
+fn is_explicit_remote_spec(repository: &str) -> bool {
+    if is_ssh_spec(repository) || Url::parse(repository).is_ok() {
+        return true;
+    }
+
+    let path = Path::new(repository);
+    path.is_absolute()
+        || path.exists()
+        || repository.starts_with("./")
+        || repository.starts_with("../")
+        || repository.contains('/')
+        || repository.contains('\\')
 }
 
 fn compile_patterns(patterns: &[String]) -> Result<Vec<CompiledPattern>, LsRemoteError> {
@@ -263,8 +285,8 @@ fn glob_to_regex(pattern: &str) -> Result<Regex, LsRemoteError> {
     let mut regex = String::from("(^|.*/)");
     for ch in pattern.chars() {
         match ch {
-            '*' => regex.push_str("[^/]*"),
-            '?' => regex.push_str("[^/]"),
+            '*' => regex.push_str(".*"),
+            '?' => regex.push('.'),
             '[' => regex.push('['),
             ']' => regex.push(']'),
             '.' | '+' | '(' | ')' | '{' | '}' | '|' | '^' | '$' | '\\' => {
@@ -319,13 +341,20 @@ fn render_ls_remote_output(data: &LsRemoteOutput, output: &OutputConfig) -> CliR
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use git_internal::errors::GitError;
+    use serial_test::serial;
+    use tempfile::tempdir;
 
     use super::{
-        CompiledPattern, LsRemoteArgs, include_reference, sanitize_discovery_error,
+        CompiledPattern, LsRemoteArgs, include_reference, resolve_remote, sanitize_discovery_error,
         sanitize_remote_error_reason, visible_remote_display, visible_remote_url,
     };
-    use crate::internal::protocol::DiscRef;
+    use crate::{
+        internal::protocol::DiscRef,
+        utils::{test::ChangeDirGuard, util},
+    };
 
     fn disc_ref(refname: &str) -> DiscRef {
         DiscRef {
@@ -339,6 +368,19 @@ mod tests {
         let pattern = CompiledPattern::new("main").unwrap();
         assert!(pattern.matches("refs/heads/main"));
         assert!(!pattern.matches("refs/heads/feature"));
+    }
+
+    #[test]
+    fn glob_pattern_matches_nested_refs_across_slashes() {
+        let full_ref = CompiledPattern::new("refs/heads/*").unwrap();
+        assert!(full_ref.matches("refs/heads/feature/foo"));
+        assert!(!full_ref.matches("refs/tags/feature/foo"));
+
+        let tail_ref = CompiledPattern::new("feature*").unwrap();
+        assert!(tail_ref.matches("refs/heads/feature/foo"));
+
+        let question_ref = CompiledPattern::new("a?b").unwrap();
+        assert!(question_ref.matches("refs/heads/a/b"));
     }
 
     #[test]
@@ -390,6 +432,29 @@ mod tests {
         assert_eq!(
             visible_remote_url("user:secret@example.com:repo.git"),
             "[REDACTED]@example.com:repo.git"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn resolve_direct_url_skips_broken_current_repo_config() {
+        let repo = tempdir().unwrap();
+        let storage = repo.path().join(util::ROOT_DIR);
+        fs::create_dir_all(&storage).unwrap();
+        fs::write(storage.join(util::DATABASE), b"not sqlite").unwrap();
+        let _guard = ChangeDirGuard::new(repo.path());
+
+        let resolved = resolve_remote("https://example.com/repo.git")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resolved,
+            (
+                "https://example.com/repo.git".to_string(),
+                "https://example.com/repo.git".to_string(),
+                None
+            )
         );
     }
 

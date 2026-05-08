@@ -81,7 +81,9 @@ struct FuseTaskWorktreeBackend {
 struct TaskWorktreePaths {
     cleanup_root: PathBuf,
     workspace_root: PathBuf,
+    #[cfg(unix)]
     lower_root: PathBuf,
+    #[cfg(unix)]
     upper_root: PathBuf,
 }
 
@@ -192,6 +194,8 @@ pub(crate) fn prepare_task_worktree(
     fuse_state: &FuseProvisionState,
 ) -> io::Result<(TaskWorktree, FuseAttemptOutcome)> {
     let baseline = snapshot_workspace(main_working_dir)?;
+    #[cfg(not(unix))]
+    let _ = fuse_state;
 
     #[cfg(unix)]
     {
@@ -263,7 +267,9 @@ fn task_worktree_paths(main_working_dir: &Path, task_id: Uuid, backend: &str) ->
     ));
     TaskWorktreePaths {
         workspace_root: cleanup_root.join("workspace"),
+        #[cfg(unix)]
         lower_root: cleanup_root.join("lower"),
+        #[cfg(unix)]
         upper_root: cleanup_root.join("upper"),
         cleanup_root,
     }
@@ -1827,7 +1833,9 @@ mod tests {
 
         assert_eq!(paths.cleanup_root.parent(), Some(expected_base.as_path()));
         assert_eq!(paths.workspace_root, paths.cleanup_root.join("workspace"));
+        #[cfg(unix)]
         assert_eq!(paths.lower_root, paths.cleanup_root.join("lower"));
+        #[cfg(unix)]
         assert_eq!(paths.upper_root, paths.cleanup_root.join("upper"));
 
         let cleanup_name = paths.cleanup_root.file_name().unwrap().to_string_lossy();
