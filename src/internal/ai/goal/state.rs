@@ -233,11 +233,30 @@ impl GoalState {
 /// against the same input state is **not** safe (e.g. `PlanUpdated`
 /// would re-bind the plan, dropping intermediate progress).
 ///
-/// Returns `false` only when the envelope's [`GoalEvent::Future`]
-/// variant is encountered: an unknown future event from a newer Libra
-/// version. In that case the caller (typically the supervisor's replay
-/// loop) preserves the existing state; the false return surfaces the
-/// semver gap so callers can choose to log / refuse / continue.
+/// On success returns `true` and advances `state.updated_at` to
+/// `envelope.recorded_at`. On rejection returns `false` and leaves
+/// `state` byte-for-byte unchanged — including `updated_at`, so a
+/// caller comparing snapshots can distinguish a real mutation from
+/// a rejected envelope without a second timestamp source.
+///
+/// Returns `false` in any of these documented cases:
+///
+/// - **Cross-goal envelope** — `envelope.goal_id` does not match the
+///   spec's `goal_id`. Protects against a misrouted JSONL entry.
+/// - **Terminal-state guard** — `state.status` is already terminal
+///   (`Completed` or `Cancelled`). A late-arriving event from a racy
+///   supervisor or a replayed-twice log cannot walk a finished Goal
+///   back into `Running`.
+/// - **Invalid `CriteriaRevised`** — the embedded criteria list
+///   fails [`super::spec::validate_criteria`] (duplicate or blank
+///   id). The verifier keys completion off
+///   `completed_criteria: BTreeSet<String>`, so a duplicate id
+///   would let one claim satisfy multiple required criteria.
+/// - **`GoalEvent::Future`** — an unknown future variant from a
+///   newer Libra version that the current binary cannot interpret.
+///
+/// In every `false`-returning case the caller (typically the
+/// supervisor's replay loop) is expected to log the gap and proceed.
 pub fn apply(state: &mut GoalState, envelope: &GoalEventEnvelope) -> bool {
     if envelope.goal_id != state.spec.goal_id {
         // Cross-Goal envelope; ignore. This protects against a misrouted
@@ -250,15 +269,10 @@ pub fn apply(state: &mut GoalState, envelope: &GoalEventEnvelope) -> bool {
     // 665) require this so a late-arriving event from a racy
     // supervisor (or a corrupted log replayed twice) cannot
     // surreptitiously walk a cancelled Goal back into `Running`.
-    // The event is not silently discarded — `updated_at` advances
-    // so the audit log still records the timestamp of the late
-    // event — but the status field is frozen.
     if state.status.is_terminal() {
-        state.updated_at = envelope.recorded_at;
         return false;
     }
-    state.updated_at = envelope.recorded_at;
-    match &envelope.event {
+    let applied = match &envelope.event {
         GoalEvent::Created(_) => {
             // `from_spec` already seeded the state; receiving a second
             // Created for the same goal_id is a no-op (replay safety).
@@ -270,11 +284,9 @@ pub fn apply(state: &mut GoalState, envelope: &GoalEventEnvelope) -> bool {
             // or blank ids would let a single completion claim
             // satisfy multiple required criteria, which the
             // verifier (P6.2) cannot detect from
-            // `completed_criteria: BTreeSet<String>`. Reject the
-            // event silently (`return false`) and leave `state`
-            // unchanged so the supervisor's "applied == false"
-            // path surfaces the gap. The audit trail still
-            // records the timestamp.
+            // `completed_criteria: BTreeSet<String>`. Returning
+            // `false` from here leaves `state` byte-for-byte
+            // untouched (including `updated_at`).
             if super::spec::validate_criteria(criteria).is_err() {
                 return false;
             }
@@ -428,7 +440,16 @@ pub fn apply(state: &mut GoalState, envelope: &GoalEventEnvelope) -> bool {
             // logs and proceeds.
             false
         }
+    };
+    if applied {
+        // Only advance `updated_at` on success. Rejected envelopes
+        // (cross-goal, terminal-state guard, invalid CriteriaRevised,
+        // GoalEvent::Future) leave the timestamp untouched so a
+        // snapshot diff is a faithful signal of "did the state
+        // actually change".
+        state.updated_at = envelope.recorded_at;
     }
+    applied
 }
 
 /// Replay a sequence of envelopes against a freshly-seeded state.

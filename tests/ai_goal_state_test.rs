@@ -558,6 +558,91 @@ fn criteria_revised_with_duplicate_ids_is_rejected() {
     );
 }
 
+/// Scenario: rejected envelopes leave `state.updated_at`
+/// byte-for-byte unchanged. A snapshot consumer (the
+/// supervisor's resume diff, the audit-trail compactor) must be
+/// able to distinguish "real mutation" from "rejected envelope"
+/// by checking the timestamp; a leaked update would muddy that
+/// signal. This test feeds three rejection paths in turn and
+/// asserts the timestamp survives each one.
+#[test]
+fn rejected_envelopes_do_not_leak_updated_at() {
+    let spec = fixture_spec();
+    let goal_id = spec.goal_id;
+    let mut state = libra::internal::ai::goal::GoalState::from_spec(spec);
+    let baseline_ts = state.updated_at;
+
+    // ---- Cross-goal envelope: doesn't touch state at all.
+    let other_goal = Uuid::parse_str("00000000-0000-0000-0000-0000aaaa0000").unwrap();
+    let env = libra::internal::ai::goal::GoalEventEnvelope::new(
+        other_goal,
+        Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).unwrap(),
+        GoalEvent::StepStarted {
+            step_id: "noop".to_string(),
+        },
+    );
+    assert!(!apply(&mut state, &env));
+    assert_eq!(
+        state.updated_at, baseline_ts,
+        "cross-goal rejection must not advance updated_at"
+    );
+
+    // ---- Invalid CriteriaRevised (duplicate id).
+    let env = libra::internal::ai::goal::GoalEventEnvelope::new(
+        goal_id,
+        Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).unwrap(),
+        GoalEvent::CriteriaRevised {
+            criteria: vec![
+                GoalCriterion {
+                    id: "dup".to_string(),
+                    description: "x".to_string(),
+                    required: true,
+                    verifier_hint: None,
+                },
+                GoalCriterion {
+                    id: "dup".to_string(),
+                    description: "y".to_string(),
+                    required: true,
+                    verifier_hint: None,
+                },
+            ],
+            revised_by: GoalActor::User { id: None },
+        },
+    );
+    assert!(!apply(&mut state, &env));
+    assert_eq!(
+        state.updated_at, baseline_ts,
+        "invalid CriteriaRevised must not advance updated_at"
+    );
+
+    // ---- Terminal-state guard: cancel the Goal then send a
+    //      late event — should also not advance updated_at past
+    //      the cancellation.
+    let cancel_ts = Utc.with_ymd_and_hms(2027, 1, 1, 0, 0, 0).unwrap();
+    let cancel_env = libra::internal::ai::goal::GoalEventEnvelope::new(
+        goal_id,
+        cancel_ts,
+        GoalEvent::Cancelled {
+            reason: "x".to_string(),
+            cancelled_by: GoalActor::User { id: None },
+        },
+    );
+    assert!(apply(&mut state, &cancel_env));
+    assert_eq!(state.updated_at, cancel_ts);
+    let late = libra::internal::ai::goal::GoalEventEnvelope::new(
+        goal_id,
+        Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).unwrap(),
+        GoalEvent::StepStarted {
+            step_id: "late".to_string(),
+        },
+    );
+    assert!(!apply(&mut state, &late));
+    assert_eq!(
+        state.updated_at, cancel_ts,
+        "terminal-state guard must not advance updated_at"
+    );
+}
+
 /// Scenario: a `CriteriaRevised` event carrying a blank criterion id
 /// is rejected for the same reason as the duplicate-id case — both
 /// are shape errors `validate_criteria` enforces on construction.
