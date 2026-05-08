@@ -54,6 +54,8 @@ mod history_cell;
 mod markdown_render;
 // Built-in slash command parser.
 mod slash_command;
+// Typed parser for the `/goal` subcommand family.
+mod goal_command;
 // Spinner/elapsed-time status indicator.
 mod status_indicator;
 // Crossterm bootstrap and event streaming.

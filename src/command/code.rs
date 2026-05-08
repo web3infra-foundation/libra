@@ -606,6 +606,20 @@ pub struct CodeArgs {
     /// `--plan-mode` (alias for `=true`), `--plan-mode=true`, `--plan-mode=false`.
     #[arg(long, num_args = 0..=1, default_missing_value = "true")]
     pub plan_mode: Option<bool>,
+
+    /// Goal-mode objective. When set, the session boots with an
+    /// active Goal whose objective is the supplied string; the
+    /// supervisor (P6.3) drives the tool loop until completion is
+    /// claimed and the verifier (P6.2) accepts. Equivalent to
+    /// invoking `/goal start <objective>` immediately after the
+    /// session opens.
+    ///
+    /// The objective is validated up-front against the same shape
+    /// rules `GoalSpec::new` applies — non-empty after trim, ≤ 16
+    /// KiB. A bad objective fails CLI parsing rather than crashing
+    /// the supervisor at startup.
+    #[arg(long = "goal", value_name = "OBJECTIVE")]
+    pub goal: Option<String>,
 }
 
 /// Resolves the effective `plan_mode` flag for the current invocation.
@@ -3344,6 +3358,30 @@ fn validate_mode_args(args: &CodeArgs, _output: &OutputConfig) -> Result<(), Str
         ));
     }
 
+    // OC-Phase 6 P6.5: validate `--goal "<objective>"` against the
+    // same shape rules `GoalSpec::new` enforces (opencode.md
+    // lines 538-556). Surfacing the failure at CLI parse keeps the
+    // supervisor (P6.3) from booting against a malformed objective
+    // and gives the user a precise error string instead of a panic
+    // at session-start.
+    if let Some(objective) = args.goal.as_deref() {
+        use crate::internal::ai::goal::MAX_OBJECTIVE_LEN;
+        if objective.trim().is_empty() {
+            return Err("--goal requires a non-empty objective string (e.g. \
+                 `--goal \"ship feature X\"`)"
+                .to_string());
+        }
+        if objective.len() > MAX_OBJECTIVE_LEN {
+            return Err(format!(
+                "--goal objective is {} bytes which exceeds the {}-byte cap; \
+                 shorten the objective and add detail through the model's \
+                 first turn or `/goal criteria add <text>`",
+                objective.len(),
+                MAX_OBJECTIVE_LEN,
+            ));
+        }
+    }
+
     if args.web_only {
         reject_non_tui_flags(args, "--web")?;
     }
@@ -3546,6 +3584,7 @@ mod tests {
             codex_bin: DEFAULT_CODEX_BIN.to_string(),
             codex_port: None,
             plan_mode: None,
+            goal: None,
         }
     }
 
@@ -3554,6 +3593,33 @@ mod tests {
         let mut args = base_args();
         args.mcp_port = args.port;
         assert!(validate_mode_args(&args, &OutputConfig::default()).is_err());
+    }
+
+    /// OC-Phase 6 P6.5: `--goal` runs the same shape rules
+    /// `GoalSpec::new` does so a malformed objective fails CLI
+    /// parsing instead of crashing the supervisor at session start.
+    #[test]
+    fn accepts_well_formed_goal_objective() {
+        let mut args = base_args();
+        args.goal = Some("ship feature X".to_string());
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn rejects_blank_goal_objective() {
+        let mut args = base_args();
+        args.goal = Some("   ".to_string());
+        let err = validate_mode_args(&args, &OutputConfig::default()).unwrap_err();
+        assert!(err.contains("non-empty objective"));
+    }
+
+    #[test]
+    fn rejects_oversized_goal_objective() {
+        use crate::internal::ai::goal::MAX_OBJECTIVE_LEN;
+        let mut args = base_args();
+        args.goal = Some("z".repeat(MAX_OBJECTIVE_LEN + 1));
+        let err = validate_mode_args(&args, &OutputConfig::default()).unwrap_err();
+        assert!(err.contains("exceeds the"));
     }
 
     #[test]

@@ -4521,9 +4521,54 @@ where
                         .to_string(),
                 )));
             }
+            BuiltinCommand::Goal => {
+                let message = Self::format_goal_command_response(args);
+                self.widget
+                    .add_cell(Box::new(AssistantHistoryCell::new(message)));
+            }
             BuiltinCommand::Quit => {
                 self.request_user_exit();
             }
+        }
+    }
+
+    /// Render the response cell for a `/goal …` invocation. The
+    /// parser lives in [`super::goal_command::parse_goal_subcommand`];
+    /// this helper just maps the typed result into a human-readable
+    /// string. Once the supervisor (P6.3) is wired into the tool
+    /// loop, the `Start` / `Cancel` arms will additionally append
+    /// `GoalEvent::Created` / `GoalEvent::Cancelled` envelopes; for
+    /// now the surface is "your command parsed; full session
+    /// lifecycle wires in a follow-up". Matches the existing pattern
+    /// used by `/agents` and `/budget` while their full integration
+    /// lands incrementally.
+    fn format_goal_command_response(args: &str) -> String {
+        use super::goal_command::{GoalSubcommand, parse_goal_subcommand};
+        match parse_goal_subcommand(args) {
+            Ok(GoalSubcommand::Start { objective }) => format!(
+                "Goal mode `start` parsed.\n  Objective: {objective}\n\
+                 The objective passed shape validation. Goal supervisor wiring (the \
+                 step that actually appends `GoalEvent::Created` and drives the loop) \
+                 lands in a follow-up — until then, `/goal start` is informational."
+            ),
+            Ok(GoalSubcommand::Status) => "No active Goal in this session.\n\
+                 Use `/goal start <objective>` to declare one. The full session \
+                 lifecycle (Created → CompletionClaimed → Verifier → Completed) \
+                 lights up once the supervisor is wired into the tool loop."
+                .to_string(),
+            Ok(GoalSubcommand::Cancel { reason }) => format!(
+                "Goal mode `cancel` parsed.\n  Reason: {reason}\n\
+                 No active Goal to cancel yet — the session does not yet manage \
+                 Goal state. The reason is preserved as the audit-log entry that \
+                 will land once the supervisor integrates."
+            ),
+            Ok(GoalSubcommand::CriteriaAdd { text }) => format!(
+                "Goal mode `criteria add` parsed.\n  Description: {text}\n\
+                 No active Goal to revise yet — appending criteria mid-Goal needs \
+                 the supervisor's `CriteriaRevised` envelope path, which lands in \
+                 a follow-up."
+            ),
+            Err(err) => err.to_string(),
         }
     }
 

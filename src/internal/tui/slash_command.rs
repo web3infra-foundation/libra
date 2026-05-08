@@ -48,6 +48,12 @@ pub enum BuiltinCommand {
     /// against the configured `[code.budget]` thresholds (OC-Phase 5
     /// P5.4).
     Budget,
+    /// `/goal` — Goal mode controls (`start`, `status`, `cancel`,
+    /// `criteria add`). The subcommand parser lives in
+    /// [`super::goal_command::parse_goal_subcommand`]; the dispatch
+    /// arm in `app.rs` invokes it on every `/goal …` invocation
+    /// (OC-Phase 6 P6.5).
+    Goal,
     /// `/quit` — exit the application cleanly.
     Quit,
 }
@@ -76,6 +82,7 @@ impl BuiltinCommand {
             Self::Undo => "undo",
             Self::Agents => "agents",
             Self::Budget => "budget",
+            Self::Goal => "goal",
             Self::Quit => "quit",
         }
     }
@@ -103,6 +110,7 @@ impl BuiltinCommand {
             Self::Undo => "Undo latest AI file edit batch",
             Self::Agents => "Show declarative agents.toml table",
             Self::Budget => "Show running budget totals vs configured caps",
+            Self::Goal => "Goal mode controls: start/status/cancel/criteria",
             Self::Quit => "Quit the application",
         }
     }
@@ -131,6 +139,7 @@ impl BuiltinCommand {
             Self::Undo,
             Self::Agents,
             Self::Budget,
+            Self::Goal,
             Self::Quit,
         ]
     }
@@ -245,6 +254,18 @@ mod tests {
         assert_eq!(parse_builtin("/agents"), Some((BuiltinCommand::Agents, "")));
         assert_eq!(parse_builtin("/budget"), Some((BuiltinCommand::Budget, "")));
         assert_eq!(
+            parse_builtin("/goal start ship feature X"),
+            Some((BuiltinCommand::Goal, "start ship feature X"))
+        );
+        assert_eq!(
+            parse_builtin("/goal status"),
+            Some((BuiltinCommand::Goal, "status"))
+        );
+        assert_eq!(
+            parse_builtin("/goal cancel user changed mind"),
+            Some((BuiltinCommand::Goal, "cancel user changed mind"))
+        );
+        assert_eq!(
             parse_builtin("/usage --by=agent"),
             Some((BuiltinCommand::Usage, "--by=agent"))
         );
@@ -305,6 +326,7 @@ mod tests {
                 BuiltinCommand::Undo,
                 BuiltinCommand::Agents,
                 BuiltinCommand::Budget,
+                BuiltinCommand::Goal,
                 BuiltinCommand::Quit,
             ]
         );
@@ -316,7 +338,7 @@ mod tests {
     #[test]
     fn all_hints_returns_all() {
         let hints = BuiltinCommand::all_hints();
-        assert_eq!(hints.len(), 17);
+        assert_eq!(hints.len(), 18);
         assert!(hints.iter().any(|(n, _)| n == "help"));
         assert!(hints.iter().any(|(n, _)| n == "chat"));
         assert!(hints.iter().any(|(n, _)| n == "usage"));
