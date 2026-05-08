@@ -38,6 +38,7 @@ Commands:
   reset        Reset current HEAD to specified state
   rev-parse    Parse and normalize revision names and repository paths
   rev-list     List commit objects reachable from a revision
+  ls-remote    List references in a remote repository
   cherry-pick  Apply the changes introduced by some existing commits
   push         Update remote refs along with associated objects
   fetch        Download objects and refs from another repository
@@ -559,7 +560,6 @@ The following Git top-level commands are currently **not implemented** in Libra 
 - `hash-object` – compute object hash for raw data
 - `verify-pack` – validate pack files
 - `pack-objects` / `unpack-objects` – pack and unpack object collections
-- `ls-remote` – list remote references
 - `remote-show` – show detailed remote info
 - `fetch-pack` / `push-pack` – low-level fetch/push operations
 - `filter-branch` (or `git filter-repo`) – rewrite history

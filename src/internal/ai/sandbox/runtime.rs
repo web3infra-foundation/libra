@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
 use super::{SandboxPermissions, SandboxPolicy};
+#[cfg(unix)]
 use crate::utils::fuse;
 
 pub const LIBRA_SANDBOX_NETWORK_DISABLED_ENV_VAR: &str = "LIBRA_SANDBOX_NETWORK_DISABLED";
@@ -102,16 +103,25 @@ fn apply_fuse_workspace_env_overrides(
     env: &mut HashMap<String, String>,
     ambient_cargo_target_dir_is_set: bool,
 ) {
-    if env.contains_key(CARGO_TARGET_DIR_ENV_VAR) || ambient_cargo_target_dir_is_set {
+    #[cfg(not(unix))]
+    {
+        let _ = (cwd, env, ambient_cargo_target_dir_is_set);
         return;
     }
-    let Some(target_dir) = fuse::fuse_workspace_cargo_target_dir(cwd) else {
-        return;
-    };
-    env.insert(
-        CARGO_TARGET_DIR_ENV_VAR.to_string(),
-        target_dir.to_string_lossy().into_owned(),
-    );
+
+    #[cfg(unix)]
+    {
+        if env.contains_key(CARGO_TARGET_DIR_ENV_VAR) || ambient_cargo_target_dir_is_set {
+            return;
+        }
+        let Some(target_dir) = fuse::fuse_workspace_cargo_target_dir(cwd) else {
+            return;
+        };
+        env.insert(
+            CARGO_TARGET_DIR_ENV_VAR.to_string(),
+            target_dir.to_string_lossy().into_owned(),
+        );
+    }
 }
 
 #[derive(Debug, Clone)]
