@@ -1,6 +1,6 @@
 # `libra fsck`
 
-Verify the integrity of objects, refs, and index in a Libra repository.
+Verify repository integrity by checking objects, refs, and index.
 
 ## Synopsis
 
@@ -16,11 +16,11 @@ corruption, broken references, or data inconsistencies.
 
 The command performs the following checks:
 
-- **Object hash integrity**: Recomputes the SHA1 or SHA256 hash of each object and verifies it matches the stored hash
-- **Object format validity**: Ensures each object can be parsed correctly (blob, tree, commit, tag)
+- **Object hash integrity**: Recomputes SHA1/SHA256 hash and verifies it matches the stored hash
+- **Object format validity**: Validates object structure (blob, tree, commit, tag)
 - **Ref consistency**: Verifies all references point to existing, valid objects
-- **Index integrity**: Checks that the staging index file is valid and consistent
-- **Reachability analysis**: Detects dangling and unreachable objects using BFS from refs, reflogs, and index
+- **Index integrity**: Validates index file structure and cross-references entries with object storage
+- **Reachability analysis**: Detects dangling and unreachable objects via BFS from refs, reflogs, and index
 
 ## Options
 
@@ -43,7 +43,7 @@ libra fsck --verbose
 ### `--no-reflogs`
 
 Skip reflog validation. By default, reflogs are used as starting points for reachability analysis.
-This flag excludes reflog entries, which may cause more objects to be reported as dangling.
+Excluding reflogs may cause more objects to be reported as dangling.
 
 ```bash
 libra fsck --no-reflogs
@@ -59,13 +59,13 @@ libra fsck --unreachable
 
 ### `--dangling`, `--no-dangling`
 
-Control reporting of dangling objects. Default is to report dangling commits only.
+Control reporting of dangling objects. Default is to report dangling commits only (matching git fsck behavior).
 
-- `--dangling` or `--dangling=true`: Report all dangling objects (commits, trees, blobs)
-- `--no-dangling`: Hide all dangling object reports
+- `--dangling` or `--dangling=true`: Report dangling commits
+- `--no-dangling`: Hide dangling object reports
 
 ```bash
-libra fsck --dangling          # Report all dangling objects
+libra fsck --dangling          # Report dangling commits (default)
 libra fsck --no-dangling       # Hide dangling reports
 ```
 
@@ -76,24 +76,15 @@ Show human-readable names for objects in verbose output. Names are collected fro
 - Reflogs: `HEAD@{1778158193}`, `refs/heads/main@{1778158193}`
 - Index: `:path/to/file.txt`
 
-Names are only shown during the connectivity check phase.
-
 ```bash
 libra fsck --verbose --name-objects
-```
-
-Example output:
-```
-Checking connectivity (6 objects)
-Checking 1c59427adc4b205a270d8f810310394962e79a8b (:file2.txt)
-Checking 2906c3ede0a129d57a88b3fed7aeb6d17d68ab29 (HEAD, refs/heads/main)
 ```
 
 ### `--lost-found`
 
 Write dangling/unreachable objects to `.libra/lost-found/` directory:
-- `lost-found/commit/<hash>`: For commit and tree objects
-- `lost-found/other/<hash>`: For blob objects (actual content)
+- `lost-found/commit/<hash>`: For commit and tree objects (stores hash)
+- `lost-found/other/<hash>`: For blob objects (stores actual content)
 
 This option implies `--no-reflogs` for dangling detection, matching `git fsck --lost-found` behavior.
 
@@ -142,7 +133,7 @@ libra fsck
 # Verbose output with object names
 libra fsck --verbose --name-objects
 
-# Find dangling objects
+# Find dangling commits
 libra fsck --dangling
 
 # Write dangling objects to lost-found
@@ -163,11 +154,34 @@ libra fsck abc123def456...
 
 ## Output Format
 
-### Clean Repository
+### Diagnostic Messages (stdout)
+
+Diagnostic messages are printed to stdout and do NOT cause non-zero exit codes:
 
 ```text
-Integrity check passed: 4 objects verified
+missing <type> <object-id>
+hash mismatch <type> <object-id>
+dangling <type> <object-id>
+unreachable <type> <object-id>
 ```
+
+### Error Messages (stderr)
+
+Error messages are printed to stderr and cause non-zero exit codes:
+
+```text
+bad object sha1: <type> <object-id>
+bad tree: <object-id>
+unknown type: <type> <object-id>
+missing author: <object-id>
+missing committer: <object-id>
+bad ref content: <ref-name>: invalid hash format
+index corruption: <details>
+```
+
+### Clean Repository
+
+No output (silent success).
 
 ### With Dangling Objects
 
@@ -178,51 +192,52 @@ dangling commit 8ae045f3b2c1d9e7f6a5b4c3d2e1f0a9b8c7d6e5
 ### With Missing Object
 
 ```text
-missing tree 6678874f0d5b658ae5c88b04020c64219f51f743
-```
-
-### With Hash Mismatch
-
-```text
-hash mismatch blob 1c59427adc4b205a270d8f810310394962e79a8b
-```
-
-### With Root Commits (--root)
-
-```text
-root 2906c3ede0a129d57a88b3fed7aeb6d17d68ab29
-```
-
-### With Tagged Commits (--tags)
-
-```text
-tagged commit 85c5c26f763319a05433663eac5e083e4e55735e (v1.0)
+missing commit 6678874f0d5b658ae5c88b04020c64219f51f743
 ```
 
 ## Exit Codes
 
 | Exit Code | Meaning |
 | --------- | ------- |
-| 0 | All checks passed |
-| 1 | Object corruption (hash mismatch or invalid format) |
-| 2 | Broken refs (point to missing objects) |
-| 4 | Index corruption |
+| 0 | All checks passed, or only dangling/unreachable objects found (informational) |
+| 1 | Errors found: hash mismatch, invalid format, missing objects, broken refs, index corruption |
+| 1 | Fatal error: not a repository, invalid object ID, database error |
 
-Exit codes are additive: `3` = object corruption + broken refs, `7` = all three categories have issues.
+**Note**: 
+- `dangling` and `unreachable` are informational only and do NOT cause non-zero exit codes.
+- `missing`, `hash_mismatch`, and format errors cause exit code 1.
 
-**Note**: `dangling` and `unreachable` objects are informational only and do NOT cause non-zero exit codes.
+## Implementation Details
 
-## Compatibility with Git
+### Check Stages
 
-| Option | Git | Libra |
-| ------ | --- | ----- |
-| Full check | `git fsck` | `libra fsck` |
-| Verbose | `git fsck --verbose` | `libra fsck --verbose` |
-| Skip reflogs | `git fsck --no-reflogs` | `libra fsck --no-reflogs` |
-| Show unreachable | `git fsck --unreachable` | `libra fsck --unreachable` |
-| Hide dangling | `git fsck --no-dangling` | `libra fsck --no-dangling` |
-| Lost+found | `git fsck --lost-found` | `libra fsck --lost-found` |
-| Name objects | `git fsck --name-objects` | `libra fsck --name-objects` |
-| Connectivity only | `git fsck --connectivity-only` | `libra fsck --connectivity-only` |
-| Report roots | N/A | `libra fsck --root` |
-| Report tags | N/A | `libra fsck --tags` |
+The fsck command performs checks in the following order:
+
+1. **Directory scan**: Enumerate all loose objects and pack files
+2. **Object verification**: Verify hash integrity and format for each object
+3. **HEAD validation**: Check HEAD points to a valid ref
+4. **Reflog check**: Validate objects referenced in reflog entries
+5. **Ref validation**: Verify all refs point to valid objects
+6. **Index validation**: Check index file structure and entry integrity
+7. **Connectivity check**: Re-verify all objects with optional name resolution
+8. **Reachability analysis**: Identify dangling and unreachable objects via BFS
+9. **Root commit report**: (with `--root`) List commits with no parents
+10. **Tag report**: (with `--tags`) List tagged commits
+
+### Object Types
+
+Libra supports the same object types as Git:
+
+- **blob**: File content
+- **tree**: Directory listing with mode, name, and object references
+- **commit**: Snapshot metadata with tree, parents, author, committer
+- **tag**: Annotated tag with target, type, tagger, and message
+
+### Hash Algorithms
+
+Libra supports both SHA1 and SHA256 hash algorithms, determined by repository configuration.
+
+### Reflog Behavior
+
+By default, objects mentioned in reflogs are considered reachable and not reported as dangling.
+Use `--no-reflogs` to exclude reflog entries from reachability analysis.
