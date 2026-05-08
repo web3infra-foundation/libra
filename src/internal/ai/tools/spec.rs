@@ -3,6 +3,53 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+/// JSON Schema for one `GoalEvidenceRef` payload, shared by the
+/// `update_goal_progress` and `submit_goal_complete` tool specs.
+/// Mirrors `crate::internal::ai::goal::GoalEvidenceRef` /
+/// `GoalEvidenceTarget`; the deserializer enforces variant
+/// well-formedness, so the schema itself stays permissive on the
+/// `target` body and only pins the discriminator.
+fn goal_evidence_ref_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["target", "description"],
+        "properties": {
+            "criterion_id": {
+                "type": ["string", "null"],
+                "description": "Acceptance criterion id this evidence supports. Use the literal `id` from `GoalSpec.acceptance_criteria`. Set to null for ambient context that doesn't bind to a specific criterion."
+            },
+            "target": {
+                "type": "object",
+                "required": ["kind"],
+                "description": "Discriminator-tagged evidence target. `kind` selects the variant; remaining fields depend on the variant.",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "enum": [
+                            "context_frame",
+                            "tool_call",
+                            "file",
+                            "attachment",
+                            "agent_run",
+                            "no_changes_needed"
+                        ]
+                    },
+                    "event_id": {"type": "string", "description": "Used by `context_frame` and `agent_run`."},
+                    "call_id": {"type": "string", "description": "Used by `tool_call`."},
+                    "path": {"type": "string", "description": "Used by `file` — workspace-relative path."},
+                    "sha256": {"type": "string", "description": "Used by `file` — hex sha256 the verifier will re-validate against disk."},
+                    "attachment_id": {"type": "string", "description": "Used by `attachment`."},
+                    "rationale": {"type": "string", "description": "Used by `no_changes_needed` — explanation for why no workspace edit was required."}
+                }
+            },
+            "description": {
+                "type": "string",
+                "description": "Human-readable description of this evidence ref (kept in the audit log even when the target is opaque)."
+            }
+        }
+    })
+}
+
 /// A tool specification compatible with OpenAI's function calling format.
 ///
 /// This struct defines the interface for a tool that can be called by an LLM.
@@ -298,6 +345,167 @@ impl ToolSpec {
                         props
                     },
                     required: vec!["result".to_string(), "summary".to_string()],
+                    definitions: None,
+                },
+            },
+        }
+    }
+
+    /// Create a ToolSpec for `update_goal_progress`.
+    ///
+    /// Used inside Goal mode (`docs/improvement/opencode.md` lines
+    /// 540-560, 1808). The model invokes this between `submit_goal_complete`
+    /// attempts to record progress without claiming completion. The
+    /// supervisor (P6.3) turns each successful call into a
+    /// `GoalEvent::ProgressRecorded` envelope; the handler itself only
+    /// validates the payload shape.
+    pub fn update_goal_progress() -> Self {
+        Self {
+            spec_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: "update_goal_progress".to_string(),
+                description: "Record progress on the active Goal without claiming completion. \
+                    Use this between `submit_goal_complete` attempts to capture which \
+                    acceptance criteria have new evidence, what tools were run, and what is \
+                    still pending. Calling this tool does NOT end the Goal — the supervisor \
+                    will keep driving until you call `submit_goal_complete` and the verifier \
+                    accepts."
+                    .to_string(),
+                parameters: FunctionParameters::Object {
+                    param_type: "object".to_string(),
+                    properties: {
+                        let mut props = Map::new();
+                        props.insert(
+                            "summary".to_string(),
+                            json!({
+                                "type": "string",
+                                "minLength": 1,
+                                "description": "One-paragraph progress note: what was just done, what evidence was collected, and what remains."
+                            }),
+                        );
+                        props.insert(
+                            "completed_criteria".to_string(),
+                            json!({
+                                "type": "array",
+                                "description": "Acceptance criterion ids that now have evidence. Use the `id` field from `GoalSpec.acceptance_criteria` verbatim. May be empty if no criterion was newly satisfied this turn.",
+                                "items": {"type": "string"}
+                            }),
+                        );
+                        props.insert(
+                            "evidence_refs".to_string(),
+                            json!({
+                                "type": "array",
+                                "description": "Optional structured evidence refs supporting this progress note. Each entry references a tool call, file, attachment, sub-agent run, etc.",
+                                "items": goal_evidence_ref_schema()
+                            }),
+                        );
+                        props.insert(
+                            "next_steps".to_string(),
+                            json!({
+                                "type": "array",
+                                "description": "Short list of remaining steps the model plans to take.",
+                                "items": {"type": "string"}
+                            }),
+                        );
+                        props
+                    },
+                    required: vec!["summary".to_string()],
+                    definitions: None,
+                },
+            },
+        }
+    }
+
+    /// Create a ToolSpec for `submit_goal_complete`.
+    ///
+    /// Used inside Goal mode (`docs/improvement/opencode.md` lines
+    /// 657-661, 1808). The model invokes this when it believes the Goal
+    /// is satisfied. The supervisor (P6.3) turns each successful call
+    /// into a `GoalEvent::CompletionClaimed` envelope and runs the
+    /// deterministic verifier (P6.2) — only when the verifier accepts
+    /// does the Goal transition to terminal `Completed`.
+    ///
+    /// Registered as a **terminal tool** in the surrounding
+    /// `ToolLoopConfig.terminal_tools` so the tool loop returns to
+    /// the supervisor immediately after a successful call. The
+    /// handler itself only validates the payload shape; the rich
+    /// spec-aware checks live in the verifier.
+    pub fn submit_goal_complete() -> Self {
+        Self {
+            spec_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: "submit_goal_complete".to_string(),
+                description: "Claim that the active Goal is complete. The supervisor runs a \
+                    deterministic verifier on this claim — completion is only accepted when \
+                    every required acceptance criterion is in `completed_criteria`, each one \
+                    has matching evidence, the workspace shows the changes (or a \
+                    `no_changes_needed` rationale), and no recent tool result was failed / \
+                    denied / timed-out. A rejected claim does NOT end the Goal; the \
+                    supervisor will surface the missing items and continue. Calling this \
+                    successfully ends the Goal-bound tool loop immediately."
+                    .to_string(),
+                parameters: FunctionParameters::Object {
+                    param_type: "object".to_string(),
+                    properties: {
+                        let mut props = Map::new();
+                        props.insert(
+                            "summary".to_string(),
+                            json!({
+                                "type": "string",
+                                "minLength": 1,
+                                "description": "One-paragraph completion summary: what was achieved and what evidence supports the claim."
+                            }),
+                        );
+                        props.insert(
+                            "completed_criteria".to_string(),
+                            json!({
+                                "type": "array",
+                                "description": "Acceptance criterion ids satisfied by this claim. Must include every required criterion's `id` from `GoalSpec.acceptance_criteria`.",
+                                "items": {"type": "string"},
+                                "minItems": 1
+                            }),
+                        );
+                        props.insert(
+                            "evidence_refs".to_string(),
+                            json!({
+                                "type": "array",
+                                "description": "Structured evidence backing each claimed criterion. Standard policy requires at least one ref per claimed criterion (matching `criterion_id`); workspace-change criteria additionally need a `file` or `no_changes_needed` target.",
+                                "items": goal_evidence_ref_schema()
+                            }),
+                        );
+                        props.insert(
+                            "verification".to_string(),
+                            json!({
+                                "type": "array",
+                                "description": "Records of what the model ran (or attests to) to confirm each criterion. Required to be non-empty under Standard evidence policy.",
+                                "items": {
+                                    "type": "object",
+                                    "required": ["criterion_id", "method", "passed"],
+                                    "properties": {
+                                        "criterion_id": {"type": "string", "description": "Id of the criterion this verification record attests to."},
+                                        "method": {"type": "string", "description": "Free-form description of the verification (e.g. `cargo test --lib`, `manual review`)."},
+                                        "passed": {"type": "boolean", "description": "true iff the verification confirmed the criterion."},
+                                        "output_summary": {"type": "string", "description": "Optional short excerpt of the method's output."}
+                                    }
+                                }
+                            }),
+                        );
+                        props.insert(
+                            "residual_risks".to_string(),
+                            json!({
+                                "type": "array",
+                                "description": "Known caveats or risks the user should review even though the Goal is being claimed complete.",
+                                "items": {"type": "string"}
+                            }),
+                        );
+                        props
+                    },
+                    required: vec![
+                        "summary".to_string(),
+                        "completed_criteria".to_string(),
+                        "evidence_refs".to_string(),
+                        "verification".to_string(),
+                    ],
                     definitions: None,
                 },
             },
