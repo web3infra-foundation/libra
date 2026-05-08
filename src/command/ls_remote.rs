@@ -169,14 +169,14 @@ fn compile_patterns(patterns: &[String]) -> Result<Vec<CompiledPattern>, LsRemot
 }
 
 fn visible_remote_url(remote_url: &str) -> String {
-    redact_url_credentials(remote_url)
+    redact_remote_spec_for_diagnostics(remote_url)
 }
 
 fn visible_remote_display(remote_display: &str, remote_name: Option<&str>) -> String {
     if remote_name.is_some() {
         remote_display.to_string()
     } else {
-        redact_url_credentials(remote_display)
+        redact_remote_spec_for_diagnostics(remote_display)
     }
 }
 
@@ -386,12 +386,32 @@ mod tests {
     }
 
     #[test]
+    fn visible_remote_url_redacts_scp_password() {
+        assert_eq!(
+            visible_remote_url("user:secret@example.com:repo.git"),
+            "[REDACTED]@example.com:repo.git"
+        );
+    }
+
+    #[test]
     fn visible_remote_display_redacts_direct_url_but_preserves_remote_name() {
         assert_eq!(
             visible_remote_display("https://token@example.com/repo.git", None),
             "https://example.com/repo.git"
         );
         assert_eq!(visible_remote_display("origin", Some("origin")), "origin");
+    }
+
+    #[test]
+    fn visible_remote_display_redacts_direct_scp_password() {
+        assert_eq!(
+            visible_remote_display("user:secret@example.com:repo.git", None),
+            "[REDACTED]@example.com:repo.git"
+        );
+        assert_eq!(
+            visible_remote_display("user:secret@example.com:repo.git", Some("origin")),
+            "user:secret@example.com:repo.git"
+        );
     }
 
     #[test]

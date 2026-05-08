@@ -1,3 +1,23 @@
+use std::{path::Path, str::FromStr};
+
+use git_internal::{
+    hash::{HashKind, ObjectHash, set_hash_kind_for_test},
+    internal::object::{
+        signature::{Signature, SignatureType},
+        tag::Tag as GitTag,
+        types::ObjectType,
+    },
+};
+use libra::{
+    command::save_object_to_storage,
+    internal::{db::get_db_conn_instance_for_path, head::Head, model::reference},
+    utils::{
+        client_storage::ClientStorage,
+        util::{DATABASE, ROOT_DIR},
+    },
+};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+
 use super::*;
 
 #[test]
@@ -177,6 +197,85 @@ fn ls_remote_tags_lists_peeled_annotated_tag_for_local_libra_remote() {
         !refs_stdout.contains("\trefs/tags/v1.0^{}\n"),
         "--refs should suppress peeled annotated tag refs, got: {refs_stdout}"
     );
+}
+
+#[test]
+fn ls_remote_tags_recursively_peels_nested_annotated_tag_for_local_libra_remote() {
+    let remote = create_committed_repo_via_cli();
+    let outside = tempdir().expect("failed to create outside cwd");
+    let tag_output = run_libra_command(&["tag", "-m", "Inner release", "inner"], remote.path());
+    assert_cli_success(&tag_output, "inner annotated tag creation should succeed");
+    let (commit_hash, inner_tag_hash, outer_tag_hash) = create_nested_annotated_tag(remote.path());
+    let remote_path = remote.path().to_string_lossy().to_string();
+
+    let output = run_libra_command(&["ls-remote", "--tags", &remote_path], outside.path());
+    assert_cli_success(&output, "ls-remote --tags should succeed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(&format!("{outer_tag_hash}\trefs/tags/outer\n")),
+        "expected outer annotated tag object ref, got: {stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("{commit_hash}\trefs/tags/outer^{{}}\n")),
+        "expected outer peeled ref to final commit, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains(&format!("{inner_tag_hash}\trefs/tags/outer^{{}}\n")),
+        "peeled ref should not stop at the inner tag object, got: {stdout}"
+    );
+}
+
+fn create_nested_annotated_tag(repo: &Path) -> (String, String, String) {
+    let _hash_guard = set_hash_kind_for_test(HashKind::Sha1);
+    let runtime = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+    runtime.block_on(async {
+        let storage_path = repo.join(ROOT_DIR);
+        let db = get_db_conn_instance_for_path(&storage_path.join(DATABASE))
+            .await
+            .expect("failed to open repository database");
+        let inner_ref = reference::Entity::find()
+            .filter(reference::Column::Name.eq("refs/tags/inner"))
+            .filter(reference::Column::Kind.eq(reference::ConfigKind::Tag))
+            .one(&db)
+            .await
+            .expect("failed to query inner tag ref")
+            .expect("inner tag ref should exist");
+        let inner_tag_hash = inner_ref.commit.expect("inner tag should have a target");
+        let inner_tag_id = ObjectHash::from_str(&inner_tag_hash).expect("inner tag hash is valid");
+        let commit_hash = Head::current_commit_result_with_conn(&db)
+            .await
+            .expect("failed to resolve HEAD commit")
+            .expect("expected committed HEAD")
+            .to_string();
+        let outer_tag = GitTag::new(
+            inner_tag_id,
+            ObjectType::Tag,
+            "outer".to_string(),
+            Signature::new(
+                SignatureType::Tagger,
+                "Test User".to_string(),
+                "test@example.com".to_string(),
+            ),
+            "Outer release".to_string(),
+        );
+        let storage = ClientStorage::init(storage_path.join("objects"));
+        save_object_to_storage(&storage, &outer_tag, &outer_tag.id)
+            .expect("failed to save outer tag object");
+        let outer_tag_hash = outer_tag.id.to_string();
+        reference::ActiveModel {
+            name: Set(Some("refs/tags/outer".to_string())),
+            kind: Set(reference::ConfigKind::Tag),
+            commit: Set(Some(outer_tag_hash.clone())),
+            remote: Set(None),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("failed to insert outer tag ref");
+
+        (commit_hash, inner_tag_hash, outer_tag_hash)
+    })
 }
 
 #[test]

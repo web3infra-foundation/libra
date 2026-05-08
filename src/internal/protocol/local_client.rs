@@ -330,12 +330,16 @@ impl LocalClient {
                     let tags = tag::list()
                         .await
                         .map_err(|error| GitError::CustomError(error.to_string()))?;
+                    let mut tag_references = Vec::new();
+                    for tag in tags {
+                        tag_references.extend(tag_refs(tag).await?);
+                    }
                     Ok(DiscoveryResult {
                         refs: local_branches
                             .into_iter()
                             .chain(remote_branches)
                             .map(Into::into)
-                            .chain(tags.into_iter().flat_map(tag_refs))
+                            .chain(tag_references)
                             .chain(head_commit.map(|x| x.to_string()).map(|hash| DiscRef {
                                 _hash: hash,
                                 _ref: reflog::HEAD.to_string(),
@@ -571,7 +575,7 @@ fn tag_object_hash(object: &tag::TagObject) -> String {
     }
 }
 
-fn tag_refs(tag: tag::Tag) -> Vec<DiscRef> {
+async fn tag_refs(tag: tag::Tag) -> Result<Vec<DiscRef>, GitError> {
     let refname = format!("refs/tags/{}", tag.name);
     let mut refs = vec![DiscRef {
         _hash: tag_object_hash(&tag.object),
@@ -580,12 +584,33 @@ fn tag_refs(tag: tag::Tag) -> Vec<DiscRef> {
 
     if let tag::TagObject::Tag(tag_object) = tag.object {
         refs.push(DiscRef {
-            _hash: tag_object.object_hash.to_string(),
+            _hash: peel_tag_object_hash(tag_object.object_hash, &refname).await?,
             _ref: format!("{refname}^{{}}"),
         });
     }
 
-    refs
+    Ok(refs)
+}
+
+async fn peel_tag_object_hash(
+    mut object_hash: git_internal::hash::ObjectHash,
+    refname: &str,
+) -> Result<String, GitError> {
+    let mut seen = HashSet::new();
+    loop {
+        if !seen.insert(object_hash) {
+            return Err(GitError::CustomError(format!(
+                "detected cycle while peeling tag '{refname}'"
+            )));
+        }
+
+        match tag::load_object_trait(&object_hash).await? {
+            tag::TagObject::Commit(commit) => return Ok(commit.id.to_string()),
+            tag::TagObject::Tree(tree) => return Ok(tree.id.to_string()),
+            tag::TagObject::Blob(blob) => return Ok(blob.id.to_string()),
+            tag::TagObject::Tag(tag) => object_hash = tag.object_hash,
+        }
+    }
 }
 
 #[cfg(test)]
