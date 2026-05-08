@@ -643,6 +643,31 @@ fn rejected_envelopes_do_not_leak_updated_at() {
     );
 }
 
+/// Scenario: replay refuses a `Created` envelope whose own
+/// `goal_id` does not match the embedded spec's `goal_id`. A
+/// misrouted or corrupted log can ship a Created envelope tagged
+/// with one Goal but carrying a spec for another — without this
+/// check, subsequent envelopes (filtered by the *envelope* id)
+/// would silently fail the cross-goal guard inside `apply` and
+/// the user would lose all post-Created progress with no
+/// observable signal. Asserting `replay` returns `None` makes the
+/// failure surface immediately at the resume seam.
+#[test]
+fn replay_rejects_created_envelope_with_mismatched_goal_id() {
+    let spec = fixture_spec();
+    let envelope_goal_id = Uuid::parse_str("00000000-0000-0000-0000-000000000bad").unwrap();
+    assert_ne!(envelope_goal_id, spec.goal_id);
+    let envelopes = [libra::internal::ai::goal::GoalEventEnvelope::new(
+        envelope_goal_id,
+        fixture_now(),
+        GoalEvent::Created(spec),
+    )];
+    assert!(
+        replay(envelopes.iter()).is_none(),
+        "replay must reject a Created envelope whose goal_id != spec.goal_id"
+    );
+}
+
 /// Scenario: a `CriteriaRevised` event carrying a blank criterion id
 /// is rejected for the same reason as the duplicate-id case — both
 /// are shape errors `validate_criteria` enforces on construction.

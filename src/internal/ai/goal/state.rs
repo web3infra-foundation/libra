@@ -464,6 +464,19 @@ pub fn replay<'a>(envelopes: impl IntoIterator<Item = &'a GoalEventEnvelope>) ->
     let GoalEvent::Created(spec) = &first.event else {
         return None;
     };
+    // Cross-goal sanity check: the envelope's `goal_id` must match
+    // the embedded spec's `goal_id`. A misrouted or corrupted log
+    // could ship a `Created` envelope whose envelope id points to
+    // one Goal but whose payload describes another. Without this
+    // check, [`from_spec`] would seed state for the *spec's* goal,
+    // and every subsequent envelope (which the caller filtered for
+    // the envelope id) would silently fail the cross-goal guard
+    // inside [`apply`] — losing all post-Created progress with no
+    // observable signal. Returning `None` makes the failure
+    // surface immediately at the supervisor's resume seam.
+    if first.goal_id != spec.goal_id {
+        return None;
+    }
     let mut state = GoalState::from_spec(spec.clone());
     state.updated_at = first.recorded_at;
     for envelope in iter {
