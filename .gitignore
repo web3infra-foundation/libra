@@ -47,8 +47,3 @@ web/.pnpm-store/
 .DS_Store
 .gemini/
 gha-creds-*.json
-
-*.pdf
-CLAUDE.md
-test_fsck/
-.cargo/

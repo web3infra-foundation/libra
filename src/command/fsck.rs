@@ -1234,6 +1234,7 @@ async fn check_and_fix_refs(
         if result.overall_status == CheckStatus::Ok {
             result.overall_status = CheckStatus::Missing;
         }
+        result.has_errors = true;  // Broken refs (missing objects) should cause failure
     }
     Ok(())
 }
@@ -1247,13 +1248,16 @@ async fn verify_object(hash: &ObjectHash, storage: &ClientStorage, connectivity_
 
     // Check if object exists
     if !storage.exist(hash) {
+        if report_errors {
+            has_error |= report(FsckMsgId::Missing, "unknown", &hash.to_string());
+        }
         return Ok((ObjectCheckResult {
             object_id: hash.to_string(),
             object_type: "unknown".to_string(),
             status: CheckStatus::Missing,
             error_message: Some("Object not found in storage".to_string()),
             size: 0,
-        }, false));  // Missing is not an error for exit code
+        }, has_error));
     }
 
     // Get object type
