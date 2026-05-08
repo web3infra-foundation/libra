@@ -205,6 +205,9 @@ pub enum StableErrorCode {
     BisectRunFailed,
     /// `bisect run` cannot advance because no candidate commits remain.
     BisectNoCandidates,
+    /// AI agent run hit a configured budget cap (cost, tokens, steps,
+    /// or wall-clock). OC-Phase 5 P5.3 enforcement surface.
+    AgentBudgetExceeded,
 }
 
 impl Serialize for StableErrorCode {
@@ -242,6 +245,7 @@ impl StableErrorCode {
             Self::BisectNotActive => "LBR-BISECT-001",
             Self::BisectRunFailed => "LBR-BISECT-002",
             Self::BisectNoCandidates => "LBR-BISECT-003",
+            Self::AgentBudgetExceeded => "LBR-AGENT-001",
         }
     }
 
@@ -265,6 +269,11 @@ impl StableErrorCode {
             Self::WarningEmitted => CliErrorCategory::Warning,
             Self::AddNothingStaged => CliErrorCategory::Cli,
             Self::BisectNotActive | Self::BisectNoCandidates => CliErrorCategory::Repo,
+            // Budget caps surface as runtime/internal failures: the run
+            // didn't crash, but the operator-configured cap forced an
+            // early abort. Fits the Internal category (the run could
+            // continue if the cap were lifted) per docs/error-codes.md.
+            Self::AgentBudgetExceeded => CliErrorCategory::Internal,
         }
     }
 
@@ -349,6 +358,9 @@ impl StableErrorCode {
             }
             Self::BisectNoCandidates => {
                 "Bisect cannot advance because no candidate commits remain to test."
+            }
+            Self::AgentBudgetExceeded => {
+                "AI agent run hit a configured budget cap (cost, tokens, steps, or wall-clock)."
             }
         }
     }
