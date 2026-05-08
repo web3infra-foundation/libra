@@ -477,6 +477,16 @@ pub fn replay<'a>(envelopes: impl IntoIterator<Item = &'a GoalEventEnvelope>) ->
     if first.goal_id != spec.goal_id {
         return None;
     }
+    // Re-validate the deserialized spec the same way `GoalSpec::new`
+    // does at construction. Without this, a corrupted JSONL stream
+    // (or a future attacker forging a session log) could ship a
+    // `Created` payload with duplicate / blank criterion ids or an
+    // empty objective, bypassing the shape rules the verifier
+    // (P6.2) depends on. Returning `None` surfaces the malformed
+    // input at the supervisor's resume seam.
+    if spec.validate().is_err() {
+        return None;
+    }
     let mut state = GoalState::from_spec(spec.clone());
     state.updated_at = first.recorded_at;
     for envelope in iter {

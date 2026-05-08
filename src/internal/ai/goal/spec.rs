@@ -224,6 +224,17 @@ impl GoalSpec {
         validate_objective(&objective)?;
         Ok(Self { objective, ..self })
     }
+
+    /// Re-validate every field that [`Self::new`] checks at
+    /// construction time. Used by the replay seam in
+    /// [`super::state::replay`] so a deserialized `GoalSpec`
+    /// (e.g. from a corrupted JSONL stream) cannot bypass the
+    /// shape rules the verifier (P6.2) depends on.
+    pub fn validate(&self) -> Result<(), GoalSpecError> {
+        validate_objective(&self.objective)?;
+        validate_criteria(&self.acceptance_criteria)?;
+        Ok(())
+    }
 }
 
 fn validate_objective(objective: &str) -> Result<(), GoalSpecError> {

@@ -643,6 +643,59 @@ fn rejected_envelopes_do_not_leak_updated_at() {
     );
 }
 
+/// Scenario: a corrupted JSONL stream ships a `Created`
+/// envelope carrying a `GoalSpec` with duplicate criterion ids.
+/// `replay` must reject the stream — without re-validating the
+/// deserialised spec, the verifier (P6.2) keys completion off
+/// `completed_criteria: BTreeSet<String>` and a duplicate id
+/// would let one claim satisfy multiple required criteria.
+#[test]
+fn replay_rejects_created_envelope_with_invalid_spec_criteria() {
+    let goal_id = Uuid::parse_str("00000000-0000-0000-0000-0000feed0001").unwrap();
+    // Hand-craft a spec JSON payload that bypasses GoalSpec::new
+    // validation. Direct serde_json::from_value lets us simulate
+    // a JSONL row tampered after construction.
+    // GoalEvent uses internally-tagged enum form (`#[serde(tag = "kind")]`)
+    // so the `Created(GoalSpec)` newtype variant flattens the spec
+    // fields alongside the discriminator at the same JSON level.
+    // A `payload` sub-object would NOT round-trip — see
+    // `event.rs::round_trips_every_documented_variant` for the
+    // expected wire shape.
+    let envelope_json = serde_json::json!({
+        "envelope_id": "00000000-0000-0000-0000-0000feed0002",
+        "goal_id": goal_id,
+        "recorded_at": fixture_now().to_rfc3339(),
+        "event": {
+            "kind": "created",
+            "goal_id": goal_id,
+            "thread_id": "thread-x",
+            "session_id": "session-x",
+            "objective": "objective with duplicate ids",
+            "acceptance_criteria": [
+                {"id": "dup", "description": "first", "required": true},
+                {"id": "dup", "description": "second", "required": true},
+            ],
+            "constraints": [],
+            "evidence_policy": "standard",
+            "budget": {
+                "hard_cap_micro_usd": 0,
+                "warn_threshold_micro_usd": 0,
+                "wall_clock_seconds": 0,
+                "max_continuation_loops": 16,
+            },
+            "created_at": fixture_now().to_rfc3339(),
+            "created_by": {"kind": "user", "id": null},
+        }
+    });
+    let envelope: GoalEventEnvelope = serde_json::from_value(envelope_json)
+        .expect("hand-crafted Created envelope must deserialise");
+    let envelopes = [envelope];
+    assert!(
+        replay(envelopes.iter()).is_none(),
+        "replay must reject a Created envelope whose embedded spec carries duplicate criterion ids"
+    );
+}
+
 /// Scenario: replay refuses a `Created` envelope whose own
 /// `goal_id` does not match the embedded spec's `goal_id`. A
 /// misrouted or corrupted log can ship a Created envelope tagged
