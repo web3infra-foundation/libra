@@ -614,6 +614,21 @@ DROP TABLE IF EXISTS `agent_usage_stats`;
                 "../../../sql/migrations/2026050601_approved_permission_down.sql"
             )),
         },
+        // OC-Phase 5 P5.2: add the `agent_name` dimension to
+        // `agent_usage_stats` so the multi-agent runtime can attribute spend
+        // to a specific agent profile (planner / explorer / reviewer / …)
+        // on top of the existing (provider, model) aggregation. Additive;
+        // legacy rows keep `agent_name = NULL` and remain queryable through
+        // the existing indexes. See docs/improvement/opencode.md OC-Phase 5
+        // P5.2.
+        Migration {
+            version: 2026050801,
+            name: "agent_usage_stats_agent_name",
+            up: include_str!("../../../sql/migrations/2026050801_agent_usage_stats_agent_name.sql"),
+            down: Some(include_str!(
+                "../../../sql/migrations/2026050801_agent_usage_stats_agent_name_down.sql"
+            )),
+        },
     ]
 }
 

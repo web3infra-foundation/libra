@@ -2649,6 +2649,10 @@ where
             model: model_name.clone(),
             request_kind: "completion".to_string(),
             intent: None,
+            // OC-Phase 5 P5.2: single-agent legacy path. The
+            // dispatcher (P5.3) sets this to the active profile name
+            // when multi-agent is enabled.
+            agent_name: None,
         });
     }
 

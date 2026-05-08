@@ -14,6 +14,12 @@ pub struct UsageContext {
     pub model: String,
     pub request_kind: String,
     pub intent: Option<String>,
+    /// Declarative agent profile name from the multi-agent runtime
+    /// (`planner` / `explorer` / `reviewer` / …). `None` for the
+    /// single-agent legacy path; the `agent_usage_stats` row stores
+    /// NULL in that case so existing aggregation continues to match
+    /// the original (provider, model) grain. See OC-Phase 5 P5.2.
+    pub agent_name: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -135,8 +141,8 @@ impl UsageRecorder {
             .execute(Statement::from_sql_and_values(
                 backend,
                 "INSERT INTO agent_usage_stats \
-                 (id, session_id, thread_id, agent_run_id, run_id, provider, model, request_kind, intent, prompt_tokens, completion_tokens, cached_tokens, reasoning_tokens, total_tokens, tool_call_count, wall_clock_ms, provider_latency_ms, cost_estimate_micro_dollars, cost_usd, usage_estimated, started_at, finished_at, success, error_kind, schema_version, created_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 (id, session_id, thread_id, agent_run_id, run_id, provider, model, agent_name, request_kind, intent, prompt_tokens, completion_tokens, cached_tokens, reasoning_tokens, total_tokens, tool_call_count, wall_clock_ms, provider_latency_ms, cost_estimate_micro_dollars, cost_usd, usage_estimated, started_at, finished_at, success, error_kind, schema_version, created_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 vec![
                     Uuid::new_v4().to_string().into(),
                     input.context.session_id.clone().into(),
@@ -145,6 +151,7 @@ impl UsageRecorder {
                     input.context.run_id.clone().into(),
                     input.context.provider.clone().into(),
                     input.context.model.clone().into(),
+                    input.context.agent_name.clone().into(),
                     input.context.request_kind.clone().into(),
                     input.context.intent.clone().into(),
                     u64_to_i64_value(summary.input_tokens),
