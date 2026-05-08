@@ -14,7 +14,7 @@ use libra::{
 use url::Url;
 
 fn network_tests_enabled() -> bool {
-    std::env::var("LIBRA_TEST_GITHUB_TOKEN").map_or(false, |value| !value.is_empty())
+    std::env::var("LIBRA_TEST_GITHUB_TOKEN").is_ok_and(|value| !value.is_empty())
 }
 
 #[tokio::test]

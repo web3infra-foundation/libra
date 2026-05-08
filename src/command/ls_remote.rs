@@ -114,7 +114,7 @@ async fn run_ls_remote(args: LsRemoteArgs) -> Result<LsRemoteOutput, LsRemoteErr
     let client = RemoteClient::from_spec_with_remote(&remote_url, remote_name.as_deref()).map_err(
         |reason| LsRemoteError::InvalidRemote {
             spec: visible_remote.clone(),
-            reason,
+            reason: sanitize_remote_error_reason(&reason, &remote_url),
         },
     )?;
     let discovery = client
@@ -178,6 +178,38 @@ fn visible_remote_display(remote_display: &str, remote_name: Option<&str>) -> St
     } else {
         redact_url_credentials(remote_display)
     }
+}
+
+fn sanitize_remote_error_reason(reason: &str, remote_url: &str) -> String {
+    let redacted_remote = redact_remote_spec_for_diagnostics(remote_url);
+    let reason = reason.replace(remote_url, &redacted_remote);
+    redact_embedded_remote_credentials(&reason)
+}
+
+fn redact_remote_spec_for_diagnostics(remote_url: &str) -> String {
+    let redacted = redact_url_credentials(remote_url);
+    if redacted != remote_url {
+        return redacted;
+    }
+    redact_embedded_remote_credentials(remote_url)
+}
+
+fn redact_embedded_remote_credentials(input: &str) -> String {
+    let mut redacted = input.to_string();
+
+    if let Ok(url_like_userinfo) = Regex::new(r"(?i)([a-z][a-z0-9+.-]*://)([^\s/@]+@)") {
+        redacted = url_like_userinfo
+            .replace_all(&redacted, "${1}[REDACTED]@")
+            .into_owned();
+    }
+
+    if let Ok(scp_like_userinfo) = Regex::new(r#"(^|[\s'`"])([^\s'`"/@]+:[^\s'`"/@]+@)"#) {
+        redacted = scp_like_userinfo
+            .replace_all(&redacted, "${1}[REDACTED]@")
+            .into_owned();
+    }
+
+    redacted
 }
 
 struct CompiledPattern {
@@ -269,8 +301,8 @@ fn render_ls_remote_output(data: &LsRemoteOutput, output: &OutputConfig) -> CliR
 #[cfg(test)]
 mod tests {
     use super::{
-        CompiledPattern, LsRemoteArgs, include_reference, visible_remote_display,
-        visible_remote_url,
+        CompiledPattern, LsRemoteArgs, include_reference, sanitize_remote_error_reason,
+        visible_remote_display, visible_remote_url,
     };
     use crate::internal::protocol::DiscRef;
 
@@ -339,5 +371,40 @@ mod tests {
             "https://example.com/repo.git"
         );
         assert_eq!(visible_remote_display("origin", Some("origin")), "origin");
+    }
+
+    #[test]
+    fn invalid_remote_reason_redacts_valid_url_credentials() {
+        let remote = "file://user:secret@example.com/repo.git";
+        let reason = format!("invalid file url: {remote}");
+
+        let sanitized = sanitize_remote_error_reason(&reason, remote);
+
+        assert!(!sanitized.contains("user"));
+        assert!(!sanitized.contains("secret"));
+        assert!(sanitized.contains("file://example.com/repo.git"));
+    }
+
+    #[test]
+    fn invalid_remote_reason_redacts_malformed_url_like_credentials() {
+        let remote = "https://user:secret@";
+        let reason = format!("invalid local repository '{remote}': not found");
+
+        let sanitized = sanitize_remote_error_reason(&reason, remote);
+
+        assert!(!sanitized.contains("user"));
+        assert!(!sanitized.contains("secret"));
+        assert!(sanitized.contains("https://[REDACTED]@"));
+    }
+
+    #[test]
+    fn invalid_remote_reason_redacts_scp_like_password_credentials() {
+        let remote = "user:secret@example.com:repo.git";
+        let reason = format!("invalid local repository '{remote}': not found");
+
+        let sanitized = sanitize_remote_error_reason(&reason, remote);
+
+        assert!(!sanitized.contains("user:secret"));
+        assert!(sanitized.contains("[REDACTED]@example.com:repo.git"));
     }
 }
