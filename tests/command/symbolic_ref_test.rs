@@ -80,3 +80,79 @@ fn symbolic_ref_detached_head_returns_invalid_target() {
     );
     assert_eq!(report.error_code, "LBR-CLI-003");
 }
+
+#[test]
+fn symbolic_ref_quiet_detached_head_exits_silently() {
+    let repo = create_committed_repo_via_cli();
+
+    let detach = run_libra_command(&["switch", "--detach", "HEAD"], repo.path());
+    assert_cli_success(&detach, "switch --detach HEAD");
+
+    let output = run_libra_command(&["symbolic-ref", "--quiet", "HEAD"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "quiet detached HEAD should exit with status 1"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "quiet detached HEAD should not write stdout, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "quiet detached HEAD should not write stderr, got: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn symbolic_ref_json_quiet_detached_head_reports_structured_error() {
+    let repo = create_committed_repo_via_cli();
+
+    let detach = run_libra_command(&["switch", "--detach", "HEAD"], repo.path());
+    assert_cli_success(&detach, "switch --detach HEAD");
+
+    let output = run_libra_command(&["--json", "symbolic-ref", "--quiet", "HEAD"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "json quiet detached HEAD should preserve the quiet exit code"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "json quiet detached HEAD should not write stdout, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let (human, report) = parse_cli_error_stderr(&output.stderr);
+    assert!(
+        human.is_empty(),
+        "json mode should emit only the structured error envelope, got: {human}"
+    );
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert_eq!(report.exit_code, 1);
+    assert_eq!(report.message, "HEAD is not a symbolic ref");
+    assert!(
+        report.hints.is_empty(),
+        "quiet mode should suppress guidance hints"
+    );
+}
+
+#[test]
+fn symbolic_ref_outside_repo_reports_repo_not_found() {
+    let dir = tempdir().expect("failed to create non-repo directory");
+
+    let output = run_libra_command(&["symbolic-ref", "HEAD"], dir.path());
+    assert!(
+        !output.status.success(),
+        "symbolic-ref outside repo should fail"
+    );
+
+    let (human, report) = parse_cli_error_stderr(&output.stderr);
+    assert!(
+        human.contains("not a libra repository"),
+        "unexpected stderr: {human}"
+    );
+    assert_eq!(report.error_code, "LBR-REPO-001");
+}
