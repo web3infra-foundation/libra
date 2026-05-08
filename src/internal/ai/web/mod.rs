@@ -27,9 +27,9 @@ use tokio_stream::wrappers::BroadcastStream;
 use uuid::Uuid;
 
 use self::code_ui::{
-    CodeUiApiError, CodeUiControllerDetachRequest, CodeUiControllerKind, CodeUiInteractionResponse,
-    CodeUiMessageRequest, CodeUiRuntimeHandle, browser_controller_token_from_headers,
-    ensure_session_updated_event,
+    CodeUiApiError, CodeUiControllerDetachRequest, CodeUiControllerKind, CodeUiGoalCancelRequest,
+    CodeUiGoalStartRequest, CodeUiInteractionResponse, CodeUiMessageRequest, CodeUiRuntimeHandle,
+    browser_controller_token_from_headers, ensure_session_updated_event,
 };
 use crate::{
     command::code::resolve_storage_root,
@@ -140,16 +140,20 @@ fn code_router() -> Router<WebAppState> {
     //   /events           -> loopback only (observe)
     //   /diagnostics      -> loopback only (observe)
     //   /threads          -> loopback only (observe; lists active thread projections)
+    //   /goal/status      -> loopback only (observe; mirrors /session)
     //   /controller/attach  -> loopback; automation also needs X-Libra-Control-Token
     //   /controller/detach  -> loopback + controller-token; automation also needs control-token
     //   /messages         -> loopback + controller-token; automation also needs control-token
     //   /interactions/{id} -> loopback + controller-token; automation also needs control-token
     //   /control/cancel   -> loopback + controller-token (browser); also requires X-Libra-Control-Token for automation leases
+    //   /goal/start       -> loopback + controller-token; OC-Phase 6 P6.6
+    //   /goal/cancel      -> loopback + controller-token; OC-Phase 6 P6.6
     Router::new()
         .route("/session", get(code_session_handler))
         .route("/events", get(code_events_handler))
         .route("/diagnostics", get(code_diagnostics_handler))
         .route("/threads", get(code_threads_handler))
+        .route("/goal/status", get(code_goal_status_handler))
         .route("/controller/attach", post(code_controller_attach_handler))
         .route("/controller/detach", post(code_controller_detach_handler))
         .merge(code_write_router())
@@ -160,6 +164,8 @@ fn code_write_router() -> Router<WebAppState> {
         .route("/messages", post(code_message_handler))
         .route("/interactions/{id}", post(code_interaction_handler))
         .route("/control/cancel", post(code_cancel_handler))
+        .route("/goal/start", post(code_goal_start_handler))
+        .route("/goal/cancel", post(code_goal_cancel_handler))
         .layer(middleware::from_fn(enforce_code_write_body_limit))
 }
 
@@ -606,6 +612,110 @@ async fn code_cancel_handler(
     Ok(Json(serde_json::to_value(code_ui::CodeUiAckResponse {
         accepted: true,
     })?))
+}
+
+/// `POST /api/code/goal/start` — open an active Goal in the
+/// session. Body: `{ "objective": "<text>" }`. Requires a
+/// controller token (write-access lease) just like
+/// `/api/code/messages`. OC-Phase 6 P6.6.
+async fn code_goal_start_handler(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    State(state): State<WebAppState>,
+    headers: HeaderMap,
+    Json(body): Json<CodeUiGoalStartRequest>,
+) -> Result<Json<serde_json::Value>, WebApiError> {
+    ensure_loopback_api_request(remote_addr)?;
+    let runtime = code_ui_runtime(&state)?;
+    let token = browser_controller_token_from_headers(&headers);
+    let mut audit_kind = CodeUiControllerKind::None;
+    let mut audit_client_id = "unknown".to_string();
+    let result = async {
+        let lease = runtime
+            .ensure_controller_write_access(token.as_deref())
+            .await?;
+        audit_kind = lease.kind;
+        audit_client_id = lease.client_id.clone();
+        if lease.kind == CodeUiControllerKind::Automation {
+            ensure_automation_control_token(&headers, state.automation_control_token.as_ref())?;
+        }
+        runtime
+            .goal_start(token.as_deref(), body.objective)
+            .await
+            .map_err(WebApiError::from)
+    }
+    .await;
+    append_control_audit(
+        &state,
+        &runtime,
+        "goal.start",
+        audit_kind,
+        &audit_client_id,
+        control_audit_outcome(&result),
+    )
+    .await;
+    let rendered = result?;
+    Ok(Json(serde_json::json!({
+        "accepted": true,
+        "status": rendered,
+    })))
+}
+
+/// `GET /api/code/goal/status` — render the active Goal's
+/// snapshot. Loopback-only observe (no controller token), mirroring
+/// `/api/code/session`. OC-Phase 6 P6.6.
+async fn code_goal_status_handler(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    State(state): State<WebAppState>,
+) -> Result<Json<serde_json::Value>, WebApiError> {
+    ensure_loopback_api_request(remote_addr)?;
+    let runtime = code_ui_runtime(&state)?;
+    let rendered = runtime.goal_status().await.map_err(WebApiError::from)?;
+    Ok(Json(serde_json::json!({ "status": rendered })))
+}
+
+/// `POST /api/code/goal/cancel` — explicit cancellation of the
+/// active Goal. Body: `{ "reason": "<text>" }`. Requires a
+/// controller token. OC-Phase 6 P6.6.
+async fn code_goal_cancel_handler(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    State(state): State<WebAppState>,
+    headers: HeaderMap,
+    Json(body): Json<CodeUiGoalCancelRequest>,
+) -> Result<Json<serde_json::Value>, WebApiError> {
+    ensure_loopback_api_request(remote_addr)?;
+    let runtime = code_ui_runtime(&state)?;
+    let token = browser_controller_token_from_headers(&headers);
+    let mut audit_kind = CodeUiControllerKind::None;
+    let mut audit_client_id = "unknown".to_string();
+    let result = async {
+        let lease = runtime
+            .ensure_controller_write_access(token.as_deref())
+            .await?;
+        audit_kind = lease.kind;
+        audit_client_id = lease.client_id.clone();
+        if lease.kind == CodeUiControllerKind::Automation {
+            ensure_automation_control_token(&headers, state.automation_control_token.as_ref())?;
+        }
+        runtime
+            .goal_cancel(token.as_deref(), body.reason)
+            .await
+            .map_err(WebApiError::from)
+    }
+    .await;
+    append_control_audit(
+        &state,
+        &runtime,
+        "goal.cancel",
+        audit_kind,
+        &audit_client_id,
+        control_audit_outcome(&result),
+    )
+    .await;
+    let rendered = result?;
+    Ok(Json(serde_json::json!({
+        "accepted": true,
+        "status": rendered,
+    })))
 }
 
 async fn enforce_code_write_body_limit(request: Request, next: Next) -> Response {

@@ -352,6 +352,25 @@ pub struct CodeUiAckResponse {
     pub accepted: bool,
 }
 
+/// `POST /api/code/goal/start` body. The objective is validated
+/// at the App layer against the same `GoalSpec::new` shape rules
+/// (non-empty after trim, ≤ MAX_OBJECTIVE_LEN bytes); the wire
+/// shape itself is permissive so the validator's error messages
+/// surface verbatim through the response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeUiGoalStartRequest {
+    pub objective: String,
+}
+
+/// `POST /api/code/goal/cancel` body. The reason flows into the
+/// `GoalEvent::Cancelled` envelope's audit-log payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeUiGoalCancelRequest {
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CodeUiDiagnosticsPorts {
@@ -625,6 +644,36 @@ pub trait CodeUiCommandAdapter: Send + Sync {
     async fn cancel_turn(&self) -> anyhow::Result<()> {
         Err(anyhow!(
             "This libra code session does not support turn cancel"
+        ))
+    }
+
+    /// `goal.start` — create an active Goal in this session
+    /// (OC-Phase 6 P6.6). Returns the rendered status of the new
+    /// Goal so callers can echo it without a follow-up
+    /// `goal.status`. Default implementation returns "not
+    /// supported" so non-TUI adapters (headless, web-only Codex)
+    /// don't have to opt in until they grow Goal mode support.
+    async fn goal_start(&self, _objective: String) -> anyhow::Result<String> {
+        Err(anyhow!(
+            "This libra code session does not support Goal mode"
+        ))
+    }
+
+    /// `goal.status` — render the active Goal's snapshot, or an
+    /// error if none. Default implementation returns "not
+    /// supported".
+    async fn goal_status(&self) -> anyhow::Result<String> {
+        Err(anyhow!(
+            "This libra code session does not support Goal mode"
+        ))
+    }
+
+    /// `goal.cancel` — explicit user-driven cancellation of the
+    /// active Goal. Returns the rendered status post-cancel.
+    /// Default implementation returns "not supported".
+    async fn goal_cancel(&self, _reason: String) -> anyhow::Result<String> {
+        Err(anyhow!(
+            "This libra code session does not support Goal mode"
         ))
     }
 
@@ -1039,6 +1088,49 @@ impl CodeUiRuntimeHandle {
         self.ensure_controller_write_access(token).await?;
         self.adapter
             .cancel_turn()
+            .await
+            .map_err(CodeUiApiError::unsupported_from_error)
+    }
+
+    /// `goal.start { objective }` — open an active Goal in this
+    /// session. Requires controller write-access (a controller
+    /// token validated against the active lease) because creating
+    /// a Goal is a session-mutating operation. Returns the freshly
+    /// rendered status string so callers don't need a follow-up
+    /// `goal.status` (OC-Phase 6 P6.6).
+    pub async fn goal_start(
+        &self,
+        token: Option<&str>,
+        objective: String,
+    ) -> Result<String, CodeUiApiError> {
+        self.ensure_controller_write_access(token).await?;
+        self.adapter
+            .goal_start(objective)
+            .await
+            .map_err(CodeUiApiError::unsupported_from_error)
+    }
+
+    /// `goal.status` — return the active Goal's rendered snapshot.
+    /// **Read-only**, so no controller token is required at this
+    /// layer; the HTTP handler still loopback-gates the request.
+    pub async fn goal_status(&self) -> Result<String, CodeUiApiError> {
+        self.adapter
+            .goal_status()
+            .await
+            .map_err(CodeUiApiError::unsupported_from_error)
+    }
+
+    /// `goal.cancel { reason }` — explicit cancellation of the
+    /// active Goal. Requires controller write-access; mirrors
+    /// `cancel_turn` in shape and audit policy.
+    pub async fn goal_cancel(
+        &self,
+        token: Option<&str>,
+        reason: String,
+    ) -> Result<String, CodeUiApiError> {
+        self.ensure_controller_write_access(token).await?;
+        self.adapter
+            .goal_cancel(reason)
             .await
             .map_err(CodeUiApiError::unsupported_from_error)
     }

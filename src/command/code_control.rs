@@ -96,6 +96,20 @@ struct CancelParams {
     controller_token: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GoalStartParams {
+    objective: String,
+    controller_token: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GoalCancelParams {
+    reason: String,
+    controller_token: String,
+}
+
 pub async fn execute(args: CodeControlArgs) -> CliResult<()> {
     if !args.stdio {
         return Err(CliError::command_usage(
@@ -292,6 +306,45 @@ async fn dispatch_json_rpc_request(
             return DispatchResult::Subscribe {
                 response: json_rpc_success(id, json!({ "subscribed": true })),
             };
+        }
+        "goal.start" => {
+            // OC-Phase 6 P6.6 — Goal mode entrypoint for automation.
+            // Same contract as the TUI `/goal start <objective>`
+            // (parses the objective, validates shape, mints
+            // `GoalEvent::Created` in the active session).
+            let params = match parse_params::<GoalStartParams>(request.params) {
+                Ok(params) => params,
+                Err(error) => return DispatchResult::Error(error),
+            };
+            send_post(
+                client,
+                base_url,
+                "/api/code/goal/start",
+                control_token,
+                Some(&params.controller_token),
+                json!({ "objective": params.objective }),
+            )
+            .await
+        }
+        "goal.status" => {
+            // Read-only observe endpoint (loopback only). No
+            // controller token required at this layer.
+            send_get(client, base_url, "/api/code/goal/status").await
+        }
+        "goal.cancel" => {
+            let params = match parse_params::<GoalCancelParams>(request.params) {
+                Ok(params) => params,
+                Err(error) => return DispatchResult::Error(error),
+            };
+            send_post(
+                client,
+                base_url,
+                "/api/code/goal/cancel",
+                control_token,
+                Some(&params.controller_token),
+                json!({ "reason": params.reason }),
+            )
+            .await
         }
         _ => {
             return DispatchResult::Error(JsonRpcErrorObject {
