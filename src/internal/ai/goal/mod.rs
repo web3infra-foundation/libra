@@ -37,6 +37,7 @@
 pub mod event;
 pub mod spec;
 pub mod state;
+pub mod verifier;
 
 pub use event::{
     GoalBlockReason, GoalCompletionClaim, GoalCompletionReport, GoalCompletionShapeError,
@@ -51,4 +52,8 @@ pub use state::{
     GoalApplyReject, GoalBlocker, GoalEvidenceRef, GoalEvidenceTarget, GoalPlanStep,
     GoalReplayOutcome, GoalReplayRejection, GoalState, GoalStatus, GoalStepStatus,
     GoalVerificationRecord, MAX_REPLAY_REJECTIONS, PendingGoalClaim, apply, replay,
+};
+pub use verifier::{
+    DeterministicGoalVerifier, GoalVerifier, GoalVerifierContext, GoalVerifyOutcome,
+    RecentToolCall, ToolResultStatus,
 };

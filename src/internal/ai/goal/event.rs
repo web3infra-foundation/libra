@@ -435,9 +435,24 @@ pub fn validate_completion_report_shape(
                 );
             }
             if criterion.requires_workspace_change {
-                let has_workspace_ref = matching_refs
-                    .iter()
-                    .any(|r| matches!(r.target, GoalEvidenceTarget::File { .. }));
+                // The verifier (P6.2) accepts either an actual
+                // workspace mutation (`File` target with a hash
+                // it can re-validate against disk) OR an explicit
+                // `NoChangesNeeded` rationale (research / analysis
+                // Goals where the right answer is "no change
+                // required" — opencode.md:679). The schema floor
+                // must be a strict subset of the verifier's
+                // accept logic, so it accepts both targets here.
+                // Anything else (ToolCall / Attachment / etc.) is
+                // not workspace-bound and cannot stand in for VCS
+                // state evidence.
+                let has_workspace_ref = matching_refs.iter().any(|r| {
+                    matches!(
+                        r.target,
+                        GoalEvidenceTarget::File { .. }
+                            | GoalEvidenceTarget::NoChangesNeeded { .. }
+                    )
+                });
                 if !has_workspace_ref {
                     return Err(
                         GoalCompletionShapeError::MissingWorkspaceEvidenceForCriterion {
@@ -996,6 +1011,45 @@ mod tests {
             verification: vec![],
             residual_risks: vec![],
             changed_files: vec!["src/feature.rs".to_string()],
+            claim_envelope_id: Uuid::nil(),
+            total_spent_micro_usd: 0,
+            elapsed_wall_clock_seconds: 0,
+            continuation_loops_used: 0,
+            finalised_at: fixture_now(),
+            finalised_by: GoalActor::System {
+                reason: "verifier accepted".to_string(),
+            },
+        };
+        assert!(validate_completion_report_shape(&spec, &report).is_ok());
+    }
+
+    /// A workspace-change criterion accompanied only by a
+    /// `NoChangesNeeded` rationale also satisfies the floor — the
+    /// verifier (P6.2) accepts the explicit "no change required"
+    /// escape hatch (opencode.md:679), and the schema gate must be
+    /// a strict subset of the verifier's accept logic.
+    #[test]
+    fn shape_check_accepts_workspace_change_criterion_with_no_changes_needed_evidence() {
+        let spec = shape_fixture_spec(vec![super::super::spec::GoalCriterion {
+            id: "investigation".to_string(),
+            description: "research-only criterion".to_string(),
+            required: true,
+            verifier_hint: None,
+            requires_workspace_change: true,
+        }]);
+        let report = GoalCompletionReport {
+            summary: "no change required".to_string(),
+            completed_criteria: vec!["investigation".to_string()],
+            evidence_refs: vec![GoalEvidenceRef {
+                criterion_id: Some("investigation".to_string()),
+                target: GoalEvidenceTarget::NoChangesNeeded {
+                    rationale: "spec already correct".to_string(),
+                },
+                description: "research outcome".to_string(),
+            }],
+            verification: vec![],
+            residual_risks: vec![],
+            changed_files: vec![],
             claim_envelope_id: Uuid::nil(),
             total_spent_micro_usd: 0,
             elapsed_wall_clock_seconds: 0,

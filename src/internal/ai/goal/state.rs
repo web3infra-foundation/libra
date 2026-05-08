@@ -130,12 +130,14 @@ pub enum GoalEvidenceTarget {
     AgentRun { event_id: String },
     /// Goal completed without any code/file change being necessary
     /// (e.g. a research-only or analysis-only Goal where the right
-    /// answer is "no change required"). The verifier accepts this
-    /// as evidence in lieu of a `git status` artefact when the
-    /// Goal's [`super::spec::GoalEvidencePolicy`] is
-    /// `DocumentationOnly`, or when the matching criterion's
-    /// [`super::spec::GoalCriterion::requires_workspace_change`]
-    /// is `false` under `Standard` policy.
+    /// answer is "no change required"). Per opencode.md:679 the
+    /// verifier (P6.2) accepts this as evidence in lieu of a
+    /// `git status` artefact for *any* criterion — including a
+    /// `requires_workspace_change = true` criterion where the
+    /// supervisor concluded after investigation that no edit was
+    /// required. The schema floor and the verifier are aligned on
+    /// this: a `NoChangesNeeded` ref satisfies the workspace
+    /// evidence check.
     NoChangesNeeded { rationale: String },
     /// Forward-compatibility catch-all so an envelope carrying an
     /// evidence target shape we have not seen yet still replays
