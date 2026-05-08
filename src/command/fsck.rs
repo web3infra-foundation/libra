@@ -33,6 +33,145 @@ use crate::{
     },
 };
 
+/// Fsck message types - diagnostic messages go to stdout, errors to stderr
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FsckMsgId {
+    // ===== Diagnostic messages (stdout) =====
+    Missing,
+    HashMismatch,
+    Dangling,
+    Unreachable,
+    // ===== Error messages (stderr) - Object integrity =====
+    BadObjectSha1,
+    BadTree,
+    BadTreeSha1,
+    UnknownType,
+    // ===== Error messages - Commit validation =====
+    MissingAuthor,
+    MissingCommitter,
+    MissingTree,
+    BadDate,
+    BadEmail,
+    BadName,
+    BadTimezone,
+    MultipleAuthors,
+    MissingEmail,
+    // ===== Error messages - Tag validation =====
+    MissingTagEntry,
+    MissingType,
+    MissingObject,
+    MissingTaggerEntry,
+    BadTagName,
+    // ===== Error messages - Ref validation =====
+    BadRefOid,
+    BadRefContent,
+    BadRefName,
+    BadHeadTarget,
+    // ===== Error messages - Index validation =====
+    DuplicateEntries,
+    NullSha1,
+    TreeNotSorted,
+    // ===== Error messages - Pathname checks =====
+    HasDot,
+    HasDotdot,
+    HasDotlibra,  // Libra-specific: renamed from hasDotgit
+    EmptyName,
+    FullPathname,
+    // ===== Error messages - Libra specific =====
+    IndexCorruption,
+    InvalidIndexMode,
+    InvalidIndexStage,
+    IndexEntryWrongType,
+}
+
+impl FsckMsgId {
+    /// Check if this message is an error (stderr) or diagnostic (stdout)
+    /// All diagnostic messages (missing, hash_mismatch, dangling, unreachable) go to stdout
+    pub fn is_error(&self) -> bool {
+        !matches!(
+            self,
+            FsckMsgId::Missing
+                | FsckMsgId::HashMismatch
+                | FsckMsgId::Dangling
+                | FsckMsgId::Unreachable
+        )
+    }
+
+    /// Check if this message should cause non-zero exit code
+    /// Only dangling and unreachable are informational; all others cause failure
+    pub fn causes_failure(&self) -> bool {
+        !matches!(self, FsckMsgId::Dangling | FsckMsgId::Unreachable)
+    }
+
+    /// Get the output format string for this message
+    pub fn format(&self, obj_type: &str, obj_id: &str) -> String {
+        match self {
+            // Diagnostic messages - stdout
+            FsckMsgId::Missing => format!("missing {} {}", obj_type, obj_id),
+            FsckMsgId::HashMismatch => format!("hash mismatch {} {}", obj_type, obj_id),
+            FsckMsgId::Dangling => format!("dangling {} {}", obj_type, obj_id),
+            FsckMsgId::Unreachable => format!("unreachable {} {}", obj_type, obj_id),
+            // Error messages - stderr
+            FsckMsgId::BadObjectSha1 => format!("bad object sha1: {} {}", obj_type, obj_id),
+            FsckMsgId::BadTree => format!("bad tree: {}", obj_id),
+            FsckMsgId::BadTreeSha1 => format!("bad tree sha1: {}", obj_id),
+            FsckMsgId::UnknownType => format!("unknown type: {} {}", obj_type, obj_id),
+            FsckMsgId::MissingAuthor => format!("missing author: {}", obj_id),
+            FsckMsgId::MissingCommitter => format!("missing committer: {}", obj_id),
+            FsckMsgId::MissingTree => format!("missing tree: {}", obj_id),
+            FsckMsgId::BadDate => format!("bad date: {}", obj_id),
+            FsckMsgId::BadEmail => format!("bad email: {}", obj_id),
+            FsckMsgId::MissingEmail => format!("missing email: {}", obj_id),
+            FsckMsgId::BadName => format!("bad name: {}", obj_id),
+            FsckMsgId::BadTimezone => format!("bad timezone: {}", obj_id),
+            FsckMsgId::MultipleAuthors => format!("multiple authors: {}", obj_id),
+            FsckMsgId::MissingTagEntry => format!("missing tag entry: {}", obj_id),
+            FsckMsgId::MissingType => format!("missing type: {}", obj_id),
+            FsckMsgId::MissingObject => format!("missing object: {}", obj_id),
+            FsckMsgId::MissingTaggerEntry => format!("missing tagger: {}", obj_id),
+            FsckMsgId::BadTagName => format!("bad tag name: {}", obj_id),
+            FsckMsgId::BadRefOid => format!("bad ref oid: {}", obj_id),
+            FsckMsgId::BadRefContent => format!("bad ref content: {}", obj_id),
+            FsckMsgId::BadRefName => format!("bad ref name: {}", obj_id),
+            FsckMsgId::BadHeadTarget => format!("bad head target: {}", obj_id),
+            FsckMsgId::DuplicateEntries => format!("duplicate entries: {}", obj_id),
+            FsckMsgId::NullSha1 => format!("null sha1: {}", obj_id),
+            FsckMsgId::TreeNotSorted => format!("tree not sorted: {}", obj_id),
+            FsckMsgId::HasDot => format!("has .: {}", obj_id),
+            FsckMsgId::HasDotdot => format!("has ..: {}", obj_id),
+            FsckMsgId::HasDotlibra => format!("has .libra: {}", obj_id),
+            FsckMsgId::EmptyName => format!("empty name: {}", obj_id),
+            FsckMsgId::FullPathname => format!("full pathname: {}", obj_id),
+            FsckMsgId::IndexCorruption => format!("index corruption: {}", obj_id),
+            FsckMsgId::InvalidIndexMode => format!("invalid index mode: {} {}", obj_type, obj_id),
+            FsckMsgId::InvalidIndexStage => format!("invalid index stage: {} {}", obj_type, obj_id),
+            FsckMsgId::IndexEntryWrongType => format!("index entry wrong type: {} is {}", obj_id, obj_type),
+        }
+    }
+}
+
+/// Report a fsck message
+/// - Diagnostic messages (missing, hash_mismatch, dangling, unreachable) -> stdout
+/// - Error messages -> stderr
+/// Returns true if this is an error (for exit code tracking)
+pub fn report(msg_id: FsckMsgId, obj_type: &str, obj_id: &str) -> bool {
+    let output = msg_id.format(obj_type, obj_id);
+    if msg_id.is_error() {
+        eprintln!("{}", output);
+    } else {
+        println!("{}", output);
+    }
+    msg_id.causes_failure()
+}
+
+/// Convenience macro for reporting fsck messages
+#[macro_export]
+macro_rules! fsck_error {
+    ($msg_id:expr, $obj_type:expr, $obj_id:expr) => {
+        $crate::command::fsck::report($msg_id, $obj_type, $obj_id)
+    };
+}
+
 const FSCK_LONG_ABOUT: &str =
     "Verify the integrity of objects, refs, and index in a Libra repository.
 
@@ -155,20 +294,9 @@ pub struct FsckResult {
     pub reflog_issues: usize,
     pub cross_ref_issues: usize,
     pub overall_status: CheckStatus,
-    pub issues: Vec<IssueReport>,
+    pub has_errors: bool,  // Track if any error was printed to stderr
 }
 
-/// Detailed issue report for git fsck-style diagnostics
-#[derive(Debug, Clone, Serialize)]
-pub struct IssueReport {
-    pub issue_type: String,  // "missing", "hash_mismatch", "dangling", "unreachable"
-    pub severity: String,
-    pub object_type: Option<String>,  // "commit", "tree", "blob", "tag"
-    pub object_id: Option<String>,
-    pub ref_name: Option<String>,
-    pub message: String,
-    pub suggestion: Option<String>,
-}
 
 /// Result of checking the index file
 #[derive(Debug, Clone)]
@@ -177,7 +305,6 @@ pub struct IndexCheckResult {
     pub entries_checked: usize,
     pub entries_ok: usize,
     pub entries_corrupted: usize,
-    pub issues: Vec<IssueReport>,
 }
 
 pub async fn execute(args: FsckArgs) {
@@ -191,14 +318,8 @@ pub async fn execute(args: FsckArgs) {
 
     match result {
         Ok(fsck_result) => {
-            // Print diagnostic messages (dangling/unreachable are printed but don't cause failure)
-            if !fsck_result.issues.is_empty() {
-                print_diagnostic_messages(&fsck_result.issues);
-            }
             // Exit with failure code only for serious issues (not dangling/unreachable)
-            if !fsck_result.issues.is_empty()
-                && fsck_result.issues.iter().any(|i| i.severity == "error")
-            {
+            if fsck_result.has_errors {
                 std::process::exit(1);
             }
         }
@@ -270,67 +391,26 @@ fn list_all_objects_in_storage(storage: &ClientStorage) -> io::Result<Vec<Object
     Ok(hashes)
 }
 
-/// Build an IssueReport for a failed object check.
-/// `context` controls whether the report is for a single-object CLI check
-/// (`context == Single`) or a full-scan object (`context == FullScan`).
-enum IssueContext {
-    Single,
-    FullScan,
-}
-
-fn build_issue_report(
-    check_result: &ObjectCheckResult,
-    object_id: &str,
-    context: IssueContext,
-) -> IssueReport {
-    let (issue_type, suggestion) = match (&check_result.status, context) {
-        (CheckStatus::HashMismatch, IssueContext::Single) => (
-            "hash_mismatch".to_string(),
-            "Object data is corrupted. Consider restoring from backup or remote.".to_string(),
-        ),
-        (CheckStatus::HashMismatch, IssueContext::FullScan) => (
-            "hash_mismatch".to_string(),
-            "Consider restoring from backup or remote.".to_string(),
-        ),
-        (CheckStatus::InvalidFormat, _) => (
-            "invalid_format".to_string(),
-            "Object has invalid format.".to_string(),
-        ),
-        (CheckStatus::Missing, _) => (
-            "missing".to_string(),
-            "Object may have been deleted or never created.".to_string(),
-        ),
-        (CheckStatus::Ok, _) => unreachable!("should not build issue for Ok status"),
-    };
-
-    IssueReport {
-        issue_type,
-        severity: "error".to_string(),
-        object_type: Some(check_result.object_type.clone()),
-        object_id: Some(object_id.to_string()),
-        ref_name: None,
-        message: check_result
-            .error_message
-            .clone()
-            .unwrap_or_else(|| "Object verification failed".to_string()),
-        suggestion: Some(suggestion),
-    }
-}
 
 async fn check_single_object(object_id: &str, storage: &ClientStorage) -> CliResult<FsckResult> {
     let hash = parse_object_hash(object_id)
         .ok_or_else(|| CliError::command_usage(format!("invalid object ID: {}", object_id)))?;
 
-    let check_result = verify_object(&hash, storage, false).await?;
+    let (check_result, has_errors) = verify_object(&hash, storage, false, true).await?;
 
-    let (overall_status, issues) = match check_result.status {
+    let overall_status = match check_result.status {
         CheckStatus::Ok => {
             println!("Object {} is valid", object_id);
-            (CheckStatus::Ok, Vec::new())
+            CheckStatus::Ok
         }
-        _ => {
-            let issue = build_issue_report(&check_result, object_id, IssueContext::Single);
-            (check_result.status, vec![issue])
+        CheckStatus::Missing => {
+            report(FsckMsgId::Missing, &check_result.object_type, object_id);
+            check_result.status
+        }
+        CheckStatus::HashMismatch => check_result.status,
+        CheckStatus::InvalidFormat => {
+            // Error already reported by verify_object, no need to report again
+            check_result.status
         }
     };
 
@@ -347,7 +427,7 @@ async fn check_single_object(object_id: &str, storage: &ClientStorage) -> CliRes
         reflog_issues: 0,
         cross_ref_issues: 0,
         overall_status,
-        issues,
+        has_errors,
     })
 }
 
@@ -363,7 +443,7 @@ async fn check_all_objects(args: &FsckArgs, storage: &ClientStorage) -> CliResul
         reflog_issues: 0,
         cross_ref_issues: 0,
         overall_status: CheckStatus::Ok,
-        issues: Vec::new(),
+        has_errors: false,
     };
 
     // Get all object hashes
@@ -498,37 +578,45 @@ async fn check_objects(
             None => continue,
         };
 
-        let obj_type = match storage.get_object_type(&hash) {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-
         if verbose {
-            let type_name = match obj_type {
-                ObjectType::Blob => "blob",
-                ObjectType::Tree => "tree",
-                ObjectType::Commit => "commit",
-                ObjectType::Tag => "tag",
-                _ => "unknown",
-            };
-            println!("Checking {} {}", type_name, hash);
+            // Get object type for verbose output only
+            if let Ok(obj_type) = storage.get_object_type(&hash) {
+                let type_name = match obj_type {
+                    ObjectType::Blob => "blob",
+                    ObjectType::Tree => "tree",
+                    ObjectType::Commit => "commit",
+                    ObjectType::Tag => "tag",
+                    _ => "unknown",
+                };
+                println!("Checking {} {}", type_name, hash);
+            } else {
+                println!("Checking {}", hash);
+            }
         }
 
-        let check_result = verify_object(&hash, storage, connectivity_only).await?;
+        let (check_result, reported_errors) = verify_object(&hash, storage, connectivity_only, true).await?;
         result.objects_checked += 1;
+        result.has_errors |= reported_errors;
 
         match check_result.status {
             CheckStatus::Ok => result.objects_ok += 1,
-            _ => {
+            CheckStatus::Missing => {
                 result.objects_corrupted += 1;
                 if result.overall_status == CheckStatus::Ok {
                     result.overall_status = check_result.status.clone();
                 }
-                result.issues.push(build_issue_report(
-                    &check_result,
-                    hash_str,
-                    IssueContext::FullScan,
-                ));
+            }
+            CheckStatus::HashMismatch => {
+                result.objects_corrupted += 1;
+                if result.overall_status == CheckStatus::Ok {
+                    result.overall_status = check_result.status.clone();
+                }
+            }
+            CheckStatus::InvalidFormat => {
+                result.objects_corrupted += 1;
+                if result.overall_status == CheckStatus::Ok {
+                    result.overall_status = CheckStatus::InvalidFormat;
+                }
             }
         }
     }
@@ -644,20 +732,6 @@ fn print_notices(head_is_unborn: bool, _result: &FsckResult) {
     }
 }
 
-/// Print diagnostic messages in git fsck format
-/// Format: <issue_type> <object_type> <object_id>
-/// Examples:
-///   dangling commit 8ae045f058b7a0a5b0b0e8a0a0e8a0a0e8a0a0
-///   missing blob abc123def456789012345678901234567890abcd
-fn print_diagnostic_messages(issues: &[IssueReport]) {
-    for issue in issues {
-        if let (Some(obj_type), Some(obj_id)) = (&issue.object_type, &issue.object_id) {
-            // git fsck format: <issue_type> <object_type> <object_id>
-            eprintln!("{} {} {}", issue.issue_type, obj_type, obj_id);
-        }
-    }
-}
-
 /// Check reflogs and print entries
 async fn check_reflogs(
     storage: &ClientStorage,
@@ -680,41 +754,19 @@ async fn check_reflogs(
         let is_null_oid = |oid: &str| oid.chars().all(|c| c == '0');
 
         if !is_null_oid(&entry.old_oid) {
-            if let Some(old_hash) = parse_object_hash(&entry.old_oid) {
-                if !storage.exist(&old_hash) {
+            if let Some(_hash) = parse_object_hash(&entry.old_oid) {
+                if !storage.exist(&_hash) {
                     result.reflog_issues += 1;
-                    result.issues.push(IssueReport {
-                        issue_type: "missing".to_string(),
-                        severity: "warning".to_string(),
-                        object_type: Some("unknown".to_string()),
-                        object_id: Some(entry.old_oid.clone()),
-                        ref_name: Some(entry.ref_name.clone()),
-                        message: format!(
-                            "Reflog for '{}' references missing old OID {}",
-                            entry.ref_name, entry.old_oid
-                        ),
-                        suggestion: Some("Reflog entry is stale.".to_string()),
-                    });
+                    report(FsckMsgId::Missing, "unknown", &entry.old_oid);
                 }
             }
         }
 
         if !is_null_oid(&entry.new_oid) {
-            if let Some(new_hash) = parse_object_hash(&entry.new_oid) {
-                if !storage.exist(&new_hash) {
+            if let Some(_hash) = parse_object_hash(&entry.new_oid) {
+                if !storage.exist(&_hash) {
                     result.reflog_issues += 1;
-                    result.issues.push(IssueReport {
-                        issue_type: "missing".to_string(),
-                        severity: "warning".to_string(),
-                        object_type: Some("unknown".to_string()),
-                        object_id: Some(entry.new_oid.clone()),
-                        ref_name: Some(entry.ref_name.clone()),
-                        message: format!(
-                            "Reflog for '{}' references missing new OID {}",
-                            entry.ref_name, entry.new_oid
-                        ),
-                        suggestion: Some("Reflog entry is stale.".to_string()),
-                    });
+                    report(FsckMsgId::Missing, "unknown", &entry.new_oid);
                 }
             }
         }
@@ -734,7 +786,6 @@ fn check_index(
 
     let index_result = check_index_file(storage)?;
     result.index_valid = index_result.valid;
-    result.issues.extend(index_result.issues);
 
     if !index_result.valid && result.overall_status == CheckStatus::Ok {
         result.overall_status = CheckStatus::InvalidFormat;
@@ -773,7 +824,8 @@ async fn check_connectivity(
                 println!("Checking {}", hash);
             }
         }
-        let check_result = verify_object(hash, storage, connectivity_only).await?;
+        let (check_result, reported_errors) = verify_object(hash, storage, connectivity_only, false).await?;
+        result.has_errors |= reported_errors;
         if check_result.status != CheckStatus::Ok && result.overall_status == CheckStatus::Ok {
             result.overall_status = check_result.status.clone();
         }
@@ -930,7 +982,7 @@ fn bfs_mark_reachable(
 /// With --lost-found: writes dangling/unreachable objects to .libra/lost-found/ (implies --no-reflogs for dangling detection)
 async fn find_dangling_unreachable(
     storage: &ClientStorage,
-    result: &mut FsckResult,
+    _result: &mut FsckResult,
     unreachable: bool,
     no_reflogs: bool,
     dangling: bool,
@@ -976,27 +1028,11 @@ async fn find_dangling_unreachable(
 
         if unreachable {
             // --unreachable: report all unreachable objects
-            result.issues.push(IssueReport {
-                issue_type: "unreachable".to_string(),
-                severity: "info".to_string(),
-                object_type: Some(obj_type),
-                object_id: Some(hash.to_string()),
-                ref_name: None,
-                message: format!("{} {} is unreachable", hash, hash),
-                suggestion: None,
-            });
+            report(FsckMsgId::Unreachable, &obj_type, &hash.to_string());
         } else if dangling {
             // --dangling (default): only report dangling commits (matching git fsck)
             if obj_type == "commit" {
-                result.issues.push(IssueReport {
-                    issue_type: "dangling".to_string(),
-                    severity: "info".to_string(),
-                    object_type: Some(obj_type),
-                    object_id: Some(hash.to_string()),
-                    ref_name: None,
-                    message: format!("{} {} is dangling", hash, hash),
-                    suggestion: None,
-                });
+                report(FsckMsgId::Dangling, &obj_type, &hash.to_string());
             }
         }
         // --no-dangling: skip dangling reporting entirely
@@ -1034,7 +1070,7 @@ async fn find_and_report_roots(storage: &ClientStorage) -> CliResult<()> {
 
         if commit.parent_commit_ids.is_empty() {
             // This is a root commit
-            eprintln!("root {}", hash);
+            println!("root {}", hash);
         }
     }
 
@@ -1075,7 +1111,7 @@ async fn find_and_report_tags() -> CliResult<()> {
 
         // Check if this is an annotated tag (tag object exists)
         // For now, just report the tagged commit
-        eprintln!("tagged commit {} ({})", commit_hash, tag_name);
+        println!("tagged commit {} ({})", commit_hash, tag_name);
     }
 
     Ok(())
@@ -1193,7 +1229,6 @@ async fn check_and_fix_refs(
     result.refs_checked = ref_result.checked;
     result.refs_ok = ref_result.ok;
     result.refs_broken = ref_result.broken;
-    result.issues.extend(ref_result.issues.clone());
 
     if ref_result.broken > 0 {
         if result.overall_status == CheckStatus::Ok {
@@ -1205,54 +1240,65 @@ async fn check_and_fix_refs(
 
 /// Verify a single object's integrity
 /// If connectivity_only is true, only checks that objects exist (not their content)
-async fn verify_object(hash: &ObjectHash, storage: &ClientStorage, connectivity_only: bool) -> CliResult<ObjectCheckResult> {
+/// If report_errors is true, reports errors immediately; otherwise just returns status
+/// Returns (ObjectCheckResult, has_error)
+async fn verify_object(hash: &ObjectHash, storage: &ClientStorage, connectivity_only: bool, report_errors: bool) -> CliResult<(ObjectCheckResult, bool)> {
+    let mut has_error = false;
+
     // Check if object exists
     if !storage.exist(hash) {
-        return Ok(ObjectCheckResult {
+        return Ok((ObjectCheckResult {
             object_id: hash.to_string(),
             object_type: "unknown".to_string(),
             status: CheckStatus::Missing,
             error_message: Some("Object not found in storage".to_string()),
             size: 0,
-        });
+        }, false));  // Missing is not an error for exit code
     }
 
     // Get object type
     let obj_type = match storage.get_object_type(hash) {
         Ok(t) => t,
-        Err(e) => {
-            return Ok(ObjectCheckResult {
+        Err(_) => {
+            // Cannot determine object type - object data is corrupted
+            if report_errors {
+                has_error |= report(FsckMsgId::UnknownType, "unknown", &hash.to_string());
+            }
+            return Ok((ObjectCheckResult {
                 object_id: hash.to_string(),
                 object_type: "unknown".to_string(),
                 status: CheckStatus::InvalidFormat,
-                error_message: Some(format!("Failed to determine object type: {}", e)),
+                error_message: Some(format!("Object {} has unknown type", hash)),
                 size: 0,
-            });
+            }, has_error));
         }
     };
 
     // --connectivity-only: only check that objects exist, skip content validation
     if connectivity_only {
-        return Ok(ObjectCheckResult {
+        return Ok((ObjectCheckResult {
             object_id: hash.to_string(),
             object_type: obj_type.to_string(),
             status: CheckStatus::Ok,
             error_message: None,
             size: 0,
-        });
+        }, false));
     }
 
     // Get raw data for full validation
     let data = match storage.get(hash) {
         Ok(d) => d,
         Err(e) => {
-            return Ok(ObjectCheckResult {
+            if report_errors {
+                has_error |= report(FsckMsgId::HashMismatch, &obj_type.to_string(), &hash.to_string());
+            }
+            return Ok((ObjectCheckResult {
                 object_id: hash.to_string(),
-                object_type: "unknown".to_string(),
+                object_type: obj_type.to_string(),
                 status: CheckStatus::HashMismatch,
                 error_message: Some(format!("Failed to read object: {}", e)),
                 size: 0,
-            });
+            }, has_error));
         }
     };
 
@@ -1276,7 +1322,10 @@ async fn verify_object(hash: &ObjectHash, storage: &ClientStorage, connectivity_
     // Compare with stored hash
     let hash_bytes = hash.as_ref();
     if computed_bytes != hash_bytes {
-        return Ok(ObjectCheckResult {
+        if report_errors {
+            has_error |= report(FsckMsgId::HashMismatch, &obj_type.to_string(), &hash.to_string());
+        }
+        return Ok((ObjectCheckResult {
             object_id: hash.to_string(),
             object_type: obj_type.to_string(),
             status: CheckStatus::HashMismatch,
@@ -1286,38 +1335,146 @@ async fn verify_object(hash: &ObjectHash, storage: &ClientStorage, connectivity_
                 hex::encode(computed_bytes)
             )),
             size,
-        });
+        }, has_error));
     }
 
-    // Verify object format by attempting to parse
-    let format_valid = match obj_type {
-        ObjectType::Blob => Blob::from_bytes(&data, *hash).is_ok(),
-        ObjectType::Tree => Tree::from_bytes(&data, *hash).is_ok(),
-        ObjectType::Commit => Commit::from_bytes(&data, *hash).is_ok(),
-        ObjectType::Tag => {
-            // Tag objects are text-based, just check UTF-8 validity
-            String::from_utf8(data.clone()).is_ok()
+    // Verify object format and run type-specific checks
+    match obj_type {
+        ObjectType::Blob => {
+            if Blob::from_bytes(&data, *hash).is_err() {
+                return Ok((ObjectCheckResult {
+                    object_id: hash.to_string(),
+                    object_type: obj_type.to_string(),
+                    status: CheckStatus::InvalidFormat,
+                    error_message: Some(format!("Object {} has invalid blob format", hash)),
+                    size,
+                }, false));
+            }
         }
-        _ => false,
-    };
-
-    if !format_valid {
-        return Ok(ObjectCheckResult {
-            object_id: hash.to_string(),
-            object_type: obj_type.to_string(),
-            status: CheckStatus::InvalidFormat,
-            error_message: Some(format!("Object {} has invalid {} format", hash, obj_type)),
-            size,
-        });
+        ObjectType::Tree => {
+            match Tree::from_bytes(&data, *hash) {
+                Ok(tree) => {
+                    // Check tree entries
+                    for item in &tree.tree_items {
+                        // Check for problematic pathnames
+                        if item.name == "." {
+                            if report_errors {
+                                has_error |= report(FsckMsgId::HasDot, "tree", &hash.to_string());
+                            }
+                        } else if item.name == ".." {
+                            if report_errors {
+                                has_error |= report(FsckMsgId::HasDotdot, "tree", &hash.to_string());
+                            }
+                        } else if item.name == ".libra" {
+                            if report_errors {
+                                has_error |= report(FsckMsgId::HasDotlibra, "tree", &hash.to_string());
+                            }
+                        }
+                        // Check for empty name component
+                        if item.name.is_empty() {
+                            if report_errors {
+                                has_error |= report(FsckMsgId::EmptyName, "tree", &hash.to_string());
+                            }
+                        }
+                        // Check for full pathname
+                        if item.name.starts_with('/') {
+                            if report_errors {
+                                has_error |= report(FsckMsgId::FullPathname, "tree", &hash.to_string());
+                            }
+                        }
+                        // Check for null sha1
+                        if item.id.as_ref().iter().all(|&b| b == 0) {
+                            if report_errors {
+                                has_error |= report(FsckMsgId::NullSha1, "tree", &hash.to_string());
+                            }
+                        }
+                    }
+                }
+                Err(_) => {
+                    if report_errors {
+                        has_error |= report(FsckMsgId::BadTree, &obj_type.to_string(), &hash.to_string());
+                    }
+                    return Ok((ObjectCheckResult {
+                        object_id: hash.to_string(),
+                        object_type: obj_type.to_string(),
+                        status: CheckStatus::InvalidFormat,
+                        error_message: Some(format!("Object {} has invalid tree format", hash)),
+                        size,
+                    }, has_error));
+                }
+            }
+        }
+        ObjectType::Commit => {
+            match Commit::from_bytes(&data, *hash) {
+                Ok(commit) => {
+                    // Check required fields
+                    if commit.author.name.is_empty() {
+                        if report_errors {
+                            has_error |= report(FsckMsgId::MissingAuthor, "commit", &hash.to_string());
+                        }
+                    }
+                    if commit.author.email.is_empty() {
+                        if report_errors {
+                            has_error |= report(FsckMsgId::MissingEmail, "commit", &hash.to_string());
+                        }
+                    }
+                    if commit.committer.name.is_empty() {
+                        if report_errors {
+                            has_error |= report(FsckMsgId::MissingCommitter, "commit", &hash.to_string());
+                        }
+                    }
+                    if commit.committer.email.is_empty() {
+                        if report_errors {
+                            has_error |= report(FsckMsgId::MissingEmail, "commit", &hash.to_string());
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Commit object exists but cannot be parsed - data corruption
+                    if report_errors {
+                        has_error |= report(FsckMsgId::BadObjectSha1, "commit", &hash.to_string());
+                    }
+                    return Ok((ObjectCheckResult {
+                        object_id: hash.to_string(),
+                        object_type: obj_type.to_string(),
+                        status: CheckStatus::InvalidFormat,
+                        error_message: Some(format!("Object {} has invalid commit format", hash)),
+                        size,
+                    }, has_error));
+                }
+            }
+        }
+        ObjectType::Tag => {
+            // Tag objects are text-based, check UTF-8 validity
+            if String::from_utf8(data.clone()).is_err() {
+                // Tag object exists but cannot be parsed - data corruption
+                if report_errors {
+                    has_error |= report(FsckMsgId::BadObjectSha1, "tag", &hash.to_string());
+                }
+                return Ok((ObjectCheckResult {
+                    object_id: hash.to_string(),
+                    object_type: obj_type.to_string(),
+                    status: CheckStatus::InvalidFormat,
+                    error_message: Some(format!("Object {} has invalid tag format", hash)),
+                    size,
+                }, has_error));
+            }
+            // TODO: Parse tag and check for missing tagger, object, type, tag entry
+        }
+        _ => {
+            if report_errors {
+                has_error |= report(FsckMsgId::UnknownType, &obj_type.to_string(), &hash.to_string());
+            }
+        }
     }
 
-    Ok(ObjectCheckResult {
+    Ok((ObjectCheckResult {
         object_id: hash.to_string(),
         object_type: obj_type.to_string(),
         status: CheckStatus::Ok,
         error_message: None,
         size,
-    })
+    }, has_error))
 }
 
 /// Result of checking refs
@@ -1326,7 +1483,6 @@ struct RefCheckResult {
     checked: usize,
     ok: usize,
     broken: usize,
-    issues: Vec<IssueReport>,
     broken_ref_names: Vec<String>,
 }
 
@@ -1336,7 +1492,6 @@ async fn check_refs(storage: &ClientStorage, connectivity_only: bool) -> CliResu
         checked: 0,
         ok: 0,
         broken: 0,
-        issues: Vec::new(),
         broken_ref_names: Vec::new(),
     };
 
@@ -1355,72 +1510,34 @@ async fn check_refs(storage: &ClientStorage, connectivity_only: bool) -> CliResu
             if let Some(hash) = parse_object_hash(commit_hash_str) {
                 if storage.exist(&hash) {
                     // Verify the object is actually valid
-                    match verify_object(&hash, storage, connectivity_only).await {
-                        Ok(check) if check.status == CheckStatus::Ok => {
+                    match verify_object(&hash, storage, connectivity_only, false).await {
+                        Ok((check, _reported)) if check.status == CheckStatus::Ok => {
                             result.ok += 1;
                         }
-                        Ok(check) => {
+                        Ok((_check, _reported)) => {
+                            // Object exists but is corrupted - already reported in check_objects
                             result.broken += 1;
                             let ref_name = ref_entry.name.clone().unwrap_or_default();
                             result.broken_ref_names.push(ref_name.clone());
-                            result.issues.push(IssueReport {
-                                issue_type: "hash_mismatch".to_string(),
-                                severity: "error".to_string(),
-                                object_type: Some(check.object_type.clone()),
-                                object_id: Some(hash.to_string()),
-                                ref_name: Some(ref_name),
-                                message: format!(
-                                    "Ref points to invalid object: {}",
-                                    check.error_message.unwrap_or_default()
-                                ),
-                                suggestion: Some("Update or delete this ref.".to_string()),
-                            });
                         }
-                        Err(e) => {
+                        Err(_e) => {
                             result.broken += 1;
                             let ref_name = ref_entry.name.clone().unwrap_or_default();
                             result.broken_ref_names.push(ref_name.clone());
-                            result.issues.push(IssueReport {
-                                issue_type: "missing".to_string(),
-                                severity: "error".to_string(),
-                                object_type: Some("unknown".to_string()),
-                                object_id: Some(hash.to_string()),
-                                ref_name: Some(ref_name),
-                                message: format!("Failed to verify ref target: {}", e),
-                                suggestion: None,
-                            });
                         }
                     }
                 } else {
                     result.broken += 1;
                     let ref_name = ref_entry.name.clone().unwrap_or_default();
                     result.broken_ref_names.push(ref_name.clone());
-                    result.issues.push(IssueReport {
-                        issue_type: "missing".to_string(),
-                        severity: "error".to_string(),
-                        object_type: Some("commit".to_string()),
-                        object_id: Some(hash.to_string()),
-                        ref_name: Some(ref_name),
-                        message: format!("Ref points to missing object {}", hash),
-                        suggestion: Some("Update or delete this ref.".to_string()),
-                    });
+                    report(FsckMsgId::Missing, "commit", commit_hash_str);
                 }
             } else {
                 result.broken += 1;
                 let ref_name = ref_entry.name.clone().unwrap_or_default();
                 result.broken_ref_names.push(ref_name.clone());
-                result.issues.push(IssueReport {
-                    issue_type: "invalid_ref_hash".to_string(),
-                    severity: "error".to_string(),
-                    object_type: None,
-                    object_id: None,
-                    ref_name: Some(ref_name.clone()),
-                    message: format!(
-                        "Ref '{}' has invalid hash format: {}",
-                        ref_name, commit_hash_str
-                    ),
-                    suggestion: Some("Delete this corrupted ref.".to_string()),
-                });
+                // Invalid hash format - report as bad ref content
+                eprintln!("bad ref content: {}: invalid hash format", ref_name);
             }
         }
     }
@@ -1438,7 +1555,6 @@ fn check_index_file(storage: &ClientStorage) -> CliResult<IndexCheckResult> {
         entries_checked: 0,
         entries_ok: 0,
         entries_corrupted: 0,
-        issues: Vec::new(),
     };
 
     let index_path = path::index();
@@ -1455,15 +1571,7 @@ fn check_index_file(storage: &ClientStorage) -> CliResult<IndexCheckResult> {
         Ok(idx) => idx,
         Err(e) => {
             result.valid = false;
-            result.issues.push(IssueReport {
-                issue_type: "index_parse_error".to_string(),
-                severity: "error".to_string(),
-                object_type: None,
-                object_id: None,
-                ref_name: None,
-                message: format!("Failed to parse index file: {}", e),
-                suggestion: Some("The index file is corrupted. Try removing .libra/index and running 'libra add' to rebuild.".to_string()),
-            });
+            eprintln!("index corruption: {}", e);
             return Ok(result);
         }
     };
@@ -1474,10 +1582,11 @@ fn check_index_file(storage: &ClientStorage) -> CliResult<IndexCheckResult> {
     for entry in entries {
         result.entries_checked += 1;
 
-        if let Some(issue) = validate_index_entry(entry, storage) {
+        if let Some(msg_id) = validate_index_entry(entry, storage) {
             result.entries_corrupted += 1;
             result.valid = false;
-            result.issues.push(issue);
+            // Report and track error
+            let _ = report(msg_id, "blob", &entry.hash.to_string());
             continue;
         }
 
@@ -1489,20 +1598,7 @@ fn check_index_file(storage: &ClientStorage) -> CliResult<IndexCheckResult> {
         let conflict_entries = index.tracked_entries(stage);
         if !conflict_entries.is_empty() {
             for entry in conflict_entries {
-                result.issues.push(IssueReport {
-                    issue_type: "index_conflict_marker".to_string(),
-                    severity: "warning".to_string(),
-                    object_type: Some("blob".to_string()),
-                    object_id: Some(entry.hash.to_string()),
-                    ref_name: Some(entry.name.clone()),
-                    message: format!(
-                        "Index entry '{}' is in merge conflict stage {}",
-                        entry.name, stage
-                    ),
-                    suggestion: Some(
-                        "Resolve the merge conflict and re-add this file.".to_string(),
-                    ),
-                });
+                eprintln!("index conflict marker: {} (stage {})", entry.name, stage);
                 result.entries_checked += 1;
             }
         }
@@ -1523,71 +1619,29 @@ fn is_valid_index_mode(mode: u32) -> bool {
     )
 }
 
-/// Validate a single index entry against storage. Returns Some(issue) on failure.
+/// Validate a single index entry against storage. Returns Some(FsckMsgId) on failure.
 fn validate_index_entry(
     entry: &git_internal::internal::index::IndexEntry,
     storage: &ClientStorage,
-) -> Option<IssueReport> {
+) -> Option<FsckMsgId> {
     if !is_valid_index_mode(entry.mode) {
-        return Some(IssueReport {
-            issue_type: "invalid_index_mode".to_string(),
-            severity: "error".to_string(),
-            object_type: None,
-            object_id: None,
-            ref_name: Some(entry.name.clone()),
-            message: format!(
-                "Index entry '{}' has invalid mode 0o{:o}",
-                entry.name, entry.mode
-            ),
-            suggestion: Some("Remove and re-add this file to fix.".to_string()),
-        });
+        eprintln!("invalid index mode: {}", entry.name);
+        return Some(FsckMsgId::InvalidIndexMode);
     }
 
     if entry.flags.stage > 3 {
-        return Some(IssueReport {
-            issue_type: "invalid_index_stage".to_string(),
-            severity: "error".to_string(),
-            object_type: None,
-            object_id: None,
-            ref_name: Some(entry.name.clone()),
-            message: format!(
-                "Index entry '{}' has invalid stage {}",
-                entry.name, entry.flags.stage
-            ),
-            suggestion: Some("This may indicate a corrupted merge state.".to_string()),
-        });
+        eprintln!("invalid index stage: {}", entry.name);
+        return Some(FsckMsgId::InvalidIndexStage);
     }
 
     if !storage.exist(&entry.hash) {
-        return Some(IssueReport {
-            issue_type: "missing".to_string(),
-            severity: "error".to_string(),
-            object_type: Some("blob".to_string()),
-            object_id: Some(entry.hash.to_string()),
-            ref_name: Some(entry.name.clone()),
-            message: format!(
-                "Index entry '{}' references missing object {}",
-                entry.name, entry.hash
-            ),
-            suggestion: Some("Run 'libra add <file>' to re-stage this file.".to_string()),
-        });
+        return Some(FsckMsgId::Missing);
     }
 
     if let Ok(obj_type) = storage.get_object_type(&entry.hash)
         && obj_type != ObjectType::Blob
     {
-        return Some(IssueReport {
-            issue_type: "index_entry_wrong_type".to_string(),
-            severity: "error".to_string(),
-            object_type: Some(obj_type.to_string()),
-            object_id: Some(entry.hash.to_string()),
-            ref_name: Some(entry.name.clone()),
-            message: format!(
-                "Index entry '{}' references a {} object instead of a blob",
-                entry.name, obj_type
-            ),
-            suggestion: Some("Re-stage this file to fix the reference.".to_string()),
-        });
+        return Some(FsckMsgId::IndexEntryWrongType);
     }
 
     None
