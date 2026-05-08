@@ -122,7 +122,7 @@ async fn run_ls_remote(args: LsRemoteArgs) -> Result<LsRemoteOutput, LsRemoteErr
         .await
         .map_err(|source| LsRemoteError::Discovery {
             remote: visible_remote.clone(),
-            source,
+            source: sanitize_discovery_error(source, &remote_url),
         })?;
     let patterns = compile_patterns(&args.patterns)?;
     let entries = discovery
@@ -184,6 +184,25 @@ fn sanitize_remote_error_reason(reason: &str, remote_url: &str) -> String {
     let redacted_remote = redact_remote_spec_for_diagnostics(remote_url);
     let reason = reason.replace(remote_url, &redacted_remote);
     redact_embedded_remote_credentials(&reason)
+}
+
+fn sanitize_discovery_error(source: GitError, remote_url: &str) -> GitError {
+    match source {
+        GitError::NetworkError(message) => {
+            GitError::NetworkError(sanitize_remote_error_reason(&message, remote_url))
+        }
+        GitError::UnAuthorized(message) => {
+            GitError::UnAuthorized(sanitize_remote_error_reason(&message, remote_url))
+        }
+        GitError::CustomError(message) => {
+            GitError::CustomError(sanitize_remote_error_reason(&message, remote_url))
+        }
+        GitError::IOError(error) => GitError::IOError(std::io::Error::new(
+            error.kind(),
+            sanitize_remote_error_reason(&error.to_string(), remote_url),
+        )),
+        other => other,
+    }
 }
 
 fn redact_remote_spec_for_diagnostics(remote_url: &str) -> String {
@@ -300,9 +319,11 @@ fn render_ls_remote_output(data: &LsRemoteOutput, output: &OutputConfig) -> CliR
 
 #[cfg(test)]
 mod tests {
+    use git_internal::errors::GitError;
+
     use super::{
-        CompiledPattern, LsRemoteArgs, include_reference, sanitize_remote_error_reason,
-        visible_remote_display, visible_remote_url,
+        CompiledPattern, LsRemoteArgs, include_reference, sanitize_discovery_error,
+        sanitize_remote_error_reason, visible_remote_display, visible_remote_url,
     };
     use crate::internal::protocol::DiscRef;
 
@@ -406,5 +427,19 @@ mod tests {
 
         assert!(!sanitized.contains("user:secret"));
         assert!(sanitized.contains("[REDACTED]@example.com:repo.git"));
+    }
+
+    #[test]
+    fn discovery_error_redacts_url_credentials_in_source() {
+        let remote = "https://user:secret@example.invalid/repo.git";
+        let source = GitError::NetworkError(format!(
+            "Failed to send request: error sending request for url ({remote}/info/refs?service=git-upload-pack): dns error"
+        ));
+
+        let sanitized = sanitize_discovery_error(source, remote).to_string();
+
+        assert!(!sanitized.contains("user"));
+        assert!(!sanitized.contains("secret"));
+        assert!(sanitized.contains("https://example.invalid/repo.git"));
     }
 }

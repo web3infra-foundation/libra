@@ -42,17 +42,16 @@ async fn https_upload_pack_returns_pack_data() {
         .discovery_reference(UploadPack)
         .await
         .expect("discovery should succeed against public GitHub repo");
-    let want: Vec<String> = discovery
+    let main_ref = discovery
         .refs
         .iter()
-        .filter(|reference| reference.name().starts_with("refs/heads/"))
-        .map(|reference| reference.hash().to_string())
-        .collect();
-    assert!(!want.is_empty(), "expected branch refs to fetch");
+        .find(|reference| reference.name() == "refs/heads/main")
+        .expect("expected stable main branch ref");
+    let want = vec![main_ref.hash().to_string()];
 
-    let have = vec!["81a162e7b725bbad2adfe01879fd57e0119406b9".to_string()];
+    let have = Vec::new();
     let mut result_stream = client
-        .fetch_objects(&have, &want, None)
+        .fetch_objects(&have, &want, Some(1))
         .await
         .expect("upload-pack request should succeed");
 
