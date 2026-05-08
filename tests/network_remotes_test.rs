@@ -13,17 +13,8 @@ use libra::{
 };
 use url::Url;
 
-fn network_tests_enabled() -> bool {
-    std::env::var("LIBRA_TEST_GITHUB_TOKEN").is_ok_and(|value| !value.is_empty())
-}
-
 #[tokio::test]
 async fn https_discovery_upload_pack_lists_refs() {
-    if !network_tests_enabled() {
-        eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
-        return;
-    }
-
     let client = HttpsClient::from_url(
         &Url::parse("https://github.com/web3infra-foundation/mega.git/").unwrap(),
     );
@@ -44,11 +35,6 @@ async fn https_discovery_upload_pack_lists_refs() {
 
 #[tokio::test]
 async fn https_upload_pack_returns_pack_data() {
-    if !network_tests_enabled() {
-        eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
-        return;
-    }
-
     let client = HttpsClient::from_url(
         &Url::parse("https://github.com/web3infra-foundation/mega/").unwrap(),
     );
@@ -84,11 +70,6 @@ async fn https_upload_pack_returns_pack_data() {
 
 #[tokio::test]
 async fn github_lfs_batch_download_returns_response() {
-    if !network_tests_enabled() {
-        eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
-        return;
-    }
-
     let batch_request = BatchRequest {
         operation: Operation::Download,
         transfers: vec![lfs::LFS_TRANSFER_API.to_string()],

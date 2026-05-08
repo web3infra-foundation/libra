@@ -93,6 +93,8 @@ jobs:
       CARGO_TERM_COLOR: always
       RUSTUP_TOOLCHAIN: stable
       LIBRA_SKIP_WEB_BUILD: "1"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_BUILD_JOBS: "1"
 
     steps:
       - name: Checkout repository
@@ -187,6 +189,8 @@ jobs:
       CARGO_TERM_COLOR: always
       RUSTUP_TOOLCHAIN: stable
       LIBRA_SKIP_WEB_BUILD: "1"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_BUILD_JOBS: "1"
 
     steps:
       - name: Checkout repository
