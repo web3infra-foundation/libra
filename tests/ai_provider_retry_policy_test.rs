@@ -305,22 +305,43 @@ async fn non_retryable_errors_surface_immediately() {
 /// signature in the assertion message rather than being shadowed by
 /// a sibling rule. The signatures cover both `docs/improvement/opencode.md`
 /// stream-error codes (`server_is_overloaded`, `server_error`) and
-/// the HTTP-status branches (5xx + 429) called out at lines
-/// 1101-1109. Each signature is intentionally minimal (no overlapping
-/// status + code) so the wrapper exercises one branch per fixture.
+/// the HTTP-status branches (`429` + 5xx) called out at lines
+/// 1101-1110.
+///
+/// Each fixture is hand-picked so dropping its target rule from the
+/// wrapper's classifier would actually flip the signature into the
+/// non-retryable branch. Where a doc rule is a strict substring of
+/// another (`server_is_overloaded` overlaps the more permissive
+/// `overloaded` keyword), the fixture cannot achieve perfect
+/// isolation; the comment beside that signature documents the
+/// overlap so a reader does not assume the wrapper is more
+/// specific than it actually is.
 #[tokio::test]
 async fn every_retryable_signature_triggers_a_retry() {
     let signatures = [
         // Stream-error codes (doc table lines 1101-1102).
+        // Note: this fixture is *also* matched by the generic
+        // `overloaded` keyword the wrapper recognises for production
+        // provider quirks — a strict-isolation fixture is not
+        // achievable through public substring classification because
+        // `server_is_overloaded` ⊃ `overloaded` by design.
         "server_is_overloaded",
         "server_error: backend stalled",
-        // HTTP-status branches (doc rule line 1109).
+        // HTTP-status branches (doc rule line 1109): each phrasing
+        // is chosen so the only retryable-needle hit is the numeric
+        // `status XYZ` substring. None of them contains `timeout`,
+        // `rate limit`, `unavailable`, or any other sibling needle.
+        "status 500 internal failure",
         "status 502 bad gateway",
-        "status 503 service unavailable",
-        "status 504 gateway timeout",
-        "status 500 internal server error",
-        // 429 rate-limit branch (line 1110).
-        "429 rate limit exceeded",
+        "status 503 backend down",
+        "status 504 gateway down",
+        // `status 429` numeric branch — `too many requests` carries
+        // no other retryable needles, so this isolates the numeric
+        // status path from the bare `rate limit` keyword.
+        "status 429 too many requests",
+        // `rate limit` keyword path (line 1110) without an HTTP
+        // status prefix, so the keyword is the only matching needle.
+        "rate limit exceeded by upstream",
     ];
 
     for signature in signatures {

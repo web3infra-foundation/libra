@@ -126,12 +126,13 @@ impl CompletionModel for OverflowOnceModel {
     ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
         let attempt = self.calls.fetch_add(1, Ordering::SeqCst);
         if attempt == 0 {
-            // The taxonomy treats `ContextOverflow` as a non-retryable
-            // signature, so the wrapping `RetryingCompletionModel`
-            // surfaces it on the first attempt without burning the
-            // transient retry budget. `is_retryable_provider_message`
-            // does not match `context_length_exceeded`, so the
-            // wrapper correctly classifies this as non-retryable.
+            // ContextOverflow is non-retryable through the transient
+            // retry budget, so the wrapping `RetryingCompletionModel`
+            // must surface this error on the first attempt without
+            // consuming any retries. The orchestrator then classifies
+            // the surfaced error via the public taxonomy
+            // (`parse_api_error`) and routes it through the dedicated
+            // compaction branch.
             return Err(CompletionError::ProviderError(
                 self.overflow_message.clone(),
             ));
