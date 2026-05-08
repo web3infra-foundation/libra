@@ -8,7 +8,7 @@ use regex::Regex;
 use serde::Serialize;
 
 use crate::{
-    command::fetch::RemoteClient,
+    command::fetch::{RemoteClient, redact_url_credentials},
     git_protocol::ServiceType::UploadPack,
     internal::{config::ConfigKv, protocol::DiscRef},
     utils::{
@@ -136,7 +136,7 @@ async fn run_ls_remote(args: LsRemoteArgs) -> Result<LsRemoteOutput, LsRemoteErr
 
     Ok(LsRemoteOutput {
         remote: remote_display,
-        url: remote_url,
+        url: visible_remote_url(&remote_url),
         heads_only: args.heads,
         tags_only: args.tags,
         refs_only: args.refs,
@@ -165,6 +165,10 @@ fn compile_patterns(patterns: &[String]) -> Result<Vec<CompiledPattern>, LsRemot
         .iter()
         .map(|pattern| CompiledPattern::new(pattern))
         .collect()
+}
+
+fn visible_remote_url(remote_url: &str) -> String {
+    redact_url_credentials(remote_url)
 }
 
 struct CompiledPattern {
@@ -226,11 +230,12 @@ fn include_reference(
     if args.refs && (refname == "HEAD" || refname.ends_with("^{}")) {
         return false;
     }
-    if args.heads && !refname.starts_with("refs/heads/") {
-        return false;
-    }
-    if args.tags && !refname.starts_with("refs/tags/") {
-        return false;
+    if args.heads || args.tags {
+        let matches_heads = args.heads && refname.starts_with("refs/heads/");
+        let matches_tags = args.tags && refname.starts_with("refs/tags/");
+        if !matches_heads && !matches_tags {
+            return false;
+        }
     }
     patterns.is_empty() || patterns.iter().any(|pattern| pattern.matches(refname))
 }
@@ -254,7 +259,7 @@ fn render_ls_remote_output(data: &LsRemoteOutput, output: &OutputConfig) -> CliR
 
 #[cfg(test)]
 mod tests {
-    use super::{CompiledPattern, LsRemoteArgs, include_reference};
+    use super::{CompiledPattern, LsRemoteArgs, include_reference, visible_remote_url};
     use crate::internal::protocol::DiscRef;
 
     fn disc_ref(refname: &str) -> DiscRef {
@@ -287,5 +292,31 @@ mod tests {
             &[]
         ));
         assert!(include_reference(&disc_ref("refs/tags/v1.0"), &args, &[]));
+    }
+
+    #[test]
+    fn heads_and_tags_filters_use_union() {
+        let args = LsRemoteArgs {
+            heads: true,
+            tags: true,
+            refs: false,
+            repository: "origin".to_string(),
+            patterns: vec![],
+        };
+        assert!(include_reference(&disc_ref("refs/heads/main"), &args, &[]));
+        assert!(include_reference(&disc_ref("refs/tags/v1.0"), &args, &[]));
+        assert!(!include_reference(&disc_ref("HEAD"), &args, &[]));
+    }
+
+    #[test]
+    fn visible_remote_url_redacts_http_credentials() {
+        assert_eq!(
+            visible_remote_url("https://token@example.com/repo.git"),
+            "https://example.com/repo.git"
+        );
+        assert_eq!(
+            visible_remote_url("https://user:secret@example.com/repo.git"),
+            "https://example.com/repo.git"
+        );
     }
 }

@@ -66,6 +66,53 @@ fn ls_remote_heads_pattern_filters_refs() {
 }
 
 #[test]
+fn ls_remote_heads_and_tags_returns_union() {
+    let remote = create_committed_repo_via_cli();
+    let outside = tempdir().expect("failed to create outside cwd");
+    let tag_output = run_libra_command(&["tag", "v1.0"], remote.path());
+    assert_cli_success(&tag_output, "tag creation should succeed");
+    let remote_path = remote.path().to_string_lossy().to_string();
+
+    let output = run_libra_command(
+        &["ls-remote", "--heads", "--tags", &remote_path],
+        outside.path(),
+    );
+    assert_cli_success(&output, "ls-remote --heads --tags should succeed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\trefs/heads/main"),
+        "expected branch ref in union output, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("\trefs/tags/v1.0"),
+        "expected tag ref in union output, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("\tHEAD"),
+        "combined heads/tags filters should exclude HEAD, got: {stdout}"
+    );
+}
+
+#[test]
+fn ls_remote_tags_lists_local_libra_tags() {
+    let remote = create_committed_repo_via_cli();
+    let outside = tempdir().expect("failed to create outside cwd");
+    let tag_output = run_libra_command(&["tag", "v1.0"], remote.path());
+    assert_cli_success(&tag_output, "tag creation should succeed");
+    let remote_path = remote.path().to_string_lossy().to_string();
+
+    let output = run_libra_command(&["ls-remote", "--tags", &remote_path], outside.path());
+    assert_cli_success(&output, "ls-remote --tags should succeed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\trefs/tags/v1.0"),
+        "expected local Libra tag ref, got: {stdout}"
+    );
+}
+
+#[test]
 fn ls_remote_json_reports_entries() {
     let remote = create_committed_repo_via_cli();
     let outside = tempdir().expect("failed to create outside cwd");
