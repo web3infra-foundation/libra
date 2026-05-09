@@ -40,7 +40,10 @@ window.LIBRA_API = (() => {
   // ── Repository ───────────────────────────────────────────────────────────
   const repository = {
     repo_id: "rp_8f4c1b",
-    slug: "kepler-ledger",            // URL-safe; CLI scheme parses host as the slug
+    slug: "kepler-ledger",            // URL-safe; namespaced under clone_domain.
+    clone_domain: "code.example.com", // Domain-qualified clone scheme uses
+                                      // libra+cloud://<clone-domain>/<slug>
+                                      // per docs/improvement/publish.md:273+.
     name: "kepler-ledger",
     default_branch: "main",
     head_sha: "9a1f3e2c",

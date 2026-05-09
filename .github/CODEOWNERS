@@ -1,0 +1,23 @@
+# Default fallback — repo maintainers
+*                                       @web3infra-foundation/libra-maintainers
+
+# Command implementations
+/src/command/                           @web3infra-foundation/libra-maintainers
+/src/cli.rs                             @web3infra-foundation/libra-maintainers
+
+# Internal subsystems
+/src/internal/                          @web3infra-foundation/libra-maintainers
+/src/internal/ai/                       @web3infra-foundation/libra-ai-maintainers
+/src/internal/tui/                      @web3infra-foundation/libra-ai-maintainers
+
+# Compatibility track (this plan)
+/COMPATIBILITY.md                       @web3infra-foundation/libra-maintainers
+/docs/improvement/compatibility/        @web3infra-foundation/libra-maintainers
+
+# CI / governance
+/.github/                               @web3infra-foundation/libra-maintainers
+/.gitattributes                         @web3infra-foundation/libra-maintainers
+
+# Documentation
+/docs/                                  @web3infra-foundation/libra-maintainers
+/docs/improvement/agent.md              @web3infra-foundation/libra-ai-maintainers

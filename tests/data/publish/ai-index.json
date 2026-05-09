@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "siteId": "00000000-0000-0000-0000-0000publish01",
+  "revisionOid": "abcdef0123456789abcdef0123456789abcdef01",
+  "objects": [
+    {
+      "objectType": "Intent",
+      "objectId": "intent-2026-05-09-001",
+      "layer": "snapshot",
+      "r2Key": "11111111-2222-3333-4444-555555555555/publish/sites/00000000-0000-0000-0000-0000publish01/revisions/abcdef0123456789abcdef0123456789abcdef01/ai/objects/snapshot/Intent/intent-2026-05-09-001.json",
+      "payloadSha256": "a1c2d8b6e5fa20f4e6cb2c3812d3deada3fdabfd3b6f63015b0c0c1f88ae5a47"
+    },
+    {
+      "objectType": "Run",
+      "objectId": "run-2026-05-09-001",
+      "layer": "snapshot",
+      "r2Key": "11111111-2222-3333-4444-555555555555/publish/sites/00000000-0000-0000-0000-0000publish01/revisions/abcdef0123456789abcdef0123456789abcdef01/ai/objects/snapshot/Run/run-2026-05-09-001.json",
+      "payloadSha256": "20d4deb8b04a87a2eb20d1d9ed6df8a35c0e60a45c7e3a34d23c5f4cc7e3f410"
+    }
+  ],
+  "bundles": [
+    {
+      "aiVersionId": "ai-version-2026-05-09-001",
+      "bundleKey": "11111111-2222-3333-4444-555555555555/publish/sites/00000000-0000-0000-0000-0000publish01/revisions/abcdef0123456789abcdef0123456789abcdef01/ai/bundles/ai-version-2026-05-09-001.json",
+      "objectCount": 4,
+      "createdAt": "2026-05-09T12:55:00Z"
+    }
+  ],
+  "redaction": {
+    "mode": "default",
+    "rulesVersion": "2026.05.09-1",
+    "removedFieldCount": 6,
+    "removedFieldsByType": {
+      "Run": ["payload.providerRawResponse", "payload.absoluteWorkspacePath"]
+    },
+    "objectCountsByType": {
+      "Intent": 1,
+      "Run": 1
+    }
+  },
+  "generatedAt": "2026-05-09T13:00:00Z"
+}

@@ -1,7 +1,8 @@
 /* global React, AppShell, PageHeader, StatusPill, RefPicker, CopyButton,
    useHashRoute, useViewerMode, fmtRelative, shortSha, fmtBytes */
 // Publish page — V1 hero. Recovery / clone entry point.
-// Command shape: libra clone libra+cloud://<slug>[?ref=...|?revision=...]
+// Command shape: libra clone libra+cloud://<clone-domain>/<slug>[?ref=...|?revision=...]
+// per docs/improvement/publish.md "Clone domain 方案" (line 273+).
 
 const { useState, useMemo } = React;
 
@@ -16,10 +17,16 @@ function PublishPage() {
 
   const cur = refs.find(r => r.name === refName) || refs.find(r => r.is_default);
 
-  // Variants of the clone command, all using libra+cloud:// scheme.
+  // Variants of the clone command, all using the domain-qualified
+  // libra+cloud://<clone-domain>/<slug> scheme. Falls back to a
+  // placeholder clone-domain when the mock dataset doesn't carry
+  // one yet (Phase 6+ wires the real value through).
   const slug = repo.slug;
+  const cloneDomain = repo.clone_domain || "<clone-domain>";
+  const repoId = repo.repo_id || repo.id || "<repo-id>";
   const cloneVariants = useMemo(() => {
-    const base = `libra+cloud://${slug}`;
+    const base = `libra+cloud://${cloneDomain}/${slug}`;
+    const stable = `libra+cloud://${cloneDomain}/repo/${repoId}`;
     return [
       {
         id: "default",
@@ -43,8 +50,14 @@ function PublishPage() {
           ? `Frozen at oid ${shortSha(revision)}`
           : `Use a full commit oid; the keyword \`latest\` resolves at clone time.`,
       },
+      {
+        id: "stable",
+        title: "Stable repo URL — survives slug rename",
+        cmd: `libra clone ${stable}${localPath ? " " + localPath : ""}`,
+        notes: `Domain-qualified by repo_id; rename-proof.`,
+      },
     ];
-  }, [slug, localPath, repo.default_branch, repo.head_sha, cur, revision]);
+  }, [cloneDomain, slug, repoId, localPath, repo.default_branch, repo.head_sha, cur, revision]);
 
   return (
     <AppShell>
