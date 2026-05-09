@@ -12,7 +12,7 @@ import {
   parseRevisionOid,
   parseSlug,
 } from "@/lib/server/validate";
-import { badRequest } from "@/lib/server/errors";
+import { PublishApiError, badRequest } from "@/lib/server/errors";
 
 export const runtime = "edge";
 export const dynamic = "force-dynamic";
@@ -36,9 +36,9 @@ export async function GET(
     if (revisionRaw) parseRevisionOid(revisionRaw);
 
     // Codex pass-13 P2 + pass-14 P2: AI versions cursor uses
-    // `objectId` (the ai_version_id) and the optional `revision`
-    // pointer. Reject empty cursors, missing `objectId`, and any
-    // stray fields from sibling routes.
+    // `objectId` (the ai_version_id) and `revision` (the snapshot
+    // it was generated against). Reject empty cursors, missing
+    // fields, and any stray fields from sibling routes.
     if (cursor) {
       const allowed = new Set(["objectId", "revision"]);
       const stray = Object.keys(cursor).filter((k) => !allowed.has(k));
@@ -52,6 +52,18 @@ export async function GET(
       }
     }
     const revision = await resolveRevision(bindings.db, site, refRaw, revisionRaw);
+
+    // Codex pass-17 P2: stale-cursor / moving-ref guard. A cursor
+    // generated against a previous revision must not be applied to
+    // a newer revision the ref now points at; surface 409 so the
+    // client restarts pagination cleanly.
+    if (cursor && (!cursor.revision || cursor.revision !== revision.revision_oid)) {
+      throw new PublishApiError(
+        "REVISION_NOT_FOUND",
+        409,
+        "ai-versions cursor was generated against a different revision; restart pagination",
+      );
+    }
     const after = cursor?.objectId ? parseAiVersionId(cursor.objectId) : undefined;
 
     const result = await listAiVersions(bindings.db, site.site_id, revision.revision_oid, limit, after);

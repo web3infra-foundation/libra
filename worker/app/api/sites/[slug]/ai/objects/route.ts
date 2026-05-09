@@ -14,7 +14,7 @@ import {
   parseRevisionOid,
   parseSlug,
 } from "@/lib/server/validate";
-import { badRequest } from "@/lib/server/errors";
+import { PublishApiError, badRequest } from "@/lib/server/errors";
 
 export const runtime = "edge";
 export const dynamic = "force-dynamic";
@@ -56,6 +56,22 @@ export async function GET(
       }
     }
     const revision = await resolveRevision(bindings.db, site, refRaw, revisionRaw);
+
+    // Codex pass-17 P2: a cursor ALWAYS pins the revision it was
+    // generated against. If the caller supplied `?ref=main` and the
+    // ref has advanced since the previous page resolved, the
+    // resolved revision will differ from `cursor.revision`. Refuse
+    // to silently apply the old cursor to the new revision —
+    // returning 409 lets the client restart pagination cleanly. The
+    // server-issued cursor never omits `revision`, so a missing
+    // value means a manually-constructed cursor; reject those too.
+    if (cursor && (!cursor.revision || cursor.revision !== revision.revision_oid)) {
+      throw new PublishApiError(
+        "REVISION_NOT_FOUND",
+        409,
+        "ai-objects cursor was generated against a different revision; restart pagination",
+      );
+    }
 
     const afterObjectType = cursor?.objectType ? parseObjectType(cursor.objectType) : undefined;
     const afterObjectId = cursor?.objectId ? parseObjectId(cursor.objectId) : undefined;
