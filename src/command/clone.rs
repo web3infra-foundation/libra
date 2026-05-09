@@ -119,6 +119,9 @@ pub struct CloneOutput {
     pub shallow: bool,
     /// Non-fatal warnings (empty remote, init warnings, etc.).
     pub warnings: Vec<String>,
+    /// Worktree-relative paths of `.libraignore` files written by converting
+    /// `.gitignore` files from the source repository.  Empty for bare clones.
+    pub gitignore_converted: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -529,6 +532,18 @@ fn render_clone_result(result: &CloneOutput, output: &OutputConfig) -> CliResult
         );
     }
 
+    // .gitignore → .libraignore conversion tip.
+    if !result.gitignore_converted.is_empty() {
+        println!();
+        let n = result.gitignore_converted.len();
+        let plural = if n == 1 { "" } else { "s" };
+        println!(
+            "Tip: {n} .gitignore file{plural} converted to .libraignore — \
+             run 'libra add .libraignore' (or 'libra add -A') to track them, \
+             then 'libra commit' to record the change."
+        );
+    }
+
     // Warnings on stderr.
     for w in &result.warnings {
         eprintln!("warning: {w}");
@@ -737,11 +752,16 @@ async fn clone_into_destination(
         setup_repository(remote_config.clone(), args.branch.clone(), !args.bare).await?;
 
     let mut warnings = init_output.warnings.clone();
+    let mut gitignore_converted = Vec::new();
     if !args.bare {
-        warnings.extend(
-            ignore_utils::convert_gitignore_files_to_libraignore(local_path, local_path)
-                .map_err(|source| CloneError::IgnoreFile { source })?,
-        );
+        let summary = ignore_utils::convert_gitignore_files_to_libraignore(local_path, local_path)
+            .map_err(|source| CloneError::IgnoreFile { source })?;
+        warnings.extend(summary.warnings);
+        gitignore_converted = summary
+            .converted
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
     }
 
     // Restore original directory before returning.
@@ -766,6 +786,7 @@ async fn clone_into_destination(
         ssh_key_detected: init_output.ssh_key_detected,
         shallow: args.depth.is_some(),
         warnings,
+        gitignore_converted,
     })
 }
 

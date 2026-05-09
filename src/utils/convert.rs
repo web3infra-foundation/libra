@@ -120,10 +120,8 @@ pub async fn convert_from_git_repository(
     if !is_bare {
         let target_root = env::current_dir()?;
         let source_root = source_worktree.as_deref().unwrap_or(target_root.as_path());
-        warnings.extend(ignore::convert_gitignore_files_to_libraignore(
-            source_root,
-            &target_root,
-        )?);
+        let summary = ignore::convert_gitignore_files_to_libraignore(source_root, &target_root)?;
+        warnings.extend(summary.warnings);
     }
 
     Ok(ConversionReport {

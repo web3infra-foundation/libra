@@ -89,14 +89,26 @@ pub fn ensure_root_libraignore(worktree: &Path) -> Result<(), IgnoreFileError> {
     })
 }
 
+/// Summary returned by [`convert_gitignore_files_to_libraignore`].
+pub struct IgnoreConversionSummary {
+    /// Worktree-relative paths of `.libraignore` files that were newly written
+    /// (either created from scratch or updated from the default stub).
+    pub converted: Vec<PathBuf>,
+    /// Non-fatal messages for locations where a user-owned `.libraignore` was
+    /// already present and was left unchanged.
+    pub warnings: Vec<String>,
+}
+
 /// Copies every `.gitignore` under `source_root` to a sibling `.libraignore` under `target_root`.
 ///
 /// Existing generated default `.libraignore` files are replaced; existing user-owned
 /// `.libraignore` files are preserved and reported as non-fatal warnings.
+/// Returns an [`IgnoreConversionSummary`] with the paths of newly written files and any warnings.
 pub fn convert_gitignore_files_to_libraignore(
     source_root: &Path,
     target_root: &Path,
-) -> Result<Vec<String>, IgnoreFileError> {
+) -> Result<IgnoreConversionSummary, IgnoreFileError> {
+    let mut converted = Vec::new();
     let mut warnings = Vec::new();
     for entry in WalkDir::new(source_root)
         .follow_links(false)
@@ -116,16 +128,30 @@ pub fn convert_gitignore_files_to_libraignore(
             }
         })?;
         let target = target_root.join(relative).with_file_name(LIBRAIGNORE_FILE);
-        copy_gitignore_to_libraignore(entry.path(), &target, &mut warnings)?;
+        if copy_gitignore_to_libraignore(entry.path(), &target, &mut warnings)? {
+            // Record the path relative to the target root for display purposes.
+            let display_path = target
+                .strip_prefix(target_root)
+                .unwrap_or(&target)
+                .to_path_buf();
+            converted.push(display_path);
+        }
     }
-    Ok(warnings)
+    Ok(IgnoreConversionSummary {
+        converted,
+        warnings,
+    })
 }
 
+/// Copy one `.gitignore` to a sibling `.libraignore`.
+///
+/// Returns `true` when the `.libraignore` was written (created or updated from the
+/// default stub) and `false` when an existing user-owned file was preserved.
 fn copy_gitignore_to_libraignore(
     source: &Path,
     target: &Path,
     warnings: &mut Vec<String>,
-) -> Result<(), IgnoreFileError> {
+) -> Result<bool, IgnoreFileError> {
     let source_content = fs::read(source).map_err(|read_error| IgnoreFileError::Read {
         path: source.to_path_buf(),
         source: read_error,
@@ -133,7 +159,7 @@ fn copy_gitignore_to_libraignore(
 
     if !target.exists() {
         write_libraignore(target, &source_content)?;
-        return Ok(());
+        return Ok(true);
     }
 
     let existing = fs::read(target).map_err(|read_error| IgnoreFileError::Read {
@@ -143,8 +169,9 @@ fn copy_gitignore_to_libraignore(
     if existing == DEFAULT_LIBRAIGNORE_CONTENT || existing == source_content {
         if existing != source_content {
             write_libraignore(target, &source_content)?;
+            return Ok(true);
         }
-        return Ok(());
+        return Ok(false);
     }
 
     warnings.push(format!(
@@ -152,7 +179,7 @@ fn copy_gitignore_to_libraignore(
         target.display(),
         source.display()
     ));
-    Ok(())
+    Ok(false)
 }
 
 fn write_libraignore(target: &Path, content: &[u8]) -> Result<(), IgnoreFileError> {
@@ -273,6 +300,58 @@ mod tests {
 
     fn build_index() -> Index {
         Index::load(crate::utils::path::index()).unwrap()
+    }
+
+    /// Scenario: a fresh repo with two `.gitignore` files (root + subdirectory).
+    /// `convert_gitignore_files_to_libraignore` must create both `.libraignore`
+    /// siblings and report them in `IgnoreConversionSummary::converted`.
+    #[test]
+    fn conversion_reports_newly_created_libraignore_files() {
+        let repo = tempdir().unwrap();
+        let root = repo.path();
+        let sub = root.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(root.join(".gitignore"), "*.tmp\n").unwrap();
+        fs::write(sub.join(".gitignore"), "build/\n").unwrap();
+
+        let summary = convert_gitignore_files_to_libraignore(root, root).unwrap();
+
+        // Both files should be reported as converted (no pre-existing .libraignore).
+        assert_eq!(summary.converted.len(), 2, "expected 2 converted paths");
+        assert!(summary.warnings.is_empty(), "expected no warnings");
+
+        // The created files should contain the source content.
+        assert_eq!(fs::read(root.join(".libraignore")).unwrap(), b"*.tmp\n");
+        assert_eq!(fs::read(sub.join(".libraignore")).unwrap(), b"build/\n");
+    }
+
+    /// Scenario: when a user-owned `.libraignore` already exists (content differs from
+    /// the default stub AND from `.gitignore`), the conversion must skip it, emit a
+    /// warning, and NOT include it in `converted`.
+    #[test]
+    fn conversion_preserves_user_owned_libraignore_and_warns() {
+        let repo = tempdir().unwrap();
+        let root = repo.path();
+        fs::write(root.join(".gitignore"), "*.tmp\n").unwrap();
+        // Write a user-owned .libraignore with different content.
+        fs::write(root.join(".libraignore"), "custom_rule/\n").unwrap();
+
+        let summary = convert_gitignore_files_to_libraignore(root, root).unwrap();
+
+        assert!(
+            summary.converted.is_empty(),
+            "user-owned .libraignore must not be reported as converted"
+        );
+        assert_eq!(
+            summary.warnings.len(),
+            1,
+            "expected one preservation warning"
+        );
+        // The original user content must be intact.
+        assert_eq!(
+            fs::read(root.join(".libraignore")).unwrap(),
+            b"custom_rule/\n"
+        );
     }
 
     #[test]
