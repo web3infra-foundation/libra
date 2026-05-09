@@ -5,9 +5,11 @@ import {
   ApiError,
   fetchAiObject,
   fetchAiObjects,
+  fetchAiVersionDetail,
   fetchAiVersions,
   type AiObjectsList,
   type AiObjectDetail,
+  type AiVersionDetail,
   type AiVersionsList,
 } from "@/lib/client/api";
 import { cn, formatDate } from "@/lib/utils";
@@ -58,6 +60,12 @@ export function AiBrowser({ slug, refName }: Props) {
   const [versions, setVersions] = useState<AiVersionsList | null>(null);
   const [selected, setSelected] = useState<{ objectType: string; objectId: string } | null>(null);
   const [detail, setDetail] = useState<AiObjectDetail | null>(null);
+  // Codex pass-4 P2: bundle detail panel — clicking a bundle in the
+  // sidebar fetches `/api/sites/:slug/ai/versions/:id` and shows the
+  // redacted bundle JSON next to the object list.
+  const [openBundleId, setOpenBundleId] = useState<string | null>(null);
+  const [bundleDetail, setBundleDetail] = useState<AiVersionDetail | null>(null);
+  const [loadingBundleDetail, setLoadingBundleDetail] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loadingObjects, setLoadingObjects] = useState(false);
   const [loadingDetail, setLoadingDetail] = useState(false);
@@ -113,6 +121,31 @@ export function AiBrowser({ slug, refName }: Props) {
     };
   }, [slug, refName, selected]);
 
+  useEffect(() => {
+    if (!openBundleId) {
+      setBundleDetail(null);
+      return;
+    }
+    let cancelled = false;
+    setLoadingBundleDetail(true);
+    fetchAiVersionDetail(slug, openBundleId)
+      .then((d) => {
+        if (cancelled) return;
+        setBundleDetail(d);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setError(err instanceof ApiError ? err.message : "failed to load bundle detail");
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setLoadingBundleDetail(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [slug, openBundleId]);
+
   const objectGroupsByType = useMemo(() => {
     if (!objects) return new Map<string, number>();
     const groups = new Map<string, number>();
@@ -164,14 +197,29 @@ export function AiBrowser({ slug, refName }: Props) {
         <Section title="Bundles">
           {versions && versions.versions.length > 0 ? (
             <ul className="space-y-1">
-              {versions.versions.map((entry) => (
-                <li key={entry.aiVersionId} className="text-xs">
-                  <p className="libra-mono truncate">{entry.aiVersionId}</p>
-                  <p className="libra-text-faint">
-                    {entry.objectCount.toLocaleString()} objects · redaction {entry.redactionMode}
-                  </p>
-                </li>
-              ))}
+              {versions.versions.map((entry) => {
+                const isOpen = openBundleId === entry.aiVersionId;
+                return (
+                  <li key={entry.aiVersionId} className="text-xs">
+                    <button
+                      type="button"
+                      onClick={() => setOpenBundleId(isOpen ? null : entry.aiVersionId)}
+                      className={cn(
+                        "block w-full rounded-sm px-1 py-0.5 text-left hover:bg-[var(--surface-2)]",
+                        isOpen ? "bg-[var(--surface-3)]" : "",
+                      )}
+                    >
+                      <p className="libra-mono truncate">{entry.aiVersionId}</p>
+                      <p className="libra-text-faint">
+                        {entry.objectCount.toLocaleString()} objects · redaction {entry.redactionMode}
+                      </p>
+                      <p className="libra-text-faint">
+                        sha {entry.bundleSha256.slice(0, 12)}
+                      </p>
+                    </button>
+                  </li>
+                );
+              })}
             </ul>
           ) : (
             <p className="text-xs libra-text-muted">No bundles in this revision.</p>
@@ -182,6 +230,13 @@ export function AiBrowser({ slug, refName }: Props) {
       <section className="space-y-4">
         {error && (
           <div className="libra-card libra-card-pad text-sm text-[var(--bad)]">{error}</div>
+        )}
+        {openBundleId && (
+          <BundleDetail
+            detail={bundleDetail}
+            loading={loadingBundleDetail}
+            onClose={() => setOpenBundleId(null)}
+          />
         )}
         <div className="grid gap-4 md:grid-cols-2">
           <ObjectList
@@ -289,6 +344,48 @@ function ObjectList({
           );
         })}
       </ul>
+    </div>
+  );
+}
+
+function BundleDetail({
+  detail,
+  loading,
+  onClose,
+}: {
+  readonly detail: AiVersionDetail | null;
+  readonly loading: boolean;
+  readonly onClose: () => void;
+}) {
+  return (
+    <div className="libra-card libra-card-pad space-y-3">
+      <header className="flex items-baseline justify-between gap-3">
+        <div>
+          <p className="lb-eyebrow">AI bundle</p>
+          {detail ? (
+            <>
+              <p className="lb-h2 libra-mono">{detail.version.aiVersionId}</p>
+              <p className="text-xs libra-text-muted">
+                {detail.version.objectCount.toLocaleString()} objects · redaction{" "}
+                {detail.version.redactionMode} · sha{" "}
+                {detail.version.bundleSha256.slice(0, 12)}
+              </p>
+            </>
+          ) : (
+            <p className="text-sm libra-text-muted">
+              {loading ? "Loading bundle…" : "Select a bundle from the sidebar."}
+            </p>
+          )}
+        </div>
+        <button type="button" onClick={onClose} className="lb-link text-xs">
+          Close
+        </button>
+      </header>
+      {detail && (
+        <pre className="libra-codebox max-h-[40vh] overflow-auto text-xs">
+          <code>{JSON.stringify(detail.bundle, null, 2)}</code>
+        </pre>
+      )}
     </div>
   );
 }

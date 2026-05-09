@@ -55,22 +55,38 @@ fn embed_does_not_carry_generated_or_secret_paths() {
     assert!(!embed_path_is_allowed("app/.env"));
     assert!(!embed_path_is_allowed("node_modules/foo/package.json"));
 
-    // Codex pass-3 P2: credential-bearing filenames must be denied
-    // wherever they appear in the worker tree.
+    // Codex pass-3 P2 + pass-4 P1: credential-bearing filenames
+    // must be denied wherever they appear in the worker tree, and
+    // SSH key prefixes must match suffixed variants too.
     assert!(!embed_path_is_allowed("id_rsa"));
     assert!(!embed_path_is_allowed("config/id_rsa.pub"));
     assert!(!embed_path_is_allowed("keys/id_ed25519"));
+    assert!(!embed_path_is_allowed("keys/id_ed25519_work"));
+    assert!(!embed_path_is_allowed("keys/id_rsa_personal"));
+    assert!(!embed_path_is_allowed("keys/id_ecdsa-2024"));
+    assert!(!embed_path_is_allowed("keys/id_dsa.bak"));
     assert!(!embed_path_is_allowed("server.pem"));
     assert!(!embed_path_is_allowed("server.PEM"));
     assert!(!embed_path_is_allowed("api.key"));
+    // Codex pass-4 P3: tighten "token" / "secret" to credential-
+    // style filenames; design-system token assets pass through.
     assert!(!embed_path_is_allowed("Cloudflare-Token.json"));
+    assert!(!embed_path_is_allowed("auth_token.txt"));
+    assert!(!embed_path_is_allowed("api.token.json"));
     assert!(!embed_path_is_allowed("our-secret.txt"));
+    assert!(!embed_path_is_allowed("auth_secret.json"));
+    assert!(!embed_path_is_allowed("app.secret.config"));
     assert!(!embed_path_is_allowed("aws-credentials.json"));
     assert!(!embed_path_is_allowed("nested/dir/has-secret.json"));
     // Sanity-check that allowed filenames do not collide with any
-    // deny pattern.
+    // deny pattern. `tokens.css`, `tokens.ts`, design-token assets,
+    // and component names containing "secret" / "token" must pass.
     assert!(embed_path_is_allowed("app/page.tsx"));
     assert!(embed_path_is_allowed("lib/server/d1.ts"));
+    assert!(embed_path_is_allowed("design/tokens.css"));
+    assert!(embed_path_is_allowed("design/tokens.ts"));
+    assert!(embed_path_is_allowed("components/SecretSauce.tsx"));
+    assert!(embed_path_is_allowed("components/TokenInput.tsx"));
 
     for path in WorkerTemplate::iter() {
         assert!(

@@ -1,10 +1,21 @@
 // LIBRA-MANAGED env types.
 //
-// `pnpm cf-typegen` generates `cloudflare-env.d.ts` from `wrangler.jsonc`
-// and is the runtime source of truth. This file is kept in source control
-// so `tsc --noEmit` succeeds before the user has run `cf-typegen`. If the
-// generated file is present it shadows this one (matching declarations
-// merge on `CloudflareEnv`).
+// `pnpm cf-typegen` generates `cloudflare-env.d.ts` from
+// `wrangler.jsonc` and is the runtime source of truth. The build
+// scripts in `package.json` ensure `cf-typegen` runs before `build`
+// and `deploy` so the deployed Worker always uses the generated
+// types.
+//
+// This file stays committed so `tsc --noEmit` succeeds for any
+// developer who clones the repo and runs `pnpm test` / lint before
+// `pnpm cf-typegen`. When the generated `cloudflare-env.d.ts` is
+// present it shadows this stub via declaration merging; the
+// generated declarations win and any drift between the two appears
+// as a TS error in the Worker tree.
+//
+// Codex pass-4 P3 (closed): the publish.md acceptance step
+// `pnpm --dir worker cf-typegen` MUST run before `build` /
+// `deploy` so the deployed Worker reads only generated types.
 
 interface CloudflareEnv {
   /** Static asset binding emitted by OpenNext / Next.js. */

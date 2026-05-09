@@ -73,6 +73,13 @@ export type AiVersionIndexWire = {
   objectCount: number;
   redactionMode: "default" | "strict";
   redactionRulesVersion: string;
+  /**
+   * Codex pass-4 P2: lowercase 64-char hex sha256 of the bundle JSON
+   * referenced by this row. Surfaced so clients (and contract round-
+   * trip tests) can compare R2 bodies, but the Worker performs the
+   * authoritative verification before responding.
+   */
+  bundleSha256: string;
   createdAt: string;
 };
 

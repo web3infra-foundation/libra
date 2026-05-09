@@ -452,11 +452,18 @@ pub struct PublishAiIndex {
 }
 
 /// One bundle reference inside a [`PublishAiIndex`].
+///
+/// Codex pass-4 P2: `bundle_sha256` carries the lowercase 64-char
+/// hex SHA-256 of the bundle JSON written to `bundle_key`. The
+/// Worker verifies the R2 body against this digest before serving,
+/// so a stale or tampered bundle cannot bypass the redaction
+/// metadata recorded with the index.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PublishAiIndexBundleEntry {
     pub ai_version_id: String,
     pub bundle_key: String,
+    pub bundle_sha256: String,
     pub object_count: u64,
     pub created_at: DateTime<Utc>,
 }

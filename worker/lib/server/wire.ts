@@ -124,6 +124,7 @@ export function aiVersionIndexToWire(row: AiVersionRow): AiVersionIndexWire {
     objectCount: row.object_count,
     redactionMode: row.redaction_mode,
     redactionRulesVersion: row.redaction_rules_version,
+    bundleSha256: row.bundle_sha256,
     createdAt: row.created_at,
   };
 }

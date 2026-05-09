@@ -62,14 +62,16 @@ use rust_embed::Embed;
 // these globs and the helper stay in lockstep.
 #[exclude = "**/*.pem"]
 #[exclude = "**/*.key"]
-#[exclude = "**/id_rsa"]
-#[exclude = "**/id_rsa.pub"]
-#[exclude = "**/id_ed25519"]
-#[exclude = "**/id_ed25519.pub"]
-#[exclude = "**/id_ecdsa"]
-#[exclude = "**/id_ecdsa.pub"]
-#[exclude = "**/*token*"]
-#[exclude = "**/*secret*"]
+#[exclude = "**/id_rsa*"]
+#[exclude = "**/id_dsa*"]
+#[exclude = "**/id_ecdsa*"]
+#[exclude = "**/id_ed25519*"]
+#[exclude = "**/*_token*"]
+#[exclude = "**/*-token*"]
+#[exclude = "**/*.token*"]
+#[exclude = "**/*_secret*"]
+#[exclude = "**/*-secret*"]
+#[exclude = "**/*.secret*"]
 #[exclude = "**/*credential*"]
 pub struct WorkerTemplate;
 
@@ -200,16 +202,23 @@ pub const EMBED_DENY_SEGMENTS: &[&str] = &[
 
 /// Pattern fragments that match credential-bearing filenames.
 ///
-/// Codex pass-3 P2: the gitignore + embed test were missing the
-/// `publish.md` deny rules for `*.pem`, `*.key`, `id_rsa*`,
-/// `id_ed25519*`, `*token*`, `*secret*`, `*credential*`. We mirror
-/// the gitignore entries here so the rust-embed step refuses to ship
-/// any of those even if a developer forgets to ignore them. Each
-/// entry is matched as a *case-insensitive substring* against every
-/// path segment.
-pub const EMBED_DENY_FILENAME_FRAGMENTS: &[&str] = &[
+/// Codex pass-4 P3: the previous `*token*` and `*secret*` patterns
+/// collided with legitimate design-token and design-secret-style
+/// filenames (e.g. `_design_reference/tokens.css`). We tighten the
+/// rule so a token / secret keyword only triggers when it is
+/// preceded by `_`, `-`, or `.` — the conventional separator for
+/// credential filenames such as `api_token`, `api-token.json`,
+/// `service.token`, `auth_secret`. Bare `tokens.css` no longer
+/// matches.
+pub const EMBED_DENY_FILENAME_BOUNDED_FRAGMENTS: &[&str] = &[
     "token",
     "secret",
+];
+
+/// Substrings denied without a leading separator. `credential` is
+/// always credential-bearing in our context (no design-system
+/// equivalent).
+pub const EMBED_DENY_FILENAME_FRAGMENTS: &[&str] = &[
     "credential",
 ];
 
@@ -217,14 +226,18 @@ pub const EMBED_DENY_FILENAME_FRAGMENTS: &[&str] = &[
 /// credential file. Compared case-insensitively.
 pub const EMBED_DENY_FILENAME_SUFFIXES: &[&str] = &[".pem", ".key"];
 
-/// Exact-match credential filenames.
-pub const EMBED_DENY_FILENAME_EXACT: &[&str] = &[
+/// Prefix-matched credential filenames.
+///
+/// Codex pass-4 P1: an earlier draft used exact-match only (`id_rsa`,
+/// `id_rsa.pub`, …). Real SSH keys are commonly named `id_rsa_work`,
+/// `id_ed25519_personal`, `id_ecdsa-2024`, etc. Switch to a
+/// case-insensitive prefix match so any segment that *starts with*
+/// one of these names is denied.
+pub const EMBED_DENY_FILENAME_PREFIXES: &[&str] = &[
     "id_rsa",
-    "id_rsa.pub",
-    "id_ed25519",
-    "id_ed25519.pub",
+    "id_dsa",
     "id_ecdsa",
-    "id_ecdsa.pub",
+    "id_ed25519",
 ];
 
 /// Returns true when `relative_path` contains any path segment that
@@ -268,13 +281,27 @@ pub fn embed_path_is_allowed(relative_path: &str) -> bool {
                 return false;
             }
         }
+        // Bounded fragments (token, secret) only match when preceded
+        // by a credential-style separator so design-token assets are
+        // not denied. The keyword is always allowed at the start of
+        // a segment because that's the design-system pattern
+        // (`tokens.css`, `tokens.ts`); a credential file
+        // conventionally writes `auth_token`, `api-secret`, etc.
+        for needle in EMBED_DENY_FILENAME_BOUNDED_FRAGMENTS {
+            for sep in ['_', '-', '.'] {
+                let bounded = format!("{sep}{needle}");
+                if lower.contains(&bounded) {
+                    return false;
+                }
+            }
+        }
         for suffix in EMBED_DENY_FILENAME_SUFFIXES {
             if lower.ends_with(suffix) {
                 return false;
             }
         }
-        for exact in EMBED_DENY_FILENAME_EXACT {
-            if lower == *exact {
+        for prefix in EMBED_DENY_FILENAME_PREFIXES {
+            if lower == *prefix || lower.starts_with(&format!("{prefix}.")) || lower.starts_with(&format!("{prefix}_")) || lower.starts_with(&format!("{prefix}-")) {
                 return false;
             }
         }

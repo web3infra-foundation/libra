@@ -232,11 +232,16 @@ export async function seedHappyPath(d1: FakeD1, r2: FakeR2, opts: SeedOptions = 
     edges: [],
   });
   await r2.put(bundleKey, bundleBody);
+  // Real bundle digest so the Worker's pass-4 P2 verification holds
+  // against the in-memory R2 fixture. The seed function computes the
+  // sha256 of the bundle body it just wrote to R2.
+  const bundleSha = await sha256Hex(bundleBody);
   d1.tables["publish_ai_versions"]!.push({
     site_id: SITE_ID,
     ai_version_id: "ai-version-2026-05-09-001",
     revision_oid: REVISION_OID,
     bundle_key: bundleKey,
+    bundle_sha256: bundleSha,
     object_count: 1,
     redaction_mode: "default",
     redaction_rules_version: "2026.05.09-1",

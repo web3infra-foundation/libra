@@ -225,6 +225,15 @@ CREATE TABLE IF NOT EXISTS publish_ai_versions (
     ai_version_id TEXT NOT NULL,
     revision_oid TEXT NOT NULL,
     bundle_key TEXT NOT NULL CHECK (length(bundle_key) > 0),
+    -- Bundle integrity (Codex pass-4 P2): the snapshot builder
+    -- writes the canonical bundle JSON to R2 and records its
+    -- sha256 here. The Worker MUST refuse to serve a bundle
+    -- whose R2 body does not hash to this digest, so a stale or
+    -- tampered R2 write cannot bypass the redaction policy
+    -- recorded alongside the index. The column is exactly 64
+    -- hex chars (lowercase) so a truncated digest never enters
+    -- the index.
+    bundle_sha256 TEXT NOT NULL CHECK (length(bundle_sha256) = 64),
     object_count INTEGER NOT NULL DEFAULT 0 CHECK (object_count >= 0),
     redaction_mode TEXT NOT NULL CHECK (redaction_mode IN ('default', 'strict')),
     redaction_rules_version TEXT NOT NULL,

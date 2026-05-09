@@ -12,6 +12,8 @@ import { GET as statusGet } from "@/app/api/sites/[slug]/status/route";
 import { GET as aiVersionsGet } from "@/app/api/sites/[slug]/ai/versions/route";
 import { GET as aiObjectsGet } from "@/app/api/sites/[slug]/ai/objects/route";
 import { GET as aiObjectGet } from "@/app/api/sites/[slug]/ai/objects/[type]/[id]/route";
+import { GET as aiVersionDetailGet } from "@/app/api/sites/[slug]/ai/versions/[id]/route";
+import { GET as aiGraphGet } from "@/app/api/sites/[slug]/ai/graph/route";
 
 const HOST = "code.example.com";
 
@@ -216,6 +218,49 @@ describe("/api/sites/[slug]/ai/*", () => {
     );
     const body = await response.json();
     expect(body.data.payload.payload.summary).toBe("Publish demo intent");
+  });
+
+  it("returns AI version detail without storage keys", async () => {
+    const response = await aiVersionDetailGet(
+      makeRequest("/api/sites/libra-demo/ai/versions/ai-version-2026-05-09-001"),
+      { params: Promise.resolve({ slug: "libra-demo", id: "ai-version-2026-05-09-001" }) },
+    );
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.data.version.aiVersionId).toBe("ai-version-2026-05-09-001");
+    expect(body.data.version.bundleSha256).toMatch(/^[0-9a-f]{64}$/);
+    // Codex pass-3 P1 + pass-4 P2: r2Key/bundleKey must not leak
+    // through the bundle payload, even though they are real fields
+    // in the canonical bundle JSON.
+    const serialised = JSON.stringify(body.data.bundle);
+    expect(serialised).not.toMatch(/r2Key/);
+    expect(serialised).not.toMatch(/bundleKey/);
+  });
+
+  it("returns the AI graph derived from the canonical bundle", async () => {
+    const response = await aiGraphGet(
+      makeRequest("/api/sites/libra-demo/ai/graph"),
+      { params: Promise.resolve({ slug: "libra-demo" }) },
+    );
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(Array.isArray(body.data.nodes)).toBe(true);
+    expect(body.data.nodes[0]?.objectType).toBe("Intent");
+  });
+
+  it("rejects a tampered bundle (sha mismatch) with R2_OBJECT_CORRUPT", async () => {
+    // Overwrite the bundle row's recorded digest so verification
+    // fails against the real R2 body — pass-4 P2 must surface a
+    // typed 500.
+    d1.tables["publish_ai_versions"]![0]!.bundle_sha256 =
+      "deadbeef".repeat(8);
+    const response = await aiVersionDetailGet(
+      makeRequest("/api/sites/libra-demo/ai/versions/ai-version-2026-05-09-001"),
+      { params: Promise.resolve({ slug: "libra-demo", id: "ai-version-2026-05-09-001" }) },
+    );
+    expect(response.status).toBe(500);
+    const body = await response.json();
+    expect(body).toMatchObject({ ok: false, code: "R2_OBJECT_CORRUPT" });
   });
 });
 

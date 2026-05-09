@@ -52,9 +52,14 @@ export async function GET(
       throw notFound("REVISION_NOT_FOUND", "AI bundle revision is not published");
     }
 
+    // Codex pass-4 P2: verify the bundle body against the digest
+    // recorded in `publish_ai_versions.bundle_sha256` so a stale or
+    // tampered R2 bundle cannot bypass the redaction policy
+    // recorded alongside the index.
     const rawBundle = await readPublishedJson<Record<string, unknown>>(
       bindings.bucket,
       versionRow.bundle_key,
+      versionRow.bundle_sha256,
     );
     // Codex pass-3 P1: the canonical AI bundle JSON carries
     // per-object `r2Key` and a top-level `bundleKey` so the CLI can

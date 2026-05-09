@@ -88,6 +88,13 @@ export type AiVersionRow = {
   readonly ai_version_id: string;
   readonly revision_oid: string;
   readonly bundle_key: string;
+  /**
+   * Codex pass-4 P2: lowercase hex sha256 of the bundle JSON the
+   * Worker reads from `bundle_key`. Verified against the R2 body
+   * before responding so a stale or tampered bundle cannot bypass
+   * the redaction policy recorded on this row.
+   */
+  readonly bundle_sha256: string;
   readonly object_count: number;
   readonly redaction_mode: "default" | "strict";
   readonly redaction_rules_version: string;
@@ -582,8 +589,8 @@ export async function listAiVersions(
     ? await db
         .prepare(
           `SELECT site_id, ai_version_id, revision_oid, bundle_key,
-                  object_count, redaction_mode, redaction_rules_version,
-                  schema_version, created_at
+                  bundle_sha256, object_count, redaction_mode,
+                  redaction_rules_version, schema_version, created_at
            FROM publish_ai_versions
            WHERE site_id = ? AND revision_oid = ? AND ai_version_id > ?
            ORDER BY ai_version_id LIMIT ?`,
@@ -593,8 +600,8 @@ export async function listAiVersions(
     : await db
         .prepare(
           `SELECT site_id, ai_version_id, revision_oid, bundle_key,
-                  object_count, redaction_mode, redaction_rules_version,
-                  schema_version, created_at
+                  bundle_sha256, object_count, redaction_mode,
+                  redaction_rules_version, schema_version, created_at
            FROM publish_ai_versions
            WHERE site_id = ? AND revision_oid = ?
            ORDER BY ai_version_id LIMIT ?`,

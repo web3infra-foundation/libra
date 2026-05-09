@@ -131,6 +131,21 @@ export const fetchAiVersions = (
   );
 };
 
+export type AiVersionDetail = {
+  readonly version: AiVersionIndexWire;
+  readonly revision: RevisionWire;
+  /**
+   * Bundle JSON, with `r2Key` / `bundleKey` storage keys redacted by
+   * the Worker (pass-3 P1). Shape mirrors the canonical
+   * `PublishAiBundle` minus storage pointers.
+   */
+  readonly bundle: Record<string, unknown>;
+};
+export const fetchAiVersionDetail = (slug: string, versionId: string) =>
+  request<AiVersionDetail>(
+    `/api/sites/${encodeURIComponent(slug)}/ai/versions/${encodeURIComponent(versionId)}`,
+  );
+
 export type AiObjectsList = {
   readonly revision: RevisionWire;
   readonly filter: { readonly objectType: string | null; readonly layer: string | null };

@@ -80,9 +80,14 @@ export async function GET(
     if (!versionRow) {
       throw notFound("BUNDLE_NOT_FOUND", "no AI bundle for this revision");
     }
+    // Codex pass-4 P2: verify the bundle body against the digest
+    // recorded in `publish_ai_versions.bundle_sha256` before
+    // building the graph, so a tampered R2 bundle cannot poison the
+    // graph view.
     const bundle = await readPublishedJson<BundleFromR2>(
       bindings.bucket,
       versionRow.bundle_key,
+      versionRow.bundle_sha256,
     );
 
     const nodes: ReadonlyArray<BundleObjectEntry> = bundle.objects ?? [];
