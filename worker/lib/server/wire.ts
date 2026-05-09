@@ -4,6 +4,8 @@ import type {
   AiVersionRow,
   DirEntry,
   FileRow,
+  PublishOverview,
+  PublishOverviewRefRow,
   RefRow,
   RevisionRow,
   SiteRow,
@@ -13,6 +15,8 @@ import type {
   AiObjectIndexWire,
   AiVersionIndexWire,
   FileEntryWire,
+  PublishOverviewRefWire,
+  PublishOverviewWire,
   RefWire,
   RevisionWire,
   SiteWire,
@@ -29,6 +33,8 @@ export {
   type AiObjectIndexWire,
   type AiVersionIndexWire,
   type FileEntryWire,
+  type PublishOverviewRefWire,
+  type PublishOverviewWire,
   type RefWire,
   type RevisionWire,
   type SiteWire,
@@ -126,6 +132,23 @@ export function aiVersionIndexToWire(row: AiVersionRow): AiVersionIndexWire {
     redactionRulesVersion: row.redaction_rules_version,
     bundleSha256: row.bundle_sha256,
     createdAt: row.created_at,
+  };
+}
+
+export function publishOverviewRefToWire(row: PublishOverviewRefRow): PublishOverviewRefWire {
+  return {
+    ...refToWire(row),
+    publishState: row.publish_state,
+    revisionCreatedAt: row.revision_created_at,
+    fileCount: row.file_count,
+    aiVersionsCount: row.ai_versions_count,
+  };
+}
+
+export function publishOverviewToWire(overview: PublishOverview): PublishOverviewWire {
+  return {
+    refs: overview.refs.map(publishOverviewRefToWire),
+    defaultRef: overview.defaultRef ? refToWire(overview.defaultRef) : null,
   };
 }
 

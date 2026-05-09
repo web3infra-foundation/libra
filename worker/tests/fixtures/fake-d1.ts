@@ -211,6 +211,28 @@ class FakePreparedStatement {
         .filter((row) => row["site_id"] === siteId && row["revision_oid"] === revisionOid)
         .sort((a, b) => sortBy(a, b, ["ai_version_id"]));
     }
+    // loadPublishOverview: revision projection used to colour the
+    // hero page table. Returns every revision for the site (status,
+    // file_count, created_at) so the helper can left-join in JS.
+    if (sql.startsWith("SELECT revision_oid, status, file_count, created_at")) {
+      const [siteId] = this.binds as [string];
+      return this.db.tables["publish_revisions"]!.filter(
+        (row) => row["site_id"] === siteId,
+      );
+    }
+    // loadPublishOverview: COUNT(*) of publish_ai_versions per
+    // revision so the table can render the AI-versions column without
+    // pulling every bundle row.
+    if (sql.startsWith("SELECT revision_oid, COUNT(*) AS n FROM publish_ai_versions")) {
+      const [siteId] = this.binds as [string];
+      const counts = new Map<string, number>();
+      for (const row of this.db.tables["publish_ai_versions"]!) {
+        if (row["site_id"] !== siteId) continue;
+        const oid = row["revision_oid"] as string;
+        counts.set(oid, (counts.get(oid) ?? 0) + 1);
+      }
+      return [...counts.entries()].map(([revision_oid, n]) => ({ revision_oid, n }));
+    }
     if (sql.startsWith("SELECT sync_run_id, site_id, status")) {
       const [siteId] = this.binds as [string];
       return this.db.tables["publish_sync_runs"]!

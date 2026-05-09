@@ -83,6 +83,33 @@ export type AiVersionIndexWire = {
   createdAt: string;
 };
 
+/**
+ * Per-ref publish overview row used by the hero / publish page.
+ * Extends `RefWire` with derived fields scoped to the same site:
+ *   - `publishState`: status of the revision the ref points at;
+ *     `null` when the revision row was deleted or never created
+ *     (should not happen in normal operation, but the UI shows
+ *     a neutral pill rather than crashing).
+ *   - `revisionCreatedAt`: when the revision snapshot was first
+ *     written to D1. Surfaced because `publish_refs.updated_at`
+ *     reflects the latest sync run that touched the ref, not the
+ *     point when the underlying snapshot landed.
+ *   - `fileCount`: file cardinality of the revision.
+ *   - `aiVersionsCount`: number of `publish_ai_versions` rows for
+ *     the same `(site_id, revision_oid)`.
+ */
+export type PublishOverviewRefWire = RefWire & {
+  publishState: "syncing" | "published" | "failed" | null;
+  revisionCreatedAt: string | null;
+  fileCount: number;
+  aiVersionsCount: number;
+};
+
+export type PublishOverviewWire = {
+  refs: readonly PublishOverviewRefWire[];
+  defaultRef: RefWire | null;
+};
+
 export type SyncRunWire = {
   syncRunId: string;
   status: "running" | "succeeded" | "failed";

@@ -667,6 +667,113 @@ export async function findAiVersion(
 }
 
 /* ------------------------------------------------------------------ *
+ *  Publish overview (hero page)
+ *
+ *  Aggregates per-ref publish state and AI-version counts so the
+ *  hero / "publish" page can render every ref + its current health
+ *  in a single Worker round-trip. The view is bounded by the repo's
+ *  ref count (low thousands at the absolute upper bound), and runs
+ *  three prepared queries:
+ *
+ *    1. publish_refs                 — all refs for the site.
+ *    2. publish_revisions            — status of every referenced
+ *                                      revision (in: clause keeps
+ *                                      this O(distinct revisions)).
+ *    3. publish_ai_versions          — count(*) per revision_oid.
+ *
+ *  All three queries are scoped to `site_id` so the Worker never
+ *  leaks across sites; cross-revision joins happen in JS so we
+ *  avoid synthesising large IN clauses. SQL strings stay fixed.
+ * ------------------------------------------------------------------ */
+
+export type PublishOverviewRefRow = RefRow & {
+  readonly publish_state: "syncing" | "published" | "failed" | null;
+  readonly revision_created_at: string | null;
+  readonly file_count: number;
+  readonly ai_versions_count: number;
+};
+
+export type PublishOverview = {
+  readonly refs: readonly PublishOverviewRefRow[];
+  /** Default ref row (for HEAD/clone-by-default rendering). Null
+   * when the site has no refs published yet. */
+  readonly defaultRef: RefRow | null;
+};
+
+export async function loadPublishOverview(
+  db: D1Database,
+  siteId: string,
+): Promise<PublishOverview> {
+  const refsResult = await db
+    .prepare(
+      `SELECT site_id, ref_name, ref_type, short_name, target_oid,
+              revision_oid, is_default, sync_run_id, schema_version,
+              updated_at
+       FROM publish_refs
+       WHERE site_id = ?
+       ORDER BY ref_type, short_name`,
+    )
+    .bind(siteId)
+    .all<RefRow>();
+  const refs = refsResult.results ?? [];
+  if (refs.length === 0) {
+    return { refs: [], defaultRef: null };
+  }
+
+  const revisionsResult = await db
+    .prepare(
+      `SELECT revision_oid, status, file_count, created_at
+       FROM publish_revisions
+       WHERE site_id = ?`,
+    )
+    .bind(siteId)
+    .all<{
+      readonly revision_oid: string;
+      readonly status: "syncing" | "published" | "failed";
+      readonly file_count: number;
+      readonly created_at: string;
+    }>();
+  const revisionByOid = new Map<
+    string,
+    { readonly status: "syncing" | "published" | "failed"; readonly file_count: number; readonly created_at: string }
+  >();
+  for (const row of revisionsResult.results ?? []) {
+    revisionByOid.set(row.revision_oid, {
+      status: row.status,
+      file_count: row.file_count,
+      created_at: row.created_at,
+    });
+  }
+
+  const aiCountsResult = await db
+    .prepare(
+      `SELECT revision_oid, COUNT(*) AS n
+       FROM publish_ai_versions
+       WHERE site_id = ?
+       GROUP BY revision_oid`,
+    )
+    .bind(siteId)
+    .all<{ readonly revision_oid: string; readonly n: number }>();
+  const aiCounts = new Map<string, number>();
+  for (const row of aiCountsResult.results ?? []) {
+    aiCounts.set(row.revision_oid, row.n);
+  }
+
+  const enriched: PublishOverviewRefRow[] = refs.map((row) => {
+    const rev = revisionByOid.get(row.revision_oid);
+    return {
+      ...row,
+      publish_state: rev?.status ?? null,
+      revision_created_at: rev?.created_at ?? null,
+      file_count: rev?.file_count ?? 0,
+      ai_versions_count: aiCounts.get(row.revision_oid) ?? 0,
+    };
+  });
+  const defaultRef = refs.find((r) => r.is_default === 1) ?? null;
+  return { refs: enriched, defaultRef };
+}
+
+/* ------------------------------------------------------------------ *
  *  Sync runs
  * ------------------------------------------------------------------ */
 

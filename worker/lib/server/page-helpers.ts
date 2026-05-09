@@ -9,6 +9,7 @@ import {
   findSiteBySlug,
   listDirEntries,
   listRefs,
+  loadPublishOverview,
   resolveRef,
   type RefRow,
   type SiteRow,
@@ -20,9 +21,11 @@ import type { FileEntryWire, RefWire, SiteWire } from "../wire-types";
 import {
   dirEntryToWire,
   fileToWire,
+  publishOverviewToWire,
   refToWire,
   revisionToWire,
   siteToWire,
+  type PublishOverviewWire,
   type RevisionWire,
 } from "./wire";
 import { headers } from "next/headers";
@@ -145,6 +148,20 @@ export async function resolveRefOrDefault(
     return findDefaultRef(ctx.bindings.db, ctx.site.site_id);
   }
   return null;
+}
+
+/**
+ * Load every published ref for the site, plus per-ref publish state
+ * and AI-version counts. The hero / publish page renders the entire
+ * set, so we intentionally skip pagination — the upper bound is the
+ * repository's ref cardinality (low thousands at most). All three
+ * underlying queries are scoped to the resolved site_id.
+ */
+export async function loadPublishOverviewForSite(
+  ctx: PageContext,
+): Promise<PublishOverviewWire> {
+  const overview = await loadPublishOverview(ctx.bindings.db, ctx.site.site_id);
+  return publishOverviewToWire(overview);
 }
 
 export async function loadRefsForSite(ctx: PageContext): Promise<readonly RefWire[]> {

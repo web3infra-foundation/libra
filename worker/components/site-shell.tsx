@@ -5,12 +5,13 @@ import { cn, shortRevision } from "@/lib/utils";
 
 type SiteShellProps = {
   readonly site: SiteWire;
-  readonly activeNav: "code" | "refs" | "ai" | "status";
+  readonly activeNav: "publish" | "code" | "refs" | "ai" | "status";
   readonly children: ReactNode;
 };
 
 export function SiteShell({ site, activeNav, children }: SiteShellProps) {
   const navItems: ReadonlyArray<{ key: SiteShellProps["activeNav"]; label: string; href: string }> = [
+    { key: "publish", label: "Publish", href: `/sites/${site.slug}/publish` },
     { key: "code", label: "Code", href: `/sites/${site.slug}` },
     { key: "refs", label: "Refs", href: `/sites/${site.slug}/refs` },
     { key: "ai", label: "AI Object Model", href: `/sites/${site.slug}/ai` },
