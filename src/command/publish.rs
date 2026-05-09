@@ -79,8 +79,11 @@ pub struct InitArgs {
     pub worker_name: Option<String>,
 
     /// Per-file preview cap in bytes. Files larger than this fall
-    /// back to metadata-only. Codex pass-8 P2: documented flag.
-    #[arg(long)]
+    /// back to metadata-only. Must be positive — pass `0` is rejected
+    /// because a zero cap defeats the purpose of code-preview
+    /// publishing. Codex pass-8 P2 + pass-9 P2: documented flag with
+    /// clap-side `> 0` validation.
+    #[arg(long, value_parser = parse_max_preview_bytes)]
     pub max_preview_bytes: Option<u64>,
 }
 
@@ -144,6 +147,25 @@ const NOT_YET_IMPLEMENTED: &str =
     "`libra publish` Phase 4 lands the implementation; the CLI surface is wired so the \
      command parses, but the executor is not yet ready. Track docs/improvement/publish.md \
      for the v1 release window.";
+
+/// clap value parser for `--max-preview-bytes`.
+///
+/// Codex pass-9 P2: enforce `> 0` at the parse layer so a zero value
+/// is caught before the stub runs. The SQL schema currently allows
+/// `>= 0`, but at the CLI level a zero cap publishes no file
+/// previews — that is unambiguously a misuse.
+fn parse_max_preview_bytes(raw: &str) -> Result<u64, String> {
+    let parsed: u64 = raw
+        .parse()
+        .map_err(|_| format!("'{raw}' is not a valid byte count"))?;
+    if parsed == 0 {
+        return Err(
+            "max-preview-bytes must be > 0; pass a positive byte count or omit the flag"
+                .to_string(),
+        );
+    }
+    Ok(parsed)
+}
 
 pub async fn execute(args: PublishArgs) -> CliResult<()> {
     let subcommand = match args.command {

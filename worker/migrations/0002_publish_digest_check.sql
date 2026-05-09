@@ -16,6 +16,27 @@
 -- error indistinguishable from the column-level CHECK so the Worker
 -- error envelope stays uniform.
 
+-- Codex pass-9 P2: enforce `max_preview_bytes > 0` at the trigger
+-- layer. The 0001 schema CHECKs only `>= 0`, but at the publish
+-- semantic level a zero cap publishes no previews and is treated as
+-- a misuse — the CLI rejects it via clap, and this trigger pins the
+-- invariant on databases that already applied 0001.
+CREATE TRIGGER IF NOT EXISTS publish_sites_max_preview_bytes_positive_insert
+    BEFORE INSERT ON publish_sites
+    FOR EACH ROW
+    WHEN NEW.max_preview_bytes <= 0
+BEGIN
+    SELECT RAISE(ABORT, 'publish_sites.max_preview_bytes must be > 0');
+END;
+
+CREATE TRIGGER IF NOT EXISTS publish_sites_max_preview_bytes_positive_update
+    BEFORE UPDATE OF max_preview_bytes ON publish_sites
+    FOR EACH ROW
+    WHEN NEW.max_preview_bytes <= 0
+BEGIN
+    SELECT RAISE(ABORT, 'publish_sites.max_preview_bytes must be > 0');
+END;
+
 CREATE TRIGGER IF NOT EXISTS publish_files_content_sha256_lowercase_hex_insert
     BEFORE INSERT ON publish_files
     FOR EACH ROW

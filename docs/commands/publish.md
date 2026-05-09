@@ -64,6 +64,8 @@ libra publish sync [--ref <branch|tag|full-ref>]
                    [--dry-run]
                    [--fail-on-dirty]
                    [--ai-redaction default|strict]
+                   [--allow-sensitive-path <path>]…
+                   [--force]
                    [--json]
 ```
 
@@ -84,6 +86,14 @@ libra publish sync [--ref <branch|tag|full-ref>]
   and index entry. Visibility (public/private) and `--ai-redaction`
   compose; the AI object **type coverage** is fixed and not affected
   by either knob.
+- `--allow-sensitive-path <path>`: opt-out of the built-in deny
+  rules for the named path. Repeatable. Only honored when the
+  site's `publish.visibility` is `private`; on `public` sites the
+  flag is rejected to keep secrets out of public publishes.
+- `--force`: re-upload every file/object even if `is_synced` is
+  set, and resolve a CAS conflict on `publish_sites.latest_revision_oid`
+  by force-advancing the pointer. Use after a manual recovery; the
+  conflict path normally requires a fresh `sync` invocation.
 - `--json`: emits a stable machine-readable envelope: `site_id`,
   `refs_count`, `revision_count`, `default_ref`, `latest_revision_oid`,
   `file_count`, `ai_object_count`, `ai_bundle_count`, `warnings`.
