@@ -85,9 +85,13 @@ pub struct SseEvent {
 /// the worker only uses `try_send` to surface events and errors,
 /// so it never parks waiting for the consumer; once `EventStream`
 /// itself drops the receiver, any subsequent `try_send` returns
-/// `Disconnected` and the loop exits. The OS reaps the thread as
-/// soon as the socket read returns (typically immediately, when
-/// the `Response` is dropped on this side).
+/// `Disconnected` and the loop exits.
+///
+/// The detached thread may still be parked in `read()` on the
+/// underlying socket after `Drop` returns — see [`close()`] for
+/// the exact contract. In practice the `Response` going out of
+/// scope on this side closes the TCP read, but tests must not
+/// depend on the thread having exited by the time `Drop` returns.
 pub struct EventStream {
     receiver: mpsc::Receiver<EventOrError>,
     cancel: Arc<AtomicBool>,
@@ -186,7 +190,16 @@ impl EventStream {
                 // The worker writes any fatal error here even when
                 // the channel was full and `send_or_drop` couldn't
                 // enqueue the Err envelope.
-                let stored = self.last_error.lock().ok().and_then(|guard| guard.clone());
+                //
+                // Codex pass-5 P2: PANIC on a poisoned mutex
+                // instead of swallowing it — a panic in the worker
+                // thread is itself a bug and the test must fail
+                // loud, not silently surface as a normal disconnect.
+                let stored = self
+                    .last_error
+                    .lock()
+                    .expect("SSE last_error mutex poisoned (worker panicked?)")
+                    .clone();
                 let message = stored.unwrap_or_else(|| {
                     "SSE reader thread exited without surfacing an event".to_string()
                 });
@@ -407,13 +420,19 @@ fn send_or_drop(tx: &mpsc::SyncSender<EventOrError>, value: EventOrError) -> boo
 /// disconnect-message replacement. The send failure is silent on
 /// purpose: the slot is the authoritative copy.
 fn fatal(tx: &mpsc::SyncSender<EventOrError>, last_error: &Mutex<Option<String>>, message: String) {
-    if let Ok(mut slot) = last_error.lock() {
-        // Don't clobber an earlier error if one was already
-        // recorded — the first failure is the most actionable.
-        if slot.is_none() {
-            *slot = Some(message.clone());
-        }
+    // Codex pass-5 P2: panic on a poisoned mutex rather than
+    // swallowing it. The mutex is held only briefly across short
+    // writes — a poison here means a previous holder panicked,
+    // which is itself a bug; the test should fail loud.
+    let mut slot = last_error
+        .lock()
+        .expect("SSE last_error mutex poisoned (writer panicked?)");
+    // Don't clobber an earlier error if one was already
+    // recorded — the first failure is the most actionable.
+    if slot.is_none() {
+        *slot = Some(message.clone());
     }
+    drop(slot);
     let _ = send_or_drop(tx, EventOrError::Err(message));
 }
 
