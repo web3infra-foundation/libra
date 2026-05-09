@@ -170,6 +170,52 @@ pub enum Step {
         timeout_ms: u64,
         expect: AssertionsExpect,
     },
+    /// Wave 4 / PR 4 — drain events off `stream` until one with
+    /// the requested `event:` field arrives. Intermediate events
+    /// of other types are accepted and discarded silently. Used
+    /// for cases where the order or count of supporting events
+    /// (e.g. status_changed bursts) is not stable but the matrix
+    /// still wants to assert the eventual state-change event
+    /// matches its assertions.
+    CollectEventsUntil {
+        name: String,
+        stream: String,
+        event: String,
+        #[serde(default = "default_event_timeout_ms", rename = "timeoutMs")]
+        timeout_ms: u64,
+        expect: AssertionsExpect,
+    },
+    /// Wave 4 / PR 4 — drain every `session_updated` event off
+    /// `stream` until either:
+    ///
+    ///   * the snapshot contained in the latest event has
+    ///     `status == "idle"` (terminal state), OR
+    ///   * `timeoutMs` elapses (whichever comes first).
+    ///
+    /// Run multi-event assertions on the COLLECTED sequence — e.g.
+    /// `assistant_content_monotonic` walks the assistant message
+    /// content across each session_updated and asserts it grows
+    /// monotonically (no truncation, no shrink).
+    CollectSessionUpdates {
+        name: String,
+        stream: String,
+        #[serde(default = "default_event_timeout_ms", rename = "timeoutMs")]
+        timeout_ms: u64,
+        expect: AssertionsExpect,
+    },
+    /// Wave 4 / PR 4 — submit then poll `/session` until the
+    /// session is back to `status == "idle"`. Used by the SSE
+    /// reconnect case where we need to ensure the assistant's
+    /// reply is fully recorded BEFORE re-opening the stream so
+    /// the new initial-replay snapshot contains it.
+    SubmitAndWaitIdle {
+        name: String,
+        text: String,
+        token: TokenSource,
+        #[serde(default = "default_auth")]
+        auth: AuthMode,
+        expect: SimpleExpect,
+    },
 }
 
 fn default_event_timeout_ms() -> u64 {
@@ -377,6 +423,9 @@ fn step_name(step: &Step) -> &str {
         Step::WaitSnapshot { name, .. } => name,
         Step::OpenEvents { name, .. } => name,
         Step::ExpectEvent { name, .. } => name,
+        Step::CollectEventsUntil { name, .. } => name,
+        Step::CollectSessionUpdates { name, .. } => name,
+        Step::SubmitAndWaitIdle { name, .. } => name,
     }
 }
 
@@ -421,6 +470,26 @@ impl CaseRuntime<'_> {
                 expect,
                 ..
             } => self.run_expect_event(stream, event, *timeout_ms, expect),
+            Step::CollectEventsUntil {
+                stream,
+                event,
+                timeout_ms,
+                expect,
+                ..
+            } => self.run_collect_events_until(stream, event, *timeout_ms, expect),
+            Step::CollectSessionUpdates {
+                stream,
+                timeout_ms,
+                expect,
+                ..
+            } => self.run_collect_session_updates(stream, *timeout_ms, expect),
+            Step::SubmitAndWaitIdle {
+                text,
+                token,
+                auth,
+                expect,
+                ..
+            } => self.run_submit_and_wait_idle(text, token, auth, expect),
         }
     }
 
@@ -488,6 +557,175 @@ impl CaseRuntime<'_> {
                 )
             })?;
         }
+        Ok(())
+    }
+
+    fn run_collect_events_until(
+        &mut self,
+        stream: &str,
+        target_event: &str,
+        timeout_ms: u64,
+        expect: &AssertionsExpect,
+    ) -> Result<()> {
+        let event_stream = self.streams.get_mut(stream).ok_or_else(|| {
+            anyhow!(
+                "case '{}' references SSE stream '{stream}' before openEvents",
+                self.case_name
+            )
+        })?;
+        // Per-event budget within an overall deadline so a stream
+        // that drips one stale event per second can't quietly
+        // consume the entire test budget without ever reaching
+        // the target.
+        //
+        // Wave 4 fix: the initial-replay `session_updated` carries
+        // the snapshot at SUBSCRIPTION time (typically idle, empty
+        // transcript). For an assertion like
+        // `event_transcript_contains:<reply>` the first matching
+        // event won't satisfy it — the assistant hasn't streamed
+        // yet. Treat assertion failure as "this isn't the event we
+        // want, keep waiting" and only surface the LAST error on
+        // timeout. The rule guarantees we don't silently lose a
+        // genuinely failing assertion: if the deadline elapses,
+        // the caller still sees the diagnostic from the most
+        // recent matching event.
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        let mut last_error: Option<anyhow::Error> = None;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                if let Some(error) = last_error {
+                    return Err(error.context(format!(
+                        "case '{}' timed out after {timeout_ms}ms waiting for matching '{target_event}' on '{stream}'",
+                        self.case_name,
+                    )));
+                }
+                bail!(
+                    "case '{}' timed out after {timeout_ms}ms waiting for SSE event '{target_event}' on '{stream}'",
+                    self.case_name,
+                );
+            }
+            let event = match event_stream.next_event(remaining)? {
+                Some(event) => event,
+                None => continue,
+            };
+            if event.event != target_event {
+                continue;
+            }
+            let payload = parse_event_data(&event).with_context(|| {
+                format!(
+                    "case '{}' SSE event '{}' had invalid JSON payload",
+                    self.case_name, event.event
+                )
+            })?;
+            let mut all_ok = true;
+            for assertion in &expect.assertions {
+                if let Err(error) = evaluate_event_assertion(assertion, &event, &payload) {
+                    last_error = Some(error.context(format!(
+                        "case '{}' SSE assertion '{assertion}' failed on payload: {payload}",
+                        self.case_name
+                    )));
+                    all_ok = false;
+                    break;
+                }
+            }
+            if all_ok {
+                return Ok(());
+            }
+        }
+    }
+
+    fn run_collect_session_updates(
+        &mut self,
+        stream: &str,
+        timeout_ms: u64,
+        expect: &AssertionsExpect,
+    ) -> Result<()> {
+        let event_stream = self.streams.get_mut(stream).ok_or_else(|| {
+            anyhow!(
+                "case '{}' references SSE stream '{stream}' before openEvents",
+                self.case_name
+            )
+        })?;
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        // Wave 4 fix: the initial-replay `session_updated` is
+        // always emitted with the snapshot at subscription time —
+        // for a fresh session that's `status=idle, transcript=[]`.
+        // Treating that initial idle as terminal would cause us to
+        // exit before any streaming chunks arrive. Skip the first
+        // idle observation and only honour idle as terminal AFTER
+        // we've seen at least one non-idle (`thinking`) event,
+        // which is the runtime's signal that the turn started.
+        let mut collected: Vec<Value> = Vec::new();
+        let mut saw_non_idle = false;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let event = match event_stream.next_event(remaining)? {
+                Some(event) => event,
+                None => break,
+            };
+            if event.event != "session_updated" {
+                continue;
+            }
+            let payload = parse_event_data(&event).with_context(|| {
+                format!(
+                    "case '{}' SSE session_updated had invalid JSON payload",
+                    self.case_name
+                )
+            })?;
+            let is_idle = payload
+                .pointer("/data/status")
+                .and_then(Value::as_str)
+                .is_some_and(|status| status == "idle");
+            if !is_idle {
+                saw_non_idle = true;
+            }
+            collected.push(payload);
+            if is_idle && saw_non_idle {
+                break;
+            }
+        }
+        if collected.is_empty() {
+            bail!(
+                "case '{}' collected zero session_updated events on '{stream}' within {timeout_ms}ms",
+                self.case_name,
+            );
+        }
+        for assertion in &expect.assertions {
+            evaluate_collected_assertion(assertion, &collected).with_context(|| {
+                format!(
+                    "case '{}' SSE multi-event assertion '{assertion}' failed across {} events",
+                    self.case_name,
+                    collected.len()
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    fn run_submit_and_wait_idle(
+        &mut self,
+        text: &str,
+        token: &TokenSource,
+        auth: &AuthMode,
+        expect: &SimpleExpect,
+    ) -> Result<()> {
+        // Reuse the standard submit path so the response status /
+        // error code semantics stay identical to `run_submit`.
+        self.run_submit(text, token, auth, expect)?;
+        // Then poll /session until the runtime drains the turn.
+        // 10 s ceiling matches the lease/submit smoke timeout used
+        // elsewhere in the harness.
+        self.session
+            .wait_for_snapshot(Duration::from_secs(10), |snapshot| {
+                snapshot
+                    .pointer("/status")
+                    .and_then(Value::as_str)
+                    .is_some_and(|status| status == "idle")
+            })?;
         Ok(())
     }
 
@@ -782,6 +1020,82 @@ fn evaluate_event_assertion(assertion: &str, event: &SseEvent, payload: &Value) 
             "unsupported SSE event assertion '{other}' (event '{}')",
             event.event
         ),
+    }
+    Ok(())
+}
+
+/// Evaluate an assertion across a sequence of collected SSE
+/// payloads. Used by `Step::CollectSessionUpdates`. Each payload
+/// is the full envelope (`{ seq, type, at, data: snapshot }`).
+///
+/// New cross-event assertions live here; per-event assertions
+/// stay on `evaluate_event_assertion`. Suffix assertions of the
+/// form `event_transcript_contains:NEEDLE` are also accepted —
+/// they must hold against the FINAL collected payload.
+fn evaluate_collected_assertion(assertion: &str, collected: &[Value]) -> Result<()> {
+    match assertion {
+        "assistant_content_monotonic" => {
+            // Walk every collected snapshot, extract the LAST
+            // assistant_message entry's `content`, and assert each
+            // observation is a prefix of the next (or equal). Any
+            // shrink or non-prefix change is a regression in the
+            // streaming pipeline.
+            let mut prev: Option<String> = None;
+            for (idx, payload) in collected.iter().enumerate() {
+                let transcript = payload
+                    .pointer("/data/transcript")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| anyhow!("payload #{idx} missing /data/transcript array"))?;
+                let assistant_content = transcript.iter().rev().find_map(|entry| {
+                    let kind = entry.pointer("/kind").and_then(Value::as_str).unwrap_or("");
+                    if kind == "assistant_message" {
+                        entry
+                            .pointer("/content")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    } else {
+                        None
+                    }
+                });
+                let Some(current) = assistant_content else {
+                    // Snapshots before the first assistant chunk
+                    // legitimately have no assistant message yet.
+                    // Skip but keep `prev` so the next observation
+                    // still has to extend the previous run.
+                    continue;
+                };
+                if let Some(prev_content) = &prev
+                    && !current.starts_with(prev_content)
+                {
+                    bail!(
+                        "assistant content #{idx} is not a prefix-extension of the previous; \
+                         prev: {prev_content:?}, current: {current:?}",
+                    );
+                }
+                prev = Some(current);
+            }
+            if prev.is_none() {
+                bail!("collected sessions had no assistant_message entries");
+            }
+        }
+        other if other.starts_with("event_transcript_contains:") => {
+            // Apply the per-event assertion to the FINAL collected
+            // payload — by then the streamed reply has fully
+            // landed in the snapshot.
+            let last = collected.last().ok_or_else(|| {
+                anyhow!("event_transcript_contains assertion needs at least one collected event")
+            })?;
+            let needle = other.trim_start_matches("event_transcript_contains:");
+            let transcript = last
+                .pointer("/data/transcript")
+                .and_then(Value::as_array)
+                .ok_or_else(|| anyhow!("payload missing /data/transcript array"))?;
+            let haystack = serde_json::to_string(transcript).unwrap_or_default();
+            if !haystack.contains(needle) {
+                bail!("transcript did not contain '{needle}'; serialised transcript:\n{haystack}");
+            }
+        }
+        other => bail!("unsupported collected-events assertion '{other}'"),
     }
     Ok(())
 }

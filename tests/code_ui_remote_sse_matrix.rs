@@ -50,31 +50,31 @@ macro_rules! sse_case {
     };
 }
 
-// Wave 1 closing case — exercises:
-//   * `EventStream::open` against `/api/code/events`
-//   * SSE block parser via the worker thread
-//   * `Step::OpenEvents` + `Step::ExpectEvent` matrix variants
-//   * `event_data_has_transcript_array` / `event_data_has_controller`
-//     assertion vocabulary
-// Wave 2 (PR 4) lands the remaining six cases. Note that they are
-// NOT one-line drop-ins: most need new `Step` variants (eg
-// `collectEventsUntil`, `collectSessionUpdates`, `submitAndWaitIdle`)
-// and matching `run_step` arms in `tests/harness/matrix.rs`, plus
-// extra `event_data_*` assertion vocabulary. The reference list
-// below is preserved in sync with `sse_cases.json` for case-name
-// discoverability; do not uncomment until the supporting Step
-// variants exist or the lazy-case loader will fail at deserialise
-// time with `unknown variant` for the new ops.
+// Wave 1 / Wave 4 — full SSE matrix coverage. Wave 1 wired the
+// initial-replay case as a proof-of-life and added the
+// `Step::OpenEvents` / `Step::ExpectEvent` variants + the
+// `event_data_*` assertion vocabulary. Wave 4 (this commit)
+// landed the remaining variants
+// (`Step::CollectEventsUntil`, `Step::CollectSessionUpdates`,
+// `Step::SubmitAndWaitIdle`) plus the multi-event
+// `assistant_content_monotonic` assertion, which lets every case
+// in `sse_cases.json` run end-to-end.
 #[cfg(feature = "test-provider")]
 sse_case!(sse_initial_connect_replays_session_updated_with_full_snapshot);
 
-// Wave 2 (PR 4) — additional cases, kept here as a TODO list:
-// sse_case!(sse_emits_status_changed_when_submit_starts_thinking);
-// sse_case!(sse_emits_session_updated_after_assistant_completion);
-// sse_case!(sse_emits_controller_changed_on_attach_and_detach);
-// sse_case!(sse_two_concurrent_subscribers_receive_status_changed);
-// sse_case!(sse_reconnect_initial_replay_contains_latest_transcript);
-// sse_case!(sse_streaming_fixture_transcript_content_grows_monotonically);
+// Wave 4 — remaining six P0/P1 cases.
+#[cfg(feature = "test-provider")]
+sse_case!(sse_emits_status_changed_when_submit_starts_thinking);
+#[cfg(feature = "test-provider")]
+sse_case!(sse_emits_session_updated_after_assistant_completion);
+#[cfg(feature = "test-provider")]
+sse_case!(sse_emits_controller_changed_on_attach_and_detach);
+#[cfg(feature = "test-provider")]
+sse_case!(sse_two_concurrent_subscribers_receive_status_changed);
+#[cfg(feature = "test-provider")]
+sse_case!(sse_reconnect_initial_replay_contains_latest_transcript);
+#[cfg(feature = "test-provider")]
+sse_case!(sse_streaming_fixture_transcript_content_grows_monotonically);
 
 #[cfg(not(feature = "test-provider"))]
 #[test]
