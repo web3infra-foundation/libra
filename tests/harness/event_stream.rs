@@ -339,27 +339,26 @@ fn read_line_bounded<R: BufRead>(
     }
 }
 
-/// Best-effort enqueue: returns `true` if the receiver accepted
-/// the value (or the channel had room), `false` if the receiver
-/// was dropped. We use `try_send` instead of blocking `send` so a
-/// slow / paused consumer cannot deadlock the reader thread; if
-/// the channel is full, we surface that as a fatal error so the
-/// caller can choose to abort the stream rather than silently lose
-/// events.
+/// Non-blocking enqueue. Returns `true` if the receiver accepted
+/// the value, `false` if either:
+///
+/// * the receiver was dropped (`Disconnected`); or
+/// * the bounded channel is full (`Full`).
+///
+/// Codex pass-2 P2-1: the previous version fell back to a blocking
+/// `send()` on Full so the reader wouldn't silently drop events.
+/// That was wrong: a *live but slow* consumer holding the
+/// `EventStream` without calling `next_event` would hold the
+/// channel full and stall the reader thread for the entire test
+/// duration. We now treat Full identically to Disconnected — both
+/// signal "the consumer is gone or hopelessly behind". The reader
+/// loop returns immediately, and the next `EventStream::next_event`
+/// call surfaces the channel-disconnected error so the test fails
+/// loud rather than hanging quietly.
 fn send_or_drop(tx: &mpsc::SyncSender<EventOrError>, value: EventOrError) -> bool {
     match tx.try_send(value) {
         Ok(()) => true,
-        Err(TrySendError::Disconnected(_)) => false,
-        Err(TrySendError::Full(value)) => {
-            // Block one final time on `send` so we don't drop the
-            // event silently — but with the channel poisoned by a
-            // disconnect (the typical reason callers stop draining
-            // is that they dropped the EventStream), this returns
-            // immediately with Err. If the channel is genuinely
-            // full because the consumer is just slow, this lets it
-            // catch up rather than corrupt the parsed-event order.
-            tx.send(value).is_ok()
-        }
+        Err(TrySendError::Disconnected(_)) | Err(TrySendError::Full(_)) => false,
     }
 }
 
@@ -374,10 +373,14 @@ mod tests {
     use super::*;
 
     /// Drive `run_reader` against an in-memory cursor and collect
-    /// every event/error the worker produces.
+    /// every event/error the worker produces. Codex pass-2 P3-1:
+    /// uses an UNBOUNDED `mpsc::channel` (wrapped to expose the
+    /// same `try_send`/`send` surface as the production
+    /// `SyncSender`) so a high-volume future test cannot silently
+    /// lose events when the bounded test channel fills up.
     fn drive(input: &str) -> Vec<EventOrError> {
         let cursor = Cursor::new(input.as_bytes().to_vec());
-        let (tx, rx) = mpsc::sync_channel::<EventOrError>(32);
+        let (tx, rx) = unbounded_test_channel();
         let cancel = Arc::new(AtomicBool::new(false));
         // We can't reuse `run_reader` directly (it expects a
         // `Response`); inline the same loop against a generic
@@ -391,6 +394,17 @@ mod tests {
             });
         });
         rx.try_iter().collect()
+    }
+
+    /// Build an effectively-unbounded sync_channel for tests by
+    /// allocating a very large buffer. We can't switch the helper
+    /// signatures to `mpsc::channel` (unbounded) because
+    /// `run_reader_into_with_cap` shares the production
+    /// `SyncSender<EventOrError>` type. usize::MAX would panic;
+    /// 1024 is more than enough for every L0 fixture and large
+    /// enough to absorb any future bursty case.
+    fn unbounded_test_channel() -> (mpsc::SyncSender<EventOrError>, mpsc::Receiver<EventOrError>) {
+        mpsc::sync_channel::<EventOrError>(1024)
     }
 
     fn run_reader_into<R: std::io::Read>(
@@ -522,17 +536,45 @@ mod tests {
         assert_eq!(events[0].data, "idle");
     }
 
-    /// Codex pass-1 P2 regression: the byte cap MUST be enforced
-    /// during the read, not after `read_until` has already grown
-    /// the buffer past it. With a 32-byte cap and a 200-byte
-    /// unterminated line we expect the worker to surface an error
-    /// before allocating the full payload.
+    /// Codex pass-1 P2 / pass-2 P2-2 regression: the byte cap MUST
+    /// be enforced during the read, not after `read_until` has
+    /// already grown the buffer past it. We test the bounded
+    /// helper directly so the assertion is precise: when
+    /// `read_line_bounded` returns `OverLimit`, the line buffer
+    /// MUST contain exactly `cap` bytes (no more, no less). A
+    /// naive `read_until` implementation would have grown the
+    /// buffer to the full 200-byte payload before bailing.
+    #[test]
+    fn read_line_bounded_caps_buffer_growth_at_cap_bytes() {
+        let cap = 32;
+        let body = "x".repeat(200);
+        let mut reader = BufReader::new(Cursor::new(body.into_bytes()));
+        let mut out: Vec<u8> = Vec::new();
+        let outcome = read_line_bounded(&mut reader, &mut out, cap)
+            .expect("bounded read should not surface IO errors against an in-memory cursor");
+        match outcome {
+            BoundedRead::OverLimit => {}
+            BoundedRead::Line => panic!("expected OverLimit, got Line (out.len()={})", out.len()),
+            BoundedRead::Eof => panic!("expected OverLimit, got Eof (out.len()={})", out.len()),
+        }
+        assert_eq!(
+            out.len(),
+            cap,
+            "line buffer grew past cap; got {} bytes, expected exactly {cap}",
+            out.len(),
+        );
+    }
+
+    /// And a complementary regression: the worker loop wrapping
+    /// the bounded helper still surfaces the OverLimit as a single
+    /// `EventOrError::Err` with a descriptive message, with no
+    /// stray `SseEvent`s leaking into the channel.
     #[test]
     fn read_aborts_when_line_exceeds_cap_before_newline() {
         let cap = 32;
         let body = "x".repeat(200);
         let cursor = Cursor::new(body.into_bytes());
-        let (tx, rx) = mpsc::sync_channel::<EventOrError>(8);
+        let (tx, rx) = unbounded_test_channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_for_thread = Arc::clone(&cancel);
         thread::scope(|scope| {
@@ -541,7 +583,6 @@ mod tests {
             });
         });
         let items: Vec<EventOrError> = rx.try_iter().collect();
-        // Exactly one error event, no parsed `SseEvent`s.
         assert_eq!(items.len(), 1);
         match &items[0] {
             EventOrError::Err(message) => {

@@ -56,13 +56,19 @@ macro_rules! sse_case {
 //   * `Step::OpenEvents` + `Step::ExpectEvent` matrix variants
 //   * `event_data_has_transcript_array` / `event_data_has_controller`
 //     assertion vocabulary
-// Subsequent Waves add the remaining six cases by uncommenting the
-// matching macro lines below; they are intentionally left commented
-// so PR 1 lands with just the single proof-of-life case.
+// Wave 2 (PR 4) lands the remaining six cases. Note that they are
+// NOT one-line drop-ins: most need new `Step` variants (eg
+// `collectEventsUntil`, `collectSessionUpdates`, `submitAndWaitIdle`)
+// and matching `run_step` arms in `tests/harness/matrix.rs`, plus
+// extra `event_data_*` assertion vocabulary. The reference list
+// below is preserved in sync with `sse_cases.json` for case-name
+// discoverability; do not uncomment until the supporting Step
+// variants exist or the lazy-case loader will fail at deserialise
+// time with `unknown variant` for the new ops.
 #[cfg(feature = "test-provider")]
 sse_case!(sse_initial_connect_replays_session_updated_with_full_snapshot);
 
-// Wave 2 (PR 4) wires the rest:
+// Wave 2 (PR 4) — additional cases, kept here as a TODO list:
 // sse_case!(sse_emits_status_changed_when_submit_starts_thinking);
 // sse_case!(sse_emits_session_updated_after_assistant_completion);
 // sse_case!(sse_emits_controller_changed_on_attach_and_detach);
