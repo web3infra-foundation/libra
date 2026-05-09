@@ -29,6 +29,12 @@ export async function GET(
     const revision = await resolveRevision(bindings.db, site, refRaw, revisionRaw);
     const entries = await listDirEntries(bindings.db, site.site_id, revision.revision_oid, path);
 
+    // Codex pass-11 P2: cache the response immutably only when the
+    // caller pinned an explicit `revision=<oid>`. A `ref` parameter
+    // (or the default-ref fallback) can move on the next sync, so
+    // cache it for the short-cache window with an ETag and let the
+    // client revalidate.
+    const cacheMode = revisionRaw ? ("revision-long" as const) : ("short" as const);
     return respondOk(
       {
         revision: revisionToWire(revision),
@@ -36,7 +42,7 @@ export async function GET(
         entries: entries.map(dirEntryToWire),
       },
       {
-        cache: { mode: "revision-long" },
+        cache: { mode: cacheMode },
         etag: `W/"tree-${revision.revision_oid}-${entries.length}"`,
         visibility: site.visibility,
       },

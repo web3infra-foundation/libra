@@ -248,4 +248,101 @@ mod tests {
             "negative input must hit the type-parse error: {err}",
         );
     }
+
+    /// Codex pass-11 P1: prove `--max-preview-bytes` is wired
+    /// through clap end-to-end, not just through the standalone
+    /// parser fn. `try_parse_from` exercises the actual derive macro
+    /// output, so a future regression that drops the
+    /// `value_parser = ...` attribute is caught.
+    #[test]
+    fn clap_init_max_preview_bytes_rejects_zero() {
+        use clap::Parser;
+        let err = PublishArgs::try_parse_from([
+            "publish",
+            "init",
+            "--slug",
+            "demo",
+            "--clone-domain",
+            "code.example.com",
+            "--max-preview-bytes",
+            "0",
+        ])
+        .expect_err("clap must reject --max-preview-bytes=0");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("must be > 0"),
+            "clap error must surface the positive-only constraint: {rendered}",
+        );
+    }
+
+    #[test]
+    fn clap_init_max_preview_bytes_accepts_positive() {
+        use clap::Parser;
+        let parsed = PublishArgs::try_parse_from([
+            "publish",
+            "init",
+            "--slug",
+            "demo",
+            "--clone-domain",
+            "code.example.com",
+            "--max-preview-bytes",
+            "1048576",
+        ])
+        .expect("clap must accept a positive --max-preview-bytes");
+        match parsed.command {
+            PublishCommand::Init(args) => {
+                assert_eq!(args.max_preview_bytes, Some(1024 * 1024));
+            }
+            _ => panic!("expected `init` subcommand"),
+        }
+    }
+
+    #[test]
+    fn clap_init_max_preview_bytes_rejects_non_numeric() {
+        use clap::Parser;
+        let err = PublishArgs::try_parse_from([
+            "publish",
+            "init",
+            "--slug",
+            "demo",
+            "--clone-domain",
+            "code.example.com",
+            "--max-preview-bytes",
+            "abc",
+        ])
+        .expect_err("clap must reject non-numeric --max-preview-bytes");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("not a valid byte count"),
+            "clap error must surface the parse failure: {rendered}",
+        );
+    }
+
+    #[test]
+    fn clap_sync_accepts_force_and_allow_sensitive_path() {
+        use clap::Parser;
+        let parsed = PublishArgs::try_parse_from([
+            "publish",
+            "sync",
+            "--ref",
+            "main",
+            "--force",
+            "--allow-sensitive-path",
+            ".env.local",
+            "--allow-sensitive-path",
+            "config/api-secret.json",
+        ])
+        .expect("clap must accept the documented sync flag set");
+        match parsed.command {
+            PublishCommand::Sync(args) => {
+                assert!(args.force);
+                assert_eq!(args.r#ref.as_deref(), Some("main"));
+                assert_eq!(
+                    args.allow_sensitive_path,
+                    vec![".env.local".to_string(), "config/api-secret.json".to_string()],
+                );
+            }
+            _ => panic!("expected `sync` subcommand"),
+        }
+    }
 }

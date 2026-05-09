@@ -63,7 +63,12 @@ export async function GET(
           ? encodeCursor(JSON.parse(result.nextCursor) as Record<string, string>)
           : null,
       },
-      { cache: { mode: "revision-long" }, visibility: site.visibility },
+      {
+        // Codex pass-11 P2: ref-based requests cache short; explicit
+        // revision pins go to immutable.
+        cache: { mode: revisionRaw ? "revision-long" : "short" },
+        visibility: site.visibility,
+      },
     );
   } catch (error) {
     return respondError(error);

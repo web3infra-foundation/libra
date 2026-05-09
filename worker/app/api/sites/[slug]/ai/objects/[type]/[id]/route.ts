@@ -64,7 +64,10 @@ export async function GET(
         payload,
       },
       {
-        cache: { mode: "revision-long" },
+        // Codex pass-11 P2: ref-based requests cache short; explicit
+        // revision pins go to immutable. The ETag still pins the
+        // body hash so revalidation is cheap.
+        cache: { mode: revisionRaw ? "revision-long" : "short" },
         etag: `W/"obj-${objectRow.payload_sha256}"`,
         visibility: site.visibility,
       },

@@ -35,6 +35,11 @@ export async function GET(
       throw notFound("FILE_NOT_FOUND", `path is not part of this revision: ${path}`);
     }
 
+    // Codex pass-11 P2: ref-based requests cache short with an ETag
+    // (the underlying ref can move on the next sync); explicit
+    // `revision=<oid>` requests cache `revision-long` immutably.
+    const cacheMode = revisionRaw ? ("revision-long" as const) : ("short" as const);
+
     if (fileRow.display_mode !== "text") {
       // Metadata-only response. The schema CHECK guarantees no R2 key
       // is recorded for non-text rows; we never fall through to R2.
@@ -52,7 +57,7 @@ export async function GET(
           content: null,
         },
         {
-          cache: { mode: "revision-long" },
+          cache: { mode: cacheMode },
           etag: `W/"meta-${etagDigest}"`,
           visibility: site.visibility,
         },
@@ -78,7 +83,7 @@ export async function GET(
         content: { encoding: "utf-8", body: content.body },
       },
       {
-        cache: { mode: "revision-long" },
+        cache: { mode: cacheMode },
         etag: content.etag ?? `W/"${fileRow.content_sha256}"`,
         visibility: site.visibility,
       },

@@ -1,4 +1,5 @@
 import { notFound } from "next/navigation";
+import { isPagePathSafe } from "@/lib/utils";
 import { SiteShell } from "@/components/site-shell";
 import { TreeListing } from "@/components/tree-listing";
 import { Breadcrumbs } from "@/components/breadcrumbs";
@@ -28,17 +29,10 @@ export default async function TreePage({ params, searchParams }: Props) {
   const refs = await loadRefsForSite(ctx);
 
   const path = (pathSegments ?? []).join("/");
-  // Defence-in-depth: validation matches the API path validator.
-  // Codex pass-1 P2: `\0` was missing from the page-side validator.
-  if (
-    path.includes("..") ||
-    path.startsWith("/") ||
-    path.includes("//") ||
-    path.includes("\0") ||
-    path.length > 4096
-  ) {
-    notFound();
-  }
+  // Codex pass-11 P3: share `isPagePathSafe` with the blob page so
+  // the page validator matches the API validator (segment-aware
+  // `..` rejection, NUL rejection, length cap).
+  if (!isPagePathSafe(path)) notFound();
 
   let activeRef = null;
   try {

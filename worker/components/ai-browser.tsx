@@ -71,6 +71,8 @@ export function AiBrowser({ slug, refName }: Props) {
   const [loadingDetail, setLoadingDetail] = useState(false);
 
   useEffect(() => {
+    // Codex pass-11 P2: reset accumulated pages when the filter
+    // changes so we don't show stale objects from a previous filter.
     let cancelled = false;
     setLoadingObjects(true);
     setError(null);
@@ -95,6 +97,48 @@ export function AiBrowser({ slug, refName }: Props) {
       cancelled = true;
     };
   }, [slug, refName, type, layer]);
+
+  // Codex pass-11 P2: follow `nextCursor` for both objects and
+  // versions so users see the full page set. Each click of "Load
+  // more" appends one page; we never auto-paginate to keep memory
+  // bounded for huge revisions.
+  const loadMoreObjects = async () => {
+    if (!objects?.nextCursor || loadingObjects) return;
+    setLoadingObjects(true);
+    try {
+      const next = await fetchAiObjects(slug, {
+        ref: refName,
+        type: type ?? undefined,
+        layer: layer ?? undefined,
+        cursor: objects.nextCursor,
+        limit: 200,
+      });
+      setObjects({
+        ...next,
+        objects: [...objects.objects, ...next.objects],
+      });
+    } catch (err: unknown) {
+      setError(err instanceof ApiError ? err.message : "failed to load more objects");
+    } finally {
+      setLoadingObjects(false);
+    }
+  };
+
+  const loadMoreVersions = async () => {
+    if (!versions?.nextCursor) return;
+    try {
+      const next = await fetchAiVersions(slug, {
+        ref: refName,
+        cursor: versions.nextCursor,
+      });
+      setVersions({
+        ...next,
+        versions: [...versions.versions, ...next.versions],
+      });
+    } catch (err: unknown) {
+      setError(err instanceof ApiError ? err.message : "failed to load more versions");
+    }
+  };
 
   useEffect(() => {
     if (!selected) {
@@ -240,6 +284,15 @@ export function AiBrowser({ slug, refName }: Props) {
           ) : (
             <p className="text-xs libra-text-muted">No bundles in this revision.</p>
           )}
+          {versions?.nextCursor && (
+            <button
+              type="button"
+              onClick={loadMoreVersions}
+              className="mt-2 block text-xs lb-link"
+            >
+              Load more bundles
+            </button>
+          )}
         </Section>
       </aside>
 
@@ -260,6 +313,8 @@ export function AiBrowser({ slug, refName }: Props) {
             loading={loadingObjects}
             selected={selected}
             onSelect={(item) => setSelected(item)}
+            hasMore={objects?.nextCursor != null}
+            onLoadMore={loadMoreObjects}
           />
           <ObjectDetail detail={detail} loading={loadingDetail} />
         </div>
@@ -309,11 +364,15 @@ function ObjectList({
   loading,
   selected,
   onSelect,
+  hasMore,
+  onLoadMore,
 }: {
   readonly objects: ReadonlyArray<{ readonly objectType: string; readonly objectId: string; readonly layer: string; readonly payloadSha256: string; readonly createdAt: string; readonly redactionMode: string }>;
   readonly loading: boolean;
   readonly selected: { readonly objectType: string; readonly objectId: string } | null;
   readonly onSelect: (item: { readonly objectType: string; readonly objectId: string }) => void;
+  readonly hasMore: boolean;
+  readonly onLoadMore: () => void;
 }) {
   if (loading && objects.length === 0) {
     return (
@@ -360,6 +419,18 @@ function ObjectList({
           );
         })}
       </ul>
+      {hasMore && (
+        <div className="border-t px-4 py-2 text-center" style={{ borderColor: "var(--line)" }}>
+          <button
+            type="button"
+            onClick={onLoadMore}
+            disabled={loading}
+            className="text-xs lb-link"
+          >
+            {loading ? "Loading…" : "Load more objects"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

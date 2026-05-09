@@ -37,3 +37,28 @@ export function encodePathForUrl(path: string): string {
   if (path === "") return "";
   return path.split("/").map((segment) => encodeURIComponent(segment)).join("/");
 }
+
+/**
+ * Page-side path validator. Mirrors the API `parsePath` rules without
+ * pulling `lib/server/*` into the React Server Component bundle.
+ *
+ * Codex pass-1 P2 + pass-11 P3: the page validator must match the
+ * API validator. An earlier draft rejected ANY path containing
+ * `..` substring, which incorrectly rejected legal filenames like
+ * `foo..bar.txt`. The API validator splits on `/` and rejects only
+ * the exact `..` segment; this helper does the same.
+ *
+ * Returns `true` when the path is safe; `false` to fall through to
+ * the page's `notFound()` UI. `""` (repo root) is allowed because
+ * the catch-all routes also match the empty trailing segment.
+ */
+export function isPagePathSafe(path: string): boolean {
+  if (path.length > 4096) return false;
+  if (path === "") return true;
+  if (path.includes("\0")) return false;
+  if (path.startsWith("/") || path.includes("//")) return false;
+  for (const segment of path.split("/")) {
+    if (segment === ".." || segment.length === 0) return false;
+  }
+  return true;
+}

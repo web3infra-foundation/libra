@@ -1,4 +1,5 @@
 import { notFound } from "next/navigation";
+import { isPagePathSafe } from "@/lib/utils";
 import { SiteShell } from "@/components/site-shell";
 import { Breadcrumbs } from "@/components/breadcrumbs";
 import { FileViewer } from "@/components/file-viewer";
@@ -27,18 +28,11 @@ export default async function BlobPage({ params, searchParams }: Props) {
   const refs = await loadRefsForSite(ctx);
 
   const path = pathSegments.join("/");
-  // Codex pass-1 P2: include `\0` in the page-side validator so it
-  // matches the API guard.
-  if (
-    path === "" ||
-    path.includes("..") ||
-    path.startsWith("/") ||
-    path.includes("//") ||
-    path.includes("\0") ||
-    path.length > 4096
-  ) {
-    notFound();
-  }
+  // Codex pass-11 P3: blob page rejects empty path (root has no
+  // file) AND uses the shared `isPagePathSafe` rules so segment-
+  // aware `..` denial, NUL rejection, and length cap match the API
+  // validator. This unblocks legal filenames like `foo..bar.txt`.
+  if (path === "" || !isPagePathSafe(path)) notFound();
 
   let activeRef = null;
   try {

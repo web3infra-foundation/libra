@@ -150,7 +150,10 @@ export async function GET(
         edges: filteredEdges,
         generatedAt: bundle.generatedAt ?? null,
       },
-      { cache: { mode: "revision-long" }, visibility: site.visibility },
+      {
+        cache: { mode: revisionRaw ? "revision-long" : "short" },
+        visibility: site.visibility,
+      },
     );
   } catch (error) {
     return respondError(error);
