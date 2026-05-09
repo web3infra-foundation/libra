@@ -28,6 +28,7 @@ pub mod head;
 pub mod log;
 pub mod model;
 pub mod protocol;
+pub mod publish;
 pub mod reflog;
 pub mod tag;
 pub mod tui;

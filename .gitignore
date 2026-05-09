@@ -21,7 +21,6 @@ target-codex-review/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 .idea/
 .vscode/
-.claude/
 .qwen/
 .trellis/
 .cursor/
@@ -48,3 +47,7 @@ web/.pnpm-store/
 .DS_Store
 .gemini/
 gha-creds-*.json
+
+# AI
+.codex
+.claude

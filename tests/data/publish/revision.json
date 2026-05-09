@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "siteId": "00000000-0000-0000-0000-0000publish01",
+  "revisionOid": "abcdef0123456789abcdef0123456789abcdef01",
+  "status": "published",
+  "codeManifestKey": "11111111-2222-3333-4444-555555555555/publish/sites/00000000-0000-0000-0000-0000publish01/revisions/abcdef0123456789abcdef0123456789abcdef01/code-manifest.json",
+  "aiIndexKey": "11111111-2222-3333-4444-555555555555/publish/sites/00000000-0000-0000-0000-0000publish01/revisions/abcdef0123456789abcdef0123456789abcdef01/ai/index.json",
+  "fileCount": 248,
+  "aiObjectCount": 96,
+  "aiBundleCount": 1,
+  "redactionMode": "default",
+  "redactionRulesVersion": "2026.05.09-1",
+  "syncRunId": "11111111-aaaa-bbbb-cccc-deadbeef0001",
+  "createdAt": "2026-05-09T12:55:00Z",
+  "updatedAt": "2026-05-09T13:00:00Z"
+}

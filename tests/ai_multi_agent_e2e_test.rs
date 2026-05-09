@@ -180,6 +180,26 @@ async fn s7_three_agents_persist_distinct_agent_name_rows() {
         .unwrap();
     assert_eq!(by_agent.len(), 3);
 
+    // (provider, model) legacy grain: also three buckets here because
+    // each agent runs on a different (provider, model) pair, but the
+    // important shape contract is that `agent_name` is `None` on
+    // every row (the legacy renderer never surfaces the agent
+    // dimension regardless of source data). This is the back-compat
+    // gate for any caller that pre-dates P5.2.
+    let by_pm = query
+        .aggregate_filtered(UsageGrouping::ProviderModel, &UsageQueryFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(by_pm.len(), 3);
+    assert!(
+        by_pm.iter().all(|r| r.agent_name.is_none()),
+        "ProviderModel grain must hide the agent dimension; got: {by_pm:?}"
+    );
+    let providers: Vec<&str> = by_pm.iter().map(|r| r.provider.as_str()).collect();
+    assert!(providers.contains(&"anthropic"));
+    assert!(providers.contains(&"deepseek"));
+    assert!(providers.contains(&"openai"));
+
     // Renderer surfaces every agent in the /usage --by=agent table.
     let table = format_usage_table(&by_apm);
     assert!(table.contains("Usage:"));

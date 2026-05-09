@@ -1,0 +1,189 @@
+/* Libra · paper-navy tokens v2 — tool-first type, responsive breakpoints */
+
+:root {
+  /* ── Type stacks ───────────────────────────────────────────────────── */
+  --sans:  "Inter", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --mono:  "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --serif: "Source Serif 4", "Source Serif Pro", Georgia, serif; /* brand + hero only */
+
+  /* ── Paper-navy palette ────────────────────────────────────────────── */
+  --paper:        #F7F3EC;   /* page */
+  --paper-deep:   #EFEAE0;   /* surface 1 — toolbar / row hover */
+  --paper-edge:   #E5DFD2;   /* divider faint */
+  --paper-line:   #D6CDB9;   /* divider */
+  --paper-ink:    #BFB39A;   /* keyline / chip border on light */
+
+  --ink-deep:     #0E1F36;   /* body bold / code */
+  --ink:          #1F3A5F;   /* primary navy — body */
+  --ink-mid:      #3D5577;   /* meta */
+  --ink-soft:     #687588;   /* meta soft */
+  --ink-faint:    #A4ACBA;   /* line-numbers, disabled */
+
+  --gold:         #8C6A2B;   /* accent — links, active rail */
+  --gold-soft:    #C9A24A;   /* accent soft — emphasis on dark */
+  --gold-tint:    rgba(140, 106, 43, 0.10);
+
+  /* Status — semantic, used by chips/diff/log */
+  --good:         #4F6B3A;   /* passed / synced */
+  --warn:         #8C6A2B;   /* rate-limited / superseded */
+  --bad:          #8E3A2E;   /* error / rejected / failed — was missing */
+  --info:         #2F4E76;   /* neutral signal */
+
+  --good-tint:    rgba(79, 107, 58, 0.10);
+  --warn-tint:    rgba(140, 106, 43, 0.12);
+  --bad-tint:     rgba(142, 58, 46, 0.10);
+  --info-tint:    rgba(47, 78, 118, 0.10);
+
+  /* ── Radius (2 steps) ──────────────────────────────────────────────── */
+  --r-1: 4px;
+  --r-2: 8px;
+
+  /* ── Shadow (restrained) ───────────────────────────────────────────── */
+  --shadow-1: 0 1px 0 rgba(20, 36, 60, 0.04), 0 0 0 1px rgba(20, 36, 60, 0.04);
+  --shadow-2: 0 1px 2px rgba(20, 36, 60, 0.06), 0 4px 14px rgba(20, 36, 60, 0.06);
+
+  /* ── Layout ────────────────────────────────────────────────────────── */
+  --sidebar-w-desktop: 248px;
+  --sidebar-w-tablet:  64px;   /* icon-rail */
+  --topbar-h:          56px;
+  --content-max:       1240px;
+
+  /* ── Breakpoints (reference; used in @media) ──────────────────────── */
+  /* mobile  : <  720px  */
+  /* tablet  : >= 720px  */
+  /* desktop : >= 1080px */
+}
+
+/* ── Reset / base ─────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ink);
+  background: var(--paper);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Selection */
+::selection { background: var(--gold-tint); color: var(--ink-deep); }
+
+/* Focus — visible everywhere keyboard-driven */
+:focus { outline: none; }
+:focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* ── Utility classes ──────────────────────────────────────────────────── */
+.lb-mono   { font-family: var(--mono); font-feature-settings: "calt" 0; }
+.lb-serif  { font-family: var(--serif); }
+
+.lb-eyebrow {
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+.lb-meta {
+  font-family: var(--sans);
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  line-height: 1.45;
+}
+.lb-h1 {
+  font-family: var(--sans);     /* body type carries headlines now */
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--ink-deep);
+  margin: 0;
+  line-height: 1.2;
+}
+.lb-h2 {
+  font-family: var(--sans);
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--ink-deep);
+  margin: 0;
+  letter-spacing: -0.005em;
+}
+.lb-brand {
+  font-family: var(--serif);
+  font-style: italic;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--ink-deep);
+}
+.lb-code {
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--ink-deep);
+}
+
+/* Reset semantic elements */
+button {
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+button:disabled { cursor: not-allowed; opacity: 0.55; }
+a {
+  color: var(--gold);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+}
+a:hover { border-bottom-color: var(--gold); }
+
+/* Pill / chip baseline */
+.lb-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: var(--r-1);
+  border: 1px solid var(--paper-line);
+  background: var(--paper);
+  font-family: var(--sans);
+  font-size: 11.5px;
+  color: var(--ink-mid);
+  white-space: nowrap;
+}
+.lb-chip[data-tone="good"] { background: var(--good-tint); border-color: transparent; color: var(--good); }
+.lb-chip[data-tone="warn"] { background: var(--warn-tint); border-color: transparent; color: var(--warn); }
+.lb-chip[data-tone="bad"]  { background: var(--bad-tint);  border-color: transparent; color: var(--bad);  }
+.lb-chip[data-tone="info"] { background: var(--info-tint); border-color: transparent; color: var(--info); }
+
+/* Scrollbars (paper) */
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-thumb {
+  background: rgba(31, 58, 95, 0.18);
+  border-radius: var(--r-1);
+}
+*::-webkit-scrollbar-thumb:hover { background: rgba(31, 58, 95, 0.32); }
+*::-webkit-scrollbar-track { background: transparent; }
+
+/* Visually-hidden helper for sr-only */
+.lb-sr {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0,0,0,0);
+  white-space: nowrap;
+  border: 0;
+}
