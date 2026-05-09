@@ -1388,10 +1388,8 @@ fn split_sql_statements(input: &str) -> Vec<String> {
 fn flush_keyword(prev_word: &mut String, depth_begin_end: &mut i32) {
     match prev_word.as_str() {
         "begin" => *depth_begin_end += 1,
-        "end" => {
-            if *depth_begin_end > 0 {
-                *depth_begin_end -= 1;
-            }
+        "end" if *depth_begin_end > 0 => {
+            *depth_begin_end -= 1;
         }
         _ => {}
     }

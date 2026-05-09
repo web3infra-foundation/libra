@@ -24,10 +24,10 @@ const CASE_FILE_PATH: &str = "tests/data/code_ui_remote/lease_cases.json";
 fn run_lease_case(case_name: &str) -> Result<()> {
     let file_path = harness::matrix::data_path(CASE_FILE_PATH);
     let file: CaseFile = load_case_file(&file_path)?;
-    let case: &Case = find_case(&file, case_name)?;
-    let options = build_session_options(&file, case);
+    let case: Case = find_case(&file, case_name)?;
+    let options = build_session_options(&file, &case);
     let mut session = CodeSession::spawn(options)?;
-    let outcome = harness::matrix::run_case(&mut session, case);
+    let outcome = harness::matrix::run_case(&mut session, &case);
     let shutdown = session.shutdown();
     outcome?;
     shutdown

@@ -308,6 +308,27 @@ impl CodeSession {
         self.get_json("/session")
     }
 
+    /// Open a blocking SSE subscription against `/api/code/events`.
+    /// The returned [`super::EventStream`] reads events on a worker
+    /// thread; per-event timeouts are configured by the caller.
+    ///
+    /// Wave 1 of `docs/improvement/test.md` makes this the central
+    /// entry point for the SSE matrix and downstream Waves
+    /// (state / generation / approval) that need to observe runtime
+    /// notifications without polling `/session`.
+    pub fn open_event_stream(&self) -> Result<super::EventStream> {
+        // Use a dedicated client with no overall timeout so the SSE
+        // long-poll isn't cut off by the harness's default 5 s
+        // request budget. Per-event timeouts are enforced by
+        // `EventStream::next_event` itself.
+        let client = Client::builder()
+            .timeout(None)
+            .build()
+            .context("failed to build SSE HTTP client")?;
+        let url = self.url("/events");
+        super::EventStream::open(&client, &url, None)
+    }
+
     pub fn diagnostics(&self) -> Result<Value> {
         self.get_json("/diagnostics")
     }

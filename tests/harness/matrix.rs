@@ -40,8 +40,19 @@ use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{CodeSession, CodeSessionOptions};
+use super::{CodeSession, CodeSessionOptions, EventStream, SseEvent};
 
+/// Loaded matrix file. Cases are kept as raw JSON values and only
+/// deserialised into typed [`Case`]s on demand by [`find_case`].
+///
+/// Why lazy: each Wave (`docs/improvement/test.md`) lands new
+/// `Step` variants alongside the runner code. If we deserialised
+/// every case upfront, Wave 1's runner would refuse to load the
+/// shared `sse_cases.json` file just because Wave 2's case relies
+/// on a `collectEventsUntil` step the Wave 1 runner doesn't
+/// implement yet. Per-case deserialisation lets each Wave run only
+/// the cases it has wired up while leaving the JSON file as the
+/// shared source of truth.
 #[derive(Debug, Deserialize)]
 pub struct CaseFile {
     #[serde(rename = "schemaVersion")]
@@ -49,7 +60,7 @@ pub struct CaseFile {
     #[allow(dead_code)]
     pub matrix: String,
     pub defaults: Defaults,
-    pub cases: Vec<Case>,
+    pub cases: Vec<Value>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -122,6 +133,39 @@ pub enum Step {
         name: String,
         expect: AssertionsExpect,
     },
+    /// Open a new SSE subscription against `/api/code/events` and
+    /// label it with `stream` so later steps can wait for events on
+    /// it. `timeoutMs` is the wait budget for individual reads on
+    /// this stream (NOT the open call itself).
+    ///
+    /// `closeImmediately` lets reconnect tests open a stream just
+    /// to consume the initial replay and then drop it before any
+    /// later submit fires; downstream Waves (SSE reconnect case)
+    /// rely on this.
+    OpenEvents {
+        name: String,
+        stream: String,
+        #[serde(default = "default_event_timeout_ms", rename = "timeoutMs")]
+        timeout_ms: u64,
+        #[serde(default, rename = "closeImmediately")]
+        close_immediately: bool,
+    },
+    /// Read the very next event off `stream` and assert it has the
+    /// requested `event:` field plus all expected assertions. Use
+    /// this when the next event is deterministic (e.g. SSE initial
+    /// replay always emits `session_updated` first).
+    ExpectEvent {
+        name: String,
+        stream: String,
+        event: String,
+        #[serde(default = "default_event_timeout_ms", rename = "timeoutMs")]
+        timeout_ms: u64,
+        expect: AssertionsExpect,
+    },
+}
+
+fn default_event_timeout_ms() -> u64 {
+    5_000
 }
 
 fn default_auth() -> AuthMode {
@@ -196,6 +240,10 @@ struct CaseRuntime<'a> {
     tokens: HashMap<TokenSlot, String>,
     /// Saved `leaseExpiresAt` values, keyed by user-supplied label.
     lease_timestamps: HashMap<String, chrono::DateTime<chrono::Utc>>,
+    /// Open SSE subscriptions, keyed by the user-supplied `stream`
+    /// label. Streams persist across steps so a single case can
+    /// `openEvents` early and `expectEvent` later.
+    streams: HashMap<String, EventStream>,
 }
 
 const FORGED_CONTROLLER_TOKEN: &str = "42424242-4242-4242-4242-424242424242";
@@ -226,12 +274,22 @@ pub fn load_case_file(path: &Path) -> Result<CaseFile> {
     Ok(parsed)
 }
 
-/// Locate a case by name in the loaded file.
-pub fn find_case<'a>(file: &'a CaseFile, name: &str) -> Result<&'a Case> {
-    file.cases
+/// Locate a case by name in the loaded file and deserialise it
+/// into a typed [`Case`]. The returned value is owned because
+/// each case in the file is stored as raw JSON until requested
+/// (see the doc-comment on [`CaseFile`] for why).
+pub fn find_case(file: &CaseFile, name: &str) -> Result<Case> {
+    let raw = file
+        .cases
         .iter()
-        .find(|c| c.name == name)
-        .ok_or_else(|| anyhow!("matrix case '{name}' not present in case file"))
+        .find(|c| {
+            c.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|n| n == name)
+        })
+        .ok_or_else(|| anyhow!("matrix case '{name}' not present in case file"))?;
+    serde_json::from_value::<Case>(raw.clone())
+        .with_context(|| format!("failed to deserialise matrix case '{name}'"))
 }
 
 /// Merge per-case options on top of the file-level defaults.
@@ -282,6 +340,7 @@ pub fn run_case(session: &mut CodeSession, case: &Case) -> Result<()> {
         case_name: &case.name,
         tokens: HashMap::new(),
         lease_timestamps: HashMap::new(),
+        streams: HashMap::new(),
     };
     for (idx, step) in case.steps.iter().enumerate() {
         let step_name = step_name(step);
@@ -299,6 +358,8 @@ fn step_name(step: &Step) -> &str {
         Step::Submit { name, .. } => name,
         Step::Sleep { name, .. } => name,
         Step::WaitSnapshot { name, .. } => name,
+        Step::OpenEvents { name, .. } => name,
+        Step::ExpectEvent { name, .. } => name,
     }
 }
 
@@ -331,7 +392,86 @@ impl CaseRuntime<'_> {
                 Ok(())
             }
             Step::WaitSnapshot { expect, .. } => self.run_wait_snapshot(expect),
+            Step::OpenEvents {
+                stream,
+                close_immediately,
+                ..
+            } => self.run_open_events(stream, *close_immediately),
+            Step::ExpectEvent {
+                stream,
+                event,
+                timeout_ms,
+                expect,
+                ..
+            } => self.run_expect_event(stream, event, *timeout_ms, expect),
         }
+    }
+
+    fn run_open_events(&mut self, stream: &str, close_immediately: bool) -> Result<()> {
+        // Open the SSE subscription. The downstream Wave 2 case
+        // `sse_reconnect_initial_replay_contains_latest_transcript`
+        // depends on `closeImmediately` to consume the initial
+        // replay then drop the stream before any later submit.
+        let mut event_stream = self
+            .session
+            .open_event_stream()
+            .with_context(|| format!("failed to open SSE stream '{stream}'"))?;
+        if close_immediately {
+            event_stream.close();
+            return Ok(());
+        }
+        if self
+            .streams
+            .insert(stream.to_string(), event_stream)
+            .is_some()
+        {
+            bail!(
+                "case '{}' opened SSE stream label '{stream}' twice",
+                self.case_name
+            );
+        }
+        Ok(())
+    }
+
+    fn run_expect_event(
+        &mut self,
+        stream: &str,
+        event: &str,
+        timeout_ms: u64,
+        expect: &AssertionsExpect,
+    ) -> Result<()> {
+        let event_stream = self.streams.get_mut(stream).ok_or_else(|| {
+            anyhow!(
+                "case '{}' references SSE stream '{stream}' before openEvents",
+                self.case_name
+            )
+        })?;
+        let timeout = Duration::from_millis(timeout_ms);
+        let received = event_stream
+            .next_event(timeout)?
+            .ok_or_else(|| anyhow!("timed out waiting for SSE event '{event}' on '{stream}'"))?;
+        if received.event != event {
+            bail!(
+                "expected SSE event '{event}' on '{stream}', got '{}': {}",
+                received.event,
+                received.data
+            );
+        }
+        let payload = parse_event_data(&received).with_context(|| {
+            format!(
+                "case '{}' SSE event '{}' had invalid JSON payload",
+                self.case_name, received.event
+            )
+        })?;
+        for assertion in &expect.assertions {
+            evaluate_event_assertion(assertion, &received, &payload).with_context(|| {
+                format!(
+                    "case '{}' SSE assertion '{assertion}' failed; payload: {payload}",
+                    self.case_name
+                )
+            })?;
+        }
+        Ok(())
     }
 
     fn run_attach(
@@ -544,6 +684,89 @@ fn evaluate_snapshot_assertion(
         }
         other => bail!("unsupported snapshot assertion '{other}'"),
     }
+}
+
+/// Parse an SSE event's `data:` field as JSON. The `/api/code/events`
+/// handler always serialises a `CodeUiEventEnvelope` via
+/// `Event::json_data`, so a deserialisation failure here means the
+/// runtime emitted a malformed envelope — surface as an error rather
+/// than silently empty.
+fn parse_event_data(event: &SseEvent) -> Result<Value> {
+    serde_json::from_str(&event.data)
+        .with_context(|| format!("failed to parse SSE data as JSON: {}", event.data))
+}
+
+fn evaluate_event_assertion(assertion: &str, event: &SseEvent, payload: &Value) -> Result<()> {
+    match assertion {
+        "event_data_has_transcript_array" => {
+            // Initial replay must include the snapshot's transcript
+            // array so a fresh subscriber renders the room state.
+            let transcript = payload
+                .pointer("/data/transcript")
+                .and_then(Value::as_array);
+            if transcript.is_none() {
+                bail!("payload missing /data/transcript array");
+            }
+        }
+        "event_data_has_controller" => {
+            let controller = payload.pointer("/data/controller");
+            if !controller.is_some_and(Value::is_object) {
+                bail!("payload missing /data/controller object");
+            }
+        }
+        "event_data_status_thinking" => {
+            let status = payload
+                .pointer("/data/status")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if status != "thinking" {
+                bail!("expected /data/status == 'thinking', got '{status}'");
+            }
+        }
+        "event_data_status_idle" => {
+            let status = payload
+                .pointer("/data/status")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if status != "idle" {
+                bail!("expected /data/status == 'idle', got '{status}'");
+            }
+        }
+        "event_data_controller_kind_automation" => {
+            let kind = payload
+                .pointer("/data/controller/kind")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if kind != "automation" {
+                bail!("expected /data/controller.kind == 'automation', got '{kind}'");
+            }
+        }
+        "event_data_controller_kind_tui_or_none" => {
+            let kind = payload
+                .pointer("/data/controller/kind")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if kind != "tui" && kind != "none" {
+                bail!("expected /data/controller.kind in {{tui, none}}, got '{kind}'");
+            }
+        }
+        other if other.starts_with("event_transcript_contains:") => {
+            let needle = other.trim_start_matches("event_transcript_contains:");
+            let transcript = payload
+                .pointer("/data/transcript")
+                .and_then(Value::as_array)
+                .ok_or_else(|| anyhow!("payload missing /data/transcript array"))?;
+            let haystack = serde_json::to_string(transcript).unwrap_or_default();
+            if !haystack.contains(needle) {
+                bail!("transcript did not contain '{needle}'; serialised transcript:\n{haystack}");
+            }
+        }
+        other => bail!(
+            "unsupported SSE event assertion '{other}' (event '{}')",
+            event.event
+        ),
+    }
+    Ok(())
 }
 
 fn ensure_status(actual: StatusCode, expected: StatusCode, body: &Value) -> Result<()> {

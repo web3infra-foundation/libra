@@ -89,6 +89,7 @@ struct UserRule {
 }
 
 #[derive(Clone, Copy, Debug)]
+#[allow(clippy::enum_variant_names)] // every variant operates on a path "segment"; the prefix is the domain term, not noise
 enum UserRuleStyle {
     /// Exact segment match (no `*`).
     SegmentExact,
