@@ -66,9 +66,13 @@ pub struct SseEvent {
     pub data: String,
 }
 
-/// Blocking SSE client wrapper. The drop impl signals the worker
-/// thread to stop and joins it so a panicking test does not leak
-/// threads or sockets.
+/// Blocking SSE client wrapper. The Drop impl signals the worker
+/// thread to stop and DETACHES it (it does not join). Joining
+/// would deadlock teardown if the worker were parked in a long
+/// socket read or a blocked `SyncSender::send`. Detaching plus
+/// dropping the receiver is enough: the next `try_send` from the
+/// worker fails with `Disconnected`, the loop exits, and the
+/// underlying socket close lets the OS reap the thread.
 pub struct EventStream {
     receiver: mpsc::Receiver<EventOrError>,
     cancel: Arc<AtomicBool>,
@@ -373,14 +377,15 @@ mod tests {
     use super::*;
 
     /// Drive `run_reader` against an in-memory cursor and collect
-    /// every event/error the worker produces. Codex pass-2 P3-1:
-    /// uses an UNBOUNDED `mpsc::channel` (wrapped to expose the
-    /// same `try_send`/`send` surface as the production
-    /// `SyncSender`) so a high-volume future test cannot silently
-    /// lose events when the bounded test channel fills up.
+    /// every event/error the worker produces. Uses a 1024-slot
+    /// sync_channel (see [`large_buffer_test_channel`]) — wide
+    /// enough that any plausible future L0 fixture won't fill it,
+    /// but still backpressured so the type matches the production
+    /// `SyncSender<EventOrError>` signature on
+    /// `run_reader_into_with_cap`.
     fn drive(input: &str) -> Vec<EventOrError> {
         let cursor = Cursor::new(input.as_bytes().to_vec());
-        let (tx, rx) = unbounded_test_channel();
+        let (tx, rx) = large_buffer_test_channel();
         let cancel = Arc::new(AtomicBool::new(false));
         // We can't reuse `run_reader` directly (it expects a
         // `Response`); inline the same loop against a generic
@@ -396,14 +401,23 @@ mod tests {
         rx.try_iter().collect()
     }
 
-    /// Build an effectively-unbounded sync_channel for tests by
-    /// allocating a very large buffer. We can't switch the helper
-    /// signatures to `mpsc::channel` (unbounded) because
-    /// `run_reader_into_with_cap` shares the production
-    /// `SyncSender<EventOrError>` type. usize::MAX would panic;
-    /// 1024 is more than enough for every L0 fixture and large
-    /// enough to absorb any future bursty case.
-    fn unbounded_test_channel() -> (mpsc::SyncSender<EventOrError>, mpsc::Receiver<EventOrError>) {
+    /// Build a 1024-slot bounded `sync_channel` for L0 tests.
+    ///
+    /// We intentionally don't use `mpsc::channel` (genuinely
+    /// unbounded) because `run_reader_into_with_cap` takes the
+    /// same `SyncSender<EventOrError>` type the production reader
+    /// uses, so the test surface has to stay
+    /// `SyncSender`-compatible. 1024 slots is large enough that
+    /// every L0 fixture (which currently emits 1 event each, with
+    /// a worst-case bound of "a few" for future high-fan-out
+    /// tests) drains synchronously into `try_iter()` without ever
+    /// hitting backpressure. Backpressure DOES still exist if a
+    /// future L0 case generates more than 1024 events without
+    /// draining — surface that as a test failure rather than a
+    /// silent hang by relying on the production `send_or_drop`
+    /// contract (Full == Disconnected).
+    fn large_buffer_test_channel() -> (mpsc::SyncSender<EventOrError>, mpsc::Receiver<EventOrError>)
+    {
         mpsc::sync_channel::<EventOrError>(1024)
     }
 
@@ -574,7 +588,7 @@ mod tests {
         let cap = 32;
         let body = "x".repeat(200);
         let cursor = Cursor::new(body.into_bytes());
-        let (tx, rx) = unbounded_test_channel();
+        let (tx, rx) = large_buffer_test_channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_for_thread = Arc::clone(&cancel);
         thread::scope(|scope| {
