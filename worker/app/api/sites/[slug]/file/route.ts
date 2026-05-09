@@ -1,0 +1,77 @@
+import { NextRequest } from "next/server";
+import { getBindings } from "@/lib/server/cloudflare";
+import { resolveSiteForSlug, gateRequest } from "@/lib/server/site";
+import { findFileRow, resolveRevision } from "@/lib/server/d1";
+import { readPublishedTextFile } from "@/lib/server/r2";
+import { respondError, respondOk } from "@/lib/server/response";
+import { fileToWire, revisionToWire } from "@/lib/server/wire";
+import { notFound } from "@/lib/server/errors";
+import { parsePath, parseRevisionOid, parseSlug } from "@/lib/server/validate";
+
+export const runtime = "edge";
+export const dynamic = "force-dynamic";
+
+export async function GET(
+  request: NextRequest,
+  context: { readonly params: Promise<{ readonly slug: string }> },
+): Promise<Response> {
+  try {
+    const { slug: rawSlug } = await context.params;
+    const slug = parseSlug(rawSlug);
+    const bindings = getBindings();
+    const site = await resolveSiteForSlug(bindings, request, slug);
+    await gateRequest(bindings, request, site);
+
+    const url = new URL(request.url);
+    const refRaw = url.searchParams.get("ref");
+    const revisionRaw = url.searchParams.get("revision");
+    const pathRaw = url.searchParams.get("path");
+    const path = parsePath(pathRaw);
+    if (revisionRaw) parseRevisionOid(revisionRaw);
+
+    const revision = await resolveRevision(bindings.db, site, refRaw, revisionRaw);
+    const fileRow = await findFileRow(bindings.db, site.site_id, revision.revision_oid, path);
+    if (!fileRow) {
+      throw notFound("FILE_NOT_FOUND", `path is not part of this revision: ${path}`);
+    }
+
+    if (fileRow.display_mode !== "text") {
+      // Metadata-only response. The schema CHECK guarantees no R2 key
+      // is recorded for non-text rows; we never fall through to R2.
+      return respondOk(
+        {
+          revision: revisionToWire(revision),
+          file: fileToWire(fileRow),
+          content: null,
+        },
+        { cache: { mode: "revision-long" }, etag: `W/"meta-${fileRow.path}-${fileRow.display_mode}"` },
+      );
+    }
+
+    const content = await readPublishedTextFile(
+      bindings.bucket,
+      { display_mode: fileRow.display_mode, r2_key: fileRow.r2_key, size_bytes: fileRow.size_bytes },
+      fileRow.content_sha256,
+    );
+    if (!content) {
+      // Should be unreachable given schema CHECKs, but fail safely
+      // rather than serve stale metadata if somebody bypasses the
+      // SQL layer.
+      throw notFound("FILE_NOT_FOUND", "file content is missing");
+    }
+
+    return respondOk(
+      {
+        revision: revisionToWire(revision),
+        file: fileToWire(fileRow),
+        content: { encoding: "utf-8", body: content.body },
+      },
+      {
+        cache: { mode: "revision-long" },
+        etag: content.etag ?? `W/"${fileRow.content_sha256}"`,
+      },
+    );
+  } catch (error) {
+    return respondError(error);
+  }
+}

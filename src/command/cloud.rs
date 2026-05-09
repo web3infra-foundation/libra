@@ -90,6 +90,187 @@ pub struct StatusArgs {
     pub verbose: bool,
 }
 
+// ───────────────────────────────────────────────────────────────────
+// Phase 1 (publish.md) — structured `cloud sync` helper.
+//
+// `run_cloud_sync` is the headless entry that `libra publish` will
+// reuse in Phase 4+. It performs the full object + metadata + agent
+// capture sync but emits human-readable progress through a callback
+// trait instead of `println!`/`eprintln!` directly. The legacy
+// `execute_sync` wraps this helper with `ConsoleCloudSyncProgress` so
+// `libra cloud sync` keeps its original output verbatim.
+
+/// Inputs for [`run_cloud_sync`].
+#[derive(Debug, Clone)]
+pub struct CloudSyncContext {
+    /// Number of objects per batch when streaming to R2 / D1.
+    pub batch_size: usize,
+    /// Re-sync every object regardless of `is_synced`.
+    pub force: bool,
+}
+
+/// Metadata-sync outcome surfaced in [`CloudSyncReport`].
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum MetadataSyncOutcome {
+    /// Skipped because object failures preceded it.
+    NotRun,
+    /// Refs payload uploaded; references emitted = refs count.
+    Synced { references: usize },
+    /// Metadata hash unchanged since the last sync; nothing uploaded.
+    Skipped,
+}
+
+/// Agent-capture mirroring outcome surfaced in [`CloudSyncReport`].
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum AgentCaptureSyncOutcome {
+    /// Skipped because object failures preceded it.
+    NotRun,
+    /// Local schema predates the agent_session/agent_checkpoint
+    /// migration; nothing to mirror.
+    SkippedLegacySchema,
+    /// Tables exist; ran the upsert pass. Per-row failures are
+    /// reflected in the counts and surface as warnings, not hard
+    /// errors (matches the legacy semantics).
+    Completed {
+        sessions_synced: usize,
+        sessions_failed: usize,
+        checkpoints_synced: usize,
+        checkpoints_failed: usize,
+    },
+    /// Hard error (table-existence query, ensure-table call, ...).
+    Failed { error: String },
+}
+
+/// Final outcome of a `run_cloud_sync` call. Hard errors short-
+/// circuit and surface as `Err`; recoverable per-object failures live
+/// in `failed_count` and the metadata/agent_capture variants.
+#[derive(Debug, Clone)]
+pub struct CloudSyncReport {
+    pub repo_id: String,
+    pub project_name: String,
+    pub total_unsynced: usize,
+    pub synced_count: usize,
+    pub failed_count: usize,
+    pub metadata: MetadataSyncOutcome,
+    pub agent_capture: AgentCaptureSyncOutcome,
+}
+
+/// Progress callbacks fired during a `run_cloud_sync` call.
+///
+/// All methods have empty default impls — implementors only override
+/// the events they care about. `ConsoleCloudSyncProgress` mirrors the
+/// pre-Phase-1 `libra cloud sync` output verbatim. Phase 4+ publish
+/// callers may pass a quieter or structured implementation.
+pub trait CloudSyncProgress: Send + Sync {
+    fn on_starting(&self) {}
+    fn on_no_objects(&self) {}
+    fn on_object_total(&self, total: usize) {
+        let _ = total;
+    }
+    fn on_batch_progress(&self, synced: usize, total: usize, failed: usize) {
+        let _ = (synced, total, failed);
+    }
+    fn on_object_error(&self, oid: &str, err: &str) {
+        let _ = (oid, err);
+    }
+    fn on_local_status_warning(&self, oid: &str, err: &str) {
+        let _ = (oid, err);
+    }
+    fn on_sync_complete(&self, synced: usize, failed: usize) {
+        let _ = (synced, failed);
+    }
+    fn on_metadata_starting(&self) {}
+    fn on_metadata_skipped(&self) {}
+    fn on_metadata_synced(&self, references: usize) {
+        let _ = references;
+    }
+    fn on_agent_capture_starting(&self) {}
+    fn on_agent_capture_session_warning(&self, session_id: &str, err: &str) {
+        let _ = (session_id, err);
+    }
+    fn on_agent_capture_checkpoint_warning(&self, checkpoint_id: &str, err: &str) {
+        let _ = (checkpoint_id, err);
+    }
+    fn on_agent_capture_done(
+        &self,
+        sessions_synced: usize,
+        sessions_failed: usize,
+        checkpoints_synced: usize,
+        checkpoints_failed: usize,
+    ) {
+        let _ = (
+            sessions_synced,
+            sessions_failed,
+            checkpoints_synced,
+            checkpoints_failed,
+        );
+    }
+    fn on_agent_capture_warning(&self, err: &str) {
+        let _ = err;
+    }
+}
+
+/// Console implementation that reproduces the legacy `libra cloud
+/// sync` output verbatim.
+pub struct ConsoleCloudSyncProgress;
+
+impl CloudSyncProgress for ConsoleCloudSyncProgress {
+    fn on_starting(&self) {
+        println!("Starting cloud sync...");
+    }
+    fn on_no_objects(&self) {
+        println!("No objects to sync.");
+    }
+    fn on_object_total(&self, total: usize) {
+        println!("Found {total} objects to sync.");
+    }
+    fn on_batch_progress(&self, synced: usize, total: usize, failed: usize) {
+        println!("Progress: {synced}/{total} synced, {failed} failed");
+    }
+    fn on_object_error(&self, oid: &str, err: &str) {
+        cli_error!(err => format!("error: failed to sync {oid}"));
+    }
+    fn on_local_status_warning(&self, oid: &str, err: &str) {
+        cli_error!(err => format!("warning: failed to update local sync status for {oid}"));
+    }
+    fn on_sync_complete(&self, synced: usize, failed: usize) {
+        println!("Sync complete: {synced} synced, {failed} failed");
+    }
+    fn on_metadata_starting(&self) {
+        println!("Syncing metadata...");
+    }
+    fn on_metadata_skipped(&self) {
+        println!("Metadata unchanged, skipping upload.");
+    }
+    fn on_metadata_synced(&self, references: usize) {
+        println!("Metadata synced ({references} references).");
+    }
+    fn on_agent_capture_starting(&self) {
+        println!("Syncing agent_session / agent_checkpoint to D1...");
+    }
+    fn on_agent_capture_session_warning(&self, session_id: &str, err: &str) {
+        eprintln!("warning: agent_session {session_id} upsert failed: {err}");
+    }
+    fn on_agent_capture_checkpoint_warning(&self, checkpoint_id: &str, err: &str) {
+        eprintln!("warning: agent_checkpoint {checkpoint_id} upsert failed: {err}");
+    }
+    fn on_agent_capture_done(
+        &self,
+        sessions_synced: usize,
+        sessions_failed: usize,
+        checkpoints_synced: usize,
+        checkpoints_failed: usize,
+    ) {
+        println!(
+            "Agent capture sync: {sessions_synced} sessions ({sessions_failed} failed), \
+             {checkpoints_synced} checkpoints ({checkpoints_failed} failed)."
+        );
+    }
+    fn on_agent_capture_warning(&self, err: &str) {
+        eprintln!("warning: agent capture sync incomplete: {err}");
+    }
+}
+
 /// Execute cloud command
 pub async fn execute(args: CloudArgs) -> CliResult<()> {
     match args.command {
@@ -120,29 +301,62 @@ fn cloud_cli_error(operation: &str, error: String) -> CliError {
 
 /// Execute sync command - uploads objects to R2, indexes to D1, and registers project name
 async fn execute_sync(args: SyncArgs) -> Result<(), String> {
-    if args.batch_size < 1 {
+    let ctx = CloudSyncContext {
+        batch_size: args.batch_size,
+        force: args.force,
+    };
+    let report = run_cloud_sync(ctx, &ConsoleCloudSyncProgress).await?;
+
+    // Preserve the pre-Phase-1 exit semantics: per-object failures
+    // surface as a hard error after the human-readable summary has
+    // already been emitted by `ConsoleCloudSyncProgress`.
+    if report.failed_count > 0 {
+        return Err(format!("{} objects failed to sync", report.failed_count));
+    }
+    Ok(())
+}
+
+/// Phase 1 helper extracted from `execute_sync`.
+///
+/// Runs the full `libra cloud sync` flow without printing directly to
+/// stdout / stderr: env validation → D1 / R2 init → object stream →
+/// metadata refresh → agent_capture mirror. Human-readable progress
+/// flows through the [`CloudSyncProgress`] trait so callers can plug
+/// in their own renderer (`ConsoleCloudSyncProgress` for the legacy
+/// CLI, a quieter or structured one for `libra publish` later).
+///
+/// Returns a [`CloudSyncReport`] for the completed run. Hard errors
+/// (env, D1, R2, repo-id, db-query, metadata-sync) short-circuit as
+/// `Err`. Per-object failures are captured in `failed_count` and skip
+/// the metadata + agent_capture phases (preserving the pre-Phase-1
+/// "block follow-up work on object failure" gate).
+pub async fn run_cloud_sync(
+    ctx: CloudSyncContext,
+    progress: &dyn CloudSyncProgress,
+) -> Result<CloudSyncReport, String> {
+    if ctx.batch_size < 1 {
         return Err("Batch size must be at least 1".to_string());
     }
 
-    println!("Starting cloud sync...");
+    progress.on_starting();
 
     validate_cloud_backup_env(false).await?;
 
-    // Initialize D1 client
+    // Initialize D1 client.
     let d1_client = D1Client::from_env()
         .await
         .map_err(|e| format!("D1 client error: {}", e.message))?;
 
-    // Ensure D1 table exists before any operations
+    // Ensure D1 table exists before any operations.
     d1_client
         .ensure_object_index_table()
         .await
         .map_err(|e| format!("Failed to create D1 table: {}", e.message))?;
 
-    // Get database connection
+    // Get database connection.
     let db_conn = db::get_db_conn_instance().await;
 
-    // Check if object_index table exists locally, create if not
+    // Check if object_index table exists locally, create if not.
     let builder = db_conn.get_database_backend();
     let schema = Schema::new(builder);
     let stmt = schema
@@ -154,7 +368,7 @@ async fn execute_sync(args: SyncArgs) -> Result<(), String> {
 
     let repo_id = ensure_repo_id().await?;
 
-    // Determine project name from config 'cloud.name' or current directory name
+    // Determine project name from config 'cloud.name' or current directory name.
     let project_name = ConfigKv::get("cloud.name")
         .await
         .ok()
@@ -167,19 +381,19 @@ async fn execute_sync(args: SyncArgs) -> Result<(), String> {
                 .unwrap_or_else(|| "unknown-project".to_string())
         });
 
-    // Ensure repositories table exists
+    // Ensure repositories table exists.
     d1_client
         .ensure_repositories_table()
         .await
         .map_err(|e| format!("Failed to create repositories table: {}", e.message))?;
 
-    // Upsert repository info
+    // Upsert repository info.
     let repo_row = d1_client
         .upsert_repository(&repo_id, &project_name)
         .await
         .map_err(|e| format!("Failed to upsert repository: {}", e.message))?;
 
-    // Verify repo_id matches (to detect name conflict)
+    // Verify repo_id matches (to detect name conflict).
     if repo_row.repo_id != repo_id {
         return Err(format!(
             "Project name '{}' is already taken by another repository (ID: {}). Please choose a different name in cloud.name config.",
@@ -187,8 +401,8 @@ async fn execute_sync(args: SyncArgs) -> Result<(), String> {
         ));
     }
 
-    // Query unsynced objects
-    let query = if args.force {
+    // Query unsynced objects.
+    let query = if ctx.force {
         object_index::Entity::find().filter(object_index::Column::RepoId.eq(&repo_id))
     } else {
         object_index::Entity::find()
@@ -201,85 +415,110 @@ async fn execute_sync(args: SyncArgs) -> Result<(), String> {
         .await
         .map_err(|e| format!("Database query failed: {}", e))?;
 
-    // Initialize R2 storage
+    // Initialize R2 storage.
     let r2_storage = create_r2_storage(&repo_id).await?;
 
+    let total_unsynced = unsynced_objects.len();
+
     if unsynced_objects.is_empty() {
-        println!("No objects to sync.");
-        sync_metadata(&db_conn, &r2_storage)
+        progress.on_no_objects();
+        let metadata = sync_metadata(&db_conn, &r2_storage, progress)
             .await
-            .map_err(|e| format!("Metadata sync failed: {}", e))?;
+            .map_err(|e| format!("Metadata sync failed: {e}"))?;
         // CEX-EntireIO §10.2: even when there are no new git objects to
         // ship, the agent_session/agent_checkpoint catalog may have new
         // rows from local hook ingestion. Mirror them on every sync.
-        if let Err(err) = sync_agent_capture_tables(&db_conn, &d1_client, &repo_id).await {
-            eprintln!("warning: agent capture sync incomplete: {err}");
-        }
-        return Ok(());
+        let agent_capture =
+            match sync_agent_capture_tables(&db_conn, &d1_client, &repo_id, progress).await {
+                Ok(outcome) => outcome,
+                Err(err) => {
+                    progress.on_agent_capture_warning(&err);
+                    AgentCaptureSyncOutcome::Failed { error: err }
+                }
+            };
+        return Ok(CloudSyncReport {
+            repo_id,
+            project_name,
+            total_unsynced: 0,
+            synced_count: 0,
+            failed_count: 0,
+            metadata,
+            agent_capture,
+        });
     }
 
-    println!("Found {} objects to sync.", unsynced_objects.len());
+    progress.on_object_total(total_unsynced);
 
-    // Initialize local storage for reading objects
+    // Initialize local storage for reading objects.
     let objects_path = path::objects();
     let local_storage = LocalStorage::new(objects_path);
 
-    let mut synced_count = 0;
-    let mut failed_count = 0;
+    let mut synced_count = 0usize;
+    let mut failed_count = 0usize;
 
-    // Process in batches
-    for batch in unsynced_objects.chunks(args.batch_size) {
+    // Process in batches.
+    for batch in unsynced_objects.chunks(ctx.batch_size) {
         for obj in batch {
             let result = sync_single_object(obj, &local_storage, &r2_storage, &d1_client).await;
 
             match result {
                 Ok(_) => {
-                    // Update local is_synced flag
+                    // Update local is_synced flag.
                     let mut active: object_index::ActiveModel = obj.clone().into();
                     active.is_synced = Set(1);
                     if let Err(e) = active.update(&db_conn).await {
-                        cli_error!(
-                            e,
-                            "warning: failed to update local sync status for {}",
-                            obj.o_id
-                        );
+                        progress.on_local_status_warning(&obj.o_id, &e.to_string());
                     }
                     synced_count += 1;
                 }
                 Err(e) => {
-                    cli_error!(e, "error: failed to sync {}", obj.o_id);
+                    progress.on_object_error(&obj.o_id, &e);
                     failed_count += 1;
                 }
             }
         }
-        println!(
-            "Progress: {}/{} synced, {} failed",
-            synced_count,
-            unsynced_objects.len(),
-            failed_count
-        );
+        progress.on_batch_progress(synced_count, total_unsynced, failed_count);
     }
 
-    println!(
-        "Sync complete: {} synced, {} failed",
-        synced_count, failed_count
-    );
+    progress.on_sync_complete(synced_count, failed_count);
 
     if failed_count > 0 {
-        Err(format!("{} objects failed to sync", failed_count))
-    } else {
-        sync_metadata(&db_conn, &r2_storage)
-            .await
-            .map_err(|e| format!("Metadata sync failed: {}", e))?;
-        // CEX-EntireIO §10.2: append agent capture catalog mirroring at
-        // the tail of the sync flow per the plan. Errors here are
-        // surfaced as a warning rather than a hard failure so an entirely
-        // green object sync is not undone by a transient D1 hiccup.
-        if let Err(err) = sync_agent_capture_tables(&db_conn, &d1_client, &repo_id).await {
-            eprintln!("warning: agent capture sync incomplete: {err}");
-        }
-        Ok(())
+        return Ok(CloudSyncReport {
+            repo_id,
+            project_name,
+            total_unsynced,
+            synced_count,
+            failed_count,
+            metadata: MetadataSyncOutcome::NotRun,
+            agent_capture: AgentCaptureSyncOutcome::NotRun,
+        });
     }
+
+    let metadata = sync_metadata(&db_conn, &r2_storage, progress)
+        .await
+        .map_err(|e| format!("Metadata sync failed: {e}"))?;
+    // CEX-EntireIO §10.2: append agent capture catalog mirroring at the
+    // tail of the sync flow per the plan. Errors here surface as a
+    // warning rather than a hard failure so an entirely green object
+    // sync is not undone by a transient D1 hiccup.
+    let agent_capture =
+        match sync_agent_capture_tables(&db_conn, &d1_client, &repo_id, progress).await {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                progress.on_agent_capture_warning(&err);
+                AgentCaptureSyncOutcome::Failed { error: err }
+            }
+        };
+
+    Ok(CloudSyncReport {
+        repo_id,
+        project_name,
+        total_unsynced,
+        synced_count,
+        failed_count,
+        metadata,
+        agent_capture,
+    })
 }
 
 /// Sync a single object: R2 first (idempotent), then D1
@@ -753,14 +992,15 @@ fn calculate_metadata_hash(json: &[u8]) -> u64 {
 async fn sync_metadata(
     db_conn: &sea_orm::DatabaseConnection,
     r2_storage: &RemoteStorage,
-) -> Result<(), String> {
-    println!("Syncing metadata...");
+    progress: &dyn CloudSyncProgress,
+) -> Result<MetadataSyncOutcome, String> {
+    progress.on_metadata_starting();
     let references = reference::Entity::find()
         .all(db_conn)
         .await
         .map_err(|e| format!("Failed to fetch references: {}", e))?;
 
-    // Sort to ensure deterministic output for hashing
+    // Sort to ensure deterministic output for hashing.
     let mut sorted_refs = references;
     sorted_refs.sort_by(|a, b| {
         let a_kind = format!("{:?}", a.kind);
@@ -775,7 +1015,7 @@ async fn sync_metadata(
 
     let current_hash = calculate_metadata_hash(&json);
 
-    // Check if hash matches last sync
+    // Check if hash matches last sync.
     if let Some(stored) = ConfigKv::get("cloud.metadata_hash")
         .await
         .ok()
@@ -784,8 +1024,8 @@ async fn sync_metadata(
         && let Ok(stored_hash) = stored.parse::<u64>()
         && stored_hash == current_hash
     {
-        println!("Metadata unchanged, skipping upload.");
-        return Ok(());
+        progress.on_metadata_skipped();
+        return Ok(MetadataSyncOutcome::Skipped);
     }
 
     r2_storage
@@ -793,11 +1033,13 @@ async fn sync_metadata(
         .await
         .map_err(|e| format!("Failed to upload metadata: {}", e))?;
 
-    // Update stored hash
+    // Update stored hash.
     let _ = ConfigKv::set("cloud.metadata_hash", &current_hash.to_string(), false).await;
 
-    println!("Metadata synced ({} references).", sorted_refs.len());
-    Ok(())
+    progress.on_metadata_synced(sorted_refs.len());
+    Ok(MetadataSyncOutcome::Synced {
+        references: sorted_refs.len(),
+    })
 }
 
 /// Mirror local `agent_session` and `agent_checkpoint` rows up to the D1
@@ -812,7 +1054,8 @@ async fn sync_agent_capture_tables(
     db_conn: &sea_orm::DatabaseConnection,
     d1_client: &D1Client,
     repo_id: &str,
-) -> Result<(), String> {
+    progress: &dyn CloudSyncProgress,
+) -> Result<AgentCaptureSyncOutcome, String> {
     use sea_orm::{ConnectionTrait, Statement};
 
     // Bail out cleanly when the migration that creates these tables
@@ -830,10 +1073,10 @@ async fn sync_agent_capture_tables(
         .is_some();
     if !session_present {
         // Older local schema — nothing to mirror.
-        return Ok(());
+        return Ok(AgentCaptureSyncOutcome::SkippedLegacySchema);
     }
 
-    println!("Syncing agent_session / agent_checkpoint to D1...");
+    progress.on_agent_capture_starting();
     d1_client
         .ensure_agent_session_table()
         .await
@@ -880,10 +1123,7 @@ async fn sync_agent_capture_tables(
         match d1_client.upsert_agent_session(repo_id, &agent_row).await {
             Ok(_) => sessions_synced += 1,
             Err(e) => {
-                eprintln!(
-                    "warning: agent_session {} upsert failed: {}",
-                    agent_row.session_id, e.message
-                );
+                progress.on_agent_capture_session_warning(&agent_row.session_id, &e.message);
                 sessions_failed += 1;
             }
         }
@@ -921,18 +1161,17 @@ async fn sync_agent_capture_tables(
         match d1_client.upsert_agent_checkpoint(repo_id, &cp_row).await {
             Ok(_) => checkpoints_synced += 1,
             Err(e) => {
-                eprintln!(
-                    "warning: agent_checkpoint {} upsert failed: {}",
-                    cp_row.checkpoint_id, e.message
-                );
+                progress.on_agent_capture_checkpoint_warning(&cp_row.checkpoint_id, &e.message);
                 checkpoints_failed += 1;
             }
         }
     }
 
-    println!(
-        "Agent capture sync: {sessions_synced} sessions ({sessions_failed} failed), \
-         {checkpoints_synced} checkpoints ({checkpoints_failed} failed)."
+    progress.on_agent_capture_done(
+        sessions_synced,
+        sessions_failed,
+        checkpoints_synced,
+        checkpoints_failed,
     );
     if sessions_failed > 0 || checkpoints_failed > 0 {
         Err(format!(
@@ -940,7 +1179,12 @@ async fn sync_agent_capture_tables(
             sessions_failed, checkpoints_failed
         ))
     } else {
-        Ok(())
+        Ok(AgentCaptureSyncOutcome::Completed {
+            sessions_synced,
+            sessions_failed,
+            checkpoints_synced,
+            checkpoints_failed,
+        })
     }
 }
 

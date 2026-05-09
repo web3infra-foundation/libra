@@ -1,0 +1,14 @@
+node_modules/
+.next/
+.open-next/
+.wrangler/
+.turbo/
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+*.tsbuildinfo
+coverage/
+.next-types/
+cloudflare-env.d.ts

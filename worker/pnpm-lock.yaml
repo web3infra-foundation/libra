@@ -1,0 +1,14 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+# This is a placeholder. Run `pnpm install` from `worker/` to populate
+# the real lockfile after running `libra publish init`. The lockfile
+# is committed once it has been generated so reproducible deploys do
+# not depend on registry-time resolution.
+
+importers: {}
+
+packages: {}

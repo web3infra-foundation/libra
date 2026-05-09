@@ -16,8 +16,14 @@
 //!   mirror at `worker/migrations/0001_publish.sql` round-trip
 //!   through these types in the Phase 0 contract tests.
 //!
+//! - `worker_template` — the Worker source-only template embedded
+//!   into the binary so `libra publish init` can materialise the
+//!   project root `worker/` without depending on a Libra source
+//!   checkout (Phase 6/7 split).
+//!
 //! Later phases land additional submodules: `preflight`, `snapshot`,
-//! `ai_export`, `worker_template`, etc. Each phase's submodule is
-//! gated on its predecessors' contracts holding stable.
+//! `ai_export`, etc. Each phase's submodule is gated on its
+//! predecessors' contracts holding stable.
 
 pub mod contract;
+pub mod worker_template;
