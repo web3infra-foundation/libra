@@ -601,6 +601,20 @@ mod tests {
         round_trip::<PublishFile>("file-metadata.json");
     }
 
+    /// Codex pass-3 P2: `display_mode='too_large'` rows MUST omit
+    /// `content_sha256` and `r2_key` (no R2 object exists). The SQL
+    /// CHECK enforces the same invariant on the D1 side; this test
+    /// pins the JSON contract.
+    #[test]
+    fn publish_contract_round_trip_file_metadata_too_large() {
+        let raw = load_fixture("file-metadata-too-large.json");
+        let parsed: PublishFile = serde_json::from_value(raw).unwrap();
+        assert!(matches!(parsed.display_mode, FileDisplayMode::TooLarge));
+        assert!(parsed.content_sha256.is_none());
+        assert!(parsed.r2_key.is_none());
+        round_trip::<PublishFile>("file-metadata-too-large.json");
+    }
+
     #[test]
     fn publish_contract_round_trip_ai_object() {
         round_trip::<PublishAiObject>("ai-object.json");
@@ -609,6 +623,60 @@ mod tests {
     #[test]
     fn publish_contract_round_trip_ai_bundle() {
         round_trip::<PublishAiBundle>("ai-bundle.json");
+    }
+
+    /// Codex pass-3 P2: AI bundles use a `BTreeMap` for `indexes` to
+    /// keep JSON output deterministic. Re-serialize twice and compare
+    /// byte-for-byte so a future swap to `HashMap` (or similar) lights
+    /// up here, not in production diffs.
+    #[test]
+    fn publish_contract_ai_bundle_serializes_deterministically() {
+        let raw = load_fixture("ai-bundle.json");
+        let parsed: PublishAiBundle = serde_json::from_value(raw).unwrap();
+        let first = serde_json::to_vec(&parsed).expect("bundle serializes");
+        let second = serde_json::to_vec(&parsed).expect("bundle serializes");
+        assert_eq!(
+            first, second,
+            "AI bundle JSON output MUST be byte-stable across calls",
+        );
+    }
+
+    /// Codex pass-3 P2: the bundle-level redaction mode MUST agree
+    /// with every per-object redaction mode in the same revision,
+    /// otherwise a `default` bundle could ship `strict`-redacted
+    /// objects (or vice versa) and downstream readers would render
+    /// stale labels. The SQL schema doesn't enforce this cross-row,
+    /// so the contract fixtures are the test boundary: the canonical
+    /// `ai-bundle.json` and the `ai-object.json` it references MUST
+    /// declare the same mode.
+    #[test]
+    fn publish_contract_ai_bundle_redaction_mode_matches_object_fixture() {
+        let bundle: PublishAiBundle =
+            serde_json::from_value(load_fixture("ai-bundle.json")).unwrap();
+        let object: PublishAiObject =
+            serde_json::from_value(load_fixture("ai-object.json")).unwrap();
+        assert_eq!(
+            bundle.site_id, object.site_id,
+            "bundle and object fixtures must reference the same site",
+        );
+        assert_eq!(
+            bundle.revision_oid, object.revision_oid,
+            "bundle and object fixtures must reference the same revision",
+        );
+        assert_eq!(
+            bundle.redaction.mode, object.redaction.mode,
+            "bundle redaction.mode {:?} must match referenced object redaction.mode {:?}",
+            bundle.redaction.mode, object.redaction.mode,
+        );
+        let referenced = bundle
+            .objects
+            .iter()
+            .find(|entry| entry.object_id == object.object_id);
+        assert!(
+            referenced.is_some(),
+            "bundle.objects must list the canonical ai-object fixture {}",
+            object.object_id,
+        );
     }
 
     #[test]

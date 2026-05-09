@@ -10,6 +10,19 @@
 --
 -- Worker runtime never migrates the schema; reads only.
 --
+-- Migration convention (Codex pass-3 P3):
+--   * This file is `0001_publish.sql`. Once landed it is IMMUTABLE in
+--     production — additive-only edits during pass-N review iterations
+--     before a release tag are allowed (this file is still pre-cut).
+--   * Future schema changes go into `0002_<topic>.sql`, `0003_…`, etc.
+--     Each migration MUST be additive (CREATE TABLE … IF NOT EXISTS,
+--     ALTER TABLE … ADD COLUMN with a default, CREATE INDEX … IF NOT
+--     EXISTS) so reapplying on a fresh shard yields the same end state
+--     as applying the chain incrementally.
+--   * `D1Client::ensure_publish_schema()` will apply the migrations in
+--     order; do not rely on cross-migration ordering of statements
+--     within a single file beyond what SQLite's grammar guarantees.
+--
 -- Naming + invariants:
 --   * Every row carries `site_id` so a Worker query can scope to one site
 --     without cross-site leakage.
@@ -42,12 +55,19 @@ CREATE TABLE IF NOT EXISTS publish_sites (
                OR default_ref LIKE 'refs/heads/%'
                OR default_ref LIKE 'refs/tags/%'),
     latest_revision_oid TEXT,
-    refs_generation INTEGER NOT NULL DEFAULT 0,
-    max_preview_bytes INTEGER NOT NULL,
+    refs_generation INTEGER NOT NULL DEFAULT 0
+        CHECK (refs_generation >= 0),
+    max_preview_bytes INTEGER NOT NULL CHECK (max_preview_bytes >= 0),
     schema_version INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE (clone_domain, slug),
+    -- Stable URL invariant (Codex pass-3 P2): the design doc
+    -- specifies `(clone_domain, repo_id)` is the rename-proof
+    -- entry point. Two sites under one clone domain MUST NOT
+    -- share a repo_id, otherwise `repo/<repo_id>` lookups become
+    -- ambiguous.
+    UNIQUE (clone_domain, repo_id),
     -- Composite FKs (Codex pass-2 P2): a site's `default_ref` must
     -- name a real ref of this site, and `latest_revision_oid` must
     -- name a real revision. Both columns are nullable, so the
@@ -72,15 +92,20 @@ CREATE TABLE IF NOT EXISTS publish_revisions (
     status TEXT NOT NULL CHECK (status IN ('syncing', 'published', 'failed')),
     code_manifest_key TEXT,
     ai_index_key TEXT,
-    file_count INTEGER NOT NULL DEFAULT 0,
-    ai_object_count INTEGER NOT NULL DEFAULT 0,
-    ai_bundle_count INTEGER NOT NULL DEFAULT 0,
+    file_count INTEGER NOT NULL DEFAULT 0 CHECK (file_count >= 0),
+    ai_object_count INTEGER NOT NULL DEFAULT 0 CHECK (ai_object_count >= 0),
+    ai_bundle_count INTEGER NOT NULL DEFAULT 0 CHECK (ai_bundle_count >= 0),
     redaction_mode TEXT NOT NULL CHECK (redaction_mode IN ('default', 'strict')),
     redaction_rules_version TEXT NOT NULL,
     sync_run_id TEXT NOT NULL,
     schema_version INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    -- Published-revision manifest invariant (Codex pass-3 P2): a row
+    -- whose status is `published` MUST carry a code manifest key.
+    -- `ai_index_key` may legitimately be NULL when a snapshot has
+    -- no AI objects (still-rare, but allowed by design).
+    CHECK (status != 'published' OR code_manifest_key IS NOT NULL),
     PRIMARY KEY (site_id, revision_oid),
     FOREIGN KEY (site_id) REFERENCES publish_sites (site_id) ON DELETE CASCADE,
     -- Codex pass-2 P2: the sync_run that produced this revision must
@@ -139,9 +164,21 @@ CREATE TABLE IF NOT EXISTS publish_files (
     ),
     content_sha256 TEXT,
     r2_key TEXT,
-    size_bytes INTEGER NOT NULL DEFAULT 0,
+    size_bytes INTEGER NOT NULL DEFAULT 0 CHECK (size_bytes >= 0),
     language TEXT,
     schema_version INTEGER NOT NULL DEFAULT 1,
+    -- File-content invariant (Codex pass-3 P2): `text`/`binary` rows
+    -- carry the contents in R2 and a sha256 digest; `too_large` and
+    -- `ignored` rows record metadata only and MUST NOT carry
+    -- content pointers (otherwise stale R2 keys leak).
+    CHECK (
+        (display_mode IN ('text', 'binary')
+            AND content_sha256 IS NOT NULL
+            AND r2_key IS NOT NULL)
+        OR (display_mode IN ('too_large', 'ignored')
+            AND content_sha256 IS NULL
+            AND r2_key IS NULL)
+    ),
     PRIMARY KEY (site_id, revision_oid, path),
     FOREIGN KEY (site_id, revision_oid)
         REFERENCES publish_revisions (site_id, revision_oid) ON DELETE CASCADE
@@ -177,7 +214,7 @@ CREATE TABLE IF NOT EXISTS publish_ai_versions (
     ai_version_id TEXT NOT NULL,
     revision_oid TEXT NOT NULL,
     bundle_key TEXT NOT NULL,
-    object_count INTEGER NOT NULL DEFAULT 0,
+    object_count INTEGER NOT NULL DEFAULT 0 CHECK (object_count >= 0),
     redaction_mode TEXT NOT NULL CHECK (redaction_mode IN ('default', 'strict')),
     redaction_rules_version TEXT NOT NULL,
     schema_version INTEGER NOT NULL,
@@ -196,12 +233,16 @@ CREATE TABLE IF NOT EXISTS publish_sync_runs (
     status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed')),
     started_at TEXT NOT NULL,
     finished_at TEXT,
-    refs_count INTEGER NOT NULL DEFAULT 0,
-    revision_count INTEGER NOT NULL DEFAULT 0,
-    file_count INTEGER NOT NULL DEFAULT 0,
-    ai_object_count INTEGER NOT NULL DEFAULT 0,
-    ai_bundle_count INTEGER NOT NULL DEFAULT 0,
-    warnings_json TEXT NOT NULL DEFAULT '[]',
+    refs_count INTEGER NOT NULL DEFAULT 0 CHECK (refs_count >= 0),
+    revision_count INTEGER NOT NULL DEFAULT 0 CHECK (revision_count >= 0),
+    file_count INTEGER NOT NULL DEFAULT 0 CHECK (file_count >= 0),
+    ai_object_count INTEGER NOT NULL DEFAULT 0 CHECK (ai_object_count >= 0),
+    ai_bundle_count INTEGER NOT NULL DEFAULT 0 CHECK (ai_bundle_count >= 0),
+    -- warnings_json invariant (Codex pass-3 P2): the column stores
+    -- a JSON array of human-readable warning strings. A malformed
+    -- write would poison every status reader.
+    warnings_json TEXT NOT NULL DEFAULT '[]'
+        CHECK (json_valid(warnings_json) AND json_type(warnings_json) = 'array'),
     error_message TEXT,
     cli_version TEXT NOT NULL,
     schema_version INTEGER NOT NULL DEFAULT 1,
@@ -237,6 +278,7 @@ CREATE VIEW IF NOT EXISTS publish_revisions_published AS
            redaction_mode,
            redaction_rules_version,
            sync_run_id,
+           schema_version,
            created_at,
            updated_at
     FROM publish_revisions
