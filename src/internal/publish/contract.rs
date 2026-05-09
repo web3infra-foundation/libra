@@ -948,9 +948,7 @@ mod tests {
         let entries: Vec<_> = std::fs::read_dir(&source_dir)
             .expect("read sql/publish/")
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path().extension().and_then(|s| s.to_str()) == Some("sql")
-            })
+            .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("sql"))
             .collect();
         assert!(
             !entries.is_empty(),
@@ -958,8 +956,8 @@ mod tests {
         );
         for entry in entries {
             let name = entry.file_name();
-            let source = std::fs::read(entry.path())
-                .unwrap_or_else(|_| panic!("read {:?}", entry.path()));
+            let source =
+                std::fs::read(entry.path()).unwrap_or_else(|_| panic!("read {:?}", entry.path()));
             let mirror = std::fs::read(worker_dir.join(&name)).unwrap_or_else(|_| {
                 panic!(
                     "worker/migrations/{} must exist as a byte-equal mirror of sql/publish/{0}",

@@ -143,8 +143,7 @@ pub struct UnpublishArgs {
     pub yes: bool,
 }
 
-const NOT_YET_IMPLEMENTED: &str =
-    "`libra publish` Phase 4 lands the implementation; the CLI surface is wired so the \
+const NOT_YET_IMPLEMENTED: &str = "`libra publish` Phase 4 lands the implementation; the CLI surface is wired so the \
      command parses, but the executor is not yet ready. Track docs/improvement/publish.md \
      for the v1 release window.";
 
@@ -235,7 +234,10 @@ mod tests {
             1024 * 1024,
             "1 MiB byte count must round-trip",
         );
-        assert_eq!(parse_max_preview_bytes("18446744073709551615").unwrap(), u64::MAX);
+        assert_eq!(
+            parse_max_preview_bytes("18446744073709551615").unwrap(),
+            u64::MAX
+        );
     }
 
     #[test]
@@ -339,7 +341,10 @@ mod tests {
                 assert_eq!(args.r#ref.as_deref(), Some("main"));
                 assert_eq!(
                     args.allow_sensitive_path,
-                    vec![".env.local".to_string(), "config/api-secret.json".to_string()],
+                    vec![
+                        ".env.local".to_string(),
+                        "config/api-secret.json".to_string()
+                    ],
                 );
             }
             _ => panic!("expected `sync` subcommand"),

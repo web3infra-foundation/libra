@@ -853,6 +853,585 @@ impl D1Client {
         self.execute(sql, Some(params)).await?;
         Ok(())
     }
+
+    // ─────────────────────────────────────────────────────────────
+    // Phase 2 (publish.md) — D1 publish schema + upsert/list.
+    //
+    // The publish schema source-of-truth lives at
+    // `sql/publish/0001_publish.sql` + later migrations under
+    // `sql/publish/`. `ensure_publish_schema` reads every `*.sql`
+    // file via `include_str!` and applies them in numeric order;
+    // each statement is run individually because D1's REST `execute`
+    // does not accept multi-statement payloads.
+    //
+    // Upsert/list helpers below are the typed access surface the
+    // CLI snapshot builder (Phase 3) and the publish CLI (Phase 4)
+    // call into. They never `println!`/`eprintln!` — the caller
+    // owns user-facing output.
+    // ─────────────────────────────────────────────────────────────
+
+    /// Apply every publish schema migration in `sql/publish/` to the
+    /// remote D1 database. Idempotent — every migration uses
+    /// `CREATE TABLE IF NOT EXISTS` / `CREATE TRIGGER IF NOT
+    /// EXISTS` / `DROP TRIGGER IF EXISTS` so repeat calls converge
+    /// to the same state. Phase 6+7 reviewers (passes 6 + 11)
+    /// pinned the migration chain via the
+    /// `publish_schema_contract_worker_mirror_is_byte_equal` test;
+    /// the strings below MUST stay byte-equal mirrors of the on-
+    /// disk SQL files, which is enforced by `include_str!`.
+    pub async fn ensure_publish_schema(&self) -> Result<(), D1Error> {
+        // Order matches numeric migration prefix.
+        let migrations: &[(&str, &str)] = &[
+            (
+                "0001_publish.sql",
+                include_str!("../../sql/publish/0001_publish.sql"),
+            ),
+            (
+                "0002_publish_digest_check.sql",
+                include_str!("../../sql/publish/0002_publish_digest_check.sql"),
+            ),
+            (
+                "0003_publish_max_preview_trigger_replace.sql",
+                include_str!("../../sql/publish/0003_publish_max_preview_trigger_replace.sql"),
+            ),
+            (
+                "0004_publish_refs_index.sql",
+                include_str!("../../sql/publish/0004_publish_refs_index.sql"),
+            ),
+        ];
+        for (label, sql) in migrations {
+            for statement in split_sql_statements(sql) {
+                self.execute(&statement, None).await.map_err(|e| D1Error {
+                    code: e.code,
+                    message: format!(
+                        "publish migration {label} failed at statement {statement:?}: {}",
+                        e.message
+                    ),
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Insert or update a `publish_sites` row.
+    ///
+    /// `default_ref` and `latest_revision_oid` may be NULL on first
+    /// insert (the chicken-and-egg insert order described in
+    /// `sql/publish/0001_publish.sql`); update them in a follow-up
+    /// call once the refs/revisions exist.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_publish_site(&self, row: &PublishSiteRow) -> Result<(), D1Error> {
+        let sql = r#"
+            INSERT INTO publish_sites (
+                site_id, repo_id, clone_domain, slug, display_origin,
+                name, visibility, status, worker_name, default_ref,
+                latest_revision_oid, refs_generation, max_preview_bytes,
+                schema_version, created_at, updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+            ON CONFLICT(site_id) DO UPDATE SET
+                repo_id = excluded.repo_id,
+                clone_domain = excluded.clone_domain,
+                slug = excluded.slug,
+                display_origin = excluded.display_origin,
+                name = excluded.name,
+                visibility = excluded.visibility,
+                status = excluded.status,
+                worker_name = excluded.worker_name,
+                default_ref = excluded.default_ref,
+                latest_revision_oid = excluded.latest_revision_oid,
+                refs_generation = excluded.refs_generation,
+                max_preview_bytes = excluded.max_preview_bytes,
+                schema_version = excluded.schema_version,
+                updated_at = excluded.updated_at
+        "#;
+        let params = vec![
+            serde_json::json!(row.site_id),
+            serde_json::json!(row.repo_id),
+            serde_json::json!(row.clone_domain),
+            serde_json::json!(row.slug),
+            serde_json::json!(row.display_origin),
+            serde_json::json!(row.name),
+            serde_json::json!(row.visibility),
+            serde_json::json!(row.status),
+            serde_json::json!(row.worker_name),
+            serde_json::json!(row.default_ref),
+            serde_json::json!(row.latest_revision_oid),
+            serde_json::json!(row.refs_generation),
+            serde_json::json!(row.max_preview_bytes),
+            serde_json::json!(row.schema_version),
+            serde_json::json!(row.created_at),
+            serde_json::json!(row.updated_at),
+        ];
+        self.execute(sql, Some(params)).await?;
+        Ok(())
+    }
+
+    /// Insert or update a `publish_sync_runs` row.
+    pub async fn upsert_publish_sync_run(&self, row: &PublishSyncRunRow) -> Result<(), D1Error> {
+        let sql = r#"
+            INSERT INTO publish_sync_runs (
+                sync_run_id, site_id, status, started_at, finished_at,
+                refs_count, revision_count, file_count, ai_object_count,
+                ai_bundle_count, warnings_json, error_message,
+                cli_version, schema_version
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            ON CONFLICT(sync_run_id) DO UPDATE SET
+                status = excluded.status,
+                finished_at = excluded.finished_at,
+                refs_count = excluded.refs_count,
+                revision_count = excluded.revision_count,
+                file_count = excluded.file_count,
+                ai_object_count = excluded.ai_object_count,
+                ai_bundle_count = excluded.ai_bundle_count,
+                warnings_json = excluded.warnings_json,
+                error_message = excluded.error_message
+        "#;
+        let params = vec![
+            serde_json::json!(row.sync_run_id),
+            serde_json::json!(row.site_id),
+            serde_json::json!(row.status),
+            serde_json::json!(row.started_at),
+            serde_json::json!(row.finished_at),
+            serde_json::json!(row.refs_count),
+            serde_json::json!(row.revision_count),
+            serde_json::json!(row.file_count),
+            serde_json::json!(row.ai_object_count),
+            serde_json::json!(row.ai_bundle_count),
+            serde_json::json!(row.warnings_json),
+            serde_json::json!(row.error_message),
+            serde_json::json!(row.cli_version),
+            serde_json::json!(row.schema_version),
+        ];
+        self.execute(sql, Some(params)).await?;
+        Ok(())
+    }
+
+    /// Insert or update a `publish_revisions` row.
+    pub async fn upsert_publish_revision(&self, row: &PublishRevisionRow) -> Result<(), D1Error> {
+        let sql = r#"
+            INSERT INTO publish_revisions (
+                site_id, revision_oid, status, code_manifest_key, ai_index_key,
+                file_count, ai_object_count, ai_bundle_count, redaction_mode,
+                redaction_rules_version, sync_run_id, schema_version,
+                created_at, updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            ON CONFLICT(site_id, revision_oid) DO UPDATE SET
+                status = excluded.status,
+                code_manifest_key = excluded.code_manifest_key,
+                ai_index_key = excluded.ai_index_key,
+                file_count = excluded.file_count,
+                ai_object_count = excluded.ai_object_count,
+                ai_bundle_count = excluded.ai_bundle_count,
+                redaction_mode = excluded.redaction_mode,
+                redaction_rules_version = excluded.redaction_rules_version,
+                sync_run_id = excluded.sync_run_id,
+                updated_at = excluded.updated_at
+        "#;
+        let params = vec![
+            serde_json::json!(row.site_id),
+            serde_json::json!(row.revision_oid),
+            serde_json::json!(row.status),
+            serde_json::json!(row.code_manifest_key),
+            serde_json::json!(row.ai_index_key),
+            serde_json::json!(row.file_count),
+            serde_json::json!(row.ai_object_count),
+            serde_json::json!(row.ai_bundle_count),
+            serde_json::json!(row.redaction_mode),
+            serde_json::json!(row.redaction_rules_version),
+            serde_json::json!(row.sync_run_id),
+            serde_json::json!(row.schema_version),
+            serde_json::json!(row.created_at),
+            serde_json::json!(row.updated_at),
+        ];
+        self.execute(sql, Some(params)).await?;
+        Ok(())
+    }
+
+    /// Insert or update a `publish_refs` row.
+    pub async fn upsert_publish_ref(&self, row: &PublishRefRow) -> Result<(), D1Error> {
+        let sql = r#"
+            INSERT INTO publish_refs (
+                site_id, ref_name, ref_type, short_name, target_oid,
+                revision_oid, is_default, sync_run_id, schema_version, updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            ON CONFLICT(site_id, ref_name) DO UPDATE SET
+                ref_type = excluded.ref_type,
+                short_name = excluded.short_name,
+                target_oid = excluded.target_oid,
+                revision_oid = excluded.revision_oid,
+                is_default = excluded.is_default,
+                sync_run_id = excluded.sync_run_id,
+                updated_at = excluded.updated_at
+        "#;
+        let params = vec![
+            serde_json::json!(row.site_id),
+            serde_json::json!(row.ref_name),
+            serde_json::json!(row.ref_type),
+            serde_json::json!(row.short_name),
+            serde_json::json!(row.target_oid),
+            serde_json::json!(row.revision_oid),
+            serde_json::json!(row.is_default),
+            serde_json::json!(row.sync_run_id),
+            serde_json::json!(row.schema_version),
+            serde_json::json!(row.updated_at),
+        ];
+        self.execute(sql, Some(params)).await?;
+        Ok(())
+    }
+
+    /// Insert or update a `publish_files` row.
+    pub async fn upsert_publish_file(&self, row: &PublishFileRow) -> Result<(), D1Error> {
+        let sql = r#"
+            INSERT INTO publish_files (
+                site_id, revision_oid, path, display_mode, content_sha256,
+                r2_key, size_bytes, language, schema_version
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            ON CONFLICT(site_id, revision_oid, path) DO UPDATE SET
+                display_mode = excluded.display_mode,
+                content_sha256 = excluded.content_sha256,
+                r2_key = excluded.r2_key,
+                size_bytes = excluded.size_bytes,
+                language = excluded.language
+        "#;
+        let params = vec![
+            serde_json::json!(row.site_id),
+            serde_json::json!(row.revision_oid),
+            serde_json::json!(row.path),
+            serde_json::json!(row.display_mode),
+            serde_json::json!(row.content_sha256),
+            serde_json::json!(row.r2_key),
+            serde_json::json!(row.size_bytes),
+            serde_json::json!(row.language),
+            serde_json::json!(row.schema_version),
+        ];
+        self.execute(sql, Some(params)).await?;
+        Ok(())
+    }
+
+    /// Insert or update a `publish_ai_objects` row.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_publish_ai_object(&self, row: &PublishAiObjectRow) -> Result<(), D1Error> {
+        let sql = r#"
+            INSERT INTO publish_ai_objects (
+                site_id, revision_oid, object_type, object_id, layer,
+                r2_key, redaction_mode, payload_sha256, schema_version, created_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            ON CONFLICT(site_id, revision_oid, object_type, object_id) DO UPDATE SET
+                layer = excluded.layer,
+                r2_key = excluded.r2_key,
+                redaction_mode = excluded.redaction_mode,
+                payload_sha256 = excluded.payload_sha256
+        "#;
+        let params = vec![
+            serde_json::json!(row.site_id),
+            serde_json::json!(row.revision_oid),
+            serde_json::json!(row.object_type),
+            serde_json::json!(row.object_id),
+            serde_json::json!(row.layer),
+            serde_json::json!(row.r2_key),
+            serde_json::json!(row.redaction_mode),
+            serde_json::json!(row.payload_sha256),
+            serde_json::json!(row.schema_version),
+            serde_json::json!(row.created_at),
+        ];
+        self.execute(sql, Some(params)).await?;
+        Ok(())
+    }
+
+    /// Insert or update a `publish_ai_versions` row.
+    pub async fn upsert_publish_ai_version(
+        &self,
+        row: &PublishAiVersionRow,
+    ) -> Result<(), D1Error> {
+        let sql = r#"
+            INSERT INTO publish_ai_versions (
+                site_id, ai_version_id, revision_oid, bundle_key, bundle_sha256,
+                object_count, redaction_mode, redaction_rules_version,
+                schema_version, created_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            ON CONFLICT(site_id, ai_version_id) DO UPDATE SET
+                revision_oid = excluded.revision_oid,
+                bundle_key = excluded.bundle_key,
+                bundle_sha256 = excluded.bundle_sha256,
+                object_count = excluded.object_count,
+                redaction_mode = excluded.redaction_mode,
+                redaction_rules_version = excluded.redaction_rules_version
+        "#;
+        let params = vec![
+            serde_json::json!(row.site_id),
+            serde_json::json!(row.ai_version_id),
+            serde_json::json!(row.revision_oid),
+            serde_json::json!(row.bundle_key),
+            serde_json::json!(row.bundle_sha256),
+            serde_json::json!(row.object_count),
+            serde_json::json!(row.redaction_mode),
+            serde_json::json!(row.redaction_rules_version),
+            serde_json::json!(row.schema_version),
+            serde_json::json!(row.created_at),
+        ];
+        self.execute(sql, Some(params)).await?;
+        Ok(())
+    }
+
+    /// List all `publish_refs` rows for one site.
+    pub async fn list_publish_refs(&self, site_id: &str) -> Result<Vec<PublishRefRow>, D1Error> {
+        let sql = "SELECT site_id, ref_name, ref_type, short_name, target_oid, \
+                          revision_oid, is_default, sync_run_id, schema_version, updated_at \
+                   FROM publish_refs WHERE site_id = ?1 \
+                   ORDER BY ref_type, short_name";
+        self.query(sql, Some(vec![serde_json::json!(site_id)]))
+            .await
+    }
+
+    /// Find one published revision row by `(site_id, revision_oid)`.
+    pub async fn find_publish_revision(
+        &self,
+        site_id: &str,
+        revision_oid: &str,
+    ) -> Result<Option<PublishRevisionRow>, D1Error> {
+        let sql = "SELECT site_id, revision_oid, status, code_manifest_key, ai_index_key, \
+                          file_count, ai_object_count, ai_bundle_count, redaction_mode, \
+                          redaction_rules_version, sync_run_id, schema_version, \
+                          created_at, updated_at \
+                   FROM publish_revisions WHERE site_id = ?1 AND revision_oid = ?2";
+        let rows: Vec<PublishRevisionRow> = self
+            .query(
+                sql,
+                Some(vec![
+                    serde_json::json!(site_id),
+                    serde_json::json!(revision_oid),
+                ]),
+            )
+            .await?;
+        Ok(rows.into_iter().next())
+    }
+
+    /// Find one publish_sites row by site_id.
+    pub async fn find_publish_site(
+        &self,
+        site_id: &str,
+    ) -> Result<Option<PublishSiteRow>, D1Error> {
+        let sql = "SELECT site_id, repo_id, clone_domain, slug, display_origin, \
+                          name, visibility, status, worker_name, default_ref, \
+                          latest_revision_oid, refs_generation, max_preview_bytes, \
+                          schema_version, created_at, updated_at \
+                   FROM publish_sites WHERE site_id = ?1";
+        let rows: Vec<PublishSiteRow> = self
+            .query(sql, Some(vec![serde_json::json!(site_id)]))
+            .await?;
+        Ok(rows.into_iter().next())
+    }
+}
+
+/// Split a multi-statement SQL script into individual statements.
+///
+/// SQLite's REST `execute` accepts one statement per call, but the
+/// publish migrations are written as multi-statement files for
+/// readability. This helper splits on top-level `;` boundaries
+/// while ignoring `;` inside string literals (`'…'`) and inside
+/// SQL `CREATE TRIGGER … BEGIN …; …; END;` blocks. Comments
+/// (`--…\n`) are stripped so the final statement count stays
+/// stable across `cargo +nightly fmt` reflow.
+fn split_sql_statements(input: &str) -> Vec<String> {
+    let mut statements: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_string = false;
+    let mut depth_begin_end: i32 = 0;
+    let mut prev_word = String::new();
+
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        // Strip line comments outside of string literals.
+        if !in_string && ch == '-' && chars.peek() == Some(&'-') {
+            // Consume to end of line.
+            for next_ch in chars.by_ref() {
+                if next_ch == '\n' {
+                    current.push('\n');
+                    break;
+                }
+            }
+            prev_word.clear();
+            continue;
+        }
+
+        if ch == '\'' && !in_string {
+            in_string = true;
+            current.push(ch);
+            prev_word.clear();
+            continue;
+        }
+        if ch == '\'' && in_string {
+            // Handle SQL `''` escape inside a string.
+            if chars.peek() == Some(&'\'') {
+                current.push(ch);
+                current.push(chars.next().unwrap());
+                continue;
+            }
+            in_string = false;
+            current.push(ch);
+            prev_word.clear();
+            continue;
+        }
+
+        if !in_string && ch.is_alphanumeric() {
+            prev_word.push(ch.to_ascii_lowercase());
+        } else if !in_string && ch.is_whitespace() {
+            // Track BEGIN/END nesting on whitespace word boundaries.
+            match prev_word.as_str() {
+                "begin" => depth_begin_end += 1,
+                "end" => {
+                    if depth_begin_end > 0 {
+                        depth_begin_end -= 1;
+                    }
+                }
+                _ => {}
+            }
+            prev_word.clear();
+        } else if !in_string {
+            prev_word.clear();
+        }
+
+        if ch == ';' && !in_string && depth_begin_end == 0 {
+            let trimmed = current.trim().to_string();
+            if !trimmed.is_empty() {
+                statements.push(trimmed);
+            }
+            current.clear();
+            continue;
+        }
+
+        current.push(ch);
+    }
+    let trailing = current.trim().to_string();
+    if !trailing.is_empty() {
+        statements.push(trailing);
+    }
+    statements
+}
+
+/// Local view of a `publish_sites` row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishSiteRow {
+    pub site_id: String,
+    pub repo_id: String,
+    pub clone_domain: String,
+    pub slug: String,
+    pub display_origin: String,
+    pub name: String,
+    pub visibility: String,
+    pub status: String,
+    pub worker_name: String,
+    pub default_ref: Option<String>,
+    pub latest_revision_oid: Option<String>,
+    pub refs_generation: i64,
+    pub max_preview_bytes: i64,
+    pub schema_version: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Local view of a `publish_revisions` row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishRevisionRow {
+    pub site_id: String,
+    pub revision_oid: String,
+    pub status: String,
+    pub code_manifest_key: Option<String>,
+    pub ai_index_key: Option<String>,
+    pub file_count: i64,
+    pub ai_object_count: i64,
+    pub ai_bundle_count: i64,
+    pub redaction_mode: String,
+    pub redaction_rules_version: String,
+    pub sync_run_id: String,
+    pub schema_version: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Local view of a `publish_refs` row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishRefRow {
+    pub site_id: String,
+    pub ref_name: String,
+    pub ref_type: String,
+    pub short_name: String,
+    pub target_oid: String,
+    pub revision_oid: String,
+    pub is_default: i64,
+    pub sync_run_id: String,
+    pub schema_version: i64,
+    pub updated_at: String,
+}
+
+/// Local view of a `publish_files` row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishFileRow {
+    pub site_id: String,
+    pub revision_oid: String,
+    pub path: String,
+    pub display_mode: String,
+    pub content_sha256: Option<String>,
+    pub r2_key: Option<String>,
+    pub size_bytes: i64,
+    pub language: Option<String>,
+    pub schema_version: i64,
+}
+
+/// Local view of a `publish_ai_objects` row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishAiObjectRow {
+    pub site_id: String,
+    pub revision_oid: String,
+    pub object_type: String,
+    pub object_id: String,
+    pub layer: String,
+    pub r2_key: String,
+    pub redaction_mode: String,
+    pub payload_sha256: String,
+    pub schema_version: i64,
+    pub created_at: String,
+}
+
+/// Local view of a `publish_ai_versions` row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishAiVersionRow {
+    pub site_id: String,
+    pub ai_version_id: String,
+    pub revision_oid: String,
+    pub bundle_key: String,
+    pub bundle_sha256: String,
+    pub object_count: i64,
+    pub redaction_mode: String,
+    pub redaction_rules_version: String,
+    pub schema_version: i64,
+    pub created_at: String,
+}
+
+/// Local view of a `publish_sync_runs` row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishSyncRunRow {
+    pub sync_run_id: String,
+    pub site_id: String,
+    pub status: String,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub refs_count: i64,
+    pub revision_count: i64,
+    pub file_count: i64,
+    pub ai_object_count: i64,
+    pub ai_bundle_count: i64,
+    pub warnings_json: String,
+    pub error_message: Option<String>,
+    pub cli_version: String,
+    pub schema_version: i64,
 }
 
 /// Local view of an `agent_session` row prepared for D1 mirroring.
@@ -1069,5 +1648,81 @@ mod tests {
             "unexpected error: {}",
             err.message
         );
+    }
+
+    /// Codex Phase 2 P3: pin the SQL splitter behaviour so the
+    /// publish migrations apply one statement at a time without
+    /// breaking on `BEGIN…END` blocks (used by the trigger
+    /// migrations) or `--` line comments.
+    #[test]
+    fn split_sql_statements_handles_triggers_and_comments() {
+        let sql = r#"
+            -- Header comment, ignored.
+            CREATE TABLE IF NOT EXISTS foo (id INTEGER);
+            CREATE TRIGGER IF NOT EXISTS foo_guard
+                BEFORE INSERT ON foo
+                FOR EACH ROW
+                WHEN NEW.id < 0
+            BEGIN
+                SELECT RAISE(ABORT, 'id must be >= 0');
+            END;
+            CREATE INDEX IF NOT EXISTS foo_id ON foo (id);
+        "#;
+        let stmts = split_sql_statements(sql);
+        assert_eq!(stmts.len(), 3, "got: {stmts:?}");
+        assert!(stmts[0].starts_with("CREATE TABLE IF NOT EXISTS foo"));
+        assert!(stmts[1].contains("CREATE TRIGGER IF NOT EXISTS foo_guard"));
+        assert!(stmts[1].contains("END"));
+        assert!(stmts[2].starts_with("CREATE INDEX IF NOT EXISTS foo_id"));
+    }
+
+    /// Pin the splitter against single-quoted literals containing
+    /// semicolons (e.g. `RAISE(ABORT, 'must be > 0; restart')`).
+    /// A naive splitter would chop the literal in two.
+    #[test]
+    fn split_sql_statements_preserves_quoted_semicolons() {
+        let sql = r#"
+            SELECT 'one; two; three' AS phrase;
+            SELECT 1;
+        "#;
+        let stmts = split_sql_statements(sql);
+        assert_eq!(stmts.len(), 2, "got: {stmts:?}");
+        assert!(stmts[0].contains("'one; two; three'"));
+        assert_eq!(stmts[1], "SELECT 1");
+    }
+
+    /// The publish migrations under `sql/publish/` must split into a
+    /// non-empty statement list and the BEGIN/END trigger blocks must
+    /// not be chopped. Acts as a smoke test for `ensure_publish_schema`.
+    #[test]
+    fn publish_migrations_split_cleanly() {
+        let sql_0001 = include_str!("../../sql/publish/0001_publish.sql");
+        let sql_0002 = include_str!("../../sql/publish/0002_publish_digest_check.sql");
+        let sql_0003 =
+            include_str!("../../sql/publish/0003_publish_max_preview_trigger_replace.sql");
+        let sql_0004 = include_str!("../../sql/publish/0004_publish_refs_index.sql");
+        for (label, sql) in [
+            ("0001", sql_0001),
+            ("0002", sql_0002),
+            ("0003", sql_0003),
+            ("0004", sql_0004),
+        ] {
+            let stmts = split_sql_statements(sql);
+            assert!(!stmts.is_empty(), "{label} produced no statements");
+            for (idx, stmt) in stmts.iter().enumerate() {
+                let begin_count = stmt
+                    .split_whitespace()
+                    .filter(|w| w.eq_ignore_ascii_case("BEGIN"))
+                    .count();
+                let end_count = stmt
+                    .split_whitespace()
+                    .filter(|w| w.eq_ignore_ascii_case("END"))
+                    .count();
+                assert_eq!(
+                    begin_count, end_count,
+                    "{label} statement #{idx} has unbalanced BEGIN/END:\n{stmt}",
+                );
+            }
+        }
     }
 }

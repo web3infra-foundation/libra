@@ -240,11 +240,7 @@ pub const EMBED_DENY_SEGMENTS: &[&str] = &[
 /// `tokens.ts`). This catches `tokens.json`, `token.txt`,
 /// `secrets.json`, etc. while still letting the design package's
 /// canonical asset filenames through.
-pub const EMBED_DENY_FILENAME_FRAGMENTS: &[&str] = &[
-    "token",
-    "secret",
-    "credential",
-];
+pub const EMBED_DENY_FILENAME_FRAGMENTS: &[&str] = &["token", "secret", "credential"];
 
 /// Allowlist of design-system filenames that contain `token` /
 /// `secret` substrings but are NOT credentials. Whole-segment
@@ -279,12 +275,7 @@ pub const EMBED_DENY_FILENAME_SUFFIXES: &[&str] = &[".pem", ".key"];
 /// `id_ed25519_personal`, `id_ecdsa-2024`, etc. Switch to a
 /// case-insensitive prefix match so any segment that *starts with*
 /// one of these names is denied.
-pub const EMBED_DENY_FILENAME_PREFIXES: &[&str] = &[
-    "id_rsa",
-    "id_dsa",
-    "id_ecdsa",
-    "id_ed25519",
-];
+pub const EMBED_DENY_FILENAME_PREFIXES: &[&str] = &["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"];
 
 /// Returns true when `relative_path` contains any path segment that
 /// the embed must not ship.
@@ -349,7 +340,11 @@ pub fn embed_path_is_allowed(relative_path: &str) -> bool {
             }
         }
         for prefix in EMBED_DENY_FILENAME_PREFIXES {
-            if lower == *prefix || lower.starts_with(&format!("{prefix}.")) || lower.starts_with(&format!("{prefix}_")) || lower.starts_with(&format!("{prefix}-")) {
+            if lower == *prefix
+                || lower.starts_with(&format!("{prefix}."))
+                || lower.starts_with(&format!("{prefix}_"))
+                || lower.starts_with(&format!("{prefix}-"))
+            {
                 return false;
             }
         }
