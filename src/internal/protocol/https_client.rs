@@ -79,8 +79,11 @@ impl BasicAuth {
             } // if no auth exists, try without auth (e.g. clone public)
             res = request.send().await?;
             if res.status() == StatusCode::FORBIDDEN {
-                // 403: no access, no need to retry
-                eprintln!("fatal: authentication failed, forbidden");
+                // 403: no access, no need to retry. The caller receives the
+                // response and decides how to handle it — some callers (e.g.
+                // LFS Chunks API) expect 403 as a normal "not supported" signal,
+                // so do not print an alarming message here.
+                tracing::warn!("HTTP 403 Forbidden from server; caller will decide how to handle");
                 break;
             } else if res.status() != StatusCode::UNAUTHORIZED {
                 break;
