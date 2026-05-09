@@ -1425,12 +1425,20 @@ mod tests {
         // We use a deliberately synthetic prefix so secret-
         // scanning push protection doesn't flag the literal as a
         // real provider token.
+        //
+        // Codex pass-2 P2: the assertion has to be tight enough
+        // to catch ANY redaction — not just the prefix. If a
+        // future change accidentally masks the FAKE… payload, an
+        // assertion that only checks for `synthetic-pin-` would
+        // still pass and silently invalidate the documented gap.
+        // Assert full equality (the input has no leading/trailing
+        // whitespace so `trim()` is a no-op).
         let raw = "synthetic-pin-FAKEFAKEFAKEFAKEFAKE-xyz";
         let sanitized = sanitized_audit_client_id(&redactor, raw);
-        assert!(
-            sanitized.contains("synthetic-pin-"),
-            "marker-only redactor unexpectedly masked a bare secret \
-             shape; the test pin needs updating: '{sanitized}'",
+        assert_eq!(
+            sanitized, raw,
+            "marker-only redactor unexpectedly altered a bare secret \
+             shape; the test pin needs updating",
         );
     }
 
