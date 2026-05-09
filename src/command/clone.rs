@@ -157,6 +157,12 @@ pub enum CloneError {
     },
     #[error("failed to complete clone setup: {message}")]
     SetupFailed { message: String },
+    #[error(
+        "libra+cloud:// clone source recognised, but Phase 5 of \
+         docs/improvement/publish.md is not yet implemented; tracking \
+         the v1 release window for `libra clone {input}`"
+    )]
+    CloudPublishSourceNotYetImplemented { input: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -220,6 +226,23 @@ impl From<CloneError> for CliError {
             CloneError::SetupFailed { .. } => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::InternalInvariant)
                 .with_hint(format!("please report this issue at: {ISSUE_URL}")),
+            CloneError::CloudPublishSourceNotYetImplemented { .. } => {
+                // Codex pass-7 P1: surface the recognised but
+                // unimplemented Cloudflare publish clone source as a
+                // fatal CLI error so the user sees a precise message
+                // instead of falling through to the generic remote
+                // discovery path. Phase 5 of
+                // docs/improvement/publish.md lands the actual
+                // implementation; until then this acts as a clean
+                // surface for forward compatibility.
+                CliError::fatal(error.to_string())
+                    .with_stable_code(StableErrorCode::CliInvalidArguments)
+                    .with_hint(
+                        "Phase 5 of docs/improvement/publish.md is in progress; \
+                         use the local CLI's existing `libra cloud restore` flow \
+                         (or wait for the v1 release) to recover the repository.",
+                    )
+            }
         }
     }
 }
@@ -569,6 +592,23 @@ async fn execute_clone_inner(
     original_dir: &Path,
     output: &OutputConfig,
 ) -> Result<CloneOutput, (CloneError, Option<String>)> {
+    // Codex pass-7 P1: intercept the Cloudflare publish source scheme
+    // before generic remote discovery. Phase 5 of
+    // `docs/improvement/publish.md` lands the actual D1/R2 restore
+    // path; until then we fail with a clear "not yet implemented"
+    // error pointing the user at the Phase 5 release window. This
+    // prevents a `libra+cloud://...` URL from falling into the
+    // generic Git fetch path and emitting a confusing protocol
+    // error.
+    if args.remote_repo.starts_with("libra+cloud://") {
+        return Err((
+            CloneError::CloudPublishSourceNotYetImplemented {
+                input: args.remote_repo.clone(),
+            },
+            None,
+        ));
+    }
+
     let mut remote_repo = args.remote_repo.clone();
     if !remote_repo.ends_with('/') {
         remote_repo.push('/');

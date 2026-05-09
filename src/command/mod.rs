@@ -38,6 +38,7 @@ pub mod log;
 pub mod merge;
 pub mod mv;
 pub mod open;
+pub mod publish;
 pub mod pull;
 pub mod push;
 pub mod rebase;

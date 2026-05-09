@@ -120,6 +120,7 @@ fn embed_contains_critical_worker_entrypoints() {
         "next.config.ts",
         "open-next.config.ts",
         "migrations/0001_publish.sql",
+        "migrations/0002_publish_digest_check.sql",
         "app/layout.tsx",
         "app/page.tsx",
         "app/globals.css",

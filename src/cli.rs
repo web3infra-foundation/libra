@@ -279,6 +279,11 @@ enum Commands {
     #[command(about = "Cloud backup and restore operations (D1/R2)")]
     Cloud(command::cloud::CloudArgs),
 
+    #[command(
+        about = "Read-only publish of code, refs and AI object model to Cloudflare Workers (D1/R2)"
+    )]
+    Publish(command::publish::PublishArgs),
+
     // CEX-EntireIO: external-Agent capture surface.
     #[command(about = "Manage external-agent capture (Claude Code, Gemini, …)")]
     Agent(command::agent::AgentArgs),
@@ -930,6 +935,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Reflog(cmd_args) => command::reflog::execute_safe(cmd_args, &output).await?,
         Commands::Worktree(cmd_args) => command::worktree::execute_safe(cmd_args, &output).await?,
         Commands::Cloud(cmd_args) => command::cloud::execute_safe(cmd_args, &output).await?,
+        Commands::Publish(cmd_args) => command::publish::execute_safe(cmd_args, &output).await?,
         Commands::Agent(cmd_args) => command::agent::execute_safe(cmd_args, &output).await?,
         Commands::Hooks(cmd_args) => command::hooks::execute_safe(cmd_args, &output).await?,
         Commands::Bisect(bisect_cmd) => command::bisect::execute_safe(bisect_cmd, &output).await?,

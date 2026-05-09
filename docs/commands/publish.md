@@ -163,8 +163,17 @@ or to `ConfigKv`.
 ## Files
 
 - `sql/publish/0001_publish.sql` — the D1 schema source of truth.
-- `worker/migrations/0001_publish.sql` — byte-equal mirror used by
-  `wrangler d1 migrations apply` at deploy time.
+- `sql/publish/0002_publish_digest_check.sql` — additive trigger
+  migration that enforces lowercase 64-char hex on every digest
+  column for tenants who already applied 0001. Required because
+  SQLite's `CREATE TABLE IF NOT EXISTS` is a no-op when the table
+  already exists, so column-level CHECK additions in 0001 never
+  reach existing databases.
+- `worker/migrations/<NNNN>_*.sql` — byte-equal mirrors of every
+  file under `sql/publish/`, applied by `wrangler d1 migrations
+  apply` at deploy time. The
+  `publish_schema_contract_worker_mirror_is_byte_equal` test walks
+  both directories and refuses any drift.
 - `worker/` — Next.js + React + OpenNext-for-Cloudflare project. Ships
   embedded in the Libra binary; `libra publish init` materialises it
   in the target repository's root.

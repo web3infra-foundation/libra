@@ -66,24 +66,39 @@ use rust_embed::Embed;
 #[exclude = "**/id_dsa*"]
 #[exclude = "**/id_ecdsa*"]
 #[exclude = "**/id_ed25519*"]
-// Codex pass-6 P2: rust-embed gives `#[exclude]` priority over
-// `#[include]`, so a broad `**/*token*` glob would strip the
+// Codex pass-6 P2 + pass-7 P2: rust-embed gives `#[exclude]` priority
+// over `#[include]`, so a broad `**/*token*` glob would strip the
 // design-system allowlist (`tokens.css`, `tokens.ts`, …) before
 // `WorkerTemplate::iter()` ever runs. We keep the **bounded**
 // credential excludes here (which do not match design-system
-// filenames because they require a separator before the keyword)
-// and let the runtime `embed_path_is_allowed` helper enforce the
-// final policy via the
-// `embed_does_not_carry_generated_or_secret_paths` test. The
-// runtime helper is more permissive only for the explicit design-
-// system allowlist; everything else stays denied at both layers.
+// filenames because they require a separator before the keyword).
+// rust-embed glob matching is case-sensitive, so each exclude has
+// lowercase + Title-case + UPPERCASE variants so files like
+// `Cloudflare-Token.json` and `AUTH_TOKEN.JSON` are stripped at the
+// embed layer too. The runtime `embed_path_is_allowed` helper does a
+// case-insensitive check and re-validates every embedded path at
+// test time via `embed_does_not_carry_generated_or_secret_paths`.
 #[exclude = "**/*_token*"]
 #[exclude = "**/*-token*"]
 #[exclude = "**/*.token*"]
+#[exclude = "**/*_Token*"]
+#[exclude = "**/*-Token*"]
+#[exclude = "**/*.Token*"]
+#[exclude = "**/*_TOKEN*"]
+#[exclude = "**/*-TOKEN*"]
+#[exclude = "**/*.TOKEN*"]
 #[exclude = "**/*_secret*"]
 #[exclude = "**/*-secret*"]
 #[exclude = "**/*.secret*"]
+#[exclude = "**/*_Secret*"]
+#[exclude = "**/*-Secret*"]
+#[exclude = "**/*.Secret*"]
+#[exclude = "**/*_SECRET*"]
+#[exclude = "**/*-SECRET*"]
+#[exclude = "**/*.SECRET*"]
 #[exclude = "**/*credential*"]
+#[exclude = "**/*Credential*"]
+#[exclude = "**/*CREDENTIAL*"]
 pub struct WorkerTemplate;
 
 /// Render policy for a template file.
@@ -173,6 +188,10 @@ pub const MANIFEST: &[ManifestEntry] = &[
     },
     ManifestEntry {
         path: "migrations/0001_publish.sql",
+        render_policy: RenderPolicy::ManagedTemplate,
+    },
+    ManifestEntry {
+        path: "migrations/0002_publish_digest_check.sql",
         render_policy: RenderPolicy::ManagedTemplate,
     },
     ManifestEntry {
