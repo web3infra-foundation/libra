@@ -29,8 +29,14 @@ BEGIN
     SELECT RAISE(ABORT, 'publish_sites.max_preview_bytes must be > 0');
 END;
 
+-- Codex pass-10 P2: row-level UPDATE trigger (no `OF` clause) so an
+-- update statement that does NOT touch `max_preview_bytes` still
+-- re-validates the invariant. Per-column triggers (`BEFORE UPDATE OF
+-- max_preview_bytes`) skip statements that omit the column from the
+-- SET list, which would let a row violating the invariant be
+-- modified without the trigger firing.
 CREATE TRIGGER IF NOT EXISTS publish_sites_max_preview_bytes_positive_update
-    BEFORE UPDATE OF max_preview_bytes ON publish_sites
+    BEFORE UPDATE ON publish_sites
     FOR EACH ROW
     WHEN NEW.max_preview_bytes <= 0
 BEGIN

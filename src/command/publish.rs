@@ -159,10 +159,13 @@ fn parse_max_preview_bytes(raw: &str) -> Result<u64, String> {
         .parse()
         .map_err(|_| format!("'{raw}' is not a valid byte count"))?;
     if parsed == 0 {
-        return Err(
-            "max-preview-bytes must be > 0; pass a positive byte count or omit the flag"
-                .to_string(),
-        );
+        // Codex pass-10 P3: include the offending input verbatim so
+        // the error message reads naturally in scripts that pipe
+        // user input through.
+        return Err(format!(
+            "'{raw}' is not a valid byte count: must be > 0; pass a positive byte count or \
+             omit the flag",
+        ));
     }
     Ok(parsed)
 }
@@ -192,4 +195,57 @@ pub async fn execute(args: PublishArgs) -> CliResult<()> {
 pub async fn execute_safe(args: PublishArgs, _output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
     execute(args).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Codex pass-10 P1: pin the `--max-preview-bytes` parser
+    /// behaviour. The CLI surface must reject 0 (zero cap publishes
+    /// no previews — pure misuse) and non-numeric input, and accept
+    /// any positive `u64`.
+    #[test]
+    fn max_preview_bytes_rejects_zero() {
+        let err = parse_max_preview_bytes("0").expect_err("zero must be rejected");
+        assert!(
+            err.contains("must be > 0"),
+            "error must mention the positive-only constraint: {err}",
+        );
+        assert!(
+            err.contains("'0'"),
+            "error must include the offending input: {err}",
+        );
+    }
+
+    #[test]
+    fn max_preview_bytes_rejects_non_numeric() {
+        let err = parse_max_preview_bytes("abc").expect_err("non-numeric must be rejected");
+        assert!(
+            err.contains("'abc'"),
+            "error must include the offending input: {err}",
+        );
+    }
+
+    #[test]
+    fn max_preview_bytes_accepts_positive() {
+        assert_eq!(parse_max_preview_bytes("1").unwrap(), 1);
+        assert_eq!(
+            parse_max_preview_bytes("1048576").unwrap(),
+            1024 * 1024,
+            "1 MiB byte count must round-trip",
+        );
+        assert_eq!(parse_max_preview_bytes("18446744073709551615").unwrap(), u64::MAX);
+    }
+
+    #[test]
+    fn max_preview_bytes_rejects_negative() {
+        // u64 cannot represent negatives so parse fails as
+        // "not a valid byte count" — pin the message shape.
+        let err = parse_max_preview_bytes("-1").expect_err("negative must be rejected");
+        assert!(
+            err.contains("not a valid byte count"),
+            "negative input must hit the type-parse error: {err}",
+        );
+    }
 }

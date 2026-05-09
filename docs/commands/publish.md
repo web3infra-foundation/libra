@@ -50,6 +50,10 @@ libra publish init \
 - Confirms the current directory is a Libra repo.
 - Reuses or generates `libra.repoid`.
 - Writes `publish.*` keys into `ConfigKv`.
+- `--max-preview-bytes <bytes>`: per-file preview cap (must be
+  `> 0`; the CLI rejects `0` because a zero cap publishes no file
+  previews — pass a positive byte count or omit the flag to use the
+  default).
 - Materialises `worker/` from the embedded Worker template using the
   `worker_template_manifest.json` ruleset: missing files are written
   fresh, unmodified template files may be patched, user-modified
@@ -113,6 +117,14 @@ leaves `latest_revision_oid` / `refs_generation` untouched.
 
 ### `libra publish status`
 
+```
+libra publish status [--json]
+```
+
+- `--json`: emits a stable machine-readable envelope with the same
+  fields documented below. Without `--json`, output is a
+  human-readable summary.
+
 Reports:
 
 - Local repo id, site id, slug, visibility.
@@ -128,6 +140,16 @@ Reports:
 
 ### `libra publish deploy`
 
+```
+libra publish deploy [--skip-deploy]
+```
+
+- `--skip-deploy`: run the build + migration steps but skip the
+  final `wrangler deploy`. Useful for CI smoke tests that need to
+  verify the project builds cleanly without touching production.
+
+Behaviour:
+
 - Verifies the Worker template state is not `conflicted`.
 - Runs `pnpm --dir worker build` (Next.js + OpenNext for Cloudflare).
 - Applies D1 migrations from `worker/migrations/`.
@@ -140,6 +162,16 @@ A failed deploy preserves all sync data; the next `publish sync` is
 not rolled back.
 
 ### `libra publish unpublish`
+
+```
+libra publish unpublish [--yes]
+```
+
+- `--yes`: skip the interactive confirmation prompt. Required for
+  unattended invocations (CI, scripts) since unpublish flips the
+  Worker's response to 410 immediately.
+
+Behaviour:
 
 - Sets `publish_sites.status = 'disabled'`. The Worker API
   immediately returns 410 for that site and skips R2 reads.
@@ -213,11 +245,18 @@ Current chain:
    migration. SQLite's `CREATE TABLE IF NOT EXISTS` is a no-op when
    the table already exists, so column-level CHECK additions in
    0001 do not reach existing databases. Migration 0002 adds
-   `BEFORE INSERT`/`BEFORE UPDATE` triggers that re-enforce the
-   lowercase 64-char hex shape on `publish_files.content_sha256`,
-   `publish_ai_objects.payload_sha256` and
-   `publish_ai_versions.bundle_sha256`. Idempotent (`CREATE TRIGGER
-   IF NOT EXISTS`) and safe to re-apply.
+   `BEFORE INSERT`/`BEFORE UPDATE` triggers that re-enforce:
+   * lowercase 64-char hex shape on `publish_files.content_sha256`,
+     `publish_ai_objects.payload_sha256`, and
+     `publish_ai_versions.bundle_sha256`;
+   * `publish_sites.max_preview_bytes > 0` (the 0001 column-level
+     CHECK only enforces `>= 0`; the 0002 trigger pins the
+     stricter publish-semantic invariant on existing tenants and
+     fires on row-level UPDATE so statements that omit the
+     column from the SET list still re-validate).
+
+   All triggers are idempotent (`CREATE TRIGGER IF NOT EXISTS`)
+   and safe to re-apply.
 
 Future schema changes go into `0003_<topic>.sql`, etc. Each
 migration MUST be additive (`CREATE TABLE … IF NOT EXISTS`,
