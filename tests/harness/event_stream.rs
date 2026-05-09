@@ -43,7 +43,7 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, RecvTimeoutError},
+        mpsc::{self, RecvTimeoutError, TrySendError},
     },
     thread::{self, JoinHandle},
     time::Duration,
@@ -159,17 +159,23 @@ impl EventStream {
         }
     }
 
-    /// Signal the reader thread to stop and wait for it to join.
-    /// Idempotent; called automatically by [`Drop`].
+    /// Signal the reader thread to stop. Codex pass-1 P2: do NOT
+    /// `join()` here — the reader can be parked in either a long
+    /// `read()` on the underlying socket OR a blocked
+    /// `mpsc::SyncSender::send` if the matrix consumer fell behind.
+    /// Both block until the corresponding peer wakes them up, so
+    /// joining would deadlock test teardown for an unbounded period.
+    /// Instead we drop the receiver and the join handle: dropping
+    /// the receiver makes the worker's next send fail with
+    /// `Disconnected` (it uses `try_send`), and dropping the join
+    /// handle detaches the thread. The OS reaps it once the socket
+    /// read returns (typically within milliseconds, when the
+    /// `Response` itself is dropped on this side).
     pub fn close(&mut self) {
         self.cancel.store(true, Ordering::SeqCst);
-        if let Some(handle) = self.worker.take() {
-            // Best-effort join — if the worker is still blocked on
-            // a long read we accept the leak rather than block the
-            // test forever. In practice the underlying TCP read
-            // returns once the response is dropped.
-            let _ = handle.join();
-        }
+        // Detach the worker so a stuck I/O read can't hang teardown.
+        // We intentionally do not join.
+        let _ = self.worker.take();
     }
 }
 
@@ -188,26 +194,34 @@ fn run_reader(response: Response, tx: mpsc::SyncSender<EventOrError>, cancel: Ar
             return;
         }
         let mut line_bytes: Vec<u8> = Vec::new();
-        match reader.read_until(b'\n', &mut line_bytes) {
-            Ok(0) => {
-                // Server closed the stream. Treat as a non-fatal
-                // EOF: surface a single error so callers can see
-                // disconnect, then exit.
-                let _ = tx.send(EventOrError::Err("SSE stream closed by server".to_string()));
+        // Codex pass-1 P2: bound bytes DURING the read so a malformed
+        // SSE source without newlines cannot grow the buffer beyond
+        // the documented cap before we surface the error.
+        match read_line_bounded(&mut reader, &mut line_bytes, MAX_SSE_LINE_BYTES) {
+            Ok(BoundedRead::Eof) => {
+                send_or_drop(
+                    &tx,
+                    EventOrError::Err("SSE stream closed by server".to_string()),
+                );
                 return;
             }
-            Ok(_) => {}
+            Ok(BoundedRead::Line) => {}
+            Ok(BoundedRead::OverLimit) => {
+                send_or_drop(
+                    &tx,
+                    EventOrError::Err(format!(
+                        "SSE line exceeded {MAX_SSE_LINE_BYTES} bytes before newline"
+                    )),
+                );
+                return;
+            }
             Err(error) => {
-                let _ = tx.send(EventOrError::Err(format!("SSE stream read error: {error}")));
+                send_or_drop(
+                    &tx,
+                    EventOrError::Err(format!("SSE stream read error: {error}")),
+                );
                 return;
             }
-        }
-        if line_bytes.len() > MAX_SSE_LINE_BYTES {
-            let _ = tx.send(EventOrError::Err(format!(
-                "SSE line exceeded {MAX_SSE_LINE_BYTES} bytes ({} bytes read)",
-                line_bytes.len(),
-            )));
-            return;
         }
         // Strip the trailing newline pair (`\r\n` or `\n`) without
         // allocating: the parser pre-strips so we never carry it
@@ -231,7 +245,9 @@ fn run_reader(response: Response, tx: mpsc::SyncSender<EventOrError>, cancel: Ar
                     data: data_lines.join("\n"),
                 };
                 data_lines.clear();
-                if tx.send(EventOrError::Event(event)).is_err() {
+                if !send_or_drop(&tx, EventOrError::Event(event)) {
+                    // Receiver gone — quit instead of looping
+                    // forever pushing events into a dropped channel.
                     return;
                 }
             }
@@ -247,7 +263,10 @@ fn run_reader(response: Response, tx: mpsc::SyncSender<EventOrError>, cancel: Ar
         let line = match std::str::from_utf8(&line_bytes) {
             Ok(s) => s,
             Err(error) => {
-                let _ = tx.send(EventOrError::Err(format!("SSE line not UTF-8: {error}")));
+                send_or_drop(
+                    &tx,
+                    EventOrError::Err(format!("SSE line not UTF-8: {error}")),
+                );
                 return;
             }
         };
@@ -258,15 +277,89 @@ fn run_reader(response: Response, tx: mpsc::SyncSender<EventOrError>, cancel: Ar
             // `event\n` (no colon) is not technically valid; treat
             // the entire line as a malformed signal but keep going.
             if !rest.is_empty() {
-                let _ = tx.send(EventOrError::Err(format!(
-                    "malformed SSE field, expected ':' after 'event': {line:?}"
-                )));
+                send_or_drop(
+                    &tx,
+                    EventOrError::Err(format!(
+                        "malformed SSE field, expected ':' after 'event': {line:?}"
+                    )),
+                );
                 return;
             }
         } else if let Some(rest) = line.strip_prefix("data:") {
             data_lines.push(rest.trim_start().to_string());
         }
         // `id:` and `retry:` ignored — Libra doesn't use them.
+    }
+}
+
+/// Outcome of a single bounded line read.
+enum BoundedRead {
+    /// Read up to and including a newline (the newline IS appended
+    /// to `out`, mirroring `BufRead::read_until`'s contract so the
+    /// parser can keep its existing trailing-`\n` strip logic).
+    Line,
+    /// EOF before any bytes for this call.
+    Eof,
+    /// `out` reached `cap` bytes without seeing a newline; the
+    /// caller must surface the over-limit error and stop reading.
+    OverLimit,
+}
+
+/// Read up to one line (terminated by `\n`) from `reader`, but stop
+/// as soon as `out` reaches `cap` bytes. This caps memory growth
+/// even when the upstream sends an unterminated, ever-growing line.
+fn read_line_bounded<R: BufRead>(
+    reader: &mut R,
+    out: &mut Vec<u8>,
+    cap: usize,
+) -> std::io::Result<BoundedRead> {
+    let mut byte = [0_u8; 1];
+    loop {
+        if out.len() >= cap {
+            return Ok(BoundedRead::OverLimit);
+        }
+        match reader.read(&mut byte)? {
+            0 => {
+                if out.is_empty() {
+                    return Ok(BoundedRead::Eof);
+                }
+                // EOF mid-line: treat as a complete line so the
+                // parser still classifies it; the next iteration
+                // will return Eof and exit cleanly.
+                return Ok(BoundedRead::Line);
+            }
+            1 => {
+                out.push(byte[0]);
+                if byte[0] == b'\n' {
+                    return Ok(BoundedRead::Line);
+                }
+            }
+            _ => unreachable!("Read::read with a 1-byte buf returns 0 or 1"),
+        }
+    }
+}
+
+/// Best-effort enqueue: returns `true` if the receiver accepted
+/// the value (or the channel had room), `false` if the receiver
+/// was dropped. We use `try_send` instead of blocking `send` so a
+/// slow / paused consumer cannot deadlock the reader thread; if
+/// the channel is full, we surface that as a fatal error so the
+/// caller can choose to abort the stream rather than silently lose
+/// events.
+fn send_or_drop(tx: &mpsc::SyncSender<EventOrError>, value: EventOrError) -> bool {
+    match tx.try_send(value) {
+        Ok(()) => true,
+        Err(TrySendError::Disconnected(_)) => false,
+        Err(TrySendError::Full(value)) => {
+            // Block one final time on `send` so we don't drop the
+            // event silently — but with the channel poisoned by a
+            // disconnect (the typical reason callers stop draining
+            // is that they dropped the EventStream), this returns
+            // immediately with Err. If the channel is genuinely
+            // full because the consumer is just slow, this lets it
+            // catch up rather than corrupt the parsed-event order.
+            tx.send(value).is_ok()
+        }
     }
 }
 
@@ -305,6 +398,19 @@ mod tests {
         tx: mpsc::SyncSender<EventOrError>,
         cancel: Arc<AtomicBool>,
     ) {
+        run_reader_into_with_cap(reader, tx, cancel, MAX_SSE_LINE_BYTES);
+    }
+
+    /// Variant that exposes the byte cap so the over-limit
+    /// regression test can saturate it without allocating MiB
+    /// fixtures. Mirrors `run_reader` so the parser stays in lock-
+    /// step with the production path.
+    fn run_reader_into_with_cap<R: std::io::Read>(
+        reader: R,
+        tx: mpsc::SyncSender<EventOrError>,
+        cancel: Arc<AtomicBool>,
+        cap: usize,
+    ) {
         let mut reader = BufReader::new(reader);
         let mut event_field = String::new();
         let mut data_lines: Vec<String> = Vec::new();
@@ -313,11 +419,17 @@ mod tests {
                 return;
             }
             let mut line_bytes: Vec<u8> = Vec::new();
-            match reader.read_until(b'\n', &mut line_bytes) {
-                Ok(0) => return,
-                Ok(_) => {}
+            match read_line_bounded(&mut reader, &mut line_bytes, cap) {
+                Ok(BoundedRead::Eof) => return,
+                Ok(BoundedRead::Line) => {}
+                Ok(BoundedRead::OverLimit) => {
+                    let _ = tx.try_send(EventOrError::Err(format!(
+                        "SSE line exceeded {cap} bytes before newline"
+                    )));
+                    return;
+                }
                 Err(error) => {
-                    let _ = tx.send(EventOrError::Err(format!("read error: {error}")));
+                    let _ = tx.try_send(EventOrError::Err(format!("read error: {error}")));
                     return;
                 }
             }
@@ -338,7 +450,7 @@ mod tests {
                         data: data_lines.join("\n"),
                     };
                     data_lines.clear();
-                    if tx.send(EventOrError::Event(event)).is_err() {
+                    if tx.try_send(EventOrError::Event(event)).is_err() {
                         return;
                     }
                 }
@@ -408,5 +520,37 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event, "status_changed");
         assert_eq!(events[0].data, "idle");
+    }
+
+    /// Codex pass-1 P2 regression: the byte cap MUST be enforced
+    /// during the read, not after `read_until` has already grown
+    /// the buffer past it. With a 32-byte cap and a 200-byte
+    /// unterminated line we expect the worker to surface an error
+    /// before allocating the full payload.
+    #[test]
+    fn read_aborts_when_line_exceeds_cap_before_newline() {
+        let cap = 32;
+        let body = "x".repeat(200);
+        let cursor = Cursor::new(body.into_bytes());
+        let (tx, rx) = mpsc::sync_channel::<EventOrError>(8);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_for_thread = Arc::clone(&cancel);
+        thread::scope(|scope| {
+            scope.spawn(move || {
+                run_reader_into_with_cap::<Cursor<Vec<u8>>>(cursor, tx, cancel_for_thread, cap);
+            });
+        });
+        let items: Vec<EventOrError> = rx.try_iter().collect();
+        // Exactly one error event, no parsed `SseEvent`s.
+        assert_eq!(items.len(), 1);
+        match &items[0] {
+            EventOrError::Err(message) => {
+                assert!(
+                    message.contains("32 bytes before newline"),
+                    "unexpected error message: {message}",
+                );
+            }
+            EventOrError::Event(event) => panic!("expected Err, got Event {event:?}"),
+        }
     }
 }

@@ -90,6 +90,14 @@ pub struct Case {
     pub name: String,
     #[allow(dead_code)]
     pub priority: String,
+    /// Per-case fixture override. Wave 2's
+    /// `sse_streaming_fixture_transcript_content_grows_monotonically`
+    /// case in `sse_cases.json` requires the streaming fixture
+    /// instead of the file's default basic-chat fixture. Codex
+    /// pass-1 P3: surfacing it here lets `build_session_options`
+    /// honour the override deterministically.
+    #[serde(default)]
+    pub fixture: Option<FixtureRef>,
     #[serde(default)]
     pub options: CaseOptions,
     pub steps: Vec<Step>,
@@ -305,10 +313,19 @@ fn effective_options(defaults: &CaseOptions, case: &CaseOptions) -> CaseOptions 
 }
 
 /// Build a [`CodeSessionOptions`] from the matrix config, including
-/// per-case overrides for `control` and `leaseDurationMs`.
+/// per-case overrides for `control`, `leaseDurationMs`, and
+/// `fixture`. Codex pass-1 P3: case-level `fixture` overrides the
+/// file's default, matching the JSON schema documented in
+/// `docs/improvement/test.md`.
 pub fn build_session_options(file: &CaseFile, case: &Case) -> CodeSessionOptions {
     let merged = effective_options(&file.defaults.options, &case.options);
-    let fixture = repo_root_path(&file.defaults.fixture.path);
+    let fixture_path = case
+        .fixture
+        .as_ref()
+        .unwrap_or(&file.defaults.fixture)
+        .path
+        .clone();
+    let fixture = repo_root_path(&fixture_path);
     let mut options = CodeSessionOptions::new(case.name.clone(), fixture);
     if let Some(control) = merged.control.as_deref() {
         match control {
