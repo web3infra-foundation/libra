@@ -372,8 +372,14 @@ function RefsTable({
             Branches & tags · publish status
           </h2>
         </div>
-        <div
-          role="tablist"
+        {/*
+          Codex pass-2 P2: this control is link-based navigation
+          (each filter is a real URL the user can bookmark). The
+          ARIA tab pattern requires roving-focus keyboard handling
+          we can't easily provide on `<a>` elements. Render as a
+          plain nav so the browser's default Tab traversal works.
+        */}
+        <nav
           aria-label="Ref filter"
           className="flex overflow-hidden rounded"
           style={{ border: "1px solid var(--paper-line)" }}
@@ -383,10 +389,7 @@ function RefsTable({
             return (
               <Link
                 key={id}
-                id={`refs-filter-tab-${id}`}
-                role="tab"
-                aria-selected={on}
-                aria-controls="refs-filter-panel"
+                aria-current={on ? "page" : undefined}
                 href={
                   id === "all"
                     ? `/sites/${slug}/publish${activeRefName ? `?ref=${encodeURIComponent(activeRefName)}` : ""}`
@@ -403,15 +406,10 @@ function RefsTable({
               </Link>
             );
           })}
-        </div>
+        </nav>
       </header>
 
-      <div
-        id="refs-filter-panel"
-        role="tabpanel"
-        aria-labelledby={`refs-filter-tab-${filter}`}
-        className="overflow-x-auto"
-      >
+      <div className="overflow-x-auto">
         <table
           className="w-full min-w-[760px] border-collapse text-left"
           style={{ fontFamily: "var(--font-sans)" }}

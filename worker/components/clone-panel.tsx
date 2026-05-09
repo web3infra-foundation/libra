@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cn, shortRevision } from "@/lib/utils";
 
 /**
@@ -42,6 +42,31 @@ export function ClonePanel({
     () => variants.find((v) => v.id === tab) ?? variants[0],
     [variants, tab],
   );
+
+  // Codex pass-2 P2: WAI-ARIA tablist roving focus. ArrowRight /
+  // ArrowLeft cycle, Home / End jump to the ends. Selecting a tab
+  // also moves DOM focus there, matching the design pattern that
+  // `tabIndex={-1}` non-active tabs imply.
+  const tabRefs = useRef(new Map<CloneVariant["id"], HTMLButtonElement>());
+  const onKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>) => {
+      const ids = variants.map((v) => v.id);
+      const idx = ids.indexOf(tab);
+      if (idx < 0) return;
+      let nextIdx: number | null = null;
+      if (event.key === "ArrowRight") nextIdx = (idx + 1) % ids.length;
+      else if (event.key === "ArrowLeft") nextIdx = (idx - 1 + ids.length) % ids.length;
+      else if (event.key === "Home") nextIdx = 0;
+      else if (event.key === "End") nextIdx = ids.length - 1;
+      if (nextIdx === null) return;
+      event.preventDefault();
+      const nextId = ids[nextIdx]!;
+      setTab(nextId);
+      tabRefs.current.get(nextId)?.focus();
+    },
+    [tab, variants],
+  );
+
   if (!active) return null;
 
   return (
@@ -88,6 +113,7 @@ export function ClonePanel({
       <div
         role="tablist"
         aria-label="Clone variant"
+        onKeyDown={onKeyDown}
         className="flex gap-0 overflow-x-auto border-b px-5"
         style={{ background: "var(--paper)", borderColor: "var(--paper-line)" }}
       >
@@ -102,6 +128,10 @@ export function ClonePanel({
               aria-selected={on}
               aria-controls={`clone-panel-${v.id}`}
               tabIndex={on ? 0 : -1}
+              ref={(el) => {
+                if (el) tabRefs.current.set(v.id, el);
+                else tabRefs.current.delete(v.id);
+              }}
               onClick={() => setTab(v.id)}
               className={cn(
                 "whitespace-nowrap px-4 py-3 text-[12.5px]",
