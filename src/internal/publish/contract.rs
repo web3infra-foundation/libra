@@ -936,19 +936,42 @@ mod tests {
         );
     }
 
-    /// Schema source-of-truth contract: the worker's mirror copy must
-    /// be byte-equal to `sql/publish/0001_publish.sql`. The publish
-    /// design doc names this the `publish_schema_contract` test.
+    /// Schema source-of-truth contract: every migration file under
+    /// `sql/publish/` must have a byte-equal copy under
+    /// `worker/migrations/`. Codex pass-6 P2 added `0002_*` so the
+    /// test now iterates the directory and checks every file.
     #[test]
     fn publish_schema_contract_worker_mirror_is_byte_equal() {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let source = std::fs::read(manifest_dir.join("sql/publish/0001_publish.sql"))
-            .expect("read sql/publish/0001_publish.sql");
-        let worker = std::fs::read(manifest_dir.join("worker/migrations/0001_publish.sql"))
-            .expect("read worker/migrations/0001_publish.sql");
-        assert_eq!(
-            source, worker,
-            "worker/migrations/0001_publish.sql must be byte-equal to sql/publish/0001_publish.sql",
+        let source_dir = manifest_dir.join("sql/publish");
+        let worker_dir = manifest_dir.join("worker/migrations");
+        let entries: Vec<_> = std::fs::read_dir(&source_dir)
+            .expect("read sql/publish/")
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path().extension().and_then(|s| s.to_str()) == Some("sql")
+            })
+            .collect();
+        assert!(
+            !entries.is_empty(),
+            "sql/publish/ must contain at least one migration",
         );
+        for entry in entries {
+            let name = entry.file_name();
+            let source = std::fs::read(entry.path())
+                .unwrap_or_else(|_| panic!("read {:?}", entry.path()));
+            let mirror = std::fs::read(worker_dir.join(&name)).unwrap_or_else(|_| {
+                panic!(
+                    "worker/migrations/{} must exist as a byte-equal mirror of sql/publish/{0}",
+                    name.to_string_lossy(),
+                )
+            });
+            assert_eq!(
+                source,
+                mirror,
+                "worker/migrations/{0} must be byte-equal to sql/publish/{0}",
+                name.to_string_lossy(),
+            );
+        }
     }
 }

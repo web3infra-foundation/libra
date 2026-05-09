@@ -66,16 +66,23 @@ use rust_embed::Embed;
 #[exclude = "**/id_dsa*"]
 #[exclude = "**/id_ecdsa*"]
 #[exclude = "**/id_ed25519*"]
-// Codex pass-5 P1: deny every `*token*` / `*secret*` /
-// `*credential*` at the rust-embed level. Design-system token
-// assets like `tokens.css` are picked up explicitly via the
-// `#[include]` rules above (e.g. `app/**/*`), and rust-embed's
-// `#[include]` wins over `#[exclude]` only for matches that
-// already passed the include filter — so the runtime
-// `embed_path_is_allowed` helper carries the design-system
-// allowlist check.
-#[exclude = "**/*token*"]
-#[exclude = "**/*secret*"]
+// Codex pass-6 P2: rust-embed gives `#[exclude]` priority over
+// `#[include]`, so a broad `**/*token*` glob would strip the
+// design-system allowlist (`tokens.css`, `tokens.ts`, …) before
+// `WorkerTemplate::iter()` ever runs. We keep the **bounded**
+// credential excludes here (which do not match design-system
+// filenames because they require a separator before the keyword)
+// and let the runtime `embed_path_is_allowed` helper enforce the
+// final policy via the
+// `embed_does_not_carry_generated_or_secret_paths` test. The
+// runtime helper is more permissive only for the explicit design-
+// system allowlist; everything else stays denied at both layers.
+#[exclude = "**/*_token*"]
+#[exclude = "**/*-token*"]
+#[exclude = "**/*.token*"]
+#[exclude = "**/*_secret*"]
+#[exclude = "**/*-secret*"]
+#[exclude = "**/*.secret*"]
 #[exclude = "**/*credential*"]
 pub struct WorkerTemplate;
 

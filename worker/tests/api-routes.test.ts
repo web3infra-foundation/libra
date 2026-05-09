@@ -220,6 +220,17 @@ describe("/api/sites/[slug]/ai/*", () => {
     expect(body.data.payload.payload.summary).toBe("Publish demo intent");
   });
 
+  // Codex pass-6 P3: a future regression that drops `bundle_sha256`
+  // from the SELECT projection would still pass against FakeD1
+  // because the fake returns the seeded row in full. Pin the SQL
+  // string here so the projection cannot drift silently.
+  it("findAiVersion SELECT projects bundle_sha256", async () => {
+    const findAiVersionSource = (
+      await import("@/lib/server/d1")
+    ).findAiVersion.toString();
+    expect(findAiVersionSource).toMatch(/bundle_sha256/);
+  });
+
   it("returns AI version detail without storage keys", async () => {
     const response = await aiVersionDetailGet(
       makeRequest("/api/sites/libra-demo/ai/versions/ai-version-2026-05-09-001"),
