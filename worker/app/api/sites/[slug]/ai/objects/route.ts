@@ -14,6 +14,7 @@ import {
   parseRevisionOid,
   parseSlug,
 } from "@/lib/server/validate";
+import { badRequest } from "@/lib/server/errors";
 
 export const runtime = "edge";
 export const dynamic = "force-dynamic";
@@ -39,6 +40,16 @@ export async function GET(
     const cursor = parseCursor(url.searchParams.get("cursor"));
     if (revisionRaw) parseRevisionOid(revisionRaw);
 
+    // Codex pass-13 P2: AI objects cursor MUST carry both
+    // `objectType` AND `objectId`. A partial cursor would silently
+    // disable keyset pagination.
+    if (cursor) {
+      const hasType = cursor.objectType !== undefined;
+      const hasId = cursor.objectId !== undefined;
+      if (hasType !== hasId) {
+        throw badRequest("ai-objects cursor must carry both objectType and objectId");
+      }
+    }
     const revision = await resolveRevision(bindings.db, site, refRaw, revisionRaw);
 
     const afterObjectType = cursor?.objectType ? parseObjectType(cursor.objectType) : undefined;

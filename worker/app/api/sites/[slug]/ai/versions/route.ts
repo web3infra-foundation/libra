@@ -12,6 +12,7 @@ import {
   parseRevisionOid,
   parseSlug,
 } from "@/lib/server/validate";
+import { badRequest } from "@/lib/server/errors";
 
 export const runtime = "edge";
 export const dynamic = "force-dynamic";
@@ -34,6 +35,18 @@ export async function GET(
     const cursor = parseCursor(url.searchParams.get("cursor"));
     if (revisionRaw) parseRevisionOid(revisionRaw);
 
+    // Codex pass-13 P2: AI versions cursor only uses `objectId` (the
+    // ai_version_id). Reject any cursor that carries other fields
+    // (e.g., a stray `objectType` from a misrouted object cursor).
+    if (cursor) {
+      const allowed = new Set(["objectId", "revision"]);
+      const stray = Object.keys(cursor).filter((k) => !allowed.has(k));
+      if (stray.length > 0) {
+        throw badRequest(
+          `ai-versions cursor contains fields not permitted: ${stray.join(",")}`,
+        );
+      }
+    }
     const revision = await resolveRevision(bindings.db, site, refRaw, revisionRaw);
     const after = cursor?.objectId ? parseAiVersionId(cursor.objectId) : undefined;
 

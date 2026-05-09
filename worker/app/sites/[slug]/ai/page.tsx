@@ -1,6 +1,7 @@
 import { SiteShell } from "@/components/site-shell";
 import { EmptyState } from "@/components/empty-state";
 import { AiBrowser } from "@/components/ai-browser";
+import { RefPicker } from "@/components/ref-picker";
 import {
   loadRefsForSite,
   loadSiteContextForSlug,
@@ -103,25 +104,26 @@ function Header({
   readonly refs: readonly { readonly refName: string; readonly refType: "branch" | "tag"; readonly shortName: string; readonly targetOid: string; readonly revisionOid: string; readonly isDefault: boolean; readonly updatedAt: string }[];
   readonly activeRef: string;
 }) {
-  // The ref picker renders as part of the AiBrowser to share state
-  // with the type/layer filters; surface a static summary here.
-  void slug;
-  void refs;
-  void activeRef;
+  // Codex pass-13 P2: AI page shows the ref picker so users can
+  // switch branches/tags from the AI model view, matching Phase 7
+  // behaviour on the code/refs/status pages.
   return (
-    <div className="mb-6">
-      <h1 className="text-xl font-semibold">AI object model</h1>
-      <p className="mt-1 text-sm libra-text-muted">
-        Revision <span className="libra-mono">{revision.revisionOid.slice(0, 12)}</span>
-        {" · "}
-        {revision.aiObjectCount.toLocaleString()} objects
-        {" · "}
-        {revision.aiBundleCount.toLocaleString()} bundle{revision.aiBundleCount === 1 ? "" : "s"}
-        {" · "}
-        redaction <span className="libra-mono">{revision.redactionMode}</span>
-        {" · "}
-        rules <span className="libra-mono">{revision.redactionRulesVersion}</span>
-      </p>
+    <div className="mb-6 space-y-3">
+      <RefPicker slug={slug} refs={refs} active={activeRef} />
+      <div>
+        <h1 className="text-xl font-semibold">AI object model</h1>
+        <p className="mt-1 text-sm libra-text-muted">
+          Revision <span className="libra-mono">{revision.revisionOid.slice(0, 12)}</span>
+          {" · "}
+          {revision.aiObjectCount.toLocaleString()} objects
+          {" · "}
+          {revision.aiBundleCount.toLocaleString()} bundle{revision.aiBundleCount === 1 ? "" : "s"}
+          {" · "}
+          redaction <span className="libra-mono">{revision.redactionMode}</span>
+          {" · "}
+          rules <span className="libra-mono">{revision.redactionRulesVersion}</span>
+        </p>
+      </div>
     </div>
   );
 }

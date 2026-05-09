@@ -180,7 +180,7 @@ CI 默认门：L0+L1 必跑；L2 在 `test-provider` 下必跑；L3 仅 nightly 
 
 - **现状 ❌**：完全无 Rust 客户端；[tests/data/code_ui_remote/sse_cases.json](../../tests/data/code_ui_remote/sse_cases.json) 7 条已写好，但**没有 runner**。
 - **缺口**：
-  - SSE blocking client：[tests/harness/event_stream.rs](../../tests/harness/event_stream.rs)（**新建文件**，独立 `reqwest::blocking`、per-read timeout、1 MiB 行上限、EOF 与 timeout 区分）。
+  - SSE blocking client：`tests/harness/event_stream.rs`（**新建文件**，独立 `reqwest::blocking`、per-read timeout、1 MiB 行上限、EOF 与 timeout 区分）。
   - 初次连接 replay 全量 `session_updated` snapshot。
   - submit → `status_changed: thinking` → tool_call → `status_changed: idle` 的事件序列与 `seq` 单调性。
   - attach/detach 触发 `controller_changed`。
@@ -447,7 +447,7 @@ pub struct RemoteCase {
   - `open_event_stream(timeout) -> Result<EventStream>`
   - `respond_interaction(id, response) -> Result<(StatusCode, Value)>`
 
-新增 [tests/harness/event_stream.rs](../../tests/harness/event_stream.rs)：
+新增 `tests/harness/event_stream.rs`：
 
 - 使用独立 `reqwest::blocking::Client`。不要复用全局 5s total timeout，而是设置 per-read timeout。
 - 手工解析 SSE block，只识别 `event:` 和 `data:`。
@@ -654,7 +654,7 @@ libra code --env-file .env.test --provider "$LIBRA_CODE_TEST_PROVIDER" \
 
 ### 待新增 — 基础设施
 
-- [tests/harness/event_stream.rs](../../tests/harness/event_stream.rs)（**新建，P0 阻塞项**）
+- `tests/harness/event_stream.rs`（**新建，P0 阻塞项**）
 - 扩展 [tests/harness/code_session.rs](../../tests/harness/code_session.rs)：`with_model_from_env_test()`、`respond_interaction()`、`open_event_stream()`、`get_threads()`、`diagnostics_raw_text()`、`libra_log_text()`、`read_repo_file()`、`run_repo_command()`（**扩展现有文件**）
 - 扩展 [tests/harness/matrix.rs](../../tests/harness/matrix.rs)：`ProviderRef::ModelFromEnvFile`、`Step::OpenEventStream` / `WaitEvent`、`Step::RespondInteraction`（**扩展现有文件**）
 

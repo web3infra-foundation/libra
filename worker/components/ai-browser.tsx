@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
   fetchAiObject,
@@ -70,10 +70,15 @@ export function AiBrowser({ slug, refName }: Props) {
   const [loadingObjects, setLoadingObjects] = useState(false);
   const [loadingDetail, setLoadingDetail] = useState(false);
 
-  // Codex pass-12 P2: track the active filter key so a late-resolving
-  // `loadMoreObjects()` from a previous filter cannot append into the
-  // current view.
+  // Codex pass-12 P2 + pass-13 P2: track the active filter key in a
+  // ref so `loadMoreObjects()` always reads the LATEST key when its
+  // promise resolves. The earlier draft closed over the render's
+  // `filterKey` value, which never updates inside the in-flight
+  // closure. With `activeFilterKeyRef.current` the guard sees
+  // post-filter-change values immediately.
   const filterKey = `${slug}::${refName}::${type ?? ""}::${layer ?? ""}`;
+  const activeFilterKeyRef = useRef(filterKey);
+  activeFilterKeyRef.current = filterKey;
 
   useEffect(() => {
     // Codex pass-11 P2 + pass-12 P2: clear accumulated pages,
@@ -126,7 +131,7 @@ export function AiBrowser({ slug, refName }: Props) {
         cursor: objects.nextCursor,
         limit: 200,
       });
-      if (requestKey !== filterKey) return;
+      if (requestKey !== activeFilterKeyRef.current) return;
       setObjects((prev) =>
         prev
           ? {
@@ -136,10 +141,10 @@ export function AiBrowser({ slug, refName }: Props) {
           : next,
       );
     } catch (err: unknown) {
-      if (requestKey !== filterKey) return;
+      if (requestKey !== activeFilterKeyRef.current) return;
       setError(err instanceof ApiError ? err.message : "failed to load more objects");
     } finally {
-      if (requestKey === filterKey) setLoadingObjects(false);
+      if (requestKey === activeFilterKeyRef.current) setLoadingObjects(false);
     }
   };
 

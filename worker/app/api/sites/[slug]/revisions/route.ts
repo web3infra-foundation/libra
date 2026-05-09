@@ -5,6 +5,7 @@ import { listPublishedRevisions } from "@/lib/server/d1";
 import { respondError, respondOk } from "@/lib/server/response";
 import { revisionToWire } from "@/lib/server/wire";
 import { encodeCursor, parseCursor, parseLimit, parseRevisionOid, parseSlug } from "@/lib/server/validate";
+import { badRequest } from "@/lib/server/errors";
 
 export const runtime = "edge";
 export const dynamic = "force-dynamic";
@@ -24,6 +25,15 @@ export async function GET(
     const limit = parseLimit(url.searchParams.get("limit"), 100);
     const cursor = parseCursor(url.searchParams.get("cursor"));
 
+    // Codex pass-13 P2: revisions cursor MUST carry both `revision`
+    // and `startedAt`. A partial cursor would silently restart the
+    // page from the top, masking pagination breakage.
+    if (cursor) {
+      const presence = [cursor.revision, cursor.startedAt].map(Boolean);
+      if (presence.some((v) => v) && !presence.every((v) => v)) {
+        throw badRequest("revisions cursor must carry both revision and startedAt");
+      }
+    }
     const before = cursor?.revision && cursor?.startedAt
       ? { revisionOid: parseRevisionOid(cursor.revision), createdAt: cursor.startedAt }
       : undefined;
