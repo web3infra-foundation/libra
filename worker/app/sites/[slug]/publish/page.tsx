@@ -6,7 +6,7 @@ import {
   loadPublishOverviewForSite,
   loadSiteContextForSlug,
 } from "@/lib/server/page-helpers";
-import { formatDate, shortRevision } from "@/lib/utils";
+import { cn, formatDate, shortRevision } from "@/lib/utils";
 import type { PublishOverviewRefWire } from "@/lib/wire-types";
 
 export const runtime = "edge";
@@ -43,6 +43,17 @@ function readRefSelection(
   return refs.find((r) => r.isDefault) ?? refs[0] ?? null;
 }
 
+/**
+ * POSIX shell single-quote: wrap the value in `'...'` and replace any
+ * embedded single-quote with `'\''`. Safe for any printable input;
+ * we use it on every dynamic URL or oid that lands inside the
+ * copy-pasted clone command so a hostile or unusual ref name cannot
+ * inject extra arguments.
+ */
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
 function buildCloneVariants(args: {
   readonly cloneDomain: string;
   readonly slug: string;
@@ -54,12 +65,11 @@ function buildCloneVariants(args: {
   const base = `libra+cloud://${args.cloneDomain}/${args.slug}`;
   const stable = `libra+cloud://${args.cloneDomain}/repo/${args.repoId}`;
   const sel = args.selected;
-  const selRevisionShort = sel ? shortRevision(sel.revisionOid) : "<oid>";
   return [
     {
       id: "default",
       title: "Default — clone HEAD of default branch",
-      command: `libra clone ${base}`,
+      command: `libra clone ${shellQuote(base)}`,
       notes: args.defaultRefShort && args.defaultTargetOid
         ? `Resolves to refs/heads/${args.defaultRefShort} @ ${shortRevision(args.defaultTargetOid)}`
         : "Resolves to the site's default ref at clone time.",
@@ -68,7 +78,7 @@ function buildCloneVariants(args: {
       id: "ref",
       title: "Pin to a branch or tag",
       command: sel
-        ? `libra clone "${base}?ref=${sel.refName}"`
+        ? `libra clone ${shellQuote(`${base}?${new URLSearchParams({ ref: sel.refName }).toString()}`)}`
         : `libra clone "${base}?ref=<branch-or-tag>"`,
       notes: sel
         ? `${sel.refType === "tag" ? "Tag" : "Branch"} · ${sel.refName} @ ${shortRevision(sel.targetOid)}`
@@ -77,15 +87,20 @@ function buildCloneVariants(args: {
     {
       id: "revision",
       title: "Pin to an immutable revision",
-      command: `libra clone "${base}?revision=${selRevisionShort}"`,
+      // Clone with the FULL revision oid — `shortRevision` is only
+      // for human-readable labels. A short oid is ambiguous and the
+      // CLI's revision parser rejects truncated values.
+      command: sel
+        ? `libra clone ${shellQuote(`${base}?${new URLSearchParams({ revision: sel.revisionOid }).toString()}`)}`
+        : `libra clone "${base}?revision=<oid>"`,
       notes: sel
-        ? `Frozen at oid ${selRevisionShort}. Use a full commit oid; the keyword latest resolves at clone time.`
+        ? `Frozen at oid ${shortRevision(sel.revisionOid)}. Use a full commit oid; the keyword latest resolves at clone time.`
         : "Use a full commit oid; the keyword latest resolves at clone time.",
     },
     {
       id: "stable",
       title: "Stable repo URL — survives slug rename",
-      command: `libra clone ${stable}`,
+      command: `libra clone ${shellQuote(stable)}`,
       notes: "Domain-qualified by repo_id; survives a slug rename.",
     },
   ];
@@ -157,6 +172,8 @@ export default async function PublishHeroPage({ params, searchParams }: Props) {
           variants={cloneVariants}
         />
 
+        <SelectedRefFacts selected={selected} />
+
         <QuickTaskGrid slug={ctx.siteWire.slug} refName={selected?.refName ?? null} />
 
         <RefsTable
@@ -169,6 +186,59 @@ export default async function PublishHeroPage({ params, searchParams }: Props) {
         />
       </div>
     </SiteShell>
+  );
+}
+
+function SelectedRefFacts({
+  selected,
+}: {
+  readonly selected: PublishOverviewRefWire | null;
+}) {
+  if (!selected) return null;
+  return (
+    <section
+      aria-label="Selected ref"
+      className="rounded-md p-4"
+      style={{
+        background: "var(--paper)",
+        border: "1px solid var(--paper-line)",
+      }}
+    >
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <Fact label="HEAD oid" value={shortRevision(selected.targetOid)} mono />
+        <Fact label="Selected ref" value={selected.refName} mono />
+        <Fact
+          label="Last published"
+          value={formatDate(selected.revisionCreatedAt ?? selected.updatedAt)}
+        />
+        <Fact
+          label="Publish state"
+          value={<PublishStatePill state={selected.publishState} />}
+        />
+      </div>
+    </section>
+  );
+}
+
+function Fact({
+  label,
+  value,
+  mono,
+}: {
+  readonly label: string;
+  readonly value: React.ReactNode;
+  readonly mono?: boolean;
+}) {
+  return (
+    <div className="min-w-0">
+      <div className="lb-eyebrow mb-1">{label}</div>
+      <div
+        className={cn("text-[13px] truncate", mono ? "lb-mono" : "")}
+        style={{ color: "var(--ink-deep)" }}
+      >
+        {value}
+      </div>
+    </div>
   );
 }
 
@@ -231,7 +301,11 @@ function QuickTaskGrid({
       eyebrow: "Track",
       title: "Refs & publish status",
       desc: "All branches and tags · publish health.",
-      href: `/sites/${slug}/refs`,
+      // Codex pass-1 deviation note: keep the Track action on the
+      // publish route so the design's single-page hero stays intact.
+      // The query carries the selected ref (so the table highlights
+      // the same row); the hash scrolls to the table heading.
+      href: `/sites/${slug}/publish${refQuery}#refs-table-heading`,
     },
   ];
   return (
@@ -309,8 +383,10 @@ function RefsTable({
             return (
               <Link
                 key={id}
+                id={`refs-filter-tab-${id}`}
                 role="tab"
                 aria-selected={on}
+                aria-controls="refs-filter-panel"
                 href={
                   id === "all"
                     ? `/sites/${slug}/publish${activeRefName ? `?ref=${encodeURIComponent(activeRefName)}` : ""}`
@@ -330,7 +406,12 @@ function RefsTable({
         </div>
       </header>
 
-      <div className="overflow-x-auto">
+      <div
+        id="refs-filter-panel"
+        role="tabpanel"
+        aria-labelledby={`refs-filter-tab-${filter}`}
+        className="overflow-x-auto"
+      >
         <table
           className="w-full min-w-[760px] border-collapse text-left"
           style={{ fontFamily: "var(--font-sans)" }}

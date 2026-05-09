@@ -720,13 +720,22 @@ export async function loadPublishOverview(
     return { refs: [], defaultRef: null };
   }
 
+  // Codex pass-1 P2: bound the revision/AI-version follow-ups to the
+  // distinct revision oids currently referenced by `publish_refs` so
+  // accumulated historical revisions don't widen the scan over time.
+  // Implemented as a positional `?, ?, ?` IN-list — D1 doesn't expand
+  // arrays, so we generate the placeholder list ourselves and bind
+  // each oid as its own parameter alongside the site id.
+  const distinctRevisionOids = [...new Set(refs.map((r) => r.revision_oid))];
+  const inPlaceholders = distinctRevisionOids.map(() => "?").join(", ");
+
   const revisionsResult = await db
     .prepare(
       `SELECT revision_oid, status, file_count, created_at
        FROM publish_revisions
-       WHERE site_id = ?`,
+       WHERE site_id = ? AND revision_oid IN (${inPlaceholders})`,
     )
-    .bind(siteId)
+    .bind(siteId, ...distinctRevisionOids)
     .all<{
       readonly revision_oid: string;
       readonly status: "syncing" | "published" | "failed";
@@ -749,10 +758,10 @@ export async function loadPublishOverview(
     .prepare(
       `SELECT revision_oid, COUNT(*) AS n
        FROM publish_ai_versions
-       WHERE site_id = ?
+       WHERE site_id = ? AND revision_oid IN (${inPlaceholders})
        GROUP BY revision_oid`,
     )
-    .bind(siteId)
+    .bind(siteId, ...distinctRevisionOids)
     .all<{ readonly revision_oid: string; readonly n: number }>();
   const aiCounts = new Map<string, number>();
   for (const row of aiCountsResult.results ?? []) {

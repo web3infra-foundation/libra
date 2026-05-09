@@ -212,23 +212,32 @@ class FakePreparedStatement {
         .sort((a, b) => sortBy(a, b, ["ai_version_id"]));
     }
     // loadPublishOverview: revision projection used to colour the
-    // hero page table. Returns every revision for the site (status,
-    // file_count, created_at) so the helper can left-join in JS.
+    // hero page table. Codex pass-1 P2 narrowed the SQL to an
+    // IN (?, ?, ...) over the distinct revision oids actually
+    // referenced by publish_refs. The first bind is the site id, the
+    // rest are the revision oids (variable count); we filter the
+    // mock rows accordingly.
     if (sql.startsWith("SELECT revision_oid, status, file_count, created_at")) {
-      const [siteId] = this.binds as [string];
+      const [siteId, ...revisionOids] = this.binds as [string, ...string[]];
+      const allowed = new Set(revisionOids);
       return this.db.tables["publish_revisions"]!.filter(
-        (row) => row["site_id"] === siteId,
+        (row) =>
+          row["site_id"] === siteId &&
+          allowed.has(row["revision_oid"] as string),
       );
     }
     // loadPublishOverview: COUNT(*) of publish_ai_versions per
-    // revision so the table can render the AI-versions column without
-    // pulling every bundle row.
+    // revision (also IN-bounded to the current refs' revisions) so
+    // the table can render the AI-versions column without pulling
+    // every bundle row.
     if (sql.startsWith("SELECT revision_oid, COUNT(*) AS n FROM publish_ai_versions")) {
-      const [siteId] = this.binds as [string];
+      const [siteId, ...revisionOids] = this.binds as [string, ...string[]];
+      const allowed = new Set(revisionOids);
       const counts = new Map<string, number>();
       for (const row of this.db.tables["publish_ai_versions"]!) {
         if (row["site_id"] !== siteId) continue;
         const oid = row["revision_oid"] as string;
+        if (!allowed.has(oid)) continue;
         counts.set(oid, (counts.get(oid) ?? 0) + 1);
       }
       return [...counts.entries()].map(([revision_oid, n]) => ({ revision_oid, n }));

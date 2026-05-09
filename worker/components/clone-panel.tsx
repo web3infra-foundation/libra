@@ -97,8 +97,11 @@ export function ClonePanel({
             <button
               key={v.id}
               type="button"
+              id={`clone-tab-${v.id}`}
               role="tab"
               aria-selected={on}
+              aria-controls={`clone-panel-${v.id}`}
+              tabIndex={on ? 0 : -1}
               onClick={() => setTab(v.id)}
               className={cn(
                 "whitespace-nowrap px-4 py-3 text-[12.5px]",
@@ -116,7 +119,12 @@ export function ClonePanel({
         })}
       </div>
 
-      <div className="px-5 py-4">
+      <div
+        id={`clone-panel-${active.id}`}
+        role="tabpanel"
+        aria-labelledby={`clone-tab-${active.id}`}
+        className="px-5 py-4"
+      >
         <CommandLine value={active.command} />
         <p className="lb-meta mt-3 text-[12px]">{active.notes}</p>
       </div>
