@@ -1348,12 +1348,32 @@ mod tests {
     #[test]
     fn sanitized_audit_client_id_replaces_control_characters_with_underscore() {
         let redactor = SecretRedactor::default_runtime();
-        // Mix tab, newline, NUL, ESC and bell — all should be
-        // replaced with `_` so the audit summary stays
-        // greppable / single-line.
-        let raw = "client\t\nA\u{0007}\u{0000}\u{001b}end";
+        // Cover the full `char::is_control()` set the implementation
+        // sanitizes against:
+        //   * C0 controls 0x00–0x1F (NUL, BEL, tab, newline, ESC, …)
+        //   * DEL 0x7F
+        //   * C1 controls 0x80–0x9F (NEL 0x85, APC 0x9F, …)
+        // A sanitizer change that drops DEL or the C1 range would
+        // regress this test; covering all three groups guards both.
+        let raw = "c\t\nA\u{0007}\u{0000}\u{001b}B\u{007f}C\u{0085}D\u{009f}end";
         let sanitized = sanitized_audit_client_id(&redactor, raw);
-        assert_eq!(sanitized, "client__A___end");
+        // Original NL/CR are trimmed (it lives at the start) — but
+        // the embedded ones are replaced. Build the expected string
+        // by walking the input and substituting controls so the
+        // assertion stays in lock-step with the implementation.
+        let expected: String = "c\t\nA\u{0007}\u{0000}\u{001b}B\u{007f}C\u{0085}D\u{009f}end"
+            .trim()
+            .chars()
+            .map(|ch| if ch.is_control() { '_' } else { ch })
+            .collect();
+        assert_eq!(sanitized, expected);
+        // Spot-check that DEL and a representative C1 char
+        // ARE represented as `_` in the output (regression
+        // anchor — these are the codepoints Codex pass-1 P2 C1
+        // flagged as missing from the original test).
+        assert!(!sanitized.contains('\u{007f}'), "DEL leaked: {sanitized:?}");
+        assert!(!sanitized.contains('\u{0085}'), "NEL leaked: {sanitized:?}");
+        assert!(!sanitized.contains('\u{009f}'), "APC leaked: {sanitized:?}");
     }
 
     #[test]
@@ -1368,36 +1388,80 @@ mod tests {
         }
     }
 
+    /// Default runtime redactor only masks marker-prefixed values
+    /// (`token=`, `password:`, `x-libra-control-token=`, …) — it
+    /// does NOT do bare-token pattern detection. The audit
+    /// pipeline still runs the redactor over the client_id, so a
+    /// caller that ATTACHES a marker pattern around a secret
+    /// (e.g. paste of `token=...`) gets it scrubbed before the
+    /// summary is persisted. Bare secret-shaped client IDs without
+    /// markers WILL pass through; that's a documented gap, not a
+    /// silent failure (Codex pass-1 P2 C5).
     #[test]
-    fn sanitized_audit_client_id_runs_redactor_marker_pass() {
+    fn sanitized_audit_client_id_runs_marker_redactor_over_input() {
         let redactor = SecretRedactor::default_runtime();
-        // Default runtime redactor masks values that follow one of
-        // the `marker=` / `marker:` prefixes (token=, password=,
-        // x-libra-control-token=, …). Use one of those so the
-        // redactor actually has something to mask. The original
-        // secret tail must not appear verbatim in the sanitized
-        // output.
         let raw = "client-id:token=top-secret-payload";
         let sanitized = sanitized_audit_client_id(&redactor, raw);
         assert!(
             !sanitized.contains("top-secret-payload"),
-            "redactor failed to mask the marker value: '{sanitized}'",
+            "marker redactor failed to mask the value: '{sanitized}'",
+        );
+    }
+
+    /// Companion regression for the documented gap above: a bare
+    /// secret-shaped client_id without a marker prefix DOES survive
+    /// the redactor. This is intentional given the marker-only
+    /// design of `SecretRedactor::default_runtime()`. Pinning it
+    /// makes any future change to the redactor surface (e.g.
+    /// adopting pattern-based detection) appear as an obvious
+    /// `assert!(...)` failure that needs a deliberate update.
+    #[test]
+    fn sanitized_audit_client_id_does_not_mask_bare_secret_shaped_input() {
+        let redactor = SecretRedactor::default_runtime();
+        // A bare secret-SHAPED string with no marker prefix:
+        // long random-looking alnum that an attacker might paste
+        // as a client_id. The marker redactor (which only looks
+        // for `marker=` / `marker:` boundaries) leaves it alone.
+        // We use a deliberately synthetic prefix so secret-
+        // scanning push protection doesn't flag the literal as a
+        // real provider token.
+        let raw = "synthetic-pin-FAKEFAKEFAKEFAKEFAKE-xyz";
+        let sanitized = sanitized_audit_client_id(&redactor, raw);
+        assert!(
+            sanitized.contains("synthetic-pin-"),
+            "marker-only redactor unexpectedly masked a bare secret \
+             shape; the test pin needs updating: '{sanitized}'",
         );
     }
 
     #[test]
-    fn sanitized_audit_client_id_counts_unicode_chars_not_bytes() {
+    fn sanitized_audit_client_id_caps_chars_not_bytes() {
         let redactor = SecretRedactor::default_runtime();
-        // 81 multi-byte chars; cap is 80 chars, not 80 bytes, so
-        // the result must still be exactly 80 chars even though
-        // its byte-len is much larger. A naive `bytes().take(80)`
-        // would corrupt UTF-8 mid-codepoint.
+        // 120 four-byte emoji codepoints. The cap is 80 CHARS
+        // (not bytes), so the result must contain exactly 80
+        // chars and a byte length of 80*4 = 320 bytes. A bytes-
+        // based truncation would leave us with 80 bytes (= 20
+        // emoji) and a much shorter char count.
+        //
+        // Codex pass-1 P3 C4: the previous version asserted
+        // `from_utf8` succeeded — tautological for char-based
+        // truncation. The byte-length check below is what
+        // actually proves the implementation counts chars rather
+        // than bytes, since a bytes-based cap would yield byte_len
+        // == 80, not 320.
         let raw = "📦".repeat(120);
         let sanitized = sanitized_audit_client_id(&redactor, &raw);
-        assert_eq!(sanitized.chars().count(), 80);
-        // Round-trip via `from_utf8` to confirm we did not chop a
-        // 4-byte codepoint mid-byte.
-        let bytes = sanitized.as_bytes().to_vec();
-        std::str::from_utf8(&bytes).expect("cap must not split a UTF-8 codepoint");
+        assert_eq!(
+            sanitized.chars().count(),
+            80,
+            "cap must apply per-char, got {} chars",
+            sanitized.chars().count(),
+        );
+        assert_eq!(
+            sanitized.len(),
+            80 * 4,
+            "cap must be char-based, not byte-based; a byte cap \
+             would have yielded ~80 bytes",
+        );
     }
 }

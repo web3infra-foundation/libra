@@ -196,6 +196,10 @@ jobs:
       # in tests/code_ui_scenarios.rs and tests/harness_self_test.rs short-circuit; CI
       # would silently skip them. `--test-threads=1` because each scenario spawns a
       # `libra code` subprocess that contends for 0600 control-token files and ports.
+      #
+      # docs/improvement/test.md Wave 1 + Wave 3 also require the SSE harness and
+      # lease matrix to run under the same gate, otherwise CI silently skips every
+      # `lease_case!()` / `sse_case!()` registration.
       - name: Run TUI automation scenarios
         env:
           LIBRA_ENABLE_TEST_PROVIDER: "1"
@@ -204,6 +208,8 @@ jobs:
             --test code_ui_scenarios \
             --test harness_self_test \
             --test code_codex_default_tui_test \
+            --test code_ui_remote_lease_matrix \
+            --test code_ui_remote_sse_matrix \
             -- --test-threads=1
 
       - name: Upload TUI scenario artifacts on failure
