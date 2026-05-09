@@ -66,6 +66,12 @@ export function AiBrowser({ slug, refName }: Props) {
   const [openBundleId, setOpenBundleId] = useState<string | null>(null);
   const [bundleDetail, setBundleDetail] = useState<AiVersionDetail | null>(null);
   const [loadingBundleDetail, setLoadingBundleDetail] = useState(false);
+  // Codex pass-15 P2: in-flight cursor for `loadMoreVersions`. Two
+  // rapid clicks before the first request resolves must not issue
+  // the same cursor twice. The ref carries the active cursor while
+  // the React state powers the disabled-button UI.
+  const [loadingVersions, setLoadingVersions] = useState(false);
+  const loadingVersionsRef = useRef<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loadingObjects, setLoadingObjects] = useState(false);
   const [loadingDetail, setLoadingDetail] = useState(false);
@@ -155,6 +161,16 @@ export function AiBrowser({ slug, refName }: Props) {
 
   const loadMoreVersions = async () => {
     if (!versions?.nextCursor) return;
+    // Codex pass-15 P2: prevent double-append from rapid clicks. Two
+    // back-to-back clicks before the first response lands would
+    // otherwise issue the same cursor twice and append the same
+    // page twice. We track the in-flight cursor in a ref and bail
+    // when it is set; inside the functional updater we also verify
+    // the current state's `nextCursor` is still the one we sent.
+    if (loadingVersionsRef.current) return;
+    const requestCursor = versions.nextCursor;
+    loadingVersionsRef.current = requestCursor;
+    setLoadingVersions(true);
     // Codex pass-14 P2: capture `refName` at request time so a late
     // page from a previous ref does not append into the current
     // view. Mirrors the `loadMoreObjects` guard.
@@ -162,20 +178,27 @@ export function AiBrowser({ slug, refName }: Props) {
     try {
       const next = await fetchAiVersions(slug, {
         ref: refName,
-        cursor: versions.nextCursor,
+        cursor: requestCursor,
       });
       if (requestRef !== activeRefNameRef.current) return;
-      setVersions((prev) =>
-        prev
-          ? {
-              ...next,
-              versions: [...prev.versions, ...next.versions],
-            }
-          : next,
-      );
+      setVersions((prev) => {
+        if (!prev) return next;
+        // Skip the append when the cursor moved underneath us
+        // (another in-flight load reset state, or a ref change).
+        if (prev.nextCursor !== requestCursor) return prev;
+        return {
+          ...next,
+          versions: [...prev.versions, ...next.versions],
+        };
+      });
     } catch (err: unknown) {
       if (requestRef !== activeRefNameRef.current) return;
       setError(err instanceof ApiError ? err.message : "failed to load more versions");
+    } finally {
+      if (loadingVersionsRef.current === requestCursor) {
+        loadingVersionsRef.current = null;
+        setLoadingVersions(false);
+      }
     }
   };
 
@@ -337,9 +360,10 @@ export function AiBrowser({ slug, refName }: Props) {
             <button
               type="button"
               onClick={loadMoreVersions}
+              disabled={loadingVersions}
               className="mt-2 block text-xs lb-link"
             >
-              Load more bundles
+              {loadingVersions ? "Loading…" : "Load more bundles"}
             </button>
           )}
         </Section>
