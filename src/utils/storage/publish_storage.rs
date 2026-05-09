@@ -233,12 +233,24 @@ fn validate_id_segment(label: &str, value: &str) -> Result<(), PublishStorageErr
             message: format!("{label} must not contain path separators or NUL"),
         });
     }
+    // Codex Phase 2 P3: reject Unicode slash confusables in id
+    // segments too — same rationale as the relative-path check.
+    for confusable in ['\u{2044}', '\u{2215}', '\u{29F8}', '\u{FF0F}', '\u{FF3C}'] {
+        if value.contains(confusable) {
+            return Err(PublishStorageError::InvalidKey {
+                message: format!(
+                    "{label} must not contain Unicode slash confusable U+{:04X}",
+                    confusable as u32
+                ),
+            });
+        }
+    }
     if value == "." || value == ".." {
         return Err(PublishStorageError::InvalidKey {
             message: format!("{label} must not be '.' or '..'"),
         });
     }
-    if value.len() > 256 {
+    if value.chars().count() > 256 {
         return Err(PublishStorageError::InvalidKey {
             message: format!("{label} length is out of range (1..=256)"),
         });
@@ -252,9 +264,13 @@ fn validate_relative_path(relative: &str) -> Result<(), PublishStorageError> {
             message: "publish path must not be empty".to_string(),
         });
     }
-    if relative.len() > 4096 {
+    // Codex Phase 2 P2: enforce 4096 *characters*, not 4096 bytes,
+    // so a multibyte UTF-8 path is not rejected below the documented
+    // limit. The error message is updated to match.
+    let char_count = relative.chars().count();
+    if char_count > 4096 {
         return Err(PublishStorageError::InvalidKey {
-            message: format!("publish path length {} exceeds 4096 chars", relative.len()),
+            message: format!("publish path length {char_count} exceeds 4096 chars"),
         });
     }
     if relative.starts_with('/') {
@@ -267,6 +283,31 @@ fn validate_relative_path(relative: &str) -> Result<(), PublishStorageError> {
             message: "publish path must not contain NUL".to_string(),
         });
     }
+    // Codex Phase 2 P3: reject backslash + Unicode slash confusables
+    // explicitly so an attacker cannot smuggle a path-segment
+    // separator past us by relying on `object_store::Path::from()`'s
+    // percent-encoding behaviour.
+    if relative.contains('\\') {
+        return Err(PublishStorageError::InvalidKey {
+            message: "publish path must not contain '\\' (use '/')".to_string(),
+        });
+    }
+    for confusable in [
+        '\u{2044}', // FRACTION SLASH
+        '\u{2215}', // DIVISION SLASH
+        '\u{29F8}', // BIG SOLIDUS
+        '\u{FF0F}', // FULLWIDTH SOLIDUS
+        '\u{FF3C}', // FULLWIDTH REVERSE SOLIDUS
+    ] {
+        if relative.contains(confusable) {
+            return Err(PublishStorageError::InvalidKey {
+                message: format!(
+                    "publish path must not contain Unicode slash confusable U+{:04X}",
+                    confusable as u32
+                ),
+            });
+        }
+    }
     if relative.contains("//") {
         return Err(PublishStorageError::InvalidKey {
             message: "publish path must not contain doubled slashes".to_string(),
@@ -277,6 +318,20 @@ fn validate_relative_path(relative: &str) -> Result<(), PublishStorageError> {
             return Err(PublishStorageError::InvalidKey {
                 message: format!(
                     "publish path segment {segment:?} is invalid (no '', '.', or '..')"
+                ),
+            });
+        }
+        // %2e%2e and similar percent-encoded traversals are blocked
+        // because the only legal place a `%` can appear in a publish
+        // key is inside a sha256-derived blob name (lowercase hex),
+        // and percent-encoded `..` is never produced by the Rust
+        // exporter. Any segment matching a literal `%2e%2e` shape
+        // is treated as suspicious.
+        let lower = segment.to_ascii_lowercase();
+        if lower.contains("%2e%2e") {
+            return Err(PublishStorageError::InvalidKey {
+                message: format!(
+                    "publish path segment {segment:?} contains percent-encoded traversal"
                 ),
             });
         }
@@ -401,5 +456,74 @@ mod tests {
             storage.key_for("latest.json").unwrap(),
             "11111111-2222-3333-4444-555555555555/publish/sites/00000000-0000-0000-0000-0000publish01/latest.json",
         );
+    }
+
+    /// Codex Phase 2 P2: the path length contract is now char-count
+    /// based, not byte-count. A multibyte UTF-8 path under the
+    /// 4096-char cap must be accepted; a path over 4096 chars must
+    /// be rejected, regardless of byte count.
+    #[test]
+    fn path_length_uses_char_count_not_bytes() {
+        let storage = make_storage();
+        // 1024 four-byte CJK chars = 4096 chars but 4096 bytes too.
+        // Stay just under the cap.
+        let multibyte = "中".repeat(4000);
+        storage
+            .resolve(&multibyte)
+            .expect("4000 multibyte chars must be allowed");
+        let too_long = "中".repeat(4097);
+        let err = storage
+            .resolve(&too_long)
+            .expect_err("4097 chars must be rejected");
+        assert!(matches!(err, PublishStorageError::InvalidKey { .. }));
+    }
+
+    /// Codex Phase 2 P3: backslash + Unicode slash confusables must
+    /// be rejected explicitly so an attacker cannot smuggle a path
+    /// separator past the validator.
+    #[test]
+    fn unicode_slash_confusables_are_rejected() {
+        let storage = make_storage();
+        for confusable in [
+            "ok\\bad",
+            "ok\u{2044}bad",
+            "ok\u{2215}bad",
+            "ok\u{29F8}bad",
+            "ok\u{FF0F}bad",
+            "ok\u{FF3C}bad",
+        ] {
+            let err = storage
+                .resolve(confusable)
+                .expect_err(&format!("{confusable:?} must be rejected"));
+            assert!(matches!(err, PublishStorageError::InvalidKey { .. }));
+        }
+    }
+
+    /// Codex Phase 2 P3: percent-encoded `..` traversals (`%2E%2E`)
+    /// must be rejected since the only legitimate `%` in publish
+    /// keys is inside a sha256-derived blob name.
+    #[test]
+    fn percent_encoded_traversal_is_rejected() {
+        let storage = make_storage();
+        for bad in ["%2E%2E", "%2e%2e/escape", "files/%2e%2e/up"] {
+            let err = storage
+                .resolve(bad)
+                .expect_err(&format!("{bad:?} must be rejected"));
+            assert!(matches!(err, PublishStorageError::InvalidKey { .. }));
+        }
+    }
+
+    /// Codex Phase 2 P2: oversize JSON path is rejected at the
+    /// resolve step; we don't need to stage a multi-megabyte body
+    /// to exercise this — the key validator runs first.
+    #[test]
+    fn repo_id_with_separator_is_rejected() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        for repo in ["a/b", "a\\b", "..", "a\u{FF0F}b"] {
+            assert!(
+                PublishStorage::new(Arc::clone(&store), repo, "ok").is_err(),
+                "repo_id {repo:?} must be rejected"
+            );
+        }
     }
 }

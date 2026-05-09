@@ -986,7 +986,8 @@ impl D1Client {
                 ai_object_count = excluded.ai_object_count,
                 ai_bundle_count = excluded.ai_bundle_count,
                 warnings_json = excluded.warnings_json,
-                error_message = excluded.error_message
+                error_message = excluded.error_message,
+                schema_version = excluded.schema_version
         "#;
         let params = vec![
             serde_json::json!(row.sync_run_id),
@@ -1028,6 +1029,7 @@ impl D1Client {
                 redaction_mode = excluded.redaction_mode,
                 redaction_rules_version = excluded.redaction_rules_version,
                 sync_run_id = excluded.sync_run_id,
+                schema_version = excluded.schema_version,
                 updated_at = excluded.updated_at
         "#;
         let params = vec![
@@ -1065,6 +1067,7 @@ impl D1Client {
                 revision_oid = excluded.revision_oid,
                 is_default = excluded.is_default,
                 sync_run_id = excluded.sync_run_id,
+                schema_version = excluded.schema_version,
                 updated_at = excluded.updated_at
         "#;
         let params = vec![
@@ -1096,7 +1099,8 @@ impl D1Client {
                 content_sha256 = excluded.content_sha256,
                 r2_key = excluded.r2_key,
                 size_bytes = excluded.size_bytes,
-                language = excluded.language
+                language = excluded.language,
+                schema_version = excluded.schema_version
         "#;
         let params = vec![
             serde_json::json!(row.site_id),
@@ -1126,7 +1130,8 @@ impl D1Client {
                 layer = excluded.layer,
                 r2_key = excluded.r2_key,
                 redaction_mode = excluded.redaction_mode,
-                payload_sha256 = excluded.payload_sha256
+                payload_sha256 = excluded.payload_sha256,
+                schema_version = excluded.schema_version
         "#;
         let params = vec![
             serde_json::json!(row.site_id),
@@ -1162,7 +1167,8 @@ impl D1Client {
                 bundle_sha256 = excluded.bundle_sha256,
                 object_count = excluded.object_count,
                 redaction_mode = excluded.redaction_mode,
-                redaction_rules_version = excluded.redaction_rules_version
+                redaction_rules_version = excluded.redaction_rules_version,
+                schema_version = excluded.schema_version
         "#;
         let params = vec![
             serde_json::json!(row.site_id),
@@ -1190,8 +1196,17 @@ impl D1Client {
             .await
     }
 
-    /// Find one published revision row by `(site_id, revision_oid)`.
-    pub async fn find_publish_revision(
+    /// Find one revision row by `(site_id, revision_oid)`, regardless
+    /// of status. Used for state inspection (publish status command);
+    /// the Worker side filters `status = 'published'` separately so
+    /// in-progress `syncing` rows never leak into reads.
+    ///
+    /// Codex Phase 2 P3 (closed): the earlier name was
+    /// `find_publish_revision` which implied a published-only filter
+    /// the SQL didn't have. Renamed to `find_publish_revision_any`
+    /// to make the broader semantic explicit; new
+    /// `find_published_revision` carries the published filter.
+    pub async fn find_publish_revision_any(
         &self,
         site_id: &str,
         revision_oid: &str,
@@ -1201,6 +1216,32 @@ impl D1Client {
                           redaction_rules_version, sync_run_id, schema_version, \
                           created_at, updated_at \
                    FROM publish_revisions WHERE site_id = ?1 AND revision_oid = ?2";
+        let rows: Vec<PublishRevisionRow> = self
+            .query(
+                sql,
+                Some(vec![
+                    serde_json::json!(site_id),
+                    serde_json::json!(revision_oid),
+                ]),
+            )
+            .await?;
+        Ok(rows.into_iter().next())
+    }
+
+    /// Find one revision row that is in `status = 'published'`.
+    /// Mirror of the Worker-side semantic: in-flight `syncing` rows
+    /// are invisible.
+    pub async fn find_published_revision(
+        &self,
+        site_id: &str,
+        revision_oid: &str,
+    ) -> Result<Option<PublishRevisionRow>, D1Error> {
+        let sql = "SELECT site_id, revision_oid, status, code_manifest_key, ai_index_key, \
+                          file_count, ai_object_count, ai_bundle_count, redaction_mode, \
+                          redaction_rules_version, sync_run_id, schema_version, \
+                          created_at, updated_at \
+                   FROM publish_revisions \
+                   WHERE site_id = ?1 AND revision_oid = ?2 AND status = 'published'";
         let rows: Vec<PublishRevisionRow> = self
             .query(
                 sql,
@@ -1236,9 +1277,17 @@ impl D1Client {
 /// publish migrations are written as multi-statement files for
 /// readability. This helper splits on top-level `;` boundaries
 /// while ignoring `;` inside string literals (`'…'`) and inside
-/// SQL `CREATE TRIGGER … BEGIN …; …; END;` blocks. Comments
-/// (`--…\n`) are stripped so the final statement count stays
-/// stable across `cargo +nightly fmt` reflow.
+/// SQL `CREATE TRIGGER … BEGIN …; …; END;` blocks. Line comments
+/// (`--…\n`) and block comments (`/* … */`) are stripped so the
+/// final statement count stays stable across `cargo +nightly fmt`
+/// reflow.
+///
+/// Codex Phase 2 P1 (closed): the earlier draft processed `;`
+/// before flushing the running `prev_word` into the BEGIN/END
+/// counter, so `END;` collapsed an entire trigger block into a
+/// single multi-statement payload. The fix flushes the pending
+/// keyword on EVERY non-alphanumeric boundary (whitespace,
+/// punctuation, end-of-input) before checking for `;`.
 fn split_sql_statements(input: &str) -> Vec<String> {
     let mut statements: Vec<String> = Vec::new();
     let mut current = String::new();
@@ -1250,52 +1299,66 @@ fn split_sql_statements(input: &str) -> Vec<String> {
     while let Some(ch) = chars.next() {
         // Strip line comments outside of string literals.
         if !in_string && ch == '-' && chars.peek() == Some(&'-') {
-            // Consume to end of line.
             for next_ch in chars.by_ref() {
                 if next_ch == '\n' {
                     current.push('\n');
                     break;
                 }
             }
-            prev_word.clear();
+            flush_keyword(&mut prev_word, &mut depth_begin_end);
+            continue;
+        }
+        // Strip block comments outside of string literals.
+        if !in_string && ch == '/' && chars.peek() == Some(&'*') {
+            // Consume the leading '*'.
+            chars.next();
+            // Walk until we see the closing '*/'.
+            while let Some(next_ch) = chars.next() {
+                if next_ch == '*' && chars.peek() == Some(&'/') {
+                    chars.next();
+                    break;
+                }
+            }
+            current.push(' ');
+            flush_keyword(&mut prev_word, &mut depth_begin_end);
             continue;
         }
 
         if ch == '\'' && !in_string {
             in_string = true;
             current.push(ch);
-            prev_word.clear();
+            flush_keyword(&mut prev_word, &mut depth_begin_end);
             continue;
         }
         if ch == '\'' && in_string {
-            // Handle SQL `''` escape inside a string.
+            // Handle SQL `''` escape inside a string. Codex Phase 2
+            // P1 (closed): use `if let Some(...)` instead of
+            // `chars.next().unwrap()` so the splitter never
+            // panics on a malformed input mid-stream.
             if chars.peek() == Some(&'\'') {
                 current.push(ch);
-                current.push(chars.next().unwrap());
+                if let Some(escaped) = chars.next() {
+                    current.push(escaped);
+                }
                 continue;
             }
             in_string = false;
             current.push(ch);
-            prev_word.clear();
+            flush_keyword(&mut prev_word, &mut depth_begin_end);
             continue;
         }
 
         if !in_string && ch.is_alphanumeric() {
             prev_word.push(ch.to_ascii_lowercase());
-        } else if !in_string && ch.is_whitespace() {
-            // Track BEGIN/END nesting on whitespace word boundaries.
-            match prev_word.as_str() {
-                "begin" => depth_begin_end += 1,
-                "end" => {
-                    if depth_begin_end > 0 {
-                        depth_begin_end -= 1;
-                    }
-                }
-                _ => {}
-            }
-            prev_word.clear();
         } else if !in_string {
-            prev_word.clear();
+            // Codex Phase 2 P1 (closed): flush the pending keyword
+            // on any non-alphanumeric boundary BEFORE we check
+            // whether the current char is `;`. This means `END;`
+            // increments the depth-tracker for the `END` token,
+            // closing the BEGIN/END block, and the subsequent `;`
+            // check sees `depth_begin_end == 0` so the trigger
+            // statement closes correctly.
+            flush_keyword(&mut prev_word, &mut depth_begin_end);
         }
 
         if ch == ';' && !in_string && depth_begin_end == 0 {
@@ -1309,11 +1372,30 @@ fn split_sql_statements(input: &str) -> Vec<String> {
 
         current.push(ch);
     }
+    // Flush any trailing keyword at end-of-input so a file that
+    // ends with `END` (no trailing semicolon) still updates the
+    // depth tracker before we capture the final statement.
+    flush_keyword(&mut prev_word, &mut depth_begin_end);
     let trailing = current.trim().to_string();
     if !trailing.is_empty() {
         statements.push(trailing);
     }
     statements
+}
+
+/// Apply the BEGIN/END nesting effect of the keyword that just
+/// ended at a word boundary, then clear the buffer.
+fn flush_keyword(prev_word: &mut String, depth_begin_end: &mut i32) {
+    match prev_word.as_str() {
+        "begin" => *depth_begin_end += 1,
+        "end" => {
+            if *depth_begin_end > 0 {
+                *depth_begin_end -= 1;
+            }
+        }
+        _ => {}
+    }
+    prev_word.clear();
 }
 
 /// Local view of a `publish_sites` row.
@@ -1650,14 +1732,19 @@ mod tests {
         );
     }
 
-    /// Codex Phase 2 P3: pin the SQL splitter behaviour so the
-    /// publish migrations apply one statement at a time without
-    /// breaking on `BEGIN…END` blocks (used by the trigger
-    /// migrations) or `--` line comments.
+    /// Codex Phase 2 P3 + pass-1 P1 (closed): pin the SQL splitter
+    /// behaviour so the publish migrations apply one statement at a
+    /// time without breaking on `BEGIN…END` blocks (used by the
+    /// trigger migrations), `--` line comments, or `/* */` block
+    /// comments. The previous draft of the splitter incorrectly
+    /// processed `;` before flushing the running keyword, so `END;`
+    /// collapsed an entire trigger block into a single multi-
+    /// statement payload.
     #[test]
     fn split_sql_statements_handles_triggers_and_comments() {
         let sql = r#"
             -- Header comment, ignored.
+            /* Block comment with ; and BEGIN inside, also ignored. */
             CREATE TABLE IF NOT EXISTS foo (id INTEGER);
             CREATE TRIGGER IF NOT EXISTS foo_guard
                 BEFORE INSERT ON foo
@@ -1666,14 +1753,23 @@ mod tests {
             BEGIN
                 SELECT RAISE(ABORT, 'id must be >= 0');
             END;
+            CREATE TRIGGER IF NOT EXISTS foo_guard_update
+                BEFORE UPDATE ON foo
+                FOR EACH ROW
+                WHEN NEW.id < 0
+            BEGIN
+                SELECT RAISE(ABORT, 'id must be >= 0');
+            END;
             CREATE INDEX IF NOT EXISTS foo_id ON foo (id);
         "#;
         let stmts = split_sql_statements(sql);
-        assert_eq!(stmts.len(), 3, "got: {stmts:?}");
+        assert_eq!(stmts.len(), 4, "got: {stmts:?}");
         assert!(stmts[0].starts_with("CREATE TABLE IF NOT EXISTS foo"));
         assert!(stmts[1].contains("CREATE TRIGGER IF NOT EXISTS foo_guard"));
         assert!(stmts[1].contains("END"));
-        assert!(stmts[2].starts_with("CREATE INDEX IF NOT EXISTS foo_id"));
+        assert!(stmts[2].contains("CREATE TRIGGER IF NOT EXISTS foo_guard_update"));
+        assert!(stmts[2].contains("END"));
+        assert!(stmts[3].starts_with("CREATE INDEX IF NOT EXISTS foo_id"));
     }
 
     /// Pin the splitter against single-quoted literals containing
@@ -1723,6 +1819,69 @@ mod tests {
                     "{label} statement #{idx} has unbalanced BEGIN/END:\n{stmt}",
                 );
             }
+        }
+    }
+
+    /// Codex Phase 2 P2 (closed): the `ensure_publish_schema`
+    /// migration list is hardcoded via `include_str!` because Rust
+    /// has no built-in directory glob at compile time. This test
+    /// reads the on-disk `sql/publish/` directory and asserts every
+    /// `*.sql` file is present in the hardcoded list, so a future
+    /// `0005_*.sql` cannot ship without an explicit code change.
+    #[test]
+    fn publish_migration_list_matches_disk() {
+        use std::path::PathBuf;
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let dir = manifest_dir.join("sql/publish");
+        let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
+            .expect("read sql/publish/")
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let path = e.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("sql") {
+                    path.file_name()?.to_str().map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        on_disk.sort();
+        let expected: Vec<&str> = vec![
+            "0001_publish.sql",
+            "0002_publish_digest_check.sql",
+            "0003_publish_max_preview_trigger_replace.sql",
+            "0004_publish_refs_index.sql",
+        ];
+        assert_eq!(
+            on_disk.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            expected,
+            "sql/publish/ contents drifted from `ensure_publish_schema` include_str! list; \
+             update both lists together",
+        );
+    }
+
+    /// Codex Phase 2 P1 (regression): the 0002 trigger migration
+    /// MUST split into one statement per trigger, not a single
+    /// multi-trigger payload. The earlier splitter collapsed every
+    /// `END;` because the `;` cleared the keyword buffer before the
+    /// `END` was processed at a word boundary.
+    #[test]
+    fn publish_0002_splits_one_statement_per_trigger() {
+        let sql = include_str!("../../sql/publish/0002_publish_digest_check.sql");
+        let stmts = split_sql_statements(sql);
+        // 0002 ships eight triggers (max_preview INSERT/UPDATE +
+        // three sha256 columns × INSERT/UPDATE). Pin the count so a
+        // future drift surfaces here instead of in CI under D1.
+        assert_eq!(stmts.len(), 8, "0002 stmts: {stmts:?}");
+        for (idx, stmt) in stmts.iter().enumerate() {
+            assert!(
+                stmt.contains("CREATE TRIGGER IF NOT EXISTS"),
+                "0002 statement #{idx} is not a trigger:\n{stmt}",
+            );
+            assert!(
+                stmt.ends_with("END") || stmt.contains("END"),
+                "0002 statement #{idx} should close with END:\n{stmt}",
+            );
         }
     }
 }

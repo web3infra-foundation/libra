@@ -26,4 +26,6 @@
 //! predecessors' contracts holding stable.
 
 pub mod contract;
+pub mod preflight;
+pub mod snapshot;
 pub mod worker_template;
