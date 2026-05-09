@@ -1015,6 +1015,15 @@ pub(crate) async fn fetch_repository_with_result(
         .cloned()
         .collect::<Vec<_>>();
 
+    // Only request refs we will actually persist as remote-tracking refs.
+    // `update_references` saves `refs/heads/*` and `refs/mr/*`; asking for
+    // anything else (HEAD symref, `refs/pull/*`, `refs/tags/*`) makes the
+    // server include unreachable objects that the next fetch's `have` cannot
+    // cover, which forces the same pack to be re-downloaded every time.
+    refs.retain(|reference| {
+        reference._ref.starts_with("refs/heads/") || reference._ref.starts_with("refs/mr/")
+    });
+
     if let Some(branch_name) = &branch
         && single_branch
     {
@@ -1022,10 +1031,12 @@ pub(crate) async fn fetch_repository_with_result(
         refs.retain(|reference| reference._ref == normalized);
     }
 
-    let want = refs
+    let mut want = refs
         .iter()
         .map(|reference| reference._hash.clone())
         .collect::<Vec<_>>();
+    want.sort();
+    want.dedup();
     let have = current_have_safe().await?;
     let mut result_stream = remote_client
         .fetch_objects(&have, &want, depth)
@@ -1124,6 +1135,9 @@ async fn read_fetch_stream(
                 }
             }
         } else if data != b"NAK\n"
+            && !data.starts_with(b"ACK ")
+            && !data.starts_with(b"shallow ")
+            && !data.starts_with(b"unshallow ")
             && let Some((&code, payload)) = data.split_first()
         {
             match code {
@@ -1137,9 +1151,10 @@ async fn read_fetch_stream(
                     });
                 }
                 _ => {
-                    // Preserve unknown/non-side-band frames as-is: the leading byte may be
-                    // payload data rather than a channel discriminator.
-                    print_remote_progress(&data, render_progress, bar.as_ref());
+                    tracing::debug!(
+                        "ignoring pre-pack frame: {:?}",
+                        String::from_utf8_lossy(&data)
+                    );
                 }
             }
         }
