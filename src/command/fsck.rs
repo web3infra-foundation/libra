@@ -151,8 +151,10 @@ impl FsckMsgId {
 }
 
 /// Report a fsck message
+///
 /// - Diagnostic messages (missing, hash_mismatch, dangling, unreachable) -> stdout
 /// - Error messages -> stderr
+///
 /// Returns true if this is an error (for exit code tracking)
 pub fn report(msg_id: FsckMsgId, obj_type: &str, obj_id: &str) -> bool {
     let output = msg_id.format(obj_type, obj_id);
@@ -502,25 +504,25 @@ fn check_directories(storage: &ClientStorage, all_hashes: &[ObjectHash], verbose
     let mut prefix_counts = vec![0usize; 256];
     for hash in all_hashes {
         let hash_str = hash.to_string();
-        if hash_str.len() >= 2 {
-            if let Ok(prefix) = u8::from_str_radix(&hash_str[0..2], 16) {
-                prefix_counts[prefix as usize] += 1;
-            }
+        if hash_str.len() >= 2
+            && let Ok(prefix) = u8::from_str_radix(&hash_str[0..2], 16)
+        {
+            prefix_counts[prefix as usize] += 1;
         }
     }
 
     // Count pack objects
     let mut pack_count = 0;
     let pack_dir = storage.base_path().join("pack");
-    if pack_dir.exists() {
-        if let Ok(entries) = fs::read_dir(&pack_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().map_or(false, |ext| ext == "idx") {
-                    if let Ok(count) = count_pack(&path) {
-                        pack_count += count;
-                    }
-                }
+    if pack_dir.exists()
+        && let Ok(entries) = fs::read_dir(&pack_dir)
+    {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "idx")
+                && let Ok(count) = count_pack(&path)
+            {
+                pack_count += count;
             }
         }
     }
@@ -684,8 +686,8 @@ async fn build_object_name_map() -> std::collections::HashMap<String, String> {
 
     // For each hash, format the reflog names with timestamps and positions
     for (hash, mut entries) in reflog_by_hash {
-        // Sort by timestamp descending (most recent first)
-        entries.sort_by(|a, b| b.0.cmp(&a.0));
+    // Sort by timestamp descending (most recent first)
+        entries.sort_by_key(|b| std::cmp::Reverse(b.0));
 
         let names: Vec<String> = entries
             .iter()
@@ -708,16 +710,16 @@ async fn build_object_name_map() -> std::collections::HashMap<String, String> {
 
     // Collect names from index (e.g., ":src/main.rs" or "src/main.rs")
     let index_path = path::index();
-    if index_path.exists() {
-        if let Ok(index) = Index::load(&index_path) {
-            for entry in index.tracked_entries(0) {
-                let hash_str = entry.hash.to_string();
-                let path_name = format!(":{}", entry.name);
-                name_map
-                    .entry(hash_str)
-                    .and_modify(|e| *e = format!("{}, {}", e, path_name))
-                    .or_insert(path_name);
-            }
+    if index_path.exists()
+        && let Ok(index) = Index::load(&index_path)
+    {
+        for entry in index.tracked_entries(0) {
+            let hash_str = entry.hash.to_string();
+            let path_name = format!(":{}", entry.name);
+            name_map
+                .entry(hash_str)
+                .and_modify(|e| *e = format!("{}, {}", e, path_name))
+                .or_insert(path_name);
         }
     }
 
@@ -753,22 +755,20 @@ async fn check_reflogs(
         // Skip null OID (all zeros)
         let is_null_oid = |oid: &str| oid.chars().all(|c| c == '0');
 
-        if !is_null_oid(&entry.old_oid) {
-            if let Some(_hash) = parse_object_hash(&entry.old_oid) {
-                if !storage.exist(&_hash) {
-                    result.reflog_issues += 1;
-                    report(FsckMsgId::Missing, "unknown", &entry.old_oid);
-                }
-            }
+        if !is_null_oid(&entry.old_oid)
+            && let Some(_hash) = parse_object_hash(&entry.old_oid)
+            && !storage.exist(&_hash)
+        {
+            result.reflog_issues += 1;
+            report(FsckMsgId::Missing, "unknown", &entry.old_oid);
         }
 
-        if !is_null_oid(&entry.new_oid) {
-            if let Some(_hash) = parse_object_hash(&entry.new_oid) {
-                if !storage.exist(&_hash) {
-                    result.reflog_issues += 1;
-                    report(FsckMsgId::Missing, "unknown", &entry.new_oid);
-                }
-            }
+        if !is_null_oid(&entry.new_oid)
+            && let Some(_hash) = parse_object_hash(&entry.new_oid)
+            && !storage.exist(&_hash)
+        {
+            result.reflog_issues += 1;
+            report(FsckMsgId::Missing, "unknown", &entry.new_oid);
         }
     }
     Ok(())
@@ -876,10 +876,10 @@ async fn collect_reachability_context(
         .map_err(|e| CliError::fatal(format!("failed to load refs: {}", e)))?;
 
     for ref_entry in refs {
-        if let Some(commit_hash_str) = &ref_entry.commit {
-            if let Some(hash) = parse_object_hash(commit_hash_str) {
-                ctx.refs_reachable.insert(hash);
-            }
+        if let Some(commit_hash_str) = &ref_entry.commit
+            && let Some(hash) = parse_object_hash(commit_hash_str)
+        {
+            ctx.refs_reachable.insert(hash);
         }
     }
 
@@ -891,25 +891,25 @@ async fn collect_reachability_context(
 
     for entry in reflogs {
         let is_null_oid = |oid: &str| oid.chars().all(|c| c == '0');
-        if !is_null_oid(&entry.old_oid) {
-            if let Some(hash) = parse_object_hash(&entry.old_oid) {
-                ctx.reflog_objects.insert(hash);
-            }
+        if !is_null_oid(&entry.old_oid)
+            && let Some(hash) = parse_object_hash(&entry.old_oid)
+        {
+            ctx.reflog_objects.insert(hash);
         }
-        if !is_null_oid(&entry.new_oid) {
-            if let Some(hash) = parse_object_hash(&entry.new_oid) {
-                ctx.reflog_objects.insert(hash);
-            }
+        if !is_null_oid(&entry.new_oid)
+            && let Some(hash) = parse_object_hash(&entry.new_oid)
+        {
+            ctx.reflog_objects.insert(hash);
         }
     }
 
     // Collect objects from index
     let index_path = path::index();
-    if index_path.exists() {
-        if let Ok(index) = Index::load(&index_path) {
-            for entry in index.tracked_entries(0) {
-                ctx.index_objects.insert(entry.hash);
-            }
+    if index_path.exists()
+        && let Ok(index) = Index::load(&index_path)
+    {
+        for entry in index.tracked_entries(0) {
+            ctx.index_objects.insert(entry.hash);
         }
     }
 
@@ -1023,7 +1023,7 @@ async fn find_dangling_unreachable(
 
         // Collect objects for lost-found
         if lost_found {
-            lost_found_objects.push((hash.clone(), obj_type.clone()));
+            lost_found_objects.push((*hash, obj_type.clone()));
         }
 
         if unreachable {
@@ -1361,36 +1361,24 @@ async fn verify_object(hash: &ObjectHash, storage: &ClientStorage, connectivity_
                     // Check tree entries
                     for item in &tree.tree_items {
                         // Check for problematic pathnames
-                        if item.name == "." {
-                            if report_errors {
-                                has_error |= report(FsckMsgId::HasDot, "tree", &hash.to_string());
-                            }
-                        } else if item.name == ".." {
-                            if report_errors {
-                                has_error |= report(FsckMsgId::HasDotdot, "tree", &hash.to_string());
-                            }
-                        } else if item.name == ".libra" {
-                            if report_errors {
-                                has_error |= report(FsckMsgId::HasDotlibra, "tree", &hash.to_string());
-                            }
+                        if item.name == "." && report_errors {
+                            has_error |= report(FsckMsgId::HasDot, "tree", &hash.to_string());
+                        } else if item.name == ".." && report_errors {
+                            has_error |= report(FsckMsgId::HasDotdot, "tree", &hash.to_string());
+                        } else if item.name == ".libra" && report_errors {
+                            has_error |= report(FsckMsgId::HasDotlibra, "tree", &hash.to_string());
                         }
                         // Check for empty name component
-                        if item.name.is_empty() {
-                            if report_errors {
-                                has_error |= report(FsckMsgId::EmptyName, "tree", &hash.to_string());
-                            }
+                        if item.name.is_empty() && report_errors {
+                            has_error |= report(FsckMsgId::EmptyName, "tree", &hash.to_string());
                         }
                         // Check for full pathname
-                        if item.name.starts_with('/') {
-                            if report_errors {
-                                has_error |= report(FsckMsgId::FullPathname, "tree", &hash.to_string());
-                            }
+                        if item.name.starts_with('/') && report_errors {
+                            has_error |= report(FsckMsgId::FullPathname, "tree", &hash.to_string());
                         }
                         // Check for null sha1
-                        if item.id.as_ref().iter().all(|&b| b == 0) {
-                            if report_errors {
-                                has_error |= report(FsckMsgId::NullSha1, "tree", &hash.to_string());
-                            }
+                        if item.id.as_ref().iter().all(|&b| b == 0) && report_errors {
+                            has_error |= report(FsckMsgId::NullSha1, "tree", &hash.to_string());
                         }
                     }
                 }
@@ -1412,25 +1400,17 @@ async fn verify_object(hash: &ObjectHash, storage: &ClientStorage, connectivity_
             match Commit::from_bytes(&data, *hash) {
                 Ok(commit) => {
                     // Check required fields
-                    if commit.author.name.is_empty() {
-                        if report_errors {
-                            has_error |= report(FsckMsgId::MissingAuthor, "commit", &hash.to_string());
-                        }
+                    if commit.author.name.is_empty() && report_errors {
+                        has_error |= report(FsckMsgId::MissingAuthor, "commit", &hash.to_string());
                     }
-                    if commit.author.email.is_empty() {
-                        if report_errors {
-                            has_error |= report(FsckMsgId::MissingEmail, "commit", &hash.to_string());
-                        }
+                    if commit.author.email.is_empty() && report_errors {
+                        has_error |= report(FsckMsgId::MissingEmail, "commit", &hash.to_string());
                     }
-                    if commit.committer.name.is_empty() {
-                        if report_errors {
-                            has_error |= report(FsckMsgId::MissingCommitter, "commit", &hash.to_string());
-                        }
+                    if commit.committer.name.is_empty() && report_errors {
+                        has_error |= report(FsckMsgId::MissingCommitter, "commit", &hash.to_string());
                     }
-                    if commit.committer.email.is_empty() {
-                        if report_errors {
-                            has_error |= report(FsckMsgId::MissingEmail, "commit", &hash.to_string());
-                        }
+                    if commit.committer.email.is_empty() && report_errors {
+                        has_error |= report(FsckMsgId::MissingEmail, "commit", &hash.to_string());
                     }
                 }
                 Err(_) => {
