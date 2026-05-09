@@ -227,13 +227,17 @@ export function AiBrowser({ slug, refName }: Props) {
     };
   }, [slug, refName, selected]);
 
-  // Codex pass-14 P2: ref change clears `openBundleId` and the
-  // bundle detail so a stale bundle from the previous ref never
-  // appears under a new ref.
+  // Codex pass-14 P2 + pass-16 P2: ref change clears `openBundleId`,
+  // `bundleDetail`, AND the in-flight loadMoreVersions guard. Without
+  // resetting the guard, a load-more request from the previous ref
+  // would keep the new view's "Load more bundles" button disabled
+  // until the stale response finally resolves.
   useEffect(() => {
     setOpenBundleId(null);
     setBundleDetail(null);
-  }, [refName]);
+    loadingVersionsRef.current = null;
+    setLoadingVersions(false);
+  }, [refName, slug]);
 
   useEffect(() => {
     if (!openBundleId) {
