@@ -1340,16 +1340,21 @@ impl CodeUiApiError {
 }
 
 /// Wave 2 / PR 2 — single source-of-truth catalogue of every
-/// `CodeUiApiError` code the Code UI exposes, paired with the HTTP
-/// status it MUST resolve to. Per `docs/improvement/test.md` §5.20,
-/// this list is enforced by `code_ui_error_code_contract` in
-/// `tests` below: any new error code added by a constructor or
-/// emitted by a route handler must be appended here, otherwise the
-/// test fails. The list is also the reference for
-/// `docs/automation/local-tui-control.md` and the Worker frontend
-/// error rendering.
+/// Code UI error code the API exposes, paired with the HTTP status
+/// it MUST resolve to. Per `docs/improvement/test.md` §5.20, this
+/// list is enforced by `code_ui_error_code_contract*` in `tests`
+/// below: any new error code added by a constructor OR emitted by
+/// a route handler as an inline `WebApiError {…}` literal must be
+/// appended here, otherwise the test fails. The list is also the
+/// reference for `docs/automation/local-tui-control.md` and the
+/// Worker frontend error rendering.
 ///
-/// Order is alphabetical so a future diff stays readable.
+/// Codex pass-1 P3: the list is grouped by gate-rejection layer
+/// (loopback first, then body limit, then control-token, then
+/// controller lease, then read/runtime) so a reviewer can see at
+/// a glance which check produced a given code. Do NOT re-sort
+/// alphabetically — the gate ordering is part of the contract
+/// and matches the §5.3 / §5.4 specification.
 pub fn code_ui_error_codes() -> &'static [(&'static str, u16)] {
     &[
         // Layer ordering: route handlers reject non-loopback first.
@@ -1666,6 +1671,55 @@ mod tests {
                 err.status, expected_status,
                 "code '{expected_code}' resolved to status {} but the catalogue says {}",
                 err.status, expected_status,
+            );
+        }
+    }
+
+    /// Codex pass-1 P2 — inline-producer coverage for the
+    /// catalogue. The codes listed below are emitted as inline
+    /// `WebApiError { … }` literals from `web::mod` rather than
+    /// via the `CodeUiApiError` constructors above. Pinning their
+    /// (code, status) shape here makes the catalogue's
+    /// "single-source-of-truth" claim true for the WHOLE error
+    /// surface, not just the constructor surface.
+    ///
+    /// The literal shapes mirror the inline producers in
+    /// `src/internal/ai/web/mod.rs` (search for the code string
+    /// to find the producer). When refactoring an inline literal
+    /// into a named helper, move the corresponding case into
+    /// `code_ui_error_code_contract_pins_status_per_code` above.
+    #[test]
+    fn code_ui_error_code_contract_pins_status_for_inline_producers() {
+        let catalogue = code_ui_error_codes();
+        let map: std::collections::HashMap<&'static str, u16> = catalogue.iter().copied().collect();
+        // (code string, observed status) pairs — assert both halves
+        // appear in the catalogue and resolve to the listed status.
+        let inline_cases: &[(&str, u16)] = &[
+            // mod.rs `enforce_code_write_body_limit` /
+            // `code_control_body_too_large_response`.
+            ("PAYLOAD_TOO_LARGE", 413),
+            // mod.rs `parse_optional_u64` (?limit/?offset parser).
+            ("INVALID_QUERY_PARAM", 400),
+            // mod.rs `code_threads_handler` storage path build.
+            ("STORAGE_PATH_INVALID", 500),
+            // mod.rs `code_threads_handler` thread-list query path.
+            ("DB_UNAVAILABLE", 500),
+            ("THREAD_LIST_FAILED", 500),
+            // mod.rs `code_goal_status_handler` response coerce.
+            ("STATUS_UNAVAILABLE", 500),
+            // mod.rs `WebApiError::From<serde_json::Error>` fallback.
+            ("INTERNAL_ERROR", 500),
+        ];
+        for (code, observed_status) in inline_cases {
+            let expected = map.get(code).copied().unwrap_or_else(|| {
+                panic!(
+                    "code '{code}' is in the inline-producer test list but missing from \
+                     code_ui_error_codes(); update the catalogue when adding inline producers",
+                )
+            });
+            assert_eq!(
+                expected, *observed_status,
+                "inline producer for '{code}' emits status {observed_status} but the catalogue says {expected}",
             );
         }
     }

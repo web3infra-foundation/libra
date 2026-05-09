@@ -28,7 +28,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use libra::command::code::CodeArgs;
+use libra::command::code::{CodeArgs, CodeNetworkAccess, ControlMode};
 
 /// Helper: parse `argv0 + args` with a fixed binary name. Strip the
 /// `--web`/`--stdio` from the spelling caller passed since clap
@@ -136,14 +136,18 @@ fn defaults_are_observe_control_and_deny_network() {
     // ControlMode::Observe is the safe default (no automation
     // writes); CodeNetworkAccess::Deny is the safe default for
     // shell tools.
-    let serialized = format!("{:?}", bare.control);
-    assert!(
-        serialized.contains("Observe"),
-        "control default must be Observe; got {serialized}",
+    //
+    // Codex pass-1 P3: assert via PartialEq on the enum directly
+    // instead of `format!("{:?}")` substring matching, which
+    // would pass on accidental Debug-impl substring overlap.
+    assert_eq!(
+        bare.control,
+        ControlMode::Observe,
+        "control default must be ControlMode::Observe",
     );
-    let net = format!("{:?}", bare.network_access);
-    assert!(
-        net.contains("Deny"),
-        "network_access default must be Deny; got {net}",
+    assert_eq!(
+        bare.network_access,
+        CodeNetworkAccess::Deny,
+        "network_access default must be CodeNetworkAccess::Deny",
     );
 }

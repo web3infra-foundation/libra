@@ -148,6 +148,12 @@ fn code_router() -> Router<WebAppState> {
     //   /control/cancel   -> loopback + controller-token (browser); also requires X-Libra-Control-Token for automation leases
     //   /goal/start       -> loopback + controller-token; OC-Phase 6 P6.6
     //   /goal/cancel      -> loopback + controller-token; OC-Phase 6 P6.6
+    // Codex pass-1 P1: the loopback middleware is the OUTERMOST
+    // layer on EVERY code route, including `/controller/attach`
+    // and `/controller/detach`. Without it, those POST routes
+    // would let axum's `Json<...>` extractor reject malformed/
+    // oversized bodies BEFORE the per-handler loopback check ran,
+    // leaking that the runtime is up to a remote caller.
     Router::new()
         .route("/session", get(code_session_handler))
         .route("/events", get(code_events_handler))
@@ -157,17 +163,16 @@ fn code_router() -> Router<WebAppState> {
         .route("/controller/attach", post(code_controller_attach_handler))
         .route("/controller/detach", post(code_controller_detach_handler))
         .merge(code_write_router())
+        .layer(middleware::from_fn(enforce_code_route_loopback))
 }
 
 fn code_write_router() -> Router<WebAppState> {
     // Layer order on `Router::layer`: each subsequent `.layer()`
     // wraps the previous (tower service-builder semantics), so
     // the LAST `.layer()` is the OUTERMOST and runs first on
-    // each request. Loopback gate goes LAST so it runs BEFORE
-    // body-limit middleware per docs/improvement/test.md §5.3
-    // ("loopback 校验**先于** body/token 校验，错误码顺序固定").
-    // A remote caller posting an oversized body must see
-    // LOOPBACK_REQUIRED, not PAYLOAD_TOO_LARGE.
+    // each request. Body limit goes here; the loopback gate is
+    // applied at the `code_router()` level above so it covers
+    // every code route uniformly.
     Router::new()
         .route("/messages", post(code_message_handler))
         .route("/interactions/{id}", post(code_interaction_handler))
@@ -175,7 +180,6 @@ fn code_write_router() -> Router<WebAppState> {
         .route("/goal/start", post(code_goal_start_handler))
         .route("/goal/cancel", post(code_goal_cancel_handler))
         .layer(middleware::from_fn(enforce_code_write_body_limit))
-        .layer(middleware::from_fn(enforce_code_route_loopback))
 }
 
 async fn static_handler(uri: axum::http::Uri) -> impl IntoResponse {
@@ -1115,10 +1119,15 @@ mod tests {
     /// content-type check, or any controller-token check fires.
     /// Without this ordering a remote caller could probe whether
     /// the runtime is up by counting which error code they get.
+    ///
+    /// Codex pass-1 P1: build the test app from `code_router()`
+    /// (not `code_write_router()`) so the loopback middleware
+    /// applies — the layer was promoted to cover attach/detach
+    /// too, and now lives on the outer router.
     #[tokio::test]
     async fn code_messages_route_rejects_non_loopback_before_body_or_token_check() {
         use axum::extract::connect_info::MockConnectInfo;
-        let app = code_write_router()
+        let app = code_router()
             .with_state(WebAppState {
                 working_dir: Arc::new(PathBuf::from("/tmp/libra")),
                 code_ui: None,
@@ -1156,6 +1165,72 @@ mod tests {
             value["error"]["code"], "LOOPBACK_REQUIRED",
             "loopback gate MUST fire before body/token checks; got: {value}",
         );
+    }
+
+    /// Codex pass-1 P1 — attach/detach coverage. POST routes that
+    /// use axum's `Json<...>` extractor would otherwise let
+    /// malformed-body deserialisation errors fire BEFORE the
+    /// per-handler loopback check, leaking liveness to a remote
+    /// caller. The middleware layered on `code_router()` must
+    /// short-circuit with `LOOPBACK_REQUIRED` regardless of body
+    /// shape.
+    #[tokio::test]
+    async fn code_controller_attach_route_rejects_non_loopback_before_body_parse() {
+        use axum::extract::connect_info::MockConnectInfo;
+        let app = code_router()
+            .with_state(WebAppState {
+                working_dir: Arc::new(PathBuf::from("/tmp/libra")),
+                code_ui: None,
+                automation_control_token: None,
+                audit_sink: Arc::new(TracingAuditSink),
+                control_trace_id: Uuid::new_v4(),
+            })
+            .layer(MockConnectInfo(SocketAddr::from((
+                Ipv4Addr::new(192, 0, 2, 10),
+                34567,
+            ))));
+        // Send a malformed body so a Json extractor would otherwise
+        // fail the request with 400/415 BEFORE reaching the
+        // per-handler check. We must still get 403 LOOPBACK_REQUIRED.
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/controller/attach")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from("{not valid json"))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], "LOOPBACK_REQUIRED");
+    }
+
+    #[tokio::test]
+    async fn code_controller_detach_route_rejects_non_loopback_before_body_parse() {
+        use axum::extract::connect_info::MockConnectInfo;
+        let app = code_router()
+            .with_state(WebAppState {
+                working_dir: Arc::new(PathBuf::from("/tmp/libra")),
+                code_ui: None,
+                automation_control_token: None,
+                audit_sink: Arc::new(TracingAuditSink),
+                control_trace_id: Uuid::new_v4(),
+            })
+            .layer(MockConnectInfo(SocketAddr::from((
+                Ipv4Addr::new(192, 0, 2, 10),
+                34567,
+            ))));
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/controller/detach")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from("{not valid json"))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], "LOOPBACK_REQUIRED");
     }
 
     #[tokio::test]
