@@ -40,13 +40,18 @@ export async function GET(
     const cursor = parseCursor(url.searchParams.get("cursor"));
     if (revisionRaw) parseRevisionOid(revisionRaw);
 
-    // Codex pass-13 P2: AI objects cursor MUST carry both
-    // `objectType` AND `objectId`. A partial cursor would silently
-    // disable keyset pagination.
+    // Codex pass-13 P2 + pass-14 P2: AI objects cursor MUST carry
+    // both `objectType` AND `objectId`. Reject empty cursors,
+    // partial cursors, and stray fields from sibling routes.
     if (cursor) {
-      const hasType = cursor.objectType !== undefined;
-      const hasId = cursor.objectId !== undefined;
-      if (hasType !== hasId) {
+      const allowed = new Set(["objectType", "objectId", "revision"]);
+      const stray = Object.keys(cursor).filter((k) => !allowed.has(k));
+      if (stray.length > 0) {
+        throw badRequest(
+          `ai-objects cursor contains fields not permitted: ${stray.join(",")}`,
+        );
+      }
+      if (!cursor.objectType || !cursor.objectId) {
         throw badRequest("ai-objects cursor must carry both objectType and objectId");
       }
     }

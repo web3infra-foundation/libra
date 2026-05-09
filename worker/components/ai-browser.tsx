@@ -79,6 +79,11 @@ export function AiBrowser({ slug, refName }: Props) {
   const filterKey = `${slug}::${refName}::${type ?? ""}::${layer ?? ""}`;
   const activeFilterKeyRef = useRef(filterKey);
   activeFilterKeyRef.current = filterKey;
+  // Codex pass-14 P2: ref change must also clear bundle / version
+  // state so a stale bundle from the previous ref does not bleed
+  // into the new ref's view.
+  const activeRefNameRef = useRef(refName);
+  activeRefNameRef.current = refName;
 
   useEffect(() => {
     // Codex pass-11 P2 + pass-12 P2: clear accumulated pages,
@@ -150,16 +155,26 @@ export function AiBrowser({ slug, refName }: Props) {
 
   const loadMoreVersions = async () => {
     if (!versions?.nextCursor) return;
+    // Codex pass-14 P2: capture `refName` at request time so a late
+    // page from a previous ref does not append into the current
+    // view. Mirrors the `loadMoreObjects` guard.
+    const requestRef = refName;
     try {
       const next = await fetchAiVersions(slug, {
         ref: refName,
         cursor: versions.nextCursor,
       });
-      setVersions({
-        ...next,
-        versions: [...versions.versions, ...next.versions],
-      });
+      if (requestRef !== activeRefNameRef.current) return;
+      setVersions((prev) =>
+        prev
+          ? {
+              ...next,
+              versions: [...prev.versions, ...next.versions],
+            }
+          : next,
+      );
     } catch (err: unknown) {
+      if (requestRef !== activeRefNameRef.current) return;
       setError(err instanceof ApiError ? err.message : "failed to load more versions");
     }
   };
@@ -189,14 +204,24 @@ export function AiBrowser({ slug, refName }: Props) {
     };
   }, [slug, refName, selected]);
 
+  // Codex pass-14 P2: ref change clears `openBundleId` and the
+  // bundle detail so a stale bundle from the previous ref never
+  // appears under a new ref.
+  useEffect(() => {
+    setOpenBundleId(null);
+    setBundleDetail(null);
+  }, [refName]);
+
   useEffect(() => {
     if (!openBundleId) {
       setBundleDetail(null);
       return;
     }
-    // Codex pass-5 P2: clear stale detail + error before fetching
-    // a different bundle so the panel doesn't flash old data while
-    // the new request is in flight.
+    // Codex pass-5 P2 + pass-14 P2: clear stale detail + error
+    // before fetching a different bundle so the panel doesn't flash
+    // old data while the new request is in flight. `refName` is in
+    // the dep array so a ref switch cancels any in-flight bundle
+    // fetch.
     let cancelled = false;
     setBundleDetail(null);
     setError(null);
@@ -217,7 +242,7 @@ export function AiBrowser({ slug, refName }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [slug, openBundleId]);
+  }, [slug, openBundleId, refName]);
 
   const objectGroupsByType = useMemo(() => {
     if (!objects) return new Map<string, number>();

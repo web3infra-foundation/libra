@@ -35,9 +35,10 @@ export async function GET(
     const cursor = parseCursor(url.searchParams.get("cursor"));
     if (revisionRaw) parseRevisionOid(revisionRaw);
 
-    // Codex pass-13 P2: AI versions cursor only uses `objectId` (the
-    // ai_version_id). Reject any cursor that carries other fields
-    // (e.g., a stray `objectType` from a misrouted object cursor).
+    // Codex pass-13 P2 + pass-14 P2: AI versions cursor uses
+    // `objectId` (the ai_version_id) and the optional `revision`
+    // pointer. Reject empty cursors, missing `objectId`, and any
+    // stray fields from sibling routes.
     if (cursor) {
       const allowed = new Set(["objectId", "revision"]);
       const stray = Object.keys(cursor).filter((k) => !allowed.has(k));
@@ -45,6 +46,9 @@ export async function GET(
         throw badRequest(
           `ai-versions cursor contains fields not permitted: ${stray.join(",")}`,
         );
+      }
+      if (!cursor.objectId) {
+        throw badRequest("ai-versions cursor must carry objectId");
       }
     }
     const revision = await resolveRevision(bindings.db, site, refRaw, revisionRaw);

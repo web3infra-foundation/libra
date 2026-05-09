@@ -25,12 +25,18 @@ export async function GET(
     const limit = parseLimit(url.searchParams.get("limit"), 100);
     const cursor = parseCursor(url.searchParams.get("cursor"));
 
-    // Codex pass-13 P2: revisions cursor MUST carry both `revision`
-    // and `startedAt`. A partial cursor would silently restart the
-    // page from the top, masking pagination breakage.
+    // Codex pass-13 P2 + pass-14 P2: revisions cursor MUST carry
+    // both `revision` AND `startedAt`. Reject empty cursors, partial
+    // cursors, and any stray fields from sibling routes.
     if (cursor) {
-      const presence = [cursor.revision, cursor.startedAt].map(Boolean);
-      if (presence.some((v) => v) && !presence.every((v) => v)) {
+      const allowed = new Set(["revision", "startedAt"]);
+      const stray = Object.keys(cursor).filter((k) => !allowed.has(k));
+      if (stray.length > 0) {
+        throw badRequest(
+          `revisions cursor contains fields not permitted: ${stray.join(",")}`,
+        );
+      }
+      if (!cursor.revision || !cursor.startedAt) {
         throw badRequest("revisions cursor must carry both revision and startedAt");
       }
     }
