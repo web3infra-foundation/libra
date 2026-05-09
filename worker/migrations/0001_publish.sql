@@ -101,11 +101,16 @@ CREATE TABLE IF NOT EXISTS publish_revisions (
     schema_version INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    -- Published-revision manifest invariant (Codex pass-3 P2): a row
-    -- whose status is `published` MUST carry a code manifest key.
-    -- `ai_index_key` may legitimately be NULL when a snapshot has
-    -- no AI objects (still-rare, but allowed by design).
-    CHECK (status != 'published' OR code_manifest_key IS NOT NULL),
+    -- Published-revision manifest invariant (Codex pass-3 P2 +
+    -- pass-4 P2): a row whose status is `published` MUST carry a
+    -- non-empty code manifest key. `ai_index_key` (when present)
+    -- must also be non-empty. `ai_index_key` may legitimately be
+    -- NULL when a snapshot has no AI objects (rare but allowed).
+    CHECK (
+        status != 'published'
+        OR (code_manifest_key IS NOT NULL AND length(code_manifest_key) > 0)
+    ),
+    CHECK (ai_index_key IS NULL OR length(ai_index_key) > 0),
     PRIMARY KEY (site_id, revision_oid),
     FOREIGN KEY (site_id) REFERENCES publish_sites (site_id) ON DELETE CASCADE,
     -- Codex pass-2 P2: the sync_run that produced this revision must
@@ -167,15 +172,19 @@ CREATE TABLE IF NOT EXISTS publish_files (
     size_bytes INTEGER NOT NULL DEFAULT 0 CHECK (size_bytes >= 0),
     language TEXT,
     schema_version INTEGER NOT NULL DEFAULT 1,
-    -- File-content invariant (Codex pass-3 P2): `text`/`binary` rows
-    -- carry the contents in R2 and a sha256 digest; `too_large` and
-    -- `ignored` rows record metadata only and MUST NOT carry
-    -- content pointers (otherwise stale R2 keys leak).
+    -- File-content invariant (Codex pass-3 P2 + pass-4 P2): only
+    -- `text` rows carry contents in R2 and a sha256 digest;
+    -- `binary`, `too_large` and `ignored` rows record metadata
+    -- only and MUST NOT carry content pointers (otherwise stale
+    -- R2 keys leak). content_sha256 is exactly 64 hex chars when
+    -- present; r2_key must be non-empty when present.
     CHECK (
-        (display_mode IN ('text', 'binary')
+        (display_mode = 'text'
             AND content_sha256 IS NOT NULL
-            AND r2_key IS NOT NULL)
-        OR (display_mode IN ('too_large', 'ignored')
+            AND length(content_sha256) = 64
+            AND r2_key IS NOT NULL
+            AND length(r2_key) > 0)
+        OR (display_mode IN ('binary', 'too_large', 'ignored')
             AND content_sha256 IS NULL
             AND r2_key IS NULL)
     ),
@@ -193,9 +202,11 @@ CREATE TABLE IF NOT EXISTS publish_ai_objects (
     object_type TEXT NOT NULL,
     object_id TEXT NOT NULL,
     layer TEXT NOT NULL CHECK (layer IN ('snapshot', 'event', 'projection')),
-    r2_key TEXT NOT NULL,
+    r2_key TEXT NOT NULL CHECK (length(r2_key) > 0),
     redaction_mode TEXT NOT NULL CHECK (redaction_mode IN ('default', 'strict')),
-    payload_sha256 TEXT NOT NULL,
+    -- sha256 hex is exactly 64 chars; pin shape so a truncated hash
+    -- never enters the index (Codex pass-4 P2).
+    payload_sha256 TEXT NOT NULL CHECK (length(payload_sha256) = 64),
     schema_version INTEGER NOT NULL,
     created_at TEXT NOT NULL,
     PRIMARY KEY (site_id, revision_oid, object_type, object_id),
@@ -213,7 +224,7 @@ CREATE TABLE IF NOT EXISTS publish_ai_versions (
     site_id TEXT NOT NULL,
     ai_version_id TEXT NOT NULL,
     revision_oid TEXT NOT NULL,
-    bundle_key TEXT NOT NULL,
+    bundle_key TEXT NOT NULL CHECK (length(bundle_key) > 0),
     object_count INTEGER NOT NULL DEFAULT 0 CHECK (object_count >= 0),
     redaction_mode TEXT NOT NULL CHECK (redaction_mode IN ('default', 'strict')),
     redaction_rules_version TEXT NOT NULL,

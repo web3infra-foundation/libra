@@ -615,6 +615,19 @@ mod tests {
         round_trip::<PublishFile>("file-metadata-too-large.json");
     }
 
+    /// Codex pass-4 P2: `binary` files publish metadata only — no
+    /// R2 contents. The SQL composite CHECK now groups `binary`
+    /// with `too_large`/`ignored`; pin the JSON contract here too.
+    #[test]
+    fn publish_contract_round_trip_file_metadata_binary() {
+        let raw = load_fixture("file-metadata-binary.json");
+        let parsed: PublishFile = serde_json::from_value(raw).unwrap();
+        assert!(matches!(parsed.display_mode, FileDisplayMode::Binary));
+        assert!(parsed.content_sha256.is_none());
+        assert!(parsed.r2_key.is_none());
+        round_trip::<PublishFile>("file-metadata-binary.json");
+    }
+
     #[test]
     fn publish_contract_round_trip_ai_object() {
         round_trip::<PublishAiObject>("ai-object.json");
@@ -625,19 +638,31 @@ mod tests {
         round_trip::<PublishAiBundle>("ai-bundle.json");
     }
 
-    /// Codex pass-3 P2: AI bundles use a `BTreeMap` for `indexes` to
-    /// keep JSON output deterministic. Re-serialize twice and compare
-    /// byte-for-byte so a future swap to `HashMap` (or similar) lights
-    /// up here, not in production diffs.
+    /// Codex pass-3 P2 + pass-4 P3: AI bundles use a `BTreeMap` for
+    /// `indexes` to keep JSON output deterministic. Parse the same
+    /// fixture into two independent instances (so any
+    /// `HashMap`-style insertion-order non-determinism would diverge
+    /// between them) and assert byte-equal serialization. Same-
+    /// instance repeatability is the weaker check; cross-instance
+    /// equality is what catches a future `HashMap` swap.
     #[test]
     fn publish_contract_ai_bundle_serializes_deterministically() {
         let raw = load_fixture("ai-bundle.json");
-        let parsed: PublishAiBundle = serde_json::from_value(raw).unwrap();
-        let first = serde_json::to_vec(&parsed).expect("bundle serializes");
-        let second = serde_json::to_vec(&parsed).expect("bundle serializes");
+        let first_instance: PublishAiBundle = serde_json::from_value(raw.clone()).unwrap();
+        let second_instance: PublishAiBundle = serde_json::from_value(raw).unwrap();
+        let first_bytes = serde_json::to_vec(&first_instance).expect("bundle serializes");
+        let second_bytes = serde_json::to_vec(&second_instance).expect("bundle serializes");
         assert_eq!(
-            first, second,
-            "AI bundle JSON output MUST be byte-stable across calls",
+            first_bytes, second_bytes,
+            "AI bundle JSON output MUST be byte-stable across separately constructed instances",
+        );
+        // Same-instance repeatability is also pinned so a stateful
+        // serializer (e.g. caching with order-dependent state) lights
+        // up here.
+        let third_bytes = serde_json::to_vec(&first_instance).expect("bundle serializes");
+        assert_eq!(
+            first_bytes, third_bytes,
+            "AI bundle JSON output MUST be byte-stable across repeat calls on the same instance",
         );
     }
 
