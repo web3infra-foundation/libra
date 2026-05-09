@@ -616,6 +616,39 @@ mod tests {
         round_trip::<PublishSyncRun>("sync-run.json");
     }
 
+    /// Codex pass-2 P2: the sync-run state machine is enforced by SQL
+    /// CHECK constraints. Cover the `running` state (no `finished_at`,
+    /// no `error_message`) on the contract side so a struct change
+    /// that drops `Option<finished_at>` lights up here.
+    #[test]
+    fn publish_contract_round_trip_sync_run_running() {
+        let raw = load_fixture("sync-run-running.json");
+        let parsed: PublishSyncRun = serde_json::from_value(raw).unwrap();
+        assert!(matches!(parsed.status, SyncRunStatus::Running));
+        assert!(parsed.finished_at.is_none());
+        assert!(parsed.error_message.is_none());
+        round_trip::<PublishSyncRun>("sync-run-running.json");
+    }
+
+    /// Codex pass-2 P2: the `failed` state MUST carry both
+    /// `finished_at` and a non-empty `error_message`.
+    #[test]
+    fn publish_contract_round_trip_sync_run_failed() {
+        let raw = load_fixture("sync-run-failed.json");
+        let parsed: PublishSyncRun = serde_json::from_value(raw).unwrap();
+        assert!(matches!(parsed.status, SyncRunStatus::Failed));
+        assert!(parsed.finished_at.is_some());
+        let msg = parsed
+            .error_message
+            .as_deref()
+            .expect("failed sync run fixture must carry an error_message");
+        assert!(
+            !msg.is_empty(),
+            "failed sync run fixture must carry a non-empty error_message",
+        );
+        round_trip::<PublishSyncRun>("sync-run-failed.json");
+    }
+
     #[test]
     fn publish_contract_round_trip_site_latest() {
         round_trip::<PublishSiteLatest>("latest.json");

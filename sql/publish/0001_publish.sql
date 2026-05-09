@@ -44,9 +44,23 @@ CREATE TABLE IF NOT EXISTS publish_sites (
     latest_revision_oid TEXT,
     refs_generation INTEGER NOT NULL DEFAULT 0,
     max_preview_bytes INTEGER NOT NULL,
+    schema_version INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    UNIQUE (clone_domain, slug)
+    UNIQUE (clone_domain, slug),
+    -- Composite FKs (Codex pass-2 P2): a site's `default_ref` must
+    -- name a real ref of this site, and `latest_revision_oid` must
+    -- name a real revision. Both columns are nullable, so the
+    -- chicken-and-egg insert order works:
+    --   1) INSERT publish_sites with both NULL.
+    --   2) INSERT publish_sync_runs / publish_revisions / publish_refs.
+    --   3) UPDATE publish_sites with the resolved values.
+    -- Default ON DELETE/UPDATE is NO ACTION; this blocks deleting a
+    -- ref/revision that is still referenced as default/latest.
+    FOREIGN KEY (site_id, default_ref)
+        REFERENCES publish_refs (site_id, ref_name),
+    FOREIGN KEY (site_id, latest_revision_oid)
+        REFERENCES publish_revisions (site_id, revision_oid)
 );
 
 CREATE INDEX IF NOT EXISTS idx_publish_sites_repo_id
@@ -64,10 +78,15 @@ CREATE TABLE IF NOT EXISTS publish_revisions (
     redaction_mode TEXT NOT NULL CHECK (redaction_mode IN ('default', 'strict')),
     redaction_rules_version TEXT NOT NULL,
     sync_run_id TEXT NOT NULL,
+    schema_version INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (site_id, revision_oid),
-    FOREIGN KEY (site_id) REFERENCES publish_sites (site_id) ON DELETE CASCADE
+    FOREIGN KEY (site_id) REFERENCES publish_sites (site_id) ON DELETE CASCADE,
+    -- Codex pass-2 P2: the sync_run that produced this revision must
+    -- exist. Default NO ACTION blocks deleting a sync_run that is
+    -- still referenced.
+    FOREIGN KEY (sync_run_id) REFERENCES publish_sync_runs (sync_run_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_publish_revisions_status
@@ -75,20 +94,28 @@ CREATE INDEX IF NOT EXISTS idx_publish_revisions_status
 
 CREATE TABLE IF NOT EXISTS publish_refs (
     site_id TEXT NOT NULL,
-    ref_name TEXT NOT NULL CHECK (
-        ref_name LIKE 'refs/heads/%' OR ref_name LIKE 'refs/tags/%'
-    ),
-    ref_type TEXT NOT NULL CHECK (ref_type IN ('branch', 'tag')),
+    ref_name TEXT NOT NULL,
+    ref_type TEXT NOT NULL,
     short_name TEXT NOT NULL,
     target_oid TEXT NOT NULL,
     revision_oid TEXT NOT NULL,
     is_default INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1)),
     sync_run_id TEXT NOT NULL,
+    schema_version INTEGER NOT NULL DEFAULT 1,
     updated_at TEXT NOT NULL,
+    -- Composite CHECK (Codex pass-2 P2): ref_type and ref_name MUST
+    -- agree. Independent CHECKs would let `ref_type='branch'` carry
+    -- `ref_name='refs/tags/v1'` and vice versa, breaking the picker
+    -- and the tag target-OID invariant tests.
+    CHECK (
+        (ref_type = 'branch' AND ref_name LIKE 'refs/heads/%')
+        OR (ref_type = 'tag' AND ref_name LIKE 'refs/tags/%')
+    ),
     PRIMARY KEY (site_id, ref_name),
     FOREIGN KEY (site_id) REFERENCES publish_sites (site_id) ON DELETE CASCADE,
     FOREIGN KEY (site_id, revision_oid)
-        REFERENCES publish_revisions (site_id, revision_oid) ON DELETE CASCADE
+        REFERENCES publish_revisions (site_id, revision_oid) ON DELETE CASCADE,
+    FOREIGN KEY (sync_run_id) REFERENCES publish_sync_runs (sync_run_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_publish_refs_short_name
@@ -114,6 +141,7 @@ CREATE TABLE IF NOT EXISTS publish_files (
     r2_key TEXT,
     size_bytes INTEGER NOT NULL DEFAULT 0,
     language TEXT,
+    schema_version INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (site_id, revision_oid, path),
     FOREIGN KEY (site_id, revision_oid)
         REFERENCES publish_revisions (site_id, revision_oid) ON DELETE CASCADE
@@ -176,6 +204,17 @@ CREATE TABLE IF NOT EXISTS publish_sync_runs (
     warnings_json TEXT NOT NULL DEFAULT '[]',
     error_message TEXT,
     cli_version TEXT NOT NULL,
+    schema_version INTEGER NOT NULL DEFAULT 1,
+    -- Sync-run state machine (Codex pass-2 P2): a `succeeded` or
+    -- `failed` row MUST have `finished_at`; a `running` row MUST
+    -- NOT. A `failed` row MUST carry a non-empty `error_message`;
+    -- non-failed rows MUST NOT.
+    CHECK (
+        (status = 'running' AND finished_at IS NULL AND error_message IS NULL)
+        OR (status = 'succeeded' AND finished_at IS NOT NULL AND error_message IS NULL)
+        OR (status = 'failed' AND finished_at IS NOT NULL
+            AND error_message IS NOT NULL AND length(error_message) > 0)
+    ),
     FOREIGN KEY (site_id) REFERENCES publish_sites (site_id) ON DELETE CASCADE
 );
 
