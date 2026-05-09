@@ -20,8 +20,10 @@
 //!   timeout we hand `reqwest`.
 //! * Bound the parsed line buffer at 1 MiB so a runaway server can't
 //!   exhaust the test process. Lines bigger than that abort the
-//!   stream and surface as an `Err` from the next call to
-//!   `next_event`; the parser thread shuts down at the same time.
+//!   stream and the parser thread exits. The diagnostic is stored
+//!   in a shared `last_error` slot so `next_event` surfaces it on
+//!   disconnect even when a slow consumer fills the channel before
+//!   the worker can enqueue the `EventOrError::Err`.
 //! * EOF and timeout are distinct outcomes:
 //!   * `Ok(None)` — no event arrived within the requested timeout
 //!     (the underlying connection may still be open).
@@ -41,7 +43,7 @@
 use std::{
     io::{BufRead, BufReader},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc::{self, RecvTimeoutError, TrySendError},
     },
@@ -58,6 +60,16 @@ use reqwest::blocking::{Client, Response};
 /// growing the test process unboundedly.
 pub const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
 
+/// Capacity of the worker→consumer channel. 64 is sized so a normal
+/// SSE matrix run (one snapshot per submit, plus controller_changed
+/// /status_changed bursts that never exceed a handful) drains
+/// synchronously without any backpressure. If a future high-fan-out
+/// case ever fills this, `send_or_drop` exits the worker loop and
+/// `next_event` surfaces the stored last-error (see
+/// [`EventStream::last_error`]) so the test fails loud rather than
+/// silently losing events.
+const WORKER_CHANNEL_CAPACITY: usize = 64;
+
 /// Decoded `event:` + `data:` block. Multi-line `data:` payloads are
 /// joined with `\n` per the SSE spec, mirroring the EventSource API.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,10 +81,13 @@ pub struct SseEvent {
 /// Blocking SSE client wrapper. The Drop impl signals the worker
 /// thread to stop and DETACHES it (it does not join). Joining
 /// would deadlock teardown if the worker were parked in a long
-/// socket read or a blocked `SyncSender::send`. Detaching plus
-/// dropping the receiver is enough: the next `try_send` from the
-/// worker fails with `Disconnected`, the loop exits, and the
-/// underlying socket close lets the OS reap the thread.
+/// `read()` on the underlying socket. Detaching is safe because
+/// the worker only uses `try_send` to surface events and errors,
+/// so it never parks waiting for the consumer; once `EventStream`
+/// itself drops the receiver, any subsequent `try_send` returns
+/// `Disconnected` and the loop exits. The OS reaps the thread as
+/// soon as the socket read returns (typically immediately, when
+/// the `Response` is dropped on this side).
 pub struct EventStream {
     receiver: mpsc::Receiver<EventOrError>,
     cancel: Arc<AtomicBool>,
@@ -81,6 +96,13 @@ pub struct EventStream {
     /// keep returning it on subsequent calls so callers don't
     /// silently treat "connection died" as "no event yet".
     poisoned: Option<String>,
+    /// Codex pass-4 P2: shared with the worker so a fatal
+    /// diagnostic (line-too-long, IO error, malformed field, EOF)
+    /// is preserved even when `send_or_drop` cannot enqueue the
+    /// `EventOrError::Err`. `next_event` reads this on
+    /// `RecvTimeoutError::Disconnected` and prefers the stored
+    /// message over the generic "reader thread exited" fallback.
+    last_error: Arc<Mutex<Option<String>>>,
 }
 
 enum EventOrError {
@@ -119,13 +141,15 @@ impl EventStream {
             bail!("SSE stream returned non-event Content-Type '{content_type}'");
         }
 
-        let (tx, rx) = mpsc::sync_channel::<EventOrError>(64);
+        let (tx, rx) = mpsc::sync_channel::<EventOrError>(WORKER_CHANNEL_CAPACITY);
         let cancel = Arc::new(AtomicBool::new(false));
+        let last_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let cancel_for_thread = Arc::clone(&cancel);
+        let last_error_for_thread = Arc::clone(&last_error);
         let worker = thread::Builder::new()
             .name("libra-test-sse-reader".to_string())
             .spawn(move || {
-                run_reader(response, tx, cancel_for_thread);
+                run_reader(response, tx, cancel_for_thread, last_error_for_thread);
             })
             .context("failed to spawn SSE reader thread")?;
         Ok(Self {
@@ -133,6 +157,7 @@ impl EventStream {
             cancel,
             worker: Some(worker),
             poisoned: None,
+            last_error,
         })
     }
 
@@ -156,29 +181,41 @@ impl EventStream {
             }
             Err(RecvTimeoutError::Timeout) => Ok(None),
             Err(RecvTimeoutError::Disconnected) => {
-                let message = "SSE reader thread exited without surfacing an event".to_string();
+                // Codex pass-4 P2: prefer the worker's stored
+                // diagnostic over the generic disconnect message.
+                // The worker writes any fatal error here even when
+                // the channel was full and `send_or_drop` couldn't
+                // enqueue the Err envelope.
+                let stored = self.last_error.lock().ok().and_then(|guard| guard.clone());
+                let message = stored.unwrap_or_else(|| {
+                    "SSE reader thread exited without surfacing an event".to_string()
+                });
                 self.poisoned = Some(message.clone());
                 Err(anyhow!(message))
             }
         }
     }
 
-    /// Signal the reader thread to stop. Codex pass-1 P2: do NOT
-    /// `join()` here — the reader can be parked in either a long
-    /// `read()` on the underlying socket OR a blocked
-    /// `mpsc::SyncSender::send` if the matrix consumer fell behind.
-    /// Both block until the corresponding peer wakes them up, so
-    /// joining would deadlock test teardown for an unbounded period.
-    /// Instead we drop the receiver and the join handle: dropping
-    /// the receiver makes the worker's next send fail with
-    /// `Disconnected` (it uses `try_send`), and dropping the join
-    /// handle detaches the thread. The OS reaps it once the socket
-    /// read returns (typically within milliseconds, when the
-    /// `Response` itself is dropped on this side).
+    /// Signal the reader thread to stop and detach the join
+    /// handle. Codex pass-1 P2 + pass-4 P3:
+    ///
+    /// * `close()` only sets the cancel flag and detaches the
+    ///   worker handle — the receiver is NOT dropped here, so the
+    ///   worker may still be parked in a long socket `read()`.
+    ///   That's fine: we never join, so detach + the eventual
+    ///   socket close are enough.
+    /// * The worker uses `try_send` exclusively (see
+    ///   [`send_or_drop`]) so it never parks waiting for the
+    ///   consumer; backpressure surfaces as a worker exit, not a
+    ///   teardown deadlock.
+    /// * The receiver is dropped only when the surrounding
+    ///   [`EventStream`] itself is dropped, which immediately
+    ///   makes any subsequent `try_send` from the worker return
+    ///   `Disconnected` and ends its loop.
+    ///
+    /// Idempotent; called automatically by [`Drop`].
     pub fn close(&mut self) {
         self.cancel.store(true, Ordering::SeqCst);
-        // Detach the worker so a stuck I/O read can't hang teardown.
-        // We intentionally do not join.
         let _ = self.worker.take();
     }
 }
@@ -189,7 +226,12 @@ impl Drop for EventStream {
     }
 }
 
-fn run_reader(response: Response, tx: mpsc::SyncSender<EventOrError>, cancel: Arc<AtomicBool>) {
+fn run_reader(
+    response: Response,
+    tx: mpsc::SyncSender<EventOrError>,
+    cancel: Arc<AtomicBool>,
+    last_error: Arc<Mutex<Option<String>>>,
+) {
     let mut reader = BufReader::new(response);
     let mut event_field = String::new();
     let mut data_lines: Vec<String> = Vec::new();
@@ -203,27 +245,20 @@ fn run_reader(response: Response, tx: mpsc::SyncSender<EventOrError>, cancel: Ar
         // the documented cap before we surface the error.
         match read_line_bounded(&mut reader, &mut line_bytes, MAX_SSE_LINE_BYTES) {
             Ok(BoundedRead::Eof) => {
-                send_or_drop(
-                    &tx,
-                    EventOrError::Err("SSE stream closed by server".to_string()),
-                );
+                fatal(&tx, &last_error, "SSE stream closed by server".to_string());
                 return;
             }
             Ok(BoundedRead::Line) => {}
             Ok(BoundedRead::OverLimit) => {
-                send_or_drop(
+                fatal(
                     &tx,
-                    EventOrError::Err(format!(
-                        "SSE line exceeded {MAX_SSE_LINE_BYTES} bytes before newline"
-                    )),
+                    &last_error,
+                    format!("SSE line exceeded {MAX_SSE_LINE_BYTES} bytes before newline"),
                 );
                 return;
             }
             Err(error) => {
-                send_or_drop(
-                    &tx,
-                    EventOrError::Err(format!("SSE stream read error: {error}")),
-                );
+                fatal(&tx, &last_error, format!("SSE stream read error: {error}"));
                 return;
             }
         }
@@ -267,10 +302,7 @@ fn run_reader(response: Response, tx: mpsc::SyncSender<EventOrError>, cancel: Ar
         let line = match std::str::from_utf8(&line_bytes) {
             Ok(s) => s,
             Err(error) => {
-                send_or_drop(
-                    &tx,
-                    EventOrError::Err(format!("SSE line not UTF-8: {error}")),
-                );
+                fatal(&tx, &last_error, format!("SSE line not UTF-8: {error}"));
                 return;
             }
         };
@@ -281,11 +313,10 @@ fn run_reader(response: Response, tx: mpsc::SyncSender<EventOrError>, cancel: Ar
             // `event\n` (no colon) is not technically valid; treat
             // the entire line as a malformed signal but keep going.
             if !rest.is_empty() {
-                send_or_drop(
+                fatal(
                     &tx,
-                    EventOrError::Err(format!(
-                        "malformed SSE field, expected ':' after 'event': {line:?}"
-                    )),
+                    &last_error,
+                    format!("malformed SSE field, expected ':' after 'event': {line:?}"),
                 );
                 return;
             }
@@ -366,10 +397,31 @@ fn send_or_drop(tx: &mpsc::SyncSender<EventOrError>, value: EventOrError) -> boo
     }
 }
 
+/// Codex pass-4 P2: surface a fatal worker error.
+///
+/// Stores the message in the shared `last_error` slot FIRST (so
+/// `EventStream::next_event` can prefer it on disconnect even when
+/// the channel is full), then attempts to enqueue an
+/// `EventOrError::Err` envelope so consumers that are still
+/// draining see the diagnostic in-band rather than as a
+/// disconnect-message replacement. The send failure is silent on
+/// purpose: the slot is the authoritative copy.
+fn fatal(tx: &mpsc::SyncSender<EventOrError>, last_error: &Mutex<Option<String>>, message: String) {
+    if let Ok(mut slot) = last_error.lock() {
+        // Don't clobber an earlier error if one was already
+        // recorded — the first failure is the most actionable.
+        if slot.is_none() {
+            *slot = Some(message.clone());
+        }
+    }
+    let _ = send_or_drop(tx, EventOrError::Err(message));
+}
+
 #[cfg(test)]
 mod tests {
     //! L0 unit tests for the SSE block parser. These run in-process
-    //! against an `mpsc::channel` instead of a real TCP socket so
+    //! against a 1024-slot `mpsc::sync_channel` (see
+    //! [`large_buffer_test_channel`]) instead of a real TCP socket so
     //! the parser logic is verifiable without spinning up a Worker.
 
     use std::io::Cursor;
