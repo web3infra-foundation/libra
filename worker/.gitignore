@@ -5,9 +5,14 @@ node_modules/
 .turbo/
 .env
 .env.*
-!.env.example
 .dev.vars
 .dev.vars.*
+# Codex pass-2 P1: the ONLY example env file the publish scaffold
+# ships is `.dev.vars.example`. The previous draft also un-ignored
+# `.env.example`, but pass-1 tightened `embed_path_is_allowed` to
+# reject every `.env*` segment, so that allowance contradicted the
+# embed policy and was removed.
+!.dev.vars.example
 *.tsbuildinfo
 coverage/
 .next-types/

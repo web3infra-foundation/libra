@@ -1,0 +1,11 @@
+# Copy to `.dev.vars` for local Wrangler dev. Never commit .dev.vars.
+#
+# Required when any site has `visibility = 'private'`. The Worker
+# fails closed (403) for private requests if either value is missing
+# or if the Cf-Access-Jwt-Assertion header cannot be validated.
+#
+# There is intentionally NO env var to disable the JWT check. For
+# local development against a private site, run Wrangler with a real
+# Cloudflare Access service token; never loosen the gate here.
+CF_ACCESS_TEAM_DOMAIN=your-team.cloudflareaccess.com
+CF_ACCESS_AUD=replace-with-application-aud-tag

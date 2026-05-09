@@ -68,7 +68,18 @@ export default async function SiteRoot({ params, searchParams }: Props) {
   }
 
   if (!activeRef) notFound();
-  const tree = await loadTreeForRef(ctx, activeRef, "");
+  // Root tree never throws FILE_NOT_FOUND (root listing returns []
+  // for empty repos), but match the same pattern as the path-based
+  // tree page so future changes stay symmetric.
+  let tree;
+  try {
+    tree = await loadTreeForRef(ctx, activeRef, "");
+  } catch (error) {
+    if (error instanceof PublishApiError && error.code === "FILE_NOT_FOUND") {
+      notFound();
+    }
+    throw error;
+  }
   if (!tree) notFound();
 
   return (

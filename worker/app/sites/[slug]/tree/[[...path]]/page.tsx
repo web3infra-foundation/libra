@@ -72,7 +72,20 @@ export default async function TreePage({ params, searchParams }: Props) {
       </SiteShell>
     );
   }
-  const tree = await loadTreeForRef(ctx, activeRef, path);
+  // Codex pass-2 P2: `loadTreeForRef` calls `listDirEntries`, which
+  // now throws `FILE_NOT_FOUND` for missing non-root directories
+  // instead of returning an empty list. Translate that into Next's
+  // 404 so the page renders the not-found UI rather than the
+  // generic error boundary.
+  let tree;
+  try {
+    tree = await loadTreeForRef(ctx, activeRef, path);
+  } catch (error) {
+    if (error instanceof PublishApiError && error.code === "FILE_NOT_FOUND") {
+      notFound();
+    }
+    throw error;
+  }
   if (!tree) notFound();
 
   return (

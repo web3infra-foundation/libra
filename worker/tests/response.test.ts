@@ -3,19 +3,54 @@ import { respondError, respondOk } from "@/lib/server/response";
 import { PublishApiError } from "@/lib/server/errors";
 
 describe("respondOk", () => {
-  it("emits envelope + cache + content-type headers", async () => {
+  // Codex pass-2 P1: `respondOk` defaults `visibility` to "private"
+  // (fail-safe). Tests that expect public cache headers must opt in
+  // explicitly; tests that omit `visibility` exercise the private
+  // path and should observe `private, no-store`.
+  it("emits envelope + content-type headers", async () => {
     const response = respondOk({ hello: "world" }, { cache: { mode: "no-store" } });
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toMatch(/application\/json/);
-    expect(response.headers.get("cache-control")).toBe("no-store");
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
     const body = await response.json();
     expect(body).toEqual({ ok: true, data: { hello: "world" } });
   });
-  it("emits revision-long cache headers + ETag", () => {
-    const response = respondOk({ x: 1 }, { cache: { mode: "revision-long" }, etag: 'W/"x"' });
+
+  it("returns no-store for explicit no-store + public visibility", () => {
+    const response = respondOk(
+      { x: 1 },
+      { cache: { mode: "no-store" }, visibility: "public" },
+    );
+    expect(response.headers.get("cache-control")).toBe("no-store");
+  });
+
+  it("emits revision-long cache headers + ETag for public visibility", () => {
+    const response = respondOk(
+      { x: 1 },
+      { cache: { mode: "revision-long" }, etag: 'W/"x"', visibility: "public" },
+    );
     expect(response.headers.get("cache-control")).toMatch(/immutable/);
     expect(response.headers.get("etag")).toBe('W/"x"');
+  });
+
+  it("forces private, no-store when visibility is private (overrides cache mode)", () => {
+    const response = respondOk(
+      { x: 1 },
+      { cache: { mode: "revision-long" }, etag: 'W/"x"', visibility: "private" },
+    );
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    // ETag intentionally omitted for private responses; intermediaries
+    // should never reuse the response across requests.
+    expect(response.headers.get("etag")).toBeNull();
+  });
+
+  it("defaults to private (fail-safe) when visibility is unset", () => {
+    const response = respondOk(
+      { x: 1 },
+      { cache: { mode: "revision-long" }, etag: 'W/"x"' },
+    );
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(response.headers.get("etag")).toBeNull();
   });
 });
 
