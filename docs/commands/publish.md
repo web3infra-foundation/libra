@@ -183,6 +183,38 @@ or to `ConfigKv`.
 - `.librapublishignore` — per-repo ignore list applied on top of the
   built-in deny rules.
 
+## D1 schema migrations
+
+The publish D1 schema is materialised from the source-of-truth files
+under `sql/publish/`, applied by `wrangler d1 migrations apply`
+during `libra publish deploy`. Each `.sql` file under `sql/publish/`
+has a byte-equal mirror under `worker/migrations/` (the
+`publish_schema_contract_worker_mirror_is_byte_equal` Rust test
+walks both directories and refuses any drift).
+
+Current chain:
+
+1. `sql/publish/0001_publish.sql` — initial schema. Tables:
+   `publish_sites`, `publish_revisions`, `publish_refs`,
+   `publish_files`, `publish_ai_objects`, `publish_ai_versions`,
+   `publish_sync_runs`. Adds composite FKs, ref-name shape CHECKs,
+   sync-run state-machine CHECK, lowercase-hex digest CHECKs.
+2. `sql/publish/0002_publish_digest_check.sql` — additive trigger
+   migration. SQLite's `CREATE TABLE IF NOT EXISTS` is a no-op when
+   the table already exists, so column-level CHECK additions in
+   0001 do not reach existing databases. Migration 0002 adds
+   `BEFORE INSERT`/`BEFORE UPDATE` triggers that re-enforce the
+   lowercase 64-char hex shape on `publish_files.content_sha256`,
+   `publish_ai_objects.payload_sha256` and
+   `publish_ai_versions.bundle_sha256`. Idempotent (`CREATE TRIGGER
+   IF NOT EXISTS`) and safe to re-apply.
+
+Future schema changes go into `0003_<topic>.sql`, etc. Each
+migration MUST be additive (`CREATE TABLE … IF NOT EXISTS`,
+`ALTER TABLE … ADD COLUMN …`, `CREATE INDEX … IF NOT EXISTS`,
+`CREATE TRIGGER … IF NOT EXISTS`) so reapplying on a fresh shard
+yields the same end state as applying the chain incrementally.
+
 ## See also
 
 - `libra clone` — restore a Libra repository from Cloudflare D1 / R2

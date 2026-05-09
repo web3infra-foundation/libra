@@ -24,7 +24,7 @@
 use clap::{Parser, Subcommand};
 
 use crate::utils::{
-    error::{CliError, CliResult},
+    error::{CliError, CliResult, StableErrorCode},
     output::OutputConfig,
     util,
 };
@@ -60,6 +60,16 @@ pub struct InitArgs {
     #[arg(long)]
     pub clone_domain: Option<String>,
 
+    /// Browser-facing origin URL, e.g. `https://code.example.com`.
+    /// Codex pass-8 P2: documented in publish.md / docs/commands.
+    #[arg(long)]
+    pub display_origin: Option<String>,
+
+    /// Display name shown in the Worker UI header.
+    /// Codex pass-8 P2: documented in publish.md / docs/commands.
+    #[arg(long)]
+    pub name: Option<String>,
+
     /// `public` (browser-readable) or `private` (Cloudflare Access).
     #[arg(long)]
     pub visibility: Option<String>,
@@ -67,6 +77,11 @@ pub struct InitArgs {
     /// Worker name; defaults to `libra-publish`.
     #[arg(long)]
     pub worker_name: Option<String>,
+
+    /// Per-file preview cap in bytes. Files larger than this fall
+    /// back to metadata-only. Codex pass-8 P2: documented flag.
+    #[arg(long)]
+    pub max_preview_bytes: Option<u64>,
 }
 
 #[derive(Parser, Debug)]
@@ -86,6 +101,18 @@ pub struct SyncArgs {
     /// Redaction policy: `default` or `strict`.
     #[arg(long, default_value = "default")]
     pub ai_redaction: String,
+
+    /// Allow a path that the deny list would normally block. Only
+    /// honored on `private` sites. Codex pass-8 P2: documented in
+    /// publish.md `.librapublishignore` section.
+    #[arg(long, value_name = "path")]
+    pub allow_sensitive_path: Vec<String>,
+
+    /// Force re-upload of every file/object even if `is_synced`
+    /// is set. Codex pass-8 P2: documented in publish.md hardening
+    /// criteria for the CAS latest-revision conflict path.
+    #[arg(long)]
+    pub force: bool,
 
     /// Emit machine-readable JSON output.
     #[arg(long)]
@@ -119,16 +146,25 @@ const NOT_YET_IMPLEMENTED: &str =
      for the v1 release window.";
 
 pub async fn execute(args: PublishArgs) -> CliResult<()> {
-    match args.command {
-        PublishCommand::Init(_)
-        | PublishCommand::Sync(_)
-        | PublishCommand::Status(_)
-        | PublishCommand::Deploy(_)
-        | PublishCommand::Unpublish(_) => Err(CliError::fatal(NOT_YET_IMPLEMENTED)
-            .with_detail("operation", "publish")
-            .with_detail("component", "publish")
-            .with_detail("phase", "4")),
-    }
+    let subcommand = match args.command {
+        PublishCommand::Init(_) => "init",
+        PublishCommand::Sync(_) => "sync",
+        PublishCommand::Status(_) => "status",
+        PublishCommand::Deploy(_) => "deploy",
+        PublishCommand::Unpublish(_) => "unpublish",
+    };
+    // Codex pass-8 P2: tag the typed error with `Unsupported` so the
+    // stable-code surface is `LBR-UNSUPPORTED-001`, not the generic
+    // internal-invariant fallback. Downstream tooling that classifies
+    // errors by stable code (CI matrix, telemetry) can match on
+    // "feature not yet implemented" rather than treating this as a
+    // crash bug.
+    Err(CliError::fatal(NOT_YET_IMPLEMENTED)
+        .with_stable_code(StableErrorCode::Unsupported)
+        .with_detail("operation", "publish")
+        .with_detail("component", "publish")
+        .with_detail("subcommand", subcommand)
+        .with_detail("phase", "4"))
 }
 
 pub async fn execute_safe(args: PublishArgs, _output: &OutputConfig) -> CliResult<()> {
