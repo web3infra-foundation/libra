@@ -1375,6 +1375,13 @@ async fn update_references(
     })
 }
 
+/// Soft cap on the number of commits we walk back from each branch tip when
+/// constructing the `have` list. Each `have` line is small, but we still want
+/// to keep the request bounded for repos with deep history. Tips themselves
+/// always go into `have` regardless of this limit so that the server can
+/// recognise every local/remote-tracking branch as a potential common ancestor.
+const HAVE_HISTORY_LIMIT: usize = 256;
+
 async fn current_have_safe() -> Result<Vec<String>, FetchError> {
     #[derive(PartialEq, Eq, PartialOrd, Ord)]
     struct QueueItem {
@@ -1408,7 +1415,16 @@ async fn current_have_safe() -> Result<Vec<String>, FetchError> {
         .collect::<Vec<_>>();
     remotes.push(None);
 
-    for remote in remotes {
+    let mut have = Vec::new();
+    let mut have_set: HashSet<String> = HashSet::new();
+
+    // Phase 1: every local + remote-tracking branch tip becomes a `have`,
+    // unconditionally. These are the commits the server is most likely to
+    // recognise as a common ancestor; dropping any of them forces the server
+    // to re-send the pack regions reachable from those tips on every fetch
+    // (the bug that made `libra pull` re-download the same pack repeatedly
+    // on repos with more active branches than the previous traversal limit).
+    for remote in &remotes {
         let branches = Branch::list_branches_result(remote.as_deref())
             .await
             .map_err(|source| FetchError::LocalState {
@@ -1423,15 +1439,25 @@ async fn current_have_safe() -> Result<Vec<String>, FetchError> {
                     ),
                 })?;
             check_and_insert(&commit, &mut inserted, &mut c_pending);
+            let oid = branch.commit.to_string();
+            if have_set.insert(oid.clone()) {
+                have.push(oid);
+            }
         }
     }
 
-    let mut have = Vec::new();
-    while have.len() < 32 && !c_pending.is_empty() {
+    // Phase 2: walk parents in newest-first order to provide additional
+    // common-ancestor candidates for divergent histories, bounded by
+    // `HAVE_HISTORY_LIMIT` so very deep repos don't produce an unbounded
+    // request body.
+    while have.len() < HAVE_HISTORY_LIMIT && !c_pending.is_empty() {
         let Some(item) = c_pending.pop() else {
             break;
         };
-        have.push(item.commit.to_string());
+        let oid = item.commit.to_string();
+        if have_set.insert(oid.clone()) {
+            have.push(oid);
+        }
 
         let commit: Commit =
             load_object(&item.commit).map_err(|source| FetchError::LocalState {
