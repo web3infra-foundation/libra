@@ -56,6 +56,21 @@ use rust_embed::Embed;
 #[exclude = ".DS_Store"]
 #[exclude = "_design_reference/*"]
 #[exclude = "_legacy_not_for_v1/*"]
+// Codex pass-3 P2: credential / secret filenames must never enter
+// the binary. The `embed_path_is_allowed` runtime helper enforces
+// the same set against any path the embed iterator produces, so
+// these globs and the helper stay in lockstep.
+#[exclude = "**/*.pem"]
+#[exclude = "**/*.key"]
+#[exclude = "**/id_rsa"]
+#[exclude = "**/id_rsa.pub"]
+#[exclude = "**/id_ed25519"]
+#[exclude = "**/id_ed25519.pub"]
+#[exclude = "**/id_ecdsa"]
+#[exclude = "**/id_ecdsa.pub"]
+#[exclude = "**/*token*"]
+#[exclude = "**/*secret*"]
+#[exclude = "**/*credential*"]
 pub struct WorkerTemplate;
 
 /// Render policy for a template file.
@@ -183,6 +198,35 @@ pub const EMBED_DENY_SEGMENTS: &[&str] = &[
     "_legacy_not_for_v1",
 ];
 
+/// Pattern fragments that match credential-bearing filenames.
+///
+/// Codex pass-3 P2: the gitignore + embed test were missing the
+/// `publish.md` deny rules for `*.pem`, `*.key`, `id_rsa*`,
+/// `id_ed25519*`, `*token*`, `*secret*`, `*credential*`. We mirror
+/// the gitignore entries here so the rust-embed step refuses to ship
+/// any of those even if a developer forgets to ignore them. Each
+/// entry is matched as a *case-insensitive substring* against every
+/// path segment.
+pub const EMBED_DENY_FILENAME_FRAGMENTS: &[&str] = &[
+    "token",
+    "secret",
+    "credential",
+];
+
+/// Substrings whose presence at the END of a segment marks it as a
+/// credential file. Compared case-insensitively.
+pub const EMBED_DENY_FILENAME_SUFFIXES: &[&str] = &[".pem", ".key"];
+
+/// Exact-match credential filenames.
+pub const EMBED_DENY_FILENAME_EXACT: &[&str] = &[
+    "id_rsa",
+    "id_rsa.pub",
+    "id_ed25519",
+    "id_ed25519.pub",
+    "id_ecdsa",
+    "id_ecdsa.pub",
+];
+
 /// Returns true when `relative_path` contains any path segment that
 /// the embed must not ship.
 ///
@@ -191,8 +235,13 @@ pub const EMBED_DENY_SEGMENTS: &[&str] = &[
 /// scaffold only ships ONE example file: `.dev.vars.example`. Any
 /// `.env*` file (including `.env.example`) MUST be rejected so a
 /// stray template variant in the source tree never lands in a
-/// downstream user's repo. The `embed_path_allows_dev_vars_example`
-/// regression test pins the asymmetry.
+/// downstream user's repo.
+///
+/// Codex pass-3 P2 (closed): the credential allowlist was extended
+/// to cover `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`, and any
+/// segment containing `token`, `secret`, or `credential` (case-
+/// insensitive). The regression tests pin both the env-file and
+/// credential asymmetry.
 pub fn embed_path_is_allowed(relative_path: &str) -> bool {
     for segment in relative_path.split('/') {
         for deny in EMBED_DENY_SEGMENTS {
@@ -208,6 +257,26 @@ pub fn embed_path_is_allowed(relative_path: &str) -> bool {
         }
         if segment.starts_with(".dev.vars") && segment != ".dev.vars.example" {
             return false;
+        }
+        // Credential-name patterns. `to_ascii_lowercase` is fine
+        // because we're matching ASCII keywords; non-ASCII filenames
+        // pass through this branch and are then re-checked against
+        // the deny segments above.
+        let lower = segment.to_ascii_lowercase();
+        for needle in EMBED_DENY_FILENAME_FRAGMENTS {
+            if lower.contains(needle) {
+                return false;
+            }
+        }
+        for suffix in EMBED_DENY_FILENAME_SUFFIXES {
+            if lower.ends_with(suffix) {
+                return false;
+            }
+        }
+        for exact in EMBED_DENY_FILENAME_EXACT {
+            if lower == *exact {
+                return false;
+            }
         }
     }
     true

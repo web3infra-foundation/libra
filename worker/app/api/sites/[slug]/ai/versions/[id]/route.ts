@@ -11,6 +11,26 @@ import { parseAiVersionId, parseSlug } from "@/lib/server/validate";
 export const runtime = "edge";
 export const dynamic = "force-dynamic";
 
+const STORAGE_KEY_FIELDS: ReadonlySet<string> = new Set([
+  "r2Key",
+  "bundleKey",
+  "r2_key",
+  "bundle_key",
+]);
+
+function redactBundleStorageKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redactBundleStorageKeys);
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      if (STORAGE_KEY_FIELDS.has(key)) continue;
+      out[key] = redactBundleStorageKeys(child);
+    }
+    return out;
+  }
+  return value;
+}
+
 export async function GET(
   request: NextRequest,
   context: { readonly params: Promise<{ readonly slug: string; readonly id: string }> },
@@ -32,7 +52,18 @@ export async function GET(
       throw notFound("REVISION_NOT_FOUND", "AI bundle revision is not published");
     }
 
-    const bundle = await readPublishedJson<Record<string, unknown>>(bindings.bucket, versionRow.bundle_key);
+    const rawBundle = await readPublishedJson<Record<string, unknown>>(
+      bindings.bucket,
+      versionRow.bundle_key,
+    );
+    // Codex pass-3 P1: the canonical AI bundle JSON carries
+    // per-object `r2Key` and a top-level `bundleKey` so the CLI can
+    // re-hydrate without round-tripping through D1. Those are
+    // internal storage paths and MUST NOT leave the Worker — public
+    // and even authenticated callers see only D1-rooted indexes.
+    // `redactBundleStorageKeys` walks `objects`/`bundles` arrays and
+    // strips both keys; everything else passes through unchanged.
+    const bundle = redactBundleStorageKeys(rawBundle);
 
     return respondOk(
       {

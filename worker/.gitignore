@@ -7,6 +7,21 @@ node_modules/
 .env.*
 .dev.vars
 .dev.vars.*
+# Credential files — must never enter the worker tree (Codex
+# pass-3 P2). Mirrored in `EMBED_DENY_SEGMENTS` so the rust-embed
+# build refuses any of these even if a developer forgets to
+# `git add` them locally.
+*.pem
+*.key
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
+id_ecdsa
+id_ecdsa.pub
+*token*
+*secret*
+*credential*
 # Codex pass-2 P1: the ONLY example env file the publish scaffold
 # ships is `.dev.vars.example`. The previous draft also un-ignored
 # `.env.example`, but pass-1 tightened `embed_path_is_allowed` to

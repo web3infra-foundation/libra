@@ -53,10 +53,19 @@ export async function readPublishedTextFile(
 /**
  * Read a JSON document from R2 by an already-resolved key. Raises
  * a typed error on missing object, oversize body or parse failure.
+ *
+ * Codex pass-3 P1: pass an `expectedSha256` whenever D1 records the
+ * payload digest (`publish_ai_objects.payload_sha256`). The Worker
+ * MUST refuse to serve an R2 body that does not match the index
+ * digest, otherwise a stale or malicious R2 write can bypass the
+ * redaction policy recorded in D1. The hash is over the raw UTF-8
+ * bytes — same as the Rust exporter writes — so a JSON re-encode in
+ * the Worker is not allowed before this check.
  */
 export async function readPublishedJson<T>(
   bucket: R2Bucket,
   key: string,
+  expectedSha256?: string,
 ): Promise<T> {
   const object = await bucket.get(key);
   if (!object) {
@@ -75,6 +84,16 @@ export async function readPublishedJson<T>(
   } catch {
     throw new PublishApiError("R2_OBJECT_CORRUPT", 500, "published JSON object failed to read");
   }
+  if (expectedSha256) {
+    const actual = await sha256Hex(text);
+    if (actual !== expectedSha256) {
+      throw new PublishApiError(
+        "R2_OBJECT_CORRUPT",
+        500,
+        "published JSON object hash does not match index",
+      );
+    }
+  }
   try {
     return JSON.parse(text) as T;
   } catch {
@@ -89,3 +108,5 @@ async function sha256Hex(input: string): Promise<string> {
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
 }
+
+export { sha256Hex };

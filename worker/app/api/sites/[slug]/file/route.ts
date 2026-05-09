@@ -2,7 +2,7 @@ import { NextRequest } from "next/server";
 import { getBindings } from "@/lib/server/cloudflare";
 import { resolveSiteForSlug, gateRequest } from "@/lib/server/site";
 import { findFileRow, resolveRevision } from "@/lib/server/d1";
-import { readPublishedTextFile } from "@/lib/server/r2";
+import { readPublishedTextFile, sha256Hex } from "@/lib/server/r2";
 import { respondError, respondOk } from "@/lib/server/response";
 import { fileToWire, revisionToWire } from "@/lib/server/wire";
 import { notFound } from "@/lib/server/errors";
@@ -38,6 +38,13 @@ export async function GET(
     if (fileRow.display_mode !== "text") {
       // Metadata-only response. The schema CHECK guarantees no R2 key
       // is recorded for non-text rows; we never fall through to R2.
+      // Codex pass-3 P1: the ETag previously interpolated the raw
+      // file path, which can contain quotes and other characters
+      // that break HTTP header grammar. Hash the path-bound key so
+      // the ETag is always quote-safe.
+      const etagDigest = (await sha256Hex(
+        `${revision.revision_oid}::${fileRow.path}::${fileRow.display_mode}`,
+      )).slice(0, 32);
       return respondOk(
         {
           revision: revisionToWire(revision),
@@ -46,7 +53,7 @@ export async function GET(
         },
         {
           cache: { mode: "revision-long" },
-          etag: `W/"meta-${fileRow.path}-${fileRow.display_mode}"`,
+          etag: `W/"meta-${etagDigest}"`,
           visibility: site.visibility,
         },
       );

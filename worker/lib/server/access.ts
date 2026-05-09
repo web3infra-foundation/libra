@@ -200,15 +200,33 @@ function base64UrlToBytes(input: string): Uint8Array {
   return bytes;
 }
 
+const JWKS_FETCH_TIMEOUT_MS = 4000;
+
 async function fetchJwks(issuer: string): Promise<Jwks> {
   const cached = jwksCache.get(issuer);
   const now = Date.now();
   if (cached && now - cached.fetchedAt < JWKS_CACHE_TTL_MS) {
     return cached.jwks;
   }
-  const response = await fetch(`${issuer}${JWKS_PATH}`, {
-    cf: { cacheEverything: true, cacheTtl: 3600 } as RequestInitCfProperties,
-  });
+  // Codex pass-3 P2: cap the JWKS fetch so a slow or hung Cloudflare
+  // edge can't hold private requests until the platform's hard
+  // request timeout. Aborts surface as fail-closed ACCESS_DENIED.
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), JWKS_FETCH_TIMEOUT_MS);
+  let response: Response;
+  try {
+    response = await fetch(`${issuer}${JWKS_PATH}`, {
+      signal: controller.signal,
+      cf: { cacheEverything: true, cacheTtl: 3600 } as RequestInitCfProperties,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw deny("Cloudflare Access JWKS fetch timed out");
+    }
+    throw deny("Cloudflare Access JWKS fetch failed");
+  } finally {
+    clearTimeout(timeout);
+  }
   if (!response.ok) {
     throw deny("Cloudflare Access JWKS fetch failed");
   }

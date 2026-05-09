@@ -16,21 +16,28 @@ import {
 export const runtime = "edge";
 export const dynamic = "force-dynamic";
 
-type GraphBundle = {
+// Codex pass-3 P1: the bundle JSON the snapshot builder writes is a
+// `PublishAiBundle` with `objects` + `relationships` (see
+// `src/internal/publish/contract.rs`). The previous draft expected
+// `nodes` + `edges`, so the graph endpoint silently returned an
+// empty graph for every real bundle. Map the canonical fields here
+// to the public graph wire shape (`nodes` / `edges`).
+type BundleFromR2 = {
   schemaVersion?: number;
-  nodes?: ReadonlyArray<GraphNode>;
-  edges?: ReadonlyArray<GraphEdge>;
   generatedAt?: string;
+  objects?: ReadonlyArray<BundleObjectEntry>;
+  relationships?: ReadonlyArray<BundleRelationship>;
 };
 
-type GraphNode = {
+type BundleObjectEntry = {
   objectType: string;
   objectId: string;
   layer: "snapshot" | "event" | "projection";
-  r2Key?: string;
+  // r2Key / payloadSha256 are present in the canonical bundle but
+  // are storage-only; we never echo them to the client.
 };
 
-type GraphEdge = {
+type BundleRelationship = {
   kind: string;
   fromObjectType: string;
   fromObjectId: string;
@@ -73,10 +80,13 @@ export async function GET(
     if (!versionRow) {
       throw notFound("BUNDLE_NOT_FOUND", "no AI bundle for this revision");
     }
-    const bundle = await readPublishedJson<GraphBundle>(bindings.bucket, versionRow.bundle_key);
+    const bundle = await readPublishedJson<BundleFromR2>(
+      bindings.bucket,
+      versionRow.bundle_key,
+    );
 
-    const nodes = bundle.nodes ?? [];
-    const edges = bundle.edges ?? [];
+    const nodes: ReadonlyArray<BundleObjectEntry> = bundle.objects ?? [];
+    const edges: ReadonlyArray<BundleRelationship> = bundle.relationships ?? [];
 
     let filteredNodes = nodes;
     let filteredEdges = edges;

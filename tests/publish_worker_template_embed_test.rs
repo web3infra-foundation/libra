@@ -55,6 +55,23 @@ fn embed_does_not_carry_generated_or_secret_paths() {
     assert!(!embed_path_is_allowed("app/.env"));
     assert!(!embed_path_is_allowed("node_modules/foo/package.json"));
 
+    // Codex pass-3 P2: credential-bearing filenames must be denied
+    // wherever they appear in the worker tree.
+    assert!(!embed_path_is_allowed("id_rsa"));
+    assert!(!embed_path_is_allowed("config/id_rsa.pub"));
+    assert!(!embed_path_is_allowed("keys/id_ed25519"));
+    assert!(!embed_path_is_allowed("server.pem"));
+    assert!(!embed_path_is_allowed("server.PEM"));
+    assert!(!embed_path_is_allowed("api.key"));
+    assert!(!embed_path_is_allowed("Cloudflare-Token.json"));
+    assert!(!embed_path_is_allowed("our-secret.txt"));
+    assert!(!embed_path_is_allowed("aws-credentials.json"));
+    assert!(!embed_path_is_allowed("nested/dir/has-secret.json"));
+    // Sanity-check that allowed filenames do not collide with any
+    // deny pattern.
+    assert!(embed_path_is_allowed("app/page.tsx"));
+    assert!(embed_path_is_allowed("lib/server/d1.ts"));
+
     for path in WorkerTemplate::iter() {
         assert!(
             embed_path_is_allowed(path.as_ref()),

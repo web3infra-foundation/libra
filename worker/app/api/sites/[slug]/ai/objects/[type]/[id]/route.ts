@@ -47,7 +47,15 @@ export async function GET(
     if (!objectRow) {
       throw notFound("OBJECT_NOT_FOUND", "no AI object matches this (type, id) at the requested revision");
     }
-    const payload = await readPublishedJson<Record<string, unknown>>(bindings.bucket, objectRow.r2_key);
+    // Codex pass-3 P1: verify the R2 body matches
+    // `publish_ai_objects.payload_sha256` before parsing/returning.
+    // The hash gates the redaction policy recorded alongside the
+    // index row; a stale R2 write cannot serve unredacted payloads.
+    const payload = await readPublishedJson<Record<string, unknown>>(
+      bindings.bucket,
+      objectRow.r2_key,
+      objectRow.payload_sha256,
+    );
 
     return respondOk(
       {
