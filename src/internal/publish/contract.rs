@@ -645,6 +645,54 @@ mod tests {
         round_trip::<PublishAiBundle>("ai-bundle.json");
     }
 
+    /// Codex pass-5 P2: `ai-index.json`'s `bundleSha256` claim MUST
+    /// match the actual sha256 of the `ai-bundle.json` it
+    /// references. The previous draft shipped a synthetic placeholder
+    /// digest that the structural round-trip test happily accepted,
+    /// which would have let a future drift between the two fixtures
+    /// pass CI undetected. Compute the digest fresh here and pin it.
+    #[test]
+    fn publish_contract_ai_index_bundle_sha_matches_bundle_fixture() {
+        let bundle_bytes = std::fs::read(format!(
+            "{}/tests/data/publish/ai-bundle.json",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("ai-bundle.json fixture must be readable");
+        let actual_sha = ring::digest::digest(&ring::digest::SHA256, &bundle_bytes);
+        let actual_hex: String = actual_sha
+            .as_ref()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+
+        let index = load_fixture("ai-index.json");
+        let bundles = index
+            .as_object()
+            .and_then(|m| m.get("bundles"))
+            .and_then(|v| v.as_array())
+            .expect("ai-index.json must list bundles");
+        let referenced = bundles
+            .iter()
+            .find_map(|entry| {
+                let obj = entry.as_object()?;
+                let id = obj.get("aiVersionId").and_then(|v| v.as_str())?;
+                if id == "ai-version-2026-05-09-001" {
+                    Some(obj.get("bundleSha256")?.as_str()?.to_string())
+                } else {
+                    None
+                }
+            })
+            .expect("ai-index.json must reference ai-version-2026-05-09-001");
+        // INVARIANT: the index claims the bundle digest; if it does
+        // not match the actual file, downstream Worker verification
+        // would always fail and the reader would conclude the bundle
+        // is corrupt.
+        assert_eq!(
+            referenced, actual_hex,
+            "ai-index.json bundleSha256 must equal the actual sha256 of ai-bundle.json",
+        );
+    }
+
     /// Codex pass-3 P2 + pass-4 P3: AI bundles use a `BTreeMap` for
     /// `indexes` to keep JSON output deterministic. Parse the same
     /// fixture into two independent instances (so any

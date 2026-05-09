@@ -623,11 +623,16 @@ export async function findAiVersion(
   siteId: string,
   aiVersionId: string,
 ): Promise<AiVersionRow | null> {
+  // Codex pass-5 P1: `bundle_sha256` MUST be in the projection.
+  // Earlier replace-all missed this SELECT because of a different
+  // indentation level, so the version-detail route was passing
+  // `undefined` into `readPublishedJson(..., expectedSha256)` and
+  // silently skipping tamper verification.
   return db
     .prepare(
       `SELECT site_id, ai_version_id, revision_oid, bundle_key,
-              object_count, redaction_mode, redaction_rules_version,
-              schema_version, created_at
+              bundle_sha256, object_count, redaction_mode,
+              redaction_rules_version, schema_version, created_at
        FROM publish_ai_versions
        WHERE site_id = ? AND ai_version_id = ?`,
     )

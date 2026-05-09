@@ -80,10 +80,13 @@ export async function GET(
     if (!versionRow) {
       throw notFound("BUNDLE_NOT_FOUND", "no AI bundle for this revision");
     }
-    // Codex pass-4 P2: verify the bundle body against the digest
-    // recorded in `publish_ai_versions.bundle_sha256` before
-    // building the graph, so a tampered R2 bundle cannot poison the
-    // graph view.
+    // Codex pass-4 P2 + pass-5 P1: verify the bundle body against the
+    // digest recorded in `publish_ai_versions.bundle_sha256` before
+    // building the graph. Missing-digest defensive guard mirrors the
+    // version detail route.
+    if (!versionRow.bundle_sha256 || versionRow.bundle_sha256.length !== 64) {
+      throw notFound("BUNDLE_NOT_FOUND", "AI bundle row is missing its sha256 digest");
+    }
     const bundle = await readPublishedJson<BundleFromR2>(
       bindings.bucket,
       versionRow.bundle_key,

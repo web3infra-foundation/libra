@@ -52,22 +52,27 @@ export async function GET(
       throw notFound("REVISION_NOT_FOUND", "AI bundle revision is not published");
     }
 
-    // Codex pass-4 P2: verify the bundle body against the digest
-    // recorded in `publish_ai_versions.bundle_sha256` so a stale or
-    // tampered R2 bundle cannot bypass the redaction policy
-    // recorded alongside the index.
+    // Codex pass-4 P2 + pass-5 P1: verify the bundle body against the
+    // digest recorded in `publish_ai_versions.bundle_sha256`. Refuse
+    // to read R2 if the digest is somehow missing — that would
+    // indicate a SELECT regression where the column was dropped from
+    // the projection and the verifier was silently skipped.
+    if (!versionRow.bundle_sha256 || versionRow.bundle_sha256.length !== 64) {
+      throw notFound("BUNDLE_NOT_FOUND", "AI bundle row is missing its sha256 digest");
+    }
     const rawBundle = await readPublishedJson<Record<string, unknown>>(
       bindings.bucket,
       versionRow.bundle_key,
       versionRow.bundle_sha256,
     );
-    // Codex pass-3 P1: the canonical AI bundle JSON carries
-    // per-object `r2Key` and a top-level `bundleKey` so the CLI can
-    // re-hydrate without round-tripping through D1. Those are
-    // internal storage paths and MUST NOT leave the Worker — public
-    // and even authenticated callers see only D1-rooted indexes.
-    // `redactBundleStorageKeys` walks `objects`/`bundles` arrays and
-    // strips both keys; everything else passes through unchanged.
+    // Codex pass-3 P1 + pass-5 nit: the canonical AI bundle JSON
+    // (`PublishAiBundle`) carries per-object `r2Key` for lazy re-
+    // hydration; the AI INDEX carries `bundleKey`. Both are internal
+    // storage paths and MUST NOT leave the Worker — public and even
+    // authenticated callers only see D1-rooted indexes.
+    // `redactBundleStorageKeys` walks every nested object/array and
+    // strips both keys (camelCase + snake_case); everything else
+    // passes through unchanged.
     const bundle = redactBundleStorageKeys(rawBundle);
 
     return respondOk(

@@ -22,7 +22,7 @@
     {
       "aiVersionId": "ai-version-2026-05-09-001",
       "bundleKey": "11111111-2222-3333-4444-555555555555/publish/sites/00000000-0000-0000-0000-0000publish01/revisions/abcdef0123456789abcdef0123456789abcdef01/ai/bundles/ai-version-2026-05-09-001.json",
-      "bundleSha256": "f1f2c1cda7d2c8c3a4b5c6d7e8f9a0b1c2d3e4f5061718293a4b5c6d7e8f9001",
+      "bundleSha256": "05b8cb0b9decf86db4b98aeb6eee15cc5ea2c82e552bc9a545f2b26841c16479",
       "objectCount": 4,
       "createdAt": "2026-05-09T12:55:00Z"
     }

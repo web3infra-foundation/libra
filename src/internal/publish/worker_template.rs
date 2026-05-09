@@ -66,12 +66,16 @@ use rust_embed::Embed;
 #[exclude = "**/id_dsa*"]
 #[exclude = "**/id_ecdsa*"]
 #[exclude = "**/id_ed25519*"]
-#[exclude = "**/*_token*"]
-#[exclude = "**/*-token*"]
-#[exclude = "**/*.token*"]
-#[exclude = "**/*_secret*"]
-#[exclude = "**/*-secret*"]
-#[exclude = "**/*.secret*"]
+// Codex pass-5 P1: deny every `*token*` / `*secret*` /
+// `*credential*` at the rust-embed level. Design-system token
+// assets like `tokens.css` are picked up explicitly via the
+// `#[include]` rules above (e.g. `app/**/*`), and rust-embed's
+// `#[include]` wins over `#[exclude]` only for matches that
+// already passed the include filter — so the runtime
+// `embed_path_is_allowed` helper carries the design-system
+// allowlist check.
+#[exclude = "**/*token*"]
+#[exclude = "**/*secret*"]
 #[exclude = "**/*credential*"]
 pub struct WorkerTemplate;
 
@@ -200,26 +204,42 @@ pub const EMBED_DENY_SEGMENTS: &[&str] = &[
     "_legacy_not_for_v1",
 ];
 
-/// Pattern fragments that match credential-bearing filenames.
+/// Substrings denied wherever they appear in a path segment.
 ///
-/// Codex pass-4 P3: the previous `*token*` and `*secret*` patterns
-/// collided with legitimate design-token and design-secret-style
-/// filenames (e.g. `_design_reference/tokens.css`). We tighten the
-/// rule so a token / secret keyword only triggers when it is
-/// preceded by `_`, `-`, or `.` — the conventional separator for
-/// credential filenames such as `api_token`, `api-token.json`,
-/// `service.token`, `auth_secret`. Bare `tokens.css` no longer
-/// matches.
-pub const EMBED_DENY_FILENAME_BOUNDED_FRAGMENTS: &[&str] = &[
+/// Codex pass-3 P2 made these strict per the publish.md spec; pass-4
+/// P3 relaxed them to allow design-system token assets; pass-5 P1
+/// re-tightens them: every segment containing `token`, `secret`, or
+/// `credential` is denied UNLESS the entire segment matches one of
+/// `EMBED_DENY_FILENAME_DESIGN_ALLOWLIST` (e.g. `tokens.css`,
+/// `tokens.ts`). This catches `tokens.json`, `token.txt`,
+/// `secrets.json`, etc. while still letting the design package's
+/// canonical asset filenames through.
+pub const EMBED_DENY_FILENAME_FRAGMENTS: &[&str] = &[
     "token",
     "secret",
+    "credential",
 ];
 
-/// Substrings denied without a leading separator. `credential` is
-/// always credential-bearing in our context (no design-system
-/// equivalent).
-pub const EMBED_DENY_FILENAME_FRAGMENTS: &[&str] = &[
-    "credential",
+/// Allowlist of design-system filenames that contain `token` /
+/// `secret` substrings but are NOT credentials. Whole-segment
+/// match (case-insensitive). Add entries here only after
+/// confirming the file is a design-system / styling asset and
+/// would never carry secrets.
+///
+/// Codex pass-5 P1: `tokens.json` is intentionally NOT on this
+/// list because a `.json` file with a `token` keyword is more
+/// often a credential dump (CI tokens, API tokens) than a
+/// design asset. Style-sheet / TypeScript / JavaScript variants
+/// of the design tokens stay allowed.
+pub const EMBED_DENY_FILENAME_DESIGN_ALLOWLIST: &[&str] = &[
+    "tokens.css",
+    "tokens.scss",
+    "tokens.ts",
+    "tokens.tsx",
+    "tokens.js",
+    "tokens.mjs",
+    "design-tokens.css",
+    "design-tokens.ts",
 ];
 
 /// Substrings whose presence at the END of a segment marks it as a
@@ -275,24 +295,26 @@ pub fn embed_path_is_allowed(relative_path: &str) -> bool {
         // because we're matching ASCII keywords; non-ASCII filenames
         // pass through this branch and are then re-checked against
         // the deny segments above.
+        //
+        // Codex pass-5 P1: deny ANY segment that contains
+        // `token` / `secret` / `credential` UNLESS the whole segment
+        // matches an allowlisted design-system filename. The
+        // allowlist is whole-segment so `auth_tokens.css`,
+        // `tokens.json` and similar variants stay denied.
         let lower = segment.to_ascii_lowercase();
+        let mut matched_fragment = false;
         for needle in EMBED_DENY_FILENAME_FRAGMENTS {
             if lower.contains(needle) {
-                return false;
+                matched_fragment = true;
+                break;
             }
         }
-        // Bounded fragments (token, secret) only match when preceded
-        // by a credential-style separator so design-token assets are
-        // not denied. The keyword is always allowed at the start of
-        // a segment because that's the design-system pattern
-        // (`tokens.css`, `tokens.ts`); a credential file
-        // conventionally writes `auth_token`, `api-secret`, etc.
-        for needle in EMBED_DENY_FILENAME_BOUNDED_FRAGMENTS {
-            for sep in ['_', '-', '.'] {
-                let bounded = format!("{sep}{needle}");
-                if lower.contains(&bounded) {
-                    return false;
-                }
+        if matched_fragment {
+            let allowed = EMBED_DENY_FILENAME_DESIGN_ALLOWLIST
+                .iter()
+                .any(|allowed| lower == *allowed);
+            if !allowed {
+                return false;
             }
         }
         for suffix in EMBED_DENY_FILENAME_SUFFIXES {

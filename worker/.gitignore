@@ -17,13 +17,23 @@ id_rsa*
 id_dsa*
 id_ecdsa*
 id_ed25519*
-*_token*
-*-token*
-*.token*
-*_secret*
-*-secret*
-*.secret*
+# Codex pass-5 P1: deny every `token`, `secret`, `credential`
+# filename, then re-allow the canonical design-system token
+# assets so styles / TypeScript token modules stay committable.
+# `.json` token files are intentionally NOT allowlisted because a
+# JSON file with a "token" keyword is more often a credential dump
+# than a design asset.
+*token*
+*secret*
 *credential*
+!tokens.css
+!tokens.scss
+!tokens.ts
+!tokens.tsx
+!tokens.js
+!tokens.mjs
+!design-tokens.css
+!design-tokens.ts
 # Codex pass-2 P1: the ONLY example env file the publish scaffold
 # ships is `.dev.vars.example`. The previous draft also un-ignored
 # `.env.example`, but pass-1 tightened `embed_path_is_allowed` to

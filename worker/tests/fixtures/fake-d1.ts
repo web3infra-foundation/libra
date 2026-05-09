@@ -162,6 +162,17 @@ class FakePreparedStatement {
       return rows.sort((a, b) => sortBy(a, b, ["object_type", "object_id"]));
     }
     if (sql.startsWith("SELECT site_id, ai_version_id, revision_oid")) {
+      // Codex pass-5 P3: distinguish the (site_id, ai_version_id)
+      // single-row lookup (`findAiVersion`) from the
+      // (site_id, revision_oid) list lookup (`listAiVersions`). The
+      // earlier mock matched on (site_id, revision_oid) for both,
+      // which masked column-projection bugs in the SQL string.
+      if (sql.includes("WHERE site_id = ? AND ai_version_id = ?")) {
+        const [siteId, aiVersionId] = this.binds as [string, string];
+        return this.db.tables["publish_ai_versions"]!.filter(
+          (row) => row["site_id"] === siteId && row["ai_version_id"] === aiVersionId,
+        );
+      }
       const [siteId, revisionOid] = this.binds as [string, string];
       return this.db.tables["publish_ai_versions"]!
         .filter((row) => row["site_id"] === siteId && row["revision_oid"] === revisionOid)

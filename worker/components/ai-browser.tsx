@@ -126,7 +126,12 @@ export function AiBrowser({ slug, refName }: Props) {
       setBundleDetail(null);
       return;
     }
+    // Codex pass-5 P2: clear stale detail + error before fetching
+    // a different bundle so the panel doesn't flash old data while
+    // the new request is in flight.
     let cancelled = false;
+    setBundleDetail(null);
+    setError(null);
     setLoadingBundleDetail(true);
     fetchAiVersionDetail(slug, openBundleId)
       .then((d) => {
@@ -204,6 +209,17 @@ export function AiBrowser({ slug, refName }: Props) {
                     <button
                       type="button"
                       onClick={() => setOpenBundleId(isOpen ? null : entry.aiVersionId)}
+                      // Codex pass-5 P3: ARIA + Esc-to-close. The
+                      // button toggles the bundle-detail panel that
+                      // appears above the object list.
+                      aria-expanded={isOpen}
+                      aria-controls="ai-bundle-detail-panel"
+                      onKeyDown={(event) => {
+                        if (event.key === "Escape" && isOpen) {
+                          event.preventDefault();
+                          setOpenBundleId(null);
+                        }
+                      }}
                       className={cn(
                         "block w-full rounded-sm px-1 py-0.5 text-left hover:bg-[var(--surface-2)]",
                         isOpen ? "bg-[var(--surface-3)]" : "",
@@ -358,7 +374,12 @@ function BundleDetail({
   readonly onClose: () => void;
 }) {
   return (
-    <div className="libra-card libra-card-pad space-y-3">
+    <div
+      id="ai-bundle-detail-panel"
+      role="region"
+      aria-label="AI bundle detail"
+      className="libra-card libra-card-pad space-y-3"
+    >
       <header className="flex items-baseline justify-between gap-3">
         <div>
           <p className="lb-eyebrow">AI bundle</p>

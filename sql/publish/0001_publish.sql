@@ -182,6 +182,7 @@ CREATE TABLE IF NOT EXISTS publish_files (
         (display_mode = 'text'
             AND content_sha256 IS NOT NULL
             AND length(content_sha256) = 64
+            AND content_sha256 NOT GLOB '*[^0-9a-f]*'
             AND r2_key IS NOT NULL
             AND length(r2_key) > 0)
         OR (display_mode IN ('binary', 'too_large', 'ignored')
@@ -206,7 +207,11 @@ CREATE TABLE IF NOT EXISTS publish_ai_objects (
     redaction_mode TEXT NOT NULL CHECK (redaction_mode IN ('default', 'strict')),
     -- sha256 hex is exactly 64 chars; pin shape so a truncated hash
     -- never enters the index (Codex pass-4 P2).
-    payload_sha256 TEXT NOT NULL CHECK (length(payload_sha256) = 64),
+    -- Codex pass-5 P2: pin lowercase hex shape on every digest column.
+    payload_sha256 TEXT NOT NULL CHECK (
+        length(payload_sha256) = 64
+        AND payload_sha256 NOT GLOB '*[^0-9a-f]*'
+    ),
     schema_version INTEGER NOT NULL,
     created_at TEXT NOT NULL,
     PRIMARY KEY (site_id, revision_oid, object_type, object_id),
@@ -233,7 +238,13 @@ CREATE TABLE IF NOT EXISTS publish_ai_versions (
     -- recorded alongside the index. The column is exactly 64
     -- hex chars (lowercase) so a truncated digest never enters
     -- the index.
-    bundle_sha256 TEXT NOT NULL CHECK (length(bundle_sha256) = 64),
+    -- Codex pass-5 P2: pin lowercase hex shape so an upper-case or
+    -- non-hex digest never enters the index. SQLite's GLOB is the
+    -- portable way to express a character-class restriction.
+    bundle_sha256 TEXT NOT NULL CHECK (
+        length(bundle_sha256) = 64
+        AND bundle_sha256 NOT GLOB '*[^0-9a-f]*'
+    ),
     object_count INTEGER NOT NULL DEFAULT 0 CHECK (object_count >= 0),
     redaction_mode TEXT NOT NULL CHECK (redaction_mode IN ('default', 'strict')),
     redaction_rules_version TEXT NOT NULL,
