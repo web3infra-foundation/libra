@@ -58,6 +58,7 @@ export async function GET(
       {
         cache: { mode: "revision-long" },
         etag: `W/"obj-${objectRow.payload_sha256}"`,
+        visibility: site.visibility,
       },
     );
   } catch (error) {

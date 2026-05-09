@@ -37,14 +37,13 @@
     }
   ],
 
-  "vars": {
-    // CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD are required for
-    // private visibility sites. The Worker fails closed (403) when
-    // either is missing or when the JWT cannot be validated. Set
-    // these via `wrangler secret put` for production deployments
-    // rather than committing them here.
-    "PUBLISH_REQUIRE_ACCESS_FOR_PRIVATE": "true"
-  },
+  // CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD are required for
+  // private visibility sites. The Worker fails closed (403) when
+  // either is missing or when the JWT cannot be validated. Set
+  // these via `wrangler secret put` for production deployments
+  // rather than committing them here. There is no "skip Access"
+  // var: private sites always require a valid Access JWT.
+  "vars": {},
 
   "observability": {
     "enabled": true,

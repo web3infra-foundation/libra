@@ -34,7 +34,7 @@ export async function GET(
         defaultRef: defaultRef ? refToWire(defaultRef) : null,
         latestRevision: latestRevision ? revisionToWire(latestRevision) : null,
       },
-      { cache: { mode: "no-store" } },
+      { cache: { mode: "no-store" }, visibility: site.visibility },
     );
   } catch (error) {
     return respondError(error);

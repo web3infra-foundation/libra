@@ -184,25 +184,30 @@ pub const EMBED_DENY_SEGMENTS: &[&str] = &[
 ];
 
 /// Returns true when `relative_path` contains any path segment that
-/// the embed must not ship. Exposed to keep the segment-comparison
-/// logic in lockstep between the test and any future runtime check.
+/// the embed must not ship.
+///
+/// Codex pass-1 P1 (closed): an earlier draft allow-listed any
+/// `.env*.example` file alongside `.dev.vars.example`. The publish
+/// scaffold only ships ONE example file: `.dev.vars.example`. Any
+/// `.env*` file (including `.env.example`) MUST be rejected so a
+/// stray template variant in the source tree never lands in a
+/// downstream user's repo. The `embed_path_allows_dev_vars_example`
+/// regression test pins the asymmetry.
 pub fn embed_path_is_allowed(relative_path: &str) -> bool {
     for segment in relative_path.split('/') {
         for deny in EMBED_DENY_SEGMENTS {
             if segment == *deny {
                 return false;
             }
-            // Block any `.env*` variant that isn't an explicit example
-            // file. `.env.example` and `.dev.vars.example` are
-            // template scaffolds we ship intentionally; everything
-            // else under those name prefixes is treated as secret.
-            if (deny == &".env" || deny == &".dev.vars")
-                && segment.starts_with(deny)
-                && segment != *deny
-                && !segment.ends_with(".example")
-            {
-                return false;
-            }
+        }
+        // Reject every `.env*` segment outright. `.dev.vars.example`
+        // is the single scaffold we ship; everything else under the
+        // `.env` and `.dev.vars` prefixes is treated as secret.
+        if segment.starts_with(".env") {
+            return false;
+        }
+        if segment.starts_with(".dev.vars") && segment != ".dev.vars.example" {
+            return false;
         }
     }
     true

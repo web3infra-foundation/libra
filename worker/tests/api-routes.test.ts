@@ -31,7 +31,6 @@ beforeEach(async () => {
   setTestEnv({
     LIBRA_PUBLISH_DB: d1 as unknown,
     LIBRA_PUBLISH_BUCKET: r2 as unknown,
-    PUBLISH_REQUIRE_ACCESS_FOR_PRIVATE: "true",
   });
   await seedHappyPath(d1, r2);
 });
@@ -226,8 +225,7 @@ describe("private visibility", () => {
     setTestEnv({
       LIBRA_PUBLISH_DB: d1 as unknown,
       LIBRA_PUBLISH_BUCKET: r2 as unknown,
-      PUBLISH_REQUIRE_ACCESS_FOR_PRIVATE: "true",
-      CF_ACCESS_TEAM_DOMAIN: "team.cloudflareaccess.com",
+        CF_ACCESS_TEAM_DOMAIN: "team.cloudflareaccess.com",
       CF_ACCESS_AUD: "aud-tag",
     });
     const response = await siteGet(makeRequest("/api/sites/libra-demo"), {
@@ -242,8 +240,7 @@ describe("private visibility", () => {
     setTestEnv({
       LIBRA_PUBLISH_DB: d1 as unknown,
       LIBRA_PUBLISH_BUCKET: r2 as unknown,
-      PUBLISH_REQUIRE_ACCESS_FOR_PRIVATE: "true",
-    });
+      });
     const response = await siteGet(makeRequest("/api/sites/libra-demo"), {
       params: Promise.resolve({ slug: "libra-demo" }),
     });

@@ -38,6 +38,7 @@ export async function GET(
       {
         cache: { mode: "revision-long" },
         etag: `W/"tree-${revision.revision_oid}-${entries.length}"`,
+        visibility: site.visibility,
       },
     );
   } catch (error) {

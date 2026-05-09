@@ -33,6 +33,15 @@ const jwksCache = new Map<string, CachedJwks>();
  * is not configured: an operator who deploys a private site without
  * Access settings should see denied requests, not silently public
  * content.
+ *
+ * Codex pass-1 P1: there is intentionally NO bypass env var. An earlier
+ * draft accepted `PUBLISH_REQUIRE_ACCESS_FOR_PRIVATE=false` to disable
+ * the JWT check for local development; Codex correctly flagged that as
+ * a footgun where a misconfigured production deploy could ship private
+ * publish data without Access. Private sites now ALWAYS require a
+ * valid JWT (or fail closed). For local development against a private
+ * site, run Wrangler with a real team-domain + AUD and a Cloudflare
+ * Access service token; do not loosen this gate.
  */
 export async function enforceVisibility(
   bindings: Bindings,
@@ -40,7 +49,6 @@ export async function enforceVisibility(
   site: SiteRow,
 ): Promise<void> {
   if (site.visibility !== "private") return;
-  if (!bindings.requireAccessForPrivate) return;
 
   const teamDomain = bindings.accessTeamDomain;
   const aud = bindings.accessAud;
@@ -81,7 +89,31 @@ function readAccessJwtFromRequest(request: Request): string | null {
   return null;
 }
 
-async function verifyAccessJwt(token: string, expectedIssuer: string, expectedAud: string): Promise<void> {
+async function verifyAccessJwt(
+  token: string,
+  expectedIssuer: string,
+  expectedAud: string,
+): Promise<void> {
+  // Codex pass-1 P1: every malformed-input error path must surface as
+  // 403 ACCESS_DENIED. An earlier draft let `base64UrlToBytes()` /
+  // `JSON.parse()` / `crypto.subtle.{importKey,verify}` throw their
+  // native `TypeError` / `DOMException`, which would have produced a
+  // 500 INTERNAL response and revealed JWT shape information through
+  // error messages. Wrap the whole verification path so any throw
+  // inside is rewritten as a generic deny.
+  try {
+    await verifyAccessJwtInner(token, expectedIssuer, expectedAud);
+  } catch (error) {
+    if (error instanceof PublishApiError) throw error;
+    throw deny("malformed Access JWT");
+  }
+}
+
+async function verifyAccessJwtInner(
+  token: string,
+  expectedIssuer: string,
+  expectedAud: string,
+): Promise<void> {
   const parts = token.split(".");
   if (parts.length !== 3) {
     throw deny("malformed Access JWT");

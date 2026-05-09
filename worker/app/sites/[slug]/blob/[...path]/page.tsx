@@ -27,7 +27,16 @@ export default async function BlobPage({ params, searchParams }: Props) {
   const refs = await loadRefsForSite(ctx);
 
   const path = pathSegments.join("/");
-  if (path === "" || path.includes("..") || path.startsWith("/") || path.includes("//") || path.length > 4096) {
+  // Codex pass-1 P2: include `\0` in the page-side validator so it
+  // matches the API guard.
+  if (
+    path === "" ||
+    path.includes("..") ||
+    path.startsWith("/") ||
+    path.includes("//") ||
+    path.includes("\0") ||
+    path.length > 4096
+  ) {
     notFound();
   }
 

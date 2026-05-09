@@ -1,6 +1,6 @@
 import Link from "next/link";
 import type { FileEntryWire } from "@/lib/wire-types";
-import { formatBytes } from "@/lib/utils";
+import { encodePathForUrl, formatBytes } from "@/lib/utils";
 
 type TreeListingProps = {
   readonly slug: string;
@@ -11,6 +11,7 @@ type TreeListingProps = {
 
 export function TreeListing({ slug, basePath, refQuery, entries }: TreeListingProps) {
   const refSuffix = refQuery ? `?ref=${encodeURIComponent(refQuery)}` : "";
+  const slugSegment = encodeURIComponent(slug);
 
   if (entries.length === 0) {
     return (
@@ -25,14 +26,14 @@ export function TreeListing({ slug, basePath, refQuery, entries }: TreeListingPr
       <ul>
         {entries.map((entry) => {
           const childName = basePath === "" ? entry.path : entry.path.slice(basePath.length + 1);
-          const fullPath = entry.path;
+          // Codex pass-1 P2: encode each path segment to keep `?`,
+          // `#`, `%`, spaces and other URL-active characters from
+          // breaking the route.
+          const encodedPath = encodePathForUrl(entry.path);
           const isDirectory = entry.entryKind === "directory";
-          const isText = !isDirectory && entry.displayMode === "text";
           const href = isDirectory
-            ? `/sites/${slug}/tree/${fullPath}${refSuffix}`
-            : isText
-              ? `/sites/${slug}/blob/${fullPath}${refSuffix}`
-              : `/sites/${slug}/blob/${fullPath}${refSuffix}`;
+            ? `/sites/${slugSegment}/tree/${encodedPath}${refSuffix}`
+            : `/sites/${slugSegment}/blob/${encodedPath}${refSuffix}`;
           return (
             <li
               key={entry.path}

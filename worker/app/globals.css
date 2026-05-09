@@ -59,6 +59,21 @@
   --sidebar-w-tablet: 64px;
   --topbar-h: 56px;
   --content-max: 1240px;
+
+  /*
+   * Codex pass-1 P2: components originally written against ad-hoc
+   * `--surface*` / `--line` / `--ink-muted` tokens still consume
+   * those names. Map them onto the canonical paper-navy tokens so
+   * the legacy class set renders correctly while we migrate
+   * components to the `lb-*` / `var(--paper*)` names used by the
+   * design package.
+   */
+  --surface: var(--paper);
+  --surface-2: var(--paper-deep);
+  --surface-3: var(--paper-edge);
+  --line: var(--paper-line);
+  --ink-muted: var(--ink-soft);
+  --ink-faint: var(--ink-faint);
 }
 
 @layer base {

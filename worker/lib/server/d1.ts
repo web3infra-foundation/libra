@@ -431,6 +431,18 @@ export async function listDirEntries(
       });
     }
   }
+
+  // Codex pass-1 P2: distinguish "directory exists but is empty"
+  // (impossible in our schema — every revision has at least the
+  // top-level commit tree) from "no such directory in this
+  // revision". For non-root requests, refuse to silently return an
+  // empty listing so clients get a typed FILE_NOT_FOUND instead of
+  // a misleading 200/[]. Root listings always succeed (an empty
+  // repo legitimately has no entries).
+  if (dir !== "" && seen.size === 0) {
+    throw notFound("FILE_NOT_FOUND", `path is not part of this revision: ${dir}`);
+  }
+
   // Stable lexicographic order so cache headers / ETags are
   // deterministic across requests.
   return [...seen.values()].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));

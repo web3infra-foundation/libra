@@ -15,6 +15,8 @@ export type CacheMode =
   | { readonly mode: "short" } // small s-maxage for list/status with ETag
   | { readonly mode: "revision-long" }; // cacheable per (revision, asset)
 
+export type CacheVisibility = "public" | "private";
+
 const HEADERS_BASE = {
   "Content-Type": "application/json; charset=utf-8",
   "X-Content-Type-Options": "nosniff",
@@ -24,7 +26,26 @@ const HEADERS_BASE = {
   "Referrer-Policy": "no-referrer",
 } as const;
 
-function cacheHeaders(cache: CacheMode, etag?: string): Record<string, string> {
+/**
+ * Build the Cache-Control header for a successful response.
+ *
+ * Codex pass-1 P1: caches MUST never store responses for `private`
+ * sites. An earlier draft emitted `Cache-Control: public, max-age=...`
+ * for every cacheable response, which would have let a Cloudflare
+ * edge cache (or any intermediary) reuse one authenticated read for
+ * an unauthenticated follow-up. The visibility-aware policy below
+ * forces `private, no-store` whenever the resource came from a
+ * `private` site, even when the underlying handler is otherwise
+ * cacheable.
+ */
+function cacheHeaders(
+  cache: CacheMode,
+  visibility: CacheVisibility,
+  etag?: string,
+): Record<string, string> {
+  if (visibility === "private") {
+    return { "Cache-Control": "private, no-store" };
+  }
   switch (cache.mode) {
     case "no-store":
       return { "Cache-Control": "no-store" };
@@ -45,14 +66,28 @@ function cacheHeaders(cache: CacheMode, etag?: string): Record<string, string> {
 
 export function respondOk<T>(
   data: T,
-  options?: { readonly cache?: CacheMode; readonly etag?: string },
+  options?: {
+    readonly cache?: CacheMode;
+    readonly etag?: string;
+    /**
+     * Site visibility for the response. Defaults to `"private"` —
+     * callers without a SiteRow context (e.g. health endpoints, the
+     * landing page) should leave this unset so the response is never
+     * cached by intermediaries.
+     */
+    readonly visibility?: CacheVisibility;
+  },
 ): Response {
   const body: Envelope<T> = { ok: true, data };
   return new Response(JSON.stringify(body), {
     status: 200,
     headers: {
       ...HEADERS_BASE,
-      ...cacheHeaders(options?.cache ?? { mode: "no-store" }, options?.etag),
+      ...cacheHeaders(
+        options?.cache ?? { mode: "no-store" },
+        options?.visibility ?? "private",
+        options?.etag,
+      ),
     },
   });
 }

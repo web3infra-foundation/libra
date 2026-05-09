@@ -43,6 +43,7 @@ export async function GET(
       {
         cache: { mode: "revision-long" },
         etag: `W/"bundle-${versionRow.ai_version_id}-${versionRow.revision_oid}"`,
+        visibility: site.visibility,
       },
     );
   } catch (error) {

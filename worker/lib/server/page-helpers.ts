@@ -1,5 +1,5 @@
 import "server-only";
-import { notFound } from "next/navigation";
+import { forbidden, notFound } from "next/navigation";
 import { getBindings } from "./cloudflare";
 import {
   findDefaultRef,
@@ -45,24 +45,57 @@ async function getCloneDomain(): Promise<string | null> {
 }
 
 /**
- * Server-side site lookup for Next page components. Throws Next 404
- * for unknown / disabled / Access-denied resources so the framework
- * renders the global not-found page.
+ * Server-side site lookup for Next page components.
+ *
+ * Codex pass-1 P1: page handlers MUST surface 403 / 410 distinctly
+ * from 404 so the user gets the same error envelope the API does.
+ * An earlier draft caught every `PublishApiError` and called
+ * `notFound()`, which collapsed `ACCESS_REQUIRED`, `ACCESS_DENIED`,
+ * and `SITE_DISABLED` into a generic 404 — losing both the audit
+ * signal for monitoring and the distinct UX for "you need to sign
+ * in via Cloudflare Access" vs "this slug doesn't exist". The
+ * handler now lets `PublishApiError`s propagate; the route segment
+ * exports a `generateMetadata` / error boundary upstream that
+ * rethrows them with the typed status. The same applies to the
+ * `repoId` redirect path which must enforce the Access gate before
+ * leaking the slug to the redirect target.
  */
+async function gateOrSurface(bindings: ReturnType<typeof getBindings>, site: SiteRow): Promise<void> {
+  // Codex pass-1 P1: pages must distinguish 403 / 410 from 404. We
+  // delegate to the typed helpers — `forbidden()` triggers Next's
+  // 403 boundary, and `SITE_DISABLED` is rethrown so the route's
+  // error boundary can render a 410-flavoured page rather than the
+  // generic 404 the previous draft produced.
+  if (site.status === "disabled") {
+    throw new PublishApiError(
+      "SITE_DISABLED",
+      410,
+      "site has been unpublished and is no longer available",
+    );
+  }
+  const fauxRequest = new Request("https://internal.libra/page", {
+    headers: await headersToObject(),
+  });
+  try {
+    await enforceVisibility(bindings, fauxRequest, site);
+  } catch (error) {
+    if (
+      error instanceof PublishApiError &&
+      (error.code === "ACCESS_REQUIRED" || error.code === "ACCESS_DENIED")
+    ) {
+      // Surface as Next's 403 instead of collapsing into 404.
+      forbidden();
+    }
+    throw error;
+  }
+}
+
 export async function loadSiteContextForSlug(slug: string): Promise<PageContext> {
   const bindings = getBindings();
   const cloneDomain = await getCloneDomain();
   const site = await findSiteBySlug(bindings.db, cloneDomain, slug);
-  if (!site || site.status === "disabled") notFound();
-  try {
-    const fauxRequest = new Request("https://internal.libra/page", {
-      headers: await headersToObject(),
-    });
-    await enforceVisibility(bindings, fauxRequest, site);
-  } catch (error) {
-    if (error instanceof PublishApiError) notFound();
-    throw error;
-  }
+  if (!site) notFound();
+  await gateOrSurface(bindings, site);
   return { site, siteWire: siteToWire(site), bindings, cloneDomain };
 }
 
@@ -71,7 +104,12 @@ export async function loadSiteContextForRepoId(repoId: string): Promise<PageCont
   const cloneDomain = await getCloneDomain();
   if (!cloneDomain) notFound();
   const site = await findSiteByRepoId(bindings.db, cloneDomain, repoId);
-  if (!site || site.status === "disabled") notFound();
+  if (!site) notFound();
+  // Codex pass-1 P1: enforce Access BEFORE we surface the slug to a
+  // redirect. Without this gate, anyone hitting
+  // `/sites/repo/<repo_id>` of a private site would learn the slug
+  // even when they could not access the slug page.
+  await gateOrSurface(bindings, site);
   return { site, siteWire: siteToWire(site), bindings, cloneDomain };
 }
 

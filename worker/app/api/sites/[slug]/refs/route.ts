@@ -38,7 +38,11 @@ export async function GET(
         refsGeneration: site.refs_generation,
         refs,
       },
-      { cache: { mode: "short" }, etag: `W/"refs-${site.refs_generation}-${refs.length}"` },
+      {
+        cache: { mode: "short" },
+        etag: `W/"refs-${site.refs_generation}-${refs.length}"`,
+        visibility: site.visibility,
+      },
     );
   } catch (error) {
     return respondError(error);

@@ -24,3 +24,16 @@ export function shortRevision(oid: string | null | undefined): string {
   if (!oid) return "—";
   return oid.length <= 12 ? oid : oid.slice(0, 12);
 }
+
+/**
+ * Encode a repository-relative path for use in a URL path component.
+ *
+ * Codex pass-1 P2: D1 paths can contain characters that are valid in
+ * a tree but URL-active when interpolated (`?`, `#`, `%`, spaces, …).
+ * Encoding each segment individually while preserving the `/`
+ * separator avoids both ambiguity and double-encoding of slashes.
+ */
+export function encodePathForUrl(path: string): string {
+  if (path === "") return "";
+  return path.split("/").map((segment) => encodeURIComponent(segment)).join("/");
+}

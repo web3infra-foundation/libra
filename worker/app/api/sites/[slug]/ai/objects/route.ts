@@ -63,7 +63,7 @@ export async function GET(
           ? encodeCursor(JSON.parse(result.nextCursor) as Record<string, string>)
           : null,
       },
-      { cache: { mode: "revision-long" } },
+      { cache: { mode: "revision-long" }, visibility: site.visibility },
     );
   } catch (error) {
     return respondError(error);

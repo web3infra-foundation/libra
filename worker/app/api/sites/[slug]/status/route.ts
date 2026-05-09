@@ -26,7 +26,7 @@ export async function GET(
         site: siteToWire(site),
         latestSyncRun: latest ? syncRunToWire(latest) : null,
       },
-      { cache: { mode: "no-store" } },
+      { cache: { mode: "no-store" }, visibility: site.visibility },
     );
   } catch (error) {
     return respondError(error);

@@ -29,7 +29,14 @@ export default async function TreePage({ params, searchParams }: Props) {
 
   const path = (pathSegments ?? []).join("/");
   // Defence-in-depth: validation matches the API path validator.
-  if (path.includes("..") || path.startsWith("/") || path.includes("//") || path.length > 4096) {
+  // Codex pass-1 P2: `\0` was missing from the page-side validator.
+  if (
+    path.includes("..") ||
+    path.startsWith("/") ||
+    path.includes("//") ||
+    path.includes("\0") ||
+    path.length > 4096
+  ) {
     notFound();
   }
 

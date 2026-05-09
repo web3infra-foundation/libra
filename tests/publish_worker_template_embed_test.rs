@@ -39,14 +39,20 @@ fn embed_contains_every_manifest_entry() {
 #[test]
 fn embed_does_not_carry_generated_or_secret_paths() {
     // Sanity-check the pure helper first so a regression in segment
-    // matching shows up before we crawl the embed.
+    // matching shows up before we crawl the embed. The publish
+    // scaffold ships exactly one example env file
+    // (`.dev.vars.example`); every other `.env*` and `.dev.vars*`
+    // pattern must be denied per Codex pass-1 P1.
     assert!(embed_path_is_allowed(".dev.vars.example"));
-    assert!(embed_path_is_allowed(".env.example"));
     assert!(embed_path_is_allowed("app/page.tsx"));
-    assert!(!embed_path_is_allowed(".dev.vars"));
+    assert!(!embed_path_is_allowed(".env.example"));
     assert!(!embed_path_is_allowed(".env"));
     assert!(!embed_path_is_allowed(".env.local"));
+    assert!(!embed_path_is_allowed(".env.production"));
+    assert!(!embed_path_is_allowed(".dev.vars"));
+    assert!(!embed_path_is_allowed(".dev.vars.local"));
     assert!(!embed_path_is_allowed("app/.dev.vars"));
+    assert!(!embed_path_is_allowed("app/.env"));
     assert!(!embed_path_is_allowed("node_modules/foo/package.json"));
 
     for path in WorkerTemplate::iter() {

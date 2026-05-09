@@ -20,6 +20,4 @@ interface CloudflareEnv {
   CF_ACCESS_TEAM_DOMAIN?: string;
   /** Cloudflare Access AUD tag for the application protecting this Worker. */
   CF_ACCESS_AUD?: string;
-  /** When "false", private sites do not require Access. Defaults to "true". */
-  PUBLISH_REQUIRE_ACCESS_FOR_PRIVATE?: string;
 }

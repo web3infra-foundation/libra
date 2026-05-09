@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { getBindings } from "@/lib/server/cloudflare";
 import { resolveSiteForSlug, gateRequest } from "@/lib/server/site";
-import { resolveRevision } from "@/lib/server/d1";
+import { listAiVersions, resolveRevision } from "@/lib/server/d1";
 import { readPublishedJson } from "@/lib/server/r2";
 import { respondError, respondOk } from "@/lib/server/response";
 import { revisionToWire } from "@/lib/server/wire";
@@ -15,11 +15,6 @@ import {
 
 export const runtime = "edge";
 export const dynamic = "force-dynamic";
-
-type GraphIndex = {
-  schemaVersion?: number;
-  bundles?: ReadonlyArray<{ aiVersionId: string; bundleKey: string }>;
-};
 
 type GraphBundle = {
   schemaVersion?: number;
@@ -62,20 +57,23 @@ export async function GET(
     if (revisionRaw) parseRevisionOid(revisionRaw);
     const revision = await resolveRevision(bindings.db, site, refRaw, revisionRaw);
 
-    // Use the revision's index file to find the latest bundle. The
-    // index is the same JSON the snapshot builder writes to
-    // `ai/index.json`, and the Worker reads it via D1's stored
-    // pointer (`publish_revisions.ai_index_key`). We never accept a
-    // user-provided R2 key.
-    if (!revision.ai_index_key) {
-      throw notFound("BUNDLE_NOT_FOUND", "this revision has no AI graph index");
-    }
-    const index = await readPublishedJson<GraphIndex>(bindings.bucket, revision.ai_index_key);
-    const bundleEntry = index.bundles?.[0];
-    if (!bundleEntry) {
+    // Codex pass-1 P1: every R2 read MUST source its key from a D1
+    // row. An earlier draft read `bundleKey` out of the AI index JSON
+    // (which itself lives in R2) and used it as a second R2 key —
+    // that lets a poisoned index payload exfiltrate any bucket
+    // object. The fix: ask D1 for the bundle row directly, and only
+    // use `publish_ai_versions.bundle_key` as the R2 lookup.
+    const versions = await listAiVersions(
+      bindings.db,
+      site.site_id,
+      revision.revision_oid,
+      1,
+    );
+    const versionRow = versions.rows[0];
+    if (!versionRow) {
       throw notFound("BUNDLE_NOT_FOUND", "no AI bundle for this revision");
     }
-    const bundle = await readPublishedJson<GraphBundle>(bindings.bucket, bundleEntry.bundleKey);
+    const bundle = await readPublishedJson<GraphBundle>(bindings.bucket, versionRow.bundle_key);
 
     const nodes = bundle.nodes ?? [];
     const edges = bundle.edges ?? [];
@@ -134,7 +132,7 @@ export async function GET(
         edges: filteredEdges,
         generatedAt: bundle.generatedAt ?? null,
       },
-      { cache: { mode: "revision-long" } },
+      { cache: { mode: "revision-long" }, visibility: site.visibility },
     );
   } catch (error) {
     return respondError(error);

@@ -44,7 +44,11 @@ export async function GET(
           file: fileToWire(fileRow),
           content: null,
         },
-        { cache: { mode: "revision-long" }, etag: `W/"meta-${fileRow.path}-${fileRow.display_mode}"` },
+        {
+          cache: { mode: "revision-long" },
+          etag: `W/"meta-${fileRow.path}-${fileRow.display_mode}"`,
+          visibility: site.visibility,
+        },
       );
     }
 
@@ -69,6 +73,7 @@ export async function GET(
       {
         cache: { mode: "revision-long" },
         etag: content.etag ?? `W/"${fileRow.content_sha256}"`,
+        visibility: site.visibility,
       },
     );
   } catch (error) {
