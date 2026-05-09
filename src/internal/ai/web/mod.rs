@@ -1357,10 +1357,12 @@ mod tests {
         // regress this test; covering all three groups guards both.
         let raw = "c\t\nA\u{0007}\u{0000}\u{001b}B\u{007f}C\u{0085}D\u{009f}end";
         let sanitized = sanitized_audit_client_id(&redactor, raw);
-        // Original NL/CR are trimmed (it lives at the start) — but
-        // the embedded ones are replaced. Build the expected string
-        // by walking the input and substituting controls so the
-        // assertion stays in lock-step with the implementation.
+        // The fixture has no leading/trailing whitespace, so
+        // `trim()` inside the helper is a no-op; every embedded
+        // control is replaced with `_`. Build the expected
+        // string by walking the input through the same `is_control()
+        // → '_'` substitution the implementation uses, so this
+        // assertion stays in lock-step with any future change.
         let expected: String = "c\t\nA\u{0007}\u{0000}\u{001b}B\u{007f}C\u{0085}D\u{009f}end"
             .trim()
             .chars()
