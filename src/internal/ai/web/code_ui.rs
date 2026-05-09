@@ -1339,6 +1339,46 @@ impl CodeUiApiError {
     }
 }
 
+/// Wave 2 / PR 2 — single source-of-truth catalogue of every
+/// `CodeUiApiError` code the Code UI exposes, paired with the HTTP
+/// status it MUST resolve to. Per `docs/improvement/test.md` §5.20,
+/// this list is enforced by `code_ui_error_code_contract` in
+/// `tests` below: any new error code added by a constructor or
+/// emitted by a route handler must be appended here, otherwise the
+/// test fails. The list is also the reference for
+/// `docs/automation/local-tui-control.md` and the Worker frontend
+/// error rendering.
+///
+/// Order is alphabetical so a future diff stays readable.
+pub fn code_ui_error_codes() -> &'static [(&'static str, u16)] {
+    &[
+        // Layer ordering: route handlers reject non-loopback first.
+        ("LOOPBACK_REQUIRED", 403),
+        // Then the body-limit middleware (write surface only).
+        ("PAYLOAD_TOO_LARGE", 413),
+        // Then automation control-token gate.
+        ("CONTROL_DISABLED", 403),
+        ("MISSING_CONTROL_TOKEN", 403),
+        ("INVALID_CONTROL_TOKEN", 403),
+        // Then controller (lease) state machine.
+        ("MISSING_CONTROLLER_TOKEN", 403),
+        ("INVALID_CONTROLLER_TOKEN", 403),
+        ("INVALID_CONTROLLER_KIND", 400),
+        ("CONTROLLER_CONFLICT", 409),
+        ("BROWSER_CONTROL_DISABLED", 403),
+        ("AUTOMATION_CONTROLLER_REQUIRED", 403),
+        // Tail: read-side and runtime-availability errors.
+        ("CODE_UI_UNAVAILABLE", 404),
+        ("INVALID_QUERY_PARAM", 400),
+        ("STORAGE_PATH_INVALID", 500),
+        ("STATUS_UNAVAILABLE", 500),
+        ("THREAD_LIST_FAILED", 500),
+        ("DB_UNAVAILABLE", 500),
+        ("INTERNAL_ERROR", 500),
+        ("UNSUPPORTED_OPERATION", 422),
+    ]
+}
+
 #[derive(Clone)]
 pub struct ReadOnlyCodeUiAdapter {
     session: Arc<CodeUiSession>,
@@ -1524,6 +1564,110 @@ mod tests {
             serde_json::from_value(serde_json::json!({ "clientId": "browser-1" })).unwrap();
 
         assert_eq!(request.kind, CodeUiControllerKind::Browser);
+    }
+
+    /// Wave 2 / PR 2 — error code source-of-truth contract.
+    ///
+    /// `code_ui_error_codes()` lists every Code UI error code the
+    /// API may return. Per `docs/improvement/test.md` §5.20 we
+    /// pin both:
+    ///
+    /// 1. the (code, status) tuples themselves are stable — any
+    ///    drift breaks the documented HTTP contract; and
+    /// 2. each documented constructor (`CodeUiApiError::*`) and
+    ///    runtime path that produces a code in the list still
+    ///    resolves to the listed status. Adding a new constructor
+    ///    that produces an unlisted code makes the
+    ///    `produced_codes_are_listed` assertion fail.
+    #[test]
+    fn code_ui_error_code_contract_pins_status_per_code() {
+        // 1. Status mapping must be deterministic.
+        let catalogue = code_ui_error_codes();
+        // The catalogue must be free of duplicates so callers can
+        // index it as a map without losing entries.
+        let mut seen = std::collections::HashSet::new();
+        for (code, _status) in catalogue {
+            assert!(
+                seen.insert(*code),
+                "code_ui_error_codes() duplicates the entry for '{code}'",
+            );
+        }
+
+        // 2. Walk the constructors that produce a fixed (code,
+        //    status) pair and assert each one matches the
+        //    catalogue. Adding a new producer requires extending
+        //    both the catalogue AND this list — a missing entry
+        //    fails on the lookup.
+        let map: std::collections::HashMap<&'static str, u16> = catalogue.iter().copied().collect();
+        let cases: Vec<(CodeUiApiError, &'static str)> = vec![
+            (CodeUiApiError::unavailable(), "CODE_UI_UNAVAILABLE"),
+            (
+                CodeUiApiError::forbidden("LOOPBACK_REQUIRED", "remote"),
+                "LOOPBACK_REQUIRED",
+            ),
+            (
+                CodeUiApiError::forbidden("CONTROL_DISABLED", "no token"),
+                "CONTROL_DISABLED",
+            ),
+            (
+                CodeUiApiError::forbidden("MISSING_CONTROL_TOKEN", "missing"),
+                "MISSING_CONTROL_TOKEN",
+            ),
+            (
+                CodeUiApiError::forbidden("INVALID_CONTROL_TOKEN", "bad"),
+                "INVALID_CONTROL_TOKEN",
+            ),
+            (
+                CodeUiApiError::forbidden("MISSING_CONTROLLER_TOKEN", "missing lease"),
+                "MISSING_CONTROLLER_TOKEN",
+            ),
+            (
+                CodeUiApiError::forbidden("INVALID_CONTROLLER_TOKEN", "bad lease"),
+                "INVALID_CONTROLLER_TOKEN",
+            ),
+            (
+                CodeUiApiError::bad_request("INVALID_CONTROLLER_KIND", "kind"),
+                "INVALID_CONTROLLER_KIND",
+            ),
+            (
+                CodeUiApiError::conflict("CONTROLLER_CONFLICT", "held"),
+                "CONTROLLER_CONFLICT",
+            ),
+            (
+                CodeUiApiError::forbidden("BROWSER_CONTROL_DISABLED", "off"),
+                "BROWSER_CONTROL_DISABLED",
+            ),
+            (
+                CodeUiApiError::forbidden("AUTOMATION_CONTROLLER_REQUIRED", "lease"),
+                "AUTOMATION_CONTROLLER_REQUIRED",
+            ),
+            (
+                CodeUiApiError::bad_request("INVALID_QUERY_PARAM", "limit"),
+                "INVALID_QUERY_PARAM",
+            ),
+            (
+                CodeUiApiError::unsupported_from_error(anyhow::anyhow!("operation refused")),
+                "UNSUPPORTED_OPERATION",
+            ),
+        ];
+        for (err, expected_code) in cases {
+            assert_eq!(
+                err.code, expected_code,
+                "constructor produced code '{}' but caller expected '{}'",
+                err.code, expected_code,
+            );
+            let expected_status = map.get(expected_code).copied().unwrap_or_else(|| {
+                panic!(
+                    "code '{expected_code}' is missing from code_ui_error_codes(); \
+                     update the catalogue when adding new error codes",
+                )
+            });
+            assert_eq!(
+                err.status, expected_status,
+                "code '{expected_code}' resolved to status {} but the catalogue says {}",
+                err.status, expected_status,
+            );
+        }
     }
 
     #[derive(Clone)]

@@ -160,6 +160,14 @@ fn code_router() -> Router<WebAppState> {
 }
 
 fn code_write_router() -> Router<WebAppState> {
+    // Layer order on `Router::layer`: each subsequent `.layer()`
+    // wraps the previous (tower service-builder semantics), so
+    // the LAST `.layer()` is the OUTERMOST and runs first on
+    // each request. Loopback gate goes LAST so it runs BEFORE
+    // body-limit middleware per docs/improvement/test.md §5.3
+    // ("loopback 校验**先于** body/token 校验，错误码顺序固定").
+    // A remote caller posting an oversized body must see
+    // LOOPBACK_REQUIRED, not PAYLOAD_TOO_LARGE.
     Router::new()
         .route("/messages", post(code_message_handler))
         .route("/interactions/{id}", post(code_interaction_handler))
@@ -167,6 +175,7 @@ fn code_write_router() -> Router<WebAppState> {
         .route("/goal/start", post(code_goal_start_handler))
         .route("/goal/cancel", post(code_goal_cancel_handler))
         .layer(middleware::from_fn(enforce_code_write_body_limit))
+        .layer(middleware::from_fn(enforce_code_route_loopback))
 }
 
 async fn static_handler(uri: axum::http::Uri) -> impl IntoResponse {
@@ -718,6 +727,41 @@ async fn code_goal_cancel_handler(
     })))
 }
 
+/// Per-request loopback gate. Mirrors the per-handler
+/// `ensure_loopback_api_request` check but runs as a middleware so
+/// it fires BEFORE any body-reading middleware on the write path.
+/// Without this layer a non-loopback caller sending an oversized
+/// body would learn `PAYLOAD_TOO_LARGE` first, leaking that the
+/// runtime is up. Wave 2 / PR 2 wires this in to make the
+/// documented error-code ordering (loopback ↦ body ↦ token)
+/// observable.
+async fn enforce_code_route_loopback(request: Request, next: Next) -> Response {
+    // Production injects `ConnectInfo<SocketAddr>` via
+    // `into_make_service_with_connect_info`; tests inject the
+    // mock variant `axum::extract::connect_info::MockConnectInfo<SocketAddr>`.
+    // The `ConnectInfo` extractor itself falls back to the mock,
+    // so we mirror that lookup here. If neither is present (a
+    // raw oneshot without ConnectInfo wiring) the middleware
+    // declines to enforce — the per-handler check still applies
+    // for production code paths.
+    let remote = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|info| info.0)
+        .or_else(|| {
+            request
+                .extensions()
+                .get::<axum::extract::connect_info::MockConnectInfo<SocketAddr>>()
+                .map(|info| info.0)
+        });
+    if let Some(addr) = remote
+        && let Err(error) = ensure_loopback_api_request(addr)
+    {
+        return error.into_response();
+    }
+    next.run(request).await
+}
+
 async fn enforce_code_write_body_limit(request: Request, next: Next) -> Response {
     let (parts, body) = request.into_parts();
     match to_bytes(body, CODE_CONTROL_BODY_REJECT_DRAIN_BYTES).await {
@@ -1023,6 +1067,95 @@ mod tests {
         let expected: Arc<str> = Arc::from("secret");
 
         assert!(ensure_automation_control_token(&headers, Some(&expected)).is_ok());
+    }
+
+    /// Wave 2 / PR 2 — route-level loopback gate ordering for read
+    /// routes. `docs/improvement/test.md` §5.3 / §6.3 inline test:
+    /// `GET /api/code/session` from a non-loopback `ConnectInfo`
+    /// MUST short-circuit with `403 LOOPBACK_REQUIRED` BEFORE the
+    /// runtime is touched. This guards the documented loopback ↦
+    /// body ↦ token error-code ordering — a regression that hands
+    /// remote callers the runtime-unavailable error first would
+    /// leak whether the session is up.
+    #[tokio::test]
+    async fn code_session_route_rejects_non_loopback_with_loopback_required() {
+        use axum::extract::connect_info::MockConnectInfo;
+        let app = code_router()
+            .with_state(WebAppState {
+                working_dir: Arc::new(PathBuf::from("/tmp/libra")),
+                code_ui: None,
+                automation_control_token: None,
+                audit_sink: Arc::new(TracingAuditSink),
+                control_trace_id: Uuid::new_v4(),
+            })
+            .layer(MockConnectInfo(SocketAddr::from((
+                Ipv4Addr::new(192, 0, 2, 10),
+                34567,
+            ))));
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/session")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "non-loopback GET /session must be 403, got {}",
+            response.status()
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], "LOOPBACK_REQUIRED");
+    }
+
+    /// Wave 2 / PR 2 — same gate for the write surface. `POST
+    /// /api/code/messages` from a non-loopback caller MUST return
+    /// `LOOPBACK_REQUIRED` BEFORE the body-size middleware, the
+    /// content-type check, or any controller-token check fires.
+    /// Without this ordering a remote caller could probe whether
+    /// the runtime is up by counting which error code they get.
+    #[tokio::test]
+    async fn code_messages_route_rejects_non_loopback_before_body_or_token_check() {
+        use axum::extract::connect_info::MockConnectInfo;
+        let app = code_write_router()
+            .with_state(WebAppState {
+                working_dir: Arc::new(PathBuf::from("/tmp/libra")),
+                code_ui: None,
+                automation_control_token: None,
+                audit_sink: Arc::new(TracingAuditSink),
+                control_trace_id: Uuid::new_v4(),
+            })
+            .layer(MockConnectInfo(SocketAddr::from((
+                Ipv4Addr::new(192, 0, 2, 10),
+                34567,
+            ))));
+        // Deliberately send a body that would otherwise fail body
+        // limit / controller-token checks; if loopback is enforced
+        // FIRST the error must still be LOOPBACK_REQUIRED, not
+        // PAYLOAD_TOO_LARGE / MISSING_CONTROLLER_TOKEN.
+        let oversized = "x".repeat(CODE_CONTROL_BODY_LIMIT_BYTES + 1);
+        let body = format!(r#"{{"text":"{oversized}"}}"#);
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/messages")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CONTENT_LENGTH, body.len().to_string())
+            .body(Body::from(body))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "non-loopback POST /messages must be 403, got {}",
+            response.status()
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            value["error"]["code"], "LOOPBACK_REQUIRED",
+            "loopback gate MUST fire before body/token checks; got: {value}",
+        );
     }
 
     #[tokio::test]
