@@ -529,12 +529,12 @@ set -euo pipefail
 #      Set by CEX-S2-12 to its own completion commit; updated by any later
 #      CEX that modifies smoke behavior or .libra schema.
 : "${CEX00_BASELINE_COMMIT:=48ea0ae}"
-# CP4_BASELINE_COMMIT default: CEX-S2-12 must hard-code its own completion commit
-# here when the script ships, so the gate works out-of-the-box. CI can override
-# via env to point at a later commit if a Step 1.x CEX updates the smoke schema.
-: "${CP4_BASELINE_COMMIT:=__FILL_IN_AT_CEX_S2_12_COMPLETION__}"
-test "$CP4_BASELINE_COMMIT" != "__FILL_IN_AT_CEX_S2_12_COMPLETION__" || \
-  { echo "CP4_BASELINE_COMMIT not initialized — CEX-S2-12 must replace placeholder with its completion commit hash"; exit 2; }
+# CP4_BASELINE_COMMIT is intentionally required until CEX-S2-12 has a real
+# completion commit. Do not ship this script with a placeholder default; the
+# CI job or the script itself must provide an actual commit hash.
+: "${CP4_BASELINE_COMMIT:?set CP4_BASELINE_COMMIT to the CEX-S2-12 completion commit hash}"
+git rev-parse --verify "$CP4_BASELINE_COMMIT^{commit}" >/dev/null || \
+  { echo "CP4_BASELINE_COMMIT is not a valid commit: $CP4_BASELINE_COMMIT"; exit 2; }
 
 # Fixtures live ONLY in the candidate worktree (HEAD).  Capture absolute
 # paths from the working tree NOW so we can copy them into all three worktrees
@@ -671,7 +671,7 @@ diff -u "$WORK/cp4/test.libra.normalized"          "$WORK/candidate/test.libra.n
 echo "CP-S2-3 flag-off equivalence: PASS"
 ```
 
-任一 `diff` 非空、任一 `cargo build` 失败、normalizer 不存在、fixture 不存在、`CP4_BASELINE_COMMIT` 未设置都视为 CP-S2-3 失败。CEX-S2-12 必须把 `scripts/normalize_session.sh`、`tests/data/flag_off_smoke.json` 与上面的比较脚本一并入库（参见 CEX-S2-12 Write set），不能依赖手写脚本，并必须在 CEX-S2-12 完成时把 `CP4_BASELINE_COMMIT` 默认值固化到脚本（指向 CEX-S2-12 那次 commit）。**字节级等价的强制点是步骤 5 的 6 个 `diff -u`**：`cargo_all.status` / `cargo_all.failed`（candidate vs CP-4 baseline，pass/fail-only）+ `baseline7.stdout.normalized` / `code4.stdout.normalized`（candidate vs `CEX00_BASELINE_COMMIT`，CEX-00 源代码字节级等价）+ `smoke.libra.normalized` / `test.libra.normalized`（candidate vs `CP4_BASELINE_COMMIT`，CEX-12 JSONL + CEX-12.5 sea-orm migrations（含 CEX-16 当其落地时）字节级等价）。任何主路径 / `.libra` 副作用都会被 normalizer 抹掉非确定性字段后呈现在 diff 中。
+任一 `diff` 非空、任一 `cargo build` 失败、normalizer 不存在、fixture 不存在、`CP4_BASELINE_COMMIT` 未设置或不是有效 commit 都视为 CP-S2-3 失败。CEX-S2-12 必须把 `scripts/normalize_session.sh`、`tests/data/flag_off_smoke.json` 与上面的比较脚本一并入库（参见 CEX-S2-12 Write set），不能依赖手写脚本；在 CEX-S2-12 完成时，CI 配置或脚本配置必须提供真实的 `CP4_BASELINE_COMMIT`，不得提交 placeholder 默认值。**字节级等价的强制点是步骤 5 的 6 个 `diff -u`**：`cargo_all.status` / `cargo_all.failed`（candidate vs CP-4 baseline，pass/fail-only）+ `baseline7.stdout.normalized` / `code4.stdout.normalized`（candidate vs `CEX00_BASELINE_COMMIT`，CEX-00 源代码字节级等价）+ `smoke.libra.normalized` / `test.libra.normalized`（candidate vs `CP4_BASELINE_COMMIT`，CEX-12 JSONL + CEX-12.5 sea-orm migrations（含 CEX-16 当其落地时）字节级等价）。任何主路径 / `.libra` 副作用都会被 normalizer 抹掉非确定性字段后呈现在 diff 中。
 
 ### Step 2 Codex review 协议（每张 CEX-S2-* 必走）
 

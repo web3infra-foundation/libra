@@ -27,6 +27,16 @@ export async function GET(
     if (revisionRaw) parseRevisionOid(revisionRaw); // shape validation only.
 
     const revision = await resolveRevision(bindings.db, site, refRaw, revisionRaw);
+    // Codex pass-12 P2 (deferred): publish.md `Worker API` table
+    // does NOT call out tree as a paginated list; the immediate-
+    // children synthesis logic in `listDirEntries` derives
+    // directory entries from path prefixes and would need a
+    // hierarchical cursor scheme to paginate cleanly. The current
+    // listing is bounded by `publish_files.path` cardinality of one
+    // revision (itself capped by the publish ignore policy and
+    // `max_preview_bytes`). Add pagination here once the file count
+    // per revision exceeds D1's `MAX_BIND_PARAMETERS` / response
+    // size limits in practice.
     const entries = await listDirEntries(bindings.db, site.site_id, revision.revision_oid, path);
 
     // Codex pass-11 P2: cache the response immutably only when the

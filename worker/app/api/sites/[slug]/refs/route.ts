@@ -39,30 +39,34 @@ export async function GET(
     const limit = parseLimit(url.searchParams.get("limit"), REFS_MAX_LIMIT);
     const limitOrDefault = url.searchParams.has("limit") ? limit : REFS_DEFAULT_LIMIT;
     const cursor = parseCursor(url.searchParams.get("cursor"));
+    // Codex pass-12 P3: refs cursor is `(ref_type, short_name)`. The
+    // two fields MUST appear together — a partial cursor (only one
+    // field set) is malformed and would silently disable pagination.
+    if (cursor && (!!cursor.objectType !== !!cursor.objectId)) {
+      throw badRequest("refs cursor must carry both objectType and objectId");
+    }
+    if (cursor?.objectType && cursor.objectType !== "branch" && cursor.objectType !== "tag") {
+      throw badRequest("refs cursor objectType must be branch|tag");
+    }
     const afterRefType = cursor?.objectType as "branch" | "tag" | undefined;
     const afterShortName = cursor?.objectId;
-    if (afterRefType && afterRefType !== "branch" && afterRefType !== "tag") {
-      throw badRequest("cursor ref_type must be branch|tag");
-    }
 
-    const rows = await listRefs(bindings.db, site.site_id, type ? { type } : undefined);
-    // listRefs returns the full set; trim with the cursor + limit
-    // server-side. The set is bounded by the repo's ref count which
-    // is itself bounded — D1 cardinality stays manageable.
-    const filtered = afterRefType && afterShortName
-      ? rows.filter((row) =>
-          row.ref_type > afterRefType ||
-          (row.ref_type === afterRefType && row.short_name > afterShortName),
-        )
-      : rows;
-    const trimmed = filtered.slice(0, limitOrDefault);
-    const nextCursor =
-      filtered.length > limitOrDefault
-        ? encodeCursor({
-            objectType: trimmed[trimmed.length - 1]!.ref_type,
-            objectId: trimmed[trimmed.length - 1]!.short_name,
-          })
-        : null;
+    // Codex pass-12 P2: keyset pagination is now in the SQL query
+    // (`listRefs` accepts `limit` + `afterRefType` + `afterShortName`)
+    // so D1 never has to materialise the full set before trimming.
+    const result = await listRefs(bindings.db, site.site_id, {
+      type,
+      limit: limitOrDefault,
+      afterRefType,
+      afterShortName,
+    });
+    const trimmed = result.rows;
+    const nextCursor = result.nextCursor
+      ? encodeCursor({
+          objectType: result.nextCursor.refType,
+          objectId: result.nextCursor.shortName,
+        })
+      : null;
     const refs = trimmed.map(refToWire);
     return respondOk(
       {

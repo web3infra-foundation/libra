@@ -73,11 +73,47 @@ class FakePreparedStatement {
         return row["clone_domain"] === cloneDomain && row["slug"] === slug;
       });
     }
-    if (sql.startsWith("SELECT site_id, ref_name, ref_type, short_name") && sql.includes("WHERE site_id = ? AND ref_type = ?")) {
-      const [siteId, refType] = this.binds as [string, string];
-      return this.db.tables["publish_refs"]!
-        .filter((row) => row["site_id"] === siteId && row["ref_type"] === refType)
+    if (
+      sql.startsWith("SELECT site_id, ref_name, ref_type, short_name") &&
+      sql.includes("WHERE site_id = ?") &&
+      sql.includes("ORDER BY ref_type, short_name") &&
+      !sql.includes("ref_name = ?") &&
+      !sql.includes("short_name = ?") &&
+      !sql.includes("is_default = 1")
+    ) {
+      // Codex pass-12 P2: the new `listRefs` SQL composes WHERE
+      // clauses dynamically (`type`, keyset cursor) and may carry
+      // `LIMIT ?`. Walk the binds in declaration order: siteId,
+      // optional refType, optional cursor (afterRefType,
+      // afterRefType, afterShortName), optional limit.
+      const binds = [...this.binds] as (string | number)[];
+      const siteId = binds.shift() as string;
+      let refType: string | undefined;
+      let afterRefType: string | undefined;
+      let afterShortName: string | undefined;
+      let limit: number | undefined;
+      if (sql.includes("AND ref_type = ?")) {
+        refType = binds.shift() as string;
+      }
+      if (sql.includes("AND (ref_type > ? OR (ref_type = ? AND short_name > ?))")) {
+        afterRefType = binds.shift() as string;
+        binds.shift(); // afterRefType repeated in the SQL
+        afterShortName = binds.shift() as string;
+      }
+      if (sql.endsWith("LIMIT ?")) {
+        limit = binds.shift() as number;
+      }
+      const filtered = this.db.tables["publish_refs"]!
+        .filter((row) => row["site_id"] === siteId)
+        .filter((row) => (refType !== undefined ? row["ref_type"] === refType : true))
+        .filter((row) => {
+          if (afterRefType === undefined || afterShortName === undefined) return true;
+          const rt = row["ref_type"] as string;
+          const sn = row["short_name"] as string;
+          return rt > afterRefType || (rt === afterRefType && sn > afterShortName);
+        })
         .sort((a, b) => sortBy(a, b, ["ref_type", "short_name"]));
+      return limit !== undefined ? filtered.slice(0, limit) : filtered;
     }
     if (sql.startsWith("SELECT site_id, ref_name, ref_type, short_name") && sql.includes("WHERE site_id = ? AND ref_name = ?")) {
       const [siteId, refName] = this.binds as [string, string];
@@ -97,12 +133,9 @@ class FakePreparedStatement {
         (row) => row["site_id"] === siteId && row["is_default"] === 1,
       );
     }
-    if (sql.startsWith("SELECT site_id, ref_name, ref_type, short_name") && sql.includes("WHERE site_id = ? ORDER BY ref_type")) {
-      const [siteId] = this.binds as [string];
-      return this.db.tables["publish_refs"]!
-        .filter((row) => row["site_id"] === siteId)
-        .sort((a, b) => sortBy(a, b, ["ref_type", "short_name"]));
-    }
+    // Codex pass-12 P2: legacy unparameterised listRefs branch
+    // removed; the new dynamic `listRefs` SQL is matched by the
+    // earlier branch that handles every WHERE shape uniformly.
     if (sql.startsWith("SELECT site_id, revision_oid, status,") && sql.includes("status = 'published'")) {
       const [siteId, revisionOid] = this.binds as [string, string];
       return this.db.tables["publish_revisions"]!.filter(

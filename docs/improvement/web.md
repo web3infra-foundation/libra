@@ -202,11 +202,11 @@ LIBRA_ENABLE_TEST_PROVIDER=1 cargo test --features test-provider \
 | 长 diff/tool output 卡死 UI | 浏览器主线程阻塞或布局错位 | collapse/virtualize/truncate；组件测试覆盖长数据 |
 | Docs/API drift | 用户按过期文档调用失败 | serde golden + docs consistency grep + command reference 字段表 |
 
-## Open Questions
+## 决策与后续触发条件
 
-- Remote notice 页面是纯 hand-written static HTML，还是作为 Next route 构建后复制到 `web/out/remote-notice/`？倾向 hand-written：零 JS、体积和泄露面更可控。
-- Headless v1 是否先只支持 Ollama 的 mutating tools，还是先做 provider factory 后再打开 mutation？倾向先 provider factory 和 runtime context，再逐步开 capability。
-- Thread list 是否需要 `q=` 后端搜索？当前默认 50 条 + client substring filter 足够作为 v1，等真实数据证明不足再扩。
+- Remote notice 页面采用 hand-written static HTML，直接放入 `web/out/remote-notice/`。原因是零 JS、体积和泄露面可控；不得用 Next route 生成含 runtime bundle 的页面。
+- Headless v1 先做 provider factory 和 runtime context 收敛，再逐步打开 mutating tools capability。不能只给 Ollama 打开 mutation 后把其它 provider 留在第二套启动路径。
+- Thread list v1 不加 `q=` 后端搜索。默认 50 条 + client substring filter 是当前边界；只有当真实数据证明该限制不够，且已有 server-side pagination/search 测试时，才新增 `q=`。
 
 ## 完成定义
 

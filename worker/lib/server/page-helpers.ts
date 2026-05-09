@@ -148,8 +148,13 @@ export async function resolveRefOrDefault(
 }
 
 export async function loadRefsForSite(ctx: PageContext): Promise<readonly RefWire[]> {
-  const rows = await listRefs(ctx.bindings.db, ctx.site.site_id);
-  return rows.map(refToWire);
+  // Codex pass-12 P2: page rendering loads every ref; the picker UI
+  // is bounded by the repo's ref count (≤ low thousands in
+  // practice). The listRefs helper now returns
+  // `{ rows, nextCursor? }`; for page consumption we want every
+  // row, so omit `limit` and ignore `nextCursor`.
+  const result = await listRefs(ctx.bindings.db, ctx.site.site_id);
+  return result.rows.map(refToWire);
 }
 
 export type LoadedTree = {

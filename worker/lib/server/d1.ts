@@ -178,37 +178,63 @@ export async function findSiteByRepoId(
  *  Refs
  * ------------------------------------------------------------------ */
 
+export type ListRefsArgs = {
+  readonly type?: "branch" | "tag";
+  readonly limit?: number;
+  readonly afterRefType?: "branch" | "tag";
+  readonly afterShortName?: string;
+};
+
+export type ListRefsResult = {
+  readonly rows: readonly RefRow[];
+  readonly nextCursor?: { readonly refType: "branch" | "tag"; readonly shortName: string };
+};
+
+/**
+ * List refs with optional `(ref_type, short_name)` keyset cursor.
+ *
+ * Codex pass-12 P2: pagination is now pushed into the SQL query so
+ * D1 never has to materialise the full refs set into the Worker
+ * before the route trims it. Without `limit`, callers (page
+ * components, the ref picker) get every row at once — which is
+ * fine because the picker UI loads them client-side anyway.
+ */
 export async function listRefs(
   db: D1Database,
   siteId: string,
-  filter?: { readonly type?: "branch" | "tag" },
-): Promise<readonly RefRow[]> {
-  if (filter?.type) {
-    const result = await db
-      .prepare(
-        `SELECT site_id, ref_name, ref_type, short_name, target_oid,
-                revision_oid, is_default, sync_run_id, schema_version,
-                updated_at
-         FROM publish_refs
-         WHERE site_id = ? AND ref_type = ?
-         ORDER BY ref_type, short_name`,
-      )
-      .bind(siteId, filter.type)
-      .all<RefRow>();
-    return result.results ?? [];
+  args: ListRefsArgs = {},
+): Promise<ListRefsResult> {
+  const limit = args.limit;
+  const fetchN = limit !== undefined ? limit + 1 : undefined;
+
+  let sql = `SELECT site_id, ref_name, ref_type, short_name, target_oid,
+                    revision_oid, is_default, sync_run_id, schema_version,
+                    updated_at
+             FROM publish_refs
+             WHERE site_id = ?`;
+  const binds: (string | number)[] = [siteId];
+  if (args.type) {
+    sql += ` AND ref_type = ?`;
+    binds.push(args.type);
   }
-  const result = await db
-    .prepare(
-      `SELECT site_id, ref_name, ref_type, short_name, target_oid,
-              revision_oid, is_default, sync_run_id, schema_version,
-              updated_at
-       FROM publish_refs
-       WHERE site_id = ?
-       ORDER BY ref_type, short_name`,
-    )
-    .bind(siteId)
-    .all<RefRow>();
-  return result.results ?? [];
+  if (args.afterRefType !== undefined && args.afterShortName !== undefined) {
+    sql += ` AND (ref_type > ? OR (ref_type = ? AND short_name > ?))`;
+    binds.push(args.afterRefType, args.afterRefType, args.afterShortName);
+  }
+  sql += ` ORDER BY ref_type, short_name`;
+  if (fetchN !== undefined) {
+    sql += ` LIMIT ?`;
+    binds.push(fetchN);
+  }
+  const result = await db.prepare(sql).bind(...binds).all<RefRow>();
+  const rows = result.results ?? [];
+  if (limit === undefined || rows.length <= limit) return { rows };
+  const trimmed = rows.slice(0, limit);
+  const last = trimmed[trimmed.length - 1]!;
+  return {
+    rows: trimmed,
+    nextCursor: { refType: last.ref_type, shortName: last.short_name },
+  };
 }
 
 export async function findRefByFullName(

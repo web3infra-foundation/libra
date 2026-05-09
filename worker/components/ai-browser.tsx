@@ -70,12 +70,23 @@ export function AiBrowser({ slug, refName }: Props) {
   const [loadingObjects, setLoadingObjects] = useState(false);
   const [loadingDetail, setLoadingDetail] = useState(false);
 
+  // Codex pass-12 P2: track the active filter key so a late-resolving
+  // `loadMoreObjects()` from a previous filter cannot append into the
+  // current view.
+  const filterKey = `${slug}::${refName}::${type ?? ""}::${layer ?? ""}`;
+
   useEffect(() => {
-    // Codex pass-11 P2: reset accumulated pages when the filter
-    // changes so we don't show stale objects from a previous filter.
+    // Codex pass-11 P2 + pass-12 P2: clear accumulated pages,
+    // selection, and detail when the filter changes — otherwise
+    // stale objects bleed into the new filter and the detail panel
+    // shows an object from a different type.
     let cancelled = false;
     setLoadingObjects(true);
     setError(null);
+    setObjects(null);
+    setVersions(null);
+    setSelected(null);
+    setDetail(null);
     Promise.all([
       fetchAiObjects(slug, { ref: refName, type: type ?? undefined, layer: layer ?? undefined, limit: 200 }),
       fetchAiVersions(slug, { ref: refName }),
@@ -98,12 +109,14 @@ export function AiBrowser({ slug, refName }: Props) {
     };
   }, [slug, refName, type, layer]);
 
-  // Codex pass-11 P2: follow `nextCursor` for both objects and
-  // versions so users see the full page set. Each click of "Load
-  // more" appends one page; we never auto-paginate to keep memory
-  // bounded for huge revisions.
+  // Codex pass-11 P2 + pass-12 P2: follow `nextCursor` for both
+  // objects and versions. Capture the filter key when the request
+  // fires; if it has changed by the time the request resolves, drop
+  // the response on the floor instead of merging it into the
+  // current view.
   const loadMoreObjects = async () => {
     if (!objects?.nextCursor || loadingObjects) return;
+    const requestKey = filterKey;
     setLoadingObjects(true);
     try {
       const next = await fetchAiObjects(slug, {
@@ -113,14 +126,20 @@ export function AiBrowser({ slug, refName }: Props) {
         cursor: objects.nextCursor,
         limit: 200,
       });
-      setObjects({
-        ...next,
-        objects: [...objects.objects, ...next.objects],
-      });
+      if (requestKey !== filterKey) return;
+      setObjects((prev) =>
+        prev
+          ? {
+              ...next,
+              objects: [...prev.objects, ...next.objects],
+            }
+          : next,
+      );
     } catch (err: unknown) {
+      if (requestKey !== filterKey) return;
       setError(err instanceof ApiError ? err.message : "failed to load more objects");
     } finally {
-      setLoadingObjects(false);
+      if (requestKey === filterKey) setLoadingObjects(false);
     }
   };
 
