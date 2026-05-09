@@ -98,7 +98,8 @@ async fn set_local_hash_kind_for_storage(storage: &Path) -> CliResult<()> {
 #[command(
     about = "Libra: An AI native version control system for monorepo and trunk-based development.",
     version = env!("CARGO_PKG_VERSION"),
-    after_help = ROOT_AFTER_HELP
+    after_help = ROOT_AFTER_HELP,
+    arg_required_else_help = true,
 )]
 struct Cli {
     /// Emit machine-readable JSON to stdout.
@@ -822,7 +823,9 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
     let args = match Cli::try_parse_from(argv.clone()) {
         Ok(args) => args,
         Err(err) => match err.kind() {
-            ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => {
+            ErrorKind::DisplayHelp
+            | ErrorKind::DisplayVersion
+            | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
                 err.print().map_err(|print_err| {
                     CliError::fatal(format!("failed to write clap output: {print_err}"))
                 })?;
@@ -953,6 +956,18 @@ mod tests {
 
     use super::*;
     use crate::utils::{output, test};
+
+    /// Scenario: running `libra` with no arguments should show usage information without
+    /// an `error:` prefix, matching the behaviour of `git` and other standard tools.
+    /// The underlying `arg_required_else_help = true` flag triggers clap's
+    /// `DisplayHelpOnMissingArgumentOrSubcommand` path, which we treat the same as
+    /// `DisplayHelp` — i.e. print and return `Ok(())`.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
+    async fn no_subcommand_shows_help_without_error_prefix() {
+        // `parse_async` must succeed (return Ok) so no `error:` label is emitted.
+        parse_async(Some(&["libra"])).await.unwrap();
+    }
 
     /// Scenario: clap's `debug_assert` walks the entire command tree and panics on any
     /// structural mistake (duplicate flags, conflicting aliases, malformed value
