@@ -485,7 +485,7 @@ async fn run_show(
             }
         }
     }
-    for (path, _) in base_files.iter() {
+    for path in base_files.keys() {
         if !seen.contains(path) {
             files.push(StashFileChange {
                 path: path.clone(),
@@ -754,7 +754,7 @@ async fn do_apply(stash: Option<String>) -> Result<StashOutput, StashError> {
     let merged_files = tree::get_tree_files_recursive(&merged_tree, &git_dir, &PathBuf::new())
         .map_err(|e| StashError::ReadObject(e.to_string()))?;
 
-    for (path, _) in head_files.iter() {
+    for path in head_files.keys() {
         if !merged_files.contains_key(path) {
             let full_path = workdir.join(path);
             if full_path.exists() {

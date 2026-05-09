@@ -262,7 +262,7 @@ pub fn build_index_v1(pack_file: &str, index_file: &str) -> Result<(), GitError>
     let mut cnt: u32 = 0;
     let mut fan_out = Vec::with_capacity(256 * 4);
     let obj_map = take_arc_mutex(obj_map, "index entry map")?;
-    for (hash, _) in obj_map.iter() {
+    for hash in obj_map.keys() {
         // sorted
         let first_byte = hash.as_ref()[0];
         while first_byte > i {

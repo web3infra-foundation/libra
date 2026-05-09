@@ -825,7 +825,7 @@ impl Backend for CompatSqliteBackend {
         // NOTE: `ESCAPE '\'` uses a single-character escape literal accepted by SQLite.
         let sql = format!(
             "SELECT vault_key FROM `{}` WHERE vault_key LIKE ? ESCAPE '\\'",
-            &self.table
+            self.table
         );
         let escaped_prefix = prefix
             .replace('\\', "\\\\")

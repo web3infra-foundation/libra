@@ -676,6 +676,7 @@ async fn restore_to_file_typed(hash: &ObjectHash, path: &PathBuf) -> Result<(), 
             } else {
                 LFSClient::get()
                     .await
+                    .map_err(|_| RestoreError::LfsDownload)?
                     .download_object(&oid, size, &path_abs, None)
                     .await
                     .map_err(|_| RestoreError::LfsDownload)?;
@@ -703,12 +704,13 @@ pub async fn restore_to_file(hash: &ObjectHash, path: &PathBuf) -> io::Result<()
             let lfs_obj_path = lfs::lfs_object_path(&oid);
             if lfs_obj_path.exists() {
                 fs::copy(&lfs_obj_path, &path_abs)?;
-            } else if let Err(e) = LFSClient::get()
-                .await
-                .download_object(&oid, size, &path_abs, None)
-                .await
-            {
-                return Err(io::Error::other(e.to_string()));
+            } else {
+                let client = LFSClient::get()
+                    .await
+                    .map_err(|e| io::Error::other(e.to_string()))?;
+                if let Err(e) = client.download_object(&oid, size, &path_abs, None).await {
+                    return Err(io::Error::other(e.to_string()));
+                }
             }
         }
         None => {
