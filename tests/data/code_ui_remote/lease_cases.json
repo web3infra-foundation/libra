@@ -270,6 +270,26 @@
           }
         }
       ]
+    },
+    {
+      "name": "lease_attach_observe_mode_rejects_automation_with_control_disabled",
+      "priority": "P0",
+      "options": {
+        "control": "observe"
+      },
+      "steps": [
+        {
+          "name": "attach automation in observe mode",
+          "op": "attach",
+          "kind": "automation",
+          "clientId": "lease-observe-mode",
+          "auth": "missing_control",
+          "expect": {
+            "status": 403,
+            "errorCode": "CONTROL_DISABLED"
+          }
+        }
+      ]
     }
   ]
 }

@@ -56,6 +56,34 @@ lease_case!(lease_attach_automation_with_wrong_control_token_is_403_invalid);
 #[cfg(feature = "test-provider")]
 lease_case!(lease_attach_invalid_kind_returns_400);
 
+// Wave 3 / PR 3 — bring the matrix to 9/9 case coverage. The
+// JSON in `tests/data/code_ui_remote/lease_cases.json` has had
+// these case bodies since Phase 0; Wave 1's lazy-case loader
+// keeps the runner from rejecting them on parse, and the
+// matrix Step variants used here (`Attach`, `Detach`, `Submit`,
+// `Sleep`, `WaitSnapshot`) are all already implemented.
+
+#[cfg(feature = "test-provider")]
+lease_case!(lease_attach_renew_with_same_client_id_extends_expiry);
+
+#[cfg(feature = "test-provider")]
+lease_case!(lease_attach_conflict_when_other_client_holds);
+
+#[cfg(feature = "test-provider")]
+lease_case!(lease_detach_releases_to_local_tui);
+
+#[cfg(feature = "test-provider")]
+lease_case!(lease_detach_with_wrong_controller_token_is_rejected);
+
+#[cfg(feature = "test-provider")]
+lease_case!(lease_expiry_releases_and_rejects_stale_token);
+
+// Wave 3 / PR 3 §5.4 — `--control observe` automation attach must
+// resolve to 403 / CONTROL_DISABLED. Brings the matrix to 10/10
+// (the original 9 plus this observe-mode case).
+#[cfg(feature = "test-provider")]
+lease_case!(lease_attach_observe_mode_rejects_automation_with_control_disabled);
+
 #[cfg(not(feature = "test-provider"))]
 #[test]
 fn lease_matrix_requires_test_provider_feature() {

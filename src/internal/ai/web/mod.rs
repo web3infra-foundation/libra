@@ -1325,4 +1325,79 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
+
+    /// Wave 3 / PR 3 §5.6 — control-audit `client_id` field
+    /// redaction. The plan calls out "client_id 80 字符上限、控制
+    /// 字符替换" — `sanitized_audit_client_id` enforces both, plus
+    /// a fallback "unknown" for empty input and a redactor pass for
+    /// secret-like substrings. This L0 test pins each rule so a
+    /// future refactor of the audit pipeline cannot quietly drop
+    /// any of them.
+    #[test]
+    fn sanitized_audit_client_id_truncates_at_80_chars() {
+        let redactor = SecretRedactor::default_runtime();
+        let long = "x".repeat(200);
+        let sanitized = sanitized_audit_client_id(&redactor, &long);
+        assert_eq!(
+            sanitized.chars().count(),
+            80,
+            "expected truncation to 80 chars, got '{sanitized}'",
+        );
+    }
+
+    #[test]
+    fn sanitized_audit_client_id_replaces_control_characters_with_underscore() {
+        let redactor = SecretRedactor::default_runtime();
+        // Mix tab, newline, NUL, ESC and bell — all should be
+        // replaced with `_` so the audit summary stays
+        // greppable / single-line.
+        let raw = "client\t\nA\u{0007}\u{0000}\u{001b}end";
+        let sanitized = sanitized_audit_client_id(&redactor, raw);
+        assert_eq!(sanitized, "client__A___end");
+    }
+
+    #[test]
+    fn sanitized_audit_client_id_falls_back_to_unknown_when_empty() {
+        let redactor = SecretRedactor::default_runtime();
+        // Whitespace-only inputs trim to empty, so the fallback
+        // must kick in rather than producing an empty string that
+        // would be unreadable in audit logs.
+        for input in ["", "   ", "\t\n  \r"] {
+            let sanitized = sanitized_audit_client_id(&redactor, input);
+            assert_eq!(sanitized, "unknown", "input '{input:?}' should fall back");
+        }
+    }
+
+    #[test]
+    fn sanitized_audit_client_id_runs_redactor_marker_pass() {
+        let redactor = SecretRedactor::default_runtime();
+        // Default runtime redactor masks values that follow one of
+        // the `marker=` / `marker:` prefixes (token=, password=,
+        // x-libra-control-token=, …). Use one of those so the
+        // redactor actually has something to mask. The original
+        // secret tail must not appear verbatim in the sanitized
+        // output.
+        let raw = "client-id:token=top-secret-payload";
+        let sanitized = sanitized_audit_client_id(&redactor, raw);
+        assert!(
+            !sanitized.contains("top-secret-payload"),
+            "redactor failed to mask the marker value: '{sanitized}'",
+        );
+    }
+
+    #[test]
+    fn sanitized_audit_client_id_counts_unicode_chars_not_bytes() {
+        let redactor = SecretRedactor::default_runtime();
+        // 81 multi-byte chars; cap is 80 chars, not 80 bytes, so
+        // the result must still be exactly 80 chars even though
+        // its byte-len is much larger. A naive `bytes().take(80)`
+        // would corrupt UTF-8 mid-codepoint.
+        let raw = "📦".repeat(120);
+        let sanitized = sanitized_audit_client_id(&redactor, &raw);
+        assert_eq!(sanitized.chars().count(), 80);
+        // Round-trip via `from_utf8` to confirm we did not chop a
+        // 4-byte codepoint mid-byte.
+        let bytes = sanitized.as_bytes().to_vec();
+        std::str::from_utf8(&bytes).expect("cap must not split a UTF-8 codepoint");
+    }
 }
