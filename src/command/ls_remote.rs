@@ -153,7 +153,7 @@ async fn run_ls_remote(args: LsRemoteArgs) -> Result<LsRemoteOutput, LsRemoteErr
 async fn resolve_remote(
     repository: &str,
 ) -> Result<(String, String, Option<String>), LsRemoteError> {
-    if is_explicit_remote_spec(repository) {
+    if is_unambiguous_direct_remote_spec(repository) {
         return Ok((repository.to_string(), repository.to_string(), None));
     }
 
@@ -169,18 +169,17 @@ async fn resolve_remote(
     Ok((repository.to_string(), repository.to_string(), None))
 }
 
-fn is_explicit_remote_spec(repository: &str) -> bool {
+fn is_unambiguous_direct_remote_spec(repository: &str) -> bool {
     if is_ssh_spec(repository) || Url::parse(repository).is_ok() {
         return true;
     }
 
     let path = Path::new(repository);
     path.is_absolute()
-        || path.exists()
         || repository.starts_with("./")
         || repository.starts_with("../")
-        || repository.contains('/')
-        || repository.contains('\\')
+        || repository.starts_with(".\\")
+        || repository.starts_with("..\\")
 }
 
 fn compile_patterns(patterns: &[String]) -> Result<Vec<CompiledPattern>, LsRemoteError> {

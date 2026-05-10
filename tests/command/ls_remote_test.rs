@@ -96,6 +96,30 @@ fn ls_remote_resolves_configured_remote_name() {
 }
 
 #[test]
+fn ls_remote_prefers_configured_remote_over_same_named_local_directory() {
+    let remote = create_committed_repo_via_cli();
+    let local = create_committed_repo_via_cli();
+    let remote_path = remote.path().to_string_lossy().to_string();
+
+    let output = run_libra_command(&["remote", "add", "origin", &remote_path], local.path());
+    assert_cli_success(&output, "remote add should succeed");
+    std::fs::create_dir(local.path().join("origin"))
+        .expect("failed to create path-shaped remote-name directory");
+
+    let output = run_libra_command(&["ls-remote", "origin"], local.path());
+    assert_cli_success(
+        &output,
+        "ls-remote origin should resolve the configured remote",
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\trefs/heads/main"),
+        "expected configured remote refs despite local origin/ directory, got: {stdout}"
+    );
+}
+
+#[test]
 fn ls_remote_heads_pattern_filters_refs() {
     let remote = create_committed_repo_via_cli();
     let outside = tempdir().expect("failed to create outside cwd");
