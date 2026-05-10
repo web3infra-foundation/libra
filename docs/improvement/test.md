@@ -797,6 +797,7 @@ cargo test --all --all-features
 2. nightly CI 跑 `code_ui_remote_model_generation_matrix` 至少连续 5 天通过率 ≥ 90%。
 3. 故意改坏任一 P0 case 的 expected，对应矩阵失败输出含 case/step/snapshot/log tail，**不含 secret**。
 4. [docs/improvement/test.md](test.md)（本文件）与 [docs/automation/local-tui-control.md](../automation/local-tui-control.md) 错误码列表与代码 `CodeUiApiError` 字符串字面量一致——由错误码契约 L0 测试（PR 2 + Wave 12 `code_ui_error_code_listing_matches_authoritative_doc`）保证。
+5. 覆盖矩阵第 7 节中 P0 行全部从 ⚠️/❌ 转为 ✅；P1 行至少 70% 转为 ✅。
 
 ## 当前 Wave 状态（2026-05-10 同步）
 
@@ -818,4 +819,3 @@ Wave 1–9 + Wave 12 部分已完成；Wave 10 / 11 / 12 部分均按 Codex pass
 | 12 | ⚠️ partial | 错误码 doc/code sync L0 测试已加；perf smoke 1 条（10 并发 `/threads`）`#[ignore]` + `LIBRA_RUN_PERF=1`；100k transcript / 5-min SSE soak 仍未交付 |
 
 落地完成判定的全部门只有在 Wave 9 happy path、Wave 10 全量、Wave 11 nightly CI、Wave 12 完整 perf smoke 都补齐之后才算 PASS。当前仓库状态对应"基础矩阵已落地 + 关键 L3 / 性能 / 渲染 deferred"。
-5. 覆盖矩阵第 7 节中 P0 行全部从 ⚠️/❌ 转为 ✅；P1 行至少 70% 转为 ✅。
