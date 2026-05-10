@@ -4415,6 +4415,28 @@ where
                     TurnInputSource::Local,
                 );
             }
+            BuiltinCommand::Run => {
+                // `/run` mirrors `/chat`'s plan-bypass but defers
+                // the allowed-tool decision to the launch-time
+                // `--context` / `--agent` selection rather than
+                // pinning a read-only set. Passing `None` lets
+                // `default_chat_allowed_tools` pick up
+                // `config.allowed_tools` (set from
+                // `registry.filter_by_intent(...)` at startup).
+                // Wave 5 generation matrix uses this so
+                // `--context dev` actually exposes `apply_patch`.
+                let request = args.trim();
+                if request.is_empty() {
+                    self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                        "Usage: /run <prompt>".to_string(),
+                    )));
+                    self.schedule_draw();
+                    return;
+                }
+                self.widget.clear_dag_panel();
+                self.sync_mux_input_context();
+                self.submit_direct_agent_message(request.to_string(), None, TurnInputSource::Local);
+            }
             BuiltinCommand::Model => {
                 let info = format!(
                     "Provider: {}\nModel: {}",

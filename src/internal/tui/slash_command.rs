@@ -19,6 +19,12 @@ pub enum BuiltinCommand {
     Clear,
     /// `/chat` — bypass the plan workflow and send a direct chat message.
     Chat,
+    /// `/run` — like `/chat` but inherits the launch-time tool
+    /// allowlist (driven by `--context` / `--agent`) instead of
+    /// pinning a read-only set. Lets `--context dev` reach
+    /// `apply_patch` / `shell` without going through the plan
+    /// workflow, which is what the Wave 5 generation matrix needs.
+    Run,
     /// `/model` — print the current model and provider in a system cell.
     Model,
     /// `/status` — show the current agent status.
@@ -69,6 +75,7 @@ impl BuiltinCommand {
             Self::Help => "help",
             Self::Clear => "clear",
             Self::Chat => "chat",
+            Self::Run => "run",
             Self::Model => "model",
             Self::Status => "status",
             Self::Usage => "usage",
@@ -97,6 +104,7 @@ impl BuiltinCommand {
             Self::Help => "Show available commands",
             Self::Clear => "Clear conversation history",
             Self::Chat => "Send a direct chat message without plan workflow",
+            Self::Run => "Run agent directly with launch-time tool allowlist",
             Self::Model => "Show current model info",
             Self::Status => "Show current status",
             Self::Usage => "Show current session usage",
@@ -126,6 +134,7 @@ impl BuiltinCommand {
             Self::Help,
             Self::Clear,
             Self::Chat,
+            Self::Run,
             Self::Model,
             Self::Status,
             Self::Usage,
@@ -313,6 +322,7 @@ mod tests {
                 BuiltinCommand::Help,
                 BuiltinCommand::Clear,
                 BuiltinCommand::Chat,
+                BuiltinCommand::Run,
                 BuiltinCommand::Model,
                 BuiltinCommand::Status,
                 BuiltinCommand::Usage,
@@ -338,9 +348,10 @@ mod tests {
     #[test]
     fn all_hints_returns_all() {
         let hints = BuiltinCommand::all_hints();
-        assert_eq!(hints.len(), 18);
+        assert_eq!(hints.len(), 19);
         assert!(hints.iter().any(|(n, _)| n == "help"));
         assert!(hints.iter().any(|(n, _)| n == "chat"));
+        assert!(hints.iter().any(|(n, _)| n == "run"));
         assert!(hints.iter().any(|(n, _)| n == "usage"));
         assert!(hints.iter().any(|(n, _)| n == "quit"));
         assert!(hints.iter().any(|(n, _)| n == "plan"));

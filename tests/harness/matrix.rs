@@ -32,6 +32,7 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
+    process::Output,
     time::{Duration, Instant},
 };
 
@@ -83,6 +84,18 @@ pub struct CaseOptions {
     pub browser_control: Option<String>,
     #[serde(default, rename = "leaseDurationMs")]
     pub lease_duration_ms: Option<u64>,
+    /// Wave 5 / PR 5 — operating context (`dev` / `review` /
+    /// `research`). When set, the harness spawns
+    /// `libra code --context <value>`; generation cases use `"dev"`
+    /// so `apply_patch` survives the intent classifier's
+    /// allow-list filter.
+    #[serde(default)]
+    pub context: Option<String>,
+    /// Wave 5 / PR 5 — `--approval-policy` override. Generation
+    /// cases use `"never"` so workspace-bounded apply_patch skips
+    /// the human approval gate.
+    #[serde(default, rename = "approvalPolicy")]
+    pub approval_policy: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -216,10 +229,61 @@ pub enum Step {
         auth: AuthMode,
         expect: SimpleExpect,
     },
+    /// Wave 5 / PR 5 — submit then poll `/session` until the
+    /// session reaches a terminal state — either `idle` or `error`.
+    /// Generation cases use this for the fault-injection branch
+    /// (invalid patch) where the runtime is allowed to surface an
+    /// error in the transcript without the test mistaking it for
+    /// hang. Assertions on the FINAL snapshot (status / transcript)
+    /// run via the `assertions` list, not via a follow-up
+    /// `WaitSnapshot` step, so the matrix file stays terse.
+    SubmitAndWaitTerminal {
+        name: String,
+        text: String,
+        token: TokenSource,
+        #[serde(default = "default_auth")]
+        auth: AuthMode,
+        expect: SimpleExpect,
+    },
+    /// Wave 5 / PR 5 — read a file from the spawned `libra code`
+    /// working directory and run `file_contains:<needle>` /
+    /// `file_contains_any:<a>|<b>` assertions over its contents.
+    /// Used by the apply_patch generation cases to verify the patch
+    /// landed and the produced source compiles when downstream
+    /// `Step::RunRepoCommand` invokes `rustc`.
+    ReadRepoFile {
+        name: String,
+        path: String,
+        expect: AssertionsExpect,
+    },
+    /// Wave 5 / PR 5 — assert a path under the working directory
+    /// does NOT exist. Used by the invalid-patch branch to prove
+    /// the runtime did not leave a half-written file behind.
+    RepoFileAbsent { name: String, path: String },
+    /// Wave 5 / PR 5 — run a shell command inside the spawned
+    /// working directory with a hard `timeout_ms` budget; stdout
+    /// and stderr are captured so the matrix can assert on them via
+    /// `stdout_or_stderr_contains:<needle>`. The expected exit code
+    /// is matched against `expect.status` (default 0).
+    RunRepoCommand {
+        name: String,
+        command: Vec<String>,
+        #[serde(default = "default_run_command_timeout_ms", rename = "timeoutMs")]
+        timeout_ms: u64,
+        expect: RunCommandExpect,
+    },
 }
 
 fn default_event_timeout_ms() -> u64 {
     5_000
+}
+
+/// 10 s default for `Step::RunRepoCommand` — matches the smoke
+/// timeout used elsewhere for tool-driven workflows. JSON cases
+/// override this when their command (e.g. `rustc --test`) needs a
+/// larger budget.
+fn default_run_command_timeout_ms() -> u64 {
+    10_000
 }
 
 fn default_auth() -> AuthMode {
@@ -277,6 +341,22 @@ pub struct SimpleExpect {
 pub struct AssertionsExpect {
     #[serde(default)]
     pub assertions: Vec<String>,
+}
+
+/// Expectation envelope for `Step::RunRepoCommand`. `status`
+/// defaults to 0 when absent so the common "must succeed" case
+/// stays terse in JSON. Set it to `null` only when the command is
+/// allowed to exit non-zero and only the captured output matters.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct RunCommandExpect {
+    #[serde(default = "default_run_command_status")]
+    pub status: Option<i32>,
+    #[serde(default)]
+    pub assertions: Vec<String>,
+}
+
+fn default_run_command_status() -> Option<i32> {
+    Some(0)
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Hash)]
@@ -355,6 +435,11 @@ fn effective_options(defaults: &CaseOptions, case: &CaseOptions) -> CaseOptions 
             .clone()
             .or_else(|| defaults.browser_control.clone()),
         lease_duration_ms: case.lease_duration_ms.or(defaults.lease_duration_ms),
+        context: case.context.clone().or_else(|| defaults.context.clone()),
+        approval_policy: case
+            .approval_policy
+            .clone()
+            .or_else(|| defaults.approval_policy.clone()),
     }
 }
 
@@ -391,6 +476,12 @@ pub fn build_session_options(file: &CaseFile, case: &Case) -> CodeSessionOptions
     if let Some(ms) = merged.lease_duration_ms {
         options = options.with_lease_duration_ms(ms);
     }
+    if let Some(context) = merged.context.as_deref() {
+        options = options.with_context(context);
+    }
+    if let Some(policy) = merged.approval_policy.as_deref() {
+        options = options.with_approval_policy(policy);
+    }
     options
 }
 
@@ -426,6 +517,10 @@ fn step_name(step: &Step) -> &str {
         Step::CollectEventsUntil { name, .. } => name,
         Step::CollectSessionUpdates { name, .. } => name,
         Step::SubmitAndWaitIdle { name, .. } => name,
+        Step::SubmitAndWaitTerminal { name, .. } => name,
+        Step::ReadRepoFile { name, .. } => name,
+        Step::RepoFileAbsent { name, .. } => name,
+        Step::RunRepoCommand { name, .. } => name,
     }
 }
 
@@ -490,6 +585,21 @@ impl CaseRuntime<'_> {
                 expect,
                 ..
             } => self.run_submit_and_wait_idle(text, token, auth, expect),
+            Step::SubmitAndWaitTerminal {
+                text,
+                token,
+                auth,
+                expect,
+                ..
+            } => self.run_submit_and_wait_terminal(text, token, auth, expect),
+            Step::ReadRepoFile { path, expect, .. } => self.run_read_repo_file(path, expect),
+            Step::RepoFileAbsent { path, .. } => self.run_repo_file_absent(path),
+            Step::RunRepoCommand {
+                command,
+                timeout_ms,
+                expect,
+                ..
+            } => self.run_run_repo_command(command, *timeout_ms, expect),
         }
     }
 
@@ -651,11 +761,17 @@ impl CaseRuntime<'_> {
         // Wave 4 fix: the initial-replay `session_updated` is
         // always emitted with the snapshot at subscription time —
         // for a fresh session that's `status=idle, transcript=[]`.
-        // Treating that initial idle as terminal would cause us to
-        // exit before any streaming chunks arrive. Skip the first
-        // idle observation and only honour idle as terminal AFTER
-        // we've seen at least one non-idle (`thinking`) event,
-        // which is the runtime's signal that the turn started.
+        // Treating that initial idle as terminal would exit before
+        // any streaming chunks arrive.
+        //
+        // Codex pass-1 P2 fix: the runtime emits `status_changed`
+        // for status flips (see code_ui.rs `set_status`), NOT
+        // `session_updated`. So the terminal "idle" signal we wait
+        // for is a `status_changed` event whose snapshot has
+        // `status == idle`, observed AFTER we've seen at least
+        // one non-idle status_changed (which marks the start of
+        // the turn). This avoids relying on timeout to terminate
+        // the collector and unblocks fast/no-op runtimes too.
         let mut collected: Vec<Value> = Vec::new();
         let mut saw_non_idle = false;
         loop {
@@ -667,24 +783,34 @@ impl CaseRuntime<'_> {
                 Some(event) => event,
                 None => break,
             };
-            if event.event != "session_updated" {
+            if event.event != "session_updated" && event.event != "status_changed" {
                 continue;
             }
             let payload = parse_event_data(&event).with_context(|| {
                 format!(
-                    "case '{}' SSE session_updated had invalid JSON payload",
-                    self.case_name
+                    "case '{}' SSE {} had invalid JSON payload",
+                    self.case_name, event.event,
                 )
             })?;
             let is_idle = payload
                 .pointer("/data/status")
                 .and_then(Value::as_str)
                 .is_some_and(|status| status == "idle");
+            // Track the turn lifecycle from BOTH event streams.
+            // status_changed: thinking flips the gate; the
+            // matching status_changed: idle (which fires after
+            // every transcript mutation has already produced its
+            // session_updated) closes the collection.
             if !is_idle {
                 saw_non_idle = true;
             }
-            collected.push(payload);
-            if is_idle && saw_non_idle {
+            // Only collect session_updated payloads — that's the
+            // shape the multi-event assertions look at. The
+            // status_changed events are observed purely for the
+            // terminal-idle signal and dropped from the buffer.
+            if event.event == "session_updated" {
+                collected.push(payload);
+            } else if is_idle && saw_non_idle {
                 break;
             }
         }
@@ -719,13 +845,180 @@ impl CaseRuntime<'_> {
         // Then poll /session until the runtime drains the turn.
         // 10 s ceiling matches the lease/submit smoke timeout used
         // elsewhere in the harness.
+        //
+        // Wave 4 race fix (Codex pass-1 follow-up): a naive
+        // "status == idle" wait can fire on the PRE-submit snapshot
+        // — POST /messages returns before the runtime begins
+        // processing, so the very next /session call may still
+        // observe the initial idle state. To pin "the assistant
+        // reply has actually landed", require BOTH:
+        //   * status == idle (turn drained), AND
+        //   * the transcript contains a completed assistant_message
+        //     with non-empty content (the streaming completion
+        //     marker the runtime sets when it flushes the final
+        //     delta).
+        //
+        // Wave 5 fix: the assistant_message is no longer guaranteed
+        // to be the LAST entry — apply_patch tool calls land
+        // afterwards in their own transcript entry — so search the
+        // full transcript instead of inspecting only the tail.
         self.session
             .wait_for_snapshot(Duration::from_secs(10), |snapshot| {
-                snapshot
+                let status_idle = snapshot
                     .pointer("/status")
                     .and_then(Value::as_str)
-                    .is_some_and(|status| status == "idle")
+                    .is_some_and(|status| status == "idle");
+                let assistant_complete = snapshot
+                    .pointer("/transcript")
+                    .and_then(Value::as_array)
+                    .map(|entries| {
+                        entries.iter().any(|entry| {
+                            let kind = entry.pointer("/kind").and_then(Value::as_str).unwrap_or("");
+                            let content = entry
+                                .pointer("/content")
+                                .and_then(Value::as_str)
+                                .unwrap_or("");
+                            let entry_status = entry
+                                .pointer("/status")
+                                .and_then(Value::as_str)
+                                .unwrap_or("");
+                            kind == "assistant_message"
+                                && !content.is_empty()
+                                && entry_status == "completed"
+                        })
+                    })
+                    .unwrap_or(false);
+                status_idle && assistant_complete
             })?;
+        Ok(())
+    }
+
+    fn run_submit_and_wait_terminal(
+        &mut self,
+        text: &str,
+        token: &TokenSource,
+        auth: &AuthMode,
+        expect: &SimpleExpect,
+    ) -> Result<()> {
+        // POST /messages first; reuse the standard submit path so
+        // status / error code semantics match `run_submit`.
+        self.run_submit(text, token, auth, expect)?;
+        // Then poll /session until either:
+        //   * status == "error" (fault branch — invalid patch
+        //     bubbled up to a session-level error), OR
+        //   * status == "idle" AND the transcript contains either
+        //     a completed assistant_message OR a failed tool_call
+        //     (the apply_patch failure path lands the failure as a
+        //     `tool_call` entry with status="failed", and the
+        //     fixture's text response lands an assistant_message
+        //     before that).
+        // Searching the whole transcript (rather than only the
+        // tail) covers Wave 5's apply_patch flow where the tool
+        // call entry follows the assistant message.
+        let final_snapshot =
+            self.session
+                .wait_for_snapshot(Duration::from_secs(15), |snapshot| {
+                    let status = snapshot
+                        .pointer("/status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    if status == "error" {
+                        return true;
+                    }
+                    if status != "idle" {
+                        return false;
+                    }
+                    snapshot
+                        .pointer("/transcript")
+                        .and_then(Value::as_array)
+                        .map(|entries| {
+                            entries.iter().any(|entry| {
+                                let kind =
+                                    entry.pointer("/kind").and_then(Value::as_str).unwrap_or("");
+                                let entry_status = entry
+                                    .pointer("/status")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("");
+                                (kind == "assistant_message" && entry_status == "completed")
+                                    || (kind == "tool_call"
+                                        && (entry_status == "completed"
+                                            || entry_status == "failed"))
+                                    || kind == "tool_result"
+                                    || kind == "system_message"
+                            })
+                        })
+                        .unwrap_or(false)
+                })?;
+        for assertion in &expect.assertions {
+            evaluate_terminal_snapshot_assertion(assertion, &final_snapshot).with_context(|| {
+                format!(
+                    "case '{}' SubmitAndWaitTerminal assertion '{assertion}' failed; snapshot:\n{final_snapshot:#}",
+                    self.case_name,
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    fn run_read_repo_file(&self, path: &str, expect: &AssertionsExpect) -> Result<()> {
+        let contents = self.session.read_repo_file(path)?.ok_or_else(|| {
+            anyhow!(
+                "case '{}' expected repo file '{path}' to exist; not found under {}",
+                self.case_name,
+                self.session.repo_dir().display(),
+            )
+        })?;
+        for assertion in &expect.assertions {
+            evaluate_file_assertion(assertion, &contents).with_context(|| {
+                format!(
+                    "case '{}' file assertion '{assertion}' failed for '{path}'",
+                    self.case_name
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    fn run_repo_file_absent(&self, path: &str) -> Result<()> {
+        if let Some(contents) = self.session.read_repo_file(path)? {
+            bail!(
+                "case '{}' expected repo file '{path}' to be absent, but it exists ({} bytes)",
+                self.case_name,
+                contents.len(),
+            );
+        }
+        Ok(())
+    }
+
+    fn run_run_repo_command(
+        &self,
+        command: &[String],
+        timeout_ms: u64,
+        expect: &RunCommandExpect,
+    ) -> Result<()> {
+        let output = self
+            .session
+            .run_repo_command(command, Duration::from_millis(timeout_ms))?;
+        if let Some(expected_status) = expect.status
+            && output.status.code() != Some(expected_status)
+        {
+            bail!(
+                "case '{}' command {:?} exited with {:?} (expected {expected_status})\nstdout:\n{}\nstderr:\n{}",
+                self.case_name,
+                command,
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
+        for assertion in &expect.assertions {
+            evaluate_command_output_assertion(assertion, &output).with_context(|| {
+                format!(
+                    "case '{}' command output assertion '{assertion}' failed for {:?}",
+                    self.case_name, command
+                )
+            })?;
+        }
         Ok(())
     }
 
@@ -1124,4 +1417,125 @@ fn ensure_error_code(body: &Value, expected: &str) -> Result<()> {
 /// Helper exposed to tests: forged controller token literal.
 pub fn forged_controller_token() -> &'static str {
     FORGED_CONTROLLER_TOKEN
+}
+
+/// Evaluate an assertion against the snapshot returned by
+/// `Step::SubmitAndWaitTerminal`. Generation cases lean on
+/// `transcript_contains:` / `transcript_contains_any:` here.
+fn evaluate_terminal_snapshot_assertion(assertion: &str, snapshot: &Value) -> Result<()> {
+    match assertion {
+        "snapshot_status_idle" => {
+            let status = snapshot
+                .pointer("/status")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if status != "idle" {
+                bail!("expected /status == 'idle', got '{status}'");
+            }
+            Ok(())
+        }
+        "snapshot_status_error" => {
+            let status = snapshot
+                .pointer("/status")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if status != "error" {
+                bail!("expected /status == 'error', got '{status}'");
+            }
+            Ok(())
+        }
+        "snapshot_status_error_or_idle" => {
+            let status = snapshot
+                .pointer("/status")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if status != "error" && status != "idle" {
+                bail!("expected /status in {{error, idle}}, got '{status}'");
+            }
+            Ok(())
+        }
+        other if other.starts_with("transcript_contains:") => {
+            let needle = other.trim_start_matches("transcript_contains:");
+            let transcript = snapshot
+                .pointer("/transcript")
+                .and_then(Value::as_array)
+                .ok_or_else(|| anyhow!("snapshot missing /transcript array"))?;
+            let haystack = serde_json::to_string(transcript).unwrap_or_default();
+            if !haystack.contains(needle) {
+                bail!("transcript did not contain '{needle}'; serialised transcript:\n{haystack}");
+            }
+            Ok(())
+        }
+        other if other.starts_with("transcript_contains_any:") => {
+            let raw = other.trim_start_matches("transcript_contains_any:");
+            let needles: Vec<&str> = raw.split('|').filter(|s| !s.is_empty()).collect();
+            if needles.is_empty() {
+                bail!("'transcript_contains_any:' assertion needs at least one needle");
+            }
+            let transcript = snapshot
+                .pointer("/transcript")
+                .and_then(Value::as_array)
+                .ok_or_else(|| anyhow!("snapshot missing /transcript array"))?;
+            let haystack = serde_json::to_string(transcript).unwrap_or_default();
+            if !needles.iter().any(|needle| haystack.contains(needle)) {
+                bail!("transcript matched none of {needles:?}; serialised transcript:\n{haystack}",);
+            }
+            Ok(())
+        }
+        other => bail!("unsupported terminal-snapshot assertion '{other}'"),
+    }
+}
+
+/// Evaluate an assertion against the contents of a file read with
+/// `Step::ReadRepoFile`. Generation cases use this to pin the exact
+/// strings the apply_patch fixture was supposed to produce.
+fn evaluate_file_assertion(assertion: &str, contents: &str) -> Result<()> {
+    if let Some(needle) = assertion.strip_prefix("file_contains:") {
+        if !contents.contains(needle) {
+            bail!("file did not contain '{needle}'; full contents:\n{contents}");
+        }
+        return Ok(());
+    }
+    if let Some(raw) = assertion.strip_prefix("file_contains_any:") {
+        let needles: Vec<&str> = raw.split('|').filter(|s| !s.is_empty()).collect();
+        if needles.is_empty() {
+            bail!("'file_contains_any:' assertion needs at least one needle");
+        }
+        if !needles.iter().any(|needle| contents.contains(needle)) {
+            bail!("file matched none of {needles:?}; full contents:\n{contents}");
+        }
+        return Ok(());
+    }
+    bail!("unsupported file assertion '{assertion}'")
+}
+
+/// Evaluate an assertion against the captured stdout / stderr of a
+/// `Step::RunRepoCommand`. The combined-stream form lets tests stay
+/// agnostic to which channel `rustc` / `cargo` use for "test result:
+/// ok"-style summaries (rustc emits to stdout; some wrappers send
+/// it to stderr).
+fn evaluate_command_output_assertion(assertion: &str, output: &Output) -> Result<()> {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if let Some(needle) = assertion.strip_prefix("stdout_contains:") {
+        if !stdout.contains(needle) {
+            bail!("stdout did not contain '{needle}'\nstdout:\n{stdout}\nstderr:\n{stderr}",);
+        }
+        return Ok(());
+    }
+    if let Some(needle) = assertion.strip_prefix("stderr_contains:") {
+        if !stderr.contains(needle) {
+            bail!("stderr did not contain '{needle}'\nstdout:\n{stdout}\nstderr:\n{stderr}",);
+        }
+        return Ok(());
+    }
+    if let Some(needle) = assertion.strip_prefix("stdout_or_stderr_contains:") {
+        if !stdout.contains(needle) && !stderr.contains(needle) {
+            bail!(
+                "neither stdout nor stderr contained '{needle}'\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            );
+        }
+        return Ok(());
+    }
+    bail!("unsupported command output assertion '{assertion}'")
 }

@@ -36,6 +36,20 @@ pub struct CodeSessionOptions {
     /// runtime issues short-TTL leases for expiry tests. Production
     /// builds ignore this env var.
     pub lease_duration_ms: Option<u64>,
+    /// Wave 5 / PR 5 — operating context (`dev` / `review` /
+    /// `research`). When `Some`, spawn `libra code --context <value>`
+    /// so the intent classifier doesn't filter `apply_patch` /
+    /// `shell` out of the allowed-tool set. Generation cases need
+    /// `dev` for apply_patch to actually fire; the lease / SSE
+    /// matrix leaves it `None` to preserve the auto-classify path
+    /// the runtime ships by default.
+    pub context: Option<String>,
+    /// Wave 5 / PR 5 — `--approval-policy` override. Generation
+    /// cases set `never` so workspace-bounded `apply_patch` calls
+    /// don't queue an approval interaction the harness can't
+    /// answer. Other matrices leave it `None` and inherit the
+    /// runtime's `on-request` default.
+    pub approval_policy: Option<String>,
 }
 
 impl CodeSessionOptions {
@@ -47,7 +61,26 @@ impl CodeSessionOptions {
             browser_control_loopback: false,
             control_write: true,
             lease_duration_ms: None,
+            context: None,
+            approval_policy: None,
         }
+    }
+
+    /// Force the spawned `libra code` into a specific context mode
+    /// (`dev` / `review` / `research`). Wave 5 generation matrix
+    /// uses `"dev"` so `apply_patch` is in the agent's allowed
+    /// tools without needing the auto-classifier to hit the model.
+    pub fn with_context(mut self, context: impl Into<String>) -> Self {
+        self.context = Some(context.into());
+        self
+    }
+
+    /// Override `--approval-policy`. Wave 5 generation matrix uses
+    /// `"never"` so workspace-bounded apply_patch calls don't queue
+    /// an interaction; other matrices leave the default in place.
+    pub fn with_approval_policy(mut self, policy: impl Into<String>) -> Self {
+        self.approval_policy = Some(policy.into());
+        self
     }
 
     pub fn with_default_control_paths(mut self) -> Self {
@@ -215,6 +248,12 @@ impl CodeSession {
         if options.browser_control_loopback {
             cmd.args(["--browser-control", "loopback"]);
         }
+        if let Some(context) = options.context.as_deref() {
+            cmd.args(["--context", context]);
+        }
+        if let Some(policy) = options.approval_policy.as_deref() {
+            cmd.args(["--approval-policy", policy]);
+        }
         cmd.cwd(&repo_dir);
         cmd.env("TERM", "xterm-256color");
         cmd.env("LIBRA_ENABLE_TEST_PROVIDER", "1");
@@ -335,6 +374,84 @@ impl CodeSession {
 
     pub fn artifact_dir(&self) -> &Path {
         &self.logs_dir
+    }
+
+    /// Absolute path to the temporary repo this session was spawned in.
+    /// Wave 5 / PR 5 — the generation matrix needs to read files
+    /// produced by `apply_patch` and run verification commands inside
+    /// that workspace.
+    pub fn repo_dir(&self) -> &Path {
+        &self.repo_dir
+    }
+
+    /// Read a file from the spawned `libra code` working directory.
+    /// `relative` is rebased onto `repo_dir`; absolute or
+    /// parent-traversing paths are rejected so a misconfigured matrix
+    /// case can't read arbitrary host files. Returns `Ok(None)` when
+    /// the file is missing — callers like `Step::RepoFileAbsent`
+    /// distinguish absence from I/O failure.
+    pub fn read_repo_file(&self, relative: &str) -> Result<Option<String>> {
+        let resolved = self.resolve_repo_path(relative)?;
+        match fs::read_to_string(&resolved) {
+            Ok(text) => Ok(Some(text)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error)
+                .with_context(|| format!("failed to read repo file '{}'", resolved.display())),
+        }
+    }
+
+    /// Run `command` inside the spawned `libra code` working
+    /// directory with a hard wall-clock timeout. Stdout / stderr are
+    /// captured so matrix assertions like
+    /// `stdout_or_stderr_contains:<needle>` can inspect them.
+    /// Returns the raw `Output` once the child exits or the timeout
+    /// kills it.
+    pub fn run_repo_command(&self, command: &[String], timeout: Duration) -> Result<Output> {
+        let (program, args) = command
+            .split_first()
+            .ok_or_else(|| anyhow!("repo command must have at least one element"))?;
+        let mut child = Command::new(program)
+            .args(args)
+            .current_dir(&self.repo_dir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("failed to spawn repo command '{program}'"))?;
+        let deadline = Instant::now() + timeout;
+        loop {
+            if child
+                .try_wait()
+                .with_context(|| format!("failed to poll repo command '{program}'"))?
+                .is_some()
+            {
+                return child
+                    .wait_with_output()
+                    .with_context(|| format!("failed to collect repo command '{program}' output"));
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!(
+                    "repo command '{program}' did not exit within {}ms",
+                    timeout.as_millis()
+                );
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    fn resolve_repo_path(&self, relative: &str) -> Result<PathBuf> {
+        let candidate = Path::new(relative);
+        if candidate.is_absolute() {
+            bail!("repo path '{relative}' must be relative, not absolute");
+        }
+        if candidate
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            bail!("repo path '{relative}' must not contain '..' components");
+        }
+        Ok(self.repo_dir.join(candidate))
     }
 
     pub fn debug_context(&self) -> String {

@@ -7,7 +7,9 @@
     },
     "options": {
       "control": "write",
-      "browserControl": "off"
+      "browserControl": "off",
+      "context": "dev",
+      "approvalPolicy": "never"
     }
   },
   "cases": [
@@ -29,7 +31,7 @@
         {
           "name": "call Code service with complete generation prompt",
           "op": "submitAndWaitIdle",
-          "text": "/chat generate-code-greeting: create a complete Rust source file named generated_greeting.rs with a public greeting function and self-contained unit tests",
+          "text": "/run generate-code-greeting: create a complete Rust source file named generated_greeting.rs with a public greeting function and self-contained unit tests",
           "token": "current",
           "auth": "valid_control",
           "expect": {
@@ -94,7 +96,7 @@
         {
           "name": "call Code service",
           "op": "submit",
-          "text": "/chat generate-code-greeting: create a complete Rust source file named generated_greeting.rs with a public greeting function and self-contained unit tests",
+          "text": "/run generate-code-greeting: create a complete Rust source file named generated_greeting.rs with a public greeting function and self-contained unit tests",
           "token": "current",
           "auth": "valid_control",
           "expect": {
@@ -146,7 +148,7 @@
         {
           "name": "call Code service with invalid generated patch",
           "op": "submitAndWaitTerminal",
-          "text": "/chat generate-code-invalid-patch",
+          "text": "/run generate-code-invalid-patch",
           "token": "current",
           "auth": "valid_control",
           "expect": {
