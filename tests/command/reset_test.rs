@@ -16,6 +16,8 @@ use libra::{
     internal::{branch::Branch as InternalBranch, config::ConfigKv},
     utils::test::setup_with_new_libra_in,
 };
+#[cfg(unix)]
+use libra::utils::error::StableErrorCode;
 
 use super::*;
 

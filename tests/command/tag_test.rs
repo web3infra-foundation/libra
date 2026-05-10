@@ -14,6 +14,8 @@ use libra::{
     },
     utils::test::{ChangeDirGuard, setup_with_new_libra_in},
 };
+#[cfg(unix)]
+use libra::utils::path;
 use sea_orm::{ActiveModelTrait, Set};
 use serial_test::serial;
 use tempfile::tempdir;
