@@ -209,19 +209,26 @@ fn perf_session_snapshot_serialises_100k_entry_transcript_under_200ms() -> Resul
     // "< 200 ms" but doesn't pin a build profile. `cargo test`
     // defaults to the debug profile where serde_json + clone
     // both pay several-x overhead vs release; the doc's number
-    // is a release-profile target. Use a more conservative
-    // 500 ms ceiling here so the smoke catches catastrophic
-    // O(n²) regressions without false-positiving on the
-    // baseline debug-build cost. Lower the ceiling once a
-    // release-profile perf job lands separately.
+    // is a release-profile target. Default to a 500 ms ceiling
+    // here so the smoke catches catastrophic O(n²) regressions
+    // without false-positiving on the baseline debug-build
+    // cost. Codex pass-1 fix: a slow CI runner may legitimately
+    // exceed 500 ms in debug, so allow `LIBRA_PERF_CEILING_MS`
+    // to override per-environment without a code change. A
+    // future release-profile perf job tightens the default
+    // back toward the spec's 200 ms.
+    let ceiling_ms: u64 = std::env::var("LIBRA_PERF_CEILING_MS")
+        .ok()
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or(500);
     let started = Instant::now();
     let snapshot = rt.block_on(session.snapshot());
     let _serialised =
         serde_json::to_value(&snapshot).context("serialise snapshot to serde_json::Value")?;
     let elapsed = started.elapsed();
-    if elapsed >= Duration::from_millis(500) {
+    if elapsed >= Duration::from_millis(ceiling_ms) {
         bail!(
-            "100k-entry transcript snapshot+serialise took {elapsed:?} (>= 500ms debug-profile ceiling); regressed read path?",
+            "100k-entry transcript snapshot+serialise took {elapsed:?} (>= {ceiling_ms}ms ceiling, override via LIBRA_PERF_CEILING_MS); regressed read path?",
         );
     }
     Ok(())
