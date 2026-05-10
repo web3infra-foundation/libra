@@ -66,9 +66,61 @@ pub struct CaseFile {
 
 #[derive(Debug, Deserialize, Default)]
 pub struct Defaults {
+    /// File-level fake-provider fixture default. Used when no
+    /// per-case `provider` block overrides it. Both `fixture` and
+    /// `provider` are optional so a matrix file can opt into
+    /// `provider.mode == "model_from_env_file"` without supplying
+    /// a fake fixture (Wave 11 model-generation case).
+    #[serde(default)]
     pub fixture: FixtureRef,
+    /// Wave 11 / PR 11 — alternative provider selector. When
+    /// present and `mode == "model_from_env_file"`, the matrix
+    /// runner reads `envFile` (path relative to the repo root,
+    /// default `.env.test`) and parses `providerEnv` + `modelEnv`
+    /// to fetch the live provider/model identifiers. The fake
+    /// fixture is then NOT used.
+    #[serde(default)]
+    pub provider: Option<ProviderSpec>,
     #[serde(default)]
     pub options: CaseOptions,
+}
+
+/// Wave 11 / PR 11 — case-level provider override.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum ProviderSpec {
+    /// Default fake provider — uses the `fixture` field on
+    /// `Case`/`Defaults`. Listed for symmetry; when omitted the
+    /// matrix falls back to fake automatically.
+    Fake,
+    /// Read `envFile` (default `.env.test`) and resolve the live
+    /// provider + model identifiers from the named env vars. The
+    /// runner spawns `libra code --env-file <path> --provider
+    /// <providerEnv value> --model <modelEnv value>`.
+    ModelFromEnvFile {
+        #[serde(default = "default_env_file_path", rename = "envFile")]
+        env_file: String,
+        #[serde(rename = "providerEnv")]
+        provider_env: String,
+        #[serde(rename = "modelEnv")]
+        model_env: String,
+        /// When `true` (default), the runner fails loudly if the
+        /// env file is missing or one of the env vars is unset.
+        /// When `false`, the runner skips the case with a clear
+        /// reason. The model_generation matrix sets `required:
+        /// true` so a missing `.env.test` is a hard failure under
+        /// `LIBRA_RUN_LIVE=1`.
+        #[serde(default = "default_provider_required")]
+        required: bool,
+    },
+}
+
+fn default_env_file_path() -> String {
+    ".env.test".to_string()
+}
+
+fn default_provider_required() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -118,6 +170,11 @@ pub struct Case {
     /// honour the override deterministically.
     #[serde(default)]
     pub fixture: Option<FixtureRef>,
+    /// Wave 11 / PR 11 — per-case provider override (parallel
+    /// to `Defaults::provider`). When `Some`, the case takes
+    /// precedence over the file-level default.
+    #[serde(default)]
+    pub provider: Option<ProviderSpec>,
     #[serde(default)]
     pub options: CaseOptions,
     pub steps: Vec<Step>,
@@ -228,12 +285,17 @@ pub enum Step {
     /// reconnect case where we need to ensure the assistant's
     /// reply is fully recorded BEFORE re-opening the stream so
     /// the new initial-replay snapshot contains it.
+    /// Wave 11 / PR 11 — `timeoutMs` lets live-model cases
+    /// extend the wait beyond the 10 s fake-provider default
+    /// (the model_generation_cases use 120 s).
     SubmitAndWaitIdle {
         name: String,
         text: String,
         token: TokenSource,
         #[serde(default = "default_auth")]
         auth: AuthMode,
+        #[serde(default, rename = "timeoutMs")]
+        timeout_ms: Option<u64>,
         expect: SimpleExpect,
     },
     /// Wave 5 / PR 5 — submit then poll `/session` until the
@@ -617,6 +679,14 @@ fn effective_options(defaults: &CaseOptions, case: &CaseOptions) -> CaseOptions 
 /// `fixture`. Codex pass-1 P3: case-level `fixture` overrides the
 /// file's default, matching the JSON schema documented in
 /// `docs/improvement/test.md`.
+///
+/// Wave 11 / PR 11 — when the case (or file defaults) carries a
+/// `provider` block in `model_from_env_file` mode AND the live
+/// env file is present + readable, the returned options point at
+/// the live provider/model
+/// (`CodeSessionOptions::with_live_provider` + `with_env_file`).
+/// Otherwise the fake-fixture path is used, matching every prior
+/// wave's behaviour.
 pub fn build_session_options(file: &CaseFile, case: &Case) -> CodeSessionOptions {
     let merged = effective_options(&file.defaults.options, &case.options);
     let fixture_path = case
@@ -627,6 +697,57 @@ pub fn build_session_options(file: &CaseFile, case: &Case) -> CodeSessionOptions
         .clone();
     let fixture = repo_root_path(&fixture_path);
     let mut options = CodeSessionOptions::new(case.name.clone(), fixture);
+    // Wave 11 — apply live-provider override if the case/defaults
+    // request one. Errors here panic with the case name so the
+    // failing case is obvious in cargo output; the runner is
+    // expected to gate on `LIBRA_RUN_LIVE=1` BEFORE calling
+    // `build_session_options`, so a panic at this point indicates
+    // a misconfigured live invocation rather than incidental
+    // fake-fixture flakiness.
+    if let Some(provider) = case.provider.as_ref().or(file.defaults.provider.as_ref()) {
+        match provider {
+            ProviderSpec::Fake => {} // current default; nothing to do.
+            ProviderSpec::ModelFromEnvFile {
+                env_file,
+                provider_env,
+                model_env,
+                required,
+            } => {
+                let env_path = repo_root_path(env_file);
+                let env_text = match std::fs::read_to_string(&env_path) {
+                    Ok(text) => text,
+                    Err(error) => {
+                        if *required {
+                            panic!(
+                                "case '{}' requires env file '{}', but reading it failed: {error}",
+                                case.name,
+                                env_path.display(),
+                            );
+                        }
+                        return options;
+                    }
+                };
+                let provider_value = lookup_env_value(&env_text, provider_env);
+                let model_value = lookup_env_value(&env_text, model_env);
+                let (provider_value, model_value) = match (provider_value, model_value) {
+                    (Some(p), Some(m)) => (p, m),
+                    _ => {
+                        if *required {
+                            panic!(
+                                "case '{}' requires env file '{}' to define both '{provider_env}' and '{model_env}'",
+                                case.name,
+                                env_path.display(),
+                            );
+                        }
+                        return options;
+                    }
+                };
+                options = options
+                    .with_live_provider(provider_value, model_value)
+                    .with_env_file(env_path);
+            }
+        }
+    }
     if let Some(control) = merged.control.as_deref() {
         match control {
             "write" => {} // default
@@ -765,9 +886,10 @@ impl CaseRuntime<'_> {
                 text,
                 token,
                 auth,
+                timeout_ms,
                 expect,
                 ..
-            } => self.run_submit_and_wait_idle(text, token, auth, expect),
+            } => self.run_submit_and_wait_idle(text, token, auth, *timeout_ms, expect),
             Step::SubmitAndWaitTerminal {
                 text,
                 token,
@@ -1062,6 +1184,7 @@ impl CaseRuntime<'_> {
         text: &str,
         token: &TokenSource,
         auth: &AuthMode,
+        timeout_ms: Option<u64>,
         expect: &SimpleExpect,
     ) -> Result<()> {
         // Codex pass-1 P2 — capture the pre-submit transcript
@@ -1096,30 +1219,28 @@ impl CaseRuntime<'_> {
         // afterwards in their own transcript entry — so iterate the
         // post-baseline tail instead of inspecting only the
         // absolute last entry.
-        let final_snapshot =
-            self.session
-                .wait_for_snapshot(Duration::from_secs(10), |snapshot| {
-                    let status_idle = snapshot
-                        .pointer("/status")
-                        .and_then(Value::as_str)
-                        .is_some_and(|status| status == "idle");
-                    let assistant_complete =
-                        new_transcript_entries(snapshot, baseline_len).any(|entry| {
-                            let kind = entry.pointer("/kind").and_then(Value::as_str).unwrap_or("");
-                            let content = entry
-                                .pointer("/content")
-                                .and_then(Value::as_str)
-                                .unwrap_or("");
-                            let entry_status = entry
-                                .pointer("/status")
-                                .and_then(Value::as_str)
-                                .unwrap_or("");
-                            kind == "assistant_message"
-                                && !content.is_empty()
-                                && entry_status == "completed"
-                        });
-                    status_idle && assistant_complete
-                })?;
+        let wait_budget = timeout_ms
+            .map(Duration::from_millis)
+            .unwrap_or(Duration::from_secs(10));
+        let final_snapshot = self.session.wait_for_snapshot(wait_budget, |snapshot| {
+            let status_idle = snapshot
+                .pointer("/status")
+                .and_then(Value::as_str)
+                .is_some_and(|status| status == "idle");
+            let assistant_complete = new_transcript_entries(snapshot, baseline_len).any(|entry| {
+                let kind = entry.pointer("/kind").and_then(Value::as_str).unwrap_or("");
+                let content = entry
+                    .pointer("/content")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let entry_status = entry
+                    .pointer("/status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                kind == "assistant_message" && !content.is_empty() && entry_status == "completed"
+            });
+            status_idle && assistant_complete
+        })?;
         for assertion in &expect.assertions {
             evaluate_post_submit_assertion(assertion, &final_snapshot, baseline_len)
                 .with_context(|| {
@@ -2076,6 +2197,33 @@ fn ensure_error_code(body: &Value, expected: &str) -> Result<()> {
 /// Helper exposed to tests: forged controller token literal.
 pub fn forged_controller_token() -> &'static str {
     FORGED_CONTROLLER_TOKEN
+}
+
+/// Wave 11 / PR 11 — minimal `.env`-style parser. Returns the
+/// value for `key` (after the first `=`) with optional
+/// surrounding double quotes stripped, or `None` if the key
+/// isn't present. Lines starting with `#` are treated as
+/// comments. Pulled inline rather than depending on `dotenvy`
+/// to avoid adding a new dev-dep.
+fn lookup_env_value(env_text: &str, key: &str) -> Option<String> {
+    for line in env_text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let (k, v) = trimmed.split_once('=')?;
+        if k.trim() != key {
+            continue;
+        }
+        let value = v.trim();
+        // Strip a single layer of `"..."` quoting.
+        let stripped = value
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix('"'))
+            .unwrap_or(value);
+        return Some(stripped.to_string());
+    }
+    None
 }
 
 /// Wave 7 — per-thread parallel attach helper. Builds a fresh

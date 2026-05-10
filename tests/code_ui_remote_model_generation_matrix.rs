@@ -1,52 +1,55 @@
 //! Wave 11 / PR 11 — `code_ui_remote_model_generation` matrix
-//! runner skeleton (§5.19, L3, nightly-only). DEFERRED — see
-//! the closure note at the bottom of this docstring.
+//! runner (§5.19, L3, nightly-only).
 //!
-//! This file is a placeholder for the live-model generation
-//! matrix described in `tests/data/code_ui_remote/model_generation_cases.json`.
-//! The JSON schema requires a NEW provider mode
-//! (`provider.mode == "model_from_env_file"`) that the matrix
-//! harness does not yet support, plus a `.env.test` file with a
-//! valid `DEEPSEEK_API_KEY` to drive the live provider. Wiring
-//! both is roadmap-sized work: see §6.4 Wave 4 in
-//! `docs/improvement/test.md` for the full design.
+//! Loads `tests/data/code_ui_remote/model_generation_cases.json`
+//! and runs the live-model-generation cases through a real
+//! `libra code` PTY session. The matrix harness now supports the
+//! `provider.mode == "model_from_env_file"` shape; this runner
+//! reads the configured env file (default `.env.test`), resolves
+//! `LIBRA_CODE_TEST_PROVIDER` + `LIBRA_CODE_TEST_MODEL`, and
+//! spawns `libra code --provider <provider> --model <model>
+//! --env-file <path>` so the live API key is loaded from disk.
 //!
-//! CLOSURE STATUS: NOT closed. The 12 PR Wave roadmap row 11 is
-//! deferred — Codex pass-1 review explicitly flagged that this
-//! file is a deferred placeholder, every case is `#[ignore]`,
-//! and even with `LIBRA_RUN_LIVE=1` the runner unconditionally
-//! bails because `model_from_env_file` is absent from
-//! `tests/harness/matrix.rs`. The roadmap stays open on row 11
-//! until the harness wiring + nightly CI execution land.
+//! Default behaviour: every case is `#[ignore]` so a normal
+//! `cargo test` skips the suite. Run on demand with:
 //!
-//! What this skeleton DOES today:
-//!   * Marks every case as `#[ignore]` so a normal `cargo test`
-//!     skips it.
-//!   * Gates execution on `LIBRA_RUN_LIVE=1` so even an
-//!     `--ignored` run won't accidentally fire against a
-//!     production model API in CI without explicit opt-in.
-//!   * Fails loud with the deferral message when live mode is
-//!     requested but the matrix harness still lacks the
-//!     `model_from_env_file` provider plumbing — that prevents
-//!     a future operator from believing they ran the suite when
-//!     the runner is still a no-op.
+//! ```bash
+//! LIBRA_RUN_LIVE=1 cargo test --features test-provider \
+//!   --test code_ui_remote_model_generation_matrix \
+//!   -- --ignored --test-threads=1
+//! ```
 //!
-//! Bring this runner up to a working state by:
-//!   1. Extending `tests/harness/matrix.rs` with a
-//!      `ProviderSpec::ModelFromEnvFile { envFile, providerEnv,
-//!      modelEnv }` variant alongside the current `FixtureRef`
-//!      (which becomes `ProviderSpec::FakeFixture`).
-//!   2. Extending `CodeSessionOptions` with `env_file` /
-//!      `provider_override` / `model_override` fields and
-//!      wiring them into the `libra code` argv.
-//!   3. Routing `build_session_options` to honour either the
-//!      fake fixture path or the env-file path, depending on
-//!      the case's provider mode.
+//! The runner short-circuits with a clear, actionable error
+//! before invoking the matrix when:
+//!   * `LIBRA_RUN_LIVE` is unset (so an accidental `--ignored`
+//!     run without explicit opt-in fails loud rather than firing
+//!     against the model API), or
+//!   * the env file is missing / lacks the required keys
+//!     (build_session_options panics with the case name).
+//!
+//! Out-of-scope for this runner (still tracked in the §5.19 doc
+//! note): the linked-cargo-cli case carries assertions like
+//! `cargo fmt --all --check` + `cargo clippy --all-targets
+//! --all-features -- -D warnings` that need a workspace-aware
+//! `runRepoCommand` fan-out the JSON case file does not yet
+//! describe; the runner accepts both cases but the second one
+//! will only validate what `runRepoCommand` already enforces
+//! today.
+
+#[cfg(feature = "test-provider")]
+mod harness;
 
 #[cfg(feature = "test-provider")]
 use anyhow::{Result, bail};
 #[cfg(feature = "test-provider")]
+use harness::CodeSession;
+#[cfg(feature = "test-provider")]
+use harness::matrix::{Case, CaseFile, build_session_options, find_case, load_case_file};
+#[cfg(feature = "test-provider")]
 use serial_test::serial;
+
+#[cfg(feature = "test-provider")]
+const CASE_FILE_PATH: &str = "tests/data/code_ui_remote/model_generation_cases.json";
 
 #[cfg(feature = "test-provider")]
 fn live_mode_enabled() -> bool {
@@ -64,16 +67,22 @@ fn run_model_generation_case(case_name: &str) -> Result<()> {
             "LIBRA_RUN_LIVE=1 must be set to run live model-generation case '{case_name}'; rerun with `LIBRA_RUN_LIVE=1 cargo test --features test-provider --test code_ui_remote_model_generation_matrix -- --ignored --test-threads=1`",
         );
     }
-    bail!(
-        "model-generation case '{case_name}' requires the `model_from_env_file` provider mode in `tests/harness/matrix.rs`, which is tracked as Wave 11 follow-up scaffolding (§6.4 Wave 4 in docs/improvement/test.md). Skip the runner until the harness supports it.",
-    )
+    let file_path = harness::matrix::data_path(CASE_FILE_PATH);
+    let file: CaseFile = load_case_file(&file_path)?;
+    let case: Case = find_case(&file, case_name)?;
+    let options = build_session_options(&file, &case);
+    let mut session = CodeSession::spawn(options)?;
+    let outcome = harness::matrix::run_case(&mut session, &case);
+    let shutdown = session.shutdown();
+    outcome?;
+    shutdown
 }
 
 #[cfg(feature = "test-provider")]
 macro_rules! model_generation_case {
     ($name:ident) => {
         #[test]
-        #[ignore = "L3 live model; run with LIBRA_RUN_LIVE=1 once harness supports model_from_env_file"]
+        #[ignore = "L3 live model; run with LIBRA_RUN_LIVE=1 + .env.test (DEEPSEEK_API_KEY)"]
         #[serial]
         fn $name() -> Result<()> {
             run_model_generation_case(stringify!($name))
@@ -81,6 +90,11 @@ macro_rules! model_generation_case {
     };
 }
 
+// Wave 11 — both P0 cases from `model_generation_cases.json`. The
+// linked-cargo-cli case will pass through the harness but its
+// quality-gate assertions (`cargo fmt`, `cargo clippy`,
+// `cargo test`) are bounded by what `runRepoCommand` already
+// supports; deeper workflow validation lands in a follow-up.
 #[cfg(feature = "test-provider")]
 model_generation_case!(model_generation_code_service_creates_tested_rust_file);
 #[cfg(feature = "test-provider")]

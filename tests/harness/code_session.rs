@@ -66,6 +66,24 @@ pub struct CodeSessionOptions {
     /// `libra init`. The resume test uses this to persist state
     /// between two CodeSession lifecycles.
     pub existing_repo_dir: Option<PathBuf>,
+    /// Wave 11 / PR 11 — when `Some`, replaces `--provider fake`
+    /// (and removes the paired `--fake-fixture` arg) so the
+    /// spawned process can drive a real provider through the
+    /// model_generation matrix. Pair with `model_override` and
+    /// `env_file` for a complete live-provider invocation.
+    pub provider_override: Option<String>,
+    /// Wave 11 / PR 11 — when `Some`, replaces `--model fake-local`.
+    pub model_override: Option<String>,
+    /// Wave 11 / PR 11 — when `Some`, passes
+    /// `--env-file <path>` so the runtime loads provider
+    /// credentials (e.g. `DEEPSEEK_API_KEY`) from a `.env.test`-
+    /// style file alongside the spawn.
+    pub env_file: Option<PathBuf>,
+    /// Wave 11 / PR 11 — extra arbitrary CLI flags passed to
+    /// `libra code` after the harness's standard args. The model
+    /// matrix uses this for `--deepseek-thinking enabled
+    /// --deepseek-reasoning-effort high`.
+    pub extra_cli_args: Vec<String>,
 }
 
 impl CodeSessionOptions {
@@ -82,7 +100,38 @@ impl CodeSessionOptions {
             extra_env: Vec::new(),
             resume_thread_id: None,
             existing_repo_dir: None,
+            provider_override: None,
+            model_override: None,
+            env_file: None,
+            extra_cli_args: Vec::new(),
         }
+    }
+
+    /// Wave 11 / PR 11 — point the spawn at a live provider
+    /// (`--provider <name> --model <model>`) instead of the
+    /// fake fixture.
+    pub fn with_live_provider(
+        mut self,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
+        self.provider_override = Some(provider.into());
+        self.model_override = Some(model.into());
+        self
+    }
+
+    /// Wave 11 / PR 11 — pass `--env-file <path>` so the
+    /// spawned process loads provider credentials from disk.
+    pub fn with_env_file(mut self, path: PathBuf) -> Self {
+        self.env_file = Some(path);
+        self
+    }
+
+    /// Wave 11 / PR 11 — append an extra CLI flag (e.g.
+    /// `--deepseek-thinking enabled`).
+    pub fn push_extra_cli_arg(mut self, arg: impl Into<String>) -> Self {
+        self.extra_cli_args.push(arg.into());
+        self
     }
 
     /// Wave 9 / PR 9 — pass `--resume <thread_id>` to the spawned
@@ -281,19 +330,34 @@ impl CodeSession {
             .context("failed to take PTY writer")?;
 
         let mut cmd = CommandBuilder::new(&bin);
+        // Wave 11 / PR 11 — split the provider / model / fixture
+        // args so a live-provider spawn (model_generation matrix)
+        // can drop `--fake-fixture` entirely and supply real
+        // credentials via `--env-file`. Without an override, the
+        // default fake-provider invocation matches every prior
+        // wave's expected argv exactly.
+        let provider_arg = options.provider_override.as_deref().unwrap_or("fake");
+        let model_arg = options.model_override.as_deref().unwrap_or("fake-local");
         cmd.args([
             "code",
             "--provider",
-            "fake",
-            "--fake-fixture",
-            path_str(&options.fixture)?,
+            provider_arg,
             "--model",
-            "fake-local",
+            model_arg,
             "--port",
             "0",
             "--mcp-port",
             "0",
         ]);
+        if options.provider_override.is_none() {
+            cmd.args(["--fake-fixture", path_str(&options.fixture)?]);
+        }
+        if let Some(env_file) = options.env_file.as_ref() {
+            cmd.args(["--env-file", path_str(env_file)?]);
+        }
+        for arg in &options.extra_cli_args {
+            cmd.arg(arg);
+        }
         if options.control_write {
             cmd.args(["--control", "write"]);
         }
