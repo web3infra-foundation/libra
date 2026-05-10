@@ -742,9 +742,27 @@ pub fn build_session_options(file: &CaseFile, case: &Case) -> CodeSessionOptions
                         return options;
                     }
                 };
+                let provider_lower = provider_value.to_ascii_lowercase();
                 options = options
-                    .with_live_provider(provider_value, model_value)
+                    .with_live_provider(provider_value.clone(), model_value)
                     .with_env_file(env_path);
+                // Wave 11 Codex pass-2 fix: §5.19 specifies the
+                // DeepSeek live invocation runs with thinking
+                // mode + high reasoning effort
+                // (`docs/improvement/test.md:581`). Without
+                // those flags the nightly matrix would exercise
+                // the wrong code path. Apply them automatically
+                // when the env-resolved provider is deepseek so
+                // the JSON case file doesn't have to re-state
+                // them, and so other providers don't accidentally
+                // get DeepSeek-specific flags.
+                if provider_lower == "deepseek" {
+                    options = options
+                        .push_extra_cli_arg("--deepseek-thinking")
+                        .push_extra_cli_arg("enabled")
+                        .push_extra_cli_arg("--deepseek-reasoning-effort")
+                        .push_extra_cli_arg("high");
+                }
             }
         }
     }
