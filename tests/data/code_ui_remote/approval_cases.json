@@ -138,6 +138,84 @@
           }
         }
       ]
+    },
+    {
+      "name": "approval_apply_to_future_caches_decision_for_subsequent_calls",
+      "priority": "P0",
+      "steps": [
+        {
+          "name": "attach automation",
+          "op": "attach",
+          "kind": "automation",
+          "clientId": "approval-apply-future",
+          "auth": "valid_control",
+          "expect": {
+            "status": 200,
+            "saveToken": "current"
+          }
+        },
+        {
+          "name": "submit first shell-triggering prompt",
+          "op": "submit",
+          "text": "/run approval-shell-test: first invocation seeds the cached approval",
+          "token": "current",
+          "auth": "valid_control",
+          "expect": {
+            "status": 200
+          }
+        },
+        {
+          "name": "wait for the runtime to surface the first approval interaction",
+          "op": "waitInteractionPending",
+          "interactionId": "shell-approval-1",
+          "timeoutMs": 5000
+        },
+        {
+          "name": "approve the pending interaction with applyToFuture=accept_all",
+          "op": "respondInteraction",
+          "interactionId": "shell-approval-1",
+          "token": "current",
+          "auth": "valid_control",
+          "response": {
+            "approved": true,
+            "applyToFuture": "accept_all"
+          },
+          "expect": {
+            "status": 200
+          }
+        },
+        {
+          "name": "wait for the first turn to drain to idle",
+          "op": "waitSnapshot",
+          "expect": {
+            "assertions": [
+              "status_idle",
+              "tool_call_completed:shell-approval-1",
+              "interaction_resolved:shell-approval-1"
+            ]
+          }
+        },
+        {
+          "name": "submit second shell-triggering prompt with the same command",
+          "op": "submit",
+          "text": "/run approval-shell-followup: second invocation should reuse the cached approval",
+          "token": "current",
+          "auth": "valid_control",
+          "expect": {
+            "status": 200
+          }
+        },
+        {
+          "name": "wait for the second turn to drain to idle without re-prompting",
+          "op": "waitSnapshot",
+          "expect": {
+            "assertions": [
+              "status_idle",
+              "tool_call_completed:shell-approval-2"
+            ]
+          }
+        }
+      ]
     }
   ]
 }

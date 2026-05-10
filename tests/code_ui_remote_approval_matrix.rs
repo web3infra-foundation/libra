@@ -60,13 +60,17 @@ macro_rules! approval_case {
     };
 }
 
-// Wave 6 — P0 accept and reject paths. Concurrent pending
-// interactions and `applyToFuture` caching are tracked as P1
-// follow-ups in `docs/improvement/test.md` §5.11.
+// Wave 6 — P0 accept / reject / apply_to_future caching. Concurrent
+// pending interactions are tracked as P1 in
+// `docs/improvement/test.md` §5.11 because the fake provider only
+// emits one tool call per turn, so a true two-pending case would
+// need a parallel-tool-call extension that is out of scope here.
 #[cfg(feature = "test-provider")]
 approval_case!(approval_accept_path_runs_shell_and_completes_assistant);
 #[cfg(feature = "test-provider")]
 approval_case!(approval_reject_path_propagates_rejection_to_transcript);
+#[cfg(feature = "test-provider")]
+approval_case!(approval_apply_to_future_caches_decision_for_subsequent_calls);
 
 #[cfg(not(feature = "test-provider"))]
 #[test]

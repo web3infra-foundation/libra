@@ -256,11 +256,11 @@ CI 默认门：L0+L1 必跑；L2 在 `test-provider` 下必跑；L3 仅 nightly 
 
 - **现状 ⚠️**：`ai_approval_ttl_test.rs` 覆盖 cache 策略，但 Code UI 的端到端 approval **未覆盖**。
 - **缺口**：
-  - fake fixture 触发 `Shell` tool → 因 `--approval-policy on-request` 进入 `awaiting_interaction` → harness POST `/interactions/{id}` 接受 → tool 执行 → assistant 完成。
-  - 拒绝路径：harness POST `approved=false` → tool 返回拒绝结果 → assistant 看到拒绝。
-  - `apply_to_future` 缓存：第二次同 tool 自动通过。
-  - 多个 pending interaction 并发的 ID 路由。
-- **优先级**：P0。
+  - **P0**：fake fixture 触发 `Shell` tool → 因 `--approval-policy on-request` 进入 `awaiting_interaction` → harness POST `/interactions/{id}` 接受 → tool 执行 → assistant 完成。
+  - **P0**：拒绝路径：harness POST `approved=false` → tool 返回拒绝结果 → assistant 看到拒绝。
+  - **P0**：`apply_to_future` 缓存：第二次同 tool 自动通过（`accept_all` 触发 `approve_session` cache key，需要两轮使用相同 command + cwd 才能命中）。
+  - **P1**：多个 pending interaction 并发的 ID 路由。降级原因：fake provider 每轮只发一个 tool_call，单 turn 并发需要扩展 fixture schema 支持 parallel tool calls，与 §5.13 之外的工作量不相称；P0 三条已经覆盖 ID 寻址正确性（每轮单 pending 也是 ID 路由的最小用例）。
+- **优先级**：P0（前三条），P1（并发降级）。
 - **测试位置**：**L2 新增** `tests/code_ui_approval_flow_test.rs`，扩展 `code_session.rs` 的 `respond_interaction()` helper。
 - **AI 落地提示**：`CodeSession` 已有 `browser_respond_interaction()` 和 `respond_interaction_expect_error()`，但缺少通用的 `respond_interaction(id, approved, selected_option, apply_to_future)`。建议新增：
   ```rust

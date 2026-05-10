@@ -13,6 +13,17 @@
     },
     {
       "match": {
+        "contains": "approval-shell-followup"
+      },
+      "type": "tool_call",
+      "id": "shell-approval-2",
+      "name": "shell",
+      "arguments": {
+        "command": "rm -f libra-approval-test-nonexistent-file.txt"
+      }
+    },
+    {
+      "match": {
         "equals": ""
       },
       "type": "text",
