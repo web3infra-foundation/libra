@@ -100,6 +100,128 @@ model_generation_case!(model_generation_code_service_creates_tested_rust_file);
 #[cfg(feature = "test-provider")]
 model_generation_case!(model_generation_linked_cargo_cli_project_passes_quality_gates);
 
+/// Wave 11 Codex pass-3 regression — pin the DeepSeek-flag
+/// injection in `build_session_options`. The pass-2 fix appends
+/// `--deepseek-thinking enabled --deepseek-reasoning-effort high`
+/// when the env-resolved provider is `deepseek` (case-
+/// insensitive). Without this assertion a future refactor could
+/// silently drop the flags and the live `LIBRA_RUN_LIVE` matrix
+/// would exercise the wrong code path — the §5.19 closure
+/// criterion explicitly requires those flags.
+///
+/// Drives `build_session_options` with a synthetic env file in a
+/// tempdir so the test runs in the regular non-live `cargo test`
+/// invocation; no DeepSeek API call is made.
+#[cfg(feature = "test-provider")]
+#[test]
+fn build_session_options_for_deepseek_provider_appends_thinking_flags() {
+    use harness::matrix::{Case, CaseFile, ProviderSpec, build_session_options};
+
+    let env_dir = tempfile::Builder::new()
+        .prefix("model-gen-deepseek-flag-")
+        .tempdir()
+        .expect("tempdir for env file");
+    let env_path = env_dir.path().join(".env.test");
+    std::fs::write(
+        &env_path,
+        "LIBRA_CODE_TEST_PROVIDER=deepseek\nLIBRA_CODE_TEST_MODEL=deepseek-v4-flash\n",
+    )
+    .expect("write env file");
+
+    let file = CaseFile {
+        schema_version: 1,
+        matrix: "test-deepseek-flags".to_string(),
+        defaults: harness::matrix::Defaults {
+            fixture: harness::matrix::FixtureRef {
+                path: "tests/fixtures/code_ui/basic_chat.json".to_string(),
+            },
+            provider: Some(ProviderSpec::ModelFromEnvFile {
+                env_file: env_path.display().to_string(),
+                provider_env: "LIBRA_CODE_TEST_PROVIDER".to_string(),
+                model_env: "LIBRA_CODE_TEST_MODEL".to_string(),
+                required: true,
+            }),
+            options: harness::matrix::CaseOptions::default(),
+        },
+        cases: Vec::new(),
+    };
+    let case = Case {
+        name: "deepseek-flag-injection".to_string(),
+        priority: "P0".to_string(),
+        fixture: None,
+        provider: None,
+        options: harness::matrix::CaseOptions::default(),
+        steps: Vec::new(),
+    };
+    let options = build_session_options(&file, &case);
+    assert_eq!(options.provider_override.as_deref(), Some("deepseek"));
+    assert_eq!(options.model_override.as_deref(), Some("deepseek-v4-flash"));
+    assert_eq!(
+        options.extra_cli_args,
+        vec![
+            "--deepseek-thinking".to_string(),
+            "enabled".to_string(),
+            "--deepseek-reasoning-effort".to_string(),
+            "high".to_string(),
+        ],
+        "DeepSeek live invocation must carry the §5.19 thinking + high-reasoning flags",
+    );
+}
+
+/// Wave 11 Codex pass-3 regression — companion to the above:
+/// providers OTHER than deepseek must NOT receive the
+/// DeepSeek-specific flags. Otherwise a future provider would
+/// inherit DeepSeek args meant for a different runtime.
+#[cfg(feature = "test-provider")]
+#[test]
+fn build_session_options_for_non_deepseek_provider_omits_deepseek_flags() {
+    use harness::matrix::{Case, CaseFile, ProviderSpec, build_session_options};
+
+    let env_dir = tempfile::Builder::new()
+        .prefix("model-gen-non-deepseek-flag-")
+        .tempdir()
+        .expect("tempdir for env file");
+    let env_path = env_dir.path().join(".env.test");
+    std::fs::write(
+        &env_path,
+        "LIBRA_CODE_TEST_PROVIDER=openai\nLIBRA_CODE_TEST_MODEL=gpt-4o-mini\n",
+    )
+    .expect("write env file");
+
+    let file = CaseFile {
+        schema_version: 1,
+        matrix: "test-non-deepseek".to_string(),
+        defaults: harness::matrix::Defaults {
+            fixture: harness::matrix::FixtureRef {
+                path: "tests/fixtures/code_ui/basic_chat.json".to_string(),
+            },
+            provider: Some(ProviderSpec::ModelFromEnvFile {
+                env_file: env_path.display().to_string(),
+                provider_env: "LIBRA_CODE_TEST_PROVIDER".to_string(),
+                model_env: "LIBRA_CODE_TEST_MODEL".to_string(),
+                required: true,
+            }),
+            options: harness::matrix::CaseOptions::default(),
+        },
+        cases: Vec::new(),
+    };
+    let case = Case {
+        name: "non-deepseek-flag-omission".to_string(),
+        priority: "P0".to_string(),
+        fixture: None,
+        provider: None,
+        options: harness::matrix::CaseOptions::default(),
+        steps: Vec::new(),
+    };
+    let options = build_session_options(&file, &case);
+    assert_eq!(options.provider_override.as_deref(), Some("openai"));
+    assert!(
+        options.extra_cli_args.is_empty(),
+        "non-DeepSeek provider must NOT inherit DeepSeek-specific flags; got {:?}",
+        options.extra_cli_args,
+    );
+}
+
 #[cfg(not(feature = "test-provider"))]
 #[test]
 fn model_generation_matrix_requires_test_provider_feature() {
