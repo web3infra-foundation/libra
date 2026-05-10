@@ -22,25 +22,41 @@ use std::sync::Arc;
 
 use libra::internal::ai::{
     agent::TaskIntent,
+    mcp::server::LibraMcpServer,
     tools::{
         ToolRegistry, ToolRegistryBuilder,
         handlers::{
-            ApplyPatchHandler, GrepFilesHandler, ListDirHandler, PlanHandler, ReadFileHandler,
-            SearchFilesHandler, ShellHandler, SubmitIntentDraftHandler, SubmitPlanDraftHandler,
-            SubmitTaskCompleteHandler, WebSearchHandler, register_semantic_handlers,
+            ApplyPatchHandler, GrepFilesHandler, ListDirHandler, McpBridgeHandler, PlanHandler,
+            ReadFileHandler, SearchFilesHandler, ShellHandler, SubmitIntentDraftHandler,
+            SubmitPlanDraftHandler, SubmitTaskCompleteHandler, WebSearchHandler,
+            register_semantic_handlers,
         },
     },
 };
 
 /// Build a `ToolRegistry` that mirrors what `src/command/code.rs`
-/// registers for the TUI agent at startup, MINUS the channel-
-/// dependent `RequestUserInputHandler` (which needs a runtime
-/// `mpsc::Sender` and is irrelevant to ACL filtering since it is
-/// always read-only-or-semantic). The semantic helper bundle is
-/// included so the snapshot matches what the agent actually sees.
+/// registers for the TUI agent at startup. The set kept in sync
+/// with the live registration block in `src/command/code.rs:1438-
+/// 1462` (Wave 8 / PR 8 captured this with commit 70619aef);
+/// when adding a new tool there, mirror the registration here so
+/// the ACL contract is exercised against the full live surface.
+///
+/// Excluded from this helper:
+///   * `RequestUserInputHandler` — needs a runtime `mpsc::Sender`
+///     and is irrelevant to ACL filtering because its name is on
+///     the read-only-or-semantic allowlist regardless.
+///
+/// MCP bridge handlers ARE included via
+/// `McpBridgeHandler::all_handlers(...)`. Their names are
+/// dynamic (driven off the `LibraMcpServer` manifest) so the
+/// Review/Research assertions intentionally pin only the names
+/// `is_read_only_or_semantic_tool` lists, not the whole MCP
+/// surface — Codex pass-1 P2 follow-up calls this out so a
+/// future MCP-bridge tool that names itself `delete_*` doesn't
+/// silently slip into a Review session.
 fn build_tui_like_registry() -> Arc<ToolRegistry> {
     let dir = tempfile::tempdir().expect("tempdir for ACL test");
-    let builder = ToolRegistryBuilder::with_working_dir(dir.path().to_path_buf())
+    let mut builder = ToolRegistryBuilder::with_working_dir(dir.path().to_path_buf())
         .register("read_file", Arc::new(ReadFileHandler))
         .register("list_dir", Arc::new(ListDirHandler))
         .register("grep_files", Arc::new(GrepFilesHandler))
@@ -52,7 +68,12 @@ fn build_tui_like_registry() -> Arc<ToolRegistry> {
         .register("submit_intent_draft", Arc::new(SubmitIntentDraftHandler))
         .register("submit_plan_draft", Arc::new(SubmitPlanDraftHandler))
         .register("submit_task_complete", Arc::new(SubmitTaskCompleteHandler));
-    Arc::new(register_semantic_handlers(builder).build())
+    builder = register_semantic_handlers(builder);
+    let mcp_server = Arc::new(LibraMcpServer::new(None, None));
+    for (name, handler) in McpBridgeHandler::all_handlers(mcp_server) {
+        builder = builder.register(name, handler);
+    }
+    Arc::new(builder.build())
 }
 
 /// `Dev` → `TaskIntent::Feature` lets every registered tool through
@@ -186,6 +207,45 @@ fn command_intent_allows_shell_only_among_mutating_tools() {
         assert!(
             !allowed.iter().any(|name| name == forbidden),
             "Command filter must drop '{forbidden}', but allowed: {allowed:?}",
+        );
+    }
+}
+
+/// MCP bridge tools (e.g. `run_libra_vcs`, `create_*`,
+/// `update_intent`) are dynamically added to the live agent
+/// registry. The `is_read_only_or_semantic_tool` allowlist in
+/// `tools/registry.rs` is hardcoded with a small set of names —
+/// MCP bridge mutating tools deliberately DON'T appear there, so
+/// Review and Research filters drop them.
+///
+/// This test pins that contract: any MCP-bridge name starting
+/// with `run_`, `create_`, or `update_` MUST be dropped under
+/// `TaskIntent::Review`. A future MCP-bridge tool that ships
+/// under one of those prefixes without an explicit Review allow
+/// would silently slip through to a Review session — Codex
+/// pass-1 P2 follow-up flagged this as a gap; this test closes
+/// it.
+#[test]
+fn mcp_bridge_mutating_tools_are_dropped_in_review_intent() {
+    let registry = build_tui_like_registry();
+    let dev_allowed = registry.filter_by_intent(TaskIntent::Feature);
+    let review_allowed = registry.filter_by_intent(TaskIntent::Review);
+
+    let mutating_mcp_in_dev: Vec<&String> = dev_allowed
+        .iter()
+        .filter(|name| {
+            name.starts_with("run_") || name.starts_with("create_") || name.starts_with("update_")
+        })
+        .collect();
+    assert!(
+        !mutating_mcp_in_dev.is_empty(),
+        "expected at least one MCP-bridge mutating tool in the Dev allowlist; found: {dev_allowed:?}",
+    );
+
+    for name in &mutating_mcp_in_dev {
+        assert!(
+            !review_allowed.iter().any(|allowed| allowed == *name),
+            "MCP-bridge mutating tool '{name}' must be dropped under Review, but allowed: {review_allowed:?}",
         );
     }
 }
