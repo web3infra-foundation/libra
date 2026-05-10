@@ -816,6 +816,6 @@ Wave 1–9 + Wave 12 部分已完成；Wave 10 / 11 / 12 部分均按 Codex pass
 | 9 | ⚠️ partial | 仅交付 `--resume` CLI 表面 2 条 negative-path；happy path 需要 plan-workflow scaffolding 后跟进；§5.13 Codex runtime mock + §5.14 MCP dual entry 仍未交付（roadmap-sized） |
 | 10 | ❌ deferred | TUI 快照需 `insta`，provider boot 需 `httpmock` —— 新增 dev-deps 走单独 PR |
 | 11 | ✅ closed | `tests/harness/matrix.rs` 已加 `ProviderSpec::ModelFromEnvFile` + DeepSeek thinking/high-reasoning 自动注入；`tests/code_ui_remote_model_generation_matrix.rs` 在 `LIBRA_RUN_LIVE=1` 下真正调用矩阵；`.github/workflows/model-generation-nightly.yml` 提供每日 cron + `workflow_dispatch`，需 maintainer 配置 `DEEPSEEK_API_KEY` secret 后才会运行；regression L0 测试（`build_session_options_for_*_provider_*`）锁定 DeepSeek 旗标注入逻辑 |
-| 12 | ⚠️ partial | 错误码 doc/code sync L0 测试已加；perf smoke 1 条（10 并发 `/threads`）`#[ignore]` + `LIBRA_RUN_PERF=1`；100k transcript / 5-min SSE soak 仍未交付 |
+| 12 | ⚠️ partial | 错误码 doc/code sync L0 测试已加；perf smoke 2 条（10 并发 `/threads`、100k transcript snapshot 序列化 < 500ms 可由 `LIBRA_PERF_CEILING_MS` 调整）`#[ignore]` + `LIBRA_RUN_PERF=1`；5-min SSE soak 仍未交付（需独立 nightly job） |
 
 落地完成判定的全部门只有在 Wave 9 happy path、Wave 10 全量、Wave 12 完整 perf smoke 都补齐之后才算 PASS。Wave 11 已具备完整工作流（harness wiring + 每日 nightly + L0 regression）；剩余条件（5 天连续 ≥ 90% 通过率）依赖 maintainer 配置 `DEEPSEEK_API_KEY` 并等待 5 个 nightly run。当前仓库状态对应"基础矩阵已落地 + Wave 11 已 wire + Wave 9 / 10 / 12 部分 deferred"。
