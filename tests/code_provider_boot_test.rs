@@ -19,11 +19,16 @@
 //!     non-empty `messages`. Smoke proof that the generic
 //!     OpenAI client constructor + `with_base_url` form
 //!     correctly route to the stub endpoint.
+//!   * **Anthropic**: client built with custom base URL posts
+//!     to `/v1/messages`; body carries `model`, non-empty
+//!     `messages`, and the required `max_tokens` field
+//!     (Anthropic-specific — the OpenAI-compat shape has no
+//!     mandatory token cap). Smoke proof that the helper's
+//!     `/v1/messages` route covers the second wire shape we
+//!     ship.
 //!
 //! Coverage deferred to follow-up PRs (same helper, same
 //! pattern):
-//!   * Anthropic (`/v1/messages` shape; the helper already
-//!     accepts that route).
 //!   * Kimi (`--kimi-thinking` / `--kimi-stream`), Ollama
 //!     (`--ollama-thinking` / `--ollama-compact-tools`), Gemini,
 //!     Zhipu provider boot smokes.
@@ -41,10 +46,32 @@ use libra::internal::ai::{
         request::CompletionRequest,
     },
     providers::{
-        deepseek::client::Client as DeepSeekClient, openai::client::Client as OpenAiClient,
+        anthropic::client::Client as AnthropicClient, deepseek::client::Client as DeepSeekClient,
+        openai::client::Client as OpenAiClient,
     },
 };
 use serde_json::json;
+
+/// Anthropic Messages API responds with a different envelope
+/// than OpenAI-compat — separate canned shape so the test
+/// drives a real `AnthropicResponse` deserialise rather than
+/// short-circuiting on a parse error.
+fn canned_anthropic_response() -> serde_json::Value {
+    json!({
+        "id": "msg_test_completion",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+            { "type": "text", "text": "ok" }
+        ],
+        "model": "claude-test",
+        "stop_reason": "end_turn",
+        "usage": {
+            "input_tokens": 1,
+            "output_tokens": 1
+        }
+    })
+}
 
 fn canned_chat_response() -> serde_json::Value {
     json!({
@@ -149,6 +176,41 @@ async fn openai_completion_request_smoke_boots_against_localhost_stub() -> Resul
             .and_then(|v| v.as_array())
             .is_some_and(|arr| !arr.is_empty()),
         "OpenAI request must carry non-empty messages array; got {body:?}",
+    );
+    Ok(())
+}
+
+/// Wave 10 §5.2 closure — Anthropic boot smoke against the
+/// helper's `/v1/messages` route. Anthropic's request shape is
+/// distinct from OpenAI-compat (top-level `system`,
+/// mandatory `max_tokens`), so this test proves the second wire
+/// shape we ship is reachable through the same mock helper.
+#[tokio::test]
+async fn anthropic_completion_request_smoke_boots_against_localhost_stub() -> Result<()> {
+    let server = MockProviderServer::start(canned_anthropic_response()).await;
+    let client = AnthropicClient::with_base_url(&server.base_url(), "test-key".to_string());
+    let model = client.completion_model("claude-3-5-sonnet-20241022");
+
+    let request = CompletionRequest::new(vec![Message::user("hello anthropic")]);
+    let _response = model.completion(request).await?;
+
+    let bodies = server.captured_bodies();
+    assert_eq!(bodies.len(), 1, "expected exactly one POST captured");
+    let body = &bodies[0];
+    assert_eq!(
+        body.get("model").and_then(|v| v.as_str()),
+        Some("claude-3-5-sonnet-20241022"),
+        "Anthropic model field must round-trip; got {body:?}",
+    );
+    assert!(
+        body.get("messages")
+            .and_then(|v| v.as_array())
+            .is_some_and(|arr| !arr.is_empty()),
+        "Anthropic request must carry non-empty messages array; got {body:?}",
+    );
+    assert!(
+        body.get("max_tokens").and_then(|v| v.as_u64()).is_some(),
+        "Anthropic request must carry max_tokens (mandatory in /v1/messages); got {body:?}",
     );
     Ok(())
 }
