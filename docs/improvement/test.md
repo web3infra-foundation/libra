@@ -759,7 +759,7 @@ cargo test --all --all-features
 | 3 | Lease 全量 | lease matrix 9/9 + `--control observe` + audit redaction L0 | 🟢 | 无（`with_control_observe` 已存在） |
 | 4 | SSE 全量 | `code_ui_remote_sse_matrix.rs` + 7 条 case | 🟡 | 依赖 PR 1 的 `event_stream.rs` |
 | 5 | 生成 fake | `code_ui_remote_generation_matrix.rs` + provider_fixtures + apply_patch + 失败分支 | 🟢 | 无 |
-| 6 | Approval flow | `code_ui_approval_flow_test.rs` + `respond_interaction()` helper + 并发 pending | 🟡 | 需新增 `respond_interaction` helper |
+| 6 | Approval flow | `code_ui_approval_flow_test.rs` + `respond_interaction()` helper + accept / reject / `apply_to_future` 三条 P0 | 🟡 | 需新增 `respond_interaction` helper（并发 pending 已按 §5.11 P1 拆出，单 turn 单 pending 已覆盖 ID 路由最小集） |
 | 7 | State / Security 矩阵 | 复用已就位 JSON；state busy/body/parallel/streaming + security diagnostics/threads/audit | 🟢 | 无 |
 | 8 | Orchestrator gate / max_turns / Tool ACL | `executor.rs` mod tests 扩 + `code_tool_acl_test.rs` 矩阵 | 🟢 | 无 |
 | 9 | Codex runtime + MCP 双入口 + resume | mock WS server + `code_codex_runtime_test.rs` + `code_mcp_dual_entry_test.rs` + `code_resume_test.rs` | 🟡 | 需手写 Codex JSON-RPC WS mock |
