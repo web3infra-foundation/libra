@@ -420,6 +420,17 @@ impl CodeSession {
         self.controller_token.as_deref()
     }
 
+    /// Wave 7 / PR 7 — record a controllerToken issued by a
+    /// successful matrix attach so security assertions like
+    /// `does_not_contain_controller_token` have a concrete value
+    /// to scan for. Codex pass-1 P1 fix: without this hook the
+    /// matrix `run_attach` path only updated `CaseRuntime.tokens`
+    /// and the assertion would compare against `None`, silently
+    /// passing even if the token leaked.
+    pub fn set_controller_token(&mut self, token: impl Into<String>) {
+        self.controller_token = Some(token.into());
+    }
+
     /// Absolute path to the temporary repo this session was spawned in.
     /// Wave 5 / PR 5 — the generation matrix needs to read files
     /// produced by `apply_patch` and run verification commands inside

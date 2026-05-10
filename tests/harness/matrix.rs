@@ -1574,6 +1574,14 @@ impl CaseRuntime<'_> {
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow!("attach response did not include controllerToken: {body}"))?
                 .to_string();
+            // Codex pass-1 P1 fix: also stash the token on the
+            // session so security cases (e.g. the
+            // `does_not_contain_controller_token` assertion in
+            // `evaluate_raw_text_assertion`) can compare against a
+            // concrete value instead of `None`. Without this the
+            // diagnostics-leak check would pass vacuously even if
+            // the token actually appeared in the response.
+            self.session.set_controller_token(token.clone());
             self.tokens.insert(slot, token);
         }
         if let Some(label) = expect.save_lease_expires_at.as_deref() {
