@@ -32,11 +32,16 @@
 //!     boolean, mirroring DeepSeek). Pins the
 //!     `--kimi-thinking` / `--kimi-stream` CLI →
 //!     `CompletionRequest` → `KimiRequest` chain.
+//!   * **Ollama**: `--ollama-thinking high` round-trips to
+//!     `think="high"` on the native `/api/chat` request body.
+//!     Pins the third wire shape we ship (Ollama-native, distinct
+//!     from OpenAI-compat and Anthropic).
 //!
 //! Coverage deferred to follow-up PRs (same helper, same
 //! pattern):
-//!   * Ollama (`--ollama-thinking` / `--ollama-compact-tools`),
-//!     Gemini, Zhipu provider boot smokes.
+//!   * Gemini, Zhipu provider boot smokes.
+//!   * Ollama `--ollama-compact-tools` flag (affects tool-schema
+//!     serialisation; needs a tool-bearing `CompletionRequest`).
 //!   * Missing-API-key error message + `--api-base` override
 //!     surface tests.
 
@@ -52,10 +57,30 @@ use libra::internal::ai::{
     },
     providers::{
         anthropic::client::Client as AnthropicClient, deepseek::client::Client as DeepSeekClient,
-        kimi::client::Client as KimiClient, openai::client::Client as OpenAiClient,
+        kimi::client::Client as KimiClient, ollama::client::Client as OllamaClient,
+        openai::client::Client as OpenAiClient,
     },
 };
 use serde_json::json;
+
+/// Ollama's native `/api/chat` non-streaming response is a
+/// single JSON object (NOT NDJSON) when `stream=false`. Shape
+/// matches `OllamaResponse` so the deserialiser is satisfied.
+fn canned_ollama_response() -> serde_json::Value {
+    json!({
+        "model": "test-model",
+        "created_at": "2026-05-11T00:00:00Z",
+        "message": {
+            "role": "assistant",
+            "content": "ok",
+            "thinking": null,
+            "tool_calls": []
+        },
+        "done": true,
+        "prompt_eval_count": 1,
+        "eval_count": 1
+    })
+}
 
 /// Anthropic Messages API responds with a different envelope
 /// than OpenAI-compat — separate canned shape so the test
@@ -265,6 +290,61 @@ async fn anthropic_completion_request_smoke_boots_against_localhost_stub() -> Re
     assert!(
         body.get("max_tokens").and_then(|v| v.as_u64()).is_some(),
         "Anthropic request must carry max_tokens (mandatory in /v1/messages); got {body:?}",
+    );
+    Ok(())
+}
+
+/// Wave 10 §5.2 closure — Ollama boot smoke + think flag
+/// passthrough.
+///
+/// Ollama uses its own native `/api/chat` endpoint (not
+/// OpenAI-compat) and a `think` field that accepts either a
+/// boolean or a discrete level (`low`/`medium`/`high`). When
+/// `--ollama-thinking high` is set on the CLI,
+/// `CompletionRequest.thinking = Some(CompletionThinking::High)`
+/// must serialise as `think: "high"` on the wire. Pins the
+/// third wire shape we ship.
+#[tokio::test]
+async fn ollama_completion_request_carries_think_level_flag() -> Result<()> {
+    let server = MockProviderServer::start(canned_ollama_response()).await;
+    // Ollama's `with_base_url_and_api_key` strips a trailing
+    // `/v1` (default base ends with it); pointing at the bare
+    // localhost root resolves to `<root>/api/chat`, which the
+    // mock helper now handles.
+    let client = OllamaClient::with_base_url_and_api_key(&server.base_url(), None);
+    let model = client.completion_model("ollama-test-model");
+
+    let mut request = CompletionRequest::new(vec![Message::user("hello ollama")]);
+    request.thinking = Some(CompletionThinking::High);
+    request.stream = Some(false);
+
+    let _response = model.completion(request).await?;
+
+    let bodies = server.captured_bodies();
+    assert_eq!(bodies.len(), 1, "expected exactly one POST captured");
+    let body = &bodies[0];
+    assert_eq!(
+        body.get("model").and_then(|v| v.as_str()),
+        Some("ollama-test-model"),
+        "Ollama model field must round-trip; got {body:?}",
+    );
+    assert_eq!(
+        body.get("think").and_then(|v| v.as_str()),
+        Some("high"),
+        "Ollama --ollama-thinking high must serialise as think=\"high\" (level discriminant); got {body:?}",
+    );
+    // Ollama hard-codes `stream: true` in the wire body
+    // regardless of `CompletionRequest.stream` — the runtime
+    // always opens a streaming `/api/chat` request even when the
+    // caller would prefer a one-shot reply. Pin the
+    // always-true contract here so a future runtime change
+    // (e.g. wiring `request.stream` through) breaks loudly
+    // rather than silently swapping the wire format under
+    // existing callers.
+    assert_eq!(
+        body.get("stream").and_then(|v| v.as_bool()),
+        Some(true),
+        "Ollama is streaming-only on the wire; stream:true must always be emitted; got {body:?}",
     );
     Ok(())
 }

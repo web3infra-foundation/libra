@@ -3,8 +3,10 @@
 //!
 //! Spawns a tiny `axum` router on `127.0.0.1:0` that:
 //!   * Accepts `POST /chat/completions` (OpenAI-compatible
-//!     providers: OpenAI, DeepSeek, Kimi, Zhipu) and
-//!     `POST /v1/messages` (Anthropic native shape).
+//!     providers: OpenAI, DeepSeek, Kimi, Zhipu),
+//!     `POST /v1/messages` (Anthropic native shape), and
+//!     `POST /api/chat` (Ollama native shape — note the leading
+//!     `/api`, distinct from the OpenAI-compat path).
 //!   * Captures the raw JSON body of every request so the test
 //!     can assert provider-specific flag passthrough end-to-end
 //!     (CompletionRequest → wire body).
@@ -54,6 +56,7 @@ impl MockProviderServer {
         let app = Router::new()
             .route("/chat/completions", post(handler))
             .route("/v1/messages", post(handler))
+            .route("/api/chat", post(handler))
             .with_state(state.clone());
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
