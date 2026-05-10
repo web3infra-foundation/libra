@@ -2199,31 +2199,95 @@ pub fn forged_controller_token() -> &'static str {
     FORGED_CONTROLLER_TOKEN
 }
 
-/// Wave 11 / PR 11 — minimal `.env`-style parser. Returns the
-/// value for `key` (after the first `=`) with optional
-/// surrounding double quotes stripped, or `None` if the key
-/// isn't present. Lines starting with `#` are treated as
-/// comments. Pulled inline rather than depending on `dotenvy`
-/// to avoid adding a new dev-dep.
+/// Wave 11 / PR 11 — `.env`-style parser sized for the
+/// model_generation matrix lookup. Mirrors the production
+/// parser in `src/command/code.rs::parse_env_file_value` /
+/// `parse_double_quoted_env_value` /
+/// `strip_inline_env_comment` so a value the runtime would
+/// accept also passes through this lookup.
+///
+/// Coverage:
+///   * Comments — leading `#`, AND inline `#` after whitespace
+///     on unquoted values.
+///   * `export KEY=VALUE` prefix.
+///   * Double-quoted values with `\n` / `\r` / `\t` / `\\` /
+///     `\"` escape sequences.
+///   * Single-quoted values are taken verbatim (no escape
+///     processing) per POSIX shell convention.
+///   * Empty values reject as `None` so the model_generation
+///     "required" check fires correctly when an env var is
+///     present but blank.
 fn lookup_env_value(env_text: &str, key: &str) -> Option<String> {
-    for line in env_text.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
+    for raw_line in env_text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let (k, v) = trimmed.split_once('=')?;
+        let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
+        let (k, v) = line.split_once('=')?;
         if k.trim() != key {
             continue;
         }
         let value = v.trim();
-        // Strip a single layer of `"..."` quoting.
-        let stripped = value
-            .strip_prefix('"')
-            .and_then(|rest| rest.strip_suffix('"'))
-            .unwrap_or(value);
-        return Some(stripped.to_string());
+        if value.is_empty() {
+            return None;
+        }
+        let parsed = match value.as_bytes()[0] {
+            b'"' => {
+                if value.as_bytes().last() != Some(&b'"') || value.len() < 2 {
+                    // Malformed quoted value; treat as missing
+                    // (the caller's `required: true` check will
+                    // then surface the misconfiguration cleanly).
+                    return None;
+                }
+                parse_double_quoted_env_value_inline(&value[1..value.len() - 1])?
+            }
+            b'\'' => {
+                if value.as_bytes().last() != Some(&b'\'') || value.len() < 2 {
+                    return None;
+                }
+                value[1..value.len() - 1].to_string()
+            }
+            _ => strip_inline_env_comment_inline(value)
+                .trim_end()
+                .to_string(),
+        };
+        if parsed.is_empty() {
+            return None;
+        }
+        return Some(parsed);
     }
     None
+}
+
+fn parse_double_quoted_env_value_inline(value: &str) -> Option<String> {
+    let mut parsed = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            parsed.push(ch);
+            continue;
+        }
+        let escaped = chars.next()?;
+        match escaped {
+            'n' => parsed.push('\n'),
+            'r' => parsed.push('\r'),
+            't' => parsed.push('\t'),
+            '\\' => parsed.push('\\'),
+            '"' => parsed.push('"'),
+            other => parsed.push(other),
+        }
+    }
+    Some(parsed)
+}
+
+fn strip_inline_env_comment_inline(value: &str) -> &str {
+    for (idx, ch) in value.char_indices() {
+        if ch == '#' && (idx == 0 || value[..idx].ends_with(char::is_whitespace)) {
+            return &value[..idx];
+        }
+    }
+    value
 }
 
 /// Wave 7 — per-thread parallel attach helper. Builds a fresh
