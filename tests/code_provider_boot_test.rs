@@ -40,16 +40,17 @@
 //!     `/chat/completions` (OpenAI-compat shape); body carries
 //!     `model` + non-empty `messages`. Smoke proof for the
 //!     fourth provider on the same OpenAI-compat helper route.
+//!   * **Gemini**: client built with the new test-only
+//!     `with_base_url` constructor posts to
+//!     `/v1beta/models/{model}:generateContent` (the
+//!     `:generateContent` action is captured as part of the
+//!     single path segment); body carries Gemini's native
+//!     `contents` array (NOT `messages` — Gemini uses its own
+//!     wire shape). The test-only constructor was added in the
+//!     same commit and is documented as not part of the CLI
+//!     surface.
 //!
 //! Coverage deferred to follow-up PRs:
-//!   * **Gemini**: `gemini::client::Client` intentionally has
-//!     no `with_base_url` constructor (the doc at
-//!     `src/internal/ai/providers/gemini/client.rs:71-72` notes
-//!     "no base-URL override is supported because Gemini's
-//!     public API does not have a stable proxy contract").
-//!     Boot smoke needs a runtime change to expose a
-//!     constructor accepting a custom base URL — split out as
-//!     its own roadmap-sized PR.
 //!   * Ollama `--ollama-compact-tools` flag (affects tool-schema
 //!     serialisation; needs a tool-bearing `CompletionRequest`).
 //!   * Missing-API-key error message + `--api-base` override
@@ -67,11 +68,33 @@ use libra::internal::ai::{
     },
     providers::{
         anthropic::client::Client as AnthropicClient, deepseek::client::Client as DeepSeekClient,
-        kimi::client::Client as KimiClient, ollama::client::Client as OllamaClient,
-        openai::client::Client as OpenAiClient, zhipu::client::Client as ZhipuClient,
+        gemini::client::Client as GeminiClient, kimi::client::Client as KimiClient,
+        ollama::client::Client as OllamaClient, openai::client::Client as OpenAiClient,
+        zhipu::client::Client as ZhipuClient,
     },
 };
 use serde_json::json;
+
+/// Gemini `/v1beta/models/{model}:generateContent` returns a
+/// `GenerateContentResponse` envelope distinct from OpenAI-compat.
+fn canned_gemini_response() -> serde_json::Value {
+    json!({
+        "candidates": [
+            {
+                "content": {
+                    "role": "model",
+                    "parts": [{ "text": "ok" }]
+                },
+                "finishReason": "STOP"
+            }
+        ],
+        "usageMetadata": {
+            "promptTokenCount": 1,
+            "candidatesTokenCount": 1,
+            "totalTokenCount": 2
+        }
+    })
+}
 
 /// Ollama's native `/api/chat` non-streaming response is a
 /// single JSON object (NOT NDJSON) when `stream=false`. Shape
@@ -389,6 +412,38 @@ async fn zhipu_completion_request_smoke_boots_against_localhost_stub() -> Result
             .and_then(|v| v.as_array())
             .is_some_and(|arr| !arr.is_empty()),
         "Zhipu request must carry non-empty messages array; got {body:?}",
+    );
+    Ok(())
+}
+
+/// Wave 10 §5.2 closure — Gemini boot smoke. Gemini uses its
+/// own native wire shape: requests POST to
+/// `/v1beta/models/{model}:generateContent` and the body carries
+/// a `contents` array (Gemini-style, NOT OpenAI-compat
+/// `messages`). The mock helper's `/v1beta/models/{action}`
+/// route captures both model + `:generateContent` action
+/// suffix as a single path segment.
+///
+/// Uses the new test-only `GeminiClient::with_base_url`
+/// constructor added alongside this test (CLI never invokes it;
+/// production path remains `from_env`).
+#[tokio::test]
+async fn gemini_completion_request_smoke_boots_against_localhost_stub() -> Result<()> {
+    let server = MockProviderServer::start(canned_gemini_response()).await;
+    let client = GeminiClient::with_base_url(&server.base_url(), "test-key".to_string());
+    let model = client.completion_model("gemini-2.5-flash");
+
+    let request = CompletionRequest::new(vec![Message::user("hello gemini")]);
+    let _response = model.completion(request).await?;
+
+    let bodies = server.captured_bodies();
+    assert_eq!(bodies.len(), 1, "expected exactly one POST captured");
+    let body = &bodies[0];
+    assert!(
+        body.get("contents")
+            .and_then(|v| v.as_array())
+            .is_some_and(|arr| !arr.is_empty()),
+        "Gemini request must carry non-empty contents array (NOT messages); got {body:?}",
     );
     Ok(())
 }

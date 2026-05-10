@@ -68,8 +68,10 @@ impl Client {
     ///
     /// Boundary conditions: returns `env::VarError::NotPresent` when
     /// `GEMINI_API_KEY` is unset so callers can render a friendly "no API key"
-    /// message; no base-URL override is supported because Gemini's public API
-    /// does not have a stable proxy contract.
+    /// message; the CLI deliberately does not expose a base-URL override —
+    /// Gemini's public API has no stable proxy contract for end users.
+    /// Test-only consumers that need to point at a localhost stub should
+    /// use [`Client::with_base_url`].
     pub fn from_env() -> Result<Self, env::VarError> {
         let api_key = env::var("GEMINI_API_KEY")?;
         let provider = GeminiProvider::new(api_key);
@@ -77,6 +79,19 @@ impl Client {
             "https://generativelanguage.googleapis.com",
             provider,
         ))
+    }
+
+    /// Creates a Gemini Client with a custom base URL and API key.
+    ///
+    /// Intended for tests that need to point the client at a localhost stub
+    /// (Wave 10 §5.2 boot smoke); the CLI never invokes this constructor —
+    /// `from_env` is the production entry point. A separate constructor
+    /// (rather than mutating `from_env`) keeps the production base URL
+    /// explicit and ensures CLI-driven configuration cannot accidentally
+    /// reroute requests to an arbitrary host.
+    pub fn with_base_url(base_url: &str, api_key: String) -> Self {
+        let provider = GeminiProvider::new(api_key);
+        Self::new(base_url, provider)
     }
 
     /// Creates a [`CompletionModel`](super::completion::CompletionModel) bound

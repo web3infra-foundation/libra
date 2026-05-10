@@ -4,9 +4,12 @@
 //! Spawns a tiny `axum` router on `127.0.0.1:0` that:
 //!   * Accepts `POST /chat/completions` (OpenAI-compatible
 //!     providers: OpenAI, DeepSeek, Kimi, Zhipu),
-//!     `POST /v1/messages` (Anthropic native shape), and
+//!     `POST /v1/messages` (Anthropic native shape),
 //!     `POST /api/chat` (Ollama native shape — note the leading
-//!     `/api`, distinct from the OpenAI-compat path).
+//!     `/api`, distinct from the OpenAI-compat path), and
+//!     `POST /v1beta/models/{model}` (Gemini native shape — the
+//!     `:generateContent` action is part of the captured single
+//!     path segment, no special-character routing needed).
 //!   * Captures the raw JSON body of every request so the test
 //!     can assert provider-specific flag passthrough end-to-end
 //!     (CompletionRequest → wire body).
@@ -57,6 +60,11 @@ impl MockProviderServer {
             .route("/chat/completions", post(handler))
             .route("/v1/messages", post(handler))
             .route("/api/chat", post(handler))
+            // Gemini's path is `/v1beta/models/{model}:generateContent`.
+            // `:generateContent` is part of the single path segment after
+            // `/models/`, so axum's basic `{name}` capture handles the
+            // whole `gemini-2.5-flash:generateContent` payload.
+            .route("/v1beta/models/{action}", post(handler))
             .with_state(state.clone());
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
