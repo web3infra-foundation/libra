@@ -213,6 +213,9 @@ pub struct CodeSession {
     token_path: PathBuf,
     info_path: PathBuf,
     base_url: String,
+    /// MCP server URL captured from `control.json`. Populated only when the
+    /// runtime starts an MCP server (not in `--web-only`-without-MCP modes).
+    mcp_url: Option<String>,
     control_token: String,
     controller_token: Option<String>,
     /// Whether the session was spawned with `--control write`. Observe-mode
@@ -229,6 +232,8 @@ pub struct CodeSession {
 #[serde(rename_all = "camelCase")]
 struct ControlInfo {
     base_url: String,
+    #[serde(default)]
+    mcp_url: Option<String>,
 }
 
 impl CodeSession {
@@ -410,6 +415,7 @@ impl CodeSession {
             token_path,
             info_path,
             base_url: String::new(),
+            mcp_url: None,
             control_token: String::new(),
             controller_token: None,
             control_write: options.control_write,
@@ -512,6 +518,13 @@ impl CodeSession {
     /// Wave 7 / PR 7 — accessor for the harness-issued control
     /// token so security cases can assert it does NOT leak into
     /// diagnostics or audit-log output.
+    /// MCP server URL parsed from the runtime's `control.json`. `None` if
+    /// the runtime did not start an MCP server (e.g. modes where `start_mcp_server`
+    /// is intentionally skipped). Wave 9 §5.14 item 1 closure surface.
+    pub fn mcp_url(&self) -> Option<&str> {
+        self.mcp_url.as_deref()
+    }
+
     pub fn control_token_value(&self) -> &str {
         &self.control_token
     }
@@ -1211,6 +1224,7 @@ impl CodeSession {
                     serde_json::from_str(&info_text).context("failed to parse control info")?;
                 let _ = fs::write(self.logs_dir.join("control.json"), &info_text);
                 self.base_url = info.base_url;
+                self.mcp_url = info.mcp_url;
                 if self.control_write {
                     // Token file is only written under `--control write`;
                     // observe-mode sessions skip it on purpose.
