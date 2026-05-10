@@ -55,6 +55,17 @@ pub struct CodeSessionOptions {
     /// can override `LIBRA_LOG_FILE` (security redaction case
     /// drives this) or `LIBRA_LOG`. Empty by default.
     pub extra_env: Vec<(String, String)>,
+    /// Wave 9 / PR 9 — pass `--resume <thread_id>` to the spawned
+    /// `libra code` so the runtime loads an existing
+    /// `SessionState` from `.libra/storage/code-sessions/`. The
+    /// resume test pairs this with `with_existing_repo_dir(...)`
+    /// so the second spawn shares the first spawn's storage.
+    pub resume_thread_id: Option<String>,
+    /// Wave 9 / PR 9 — when `Some`, spawn against the supplied
+    /// repo directory instead of building a fresh tempdir + running
+    /// `libra init`. The resume test uses this to persist state
+    /// between two CodeSession lifecycles.
+    pub existing_repo_dir: Option<PathBuf>,
 }
 
 impl CodeSessionOptions {
@@ -69,7 +80,26 @@ impl CodeSessionOptions {
             context: None,
             approval_policy: None,
             extra_env: Vec::new(),
+            resume_thread_id: None,
+            existing_repo_dir: None,
         }
+    }
+
+    /// Wave 9 / PR 9 — pass `--resume <thread_id>` to the spawned
+    /// process. Pair with `with_existing_repo_dir` so the storage
+    /// the first spawn wrote is visible to the resuming spawn.
+    pub fn with_resume_thread(mut self, thread_id: impl Into<String>) -> Self {
+        self.resume_thread_id = Some(thread_id.into());
+        self
+    }
+
+    /// Wave 9 / PR 9 — spawn against an existing repo dir instead
+    /// of a fresh tempdir + `libra init`. Caller owns the dir's
+    /// lifetime (typically a `tempfile::TempDir` held alive across
+    /// both spawns).
+    pub fn with_existing_repo_dir(mut self, dir: PathBuf) -> Self {
+        self.existing_repo_dir = Some(dir);
+        self
     }
 
     /// Wave 7 / PR 7 — append `(key, value)` to the env vars
@@ -159,12 +189,24 @@ impl CodeSession {
             .prefix(&format!("libra-code-ui-{}-", options.name))
             .tempdir()
             .context("failed to create code session tempdir")?;
-        let repo_dir = temp.path().join("repo");
+        // Wave 9 / PR 9 — the resume case spawns twice against the
+        // same repo so the second `libra code` can `--resume` the
+        // session the first one persisted. When `existing_repo_dir`
+        // is `Some`, skip the tempdir-managed `repo` subdir AND the
+        // `libra init` step — the caller-supplied dir is already
+        // initialised. Side effect: token / info files now live
+        // beside the repo's `.libra/`, NOT under the harness
+        // tempdir, so a follow-up spawn doesn't have to reproduce
+        // the original tempdir's path layout.
+        let repo_dir = options
+            .existing_repo_dir
+            .clone()
+            .unwrap_or_else(|| temp.path().join("repo"));
         let logs_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("target")
             .join("code-ui-scenarios")
             .join(&options.name);
-        fs::create_dir_all(&repo_dir).context("failed to create temp repo directory")?;
+        fs::create_dir_all(&repo_dir).context("failed to create repo directory")?;
         if logs_dir.exists() {
             fs::remove_dir_all(&logs_dir).with_context(|| {
                 format!("failed to clear previous logs dir '{}'", logs_dir.display())
@@ -172,17 +214,19 @@ impl CodeSession {
         }
         fs::create_dir_all(&logs_dir).context("failed to create code session logs directory")?;
 
-        let init_output = Command::new(&bin)
-            .args(["init", "--vault=false", "--quiet"])
-            .arg(&repo_dir)
-            .output()
-            .with_context(|| format!("failed to run '{} init'", bin.display()))?;
-        if !init_output.status.success() {
-            bail!(
-                "failed to initialize temp Libra repo\nstdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&init_output.stdout),
-                String::from_utf8_lossy(&init_output.stderr)
-            );
+        if options.existing_repo_dir.is_none() {
+            let init_output = Command::new(&bin)
+                .args(["init", "--vault=false", "--quiet"])
+                .arg(&repo_dir)
+                .output()
+                .with_context(|| format!("failed to run '{} init'", bin.display()))?;
+            if !init_output.status.success() {
+                bail!(
+                    "failed to initialize temp Libra repo\nstdout:\n{}\nstderr:\n{}",
+                    String::from_utf8_lossy(&init_output.stdout),
+                    String::from_utf8_lossy(&init_output.stderr)
+                );
+            }
         }
 
         let token_path = if options.use_default_control_paths {
@@ -269,6 +313,9 @@ impl CodeSession {
         }
         if let Some(policy) = options.approval_policy.as_deref() {
             cmd.args(["--approval-policy", policy]);
+        }
+        if let Some(thread_id) = options.resume_thread_id.as_deref() {
+            cmd.args(["--resume", thread_id]);
         }
         cmd.cwd(&repo_dir);
         cmd.env("TERM", "xterm-256color");
