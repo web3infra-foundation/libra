@@ -839,6 +839,14 @@ impl CaseRuntime<'_> {
         auth: &AuthMode,
         expect: &SimpleExpect,
     ) -> Result<()> {
+        // Codex pass-1 P2 — capture the pre-submit transcript
+        // length so the wait predicate AND the post-wait assertion
+        // evaluator both ignore entries from prior turns. Without
+        // this baseline a previously-completed assistant_message
+        // would satisfy the predicate immediately, and any
+        // `transcript_contains:<needle>` assertion could match a
+        // stale entry instead of the response under test.
+        let baseline_len = current_transcript_len(&self.session.snapshot()?);
         // Reuse the standard submit path so the response status /
         // error code semantics stay identical to `run_submit`.
         self.run_submit(text, token, auth, expect)?;
@@ -853,26 +861,25 @@ impl CaseRuntime<'_> {
         // observe the initial idle state. To pin "the assistant
         // reply has actually landed", require BOTH:
         //   * status == idle (turn drained), AND
-        //   * the transcript contains a completed assistant_message
-        //     with non-empty content (the streaming completion
-        //     marker the runtime sets when it flushes the final
-        //     delta).
+        //   * a NEW transcript entry (appended after `baseline_len`)
+        //     is a completed assistant_message with non-empty
+        //     content (the streaming completion marker the runtime
+        //     sets when it flushes the final delta).
         //
         // Wave 5 fix: the assistant_message is no longer guaranteed
         // to be the LAST entry — apply_patch tool calls land
-        // afterwards in their own transcript entry — so search the
-        // full transcript instead of inspecting only the tail.
-        self.session
-            .wait_for_snapshot(Duration::from_secs(10), |snapshot| {
-                let status_idle = snapshot
-                    .pointer("/status")
-                    .and_then(Value::as_str)
-                    .is_some_and(|status| status == "idle");
-                let assistant_complete = snapshot
-                    .pointer("/transcript")
-                    .and_then(Value::as_array)
-                    .map(|entries| {
-                        entries.iter().any(|entry| {
+        // afterwards in their own transcript entry — so iterate the
+        // post-baseline tail instead of inspecting only the
+        // absolute last entry.
+        let final_snapshot =
+            self.session
+                .wait_for_snapshot(Duration::from_secs(10), |snapshot| {
+                    let status_idle = snapshot
+                        .pointer("/status")
+                        .and_then(Value::as_str)
+                        .is_some_and(|status| status == "idle");
+                    let assistant_complete =
+                        new_transcript_entries(snapshot, baseline_len).any(|entry| {
                             let kind = entry.pointer("/kind").and_then(Value::as_str).unwrap_or("");
                             let content = entry
                                 .pointer("/content")
@@ -885,11 +892,18 @@ impl CaseRuntime<'_> {
                             kind == "assistant_message"
                                 && !content.is_empty()
                                 && entry_status == "completed"
-                        })
-                    })
-                    .unwrap_or(false);
-                status_idle && assistant_complete
-            })?;
+                        });
+                    status_idle && assistant_complete
+                })?;
+        for assertion in &expect.assertions {
+            evaluate_post_submit_assertion(assertion, &final_snapshot, baseline_len)
+                .with_context(|| {
+                    format!(
+                        "case '{}' SubmitAndWaitIdle assertion '{assertion}' failed; snapshot:\n{final_snapshot:#}",
+                        self.case_name,
+                    )
+                })?;
+        }
         Ok(())
     }
 
@@ -900,21 +914,27 @@ impl CaseRuntime<'_> {
         auth: &AuthMode,
         expect: &SimpleExpect,
     ) -> Result<()> {
+        // Codex pass-1 P2 — same baseline trick as
+        // `run_submit_and_wait_idle`: capture the transcript length
+        // BEFORE submit so the predicate and assertion evaluator
+        // both restrict their view to entries appended for THIS
+        // turn. Otherwise a stale completed entry from a prior
+        // submit could satisfy the wait, and a stale failure
+        // marker could match `transcript_contains_any:` even when
+        // the new turn is still streaming.
+        let baseline_len = current_transcript_len(&self.session.snapshot()?);
         // POST /messages first; reuse the standard submit path so
         // status / error code semantics match `run_submit`.
         self.run_submit(text, token, auth, expect)?;
         // Then poll /session until either:
         //   * status == "error" (fault branch — invalid patch
         //     bubbled up to a session-level error), OR
-        //   * status == "idle" AND the transcript contains either
-        //     a completed assistant_message OR a failed tool_call
-        //     (the apply_patch failure path lands the failure as a
-        //     `tool_call` entry with status="failed", and the
-        //     fixture's text response lands an assistant_message
-        //     before that).
-        // Searching the whole transcript (rather than only the
-        // tail) covers Wave 5's apply_patch flow where the tool
-        // call entry follows the assistant message.
+        //   * status == "idle" AND a NEW transcript entry (after
+        //     `baseline_len`) is either a completed
+        //     assistant_message or a tool_call with completed /
+        //     failed status (apply_patch failure lands as a
+        //     tool_call entry with status="failed"; the fixture's
+        //     follow-up text lands an assistant_message before).
         let final_snapshot =
             self.session
                 .wait_for_snapshot(Duration::from_secs(15), |snapshot| {
@@ -928,34 +948,27 @@ impl CaseRuntime<'_> {
                     if status != "idle" {
                         return false;
                     }
-                    snapshot
-                        .pointer("/transcript")
-                        .and_then(Value::as_array)
-                        .map(|entries| {
-                            entries.iter().any(|entry| {
-                                let kind =
-                                    entry.pointer("/kind").and_then(Value::as_str).unwrap_or("");
-                                let entry_status = entry
-                                    .pointer("/status")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("");
-                                (kind == "assistant_message" && entry_status == "completed")
-                                    || (kind == "tool_call"
-                                        && (entry_status == "completed"
-                                            || entry_status == "failed"))
-                                    || kind == "tool_result"
-                                    || kind == "system_message"
-                            })
-                        })
-                        .unwrap_or(false)
+                    new_transcript_entries(snapshot, baseline_len).any(|entry| {
+                        let kind = entry.pointer("/kind").and_then(Value::as_str).unwrap_or("");
+                        let entry_status = entry
+                            .pointer("/status")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        (kind == "assistant_message" && entry_status == "completed")
+                            || (kind == "tool_call"
+                                && (entry_status == "completed" || entry_status == "failed"))
+                            || kind == "tool_result"
+                            || kind == "system_message"
+                    })
                 })?;
         for assertion in &expect.assertions {
-            evaluate_terminal_snapshot_assertion(assertion, &final_snapshot).with_context(|| {
-                format!(
-                    "case '{}' SubmitAndWaitTerminal assertion '{assertion}' failed; snapshot:\n{final_snapshot:#}",
-                    self.case_name,
-                )
-            })?;
+            evaluate_post_submit_assertion(assertion, &final_snapshot, baseline_len)
+                .with_context(|| {
+                    format!(
+                        "case '{}' SubmitAndWaitTerminal assertion '{assertion}' failed; snapshot:\n{final_snapshot:#}",
+                        self.case_name,
+                    )
+                })?;
         }
         Ok(())
     }
@@ -1419,10 +1432,50 @@ pub fn forged_controller_token() -> &'static str {
     FORGED_CONTROLLER_TOKEN
 }
 
-/// Evaluate an assertion against the snapshot returned by
-/// `Step::SubmitAndWaitTerminal`. Generation cases lean on
-/// `transcript_contains:` / `transcript_contains_any:` here.
-fn evaluate_terminal_snapshot_assertion(assertion: &str, snapshot: &Value) -> Result<()> {
+/// Length of the snapshot's transcript array, or `0` if the
+/// snapshot has no transcript field. Used by SubmitAndWait* steps
+/// to pin a per-turn baseline so subsequent assertions can ignore
+/// stale entries appended by earlier submits in the same case.
+fn current_transcript_len(snapshot: &Value) -> usize {
+    snapshot
+        .pointer("/transcript")
+        .and_then(Value::as_array)
+        .map(|a| a.len())
+        .unwrap_or(0)
+}
+
+/// Iterator over transcript entries appended after `baseline_len`.
+/// Returns an empty iterator when the snapshot has no transcript or
+/// when the runtime trimmed the array below the baseline (defensive
+/// — not expected in production cases).
+fn new_transcript_entries(snapshot: &Value, baseline_len: usize) -> impl Iterator<Item = &Value> {
+    snapshot
+        .pointer("/transcript")
+        .and_then(Value::as_array)
+        .map(|entries| {
+            if baseline_len >= entries.len() {
+                [].iter()
+            } else {
+                entries[baseline_len..].iter()
+            }
+        })
+        .into_iter()
+        .flatten()
+}
+
+/// Evaluate an assertion against the snapshot returned after a
+/// `Step::SubmitAndWaitIdle` / `Step::SubmitAndWaitTerminal`.
+/// Snapshot-wide assertions (e.g. `snapshot_status_idle`) inspect
+/// the whole snapshot; transcript needle assertions
+/// (`transcript_contains:`, `transcript_contains_any:`) restrict
+/// their search to entries appended after `baseline_len` so a
+/// stale entry from a prior submit can't satisfy a needle intended
+/// for the current turn — Codex pass-1 P2 follow-up.
+fn evaluate_post_submit_assertion(
+    assertion: &str,
+    snapshot: &Value,
+    baseline_len: usize,
+) -> Result<()> {
     match assertion {
         "snapshot_status_idle" => {
             let status = snapshot
@@ -1456,13 +1509,15 @@ fn evaluate_terminal_snapshot_assertion(assertion: &str, snapshot: &Value) -> Re
         }
         other if other.starts_with("transcript_contains:") => {
             let needle = other.trim_start_matches("transcript_contains:");
-            let transcript = snapshot
-                .pointer("/transcript")
-                .and_then(Value::as_array)
-                .ok_or_else(|| anyhow!("snapshot missing /transcript array"))?;
-            let haystack = serde_json::to_string(transcript).unwrap_or_default();
+            let new_entries: Vec<&Value> = new_transcript_entries(snapshot, baseline_len).collect();
+            if new_entries.is_empty() {
+                bail!(
+                    "expected at least one transcript entry appended after baseline_len={baseline_len}, but the runtime appended none",
+                );
+            }
+            let haystack = serde_json::to_string(&new_entries).unwrap_or_default();
             if !haystack.contains(needle) {
-                bail!("transcript did not contain '{needle}'; serialised transcript:\n{haystack}");
+                bail!("new transcript entries did not contain '{needle}'; entries:\n{haystack}",);
             }
             Ok(())
         }
@@ -1472,17 +1527,19 @@ fn evaluate_terminal_snapshot_assertion(assertion: &str, snapshot: &Value) -> Re
             if needles.is_empty() {
                 bail!("'transcript_contains_any:' assertion needs at least one needle");
             }
-            let transcript = snapshot
-                .pointer("/transcript")
-                .and_then(Value::as_array)
-                .ok_or_else(|| anyhow!("snapshot missing /transcript array"))?;
-            let haystack = serde_json::to_string(transcript).unwrap_or_default();
+            let new_entries: Vec<&Value> = new_transcript_entries(snapshot, baseline_len).collect();
+            if new_entries.is_empty() {
+                bail!(
+                    "expected at least one transcript entry appended after baseline_len={baseline_len}, but the runtime appended none",
+                );
+            }
+            let haystack = serde_json::to_string(&new_entries).unwrap_or_default();
             if !needles.iter().any(|needle| haystack.contains(needle)) {
-                bail!("transcript matched none of {needles:?}; serialised transcript:\n{haystack}",);
+                bail!("new transcript entries matched none of {needles:?}; entries:\n{haystack}",);
             }
             Ok(())
         }
-        other => bail!("unsupported terminal-snapshot assertion '{other}'"),
+        other => bail!("unsupported post-submit assertion '{other}'"),
     }
 }
 
