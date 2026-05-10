@@ -50,6 +50,11 @@ pub struct CodeSessionOptions {
     /// answer. Other matrices leave it `None` and inherit the
     /// runtime's `on-request` default.
     pub approval_policy: Option<String>,
+    /// Wave 7 / PR 7 — extra env vars to export to the spawned
+    /// process. Applied AFTER the harness's own defaults so a case
+    /// can override `LIBRA_LOG_FILE` (security redaction case
+    /// drives this) or `LIBRA_LOG`. Empty by default.
+    pub extra_env: Vec<(String, String)>,
 }
 
 impl CodeSessionOptions {
@@ -63,7 +68,18 @@ impl CodeSessionOptions {
             lease_duration_ms: None,
             context: None,
             approval_policy: None,
+            extra_env: Vec::new(),
         }
+    }
+
+    /// Wave 7 / PR 7 — append `(key, value)` to the env vars
+    /// exported to the spawned `libra code`. Caller-supplied keys
+    /// override the harness defaults applied earlier (e.g. a case
+    /// can redirect `LIBRA_LOG_FILE` to a path containing a
+    /// secret-like substring to test redaction).
+    pub fn with_extra_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.extra_env.push((key.into(), value.into()));
+        self
     }
 
     /// Force the spawned `libra code` into a specific context mode
@@ -262,6 +278,12 @@ impl CodeSession {
         if let Some(ms) = options.lease_duration_ms {
             cmd.env("LIBRA_CODE_LEASE_DURATION_MS", ms.to_string());
         }
+        // Wave 7: per-case env overrides apply LAST so they can
+        // shadow the harness defaults above (notably LIBRA_LOG_FILE
+        // for the security redaction case).
+        for (key, value) in &options.extra_env {
+            cmd.env(key, value);
+        }
 
         let child = pair
             .slave
@@ -374,6 +396,28 @@ impl CodeSession {
 
     pub fn artifact_dir(&self) -> &Path {
         &self.logs_dir
+    }
+
+    /// Wave 7 / PR 7 — accessor for the harness-issued control
+    /// token so security cases can assert it does NOT leak into
+    /// diagnostics or audit-log output.
+    pub fn control_token_value(&self) -> &str {
+        &self.control_token
+    }
+
+    /// Wave 7 / PR 7 — fully-qualified `/api/code/controller/attach`
+    /// URL string. The parallel-attach state case spawns its own
+    /// per-thread `reqwest::blocking::Client` (because `CodeSession`
+    /// is not `Sync`) and needs the URL by value to do so.
+    pub fn matrix_attach_url(&self) -> String {
+        self.url("/controller/attach")
+    }
+
+    /// Wave 7 / PR 7 — accessor for the most recently issued
+    /// controller (lease) token, or `None` if no attach has run
+    /// yet. Mirrors `control_token_value()` for redaction asserts.
+    pub fn current_controller_token(&self) -> Option<&str> {
+        self.controller_token.as_deref()
     }
 
     /// Absolute path to the temporary repo this session was spawned in.
@@ -652,7 +696,7 @@ impl CodeSession {
     // -------------------------------------------------------------------
 
     pub fn matrix_attach(
-        &mut self,
+        &self,
         kind: &str,
         client_id: &str,
         auth: &super::matrix::AuthMode,
@@ -718,6 +762,112 @@ impl CodeSession {
         let status = response.status();
         let body = response.json().unwrap_or_else(|_| json!({}));
         Ok((status, body))
+    }
+
+    /// Wave 7 / PR 7 — POST `/api/code/messages` with a body of
+    /// `bytes` repeated `'x'`s, parameterised auth/token like the
+    /// rest of the matrix submit family. State cases use this for
+    /// the 256 KiB / 257 KiB / 1 MiB boundary asserts.
+    pub fn matrix_submit_bytes(
+        &self,
+        bytes: usize,
+        token: &super::matrix::TokenSource,
+        auth: &super::matrix::AuthMode,
+        tokens: &std::collections::HashMap<super::matrix::TokenSlot, String>,
+        timeout: Option<Duration>,
+    ) -> Result<(StatusCode, Value)> {
+        let mut request_builder = self.client.post(self.url("/messages"));
+        // Per-call timeout override so a 1 MiB drain test can give
+        // the runtime more time without bumping the harness-wide
+        // 5 s ceiling. None inherits the default client timeout.
+        if let Some(timeout) = timeout {
+            let scoped = Client::builder()
+                .timeout(timeout)
+                .build()
+                .context("failed to build per-call HTTP client")?;
+            request_builder = scoped.post(self.url("/messages"));
+        }
+        let text = "x".repeat(bytes);
+        let mut request = request_builder.json(&json!({ "text": text }));
+        request = self.apply_controller_token(request, token, tokens);
+        request = self.apply_control_auth(request, auth);
+        let response = request
+            .send()
+            .context("failed to send matrix submit-bytes request")?;
+        let status = response.status();
+        let body = response.json().unwrap_or_else(|_| json!({}));
+        Ok((status, body))
+    }
+
+    /// Wave 7 / PR 7 — POST `/api/code/control/cancel`. Idle-state
+    /// state cases use this to exercise the documented
+    /// `SESSION_BUSY` rejection path.
+    pub fn matrix_cancel(
+        &self,
+        token: &super::matrix::TokenSource,
+        auth: &super::matrix::AuthMode,
+        tokens: &std::collections::HashMap<super::matrix::TokenSlot, String>,
+    ) -> Result<(StatusCode, Value)> {
+        let mut request = self.client.post(self.url("/control/cancel"));
+        request = self.apply_controller_token(request, token, tokens);
+        request = self.apply_control_auth(request, auth);
+        let response = request
+            .send()
+            .context("failed to send matrix cancel request")?;
+        let status = response.status();
+        let body = response.json().unwrap_or_else(|_| json!({}));
+        Ok((status, body))
+    }
+
+    /// Wave 7 / PR 7 — GET `/api/code/diagnostics` and return the
+    /// raw response body string so security cases can pin redaction
+    /// behaviour without re-deserialising the JSON.
+    pub fn diagnostics_raw_text(&self) -> Result<String> {
+        let response = self
+            .client
+            .get(self.url("/diagnostics"))
+            .send()
+            .context("failed to GET /diagnostics")?;
+        response
+            .text()
+            .context("failed to read /diagnostics body as text")
+    }
+
+    /// Wave 7 / PR 7 — GET `/api/code/threads?limit=&offset=`. The
+    /// query params are passed through verbatim (caller may use
+    /// `Some("abc")` to drive the validation-error case) and the
+    /// response is returned as `(StatusCode, body)` regardless of
+    /// success status.
+    pub fn matrix_get_threads(
+        &self,
+        limit: Option<&str>,
+        offset: Option<&str>,
+    ) -> Result<(StatusCode, Value)> {
+        let mut request = self.client.get(self.url("/threads"));
+        let mut query: Vec<(&str, &str)> = Vec::new();
+        if let Some(l) = limit {
+            query.push(("limit", l));
+        }
+        if let Some(o) = offset {
+            query.push(("offset", o));
+        }
+        if !query.is_empty() {
+            request = request.query(&query);
+        }
+        let response = request.send().context("failed to GET /threads")?;
+        let status = response.status();
+        let body = response.json().unwrap_or_else(|_| json!({}));
+        Ok((status, body))
+    }
+
+    /// Wave 7 / PR 7 — return the contents of the spawned process's
+    /// `libra.log` so the audit-redaction case can scan for both
+    /// the present marker (`controller.attach`) and the absent
+    /// secret-like client id.
+    pub fn libra_log_text(&self) -> Result<String> {
+        let path = self.logs_dir.join("libra.log");
+        fs::read_to_string(&path)
+            .with_context(|| format!("failed to read libra log at '{}'", path.display()))
     }
 
     /// Wave 6 / PR 6 — POST `/api/code/interactions/{id}` with a

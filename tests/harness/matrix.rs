@@ -96,6 +96,13 @@ pub struct CaseOptions {
     /// the human approval gate.
     #[serde(default, rename = "approvalPolicy")]
     pub approval_policy: Option<String>,
+    /// Wave 7 / PR 7 — extra environment variables to export to the
+    /// spawned `libra code` process. Security cases use this to
+    /// inject `LIBRA_LOG_FILE` paths that contain secret-like
+    /// substrings so the diagnostics redactor can be exercised
+    /// end-to-end.
+    #[serde(default, rename = "extraEnv")]
+    pub extra_env: HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -303,6 +310,77 @@ pub enum Step {
         response: InteractionResponseSpec,
         expect: SimpleExpect,
     },
+    /// Wave 7 / PR 7 — fire two automation `attach` requests
+    /// concurrently and assert the runtime accepts exactly one and
+    /// rejects the other with `CONTROLLER_CONFLICT`. State case
+    /// `state_two_clients_attach_parallel_one_wins_one_conflict`
+    /// owns this — without a parallel primitive a serial harness
+    /// would never see the race.
+    ParallelAttach {
+        name: String,
+        kind: String,
+        #[serde(rename = "clientIds")]
+        client_ids: Vec<String>,
+        #[serde(default = "default_auth")]
+        auth: AuthMode,
+        expect: ParallelAttachExpect,
+    },
+    /// Wave 7 / PR 7 — POST `/api/code/messages` with a body of
+    /// `bytes` repeated `'x'`s. The runtime exposes 256 KiB as the
+    /// accepted ceiling; 257 KiB and above must surface
+    /// `PAYLOAD_TOO_LARGE` without hanging the connection.
+    /// `timeoutMs` overrides the per-call HTTP client timeout for
+    /// the 1 MiB drain case.
+    SubmitBytes {
+        name: String,
+        bytes: usize,
+        token: TokenSource,
+        #[serde(default = "default_auth")]
+        auth: AuthMode,
+        #[serde(default, rename = "timeoutMs")]
+        timeout_ms: Option<u64>,
+        expect: SimpleExpect,
+    },
+    /// Wave 7 / PR 7 — POST `/api/code/control/cancel`. Used by
+    /// the idle-cancel state case which expects 409 / SESSION_BUSY
+    /// per the documented contract.
+    Cancel {
+        name: String,
+        token: TokenSource,
+        #[serde(default = "default_auth")]
+        auth: AuthMode,
+        expect: SimpleExpect,
+    },
+    /// Wave 7 / PR 7 — GET `/api/code/diagnostics` and run a list
+    /// of "does_not_contain:<needle>" / "contains:<needle>" /
+    /// `does_not_contain_control_token` /
+    /// `does_not_contain_controller_token` assertions over the raw
+    /// response body so the security matrix can pin redaction
+    /// behaviour without re-deserialising the JSON.
+    DiagnosticsRaw {
+        name: String,
+        expect: AssertionsExpect,
+    },
+    /// Wave 7 / PR 7 — GET `/api/code/threads` with optional
+    /// `limit` / `offset` query params. Both are sent verbatim
+    /// (caller may pass `Some("abc")` to drive the validation-error
+    /// case). Assertions cover the response body.
+    GetThreads {
+        name: String,
+        #[serde(default)]
+        limit: Option<String>,
+        #[serde(default)]
+        offset: Option<String>,
+        expect: ThreadsExpect,
+    },
+    /// Wave 7 / PR 7 — read the spawned process's `libra.log` file
+    /// and run contains/does-not-contain assertions over the raw
+    /// text. Used by the audit-redaction case to prove a
+    /// secret-like client id was scrubbed.
+    LibraLogRaw {
+        name: String,
+        expect: AssertionsExpect,
+    },
 }
 
 fn default_event_timeout_ms() -> u64 {
@@ -418,6 +496,33 @@ pub struct InteractionResponseSpec {
     pub answers: HashMap<String, Vec<String>>,
 }
 
+/// Wave 7 — expectation envelope for `Step::ParallelAttach`. The
+/// runtime non-deterministically picks a winner so we list both
+/// expected statuses + error codes "in any order"; the runner
+/// matches the multiset of (status, error_code) pairs it
+/// actually observed.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ParallelAttachExpect {
+    #[serde(rename = "statusesAnyOrder")]
+    pub statuses_any_order: Vec<u16>,
+    #[serde(default, rename = "errorCodes")]
+    pub error_codes: Vec<Option<String>>,
+}
+
+/// Wave 7 — expectation envelope for `Step::GetThreads`. The
+/// success case asserts the body is an array clamped to a
+/// per-page maximum; the failure case asserts the JSON error
+/// envelope shape (status / errorCode / message). Both share
+/// `assertions` for the shared needle vocabulary.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ThreadsExpect {
+    pub status: u16,
+    #[serde(default, rename = "errorCode")]
+    pub error_code: Option<String>,
+    #[serde(default)]
+    pub assertions: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum TokenSlot {
@@ -487,6 +592,10 @@ pub fn find_case(file: &CaseFile, name: &str) -> Result<Case> {
 
 /// Merge per-case options on top of the file-level defaults.
 fn effective_options(defaults: &CaseOptions, case: &CaseOptions) -> CaseOptions {
+    let mut extra_env = defaults.extra_env.clone();
+    for (k, v) in &case.extra_env {
+        extra_env.insert(k.clone(), v.clone());
+    }
     CaseOptions {
         control: case.control.clone().or_else(|| defaults.control.clone()),
         browser_control: case
@@ -499,6 +608,7 @@ fn effective_options(defaults: &CaseOptions, case: &CaseOptions) -> CaseOptions 
             .approval_policy
             .clone()
             .or_else(|| defaults.approval_policy.clone()),
+        extra_env,
     }
 }
 
@@ -541,6 +651,12 @@ pub fn build_session_options(file: &CaseFile, case: &Case) -> CodeSessionOptions
     if let Some(policy) = merged.approval_policy.as_deref() {
         options = options.with_approval_policy(policy);
     }
+    // Wave 7: extra_env iteration order is HashMap-arbitrary, but
+    // each `(key, value)` is independent so the runtime sees the
+    // same final environment regardless of insertion order.
+    for (key, value) in &merged.extra_env {
+        options = options.with_extra_env(key, value);
+    }
     options
 }
 
@@ -582,6 +698,12 @@ fn step_name(step: &Step) -> &str {
         Step::RunRepoCommand { name, .. } => name,
         Step::WaitInteractionPending { name, .. } => name,
         Step::RespondInteraction { name, .. } => name,
+        Step::ParallelAttach { name, .. } => name,
+        Step::SubmitBytes { name, .. } => name,
+        Step::Cancel { name, .. } => name,
+        Step::DiagnosticsRaw { name, .. } => name,
+        Step::GetThreads { name, .. } => name,
+        Step::LibraLogRaw { name, .. } => name,
     }
 }
 
@@ -674,6 +796,35 @@ impl CaseRuntime<'_> {
                 expect,
                 ..
             } => self.run_respond_interaction(interaction_id, token, auth, response, expect),
+            Step::ParallelAttach {
+                kind,
+                client_ids,
+                auth,
+                expect,
+                ..
+            } => self.run_parallel_attach(kind, client_ids, auth, expect),
+            Step::SubmitBytes {
+                bytes,
+                token,
+                auth,
+                timeout_ms,
+                expect,
+                ..
+            } => self.run_submit_bytes(*bytes, token, auth, *timeout_ms, expect),
+            Step::Cancel {
+                token,
+                auth,
+                expect,
+                ..
+            } => self.run_cancel(token, auth, expect),
+            Step::DiagnosticsRaw { expect, .. } => self.run_diagnostics_raw(expect),
+            Step::GetThreads {
+                limit,
+                offset,
+                expect,
+                ..
+            } => self.run_get_threads(limit.as_deref(), offset.as_deref(), expect),
+            Step::LibraLogRaw { expect, .. } => self.run_libra_log_raw(expect),
         }
     }
 
@@ -1196,6 +1347,209 @@ impl CaseRuntime<'_> {
         Ok(())
     }
 
+    fn run_parallel_attach(
+        &mut self,
+        kind: &str,
+        client_ids: &[String],
+        auth: &AuthMode,
+        expect: &ParallelAttachExpect,
+    ) -> Result<()> {
+        if client_ids.len() != expect.statuses_any_order.len() {
+            bail!(
+                "case '{}' parallelAttach: clientIds.len={} but statusesAnyOrder.len={}",
+                self.case_name,
+                client_ids.len(),
+                expect.statuses_any_order.len(),
+            );
+        }
+        // Spawn one OS thread per client_id so the runtime sees
+        // genuinely racing connections. `CodeSession` isn't `Sync`
+        // (it owns the PTY writer `Box<dyn Write + Send>`), so we
+        // can't share `&self.session` across threads. Each thread
+        // builds its own short-lived `reqwest::blocking::Client`
+        // and gets the small set of values it needs by value
+        // (URL + control token); the actual race surface is the
+        // axum router, not the harness.
+        let url = self.session.matrix_attach_url();
+        let control_token = self.session.control_token_value().to_string();
+        let kind = kind.to_string();
+        let results: Vec<Result<(StatusCode, Value)>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = client_ids
+                .iter()
+                .map(|client_id| {
+                    let url = url.clone();
+                    let control_token = control_token.clone();
+                    let kind = kind.clone();
+                    let client_id = client_id.clone();
+                    let auth = auth.clone();
+                    scope.spawn(move || {
+                        parallel_attach_request(&url, &control_token, &kind, &client_id, &auth)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("attach thread panicked"))
+                .collect()
+        });
+        let mut observed: Vec<(StatusCode, Option<String>)> = Vec::new();
+        for result in results {
+            let (status, body) = result?;
+            let code = body
+                .pointer("/error/code")
+                .and_then(Value::as_str)
+                .or_else(|| body.get("code").and_then(Value::as_str))
+                .map(str::to_string);
+            observed.push((status, code));
+        }
+        // Match observed (status, error_code) pairs against the
+        // expected multiset. Order-independence matters because the
+        // OS scheduler decides which thread reaches the runtime
+        // first.
+        let mut remaining_expected: Vec<(StatusCode, Option<String>)> = expect
+            .statuses_any_order
+            .iter()
+            .zip(
+                expect
+                    .error_codes
+                    .iter()
+                    .cloned()
+                    .chain(std::iter::repeat(None)),
+            )
+            .map(|(status, code)| {
+                StatusCode::from_u16(*status)
+                    .map(|s| (s, code.clone()))
+                    .map_err(|e| anyhow!("invalid expected status {status}: {e}"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for (status, code) in &observed {
+            if let Some(idx) = remaining_expected
+                .iter()
+                .position(|(es, ec)| es == status && ec == code)
+            {
+                remaining_expected.remove(idx);
+            } else {
+                bail!(
+                    "case '{}' parallelAttach observed unexpected (status={status}, errorCode={:?}); observed={:?}, expected={:?}",
+                    self.case_name,
+                    code,
+                    observed,
+                    expect
+                        .statuses_any_order
+                        .iter()
+                        .zip(expect.error_codes.iter())
+                        .collect::<Vec<_>>(),
+                );
+            }
+        }
+        if !remaining_expected.is_empty() {
+            bail!(
+                "case '{}' parallelAttach missing expected outcomes: {remaining_expected:?}; observed={observed:?}",
+                self.case_name,
+            );
+        }
+        Ok(())
+    }
+
+    fn run_submit_bytes(
+        &mut self,
+        bytes: usize,
+        token: &TokenSource,
+        auth: &AuthMode,
+        timeout_ms: Option<u64>,
+        expect: &SimpleExpect,
+    ) -> Result<()> {
+        let timeout = timeout_ms.map(Duration::from_millis);
+        let (status, body) =
+            self.session
+                .matrix_submit_bytes(bytes, token, auth, &self.tokens, timeout)?;
+        let expected_status = StatusCode::from_u16(expect.status).with_context(|| {
+            format!(
+                "invalid expected status {} in case '{}'",
+                expect.status, self.case_name
+            )
+        })?;
+        ensure_status(status, expected_status, &body)?;
+        if let Some(code) = expect.error_code.as_deref() {
+            ensure_error_code(&body, code)?;
+        }
+        Ok(())
+    }
+
+    fn run_cancel(
+        &mut self,
+        token: &TokenSource,
+        auth: &AuthMode,
+        expect: &SimpleExpect,
+    ) -> Result<()> {
+        let (status, body) = self.session.matrix_cancel(token, auth, &self.tokens)?;
+        let expected_status = StatusCode::from_u16(expect.status).with_context(|| {
+            format!(
+                "invalid expected status {} in case '{}'",
+                expect.status, self.case_name
+            )
+        })?;
+        ensure_status(status, expected_status, &body)?;
+        if let Some(code) = expect.error_code.as_deref() {
+            ensure_error_code(&body, code)?;
+        }
+        Ok(())
+    }
+
+    fn run_diagnostics_raw(&self, expect: &AssertionsExpect) -> Result<()> {
+        let body = self.session.diagnostics_raw_text()?;
+        for assertion in &expect.assertions {
+            evaluate_raw_text_assertion(assertion, &body, self.session).with_context(|| {
+                format!(
+                    "case '{}' diagnostics raw assertion '{assertion}' failed",
+                    self.case_name
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    fn run_get_threads(
+        &self,
+        limit: Option<&str>,
+        offset: Option<&str>,
+        expect: &ThreadsExpect,
+    ) -> Result<()> {
+        let (status, body) = self.session.matrix_get_threads(limit, offset)?;
+        let expected_status = StatusCode::from_u16(expect.status).with_context(|| {
+            format!(
+                "invalid expected status {} in case '{}'",
+                expect.status, self.case_name
+            )
+        })?;
+        ensure_status(status, expected_status, &body)?;
+        if let Some(code) = expect.error_code.as_deref() {
+            ensure_error_code(&body, code)?;
+        }
+        for assertion in &expect.assertions {
+            evaluate_threads_assertion(assertion, &body).with_context(|| {
+                format!(
+                    "case '{}' threads assertion '{assertion}' failed; body:\n{body:#}",
+                    self.case_name
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    fn run_libra_log_raw(&self, expect: &AssertionsExpect) -> Result<()> {
+        let text = self.session.libra_log_text()?;
+        for assertion in &expect.assertions {
+            evaluate_raw_text_assertion(assertion, &text, self.session).with_context(|| {
+                format!(
+                    "case '{}' libra log assertion '{assertion}' failed",
+                    self.case_name
+                )
+            })?;
+        }
+        Ok(())
+    }
+
     fn run_attach(
         &mut self,
         kind: &str,
@@ -1371,6 +1725,26 @@ impl CaseRuntime<'_> {
                     bail!("renew leaseExpiresAt {parsed} did not extend past baseline {baseline}",);
                 }
             }
+            // Wave 7 — state-serial case asserts the post-detach
+            // re-attach issues a NEW controllerToken so a stale
+            // token from the prior session can't drive the new
+            // lease. Compares the freshly returned `controllerToken`
+            // against whatever was previously saved into the
+            // `Stale` slot.
+            "controller_token_differs_from_stale" => {
+                let stale = self.tokens.get(&TokenSlot::Stale).ok_or_else(|| {
+                    anyhow!("no saved controllerToken under Stale slot for differs assertion")
+                })?;
+                let current = body
+                    .get("controllerToken")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("attach response missing controllerToken: {body}"))?;
+                if current == stale {
+                    bail!(
+                        "expected new controllerToken to differ from stale, but both are '{stale}'",
+                    );
+                }
+            }
             other => bail!("unsupported attach assertion '{other}'"),
         }
         Ok(())
@@ -1404,14 +1778,25 @@ fn evaluate_snapshot_assertion(
                 .unwrap_or("");
             Ok(kind == "automation")
         }
-        // Wave 6 — session status assertions used by the approval
-        // flow matrix to gate WaitSnapshot on the runtime's
-        // `CodeUiSessionStatus` enum (snake_case in JSON).
-        "status_idle" => Ok(snapshot_status(snapshot) == "idle"),
-        "status_thinking" => Ok(snapshot_status(snapshot) == "thinking"),
-        "status_executing_tool" => Ok(snapshot_status(snapshot) == "executing_tool"),
-        "status_awaiting_interaction" => Ok(snapshot_status(snapshot) == "awaiting_interaction"),
-        "status_error" => Ok(snapshot_status(snapshot) == "error"),
+        // Wave 6 / Wave 7 — session status assertions. Both the
+        // bare `status_*` and the `snapshot_status_*` aliases are
+        // accepted so a JSON case can use either naming under
+        // `Step::WaitSnapshot` without runner vocabulary drift.
+        "status_idle" | "snapshot_status_idle" => Ok(snapshot_status(snapshot) == "idle"),
+        "status_thinking" | "snapshot_status_thinking" => {
+            Ok(snapshot_status(snapshot) == "thinking")
+        }
+        "status_executing_tool" | "snapshot_status_executing_tool" => {
+            Ok(snapshot_status(snapshot) == "executing_tool")
+        }
+        "status_awaiting_interaction" | "snapshot_status_awaiting_interaction" => {
+            Ok(snapshot_status(snapshot) == "awaiting_interaction")
+        }
+        "status_error" | "snapshot_status_error" => Ok(snapshot_status(snapshot) == "error"),
+        "snapshot_status_error_or_idle" => {
+            let s = snapshot_status(snapshot);
+            Ok(s == "error" || s == "idle")
+        }
         // Wave 6 — interaction-shape assertions used after
         // RespondInteraction resolves the awaiting state.
         // `interaction_pending:<id>` matches a PENDING interaction;
@@ -1685,6 +2070,39 @@ pub fn forged_controller_token() -> &'static str {
     FORGED_CONTROLLER_TOKEN
 }
 
+/// Wave 7 — per-thread parallel attach helper. Builds a fresh
+/// `reqwest::blocking::Client` so each thread holds its own
+/// connection, which lets two attaches genuinely race the
+/// runtime instead of being serialised by a shared client.
+fn parallel_attach_request(
+    url: &str,
+    control_token: &str,
+    kind: &str,
+    client_id: &str,
+    auth: &AuthMode,
+) -> Result<(StatusCode, Value)> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .context("failed to build per-thread parallel-attach client")?;
+    let mut request = client
+        .post(url)
+        .json(&serde_json::json!({ "clientId": client_id, "kind": kind }));
+    request = match auth {
+        AuthMode::ValidControl => request.header("X-Libra-Control-Token", control_token),
+        AuthMode::InvalidControl => request.header("X-Libra-Control-Token", "00000000-deadbeef"),
+        AuthMode::MissingControl | AuthMode::None => request,
+    };
+    let response = request
+        .send()
+        .context("failed to send parallel attach request")?;
+    let status = response.status();
+    let body = response
+        .json()
+        .unwrap_or_else(|_| Value::Object(Default::default()));
+    Ok((status, body))
+}
+
 /// Length of the snapshot's transcript array, or `0` if the
 /// snapshot has no transcript field. Used by SubmitAndWait* steps
 /// to pin a per-turn baseline so subsequent assertions can ignore
@@ -1824,6 +2242,89 @@ fn evaluate_file_assertion(assertion: &str, contents: &str) -> Result<()> {
 /// agnostic to which channel `rustc` / `cargo` use for "test result:
 /// ok"-style summaries (rustc emits to stdout; some wrappers send
 /// it to stderr).
+/// Wave 7 — generic raw-text assertion vocabulary used by
+/// `Step::DiagnosticsRaw` and `Step::LibraLogRaw`. The session
+/// reference is needed so `does_not_contain_control_token` /
+/// `does_not_contain_controller_token` can substitute the
+/// harness-issued tokens at evaluation time without baking them
+/// into the JSON case file.
+fn evaluate_raw_text_assertion(assertion: &str, text: &str, session: &CodeSession) -> Result<()> {
+    if let Some(needle) = assertion.strip_prefix("contains:") {
+        if !text.contains(needle) {
+            bail!("expected text to contain '{needle}'; full text:\n{text}");
+        }
+        return Ok(());
+    }
+    if let Some(needle) = assertion.strip_prefix("does_not_contain:") {
+        if text.contains(needle) {
+            bail!("expected text to NOT contain '{needle}'; full text:\n{text}");
+        }
+        return Ok(());
+    }
+    if assertion == "does_not_contain_control_token" {
+        let token = session.control_token_value();
+        if !token.is_empty() && text.contains(token) {
+            bail!("text leaks the harness control token");
+        }
+        return Ok(());
+    }
+    if assertion == "does_not_contain_controller_token" {
+        if let Some(token) = session.current_controller_token()
+            && !token.is_empty()
+            && text.contains(token)
+        {
+            bail!("text leaks the issued controller token");
+        }
+        return Ok(());
+    }
+    bail!("unsupported raw-text assertion '{assertion}'")
+}
+
+/// Wave 7 — `/threads` body assertions. The success branch returns
+/// `{ "items": [...] }` (or a bare array); accept both shapes via
+/// `array_root_or_items`. `items_len_lte:<n>` clamps the per-page
+/// page-size requirement; `error_message_contains:<needle>` pins
+/// the human-readable error message field.
+fn evaluate_threads_assertion(assertion: &str, body: &Value) -> Result<()> {
+    if let Some(raw) = assertion.strip_prefix("items_len_lte:") {
+        let max: usize = raw.trim().parse().with_context(|| {
+            format!("'items_len_lte:' assertion expects a non-negative integer, got '{raw}'",)
+        })?;
+        let items = array_root_or_items(body)
+            .ok_or_else(|| anyhow!("threads body is not an array nor has /items array: {body}"))?;
+        if items.len() > max {
+            bail!(
+                "threads page len={} exceeds clamp {max}; body:\n{body:#}",
+                items.len()
+            );
+        }
+        return Ok(());
+    }
+    if let Some(needle) = assertion.strip_prefix("error_message_contains:") {
+        let message = body
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .or_else(|| body.get("message").and_then(Value::as_str))
+            .unwrap_or("");
+        if !message.contains(needle) {
+            bail!("threads error message did not contain '{needle}'; body:\n{body:#}");
+        }
+        return Ok(());
+    }
+    bail!("unsupported threads assertion '{assertion}'")
+}
+
+/// Helper: return the items array regardless of whether the
+/// runtime serialises threads as a bare `[...]` or wraps it in
+/// `{ "items": [...] }`. The `/threads` route currently returns
+/// the wrapped shape but the runner stays forwards-compatible.
+fn array_root_or_items(body: &Value) -> Option<&Vec<Value>> {
+    if let Some(arr) = body.as_array() {
+        return Some(arr);
+    }
+    body.get("items").and_then(Value::as_array)
+}
+
 fn evaluate_command_output_assertion(assertion: &str, output: &Output) -> Result<()> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);

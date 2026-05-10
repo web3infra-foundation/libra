@@ -402,7 +402,11 @@ pub struct CodeUiDiagnostics {
 }
 
 impl CodeUiDiagnostics {
-    fn redact(mut self, redactor: &SecretRedactor) -> Self {
+    /// Wave 7 / PR 7 — exposed `pub(crate)` so the
+    /// `code_diagnostics_handler` in `mod.rs` can apply it before
+    /// serialising the response. Internal-only — automation
+    /// clients never construct this themselves.
+    pub(crate) fn redact(mut self, redactor: &SecretRedactor) -> Self {
         redact_string(&mut self.provider, redactor);
         redact_option_string(&mut self.model, redactor);
         redact_option_string(&mut self.thread_id, redactor);

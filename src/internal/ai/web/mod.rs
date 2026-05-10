@@ -314,7 +314,16 @@ async fn code_diagnostics_handler(
 ) -> Result<Json<serde_json::Value>, WebApiError> {
     ensure_loopback_api_request(remote_addr)?;
     let runtime = code_ui_runtime(&state)?;
-    Ok(Json(serde_json::to_value(runtime.diagnostics().await)?))
+    // Wave 7 / PR 7 — pass diagnostics through `SecretRedactor` so
+    // automation clients never observe the harness control token,
+    // controller token, or secret-like path components from
+    // `LIBRA_LOG_FILE`. The redactor's marker set is the source of
+    // truth (see `SecretRedactor::default_runtime()`); this handler
+    // is only responsible for applying it before serialisation.
+    let redactor = SecretRedactor::default_runtime();
+    Ok(Json(serde_json::to_value(
+        runtime.diagnostics().await.redact(&redactor),
+    )?))
 }
 
 #[derive(Debug, serde::Deserialize)]

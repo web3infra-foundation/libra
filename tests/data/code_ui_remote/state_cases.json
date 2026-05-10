@@ -171,9 +171,9 @@
           }
         },
         {
-          "name": "submit 256 KiB text",
+          "name": "submit text up to the 256 KiB body cap (262133 = 262144 - 11-byte JSON envelope)",
           "op": "submitBytes",
-          "bytes": 262144,
+          "bytes": 262133,
           "token": "current",
           "auth": "valid_control",
           "expect": {
