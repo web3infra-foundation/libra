@@ -1236,6 +1236,16 @@ impl Drop for CodeSession {
         if self.child.is_some() {
             let _ = self.shutdown();
         }
+        // Wave 9 / PR 9 — Codex pass-1 fix: when the child already
+        // exited (e.g. spawn failed because `--resume <bad>` made
+        // the runtime abort early), `child_exited()` cleared
+        // `self.child` long before Drop ran, so the
+        // `if child.is_some()` shutdown branch was a no-op and
+        // the PTY reader thread was never joined. The negative-
+        // path resume tests then race the reader's pty.log flush.
+        // Join unconditionally here so the log file is fully
+        // flushed by the time the test body reads it.
+        self.join_reader();
     }
 }
 
