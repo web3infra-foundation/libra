@@ -1,43 +1,40 @@
 //! Wave 9 / PR 9 — `libra code --resume <thread_id>` CLI surface
-//! coverage (§5.16, partial).
+//! coverage (§5.16).
 //!
 //! What this test pins:
-//!   * The `--resume <uuid>` CLI flag round-trips through
-//!     `SessionStore::load_for_thread_id`. Passing a syntactically
-//!     valid UUID for a session that does not exist surfaces the
-//!     documented "no Libra Code session found …" error and the
-//!     process exits with a non-zero status.
-//!   * `--resume <bad-format>` surfaces the documented
-//!     "expects a canonical thread_id UUID" error.
+//!   * **Happy path**: a chat-only `libra code` session, after
+//!     submitting one user message and shutting down cleanly, can
+//!     be resumed by passing the chat-flow session id (from
+//!     `generate_session_id`, e.g. `19e…-…-0000`) to `--resume`.
+//!     The resumed snapshot must surface the original user message
+//!     in its transcript so the runtime is demonstrably restoring
+//!     prior history rather than starting empty.
+//!   * **Negative — unknown identifier**: passing a syntactically
+//!     valid UUID that does not match any persisted session
+//!     surfaces the documented "no Libra Code session found …"
+//!     error and the process exits non-zero.
+//!   * **Negative — non-existent format**: passing a string that
+//!     is neither a known UUID nor a known chat session id is
+//!     rejected with the same unified "no Libra Code session
+//!     found …" error. Wave 9 follow-up dropped the
+//!     UUID-only pre-validation in `code.rs`; identifier shape is
+//!     now an internal detail of the store, and the CLI only
+//!     enforces non-empty input.
 //!   * The harness extensions
 //!     (`CodeSessionOptions::with_existing_repo_dir`,
 //!     `CodeSessionOptions::with_resume_thread`) drive the spawn
-//!     with the correct argv shape so the broader resume contract
-//!     can build on the same primitives once a session-binding
-//!     entry point is wired through the fake provider path.
+//!     with the correct argv shape, and `existing_repo_dir`
+//!     guarantees the resume invocation re-uses the same
+//!     `working_dir` that scoped the `SessionStore::save`.
 //!
-//! Both validation cases drive a real `libra code` invocation
-//! through a PTY so the runtime's terminal-init guard does not
-//! short-circuit — that's why we use the existing
-//! `harness::CodeSession::spawn` path (which provisions a PTY
-//! pair) and capture the failure mode through the artifact dir
-//! the harness writes for every spawn.
+//! All cases drive a real `libra code` invocation through a PTY
+//! so the runtime's terminal-init guard does not short-circuit —
+//! that's why we use the existing `harness::CodeSession::spawn`
+//! path (which provisions a PTY pair) and capture the resume
+//! outcome through both the live HTTP snapshot and the artifact
+//! dir the harness writes for every spawn.
 //!
 //! What this test does NOT cover (deferred):
-//!   * The full happy-path "spawn → submit → shutdown → resume →
-//!     transcript present" scenario from §5.16. The chat-path
-//!     submit (`/run …`) the harness drives does NOT bind a
-//!     canonical thread — `apply_thread_bundle_to_snapshot` only
-//!     fires when the planning workflow allocates a canonical
-//!     thread_id, and the snapshot's `sessionId` for a chat-only
-//!     session is the runtime's millisecond-id generator output
-//!     (`19e…-…-0000`), NOT a UUID. `code.rs:2634` rejects any
-//!     `--resume` value that isn't UUID-shaped, so the second
-//!     spawn fails before the SessionStore lookup. Closing the
-//!     gap requires either a fake provider path that triggers a
-//!     plan workflow (and therefore a canonical thread bind), or
-//!     a runtime change that lets `--resume` accept the chat
-//!     session's millisecond id. Both are larger than this PR.
 //!   * The §5.16 SIGTERM-mid-turn case — would race the
 //!     synchronous fake provider's assistant flush.
 
@@ -141,20 +138,135 @@ fn resume_with_unknown_uuid_thread_id_surfaces_session_not_found() -> Result<()>
     Ok(())
 }
 
-/// Pin the `--resume <bad-format>` validation path: any
-/// non-UUID value must surface the documented
-/// "expects a canonical thread_id UUID" error.
+/// Pin the `--resume <unknown-shape>` validation path: any
+/// non-existent identifier — UUID-shaped or otherwise — must
+/// surface the unified "no Libra Code session found …" error.
+/// Wave 9 follow-up dropped the early UUID-only pre-check so the
+/// CLI no longer rejects chat-flow session ids before they reach
+/// the store; identifier shape is internal and the failure
+/// message is the same regardless of which alphabet the input
+/// uses.
 #[cfg(feature = "test-provider")]
 #[test]
 #[serial]
-fn resume_with_non_uuid_thread_id_rejects_with_canonical_uuid_error() -> Result<()> {
+fn resume_with_unknown_non_uuid_thread_id_surfaces_session_not_found() -> Result<()> {
     let bad_thread_id = "not-a-uuid-at-all";
     let (pty, libra) = expect_resume_spawn_failure("code-resume-bad-format", bad_thread_id)?;
     let combined = format!("{pty}\n{libra}");
     assert!(
-        combined.contains("--resume expects a canonical thread_id UUID")
-            && combined.contains(bad_thread_id),
-        "combined logs did not include the documented validation error;\npty.log:\n{pty}\nlibra.log:\n{libra}"
+        combined.contains("no Libra Code session found") && combined.contains(bad_thread_id),
+        "combined logs did not include the unified session-not-found error;\npty.log:\n{pty}\nlibra.log:\n{libra}"
+    );
+    Ok(())
+}
+
+/// Wave 9 closure — happy-path `--resume <session_id>`.
+///
+/// 1. Spawn `libra code` against a temp repo with the fake
+///    provider basic_chat fixture.
+/// 2. Submit a single chat turn so `SessionStore::save` flushes
+///    the user message to `<repo>/.libra/sessions/<id>/events.jsonl`.
+/// 3. Capture the snapshot's `sessionId` (chat-flow format,
+///    `{ts:x}-{pid:x}-{counter:x}`) and shut down cleanly so the
+///    `App::leave` fallback save also fires.
+/// 4. Re-spawn `libra code --resume <session_id>` against the
+///    SAME `existing_repo_dir` (the store filters by working
+///    dir) and assert the resumed snapshot's transcript contains
+///    the original user message.
+///
+/// This pins both the runtime change (CLI no longer requires
+/// UUID shape) and the end-to-end persistence contract: chat
+/// sessions ARE saved across runs with no plan-workflow binding.
+#[cfg(feature = "test-provider")]
+#[test]
+#[serial]
+fn resume_with_chat_session_id_restores_prior_transcript() -> Result<()> {
+    let case_name = "code-resume-happy-path";
+    let user_message = "ping-resume-happy-path";
+
+    let repo_root = tempfile::Builder::new()
+        .prefix(&format!("{case_name}-"))
+        .tempdir()
+        .context("failed to create resume tempdir")?;
+    let repo_dir = repo_root.path().join("repo");
+    std::fs::create_dir_all(&repo_dir).context("failed to create repo subdir")?;
+    run_libra_init(&repo_dir)?;
+
+    // First spawn — submit one chat turn and capture the session id.
+    let session_id = {
+        let mut session = CodeSession::spawn(
+            CodeSessionOptions::new(format!("{case_name}-spawn"), fixture_path())
+                .with_existing_repo_dir(repo_dir.clone()),
+        )
+        .context("first spawn (capture session id)")?;
+        // Acquire a controller token so `submit_message` (which goes
+        // through the authorized-write path) is not rejected with
+        // `MISSING_CONTROLLER_TOKEN`.
+        session
+            .attach_automation(case_name)
+            .context("attach automation before submit")?;
+        let status = session
+            .submit_message(user_message)
+            .context("submit chat turn before shutdown")?;
+        if !status.is_success() {
+            bail!("submit returned non-success status {status}");
+        }
+        // Drain the snapshot AFTER submit so we observe the
+        // session_id the runtime persisted alongside the user
+        // message (the runtime always emits a stable id from
+        // first /session GET, but reading post-submit is harmless
+        // and lets us confirm the message landed in the in-memory
+        // transcript before we shut down).
+        let snapshot = session.snapshot().context("snapshot post-submit")?;
+        let id = snapshot
+            .get("sessionId")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                anyhow::anyhow!("snapshot did not surface a sessionId field; got {snapshot:?}")
+            })?;
+        // CodeSession::Drop will issue the clean shutdown that
+        // triggers the App::leave save fallback. Allow any
+        // outstanding writes to flush by dropping explicitly here.
+        drop(session);
+        id
+    };
+
+    if session_id.trim().is_empty() {
+        bail!("captured session_id was empty; cannot resume");
+    }
+
+    // Second spawn — resume with the captured chat-flow id.
+    let resumed = CodeSession::spawn(
+        CodeSessionOptions::new(format!("{case_name}-resume"), fixture_path())
+            .with_existing_repo_dir(repo_dir.clone())
+            .with_resume_thread(&session_id),
+    )
+    .with_context(|| format!("resume spawn for session_id '{session_id}'"))?;
+
+    let snapshot = resumed.snapshot().context("snapshot post-resume")?;
+    let transcript = snapshot
+        .get("transcript")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| {
+            anyhow::anyhow!("resumed snapshot lacked a transcript array; got {snapshot:?}")
+        })?;
+    let restored = transcript.iter().any(|entry| {
+        // Transcript entries serialise to camelCase; the user
+        // message text lands in `content` for chat entries and
+        // `title` for some entry kinds. Match either to keep the
+        // assertion robust against the entry-kind classification.
+        let matches = |key: &str| {
+            entry
+                .get(key)
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.contains(user_message))
+        };
+        matches("content") || matches("title")
+    });
+    assert!(
+        restored,
+        "resumed transcript did not include the original user message '{user_message}';\nsnapshot: {snapshot}"
     );
     Ok(())
 }

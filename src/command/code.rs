@@ -2631,11 +2631,16 @@ where
     let storage_root = resolve_storage_root(registry.working_dir());
     let session_store = SessionStore::from_storage_path(&storage_root);
     let session = if let Some(thread_id) = params.resume_thread_id.as_deref() {
-        Uuid::parse_str(thread_id).map_err(|error| {
-            CliError::command_usage(format!(
-                "--resume expects a canonical thread_id UUID (got '{thread_id}': {error})"
-            ))
-        })?;
+        // The resume identifier may be either a canonical UUID (planning-bound
+        // thread) or a chat-flow session id from `generate_session_id`
+        // (millisecond-hex / pid-hex / counter-hex). The store accepts either
+        // shape — reject empty input here and let `load_for_thread_id` surface
+        // a unified "no session found" error for any unknown identifier.
+        if thread_id.trim().is_empty() {
+            return Err(CliError::command_usage(
+                "--resume requires a non-empty thread_id",
+            ));
+        }
         match session_store.load_for_thread_id(thread_id, &working_dir_str) {
             Ok(Some(session)) => session,
             Ok(None) => {
