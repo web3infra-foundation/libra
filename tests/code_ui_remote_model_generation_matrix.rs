@@ -1,5 +1,6 @@
 //! Wave 11 / PR 11 — `code_ui_remote_model_generation` matrix
-//! runner skeleton (§5.19, L3, nightly-only).
+//! runner skeleton (§5.19, L3, nightly-only). DEFERRED — see
+//! the closure note at the bottom of this docstring.
 //!
 //! This file is a placeholder for the live-model generation
 //! matrix described in `tests/data/code_ui_remote/model_generation_cases.json`.
@@ -9,6 +10,14 @@
 //! valid `DEEPSEEK_API_KEY` to drive the live provider. Wiring
 //! both is roadmap-sized work: see §6.4 Wave 4 in
 //! `docs/improvement/test.md` for the full design.
+//!
+//! CLOSURE STATUS: NOT closed. The 12 PR Wave roadmap row 11 is
+//! deferred — Codex pass-1 review explicitly flagged that this
+//! file is a deferred placeholder, every case is `#[ignore]`,
+//! and even with `LIBRA_RUN_LIVE=1` the runner unconditionally
+//! bails because `model_from_env_file` is absent from
+//! `tests/harness/matrix.rs`. The roadmap stays open on row 11
+//! until the harness wiring + nightly CI execution land.
 //!
 //! What this skeleton DOES today:
 //!   * Marks every case as `#[ignore]` so a normal `cargo test`

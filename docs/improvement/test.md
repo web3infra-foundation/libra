@@ -796,5 +796,26 @@ cargo test --all --all-features
 1. `cargo test --features test-provider` 在主干 CI 全绿，包含 lease/SSE/state/security/generation/approval/resume/codex/MCP-dual/control-lock 全部矩阵。
 2. nightly CI 跑 `code_ui_remote_model_generation_matrix` 至少连续 5 天通过率 ≥ 90%。
 3. 故意改坏任一 P0 case 的 expected，对应矩阵失败输出含 case/step/snapshot/log tail，**不含 secret**。
-4. [docs/improvement/test.md](test.md)（本文件）与 [docs/automation/local-tui-control.md](../automation/local-tui-control.md) 错误码列表与代码 `CodeUiApiError` 字符串字面量一致——由错误码契约 L0 测试（PR 2）保证。
+4. [docs/improvement/test.md](test.md)（本文件）与 [docs/automation/local-tui-control.md](../automation/local-tui-control.md) 错误码列表与代码 `CodeUiApiError` 字符串字面量一致——由错误码契约 L0 测试（PR 2 + Wave 12 `code_ui_error_code_listing_matches_authoritative_doc`）保证。
+
+## 当前 Wave 状态（2026-05-10 同步）
+
+Wave 1–9 + Wave 12 部分已完成；Wave 10 / 11 / 12 部分均按 Codex pass-1 review 拆为独立后续 PR：
+
+| Wave | 状态 | 备注 |
+|---|---|---|
+| 1 | ✅ closed | 基础设施 + event_stream.rs + 1 条 SSE 回归 |
+| 2 | ✅ closed | CLI dispatch + route loopback + 错误码契约 L0 |
+| 3 | ✅ closed | Lease matrix 9/9 + observe-mode + audit redaction L0 |
+| 4 | ✅ closed | SSE matrix 7/7 |
+| 5 | ✅ closed | Generation matrix 3/3（apply_patch fake fixture） |
+| 6 | ✅ closed | Approval matrix 3/3（accept / reject / `apply_to_future`），并发 pending 已按 §5.11 P1 拆出 |
+| 7 | ✅ closed | State 7/7 + Security 6/6 + diagnostics SecretRedactor wire-up |
+| 8 | ✅ closed | Tool ACL 6/6（含 MCP bridge 前缀防退化） |
+| 9 | ⚠️ partial | 仅交付 `--resume` CLI 表面 2 条 negative-path；happy path 需要 plan-workflow scaffolding 后跟进；§5.13 Codex runtime mock + §5.14 MCP dual entry 仍未交付（roadmap-sized） |
+| 10 | ❌ deferred | TUI 快照需 `insta`，provider boot 需 `httpmock` —— 新增 dev-deps 走单独 PR |
+| 11 | ❌ deferred | `tests/code_ui_remote_model_generation_matrix.rs` 仅占位（`#[ignore]` + LIVE-mode bail），需要 `tests/harness/matrix.rs` 加 `model_from_env_file` provider mode + nightly CI + `.env.test` |
+| 12 | ⚠️ partial | 错误码 doc/code sync L0 测试已加；perf smoke 1 条（10 并发 `/threads`）`#[ignore]` + `LIBRA_RUN_PERF=1`；100k transcript / 5-min SSE soak 仍未交付 |
+
+落地完成判定的全部门只有在 Wave 9 happy path、Wave 10 全量、Wave 11 nightly CI、Wave 12 完整 perf smoke 都补齐之后才算 PASS。当前仓库状态对应"基础矩阵已落地 + 关键 L3 / 性能 / 渲染 deferred"。
 5. 覆盖矩阵第 7 节中 P0 行全部从 ⚠️/❌ 转为 ✅；P1 行至少 70% 转为 ✅。
