@@ -36,10 +36,20 @@
 //!     `think="high"` on the native `/api/chat` request body.
 //!     Pins the third wire shape we ship (Ollama-native, distinct
 //!     from OpenAI-compat and Anthropic).
+//!   * **Zhipu**: client built with custom base URL posts to
+//!     `/chat/completions` (OpenAI-compat shape); body carries
+//!     `model` + non-empty `messages`. Smoke proof for the
+//!     fourth provider on the same OpenAI-compat helper route.
 //!
-//! Coverage deferred to follow-up PRs (same helper, same
-//! pattern):
-//!   * Gemini, Zhipu provider boot smokes.
+//! Coverage deferred to follow-up PRs:
+//!   * **Gemini**: `gemini::client::Client` intentionally has
+//!     no `with_base_url` constructor (the doc at
+//!     `src/internal/ai/providers/gemini/client.rs:71-72` notes
+//!     "no base-URL override is supported because Gemini's
+//!     public API does not have a stable proxy contract").
+//!     Boot smoke needs a runtime change to expose a
+//!     constructor accepting a custom base URL — split out as
+//!     its own roadmap-sized PR.
 //!   * Ollama `--ollama-compact-tools` flag (affects tool-schema
 //!     serialisation; needs a tool-bearing `CompletionRequest`).
 //!   * Missing-API-key error message + `--api-base` override
@@ -58,7 +68,7 @@ use libra::internal::ai::{
     providers::{
         anthropic::client::Client as AnthropicClient, deepseek::client::Client as DeepSeekClient,
         kimi::client::Client as KimiClient, ollama::client::Client as OllamaClient,
-        openai::client::Client as OpenAiClient,
+        openai::client::Client as OpenAiClient, zhipu::client::Client as ZhipuClient,
     },
 };
 use serde_json::json;
@@ -345,6 +355,40 @@ async fn ollama_completion_request_carries_think_level_flag() -> Result<()> {
         body.get("stream").and_then(|v| v.as_bool()),
         Some(true),
         "Ollama is streaming-only on the wire; stream:true must always be emitted; got {body:?}",
+    );
+    Ok(())
+}
+
+/// Wave 10 §5.2 closure — Zhipu boot smoke. Zhipu is an
+/// OpenAI-compat provider (POSTs to `/chat/completions`) so this
+/// is the lightweight smoke variant: no provider-specific flag
+/// passthrough, just confirmation that
+/// `ZhipuClient::with_base_url` reaches the configured host and
+/// serialises a recognisable `model + messages` body. Proves
+/// the helper's `/chat/completions` route covers the fourth
+/// provider on that wire shape (after OpenAI, DeepSeek, Kimi).
+#[tokio::test]
+async fn zhipu_completion_request_smoke_boots_against_localhost_stub() -> Result<()> {
+    let server = MockProviderServer::start(canned_chat_response()).await;
+    let client = ZhipuClient::with_base_url(&server.base_url(), "test-key".to_string());
+    let model = client.completion_model("glm-4.6");
+
+    let request = CompletionRequest::new(vec![Message::user("hello zhipu")]);
+    let _response = model.completion(request).await?;
+
+    let bodies = server.captured_bodies();
+    assert_eq!(bodies.len(), 1, "expected exactly one POST captured");
+    let body = &bodies[0];
+    assert_eq!(
+        body.get("model").and_then(|v| v.as_str()),
+        Some("glm-4.6"),
+        "Zhipu model field must round-trip; got {body:?}",
+    );
+    assert!(
+        body.get("messages")
+            .and_then(|v| v.as_array())
+            .is_some_and(|arr| !arr.is_empty()),
+        "Zhipu request must carry non-empty messages array; got {body:?}",
     );
     Ok(())
 }
