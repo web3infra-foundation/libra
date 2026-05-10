@@ -6,6 +6,8 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+#[cfg(unix)]
+use libra::utils::error::StableErrorCode;
 use libra::{
     command::{
         branch::{self, BranchArgs},
@@ -16,8 +18,6 @@ use libra::{
     internal::{branch::Branch as InternalBranch, config::ConfigKv},
     utils::test::setup_with_new_libra_in,
 };
-#[cfg(unix)]
-use libra::utils::error::StableErrorCode;
 
 use super::*;
 

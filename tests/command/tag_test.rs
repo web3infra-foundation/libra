@@ -6,6 +6,8 @@ use std::collections::HashSet;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+#[cfg(unix)]
+use libra::utils::path;
 use libra::{
     command::tag::{self, TagArgs},
     internal::{
@@ -14,8 +16,6 @@ use libra::{
     },
     utils::test::{ChangeDirGuard, setup_with_new_libra_in},
 };
-#[cfg(unix)]
-use libra::utils::path;
 use sea_orm::{ActiveModelTrait, Set};
 use serial_test::serial;
 use tempfile::tempdir;
