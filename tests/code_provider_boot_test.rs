@@ -26,12 +26,17 @@
 //!     mandatory token cap). Smoke proof that the helper's
 //!     `/v1/messages` route covers the second wire shape we
 //!     ship.
+//!   * **Kimi**: `--kimi-thinking enabled` round-trips to
+//!     `thinking.type=enabled, keep=all`; `stream=false`
+//!     serialises (`KimiRequest.stream` is also a non-skip
+//!     boolean, mirroring DeepSeek). Pins the
+//!     `--kimi-thinking` / `--kimi-stream` CLI →
+//!     `CompletionRequest` → `KimiRequest` chain.
 //!
 //! Coverage deferred to follow-up PRs (same helper, same
 //! pattern):
-//!   * Kimi (`--kimi-thinking` / `--kimi-stream`), Ollama
-//!     (`--ollama-thinking` / `--ollama-compact-tools`), Gemini,
-//!     Zhipu provider boot smokes.
+//!   * Ollama (`--ollama-thinking` / `--ollama-compact-tools`),
+//!     Gemini, Zhipu provider boot smokes.
 //!   * Missing-API-key error message + `--api-base` override
 //!     surface tests.
 
@@ -47,7 +52,7 @@ use libra::internal::ai::{
     },
     providers::{
         anthropic::client::Client as AnthropicClient, deepseek::client::Client as DeepSeekClient,
-        openai::client::Client as OpenAiClient,
+        kimi::client::Client as KimiClient, openai::client::Client as OpenAiClient,
     },
 };
 use serde_json::json;
@@ -176,6 +181,55 @@ async fn openai_completion_request_smoke_boots_against_localhost_stub() -> Resul
             .and_then(|v| v.as_array())
             .is_some_and(|arr| !arr.is_empty()),
         "OpenAI request must carry non-empty messages array; got {body:?}",
+    );
+    Ok(())
+}
+
+/// Wave 10 §5.2 closure — Kimi boot smoke + thinking/stream
+/// flag passthrough.
+///
+/// Kimi's wire shape is OpenAI-compat (`POST /chat/completions`)
+/// but adds a Moonshot-specific `thinking` object with both
+/// `type` and `keep` discriminants. When `--kimi-thinking enabled`
+/// is set on the CLI the `CompletionRequest.thinking` field
+/// becomes `Some(CompletionThinking::Enabled)`; this test pins
+/// that the resulting wire body has `thinking.type=enabled`
+/// AND `thinking.keep=all` (the default for any non-Disabled
+/// value), plus the always-emitted `stream` boolean.
+#[tokio::test]
+async fn kimi_completion_request_carries_thinking_and_stream_flags() -> Result<()> {
+    let server = MockProviderServer::start(canned_chat_response()).await;
+    let client = KimiClient::with_base_url(&server.base_url(), "test-key".to_string());
+    let model = client.completion_model("kimi-k2-thinking");
+
+    let mut request = CompletionRequest::new(vec![Message::user("hello kimi")]);
+    request.thinking = Some(CompletionThinking::Enabled);
+    request.stream = Some(false);
+
+    let _response = model.completion(request).await?;
+
+    let bodies = server.captured_bodies();
+    assert_eq!(bodies.len(), 1, "expected exactly one POST captured");
+    let body = &bodies[0];
+    assert_eq!(
+        body.get("model").and_then(|v| v.as_str()),
+        Some("kimi-k2-thinking"),
+        "Kimi model field must round-trip; got {body:?}",
+    );
+    assert_eq!(
+        body.pointer("/thinking/type").and_then(|v| v.as_str()),
+        Some("enabled"),
+        "Kimi thinking flag must serialise as type=enabled; got {body:?}",
+    );
+    assert_eq!(
+        body.pointer("/thinking/keep").and_then(|v| v.as_str()),
+        Some("all"),
+        "Kimi thinking-enabled requires keep=all (preserves prior reasoning); got {body:?}",
+    );
+    assert_eq!(
+        body.get("stream").and_then(|v| v.as_bool()),
+        Some(false),
+        "Kimi stream field must serialise (KimiRequest.stream is NOT skip_serializing_if); got {body:?}",
     );
     Ok(())
 }
