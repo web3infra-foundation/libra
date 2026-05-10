@@ -720,6 +720,33 @@ impl CodeSession {
         Ok((status, body))
     }
 
+    /// Wave 6 / PR 6 — POST `/api/code/interactions/{id}` with a
+    /// caller-supplied JSON body. The matrix runner builds the body
+    /// itself (`{ "approved": true, ... }`) so individual cases can
+    /// exercise approve/reject, `applyToFuture`, `selectedOption`,
+    /// and `answers` without baking those choices into the helper.
+    pub fn matrix_respond_interaction(
+        &self,
+        interaction_id: &str,
+        body: &Value,
+        token: &super::matrix::TokenSource,
+        auth: &super::matrix::AuthMode,
+        tokens: &std::collections::HashMap<super::matrix::TokenSlot, String>,
+    ) -> Result<(StatusCode, Value)> {
+        let mut request = self
+            .client
+            .post(self.url(&format!("/interactions/{interaction_id}")))
+            .json(body);
+        request = self.apply_controller_token(request, token, tokens);
+        request = self.apply_control_auth(request, auth);
+        let response = request
+            .send()
+            .context("failed to send matrix interaction response")?;
+        let status = response.status();
+        let body = response.json().unwrap_or_else(|_| json!({}));
+        Ok((status, body))
+    }
+
     fn apply_controller_token(
         &self,
         request: reqwest::blocking::RequestBuilder,

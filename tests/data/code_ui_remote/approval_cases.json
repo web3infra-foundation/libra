@@ -1,0 +1,143 @@
+{
+  "schemaVersion": 1,
+  "matrix": "code_ui_remote_approval",
+  "defaults": {
+    "fixture": {
+      "path": "tests/data/code_ui_remote/provider_fixtures/approval_shell_chat.json"
+    },
+    "options": {
+      "control": "write",
+      "browserControl": "off",
+      "context": "dev",
+      "approvalPolicy": "on-request"
+    }
+  },
+  "cases": [
+    {
+      "name": "approval_accept_path_runs_shell_and_completes_assistant",
+      "priority": "P0",
+      "steps": [
+        {
+          "name": "attach automation",
+          "op": "attach",
+          "kind": "automation",
+          "clientId": "approval-accept",
+          "auth": "valid_control",
+          "expect": {
+            "status": 200,
+            "saveToken": "current"
+          }
+        },
+        {
+          "name": "submit shell-triggering prompt",
+          "op": "submit",
+          "text": "/run approval-shell-test: trigger the shell tool to exercise the approval gate",
+          "token": "current",
+          "auth": "valid_control",
+          "expect": {
+            "status": 200
+          }
+        },
+        {
+          "name": "wait for the runtime to surface the approval interaction",
+          "op": "waitInteractionPending",
+          "interactionId": "shell-approval-1",
+          "timeoutMs": 5000
+        },
+        {
+          "name": "confirm awaiting_interaction state",
+          "op": "waitSnapshot",
+          "expect": {
+            "assertions": [
+              "status_awaiting_interaction",
+              "interaction_pending:shell-approval-1"
+            ]
+          }
+        },
+        {
+          "name": "approve the pending interaction",
+          "op": "respondInteraction",
+          "interactionId": "shell-approval-1",
+          "token": "current",
+          "auth": "valid_control",
+          "response": {
+            "approved": true
+          },
+          "expect": {
+            "status": 200
+          }
+        },
+        {
+          "name": "wait for runtime to drain back to idle",
+          "op": "waitSnapshot",
+          "expect": {
+            "assertions": [
+              "status_idle",
+              "tool_call_completed:shell-approval-1",
+              "interaction_resolved:shell-approval-1",
+              "transcript_contains:Shell turn complete after harness response."
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "approval_reject_path_propagates_rejection_to_transcript",
+      "priority": "P0",
+      "steps": [
+        {
+          "name": "attach automation",
+          "op": "attach",
+          "kind": "automation",
+          "clientId": "approval-reject",
+          "auth": "valid_control",
+          "expect": {
+            "status": 200,
+            "saveToken": "current"
+          }
+        },
+        {
+          "name": "submit shell-triggering prompt",
+          "op": "submit",
+          "text": "/run approval-shell-test: trigger the shell tool to exercise rejection",
+          "token": "current",
+          "auth": "valid_control",
+          "expect": {
+            "status": 200
+          }
+        },
+        {
+          "name": "wait for the runtime to surface the approval interaction",
+          "op": "waitInteractionPending",
+          "interactionId": "shell-approval-1",
+          "timeoutMs": 5000
+        },
+        {
+          "name": "reject the pending interaction",
+          "op": "respondInteraction",
+          "interactionId": "shell-approval-1",
+          "token": "current",
+          "auth": "valid_control",
+          "response": {
+            "approved": false
+          },
+          "expect": {
+            "status": 200
+          }
+        },
+        {
+          "name": "wait for the runtime to surface the rejection",
+          "op": "waitSnapshot",
+          "expect": {
+            "assertions": [
+              "status_idle",
+              "tool_call_failed:shell-approval-1",
+              "interaction_resolved:shell-approval-1",
+              "transcript_contains_any:rejected by user|Tool 'shell' failed|aborted by user"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

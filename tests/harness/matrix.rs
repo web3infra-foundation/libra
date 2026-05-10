@@ -272,6 +272,37 @@ pub enum Step {
         timeout_ms: u64,
         expect: RunCommandExpect,
     },
+    /// Wave 6 / PR 6 — poll `/session` until at least one
+    /// interaction with `id == interaction_id` is present and has
+    /// `status == "pending"`. Used by the approval flow matrix to
+    /// synchronise with the runtime before POSTing
+    /// `/interactions/{id}` — without this, the responder can race
+    /// the runtime and target an interaction that has not been
+    /// upserted yet.
+    WaitInteractionPending {
+        name: String,
+        #[serde(rename = "interactionId")]
+        interaction_id: String,
+        #[serde(default = "default_interaction_wait_timeout_ms", rename = "timeoutMs")]
+        timeout_ms: u64,
+    },
+    /// Wave 6 / PR 6 — POST `/api/code/interactions/{id}`. The
+    /// `approved` / `applyToFuture` / `selectedOption` /
+    /// `answers` fields map directly onto the runtime's
+    /// `CodeUiInteractionResponse` envelope so the JSON case can
+    /// drive accept, reject, or scoped allow without growing extra
+    /// vocabulary in the runner.
+    RespondInteraction {
+        name: String,
+        #[serde(rename = "interactionId")]
+        interaction_id: String,
+        token: TokenSource,
+        #[serde(default = "default_auth")]
+        auth: AuthMode,
+        #[serde(default)]
+        response: InteractionResponseSpec,
+        expect: SimpleExpect,
+    },
 }
 
 fn default_event_timeout_ms() -> u64 {
@@ -284,6 +315,14 @@ fn default_event_timeout_ms() -> u64 {
 /// larger budget.
 fn default_run_command_timeout_ms() -> u64 {
     10_000
+}
+
+/// Wave 6 default for `Step::WaitInteractionPending` — the runtime
+/// upserts the interaction synchronously after the tool-call event
+/// fires, so 5 s is a generous ceiling that still keeps a
+/// runaway-test failure tight.
+fn default_interaction_wait_timeout_ms() -> u64 {
+    5_000
 }
 
 fn default_auth() -> AuthMode {
@@ -357,6 +396,26 @@ pub struct RunCommandExpect {
 
 fn default_run_command_status() -> Option<i32> {
     Some(0)
+}
+
+/// Wave 6 — JSON-driven `CodeUiInteractionResponse` envelope used
+/// by `Step::RespondInteraction`. The runtime accepts the same
+/// `{ approved, applyToFuture, selectedOption, note, answers }`
+/// schema; mapping straight to that shape lets reject / accept /
+/// scoped-allow cases be expressed in pure data without runner
+/// vocabulary growth.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct InteractionResponseSpec {
+    #[serde(default)]
+    pub approved: Option<bool>,
+    #[serde(default, rename = "applyToFuture")]
+    pub apply_to_future: Option<String>,
+    #[serde(default, rename = "selectedOption")]
+    pub selected_option: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(default)]
+    pub answers: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Hash)]
@@ -521,6 +580,8 @@ fn step_name(step: &Step) -> &str {
         Step::ReadRepoFile { name, .. } => name,
         Step::RepoFileAbsent { name, .. } => name,
         Step::RunRepoCommand { name, .. } => name,
+        Step::WaitInteractionPending { name, .. } => name,
+        Step::RespondInteraction { name, .. } => name,
     }
 }
 
@@ -600,6 +661,19 @@ impl CaseRuntime<'_> {
                 expect,
                 ..
             } => self.run_run_repo_command(command, *timeout_ms, expect),
+            Step::WaitInteractionPending {
+                interaction_id,
+                timeout_ms,
+                ..
+            } => self.run_wait_interaction_pending(interaction_id, *timeout_ms),
+            Step::RespondInteraction {
+                interaction_id,
+                token,
+                auth,
+                response,
+                expect,
+                ..
+            } => self.run_respond_interaction(interaction_id, token, auth, response, expect),
         }
     }
 
@@ -1035,6 +1109,93 @@ impl CaseRuntime<'_> {
         Ok(())
     }
 
+    fn run_wait_interaction_pending(&self, interaction_id: &str, timeout_ms: u64) -> Result<()> {
+        // Poll /session until at least one interaction with the
+        // requested id is observed in `pending` state. Failures
+        // beyond the deadline include the last snapshot's
+        // `interactions` array so the diagnostic identifies whether
+        // the runtime never created the interaction or created it
+        // with a different id.
+        let final_snapshot =
+            self.session
+                .wait_for_snapshot(Duration::from_millis(timeout_ms), |snapshot| {
+                    snapshot
+                        .pointer("/interactions")
+                        .and_then(Value::as_array)
+                        .map(|arr| {
+                            arr.iter().any(|i| {
+                                i.pointer("/id").and_then(Value::as_str) == Some(interaction_id)
+                                    && i.pointer("/status").and_then(Value::as_str)
+                                        == Some("pending")
+                            })
+                        })
+                        .unwrap_or(false)
+                });
+        if let Err(err) = final_snapshot {
+            return Err(err.context(format!(
+                "case '{}' timed out after {timeout_ms}ms waiting for pending interaction '{interaction_id}'",
+                self.case_name,
+            )));
+        }
+        Ok(())
+    }
+
+    fn run_respond_interaction(
+        &self,
+        interaction_id: &str,
+        token: &TokenSource,
+        auth: &AuthMode,
+        response: &InteractionResponseSpec,
+        expect: &SimpleExpect,
+    ) -> Result<()> {
+        // Build a minimal `CodeUiInteractionResponse` JSON envelope
+        // — empty fields are dropped so the runtime sees the same
+        // shape an automation client would actually send.
+        let mut body = serde_json::Map::new();
+        if let Some(approved) = response.approved {
+            body.insert("approved".to_string(), Value::Bool(approved));
+        }
+        if let Some(scope) = response.apply_to_future.as_deref() {
+            body.insert(
+                "applyToFuture".to_string(),
+                Value::String(scope.to_string()),
+            );
+        }
+        if let Some(option) = response.selected_option.as_deref() {
+            body.insert(
+                "selectedOption".to_string(),
+                Value::String(option.to_string()),
+            );
+        }
+        if let Some(note) = response.note.as_deref() {
+            body.insert("note".to_string(), Value::String(note.to_string()));
+        }
+        if !response.answers.is_empty() {
+            body.insert(
+                "answers".to_string(),
+                serde_json::to_value(&response.answers).unwrap_or(Value::Null),
+            );
+        }
+        let (status, payload) = self.session.matrix_respond_interaction(
+            interaction_id,
+            &Value::Object(body),
+            token,
+            auth,
+            &self.tokens,
+        )?;
+        let expected_status = StatusCode::from_u16(expect.status).with_context(|| {
+            format!(
+                "invalid expected status {} in case '{}'",
+                expect.status, self.case_name
+            )
+        })?;
+        ensure_status(status, expected_status, &payload)?;
+        if let Some(code) = expect.error_code.as_deref() {
+            ensure_error_code(&payload, code)?;
+        }
+        Ok(())
+    }
+
     fn run_attach(
         &mut self,
         kind: &str,
@@ -1243,8 +1404,100 @@ fn evaluate_snapshot_assertion(
                 .unwrap_or("");
             Ok(kind == "automation")
         }
+        // Wave 6 — session status assertions used by the approval
+        // flow matrix to gate WaitSnapshot on the runtime's
+        // `CodeUiSessionStatus` enum (snake_case in JSON).
+        "status_idle" => Ok(snapshot_status(snapshot) == "idle"),
+        "status_thinking" => Ok(snapshot_status(snapshot) == "thinking"),
+        "status_executing_tool" => Ok(snapshot_status(snapshot) == "executing_tool"),
+        "status_awaiting_interaction" => Ok(snapshot_status(snapshot) == "awaiting_interaction"),
+        "status_error" => Ok(snapshot_status(snapshot) == "error"),
+        // Wave 6 — interaction-shape assertions used after
+        // RespondInteraction resolves the awaiting state.
+        // `interaction_pending:<id>` matches a PENDING interaction;
+        // `interaction_resolved:<id>` matches one in RESOLVED.
+        other if other.starts_with("interaction_pending:") => {
+            let id = other.trim_start_matches("interaction_pending:");
+            Ok(snapshot_interaction_has_status(snapshot, id, "pending"))
+        }
+        other if other.starts_with("interaction_resolved:") => {
+            let id = other.trim_start_matches("interaction_resolved:");
+            Ok(snapshot_interaction_has_status(snapshot, id, "resolved"))
+        }
+        // Wave 6 — tool-call status pinning. Approve-path cases
+        // assert `tool_call_completed:<id>`; reject-path cases
+        // assert `tool_call_failed:<id>` where <id> matches the
+        // fixture's tool_call.id.
+        other if other.starts_with("tool_call_completed:") => {
+            let id = other.trim_start_matches("tool_call_completed:");
+            Ok(snapshot_tool_call_has_status(snapshot, id, "completed"))
+        }
+        other if other.starts_with("tool_call_failed:") => {
+            let id = other.trim_start_matches("tool_call_failed:");
+            Ok(snapshot_tool_call_has_status(snapshot, id, "failed"))
+        }
+        // Wave 6 — coarse needle scan over the FULL transcript.
+        // Submit-anchored cases should prefer
+        // `evaluate_post_submit_assertion`'s baselined variant; this
+        // form is fine for WaitSnapshot when the case only does one
+        // submit so a stale entry can't pollute the match.
+        other if other.starts_with("transcript_contains:") => {
+            let needle = other.trim_start_matches("transcript_contains:");
+            let transcript = snapshot
+                .pointer("/transcript")
+                .and_then(Value::as_array)
+                .ok_or_else(|| anyhow!("snapshot missing /transcript array"))?;
+            let haystack = serde_json::to_string(transcript).unwrap_or_default();
+            Ok(haystack.contains(needle))
+        }
+        other if other.starts_with("transcript_contains_any:") => {
+            let raw = other.trim_start_matches("transcript_contains_any:");
+            let needles: Vec<&str> = raw.split('|').filter(|s| !s.is_empty()).collect();
+            if needles.is_empty() {
+                bail!("'transcript_contains_any:' assertion needs at least one needle");
+            }
+            let transcript = snapshot
+                .pointer("/transcript")
+                .and_then(Value::as_array)
+                .ok_or_else(|| anyhow!("snapshot missing /transcript array"))?;
+            let haystack = serde_json::to_string(transcript).unwrap_or_default();
+            Ok(needles.iter().any(|needle| haystack.contains(needle)))
+        }
         other => bail!("unsupported snapshot assertion '{other}'"),
     }
+}
+
+fn snapshot_status(snapshot: &Value) -> &str {
+    snapshot
+        .pointer("/status")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+}
+
+fn snapshot_interaction_has_status(snapshot: &Value, id: &str, status: &str) -> bool {
+    snapshot
+        .pointer("/interactions")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter().any(|i| {
+                i.pointer("/id").and_then(Value::as_str) == Some(id)
+                    && i.pointer("/status").and_then(Value::as_str) == Some(status)
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn snapshot_tool_call_has_status(snapshot: &Value, id: &str, status: &str) -> bool {
+    snapshot
+        .pointer("/toolCalls")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter().any(|c| {
+                c.pointer("/id").and_then(Value::as_str) == Some(id)
+                    && c.pointer("/status").and_then(Value::as_str) == Some(status)
+            })
+        })
+        .unwrap_or(false)
 }
 
 /// Parse an SSE event's `data:` field as JSON. The `/api/code/events`
