@@ -91,3 +91,31 @@ LIBRA_ENABLE_TEST_PROVIDER=1 cargo test --test code_ui_scenarios --features test
 ```
 
 If a test fails, inspect `target/code-ui-scenarios/<scenario>/pty.log`, `libra.log`, and `control.json`. A `:0` URL in `control.json` means the server did not write back the bound OS port; a lingering token or info file means the TUI did not exit cleanly.
+
+## Error code reference
+
+The `/api/code/*` surface returns a stable JSON error envelope of shape `{ "error": { "code": "<CODE>", "message": "<text>" } }`. `code` values are the single source of truth and live in `code_ui_error_codes()` (`src/internal/ai/web/code_ui.rs`); when adding a new code, mirror the entry in that table so existing integration tests stay in sync.
+
+Layer ordering matches the runtime gate order — a failing request short-circuits at the FIRST gate it trips:
+
+| Code | HTTP | Gate |
+|---|---|---|
+| `LOOPBACK_REQUIRED` | 403 | route handlers — non-loopback request rejected before any other check |
+| `PAYLOAD_TOO_LARGE` | 413 | write-surface body-limit middleware (256 KiB) |
+| `CONTROL_DISABLED` | 403 | automation control-token gate when `--control observe` |
+| `MISSING_CONTROL_TOKEN` | 403 | automation control-token gate (header absent) |
+| `INVALID_CONTROL_TOKEN` | 403 | automation control-token gate (header mismatch) |
+| `MISSING_CONTROLLER_TOKEN` | 403 | controller (lease) state machine — write without lease |
+| `INVALID_CONTROLLER_TOKEN` | 403 | controller (lease) state machine — wrong / stale lease |
+| `INVALID_CONTROLLER_KIND` | 400 | controller attach payload validation |
+| `CONTROLLER_CONFLICT` | 409 | controller attach raced by another client |
+| `BROWSER_CONTROL_DISABLED` | 403 | browser write surface gated off |
+| `AUTOMATION_CONTROLLER_REQUIRED` | 403 | route requires automation lease specifically |
+| `CODE_UI_UNAVAILABLE` | 404 | runtime not constructed in this build / mode |
+| `INVALID_QUERY_PARAM` | 400 | read-side query param validation (e.g. `/threads?limit=abc`) |
+| `STORAGE_PATH_INVALID` | 500 | storage-root resolution failed |
+| `STATUS_UNAVAILABLE` | 500 | runtime status snapshot unavailable |
+| `THREAD_LIST_FAILED` | 500 | `/threads` enumeration failed |
+| `DB_UNAVAILABLE` | 500 | session DB is offline |
+| `INTERNAL_ERROR` | 500 | catch-all for adapter errors |
+| `UNSUPPORTED_OPERATION` | 422 | adapter doesn't expose the requested capability (e.g. plan ack against a chat-only runtime) |
