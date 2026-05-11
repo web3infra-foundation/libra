@@ -87,7 +87,7 @@ use url::Url;
 use uuid::Uuid;
 
 #[cfg(feature = "test-provider")]
-use crate::internal::ai::providers::fake::{Client as FakeClient, FAKE_DEFAULT_MODEL};
+use crate::internal::ai::providers::fake::FAKE_DEFAULT_MODEL;
 use crate::{
     cli_error,
     command::code_control_files::{
@@ -115,13 +115,17 @@ use crate::{
             projection::{ProjectionRebuilder, ProjectionResolver, ThreadBundle},
             prompt::{ContextMode, SystemPromptBuilder},
             providers::{
-                anthropic::{CLAUDE_3_5_SONNET, Client as AnthropicClient},
-                deepseek::client::Client as DeepSeekClient,
-                gemini::{Client as GeminiClient, GEMINI_2_5_FLASH},
-                kimi::{Client as KimiClient, KIMI_K2_6},
+                anthropic::CLAUDE_3_5_SONNET,
+                gemini::GEMINI_2_5_FLASH,
+                kimi::KIMI_K2_6,
+                // OllamaClient stays imported because the headless web
+                // runtime path (`build_non_codex_headless_runtime`) still
+                // constructs the client directly. The other provider Client
+                // aliases were dropped when the TUI dispatch migrated to
+                // `ProviderFactory`.
                 ollama::Client as OllamaClient,
-                openai::{Client as OpenAIClient, GPT_4O_MINI},
-                zhipu::{Client as ZhipuClient, GLM_5},
+                openai::GPT_4O_MINI,
+                zhipu::GLM_5,
             },
             runtime::{ToolBoundaryRuntime, TracingAuditSink},
             sandbox::{
@@ -146,10 +150,12 @@ use crate::{
                 WebServerHandle, WebServerOptions,
                 code_ui::{
                     CodeUiCapabilities, CodeUiControllerKind, CodeUiInitialController,
-                    CodeUiProviderAdapter, CodeUiProviderInfo, CodeUiRuntimeHandle, CodeUiSession,
-                    CodeUiSessionStatus, CodeUiTranscriptEntry, CodeUiTranscriptEntryKind,
-                    ReadOnlyCodeUiAdapter, initial_snapshot, snapshot_from_thread_bundle,
+                    CodeUiProviderAdapter, CodeUiProviderInfo, CodeUiRuntimeHandle,
+                    CodeUiRuntimeOptions, CodeUiSession, CodeUiSessionStatus,
+                    CodeUiTranscriptEntry, CodeUiTranscriptEntryKind, ReadOnlyCodeUiAdapter,
+                    initial_snapshot, snapshot_from_thread_bundle,
                 },
+                headless::{HeadlessCodeRuntime, headless_capabilities},
                 start as start_web_server,
             },
         },
@@ -237,6 +243,35 @@ pub enum ControlMode {
     Observe,
     /// Enable local automation write control with token and controller checks.
     Write,
+}
+
+/// Browser write-control posture for `libra code`.
+///
+/// Controls whether `/api/code/controller/attach` will issue a `Browser`
+/// lease (allowing the embedded UI to drive `/messages`,
+/// `/interactions/{id}`, and `/control/cancel`). The `--host` is still
+/// forced to a loopback address whenever `loopback` is selected — see
+/// [`ensure_loopback_browser_control_host`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum, Default)]
+pub enum BrowserControlMode {
+    /// Browser controllers cannot attach. Default for normal TUI sessions and
+    /// for `--web-only` against non-Codex providers.
+    #[default]
+    Off,
+    /// Browser controllers may attach as long as the bound `--host` is
+    /// loopback. Default for `--web-only --provider codex`.
+    Loopback,
+}
+
+impl BrowserControlMode {
+    /// Returns the canonical wire-format string used in banners, info files,
+    /// and audit summaries — matches the clap value names exactly.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BrowserControlMode::Off => "off",
+            BrowserControlMode::Loopback => "loopback",
+        }
+    }
 }
 
 /// Ollama-specific thinking/reasoning mode.
@@ -432,6 +467,18 @@ pub struct CodeArgs {
     #[arg(long, value_enum, default_value_t = ControlMode::Observe)]
     pub control: ControlMode,
 
+    /// Browser write-control posture (`off` | `loopback`).
+    ///
+    /// Defaults are mode-specific:
+    /// - normal TUI session → `off`
+    /// - `--web-only --provider codex` → `loopback`
+    /// - `--web-only` with any other provider → `off`
+    ///
+    /// Selecting `loopback` is rejected when `--host` is not a loopback
+    /// address, and the flag is incompatible with `--stdio`.
+    #[arg(long = "browser-control", value_enum, conflicts_with = "stdio")]
+    pub browser_control: Option<BrowserControlMode>,
+
     /// Path to the local automation control token file.
     #[arg(long)]
     pub control_token_file: Option<PathBuf>,
@@ -481,6 +528,17 @@ pub struct CodeArgs {
     /// Kimi stream mode: true or false. Defaults to true for Kimi.
     #[arg(long = "kimi-stream", value_name = "BOOL")]
     pub kimi_stream: Option<bool>,
+
+    /// Select an agent profile by name. When the profile carries a structured
+    /// `model: provider/model[@variant]` binding, the agent's binding wins
+    /// **atomically** — provider, model id, and variant all come from the
+    /// agent's spec, and a separately-supplied `--model` is ignored to avoid
+    /// hybrid pairs (anthropic provider + OpenAI-shaped model id). Profiles
+    /// without a structured binding fall back to the CLI defaults verbatim.
+    /// Profiles are looked up via the same three-tier hierarchy used elsewhere
+    /// (project `.libra/agents/`, user `~/.config/libra/agents/`, embedded).
+    #[arg(long = "agent", value_name = "NAME")]
+    pub agent: Option<String>,
 
     /// Test-only fake provider fixture.
     #[cfg(feature = "test-provider")]
@@ -548,6 +606,20 @@ pub struct CodeArgs {
     /// `--plan-mode` (alias for `=true`), `--plan-mode=true`, `--plan-mode=false`.
     #[arg(long, num_args = 0..=1, default_missing_value = "true")]
     pub plan_mode: Option<bool>,
+
+    /// Goal-mode objective. When set, the session boots with an
+    /// active Goal whose objective is the supplied string; the
+    /// supervisor (P6.3) drives the tool loop until completion is
+    /// claimed and the verifier (P6.2) accepts. Equivalent to
+    /// invoking `/goal start <objective>` immediately after the
+    /// session opens.
+    ///
+    /// The objective is validated up-front against the same shape
+    /// rules `GoalSpec::new` applies — non-empty after trim, ≤ 16
+    /// KiB. A bad objective fails CLI parsing rather than crashing
+    /// the supervisor at startup.
+    #[arg(long = "goal", value_name = "OBJECTIVE")]
+    pub goal: Option<String>,
 }
 
 /// Resolves the effective `plan_mode` flag for the current invocation.
@@ -665,19 +737,19 @@ impl McpServerHandle {
 /// selected host would expose loopback-only browser control.
 async fn execute_web_only(args: &CodeArgs) -> CliResult<()> {
     let working_dir = resolve_code_working_dir(args)?;
+    let browser_control = resolve_browser_control_mode(args)?;
     let control_runtime = prepare_control_runtime(args, &working_dir).await?;
     let mcp_server = init_mcp_server(&working_dir).await;
 
     let mut managed_codex_server = None;
     let code_ui_runtime = if args.provider == CodeProvider::Codex {
-        ensure_loopback_browser_control_host(&args.host)?;
-
         let server =
             start_managed_codex_server(&args.codex_bin, args.codex_port, &working_dir).await?;
         println!("Starting Libra Code Web UI with Codex provider");
         println!("Working directory: {}", working_dir.display());
         println!("Codex WebSocket: {}", server.ws_url);
         println!("Codex app-server: auto-started");
+        println!("Browser control: {}", browser_control.as_str());
         managed_codex_server = Some(server);
 
         let ws_url = managed_codex_server
@@ -689,12 +761,30 @@ async fn execute_web_only(args: &CodeArgs) -> CliResult<()> {
             &working_dir,
             ws_url,
             mcp_server.clone(),
-            true,
+            browser_control == BrowserControlMode::Loopback,
             CodeUiInitialController::Unclaimed,
         )
         .await?
     } else {
-        build_placeholder_web_code_ui_runtime(args, &working_dir).await
+        // Phase 3 v0 routes the supported providers through the new
+        // headless runtime. Anything not yet hooked up keeps the read-only
+        // placeholder so we fail closed rather than panicking on attach.
+        match build_non_codex_headless_runtime(
+            args,
+            &working_dir,
+            browser_control == BrowserControlMode::Loopback,
+        )
+        .await?
+        {
+            Some(runtime) => {
+                println!("Starting Libra Code Web UI in headless mode");
+                println!("Working directory: {}", working_dir.display());
+                println!("Provider: {:?}", args.provider);
+                println!("Browser control: {}", browser_control.as_str());
+                runtime
+            }
+            None => build_placeholder_web_code_ui_runtime(args, &working_dir).await,
+        }
     };
 
     let web_handle = match start_web_server(
@@ -926,6 +1016,306 @@ fn provider_env_value_with_lookup(
         .or_else(|| lookup(key))
 }
 
+/// Build an [`AnyCompletionModel`] for every non-Codex provider through the
+/// shared [`ProviderFactory`].
+///
+/// This consolidates what used to be eight near-identical match arms
+/// (`Gemini`, `Openai`, `Anthropic`, `Deepseek`, `Kimi`, `Zhipu`, `Ollama`,
+/// `Fake`) into a single dispatch. The Codex provider stays on its own path
+/// because it bypasses `AnyCompletionModel` entirely (managed app-server
+/// runtime).
+///
+/// Env resolution flows through [`provider_env_value`] for **every** provider,
+/// not just Deepseek / Kimi as before. The precedence is `--env-file` first
+/// then process env (documented on `--env-file` itself), and applies to API
+/// keys, base URLs, and the boolean `OLLAMA_COMPACT_TOOLS` flag. Gemini /
+/// OpenAI / Anthropic / Zhipu used to read only from process env via
+/// `from_env()`; this widens them to consult `--env-file` first as well, so
+/// a value defined in the env-file now wins over a stale process-env value
+/// for those providers.
+///
+/// The function returns the resolved model name AND the effective provider
+/// name string so the caller can tag usage / UI metadata against the agent's
+/// chosen provider (which may differ from `--provider` after an `--agent`
+/// override).
+///
+/// OC-Phase 2 P2.4 added the `--agent <name>` override path. When the flag
+/// is set the helper loads the profile via the same three-tier hierarchy
+/// the runtime uses, asserts the agent is primary-eligible, and — if the
+/// profile carries a structured `model: provider/model[@variant]` binding —
+/// uses that binding **atomically**: provider id, model id, and variant all
+/// come from the agent's spec. A separately-supplied `--model` is **ignored**
+/// when the binding wins, since mixing an explicit model id with the agent's
+/// provider can produce nonsense pairs (e.g. anthropic provider with an
+/// OpenAI-shaped model id). When the agent profile does NOT carry a binding,
+/// the CLI defaults stand verbatim.
+fn build_any_completion_model_for_args(
+    args: &CodeArgs,
+    env_file: &CodeEnvFile,
+    working_dir: &std::path::Path,
+) -> CliResult<(
+    crate::internal::ai::providers::AnyCompletionModel,
+    String,
+    String,
+)> {
+    use crate::internal::ai::{
+        agent::profile::ModelBinding,
+        providers::{
+            ProviderBuildOptions, ProviderFactory, ProviderFactoryError, runtime::provider_id,
+        },
+    };
+
+    // 1. Map `--provider` to the canonical provider id string (the factory's
+    //    dispatch key). Codex bypasses this helper entirely.
+    let mut provider_id_str = match args.provider {
+        CodeProvider::Gemini => provider_id::GEMINI.to_string(),
+        CodeProvider::Openai => provider_id::OPENAI.to_string(),
+        CodeProvider::Anthropic => provider_id::ANTHROPIC.to_string(),
+        CodeProvider::Deepseek => provider_id::DEEPSEEK.to_string(),
+        CodeProvider::Kimi => provider_id::KIMI.to_string(),
+        CodeProvider::Zhipu => provider_id::ZHIPU.to_string(),
+        CodeProvider::Ollama => provider_id::OLLAMA.to_string(),
+        #[cfg(feature = "test-provider")]
+        CodeProvider::Fake => provider_id::FAKE.to_string(),
+        CodeProvider::Codex => {
+            // Codex never reaches this helper — its dispatch path skips the
+            // factory entirely. Treat as a programmer error rather than a
+            // runtime failure so a future refactor cannot silently misroute.
+            return Err(CliError::command_usage(
+                "internal error: Codex provider must use the managed runtime path, \
+                 not the completion-model factory",
+            ));
+        }
+    };
+
+    // 2. Resolve the default model id from the CLI provider. Ollama errors
+    //    if `--model` is omitted (no sensible local default); the rest fall
+    //    back to a flagship model constant. Honored only when the agent
+    //    override does not supply a binding model id below.
+    let cli_default_model = |provider: CodeProvider| -> CliResult<String> {
+        Ok(match provider {
+            CodeProvider::Gemini => GEMINI_2_5_FLASH.to_string(),
+            CodeProvider::Openai => GPT_4O_MINI.to_string(),
+            CodeProvider::Anthropic => CLAUDE_3_5_SONNET.to_string(),
+            CodeProvider::Deepseek => "deepseek-chat".to_string(),
+            CodeProvider::Kimi => KIMI_K2_6.to_string(),
+            CodeProvider::Zhipu => GLM_5.to_string(),
+            CodeProvider::Ollama => {
+                return Err(CliError::command_usage(
+                    "--model is required when using --provider ollama \
+                     (e.g. --model llama3.2)",
+                ));
+            }
+            #[cfg(feature = "test-provider")]
+            CodeProvider::Fake => FAKE_DEFAULT_MODEL.to_string(),
+            CodeProvider::Codex => unreachable!("Codex filtered above"),
+        })
+    };
+
+    let mut variant: Option<String> = None;
+    // 3. OC-Phase 2 P2.4: apply `--agent <name>` override atomically.
+    //    When the profile carries a structured binding, all three of
+    //    (provider_id, model_id, variant) come from the spec — `--model`
+    //    is ignored to avoid hybrid pairs like "anthropic + gpt-4o".
+    let agent_binding = resolve_agent_binding_override(args, working_dir)?;
+    let model_name: String = if let Some(binding) = agent_binding {
+        provider_id_str = binding.provider_id;
+        variant = binding.variant;
+        binding.model_id
+    } else {
+        match args.model.clone() {
+            Some(m) => m,
+            None => cli_default_model(args.provider)?,
+        }
+    };
+
+    // 4. Resolve API key / base URL by provider id (string-keyed so the
+    //    agent override flows through to env-var lookup).
+    let api_key = match provider_id_str.as_str() {
+        provider_id::GEMINI => provider_env_value(env_file, "GEMINI_API_KEY"),
+        provider_id::OPENAI => provider_env_value(env_file, "OPENAI_API_KEY"),
+        provider_id::ANTHROPIC => provider_env_value(env_file, "ANTHROPIC_API_KEY"),
+        provider_id::DEEPSEEK => provider_env_value(env_file, "DEEPSEEK_API_KEY"),
+        provider_id::KIMI => provider_env_value(env_file, "MOONSHOT_API_KEY"),
+        provider_id::ZHIPU => provider_env_value(env_file, "ZHIPU_API_KEY"),
+        provider_id::OLLAMA => provider_env_value(env_file, "OLLAMA_API_KEY"),
+        #[cfg(feature = "test-provider")]
+        provider_id::FAKE => None,
+        _ => None,
+    };
+
+    let api_base = match provider_id_str.as_str() {
+        provider_id::ANTHROPIC => provider_env_value(env_file, "ANTHROPIC_BASE_URL"),
+        provider_id::OPENAI => provider_env_value(env_file, "OPENAI_BASE_URL"),
+        provider_id::KIMI => provider_env_value(env_file, "MOONSHOT_BASE_URL"),
+        provider_id::ZHIPU => provider_env_value(env_file, "ZHIPU_BASE_URL"),
+        provider_id::OLLAMA => args
+            .api_base
+            .clone()
+            .or_else(|| provider_env_value(env_file, "OLLAMA_BASE_URL")),
+        _ => None,
+    };
+
+    #[cfg(feature = "test-provider")]
+    let fake_fixture_path = if provider_id_str == provider_id::FAKE {
+        Some(args.fake_fixture.clone().ok_or_else(|| {
+            CliError::command_usage("--fake-fixture is required with --provider=fake")
+        })?)
+    } else {
+        None
+    };
+    #[cfg(not(feature = "test-provider"))]
+    let fake_fixture_path: Option<std::path::PathBuf> = None;
+
+    // The Ollama client used to read `OLLAMA_COMPACT_TOOLS` from process env
+    // at construction time. The factory now sets the flag explicitly, so we
+    // need to fold that env var back in when the CLI flag is absent —
+    // otherwise users with `OLLAMA_COMPACT_TOOLS=1` in their environment
+    // would silently lose compact-schema mode after this migration.
+    let ollama_compact_tools = args.ollama_compact_tools
+        || provider_env_value(env_file, "OLLAMA_COMPACT_TOOLS")
+            .map(|raw| {
+                matches!(
+                    raw.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false);
+
+    let options = ProviderBuildOptions {
+        api_key,
+        api_base,
+        ollama_compact_tools,
+        fake_fixture_path,
+        // Preserve the pre-factory behaviour of accepting any model string
+        // the user passes via `--model`. The capability table is best-effort
+        // and the runtime will surface a real provider error if the model
+        // does not exist.
+        accept_unknown_models: true,
+    };
+
+    let binding = ModelBinding {
+        provider_id: provider_id_str.clone(),
+        model_id: model_name.clone(),
+        variant,
+    };
+
+    let model = ProviderFactory
+        .build(&binding, options)
+        .map_err(|err| match err {
+            ProviderFactoryError::MissingApiKey { env_var, .. } => {
+                if provider_id_str == provider_id::OLLAMA {
+                    // Ollama Cloud needs the api key only when the base URL points
+                    // at ollama.com; preserve the pre-factory error wording so users
+                    // who scripted against it do not see a regression.
+                    CliError::auth(
+                        "OLLAMA_API_KEY is required when using Ollama Cloud directly \
+                     (set --api-base https://ollama.com or OLLAMA_BASE_URL=https://ollama.com)",
+                    )
+                } else {
+                    CliError::auth(format!("{env_var} is not set"))
+                }
+            }
+            ProviderFactoryError::BuildFailed { reason, .. } => CliError::io(reason),
+            ProviderFactoryError::UnknownProvider { .. }
+            | ProviderFactoryError::UnknownModel { .. } => CliError::command_usage(err.to_string()),
+        })?;
+
+    Ok((model, model_name, provider_id_str))
+}
+
+/// Resolve the **effective** [`CodeProvider`] enum that downstream
+/// provider-specific helpers should dispatch on (OC-Phase 2 P2.4).
+///
+/// When `--agent <name>` is set and the agent's profile carries a structured
+/// `model: provider/model` binding, the effective provider is the one named
+/// by the binding's `provider_id`. Otherwise the effective provider is the
+/// CLI `--provider` default.
+///
+/// An agent binding whose `provider_id` does NOT map to a known
+/// [`CodeProvider`] variant is rejected with a `command_usage` error.
+/// Silently falling back to `args.provider` would leave the system prompt /
+/// context-budget / completion knobs computed against the CLI provider
+/// while the model is ultimately built for a different (or non-existent)
+/// provider — a partial-misconfiguration trap. The list of known provider
+/// ids stays in lock-step with [`provider_id::ALL_PRODUCTION`] (plus
+/// `FAKE` under the `test-provider` feature).
+fn effective_code_provider_for_args(
+    args: &CodeArgs,
+    working_dir: &std::path::Path,
+) -> CliResult<CodeProvider> {
+    use crate::internal::ai::providers::runtime::provider_id;
+
+    let Some(binding) = resolve_agent_binding_override(args, working_dir)? else {
+        return Ok(args.provider);
+    };
+    let mapped = match binding.provider_id.as_str() {
+        provider_id::GEMINI => Some(CodeProvider::Gemini),
+        provider_id::OPENAI => Some(CodeProvider::Openai),
+        provider_id::ANTHROPIC => Some(CodeProvider::Anthropic),
+        provider_id::DEEPSEEK => Some(CodeProvider::Deepseek),
+        provider_id::KIMI => Some(CodeProvider::Kimi),
+        provider_id::ZHIPU => Some(CodeProvider::Zhipu),
+        provider_id::OLLAMA => Some(CodeProvider::Ollama),
+        #[cfg(feature = "test-provider")]
+        provider_id::FAKE => Some(CodeProvider::Fake),
+        _ => None,
+    };
+    mapped.ok_or_else(|| {
+        CliError::command_usage(format!(
+            "agent '{}' selects provider '{}', which is not a known `--provider` value. \
+             Pick a binding whose provider id is one of: {}",
+            args.agent.as_deref().unwrap_or("?"),
+            binding.provider_id,
+            provider_id::ALL_PRODUCTION.join(", "),
+        ))
+    })
+}
+
+/// Look up the agent profile selected by `--agent <name>` and return its
+/// structured `ModelBinding` if the profile carries one (OC-Phase 2 P2.4).
+///
+/// Returns `Ok(None)` when:
+/// - `--agent` was not supplied; the helper is a no-op.
+/// - The agent exists but has no `model: provider/model` binding (legacy
+///   `model: default` / `fast` / etc.). The CLI defaults stand.
+///
+/// Returns `Err(_)` when:
+/// - The agent name does not match any profile in the three-tier hierarchy.
+/// - The agent's `mode` is not primary-eligible (sub-agents are dispatched
+///   via the `task` tool in OC-Phase 3, not as the session driver).
+fn resolve_agent_binding_override(
+    args: &CodeArgs,
+    working_dir: &std::path::Path,
+) -> CliResult<Option<crate::internal::ai::agent::profile::ModelBinding>> {
+    let Some(agent_name) = args.agent.as_deref() else {
+        return Ok(None);
+    };
+    let profiles = load_profiles(working_dir);
+    let router = AgentProfileRouter::new(profiles);
+    let spec = router.execution_spec(agent_name).ok_or_else(|| {
+        let mut suggestions: Vec<&str> =
+            router.profiles().iter().map(|p| p.name.as_str()).collect();
+        suggestions.sort();
+        let suggestion_hint = if suggestions.is_empty() {
+            String::from("(no profiles loaded)")
+        } else {
+            format!("known agents: {}", suggestions.join(", "))
+        };
+        CliError::command_usage(format!(
+            "unknown agent '{agent_name}' for --agent; {suggestion_hint}"
+        ))
+    })?;
+    if !spec.mode.is_primary_eligible() {
+        return Err(CliError::command_usage(format!(
+            "agent '{agent_name}' has mode '{:?}', which is not primary-eligible. \
+             Sub-agents are dispatched via the `task` tool, not selected with --agent.",
+            spec.mode
+        )));
+    }
+    Ok(spec.model)
+}
+
 /// Main TUI execution path: initializes the AI provider, builds the tool
 /// registry, starts background web/MCP servers, and launches the interactive
 /// terminal application.
@@ -947,11 +1337,21 @@ fn provider_env_value_with_lookup(
 async fn execute_tui(args: CodeArgs) -> CliResult<()> {
     let working_dir = resolve_code_working_dir(&args)?;
     let env_file = load_code_env_file(args.env_file.as_deref())?;
+    let browser_control = resolve_browser_control_mode(&args)?;
     let control_runtime = prepare_control_runtime(&args, &working_dir).await?;
 
     // Validate --api-base: only honored for Ollama via CLI flag. Other providers
     // accept custom base URLs through their respective environment variables.
-    if args.api_base.is_some()
+    //
+    // The warning is keyed off `args.provider` because the agent override
+    // (OC-Phase 2 P2.4) is resolved later, inside the factory helper. When
+    // `--agent` is set we suppress the warning entirely — the effective
+    // provider may be Ollama via the agent's binding, in which case
+    // `--api-base` is meaningful, or it may be a non-Ollama provider that
+    // ignores the flag. Either way the user explicitly opted into the
+    // agent and is best served by silence here.
+    if args.agent.is_none()
+        && args.api_base.is_some()
         && !matches!(args.provider, CodeProvider::Ollama | CodeProvider::Codex)
     {
         eprintln!(
@@ -978,17 +1378,34 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
     }
 
     let task_intent = task_intent_for_context(args.context);
+    // OC-Phase 2 P2.4: resolve `--agent <name>` once before any provider-
+    // specific knob (context budget, completion thinking / reasoning /
+    // stream, preamble) is computed. When the agent's spec carries a
+    // structured binding, the effective provider may differ from the CLI
+    // `--provider` default; downstream computations need the agent's
+    // provider, not the CLI one.
+    let effective_provider = effective_code_provider_for_args(&args, &working_dir)?;
+    let effective_model_for_preamble = if effective_provider == args.provider {
+        args.model.as_deref().map(str::to_string)
+    } else {
+        // The agent override path resolves the concrete model id later
+        // inside `build_any_completion_model_for_args`; here we only need
+        // it for `system_preamble`'s context budget defaulting, where
+        // `None` falls back to the provider's flagship via
+        // [`default_context_budget_model`].
+        None
+    };
     let preamble = system_preamble(
         &working_dir,
         args.context,
-        args.provider,
-        args.model.as_deref(),
+        effective_provider,
+        effective_model_for_preamble.as_deref(),
     );
     let temperature = args.temperature;
-    let thinking = completion_thinking_for_args(&args);
-    let reasoning_effort = completion_reasoning_effort_for_args(&args);
-    let stream = completion_stream_for_args(&args);
-    let preserve_reasoning_content = preserve_reasoning_content_for_provider(args.provider);
+    let thinking = completion_thinking_for_provider(effective_provider, &args);
+    let reasoning_effort = completion_reasoning_effort_for_provider(effective_provider, &args);
+    let stream = completion_stream_for_provider(effective_provider, &args);
+    let preserve_reasoning_content = preserve_reasoning_content_for_provider(effective_provider);
     let resume_thread_id = args.resume.clone();
     let host = args.host.clone();
     let trace_id = resume_thread_id
@@ -1078,126 +1495,40 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
         exec_approval_tx,
         mcp_server,
         control_runtime,
+        browser_control,
     };
 
-    // Create agent based on provider
+    // Create agent based on provider. Every non-Codex provider funnels
+    // through `ProviderFactory`; Codex keeps its own managed-runtime path.
     match args.provider {
-        CodeProvider::Gemini => {
-            let client = match GeminiClient::from_env() {
-                Ok(client) => client,
-                Err(_) => return Err(CliError::auth("GEMINI_API_KEY is not set")),
-            };
-            let model_name = args.model.unwrap_or_else(|| GEMINI_2_5_FLASH.to_string());
-            let model = client.completion_model(&model_name);
-            run_tui_with_model(model, launch_config, model_name, provider_name).await?;
-        }
-        CodeProvider::Openai => {
-            let client = match OpenAIClient::from_env() {
-                Ok(client) => client,
-                Err(_) => return Err(CliError::auth("OPENAI_API_KEY is not set")),
-            };
-            let model_name = args.model.unwrap_or_else(|| GPT_4O_MINI.to_string());
-            let model = client.completion_model(&model_name);
-            run_tui_with_model(model, launch_config, model_name, provider_name).await?;
-        }
-        CodeProvider::Anthropic => {
-            let client = match AnthropicClient::from_env() {
-                Ok(client) => client,
-                Err(_) => return Err(CliError::auth("ANTHROPIC_API_KEY is not set")),
-            };
-            let model_name = args.model.unwrap_or_else(|| CLAUDE_3_5_SONNET.to_string());
-            let model = client.completion_model(&model_name);
-            run_tui_with_model(model, launch_config, model_name, provider_name).await?;
-        }
-        CodeProvider::Deepseek => {
-            let api_key = provider_env_value(&env_file, "DEEPSEEK_API_KEY")
-                .ok_or_else(|| CliError::auth("DEEPSEEK_API_KEY is not set"))?;
-            let client = DeepSeekClient::with_api_key(api_key);
-            let model_name = args.model.unwrap_or_else(|| "deepseek-chat".to_string());
-            let model = client.completion_model(&model_name);
-            run_tui_with_model(model, launch_config, model_name, provider_name).await?;
-        }
-        CodeProvider::Kimi => {
-            let api_key = provider_env_value(&env_file, "MOONSHOT_API_KEY")
-                .ok_or_else(|| CliError::auth("MOONSHOT_API_KEY is not set"))?;
-            let client = match provider_env_value(&env_file, "MOONSHOT_BASE_URL") {
-                Some(base_url) => KimiClient::with_base_url(&base_url, api_key),
-                None => KimiClient::with_api_key(api_key),
-            };
-            let model_name = args.model.unwrap_or_else(|| KIMI_K2_6.to_string());
-            let model = client.completion_model(&model_name);
-            run_tui_with_model(model, launch_config, model_name, provider_name).await?;
-        }
-        CodeProvider::Zhipu => {
-            let client = match ZhipuClient::from_env() {
-                Ok(client) => client,
-                Err(_) => return Err(CliError::auth("ZHIPU_API_KEY is not set")),
-            };
-            let model_name = args.model.unwrap_or_else(|| GLM_5.to_string());
-            let model = client.completion_model(&model_name);
-            run_tui_with_model(model, launch_config, model_name, provider_name).await?;
-        }
-        CodeProvider::Ollama => {
-            let mut client = if let Some(base_url) = &args.api_base {
-                OllamaClient::with_base_url(base_url)
-            } else {
-                OllamaClient::from_env()
-            };
-            if args.ollama_compact_tools {
-                client = client.with_compact_tool_schema(true);
-            }
-            if client.missing_required_cloud_api_key() {
-                return Err(CliError::auth(
-                    "OLLAMA_API_KEY is required when using Ollama Cloud directly (set --api-base https://ollama.com or OLLAMA_BASE_URL=https://ollama.com)",
-                ));
-            }
-            let model_name = match args.model {
-                Some(m) => m,
-                None => {
-                    return Err(CliError::command_usage(
-                        "--model is required when using --provider ollama (e.g. --model llama3.2)",
-                    ));
-                }
-            };
-            let model = client.completion_model(&model_name);
-            run_tui_with_model(model, launch_config, model_name, provider_name).await?;
-        }
-        #[cfg(feature = "test-provider")]
-        CodeProvider::Fake => {
-            let fixture = args.fake_fixture.as_deref().ok_or_else(|| {
-                CliError::command_usage("--fake-fixture is required with --provider=fake")
-            })?;
-            let client = FakeClient::from_fixture_path(fixture).map_err(|error| {
-                CliError::io(format!(
-                    "failed to load fake provider fixture '{}': {error}",
-                    fixture.display()
-                ))
-            })?;
-            let model_name = args.model.unwrap_or_else(|| FAKE_DEFAULT_MODEL.to_string());
-            let model = client.completion_model(&model_name);
-            run_tui_with_model(model, launch_config, model_name, provider_name).await?;
-        }
         CodeProvider::Codex => {
             let mut server =
                 start_managed_codex_server(&args.codex_bin, args.codex_port, &working_dir).await?;
-            let initial_controller = if launch_config.control_runtime.is_write() {
-                CodeUiInitialController::LocalTui {
-                    owner_label: "Terminal UI".to_string(),
-                    reason: Some("The terminal UI controls this live Codex run".to_string()),
-                }
-            } else {
-                CodeUiInitialController::Fixed {
-                    kind: CodeUiControllerKind::Tui,
-                    owner_label: "Terminal UI".to_string(),
-                    reason: Some("The terminal UI controls this live Codex run".to_string()),
-                }
-            };
+            let browser_write_enabled =
+                launch_config.browser_control == BrowserControlMode::Loopback;
+            // `LocalTui` keeps the terminal as the visible owner while letting
+            // browser/automation leases attach when their writer is enabled.
+            // Fall back to `Fixed { Tui }` only when both writers are off
+            // (read-only observe).
+            let initial_controller =
+                if launch_config.control_runtime.is_write() || browser_write_enabled {
+                    CodeUiInitialController::LocalTui {
+                        owner_label: "Terminal UI".to_string(),
+                        reason: Some("The terminal UI controls this live Codex run".to_string()),
+                    }
+                } else {
+                    CodeUiInitialController::Fixed {
+                        kind: CodeUiControllerKind::Tui,
+                        owner_label: "Terminal UI".to_string(),
+                        reason: Some("The terminal UI controls this live Codex run".to_string()),
+                    }
+                };
             let code_ui_runtime = match start_codex_code_ui_runtime(
                 &args,
                 &working_dir,
                 &server.ws_url,
                 launch_config.mcp_server.clone(),
-                false,
+                browser_write_enabled,
                 initial_controller,
             )
             .await
@@ -1219,13 +1550,31 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
             server.shutdown().await;
             result?;
         }
+        _ => {
+            // OC-Phase 2 P2.4: the helper returns the *effective* provider
+            // name so usage / UI metadata reports the agent-selected
+            // provider after a `--agent <name>` override, not the CLI
+            // `--provider` default that the helper started from.
+            let (model, model_name, effective_provider_name) =
+                build_any_completion_model_for_args(&args, &env_file, &working_dir)?;
+            run_tui_with_model(model, launch_config, model_name, effective_provider_name).await?;
+        }
     }
 
     Ok(())
 }
 
 fn completion_thinking_for_args(args: &CodeArgs) -> Option<CompletionThinking> {
-    match args.provider {
+    completion_thinking_for_provider(args.provider, args)
+}
+
+/// Provider-explicit variant of [`completion_thinking_for_args`] used by the
+/// `--agent` override path so the resolved provider drives the dispatch.
+fn completion_thinking_for_provider(
+    provider: CodeProvider,
+    args: &CodeArgs,
+) -> Option<CompletionThinking> {
+    match provider {
         CodeProvider::Ollama => args.ollama_thinking.map(CompletionThinking::from),
         CodeProvider::Deepseek => args.deepseek_thinking.map(CompletionThinking::from),
         CodeProvider::Kimi => args.kimi_thinking.map(CompletionThinking::from),
@@ -1234,7 +1583,15 @@ fn completion_thinking_for_args(args: &CodeArgs) -> Option<CompletionThinking> {
 }
 
 fn completion_reasoning_effort_for_args(args: &CodeArgs) -> Option<CompletionReasoningEffort> {
-    match args.provider {
+    completion_reasoning_effort_for_provider(args.provider, args)
+}
+
+/// Provider-explicit variant of [`completion_reasoning_effort_for_args`].
+fn completion_reasoning_effort_for_provider(
+    provider: CodeProvider,
+    args: &CodeArgs,
+) -> Option<CompletionReasoningEffort> {
+    match provider {
         CodeProvider::Deepseek => args
             .deepseek_reasoning_effort
             .map(CompletionReasoningEffort::from),
@@ -1243,7 +1600,12 @@ fn completion_reasoning_effort_for_args(args: &CodeArgs) -> Option<CompletionRea
 }
 
 fn completion_stream_for_args(args: &CodeArgs) -> Option<bool> {
-    match args.provider {
+    completion_stream_for_provider(args.provider, args)
+}
+
+/// Provider-explicit variant of [`completion_stream_for_args`].
+fn completion_stream_for_provider(provider: CodeProvider, args: &CodeArgs) -> Option<bool> {
+    match provider {
         CodeProvider::Deepseek => args.deepseek_stream,
         CodeProvider::Kimi => Some(args.kimi_stream.unwrap_or(true)),
         _ => None,
@@ -1422,6 +1784,215 @@ fn ensure_loopback_browser_control_host(host: &str) -> CliResult<()> {
     Err(CliError::command_usage(
         "interactive web control is restricted to loopback hosts in v1; use --host 127.0.0.1",
     ))
+}
+
+/// Resolve the effective [`BrowserControlMode`] for this invocation.
+///
+/// User-supplied `--browser-control` always wins. When the flag is omitted
+/// the default is mode-aware:
+///   - `--web-only --provider codex` → `loopback` (matches the existing
+///     "browser write enabled" default for managed Codex sessions),
+///   - all other entry points → `off` (TUI sessions and non-Codex
+///     `--web-only` placeholders).
+///
+/// `loopback` further requires that `--host` is a loopback address; this is
+/// validated up-front so we fail closed before any port is bound.
+pub fn resolve_browser_control_mode(args: &CodeArgs) -> CliResult<BrowserControlMode> {
+    let mode = match args.browser_control {
+        Some(mode) => mode,
+        None => default_browser_control_mode(args),
+    };
+    if mode == BrowserControlMode::Loopback {
+        ensure_loopback_browser_control_host(&args.host)?;
+    }
+    Ok(mode)
+}
+
+fn default_browser_control_mode(args: &CodeArgs) -> BrowserControlMode {
+    if args.web_only && matches!(args.provider, CodeProvider::Codex) {
+        BrowserControlMode::Loopback
+    } else {
+        BrowserControlMode::Off
+    }
+}
+
+/// CLI-side wrapper around `code_ui::test_lease_duration_override` that maps
+/// the helper's `String` error into `CliError::command_usage` so a bad
+/// `LIBRA_CODE_LEASE_DURATION_MS` value fails the command at startup with
+/// a stable, user-readable message.
+fn code_ui_test_lease_duration_override() -> CliResult<Option<chrono::Duration>> {
+    crate::internal::ai::web::code_ui::test_lease_duration_override()
+        .map_err(CliError::command_usage)
+}
+
+/// Build a headless Code UI runtime for `--web-only` non-Codex providers.
+///
+/// Constructs a minimal local-read-only [`ToolRegistry`]
+/// and wires it into a [`HeadlessCodeRuntime`] so the browser composer can
+/// drive a real agent turn against the supplied `model`. The result is
+/// exposed through [`CodeUiRuntimeHandle`] just like the TUI flow, so the
+/// rest of `start_web_server` can use it without per-mode special cases.
+///
+/// `browser_write_enabled` should mirror the resolved
+/// [`BrowserControlMode::Loopback`] so the runtime advertises browser writes
+/// in the snapshot capabilities. The initial controller is `Unclaimed` —
+/// the browser is the only writer in headless mode, no TUI to hand off from.
+pub async fn build_headless_web_code_ui_runtime<M>(
+    args: &CodeArgs,
+    working_dir: &Path,
+    model: M,
+    model_name: String,
+    browser_write_enabled: bool,
+) -> CliResult<Arc<CodeUiRuntimeHandle>>
+where
+    M: CompletionModel + Clone + Send + Sync + 'static,
+    M::Response: CompletionUsage,
+{
+    use crate::internal::ai::agent::runtime::tool_loop::ToolLoopConfig;
+
+    let provider_name = format!("{:?}", args.provider).to_lowercase();
+    let provider = CodeUiProviderInfo {
+        provider: provider_name.clone(),
+        model: Some(model_name.clone()),
+        mode: Some("web-headless".to_string()),
+        managed: false,
+    };
+    let capabilities = headless_capabilities();
+
+    let mut snapshot = initial_snapshot(
+        working_dir.to_string_lossy().to_string(),
+        provider,
+        capabilities.clone(),
+    );
+    snapshot.status = CodeUiSessionStatus::Idle;
+    let session = CodeUiSession::new(snapshot);
+
+    let registry = build_headless_tool_registry(working_dir);
+    let preamble = system_preamble(working_dir, args.context, args.provider, Some(&model_name));
+    let preserve_reasoning_content = preserve_reasoning_content_for_provider(args.provider);
+    let temperature = args.temperature;
+    let thinking = completion_thinking_for_args(args);
+    let reasoning_effort = completion_reasoning_effort_for_args(args);
+    let stream = completion_stream_for_args(args);
+
+    let config_factory: Arc<dyn Fn() -> ToolLoopConfig + Send + Sync> =
+        Arc::new(move || ToolLoopConfig {
+            preamble: Some(preamble.clone()),
+            temperature,
+            thinking,
+            reasoning_effort,
+            stream,
+            preserve_reasoning_content,
+            ..Default::default()
+        });
+
+    let adapter = HeadlessCodeRuntime::new(session, capabilities, model, registry, config_factory);
+
+    let mut runtime_options = CodeUiRuntimeOptions::new(
+        browser_write_enabled,
+        false,
+        CodeUiInitialController::Unclaimed,
+    );
+    runtime_options.lease_duration = code_ui_test_lease_duration_override()?;
+    Ok(CodeUiRuntimeHandle::build_with_options(adapter, runtime_options).await)
+}
+
+fn build_headless_tool_registry(working_dir: &Path) -> Arc<ToolRegistry> {
+    // Headless v0 ships **local-read-only** tools.
+    //
+    // The TUI flow attaches a `ToolRuntimeContext` (sandbox policy, approval
+    // store, network policy, user-input channel) to every `ToolLoopConfig`
+    // so `apply_patch` / `shell` invocations route through `LibraSandbox`
+    // and the approval queues, and so `web_search` honors `--network-access
+    // deny`. The headless runtime does not yet wire any of those into the
+    // browser `CodeUiInteractionRequest` surface, so:
+    //
+    // - `apply_patch` / `shell`: registering would let the agent mutate the
+    //   workspace without any sandbox or approval prompt — a security
+    //   regression vs. the TUI path.
+    // - `web_search`: `WebSearchHandler` allows network access whenever no
+    //   runtime context is present, which would silently bypass any
+    //   `--network-access deny` posture set on the CLI.
+    //
+    // Until the interaction-routing follow-up lands, headless mode exposes
+    // local-read-only tools only.
+    let trace_id = uuid::Uuid::new_v4();
+    let builder = ToolRegistryBuilder::with_working_dir(working_dir.to_path_buf())
+        .hardening(ToolBoundaryRuntime::system(
+            trace_id,
+            Arc::new(TracingAuditSink),
+        ))
+        .register("read_file", Arc::new(ReadFileHandler))
+        .register("list_dir", Arc::new(ListDirHandler))
+        .register("grep_files", Arc::new(GrepFilesHandler))
+        .register("search_files", Arc::new(SearchFilesHandler));
+    Arc::new(register_semantic_handlers(builder).build())
+}
+
+/// Construct the appropriate provider client and wrap it in
+/// [`build_headless_web_code_ui_runtime`]. Returns `None` when the requested
+/// provider is not yet wired into the headless path so the caller can fall
+/// back to the read-only placeholder gracefully.
+///
+/// v0 supports `--provider ollama` (the canonical Phase 3 verification path
+/// in `docs/improvement/web.md`). Other non-Codex providers continue to
+/// receive the placeholder runtime until each provider's client is wired in.
+///
+/// TODO(opencode OC-Phase 1+): converge this path on `ProviderFactory` so the
+/// headless and TUI flows share a single dispatch site. Today the headless
+/// flow still constructs the Ollama client directly, which means future
+/// non-Codex providers must be wired in twice (here and in
+/// [`build_any_completion_model_for_args`]) — a maintenance hazard the doc
+/// explicitly calls out as a divergence to fix.
+async fn build_non_codex_headless_runtime(
+    args: &CodeArgs,
+    working_dir: &Path,
+    browser_write_enabled: bool,
+) -> CliResult<Option<Arc<CodeUiRuntimeHandle>>> {
+    match args.provider {
+        CodeProvider::Ollama => {
+            let mut client = if let Some(base_url) = &args.api_base {
+                OllamaClient::with_base_url(base_url)
+            } else {
+                OllamaClient::from_env()
+            };
+            if args.ollama_compact_tools {
+                client = client.with_compact_tool_schema(true);
+            }
+            if client.missing_required_cloud_api_key() {
+                return Err(CliError::auth(
+                    "OLLAMA_API_KEY is required when using Ollama Cloud directly (set --api-base https://ollama.com or OLLAMA_BASE_URL=https://ollama.com)",
+                ));
+            }
+            let model_name = match args.model.clone() {
+                Some(m) => m,
+                None => {
+                    return Err(CliError::command_usage(
+                        "--model is required when using --provider ollama (e.g. --model llama3.2)",
+                    ));
+                }
+            };
+            let model = client.completion_model(&model_name);
+            Ok(Some(
+                build_headless_web_code_ui_runtime(
+                    args,
+                    working_dir,
+                    model,
+                    model_name,
+                    browser_write_enabled,
+                )
+                .await?,
+            ))
+        }
+        // Codex is handled by `start_codex_code_ui_runtime` in `execute_web_only`;
+        // it must never enter this dispatcher.
+        CodeProvider::Codex => Ok(None),
+        // Other providers (Gemini, OpenAI, Anthropic, DeepSeek, Kimi, Zhipu)
+        // can be added incrementally — each needs a `with_api_key`/`from_env`
+        // construction matching the TUI path. Until then, fall back to the
+        // placeholder.
+        _ => Ok(None),
+    }
 }
 
 async fn build_placeholder_web_code_ui_runtime(
@@ -1778,6 +2349,7 @@ struct TuiLaunchConfig {
     exec_approval_tx: tokio::sync::mpsc::UnboundedSender<ExecApprovalRequest>,
     mcp_server: Arc<LibraMcpServer>,
     control_runtime: ControlRuntimeConfig,
+    browser_control: BrowserControlMode,
 }
 
 #[derive(Clone)]
@@ -1850,6 +2422,7 @@ fn session_canonical_thread_id(session: &SessionState) -> Option<String> {
         })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn build_tui_code_ui_runtime(
     working_dir: &str,
     session: &SessionState,
@@ -1858,6 +2431,8 @@ async fn build_tui_code_ui_runtime(
     projection_bundle: Option<&ThreadBundle>,
     code_control_tx: Option<tokio::sync::mpsc::UnboundedSender<TuiControlCommand>>,
     automation_write_enabled: bool,
+    browser_write_enabled: bool,
+    lease_duration_override: Option<chrono::Duration>,
 ) -> Arc<CodeUiRuntimeHandle> {
     let capabilities = build_tui_code_ui_capabilities();
     let provider = CodeUiProviderInfo {
@@ -1889,7 +2464,11 @@ async fn build_tui_code_ui_runtime(
     } else {
         ReadOnlyCodeUiAdapter::new(code_ui_session, capabilities)
     };
-    let initial_controller = if automation_write_enabled {
+    // `LocalTui` keeps the terminal as the visible owner but still lets
+    // browser/automation leases attach when their write surface is enabled.
+    // `Fixed { Tui }` is reserved for sessions where neither writer should
+    // ever be allowed to take control (read-only browser observe).
+    let initial_controller = if automation_write_enabled || browser_write_enabled {
         CodeUiInitialController::LocalTui {
             owner_label: "Terminal UI".to_string(),
             reason: Some("The terminal UI controls this live session".to_string()),
@@ -1901,13 +2480,13 @@ async fn build_tui_code_ui_runtime(
             reason: Some("The terminal UI controls this live session".to_string()),
         }
     };
-    CodeUiRuntimeHandle::build_with_control(
-        adapter,
-        false,
+    let mut runtime_options = CodeUiRuntimeOptions::new(
+        browser_write_enabled,
         automation_write_enabled,
         initial_controller,
-    )
-    .await
+    );
+    runtime_options.lease_duration = lease_duration_override;
+    CodeUiRuntimeHandle::build_with_options(adapter, runtime_options).await
 }
 
 async fn load_code_ui_projection_bundle(
@@ -1997,6 +2576,7 @@ where
 {
     let registry = params.registry;
     let control_runtime = params.control_runtime;
+    let browser_control = params.browser_control;
     let hook_runner = {
         let runner = HookRunner::load(registry.working_dir());
         if runner.has_hooks() {
@@ -2051,11 +2631,16 @@ where
     let storage_root = resolve_storage_root(registry.working_dir());
     let session_store = SessionStore::from_storage_path(&storage_root);
     let session = if let Some(thread_id) = params.resume_thread_id.as_deref() {
-        Uuid::parse_str(thread_id).map_err(|error| {
-            CliError::command_usage(format!(
-                "--resume expects a canonical thread_id UUID (got '{thread_id}': {error})"
-            ))
-        })?;
+        // The resume identifier may be either a canonical UUID (planning-bound
+        // thread) or a chat-flow session id from `generate_session_id`
+        // (millisecond-hex / pid-hex / counter-hex). The store accepts either
+        // shape — reject empty input here and let `load_for_thread_id` surface
+        // a unified "no session found" error for any unknown identifier.
+        if thread_id.trim().is_empty() {
+            return Err(CliError::command_usage(
+                "--resume requires a non-empty thread_id",
+            ));
+        }
         match session_store.load_for_thread_id(thread_id, &working_dir_str) {
             Ok(Some(session)) => session,
             Ok(None) => {
@@ -2083,17 +2668,26 @@ where
             model: model_name.clone(),
             request_kind: "completion".to_string(),
             intent: None,
+            // OC-Phase 5 P5.2: single-agent legacy path. The
+            // dispatcher (P5.3) sets this to the active profile name
+            // when multi-agent is enabled.
+            agent_name: None,
         });
     }
 
-    let (code_control_tx, code_control_rx) = if control_runtime.is_write() {
+    let automation_write_enabled = control_runtime.is_write();
+    let browser_write_enabled = browser_control == BrowserControlMode::Loopback;
+    // The TUI control command channel is created whenever any writer
+    // (automation or browser) is enabled, so the runtime adapter can route
+    // submit/respond/cancel into the TUI app loop. Selecting the adapter
+    // based on `code_control_tx.is_some()` would gate browser writes behind
+    // `--control write`; gating on the explicit booleans avoids that.
+    let (code_control_tx, code_control_rx) = if automation_write_enabled || browser_write_enabled {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<TuiControlCommand>();
         (Some(tx), Some(rx))
     } else {
         (None, None)
     };
-    let automation_write_enabled = code_control_tx.is_some();
-
     let code_ui_runtime = if let Some(runtime) = managed_code_ui_runtime.clone() {
         if let Some(control_tx) = code_control_tx {
             let adapter = runtime.adapter();
@@ -2101,16 +2695,16 @@ where
             let capabilities = adapter.capabilities();
             let tui_adapter: Arc<dyn CodeUiProviderAdapter> =
                 TuiCodeUiAdapter::new(code_ui_session, capabilities, control_tx);
-            CodeUiRuntimeHandle::build_with_control(
-                tui_adapter,
-                false,
-                true,
+            let mut runtime_options = CodeUiRuntimeOptions::new(
+                browser_write_enabled,
+                automation_write_enabled,
                 CodeUiInitialController::LocalTui {
                     owner_label: "Terminal UI".to_string(),
                     reason: Some("The terminal UI controls this live managed session".to_string()),
                 },
-            )
-            .await
+            );
+            runtime_options.lease_duration = code_ui_test_lease_duration_override()?;
+            CodeUiRuntimeHandle::build_with_options(tui_adapter, runtime_options).await
         } else {
             runtime
         }
@@ -2137,6 +2731,8 @@ where
             projection_bundle.as_ref(),
             code_control_tx,
             automation_write_enabled,
+            browser_write_enabled,
+            code_ui_test_lease_duration_override()?,
         )
         .await
     };
@@ -2575,6 +3171,10 @@ fn approval_config_from_project_config(working_dir: &Path) -> ApprovalRuntimeCon
                 .unwrap_or(default_cache_policy.protected_branches),
             allowed_network_domains: approval.allowed_network_domains.unwrap_or_default(),
             no_cache_unknown_network: approval.no_cache_unknown_network,
+            // OC-Phase 2 P2.5: the persistent ruleset is loaded lazily by
+            // the runtime once it has a `DatabaseConnection`; the project-
+            // config-derived policy starts with no projection attached.
+            approved_ruleset: None,
         },
     }
 }
@@ -2763,6 +3363,30 @@ fn validate_mode_args(args: &CodeArgs, _output: &OutputConfig) -> Result<(), Str
         ));
     }
 
+    // OC-Phase 6 P6.5: validate `--goal "<objective>"` against the
+    // same shape rules `GoalSpec::new` enforces (opencode.md
+    // lines 538-556). Surfacing the failure at CLI parse keeps the
+    // supervisor (P6.3) from booting against a malformed objective
+    // and gives the user a precise error string instead of a panic
+    // at session-start.
+    if let Some(objective) = args.goal.as_deref() {
+        use crate::internal::ai::goal::MAX_OBJECTIVE_LEN;
+        if objective.trim().is_empty() {
+            return Err("--goal requires a non-empty objective string (e.g. \
+                 `--goal \"ship feature X\"`)"
+                .to_string());
+        }
+        if objective.len() > MAX_OBJECTIVE_LEN {
+            return Err(format!(
+                "--goal objective is {} bytes which exceeds the {}-byte cap; \
+                 shorten the objective and add detail through the model's \
+                 first turn or `/goal criteria add <text>`",
+                objective.len(),
+                MAX_OBJECTIVE_LEN,
+            ));
+        }
+    }
+
     if args.web_only {
         reject_non_tui_flags(args, "--web")?;
     }
@@ -2938,6 +3562,7 @@ mod tests {
             repo: None,
             env_file: None,
             control: ControlMode::Observe,
+            browser_control: None,
             control_token_file: None,
             control_info_file: None,
             provider: CodeProvider::Gemini,
@@ -2950,6 +3575,7 @@ mod tests {
             deepseek_stream: None,
             kimi_thinking: None,
             kimi_stream: None,
+            agent: None,
             #[cfg(feature = "test-provider")]
             fake_fixture: None,
             context: None,
@@ -2963,6 +3589,7 @@ mod tests {
             codex_bin: DEFAULT_CODEX_BIN.to_string(),
             codex_port: None,
             plan_mode: None,
+            goal: None,
         }
     }
 
@@ -2971,6 +3598,33 @@ mod tests {
         let mut args = base_args();
         args.mcp_port = args.port;
         assert!(validate_mode_args(&args, &OutputConfig::default()).is_err());
+    }
+
+    /// OC-Phase 6 P6.5: `--goal` runs the same shape rules
+    /// `GoalSpec::new` does so a malformed objective fails CLI
+    /// parsing instead of crashing the supervisor at session start.
+    #[test]
+    fn accepts_well_formed_goal_objective() {
+        let mut args = base_args();
+        args.goal = Some("ship feature X".to_string());
+        assert!(validate_mode_args(&args, &OutputConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn rejects_blank_goal_objective() {
+        let mut args = base_args();
+        args.goal = Some("   ".to_string());
+        let err = validate_mode_args(&args, &OutputConfig::default()).unwrap_err();
+        assert!(err.contains("non-empty objective"));
+    }
+
+    #[test]
+    fn rejects_oversized_goal_objective() {
+        use crate::internal::ai::goal::MAX_OBJECTIVE_LEN;
+        let mut args = base_args();
+        args.goal = Some("z".repeat(MAX_OBJECTIVE_LEN + 1));
+        let err = validate_mode_args(&args, &OutputConfig::default()).unwrap_err();
+        assert!(err.contains("exceeds the"));
     }
 
     #[test]
@@ -3150,6 +3804,7 @@ no_cache_unknown_network = true
                 protected_branches: vec!["main".to_string(), "release".to_string()],
                 allowed_network_domains: vec!["github.com".to_string()],
                 no_cache_unknown_network: true,
+                approved_ruleset: None,
             }
         );
     }
@@ -3539,6 +4194,8 @@ no_cache_unknown_network = true
             Some(&bundle),
             None,
             false,
+            false,
+            None,
         )
         .await;
         let snapshot = runtime.snapshot().await;
@@ -3678,5 +4335,266 @@ no_cache_unknown_network = true
             let sandbox = runtime.sandbox.expect("sandbox context should be present");
             assert!(matches!(sandbox.policy, SandboxPolicy::ReadOnly));
         }
+    }
+
+    // ─── OC-Phase 2 P2.4: --agent override ────────────────────────────────
+
+    /// Build a working directory with a `.libra/agents/` profile that pins a
+    /// structured `provider/model` binding so the override path has
+    /// something to lift.
+    fn write_agent_profile(working_dir: &Path, name: &str, body: &str) {
+        let agents_dir = working_dir.join(".libra").join("agents");
+        std::fs::create_dir_all(&agents_dir).expect("create agents dir");
+        std::fs::write(agents_dir.join(format!("{name}.md")), body).expect("write profile");
+    }
+
+    /// Scenario: `--agent` is unset → helper is a no-op and returns `None`.
+    /// This is the flag-off baseline OC-Phase 2 P2.4 must preserve.
+    #[test]
+    fn resolve_agent_override_noop_when_flag_absent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let args = base_args();
+        let result = resolve_agent_binding_override(&args, tmp.path()).unwrap();
+        assert!(result.is_none());
+    }
+
+    /// Scenario: `--agent <name>` lifts a profile that carries
+    /// `model: anthropic/claude-3-5-sonnet-latest` into a structured
+    /// `ModelBinding`. The legacy `model_preference` form is irrelevant
+    /// here; only the binding goes through.
+    #[test]
+    fn resolve_agent_override_lifts_provider_slash_model_binding() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_agent_profile(
+            tmp.path(),
+            "planner",
+            "---\n\
+             name: planner\n\
+             description: Implementation planner\n\
+             tools: []\n\
+             model: anthropic/claude-3-5-sonnet-latest\n\
+             ---\n\
+             You plan.",
+        );
+        let mut args = base_args();
+        args.agent = Some("planner".to_string());
+
+        let binding = resolve_agent_binding_override(&args, tmp.path())
+            .unwrap()
+            .expect("binding lifts");
+        assert_eq!(binding.provider_id, "anthropic");
+        assert_eq!(binding.model_id, "claude-3-5-sonnet-latest");
+        assert!(binding.variant.is_none());
+    }
+
+    /// Scenario: an `--agent` profile that carries only a legacy alias
+    /// (`model: default`) yields `Ok(None)` — there is no structured
+    /// binding to override the CLI defaults with, so the rest of
+    /// `build_any_completion_model_for_args` falls through to the CLI
+    /// provider/model defaults.
+    #[test]
+    fn resolve_agent_override_returns_none_for_legacy_model_alias() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_agent_profile(
+            tmp.path(),
+            "planner",
+            "---\nname: planner\nmodel: default\n---\nbody",
+        );
+        let mut args = base_args();
+        args.agent = Some("planner".to_string());
+
+        let result = resolve_agent_binding_override(&args, tmp.path()).unwrap();
+        assert!(result.is_none());
+    }
+
+    /// Scenario: an unknown agent name surfaces a `command_usage` error
+    /// listing the known profiles. Embedded defaults always load, so the
+    /// suggestion list is never empty.
+    #[test]
+    fn resolve_agent_override_unknown_name_lists_known_profiles() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut args = base_args();
+        args.agent = Some("does-not-exist".to_string());
+
+        let err = resolve_agent_binding_override(&args, tmp.path())
+            .expect_err("unknown agent must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("does-not-exist"),
+            "error must mention the bad name: {msg}"
+        );
+        // Embedded `planner` is one of the catalogued profiles, so the
+        // suggestion list must include it.
+        assert!(
+            msg.contains("planner"),
+            "error must list known profiles: {msg}"
+        );
+    }
+
+    /// Scenario: a profile whose `mode: subagent` is selected by `--agent`
+    /// is rejected. Sub-agents are dispatched via the `task` tool in
+    /// OC-Phase 3, not as the session driver.
+    #[test]
+    fn resolve_agent_override_rejects_non_primary_eligible_mode() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_agent_profile(
+            tmp.path(),
+            "explorer",
+            "---\n\
+             name: explorer\n\
+             mode: subagent\n\
+             model: anthropic/claude-3-5-haiku-latest\n\
+             ---\n\
+             body",
+        );
+        let mut args = base_args();
+        args.agent = Some("explorer".to_string());
+
+        let err = resolve_agent_binding_override(&args, tmp.path())
+            .expect_err("subagent-only profile must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("explorer"),
+            "error must mention agent name: {msg}"
+        );
+        assert!(
+            msg.contains("Subagent") || msg.contains("subagent"),
+            "error must mention the offending mode: {msg}"
+        );
+    }
+
+    /// Scenario: a `mode: all` profile IS primary-eligible, so the override
+    /// surfaces the binding rather than erroring. This pins the doc rule
+    /// "Primary | All" → primary-eligible.
+    #[test]
+    fn resolve_agent_override_accepts_mode_all() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_agent_profile(
+            tmp.path(),
+            "swiss",
+            "---\n\
+             name: swiss\n\
+             mode: all\n\
+             model: openai/gpt-4o-mini\n\
+             ---\n\
+             body",
+        );
+        let mut args = base_args();
+        args.agent = Some("swiss".to_string());
+
+        let binding = resolve_agent_binding_override(&args, tmp.path())
+            .unwrap()
+            .expect("binding lifts");
+        assert_eq!(binding.provider_id, "openai");
+        assert_eq!(binding.model_id, "gpt-4o-mini");
+    }
+
+    /// Scenario (OC-Phase 3 P3.1 flag-off invariant — production path):
+    /// the headless tool registry built by [`build_headless_tool_registry`]
+    /// MUST NOT register a `task` tool. P3.1 only ships the schema
+    /// constructor; runtime wiring lives in P3.2+ behind
+    /// `code.multi_agent.enabled` (OC-Phase 5). A regression that wires
+    /// the dispatcher unconditionally would fail this test by surfacing
+    /// `task` in the registry's `tool_names()`.
+    ///
+    /// The TUI path inlines its registry construction inside
+    /// `execute_tui` and is not testable in isolation; the unit-level
+    /// guard at
+    /// `internal::ai::tools::registry::tests::registry_does_not_expose_task_tool_in_flag_off_default`
+    /// covers the fixture-level invariant for that path.
+    #[test]
+    fn build_headless_tool_registry_omits_task_tool_in_flag_off_default() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let registry = build_headless_tool_registry(tmp.path());
+        let names = registry.tool_names();
+        assert!(
+            !names.contains(&"task".to_string()),
+            "OC-Phase 3 P3.1 invariant: `task` must not be registered in the \
+             headless registry until the dispatcher lands and is gated; \
+             got tool_names = {names:?}"
+        );
+    }
+
+    /// Scenario: an agent binding whose `provider_id` does NOT match any
+    /// `CodeProvider` variant must be rejected at
+    /// `effective_code_provider_for_args` with a clear, actionable error.
+    /// Silent fallback to `args.provider` would leave system prompt and
+    /// context-budget computations pointed at the CLI provider while the
+    /// model itself was built (or refused) for a different provider —
+    /// a partial-misconfiguration trap. Pinning this gate prevents the
+    /// regression Codex flagged on the OC-Phase 2 P2.4 review.
+    #[test]
+    fn effective_provider_rejects_unknown_binding_provider_id() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_agent_profile(
+            tmp.path(),
+            "alien",
+            "---\n\
+             name: alien\n\
+             model: aleph-omega/some-model\n\
+             ---\n\
+             body",
+        );
+        let mut args = base_args();
+        args.agent = Some("alien".to_string());
+
+        let err = effective_code_provider_for_args(&args, tmp.path())
+            .expect_err("unknown binding provider must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("alien"),
+            "error must mention the agent name: {msg}"
+        );
+        assert!(
+            msg.contains("aleph-omega"),
+            "error must echo the offending provider id: {msg}"
+        );
+        assert!(
+            msg.contains("anthropic"),
+            "error must list the known provider ids: {msg}"
+        );
+    }
+
+    /// Scenario: `--provider gemini --model gpt-foo --agent planner`
+    /// (where `planner` carries `model: anthropic/claude-3-5-sonnet-latest`)
+    /// — the agent's binding wins **atomically**. The CLI `--model gpt-foo`
+    /// is dropped because it would otherwise pair an OpenAI-style model id
+    /// with the agent's anthropic provider. Smoke tests the integration of
+    /// `resolve_agent_binding_override` with the rest of
+    /// `build_any_completion_model_for_args`.
+    #[cfg(feature = "test-provider")]
+    #[test]
+    fn build_helper_treats_agent_binding_atomically() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_agent_profile(
+            tmp.path(),
+            "planner",
+            "---\n\
+             name: planner\n\
+             model: anthropic/claude-3-5-sonnet-latest\n\
+             ---\n\
+             body",
+        );
+        let mut args = base_args();
+        args.provider = CodeProvider::Gemini;
+        args.model = Some("gemini-2.0-flash".to_string()); // would-be hybrid
+        args.agent = Some("planner".to_string());
+        let env_file = CodeEnvFile::default();
+
+        // The build call would fail (no API key in CodeEnvFile), but the
+        // failure path tells us which provider we ended up dispatching to:
+        // an Anthropic build complains about ANTHROPIC_API_KEY, NOT
+        // GEMINI_API_KEY.
+        let err = build_any_completion_model_for_args(&args, &env_file, tmp.path())
+            .expect_err("missing api key path must fire");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ANTHROPIC_API_KEY"),
+            "agent override must point env-var lookup at anthropic, got: {msg}"
+        );
+        assert!(
+            !msg.contains("GEMINI_API_KEY"),
+            "CLI --provider gemini must NOT win after agent override, got: {msg}"
+        );
     }
 }

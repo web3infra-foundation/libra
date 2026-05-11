@@ -69,6 +69,9 @@ pub mod commands;
 pub mod completion;
 // Provider-aware prompt context budget planning and allocation.
 pub mod context_budget;
+// OC-Phase 6 Goal mode runtime contract (P6.1 schema only).
+// Schema lives here; supervisor / verifier / tools / CLI land in P6.2-P6.7.
+pub mod goal;
 // Crate-private helpers for capturing artifacts produced by tool calls.
 pub(crate) mod generated_artifacts;
 // Conversation history datastructures (compaction, persistence, replay).
@@ -87,8 +90,13 @@ pub mod mcp;
 pub mod node_adapter;
 // Phase 0/1/2 orchestrator: intent -> plan -> execute pipeline.
 pub mod orchestrator;
+// External-Agent capture (CEX-EntireIO): contracts and redaction engine for
+// observing externally-hosted agents (Claude Code, Gemini CLI, …).
+pub mod observed_agents;
 // Read-only projections of session state for UI consumers.
 pub mod projection;
+// Permission ruleset machinery (OC-Phase 2 P2.3): types + evaluate / disabled algorithms.
+pub mod permission;
 // Prompt templates and rendering helpers.
 pub mod prompt;
 // One submodule per LLM backend; each implements CompletionModel.

@@ -9,18 +9,17 @@ import {
   IconShield,
   IconSpark,
 } from "@/components/icons";
-import {
-  WORKFLOW,
-  type ExecutionRun,
-  type IntentDoc,
-  type Plan,
-  type PlanStep,
-} from "@/lib/mock";
 import { cn } from "@/lib/utils";
 
 import { Card } from "./card";
 import { statusMeta } from "./status-meta";
-import type { DetailState } from "./types";
+import type {
+  DetailState,
+  ExecutionRun,
+  IntentDoc,
+  Plan,
+  PlanStep,
+} from "./types";
 
 type IntentCardProps = {
   intent: IntentDoc;
@@ -166,11 +165,13 @@ function StepRow({
 type RunsCardProps = {
   onOpen: (d: DetailState) => void;
   activeDetail: DetailState | null;
+  /** Execution plan rendered along the rail. */
+  execPlan: Plan;
+  /** Runs grouped by step id at the call site. */
+  runs: ExecutionRun[];
 };
 
-export function RunsCard({ onOpen, activeDetail }: RunsCardProps) {
-  const execPlan = WORKFLOW.plans.execution;
-  const runs = WORKFLOW.runs;
+export function RunsCard({ onOpen, activeDetail, execPlan, runs }: RunsCardProps) {
   const runsByStep: Record<string, ExecutionRun[]> = {};
   runs.forEach((r) => {
     (runsByStep[r.step] = runsByStep[r.step] ?? []).push(r);

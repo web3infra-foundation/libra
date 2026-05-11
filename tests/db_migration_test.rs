@@ -44,13 +44,25 @@ fn builtin_migrations_register_current_schema_migrations() {
         .map(|migration| migration.version)
         .collect();
     let names: Vec<&str> = migrations.iter().map(|migration| migration.name).collect();
-    assert_eq!(versions, vec![2026050301, 2026050302]);
-    assert_eq!(names, vec!["automation_log", "agent_usage_stats"]);
+    assert_eq!(
+        versions,
+        vec![2026050301, 2026050302, 2026050303, 2026050501, 2026050601]
+    );
+    assert_eq!(
+        names,
+        vec![
+            "automation_log",
+            "agent_usage_stats",
+            "agent_capture",
+            "agent_checkpoint_parent_nullable",
+            "approved_permission",
+        ]
+    );
 
     let runner = builtin_runner().expect("builtin registry must build clean");
     assert!(!runner.is_empty());
-    assert_eq!(runner.len(), 2);
-    assert_eq!(runner.max_registered_version(), Some(2026050302));
+    assert_eq!(runner.len(), 5);
+    assert_eq!(runner.max_registered_version(), Some(2026050601));
 }
 
 // ---------------------------------------------------------------------------
@@ -982,10 +994,60 @@ async fn run_builtin_migrations_applies_current_builtin_registry() {
     let applied = run_builtin_migrations(&conn)
         .await
         .expect("run_builtin_migrations");
-    assert_eq!(applied, vec![2026050301, 2026050302]);
+    assert_eq!(
+        applied,
+        vec![2026050301, 2026050302, 2026050303, 2026050501, 2026050601]
+    );
     assert!(table_exists(&conn, "schema_versions").await);
     assert!(table_exists(&conn, "automation_log").await);
     assert!(table_exists(&conn, "agent_usage_stats").await);
+    assert!(table_exists(&conn, "agent_session").await);
+    assert!(table_exists(&conn, "agent_checkpoint").await);
+    assert!(table_exists(&conn, "approved_permission").await);
+}
+
+/// OC-Phase 2 P2.5 regression guard: `approved_permission` survives an
+/// up → down → up round-trip cleanly. The down migration drops the table
+/// and the index destructively, so a subsequent up must re-create both
+/// without colliding on a stale `IF NOT EXISTS`.
+#[tokio::test]
+async fn approved_permission_up_down_up_round_trip() {
+    let (_dir, url, _path) = fresh_db_url();
+    let conn = connect(&url).await;
+    let runner = builtin_runner().expect("builtin runner builds clean");
+
+    // Up: full registry applied.
+    runner
+        .run_pending(&conn)
+        .await
+        .expect("first up applies cleanly");
+    assert!(table_exists(&conn, "approved_permission").await);
+    assert!(index_exists(&conn, "idx_approved_permission_project").await);
+
+    // Down: roll the new migration off again. Target the previous version
+    // so only `2026050601` reverses; the older migrations stay applied.
+    let rolled = runner
+        .rollback_to(&conn, 2026050501)
+        .await
+        .expect("rollback past approved_permission");
+    assert_eq!(rolled, vec![2026050601]);
+    assert!(
+        !table_exists(&conn, "approved_permission").await,
+        "down migration must drop the table"
+    );
+    assert!(
+        !index_exists(&conn, "idx_approved_permission_project").await,
+        "down migration must drop the index"
+    );
+
+    // Up again: re-create the table + index with no `IF NOT EXISTS` collision.
+    let reapplied = runner
+        .run_pending(&conn)
+        .await
+        .expect("second up reapplies cleanly");
+    assert_eq!(reapplied, vec![2026050601]);
+    assert!(table_exists(&conn, "approved_permission").await);
+    assert!(index_exists(&conn, "idx_approved_permission_project").await);
 }
 
 // ---------------------------------------------------------------------------

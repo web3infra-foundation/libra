@@ -3,10 +3,14 @@
 import { Fragment, useMemo } from "react";
 
 import { IconBranch } from "@/components/icons";
-import { WORKFLOW, type ExecutionRun, type PlanStep } from "@/lib/mock";
 import { cn } from "@/lib/utils";
 
-import type { DetailState } from "./types";
+import type {
+  DetailState,
+  ExecutionRun,
+  PlanStep,
+  WorkflowState,
+} from "./types";
 
 type Commit = {
   id: string;
@@ -33,10 +37,14 @@ const X0 = 18;
 type Props = {
   onOpen: (d: DetailState) => void;
   activeDetail: DetailState | null;
+  /** Workflow view-model derived from the live snapshot. */
+  workflow: WorkflowState;
+  /** Branch label rendered in the timeline footer. */
+  branchLabel: string;
 };
 
-export function GitTimeline({ onOpen, activeDetail }: Props) {
-  const commits = useMemo(() => buildCommits(), []);
+export function GitTimeline({ onOpen, activeDetail, workflow, branchLabel }: Props) {
+  const commits = useMemo(() => buildCommits(workflow), [workflow]);
   const width = 80;
   const height = commits.length * ROW_H + 12;
 
@@ -157,7 +165,7 @@ export function GitTimeline({ onOpen, activeDetail }: Props) {
       </div>
       <div className="mono shrink-0 border-t border-rule bg-paper-2 px-3 py-2 text-[10px]">
         <span className="text-accent">HEAD</span>
-        <span className="ml-1 text-ink-3">→ agent/optimistic-mutate</span>
+        <span className="ml-1 text-ink-3">→ {branchLabel}</span>
       </div>
     </aside>
   );
@@ -180,7 +188,7 @@ function isNodeActive(c: Commit, detail: DetailState | null) {
   return false;
 }
 
-function buildCommits(): Commit[] {
+function buildCommits(workflow: WorkflowState): Commit[] {
   let y = 14;
   const rows: Commit[] = [];
 
@@ -197,12 +205,12 @@ function buildCommits(): Commit[] {
     lane: 0,
     hash: "a81f",
     title: "intent: confirm",
-    ago: "10:44",
+    ago: "—",
     filled: true,
     phase: 0,
     parents: [],
     detailKind: "intent",
-    onClick: (open) => open({ kind: "intent", data: WORKFLOW.intent }),
+    onClick: (open) => open({ kind: "intent", data: workflow.intent }),
   });
 
   // Phase 1: plan
@@ -211,7 +219,7 @@ function buildCommits(): Commit[] {
     lane: 0,
     hash: "b3d2",
     title: "plan: exec + test",
-    ago: "10:45",
+    ago: "—",
     filled: true,
     phase: 1,
     parents: ["c0"],
@@ -223,14 +231,14 @@ function buildCommits(): Commit[] {
     lane: 0,
     hash: "c902",
     title: "phase 2: start",
-    ago: "10:46",
+    ago: "—",
     filled: true,
     phase: 2,
     parents: ["c1"],
   });
 
-  const execPlan = WORKFLOW.plans.execution;
-  const runs: ExecutionRun[] = WORKFLOW.runs;
+  const execPlan = workflow.plans.execution;
+  const runs: ExecutionRun[] = workflow.runs;
   let prevRunId = fork.id;
   let firstRun = true;
 

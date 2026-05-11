@@ -16,12 +16,24 @@ import { useState } from "react";
 
 import { IconCheck, IconCopy } from "@/components/icons";
 import { BrandMark } from "@/components/workspace/brand-mark";
-import type { ChatMessage } from "@/lib/mock";
+import type { CodeUiTranscriptEntryKind } from "@/lib/code-ui/types";
 import { cn } from "@/lib/utils";
+
+/** Chat-pane message shape — derived from snapshot transcript entries. */
+export type ChatMessageView = {
+  id: string;
+  role: "user" | "assistant";
+  time: string;
+  body: string;
+  streaming?: boolean;
+  /** Optional decorator hints from the upstream transcript entry. */
+  kind?: CodeUiTranscriptEntryKind;
+  title?: string;
+};
 
 /** Props shared by both message variants. */
 type Props = {
-  message: ChatMessage;
+  message: ChatMessageView;
 };
 
 /**
@@ -48,13 +60,8 @@ function UserMessage({ message }: Props) {
   function copy() {
     const done = () => {
       setCopied(true);
-      // Auto-revert the "Copied" badge after a beat so the affordance reads
-      // as confirmation rather than a permanent state change.
       setTimeout(() => setCopied(false), 1400);
     };
-    // Prefer the async clipboard API; if it rejects (permissions, insecure
-    // context) or is unavailable, fall back to the textarea + execCommand
-    // approach which works in more environments.
     if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
       navigator.clipboard.writeText(message.body).then(done, () => fallbackCopy(message.body, done));
     } else {
@@ -105,6 +112,9 @@ function AssistantMessage({ message }: Props) {
         <span className="mono text-[10.5px] font-medium">libra</span>
         <span className="text-[10.5px] text-ink-3">·</span>
         <span className="text-[10.5px] text-ink-3">{message.time}</span>
+        {message.title && (
+          <span className="text-[10.5px] text-ink-3">· {message.title}</span>
+        )}
         {message.streaming && (
           <span className="mono ml-2 inline-flex items-center gap-1.5 rounded-sm bg-accent-soft px-1.5 py-px text-[10px] text-accent">
             <span className="libra-pulse h-[5px] w-[5px] rounded-full bg-accent" /> streaming

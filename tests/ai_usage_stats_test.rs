@@ -19,6 +19,14 @@ fn usage_context(provider: &str, model: &str) -> UsageContext {
         model: model.to_string(),
         request_kind: "completion".to_string(),
         intent: Some("feature".to_string()),
+        agent_name: None,
+    }
+}
+
+fn usage_context_with_agent(provider: &str, model: &str, agent: &str) -> UsageContext {
+    UsageContext {
+        agent_name: Some(agent.to_string()),
+        ..usage_context(provider, model)
     }
 }
 
@@ -239,4 +247,115 @@ async fn usage_recorder_prunes_rows_before_cutoff() {
         .await
         .expect("aggregate usage");
     assert!(rows.is_empty());
+}
+
+/// OC-Phase 5 P5.2: the recorder persists `agent_name` and the
+/// query layer can aggregate at three documented grains:
+/// `(provider, model)` (legacy), `(agent_name)`, and
+/// `(agent_name, provider, model)`. Mixing rows with and without
+/// `agent_name` exercises the legacy back-compat path: the
+/// `(provider, model)` aggregation collapses every row regardless of
+/// agent, while the `(agent_name, provider, model)` aggregation
+/// surfaces the agent dimension and keeps `agent_name = None` for
+/// the legacy row.
+#[tokio::test]
+async fn usage_query_aggregates_by_agent_name_grouping() {
+    use libra::internal::ai::usage::UsageGrouping;
+
+    let conn = Database::connect("sqlite::memory:")
+        .await
+        .expect("connect sqlite");
+    run_builtin_migrations(&conn).await.expect("run migrations");
+    let recorder = UsageRecorder::new(conn.clone());
+
+    let summary = CompletionUsageSummary {
+        input_tokens: 4,
+        output_tokens: 2,
+        cached_tokens: None,
+        reasoning_tokens: None,
+        total_tokens: Some(6),
+        cost_usd: Some(0.10),
+    };
+
+    // Two `planner` rows on the same model — should fold into one
+    // row of the agent-grain aggregation.
+    let planner = usage_context_with_agent("openai", "gpt-4o", "planner");
+    recorder
+        .record_summary(&planner, &summary, Some(100))
+        .await
+        .expect("planner row 1");
+    recorder
+        .record_summary(&planner, &summary, Some(150))
+        .await
+        .expect("planner row 2");
+
+    // One `explorer` row on a different model.
+    let explorer = usage_context_with_agent("deepseek", "deepseek-chat", "explorer");
+    recorder
+        .record_summary(&explorer, &summary, Some(200))
+        .await
+        .expect("explorer row");
+
+    // One legacy single-agent row (agent_name = None).
+    let legacy = usage_context("openai", "gpt-4o");
+    recorder
+        .record_summary(&legacy, &summary, Some(50))
+        .await
+        .expect("legacy row");
+
+    let query = UsageQuery::new(conn.clone());
+
+    // Grain 1: legacy (provider, model). All four rows fold into two
+    // groups; agent_name is None on every result.
+    let by_pm = query
+        .aggregate_filtered(UsageGrouping::ProviderModel, &UsageQueryFilter::default())
+        .await
+        .expect("by-provider-model");
+    assert_eq!(by_pm.len(), 2, "two (provider, model) groups");
+    assert!(by_pm.iter().all(|r| r.agent_name.is_none()));
+    let openai_pm = by_pm
+        .iter()
+        .find(|r| r.provider == "openai" && r.model == "gpt-4o")
+        .expect("openai/gpt-4o group");
+    // 2 planner rows + 1 legacy row = 3 requests.
+    assert_eq!(openai_pm.request_count, 3);
+
+    // Grain 2: agent only. Three groups: planner / explorer / legacy(None).
+    let by_agent = query
+        .aggregate_filtered(UsageGrouping::Agent, &UsageQueryFilter::default())
+        .await
+        .expect("by-agent");
+    assert_eq!(by_agent.len(), 3);
+    let planner_total = by_agent
+        .iter()
+        .find(|r| r.agent_name.as_deref() == Some("planner"))
+        .expect("planner group");
+    assert_eq!(planner_total.request_count, 2);
+    let legacy_total = by_agent
+        .iter()
+        .find(|r| r.agent_name.is_none())
+        .expect("legacy group");
+    assert_eq!(legacy_total.request_count, 1);
+    assert!(legacy_total.provider.is_empty());
+
+    // Grain 3: full (agent_name, provider, model). Three groups
+    // because (planner, openai, gpt-4o) folds two rows; the others
+    // each contribute one row.
+    let by_apm = query
+        .aggregate_filtered(
+            UsageGrouping::AgentProviderModel,
+            &UsageQueryFilter::default(),
+        )
+        .await
+        .expect("by-agent-provider-model");
+    assert_eq!(by_apm.len(), 3);
+    let planner_apm = by_apm
+        .iter()
+        .find(|r| {
+            r.agent_name.as_deref() == Some("planner")
+                && r.provider == "openai"
+                && r.model == "gpt-4o"
+        })
+        .expect("planner/openai/gpt-4o group");
+    assert_eq!(planner_apm.request_count, 2);
 }

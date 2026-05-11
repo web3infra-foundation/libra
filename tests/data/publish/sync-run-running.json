@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "syncRunId": "11111111-aaaa-bbbb-cccc-deadbeef0002",
+  "siteId": "00000000-0000-0000-0000-0000publish01",
+  "status": "running",
+  "startedAt": "2026-05-09T14:00:00Z",
+  "refsCount": 0,
+  "revisionCount": 0,
+  "fileCount": 0,
+  "aiObjectCount": 0,
+  "aiBundleCount": 0,
+  "warnings": [],
+  "cliVersion": "0.16.3"
+}

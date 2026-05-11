@@ -1761,6 +1761,7 @@ async fn persist_runtime_event(
             )
             .await?;
         }
+        super::types::TaskRuntimeEvent::UsageUpdated { .. } => {}
     }
 
     Ok(())

@@ -50,6 +50,12 @@ impl TuiCodeUiAdapter {
     async fn wait_for_ack(
         ack_rx: oneshot::Receiver<Result<(), TuiControlError>>,
     ) -> anyhow::Result<()> {
+        Self::wait_for_typed_ack(ack_rx).await
+    }
+
+    async fn wait_for_typed_ack<T: Send + 'static>(
+        ack_rx: oneshot::Receiver<Result<T, TuiControlError>>,
+    ) -> anyhow::Result<T> {
         tokio::time::timeout(TUI_CONTROL_ACK_TIMEOUT, ack_rx)
             .await
             .context("timed out waiting for TUI control acknowledgement")?
@@ -110,6 +116,30 @@ impl CodeUiCommandAdapter for TuiCodeUiAdapter {
             .send(TuiControlCommand::CancelCurrentTurn { ack })
             .map_err(|_| anyhow!("TUI control channel is closed"))?;
         Self::wait_for_ack(ack_rx).await
+    }
+
+    async fn goal_start(&self, objective: String) -> anyhow::Result<String> {
+        let (ack, ack_rx) = oneshot::channel();
+        self.control_tx
+            .send(TuiControlCommand::GoalStart { objective, ack })
+            .map_err(|_| anyhow!("TUI control channel is closed"))?;
+        Self::wait_for_typed_ack(ack_rx).await
+    }
+
+    async fn goal_status(&self) -> anyhow::Result<String> {
+        let (ack, ack_rx) = oneshot::channel();
+        self.control_tx
+            .send(TuiControlCommand::GoalStatus { ack })
+            .map_err(|_| anyhow!("TUI control channel is closed"))?;
+        Self::wait_for_typed_ack(ack_rx).await
+    }
+
+    async fn goal_cancel(&self, reason: String) -> anyhow::Result<String> {
+        let (ack, ack_rx) = oneshot::channel();
+        self.control_tx
+            .send(TuiControlCommand::GoalCancel { reason, ack })
+            .map_err(|_| anyhow!("TUI control channel is closed"))?;
+        Self::wait_for_typed_ack(ack_rx).await
     }
 }
 
@@ -177,6 +207,71 @@ mod tests {
 
         assert!(error.downcast_ref::<TuiControlError>().is_some());
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn goal_start_sends_control_command_and_returns_rendered_status() {
+        let (adapter, mut rx) = test_adapter();
+        let goal_start =
+            tokio::spawn(async move { adapter.goal_start("ship feature X".to_string()).await });
+
+        let command = rx.recv().await.expect("control command should be sent");
+        match command {
+            TuiControlCommand::GoalStart { objective, ack } => {
+                assert_eq!(objective, "ship feature X");
+                ack.send(Ok(
+                    "Goal abc — Active\nObjective: ship feature X".to_string()
+                ))
+                .expect("ack receiver should be live");
+            }
+            _ => panic!("unexpected command — expected GoalStart"),
+        }
+
+        let rendered = goal_start.await.unwrap().unwrap();
+        assert!(rendered.contains("ship feature X"));
+        assert!(rendered.contains("Active"));
+    }
+
+    #[tokio::test]
+    async fn goal_status_sends_control_command_and_propagates_error() {
+        use crate::internal::tui::control::TuiControlError;
+        let (adapter, mut rx) = test_adapter();
+        let goal_status = tokio::spawn(async move { adapter.goal_status().await });
+
+        let command = rx.recv().await.expect("control command should be sent");
+        match command {
+            TuiControlCommand::GoalStatus { ack } => {
+                ack.send(Err(TuiControlError::GoalNotActive))
+                    .expect("ack receiver should be live");
+            }
+            _ => panic!("unexpected command — expected GoalStatus"),
+        }
+
+        let err = goal_status.await.unwrap().unwrap_err();
+        let downcast = err
+            .downcast_ref::<TuiControlError>()
+            .expect("adapter must propagate TuiControlError downcast-friendly");
+        assert!(matches!(downcast, TuiControlError::GoalNotActive));
+    }
+
+    #[tokio::test]
+    async fn goal_cancel_sends_control_command_and_returns_rendered_status() {
+        let (adapter, mut rx) = test_adapter();
+        let goal_cancel =
+            tokio::spawn(async move { adapter.goal_cancel("user changed mind".to_string()).await });
+
+        let command = rx.recv().await.expect("control command should be sent");
+        match command {
+            TuiControlCommand::GoalCancel { reason, ack } => {
+                assert_eq!(reason, "user changed mind");
+                ack.send(Ok("Goal abc — Cancelled".to_string()))
+                    .expect("ack receiver should be live");
+            }
+            _ => panic!("unexpected command — expected GoalCancel"),
+        }
+
+        let rendered = goal_cancel.await.unwrap().unwrap();
+        assert!(rendered.contains("Cancelled"));
     }
 
     #[tokio::test]

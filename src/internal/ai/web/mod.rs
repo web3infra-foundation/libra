@@ -4,13 +4,14 @@
 //! `/api/code/*` protocol used by the browser UI.
 
 pub mod code_ui;
+pub mod headless;
 
 use std::{convert::Infallible, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
-    extract::{ConnectInfo, Path, Request, State},
+    extract::{ConnectInfo, Path, Query, Request, State},
     http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
     response::{
@@ -26,13 +27,19 @@ use tokio_stream::wrappers::BroadcastStream;
 use uuid::Uuid;
 
 use self::code_ui::{
-    CodeUiApiError, CodeUiControllerDetachRequest, CodeUiControllerKind, CodeUiInteractionResponse,
-    CodeUiMessageRequest, CodeUiRuntimeHandle, browser_controller_token_from_headers,
-    ensure_session_updated_event,
+    CodeUiApiError, CodeUiControllerDetachRequest, CodeUiControllerKind, CodeUiGoalCancelRequest,
+    CodeUiGoalStartRequest, CodeUiInteractionResponse, CodeUiMessageRequest, CodeUiRuntimeHandle,
+    browser_controller_token_from_headers, ensure_session_updated_event,
 };
 use crate::{
     command::code::resolve_storage_root,
-    internal::ai::runtime::hardening::{AuditEvent, AuditSink, SecretRedactor, TracingAuditSink},
+    internal::{
+        ai::{
+            projection::ThreadProjection,
+            runtime::hardening::{AuditEvent, AuditSink, SecretRedactor, TracingAuditSink},
+        },
+        db::establish_connection,
+    },
     utils::util::get_repo_name_from_url,
 };
 
@@ -123,6 +130,7 @@ fn api_router() -> Router<WebAppState> {
     Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/repo", get(repo_info_handler))
+        .route("/repo/status", get(repo_status_handler))
         .nest("/code", code_router())
 }
 
@@ -131,25 +139,46 @@ fn code_router() -> Router<WebAppState> {
     //   /session          -> loopback only (observe)
     //   /events           -> loopback only (observe)
     //   /diagnostics      -> loopback only (observe)
+    //   /threads          -> loopback only (observe; lists active thread projections)
+    //   /goal/status      -> loopback only (observe; mirrors /session)
     //   /controller/attach  -> loopback; automation also needs X-Libra-Control-Token
     //   /controller/detach  -> loopback + controller-token; automation also needs control-token
     //   /messages         -> loopback + controller-token; automation also needs control-token
     //   /interactions/{id} -> loopback + controller-token; automation also needs control-token
-    //   /control/cancel   -> loopback + control-token + controller-token (automation only)
+    //   /control/cancel   -> loopback + controller-token (browser); also requires X-Libra-Control-Token for automation leases
+    //   /goal/start       -> loopback + controller-token; OC-Phase 6 P6.6
+    //   /goal/cancel      -> loopback + controller-token; OC-Phase 6 P6.6
+    // Codex pass-1 P1: the loopback middleware is the OUTERMOST
+    // layer on EVERY code route, including `/controller/attach`
+    // and `/controller/detach`. Without it, those POST routes
+    // would let axum's `Json<...>` extractor reject malformed/
+    // oversized bodies BEFORE the per-handler loopback check ran,
+    // leaking that the runtime is up to a remote caller.
     Router::new()
         .route("/session", get(code_session_handler))
         .route("/events", get(code_events_handler))
         .route("/diagnostics", get(code_diagnostics_handler))
+        .route("/threads", get(code_threads_handler))
+        .route("/goal/status", get(code_goal_status_handler))
         .route("/controller/attach", post(code_controller_attach_handler))
         .route("/controller/detach", post(code_controller_detach_handler))
         .merge(code_write_router())
+        .layer(middleware::from_fn(enforce_code_route_loopback))
 }
 
 fn code_write_router() -> Router<WebAppState> {
+    // Layer order on `Router::layer`: each subsequent `.layer()`
+    // wraps the previous (tower service-builder semantics), so
+    // the LAST `.layer()` is the OUTERMOST and runs first on
+    // each request. Body limit goes here; the loopback gate is
+    // applied at the `code_router()` level above so it covers
+    // every code route uniformly.
     Router::new()
         .route("/messages", post(code_message_handler))
         .route("/interactions/{id}", post(code_interaction_handler))
         .route("/control/cancel", post(code_cancel_handler))
+        .route("/goal/start", post(code_goal_start_handler))
+        .route("/goal/cancel", post(code_goal_cancel_handler))
         .layer(middleware::from_fn(enforce_code_write_body_limit))
 }
 
@@ -234,6 +263,21 @@ async fn repo_info_handler(
     })))
 }
 
+async fn repo_status_handler(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    State(state): State<WebAppState>,
+) -> Result<Json<serde_json::Value>, WebApiError> {
+    ensure_loopback_api_request(remote_addr)?;
+    crate::command::status::collect_status_json_envelope_for_api(state.working_dir.as_path())
+        .await
+        .map(Json)
+        .map_err(|err| WebApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "STATUS_UNAVAILABLE".to_string(),
+            message: format!("failed to collect repository status: {err}"),
+        })
+}
+
 async fn code_session_handler(
     ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
     State(state): State<WebAppState>,
@@ -270,7 +314,119 @@ async fn code_diagnostics_handler(
 ) -> Result<Json<serde_json::Value>, WebApiError> {
     ensure_loopback_api_request(remote_addr)?;
     let runtime = code_ui_runtime(&state)?;
-    Ok(Json(serde_json::to_value(runtime.diagnostics().await)?))
+    // Wave 7 / PR 7 — pass diagnostics through `SecretRedactor` so
+    // automation clients never observe the harness control token,
+    // controller token, or secret-like path components from
+    // `LIBRA_LOG_FILE`. The redactor's marker set is the source of
+    // truth (see `SecretRedactor::default_runtime()`); this handler
+    // is only responsible for applying it before serialisation.
+    let redactor = SecretRedactor::default_runtime();
+    Ok(Json(serde_json::to_value(
+        runtime.diagnostics().await.redact(&redactor),
+    )?))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadsRawQuery {
+    /// Page size; clamped to `[1, MAX_THREAD_LIST_LIMIT]`. Defaults to 50.
+    /// Parsed manually from string so invalid values surface as a Code UI
+    /// error envelope instead of axum's default 400 plaintext.
+    #[serde(default)]
+    limit: Option<String>,
+    /// Page offset; defaults to 0.
+    #[serde(default)]
+    offset: Option<String>,
+}
+
+fn parse_optional_u64(field: &str, value: Option<&str>) -> Result<Option<u64>, WebApiError> {
+    let Some(raw) = value else { return Ok(None) };
+    raw.parse::<u64>().map(Some).map_err(|_| WebApiError {
+        status: StatusCode::BAD_REQUEST,
+        code: "INVALID_QUERY_PARAM".to_string(),
+        message: format!("query parameter `{field}` must be a non-negative integer"),
+    })
+}
+
+const DEFAULT_THREAD_LIST_LIMIT: u64 = 50;
+const MAX_THREAD_LIST_LIMIT: u64 = 200;
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadListItem {
+    id: String,
+    title: Option<String>,
+    archived: bool,
+    current_intent_id: Option<String>,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadListResponse {
+    items: Vec<ThreadListItem>,
+    /// Offset to pass for the next page; absent when this page returned fewer
+    /// items than the requested limit (the caller has reached the end).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_offset: Option<u64>,
+}
+
+async fn code_threads_handler(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    State(state): State<WebAppState>,
+    Query(raw_query): Query<ThreadsRawQuery>,
+) -> Result<Json<ThreadListResponse>, WebApiError> {
+    ensure_loopback_api_request(remote_addr)?;
+
+    let limit = parse_optional_u64("limit", raw_query.limit.as_deref())?
+        .unwrap_or(DEFAULT_THREAD_LIST_LIMIT)
+        .clamp(1, MAX_THREAD_LIST_LIMIT);
+    let offset = parse_optional_u64("offset", raw_query.offset.as_deref())?.unwrap_or(0);
+
+    let storage_root = resolve_storage_root(state.working_dir.as_path());
+    let db_path = storage_root.join("libra.db");
+    let db_path_str = db_path.to_str().ok_or_else(|| WebApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        code: "STORAGE_PATH_INVALID".to_string(),
+        message: "libra database path is not valid UTF-8".to_string(),
+    })?;
+
+    let db = establish_connection(db_path_str)
+        .await
+        .map_err(|err| WebApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "DB_UNAVAILABLE".to_string(),
+            message: format!("failed to open libra database: {err}"),
+        })?;
+
+    let projections = ThreadProjection::list_active(&db, limit, offset)
+        .await
+        .map_err(|err| WebApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "THREAD_LIST_FAILED".to_string(),
+            message: format!("failed to list active threads: {err}"),
+        })?;
+
+    let next_offset = if (projections.len() as u64) < limit {
+        None
+    } else {
+        Some(offset + projections.len() as u64)
+    };
+
+    let items = projections
+        .into_iter()
+        .map(|p| ThreadListItem {
+            id: p.thread_id.to_string(),
+            title: p.title,
+            archived: p.archived,
+            current_intent_id: p.current_intent_id.map(|id| id.to_string()),
+            created_at: p.created_at,
+            updated_at: p.updated_at,
+        })
+        .collect();
+
+    Ok(Json(ThreadListResponse { items, next_offset }))
 }
 
 async fn code_controller_attach_handler(
@@ -435,19 +591,30 @@ async fn code_cancel_handler(
     ensure_loopback_api_request(remote_addr)?;
     let runtime = code_ui_runtime(&state)?;
     let token = browser_controller_token_from_headers(&headers);
+    let mut audit_kind = CodeUiControllerKind::None;
     let mut audit_client_id = "unknown".to_string();
     let result = async {
         let lease = runtime
             .ensure_controller_write_access(token.as_deref())
             .await?;
+        audit_kind = lease.kind;
         audit_client_id = lease.client_id.clone();
-        if lease.kind != CodeUiControllerKind::Automation {
-            return Err(WebApiError::from(CodeUiApiError::forbidden(
-                "AUTOMATION_CONTROLLER_REQUIRED",
-                "Only an automation controller can cancel through /api/code/control/cancel",
-            )));
+        match lease.kind {
+            CodeUiControllerKind::Browser => {
+                // Browser controllers reach parity with the TUI `Esc` cancel
+                // path: the lease token alone is enough — no automation
+                // control token required.
+            }
+            CodeUiControllerKind::Automation => {
+                ensure_automation_control_token(&headers, state.automation_control_token.as_ref())?;
+            }
+            _ => {
+                return Err(WebApiError::from(CodeUiApiError::forbidden(
+                    "AUTOMATION_CONTROLLER_REQUIRED",
+                    "Only a browser or automation controller can cancel through /api/code/control/cancel",
+                )));
+            }
         }
-        ensure_automation_control_token(&headers, state.automation_control_token.as_ref())?;
         runtime
             .cancel_turn(token.as_deref())
             .await
@@ -458,7 +625,7 @@ async fn code_cancel_handler(
         &state,
         &runtime,
         "turn.cancel",
-        CodeUiControllerKind::Automation,
+        audit_kind,
         &audit_client_id,
         control_audit_outcome(&result),
     )
@@ -467,6 +634,145 @@ async fn code_cancel_handler(
     Ok(Json(serde_json::to_value(code_ui::CodeUiAckResponse {
         accepted: true,
     })?))
+}
+
+/// `POST /api/code/goal/start` — open an active Goal in the
+/// session. Body: `{ "objective": "<text>" }`. Requires a
+/// controller token (write-access lease) just like
+/// `/api/code/messages`. OC-Phase 6 P6.6.
+async fn code_goal_start_handler(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    State(state): State<WebAppState>,
+    headers: HeaderMap,
+    Json(body): Json<CodeUiGoalStartRequest>,
+) -> Result<Json<serde_json::Value>, WebApiError> {
+    ensure_loopback_api_request(remote_addr)?;
+    let runtime = code_ui_runtime(&state)?;
+    let token = browser_controller_token_from_headers(&headers);
+    let mut audit_kind = CodeUiControllerKind::None;
+    let mut audit_client_id = "unknown".to_string();
+    let result = async {
+        let lease = runtime
+            .ensure_controller_write_access(token.as_deref())
+            .await?;
+        audit_kind = lease.kind;
+        audit_client_id = lease.client_id.clone();
+        if lease.kind == CodeUiControllerKind::Automation {
+            ensure_automation_control_token(&headers, state.automation_control_token.as_ref())?;
+        }
+        runtime
+            .goal_start(token.as_deref(), body.objective)
+            .await
+            .map_err(WebApiError::from)
+    }
+    .await;
+    append_control_audit(
+        &state,
+        &runtime,
+        "goal.start",
+        audit_kind,
+        &audit_client_id,
+        control_audit_outcome(&result),
+    )
+    .await;
+    let rendered = result?;
+    Ok(Json(serde_json::json!({
+        "accepted": true,
+        "status": rendered,
+    })))
+}
+
+/// `GET /api/code/goal/status` — render the active Goal's
+/// snapshot. Loopback-only observe (no controller token), mirroring
+/// `/api/code/session`. OC-Phase 6 P6.6.
+async fn code_goal_status_handler(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    State(state): State<WebAppState>,
+) -> Result<Json<serde_json::Value>, WebApiError> {
+    ensure_loopback_api_request(remote_addr)?;
+    let runtime = code_ui_runtime(&state)?;
+    let rendered = runtime.goal_status().await.map_err(WebApiError::from)?;
+    Ok(Json(serde_json::json!({ "status": rendered })))
+}
+
+/// `POST /api/code/goal/cancel` — explicit cancellation of the
+/// active Goal. Body: `{ "reason": "<text>" }`. Requires a
+/// controller token. OC-Phase 6 P6.6.
+async fn code_goal_cancel_handler(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    State(state): State<WebAppState>,
+    headers: HeaderMap,
+    Json(body): Json<CodeUiGoalCancelRequest>,
+) -> Result<Json<serde_json::Value>, WebApiError> {
+    ensure_loopback_api_request(remote_addr)?;
+    let runtime = code_ui_runtime(&state)?;
+    let token = browser_controller_token_from_headers(&headers);
+    let mut audit_kind = CodeUiControllerKind::None;
+    let mut audit_client_id = "unknown".to_string();
+    let result = async {
+        let lease = runtime
+            .ensure_controller_write_access(token.as_deref())
+            .await?;
+        audit_kind = lease.kind;
+        audit_client_id = lease.client_id.clone();
+        if lease.kind == CodeUiControllerKind::Automation {
+            ensure_automation_control_token(&headers, state.automation_control_token.as_ref())?;
+        }
+        runtime
+            .goal_cancel(token.as_deref(), body.reason)
+            .await
+            .map_err(WebApiError::from)
+    }
+    .await;
+    append_control_audit(
+        &state,
+        &runtime,
+        "goal.cancel",
+        audit_kind,
+        &audit_client_id,
+        control_audit_outcome(&result),
+    )
+    .await;
+    let rendered = result?;
+    Ok(Json(serde_json::json!({
+        "accepted": true,
+        "status": rendered,
+    })))
+}
+
+/// Per-request loopback gate. Mirrors the per-handler
+/// `ensure_loopback_api_request` check but runs as a middleware so
+/// it fires BEFORE any body-reading middleware on the write path.
+/// Without this layer a non-loopback caller sending an oversized
+/// body would learn `PAYLOAD_TOO_LARGE` first, leaking that the
+/// runtime is up. Wave 2 / PR 2 wires this in to make the
+/// documented error-code ordering (loopback ↦ body ↦ token)
+/// observable.
+async fn enforce_code_route_loopback(request: Request, next: Next) -> Response {
+    // Production injects `ConnectInfo<SocketAddr>` via
+    // `into_make_service_with_connect_info`; tests inject the
+    // mock variant `axum::extract::connect_info::MockConnectInfo<SocketAddr>`.
+    // The `ConnectInfo` extractor itself falls back to the mock,
+    // so we mirror that lookup here. If neither is present (a
+    // raw oneshot without ConnectInfo wiring) the middleware
+    // declines to enforce — the per-handler check still applies
+    // for production code paths.
+    let remote = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|info| info.0)
+        .or_else(|| {
+            request
+                .extensions()
+                .get::<axum::extract::connect_info::MockConnectInfo<SocketAddr>>()
+                .map(|info| info.0)
+        });
+    if let Some(addr) = remote
+        && let Err(error) = ensure_loopback_api_request(addr)
+    {
+        return error.into_response();
+    }
+    next.run(request).await
 }
 
 async fn enforce_code_write_body_limit(request: Request, next: Next) -> Response {
@@ -776,6 +1082,166 @@ mod tests {
         assert!(ensure_automation_control_token(&headers, Some(&expected)).is_ok());
     }
 
+    /// Wave 2 / PR 2 — route-level loopback gate ordering for read
+    /// routes. `docs/improvement/test.md` §5.3 / §6.3 inline test:
+    /// `GET /api/code/session` from a non-loopback `ConnectInfo`
+    /// MUST short-circuit with `403 LOOPBACK_REQUIRED` BEFORE the
+    /// runtime is touched. This guards the documented loopback ↦
+    /// body ↦ token error-code ordering — a regression that hands
+    /// remote callers the runtime-unavailable error first would
+    /// leak whether the session is up.
+    #[tokio::test]
+    async fn code_session_route_rejects_non_loopback_with_loopback_required() {
+        use axum::extract::connect_info::MockConnectInfo;
+        let app = code_router()
+            .with_state(WebAppState {
+                working_dir: Arc::new(PathBuf::from("/tmp/libra")),
+                code_ui: None,
+                automation_control_token: None,
+                audit_sink: Arc::new(TracingAuditSink),
+                control_trace_id: Uuid::new_v4(),
+            })
+            .layer(MockConnectInfo(SocketAddr::from((
+                Ipv4Addr::new(192, 0, 2, 10),
+                34567,
+            ))));
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/session")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "non-loopback GET /session must be 403, got {}",
+            response.status()
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], "LOOPBACK_REQUIRED");
+    }
+
+    /// Wave 2 / PR 2 — same gate for the write surface. `POST
+    /// /api/code/messages` from a non-loopback caller MUST return
+    /// `LOOPBACK_REQUIRED` BEFORE the body-size middleware, the
+    /// content-type check, or any controller-token check fires.
+    /// Without this ordering a remote caller could probe whether
+    /// the runtime is up by counting which error code they get.
+    ///
+    /// Codex pass-1 P1: build the test app from `code_router()`
+    /// (not `code_write_router()`) so the loopback middleware
+    /// applies — the layer was promoted to cover attach/detach
+    /// too, and now lives on the outer router.
+    #[tokio::test]
+    async fn code_messages_route_rejects_non_loopback_before_body_or_token_check() {
+        use axum::extract::connect_info::MockConnectInfo;
+        let app = code_router()
+            .with_state(WebAppState {
+                working_dir: Arc::new(PathBuf::from("/tmp/libra")),
+                code_ui: None,
+                automation_control_token: None,
+                audit_sink: Arc::new(TracingAuditSink),
+                control_trace_id: Uuid::new_v4(),
+            })
+            .layer(MockConnectInfo(SocketAddr::from((
+                Ipv4Addr::new(192, 0, 2, 10),
+                34567,
+            ))));
+        // Deliberately send a body that would otherwise fail body
+        // limit / controller-token checks; if loopback is enforced
+        // FIRST the error must still be LOOPBACK_REQUIRED, not
+        // PAYLOAD_TOO_LARGE / MISSING_CONTROLLER_TOKEN.
+        let oversized = "x".repeat(CODE_CONTROL_BODY_LIMIT_BYTES + 1);
+        let body = format!(r#"{{"text":"{oversized}"}}"#);
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/messages")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CONTENT_LENGTH, body.len().to_string())
+            .body(Body::from(body))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "non-loopback POST /messages must be 403, got {}",
+            response.status()
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            value["error"]["code"], "LOOPBACK_REQUIRED",
+            "loopback gate MUST fire before body/token checks; got: {value}",
+        );
+    }
+
+    /// Codex pass-1 P1 — attach/detach coverage. POST routes that
+    /// use axum's `Json<...>` extractor would otherwise let
+    /// malformed-body deserialisation errors fire BEFORE the
+    /// per-handler loopback check, leaking liveness to a remote
+    /// caller. The middleware layered on `code_router()` must
+    /// short-circuit with `LOOPBACK_REQUIRED` regardless of body
+    /// shape.
+    #[tokio::test]
+    async fn code_controller_attach_route_rejects_non_loopback_before_body_parse() {
+        use axum::extract::connect_info::MockConnectInfo;
+        let app = code_router()
+            .with_state(WebAppState {
+                working_dir: Arc::new(PathBuf::from("/tmp/libra")),
+                code_ui: None,
+                automation_control_token: None,
+                audit_sink: Arc::new(TracingAuditSink),
+                control_trace_id: Uuid::new_v4(),
+            })
+            .layer(MockConnectInfo(SocketAddr::from((
+                Ipv4Addr::new(192, 0, 2, 10),
+                34567,
+            ))));
+        // Send a malformed body so a Json extractor would otherwise
+        // fail the request with 400/415 BEFORE reaching the
+        // per-handler check. We must still get 403 LOOPBACK_REQUIRED.
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/controller/attach")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from("{not valid json"))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], "LOOPBACK_REQUIRED");
+    }
+
+    #[tokio::test]
+    async fn code_controller_detach_route_rejects_non_loopback_before_body_parse() {
+        use axum::extract::connect_info::MockConnectInfo;
+        let app = code_router()
+            .with_state(WebAppState {
+                working_dir: Arc::new(PathBuf::from("/tmp/libra")),
+                code_ui: None,
+                automation_control_token: None,
+                audit_sink: Arc::new(TracingAuditSink),
+                control_trace_id: Uuid::new_v4(),
+            })
+            .layer(MockConnectInfo(SocketAddr::from((
+                Ipv4Addr::new(192, 0, 2, 10),
+                34567,
+            ))));
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/controller/detach")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from("{not valid json"))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], "LOOPBACK_REQUIRED");
+    }
+
     #[tokio::test]
     async fn code_write_body_limit_returns_json_error() {
         let app = code_write_router().with_state(WebAppState {
@@ -867,5 +1333,154 @@ mod tests {
             .into_response();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Wave 3 / PR 3 §5.6 — control-audit `client_id` field
+    /// redaction. The plan calls out "client_id 80 字符上限、控制
+    /// 字符替换" — `sanitized_audit_client_id` enforces both, plus
+    /// a fallback "unknown" for empty input and a redactor pass for
+    /// secret-like substrings. This L0 test pins each rule so a
+    /// future refactor of the audit pipeline cannot quietly drop
+    /// any of them.
+    #[test]
+    fn sanitized_audit_client_id_truncates_at_80_chars() {
+        let redactor = SecretRedactor::default_runtime();
+        let long = "x".repeat(200);
+        let sanitized = sanitized_audit_client_id(&redactor, &long);
+        assert_eq!(
+            sanitized.chars().count(),
+            80,
+            "expected truncation to 80 chars, got '{sanitized}'",
+        );
+    }
+
+    #[test]
+    fn sanitized_audit_client_id_replaces_control_characters_with_underscore() {
+        let redactor = SecretRedactor::default_runtime();
+        // Cover the full `char::is_control()` set the implementation
+        // sanitizes against:
+        //   * C0 controls 0x00–0x1F (NUL, BEL, tab, newline, ESC, …)
+        //   * DEL 0x7F
+        //   * C1 controls 0x80–0x9F (NEL 0x85, APC 0x9F, …)
+        // A sanitizer change that drops DEL or the C1 range would
+        // regress this test; covering all three groups guards both.
+        let raw = "c\t\nA\u{0007}\u{0000}\u{001b}B\u{007f}C\u{0085}D\u{009f}end";
+        let sanitized = sanitized_audit_client_id(&redactor, raw);
+        // The fixture has no leading/trailing whitespace, so
+        // `trim()` inside the helper is a no-op; every embedded
+        // control is replaced with `_`. Build the expected
+        // string by walking the input through the same `is_control()
+        // → '_'` substitution the implementation uses, so this
+        // assertion stays in lock-step with any future change.
+        let expected: String = "c\t\nA\u{0007}\u{0000}\u{001b}B\u{007f}C\u{0085}D\u{009f}end"
+            .trim()
+            .chars()
+            .map(|ch| if ch.is_control() { '_' } else { ch })
+            .collect();
+        assert_eq!(sanitized, expected);
+        // Spot-check that DEL and a representative C1 char
+        // ARE represented as `_` in the output (regression
+        // anchor — these are the codepoints Codex pass-1 P2 C1
+        // flagged as missing from the original test).
+        assert!(!sanitized.contains('\u{007f}'), "DEL leaked: {sanitized:?}");
+        assert!(!sanitized.contains('\u{0085}'), "NEL leaked: {sanitized:?}");
+        assert!(!sanitized.contains('\u{009f}'), "APC leaked: {sanitized:?}");
+    }
+
+    #[test]
+    fn sanitized_audit_client_id_falls_back_to_unknown_when_empty() {
+        let redactor = SecretRedactor::default_runtime();
+        // Whitespace-only inputs trim to empty, so the fallback
+        // must kick in rather than producing an empty string that
+        // would be unreadable in audit logs.
+        for input in ["", "   ", "\t\n  \r"] {
+            let sanitized = sanitized_audit_client_id(&redactor, input);
+            assert_eq!(sanitized, "unknown", "input '{input:?}' should fall back");
+        }
+    }
+
+    /// Default runtime redactor only masks marker-prefixed values
+    /// (`token=`, `password:`, `x-libra-control-token=`, …) — it
+    /// does NOT do bare-token pattern detection. The audit
+    /// pipeline still runs the redactor over the client_id, so a
+    /// caller that ATTACHES a marker pattern around a secret
+    /// (e.g. paste of `token=...`) gets it scrubbed before the
+    /// summary is persisted. Bare secret-shaped client IDs without
+    /// markers WILL pass through; that's a documented gap, not a
+    /// silent failure (Codex pass-1 P2 C5).
+    #[test]
+    fn sanitized_audit_client_id_runs_marker_redactor_over_input() {
+        let redactor = SecretRedactor::default_runtime();
+        let raw = "client-id:token=top-secret-payload";
+        let sanitized = sanitized_audit_client_id(&redactor, raw);
+        assert!(
+            !sanitized.contains("top-secret-payload"),
+            "marker redactor failed to mask the value: '{sanitized}'",
+        );
+    }
+
+    /// Companion regression for the documented gap above: a bare
+    /// secret-shaped client_id without a marker prefix DOES survive
+    /// the redactor. This is intentional given the marker-only
+    /// design of `SecretRedactor::default_runtime()`. Pinning it
+    /// makes any future change to the redactor surface (e.g.
+    /// adopting pattern-based detection) appear as an obvious
+    /// `assert!(...)` failure that needs a deliberate update.
+    #[test]
+    fn sanitized_audit_client_id_does_not_mask_bare_secret_shaped_input() {
+        let redactor = SecretRedactor::default_runtime();
+        // A bare secret-SHAPED string with no marker prefix:
+        // long random-looking alnum that an attacker might paste
+        // as a client_id. The marker redactor (which only looks
+        // for `marker=` / `marker:` boundaries) leaves it alone.
+        // We use a deliberately synthetic prefix so secret-
+        // scanning push protection doesn't flag the literal as a
+        // real provider token.
+        //
+        // Codex pass-2 P2: the assertion has to be tight enough
+        // to catch ANY redaction — not just the prefix. If a
+        // future change accidentally masks the FAKE… payload, an
+        // assertion that only checks for `synthetic-pin-` would
+        // still pass and silently invalidate the documented gap.
+        // Assert full equality (the input has no leading/trailing
+        // whitespace so `trim()` is a no-op).
+        let raw = "synthetic-pin-FAKEFAKEFAKEFAKEFAKE-xyz";
+        let sanitized = sanitized_audit_client_id(&redactor, raw);
+        assert_eq!(
+            sanitized, raw,
+            "marker-only redactor unexpectedly altered a bare secret \
+             shape; the test pin needs updating",
+        );
+    }
+
+    #[test]
+    fn sanitized_audit_client_id_caps_chars_not_bytes() {
+        let redactor = SecretRedactor::default_runtime();
+        // 120 four-byte emoji codepoints. The cap is 80 CHARS
+        // (not bytes), so the result must contain exactly 80
+        // chars and a byte length of 80*4 = 320 bytes. A bytes-
+        // based truncation would leave us with 80 bytes (= 20
+        // emoji) and a much shorter char count.
+        //
+        // Codex pass-1 P3 C4: the previous version asserted
+        // `from_utf8` succeeded — tautological for char-based
+        // truncation. The byte-length check below is what
+        // actually proves the implementation counts chars rather
+        // than bytes, since a bytes-based cap would yield byte_len
+        // == 80, not 320.
+        let raw = "📦".repeat(120);
+        let sanitized = sanitized_audit_client_id(&redactor, &raw);
+        assert_eq!(
+            sanitized.chars().count(),
+            80,
+            "cap must apply per-char, got {} chars",
+            sanitized.chars().count(),
+        );
+        assert_eq!(
+            sanitized.len(),
+            80 * 4,
+            "cap must be char-based, not byte-based; a byte cap \
+             would have yielded ~80 bytes",
+        );
     }
 }

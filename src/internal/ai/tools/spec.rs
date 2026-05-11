@@ -3,6 +3,53 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+/// JSON Schema for one `GoalEvidenceRef` payload, shared by the
+/// `update_goal_progress` and `submit_goal_complete` tool specs.
+/// Mirrors `crate::internal::ai::goal::GoalEvidenceRef` /
+/// `GoalEvidenceTarget`; the deserializer enforces variant
+/// well-formedness, so the schema itself stays permissive on the
+/// `target` body and only pins the discriminator.
+fn goal_evidence_ref_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["target", "description"],
+        "properties": {
+            "criterion_id": {
+                "type": ["string", "null"],
+                "description": "Acceptance criterion id this evidence supports. Use the literal `id` from `GoalSpec.acceptance_criteria`. Set to null for ambient context that doesn't bind to a specific criterion."
+            },
+            "target": {
+                "type": "object",
+                "required": ["kind"],
+                "description": "Discriminator-tagged evidence target. `kind` selects the variant; remaining fields depend on the variant.",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "enum": [
+                            "context_frame",
+                            "tool_call",
+                            "file",
+                            "attachment",
+                            "agent_run",
+                            "no_changes_needed"
+                        ]
+                    },
+                    "event_id": {"type": "string", "description": "Used by `context_frame` and `agent_run`."},
+                    "call_id": {"type": "string", "description": "Used by `tool_call`."},
+                    "path": {"type": "string", "description": "Used by `file` — workspace-relative path."},
+                    "sha256": {"type": "string", "description": "Used by `file` — hex sha256 the verifier will re-validate against disk."},
+                    "attachment_id": {"type": "string", "description": "Used by `attachment`."},
+                    "rationale": {"type": "string", "description": "Used by `no_changes_needed` — explanation for why no workspace edit was required."}
+                }
+            },
+            "description": {
+                "type": "string",
+                "description": "Human-readable description of this evidence ref (kept in the audit log even when the target is opaque)."
+            }
+        }
+    })
+}
+
 /// A tool specification compatible with OpenAI's function calling format.
 ///
 /// This struct defines the interface for a tool that can be called by an LLM.
@@ -298,6 +345,167 @@ impl ToolSpec {
                         props
                     },
                     required: vec!["result".to_string(), "summary".to_string()],
+                    definitions: None,
+                },
+            },
+        }
+    }
+
+    /// Create a ToolSpec for `update_goal_progress`.
+    ///
+    /// Used inside Goal mode (`docs/improvement/opencode.md` lines
+    /// 540-560, 1808). The model invokes this between `submit_goal_complete`
+    /// attempts to record progress without claiming completion. The
+    /// supervisor (P6.3) turns each successful call into a
+    /// `GoalEvent::ProgressRecorded` envelope; the handler itself only
+    /// validates the payload shape.
+    pub fn update_goal_progress() -> Self {
+        Self {
+            spec_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: "update_goal_progress".to_string(),
+                description: "Record progress on the active Goal without claiming completion. \
+                    Use this between `submit_goal_complete` attempts to capture which \
+                    acceptance criteria have new evidence, what tools were run, and what is \
+                    still pending. Calling this tool does NOT end the Goal — the supervisor \
+                    will keep driving until you call `submit_goal_complete` and the verifier \
+                    accepts."
+                    .to_string(),
+                parameters: FunctionParameters::Object {
+                    param_type: "object".to_string(),
+                    properties: {
+                        let mut props = Map::new();
+                        props.insert(
+                            "summary".to_string(),
+                            json!({
+                                "type": "string",
+                                "minLength": 1,
+                                "description": "One-paragraph progress note: what was just done, what evidence was collected, and what remains."
+                            }),
+                        );
+                        props.insert(
+                            "completed_criteria".to_string(),
+                            json!({
+                                "type": "array",
+                                "description": "Acceptance criterion ids that now have evidence. Use the `id` field from `GoalSpec.acceptance_criteria` verbatim. May be empty if no criterion was newly satisfied this turn.",
+                                "items": {"type": "string"}
+                            }),
+                        );
+                        props.insert(
+                            "evidence_refs".to_string(),
+                            json!({
+                                "type": "array",
+                                "description": "Optional structured evidence refs supporting this progress note. Each entry references a tool call, file, attachment, sub-agent run, etc.",
+                                "items": goal_evidence_ref_schema()
+                            }),
+                        );
+                        props.insert(
+                            "next_steps".to_string(),
+                            json!({
+                                "type": "array",
+                                "description": "Short list of remaining steps the model plans to take.",
+                                "items": {"type": "string"}
+                            }),
+                        );
+                        props
+                    },
+                    required: vec!["summary".to_string()],
+                    definitions: None,
+                },
+            },
+        }
+    }
+
+    /// Create a ToolSpec for `submit_goal_complete`.
+    ///
+    /// Used inside Goal mode (`docs/improvement/opencode.md` lines
+    /// 657-661, 1808). The model invokes this when it believes the Goal
+    /// is satisfied. The supervisor (P6.3) turns each successful call
+    /// into a `GoalEvent::CompletionClaimed` envelope and runs the
+    /// deterministic verifier (P6.2) — only when the verifier accepts
+    /// does the Goal transition to terminal `Completed`.
+    ///
+    /// Registered as a **terminal tool** in the surrounding
+    /// `ToolLoopConfig.terminal_tools` so the tool loop returns to
+    /// the supervisor immediately after a successful call. The
+    /// handler itself only validates the payload shape; the rich
+    /// spec-aware checks live in the verifier.
+    pub fn submit_goal_complete() -> Self {
+        Self {
+            spec_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: "submit_goal_complete".to_string(),
+                description: "Claim that the active Goal is complete. The supervisor runs a \
+                    deterministic verifier on this claim — completion is only accepted when \
+                    every required acceptance criterion is in `completed_criteria`, each one \
+                    has matching evidence, the workspace shows the changes (or a \
+                    `no_changes_needed` rationale), and no recent tool result was failed / \
+                    denied / timed-out. A rejected claim does NOT end the Goal; the \
+                    supervisor will surface the missing items and continue. Calling this \
+                    successfully ends the Goal-bound tool loop immediately."
+                    .to_string(),
+                parameters: FunctionParameters::Object {
+                    param_type: "object".to_string(),
+                    properties: {
+                        let mut props = Map::new();
+                        props.insert(
+                            "summary".to_string(),
+                            json!({
+                                "type": "string",
+                                "minLength": 1,
+                                "description": "One-paragraph completion summary: what was achieved and what evidence supports the claim."
+                            }),
+                        );
+                        props.insert(
+                            "completed_criteria".to_string(),
+                            json!({
+                                "type": "array",
+                                "description": "Acceptance criterion ids satisfied by this claim. Must include every required criterion's `id` from `GoalSpec.acceptance_criteria`.",
+                                "items": {"type": "string"},
+                                "minItems": 1
+                            }),
+                        );
+                        props.insert(
+                            "evidence_refs".to_string(),
+                            json!({
+                                "type": "array",
+                                "description": "Structured evidence backing each claimed criterion. Standard policy requires at least one ref per claimed criterion (matching `criterion_id`); workspace-change criteria additionally need a `file` or `no_changes_needed` target.",
+                                "items": goal_evidence_ref_schema()
+                            }),
+                        );
+                        props.insert(
+                            "verification".to_string(),
+                            json!({
+                                "type": "array",
+                                "description": "Records of what the model ran (or attests to) to confirm each criterion. Required to be non-empty under Standard evidence policy.",
+                                "items": {
+                                    "type": "object",
+                                    "required": ["criterion_id", "method", "passed"],
+                                    "properties": {
+                                        "criterion_id": {"type": "string", "description": "Id of the criterion this verification record attests to."},
+                                        "method": {"type": "string", "description": "Free-form description of the verification (e.g. `cargo test --lib`, `manual review`)."},
+                                        "passed": {"type": "boolean", "description": "true iff the verification confirmed the criterion."},
+                                        "output_summary": {"type": "string", "description": "Optional short excerpt of the method's output."}
+                                    }
+                                }
+                            }),
+                        );
+                        props.insert(
+                            "residual_risks".to_string(),
+                            json!({
+                                "type": "array",
+                                "description": "Known caveats or risks the user should review even though the Goal is being claimed complete.",
+                                "items": {"type": "string"}
+                            }),
+                        );
+                        props
+                    },
+                    required: vec![
+                        "summary".to_string(),
+                        "completed_criteria".to_string(),
+                        "evidence_refs".to_string(),
+                        "verification".to_string(),
+                    ],
                     definitions: None,
                 },
             },
@@ -605,6 +813,79 @@ It is important to remember:
         ))
     }
 
+    /// Create a ToolSpec for the OC-Phase 3 `task` tool — the schema the
+    /// model sees when it wants to dispatch a sub-agent through the
+    /// parent session.
+    ///
+    /// This is the **schema only**: returning a `ToolSpec` does not
+    /// register a handler. The `task` invocation is **not** routed
+    /// through a normal `ToolHandler`; OC-Phase 3 P3.2+ intercepts the
+    /// call at the tool-loop layer and forwards it into a
+    /// `SubAgentDispatcher` that has access to the parent session
+    /// state, model binding, and usage recorder. The schema therefore
+    /// stays absent from the registry's `register(...)` graph — see
+    /// `registry_does_not_expose_task_tool_in_flag_off_default` and the
+    /// production-path equivalents in `command::code` tests for the
+    /// flag-off invariant.
+    ///
+    /// Wire shape (mirrors `TaskInvocation` in
+    /// `docs/improvement/opencode.md`):
+    ///
+    /// ```json
+    /// {
+    ///   "description": "find all TODOs",
+    ///   "prompt": "grep TODO src/",
+    ///   "subagent_type": "explore"
+    /// }
+    /// ```
+    ///
+    /// `task_id` is optional and **omitted** when starting a fresh
+    /// dispatch. Supplying it on a later call resumes the prior dispatch
+    /// under the same parent thread (the dispatcher rejects cross-
+    /// thread reuse per S2-INV-12). The schema declares it as a string;
+    /// providers that prefer JSON `null` over key omission can pass
+    /// either form.
+    pub fn task() -> Self {
+        Self::new(
+            "task",
+            "Dispatch a sub-agent under the current session. The sub-agent runs in an \
+             isolated context with its own model and tool whitelist; results return as a \
+             single tool result. Use `subagent_type` to pick which agent runs (must be \
+             primary-eligible or sub-agent eligible per the agent profile). Reuse `task_id` \
+             only to resume a prior dispatch within the same parent thread.",
+        )
+        .with_parameters(FunctionParameters::object(
+            [
+                (
+                    "description",
+                    "string",
+                    "Short human-readable summary of the sub-task. Surfaced in transcripts and budget logs.",
+                ),
+                (
+                    "prompt",
+                    "string",
+                    "The instruction sent to the sub-agent as its initial user message.",
+                ),
+                (
+                    "subagent_type",
+                    "string",
+                    "Name of the agent profile to dispatch (e.g. `explore`). Must resolve to a profile whose `mode` is `subagent` or `all`.",
+                ),
+                (
+                    "task_id",
+                    "string",
+                    "Optional resume token from a prior dispatch under the same parent thread.",
+                ),
+            ],
+            [
+                ("description", true),
+                ("prompt", true),
+                ("subagent_type", true),
+                ("task_id", false),
+            ],
+        ))
+    }
+
     /// Convert to a JSON value for API requests.
     pub fn to_json(&self) -> Value {
         json!(self)
@@ -901,5 +1182,94 @@ mod tests {
             check["properties"]["kind"]["description"],
             "Check type. Optional when command is present; omitted command checks default to command."
         );
+    }
+
+    // ─── OC-Phase 3 P3.1: task tool schema ────────────────────────────────
+
+    /// Scenario: `ToolSpec::task()` returns the documented schema —
+    /// `description` / `prompt` / `subagent_type` required, `task_id`
+    /// optional. The function name is exactly `task` so a future
+    /// dispatcher can match against it.
+    #[test]
+    fn test_tool_spec_task_schema() {
+        let spec = ToolSpec::task();
+        assert_eq!(spec.spec_type, "function");
+        assert_eq!(spec.function.name, "task");
+
+        match &spec.function.parameters {
+            FunctionParameters::Object {
+                param_type,
+                properties,
+                required,
+                ..
+            } => {
+                assert_eq!(param_type, "object");
+                for key in ["description", "prompt", "subagent_type", "task_id"] {
+                    assert!(
+                        properties.contains_key(key),
+                        "task schema must list `{key}` in properties"
+                    );
+                }
+                assert_eq!(
+                    required
+                        .iter()
+                        .cloned()
+                        .collect::<std::collections::BTreeSet<_>>(),
+                    [
+                        "description".to_string(),
+                        "prompt".to_string(),
+                        "subagent_type".to_string(),
+                    ]
+                    .into_iter()
+                    .collect::<std::collections::BTreeSet<_>>(),
+                    "required must be exactly description+prompt+subagent_type; \
+                     task_id stays optional"
+                );
+            }
+            other => panic!("expected Object parameters, got {other:?}"),
+        }
+    }
+
+    /// Scenario: the `task` schema serializes to the OpenAI function-call
+    /// JSON shape and `task_id` is **not** in the `required` list. A
+    /// regression that promoted task_id to required would break callers
+    /// who legitimately omit it on a fresh dispatch.
+    #[test]
+    fn test_tool_spec_task_serializes_with_task_id_optional() {
+        let spec = ToolSpec::task();
+        let json = spec.to_json();
+        assert_eq!(json["type"], "function");
+        assert_eq!(json["function"]["name"], "task");
+        assert_eq!(json["function"]["parameters"]["type"], "object");
+
+        let required = json["function"]["parameters"]["required"]
+            .as_array()
+            .expect("required must be an array");
+        let names: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(names.contains(&"description"));
+        assert!(names.contains(&"prompt"));
+        assert!(names.contains(&"subagent_type"));
+        assert!(
+            !names.contains(&"task_id"),
+            "task_id must remain optional in the wire schema"
+        );
+    }
+
+    /// Scenario: returning `ToolSpec::task()` does NOT register a handler.
+    /// The flag-off invariant of OC-Phase 3 P3.1 is that the schema
+    /// constructor exists but the registry does not surface a `task`
+    /// entry until the dispatcher lands (P3.2+) and is gated behind
+    /// `code.multi_agent.enabled` (OC-Phase 5). This test pins that
+    /// behavior at the schema layer: constructing a fresh schema does
+    /// not mutate any global registry state.
+    #[test]
+    fn test_tool_spec_task_is_pure_construction_only() {
+        let first = ToolSpec::task();
+        let second = ToolSpec::task();
+        // Two independent constructions are equal-by-shape (function name,
+        // parameter object). They also do not touch any shared registry —
+        // the absence of a registry import in this file is itself the
+        // proof. We sanity-check the equality via the JSON wire form.
+        assert_eq!(first.to_json(), second.to_json());
     }
 }

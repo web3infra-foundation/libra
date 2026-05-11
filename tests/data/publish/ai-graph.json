@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "siteId": "00000000-0000-0000-0000-0000publish01",
+  "revisionOid": "abcdef0123456789abcdef0123456789abcdef01",
+  "aiVersionId": "ai-version-2026-05-09-001",
+  "nodes": [
+    {
+      "objectType": "Intent",
+      "objectId": "intent-2026-05-09-001",
+      "layer": "snapshot",
+      "r2Key": "11111111-2222-3333-4444-555555555555/publish/sites/00000000-0000-0000-0000-0000publish01/revisions/abcdef0123456789abcdef0123456789abcdef01/ai/objects/snapshot/Intent/intent-2026-05-09-001.json"
+    },
+    {
+      "objectType": "Plan",
+      "objectId": "plan-2026-05-09-001",
+      "layer": "snapshot",
+      "r2Key": "11111111-2222-3333-4444-555555555555/publish/sites/00000000-0000-0000-0000-0000publish01/revisions/abcdef0123456789abcdef0123456789abcdef01/ai/objects/snapshot/Plan/plan-2026-05-09-001.json"
+    },
+    {
+      "objectType": "Run",
+      "objectId": "run-2026-05-09-001",
+      "layer": "snapshot",
+      "r2Key": "11111111-2222-3333-4444-555555555555/publish/sites/00000000-0000-0000-0000-0000publish01/revisions/abcdef0123456789abcdef0123456789abcdef01/ai/objects/snapshot/Run/run-2026-05-09-001.json"
+    },
+    {
+      "objectType": "Thread",
+      "objectId": "thread-2026-05-09-001",
+      "layer": "projection",
+      "r2Key": "11111111-2222-3333-4444-555555555555/publish/sites/00000000-0000-0000-0000-0000publish01/revisions/abcdef0123456789abcdef0123456789abcdef01/ai/objects/projection/Thread/thread-2026-05-09-001.json"
+    }
+  ],
+  "edges": [
+    {
+      "kind": "isPartOf",
+      "fromObjectType": "Plan",
+      "fromObjectId": "plan-2026-05-09-001",
+      "toObjectType": "Intent",
+      "toObjectId": "intent-2026-05-09-001"
+    },
+    {
+      "kind": "appliesTo",
+      "fromObjectType": "Run",
+      "fromObjectId": "run-2026-05-09-001",
+      "toObjectType": "Plan",
+      "toObjectId": "plan-2026-05-09-001"
+    },
+    {
+      "kind": "groupedBy",
+      "fromObjectType": "Run",
+      "fromObjectId": "run-2026-05-09-001",
+      "toObjectType": "Thread",
+      "toObjectId": "thread-2026-05-09-001"
+    }
+  ],
+  "generatedAt": "2026-05-09T13:00:00Z"
+}

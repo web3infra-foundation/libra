@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "siteId": "00000000-0000-0000-0000-0000publish01",
+  "revisionOid": "abcdef0123456789abcdef0123456789abcdef01",
+  "commitOid": "abcdef0123456789abcdef0123456789abcdef01",
+  "treeOid": "1234567812345678123456781234567812345678",
+  "generatedAt": "2026-05-09T12:55:00Z",
+  "files": [
+    {
+      "siteId": "00000000-0000-0000-0000-0000publish01",
+      "revisionOid": "abcdef0123456789abcdef0123456789abcdef01",
+      "path": "README.md",
+      "displayMode": "text",
+      "contentSha256": "1bf1e1a4b13e9d68e4fc12be5ad85bcc99ae2d2ddbef9c5d81f82e08bad4fa1a",
+      "r2Key": "11111111-2222-3333-4444-555555555555/publish/sites/00000000-0000-0000-0000-0000publish01/revisions/abcdef0123456789abcdef0123456789abcdef01/files/1bf1e1a4b13e9d68e4fc12be5ad85bcc99ae2d2ddbef9c5d81f82e08bad4fa1a.txt",
+      "sizeBytes": 1734,
+      "language": "markdown"
+    },
+    {
+      "siteId": "00000000-0000-0000-0000-0000publish01",
+      "revisionOid": "abcdef0123456789abcdef0123456789abcdef01",
+      "path": "src/lib.rs",
+      "displayMode": "text",
+      "contentSha256": "9a0364b9e99bb480dd25e1f0284c8555a30dca56ab59e10e8a95da4c6f97c5e8",
+      "r2Key": "11111111-2222-3333-4444-555555555555/publish/sites/00000000-0000-0000-0000-0000publish01/revisions/abcdef0123456789abcdef0123456789abcdef01/files/9a0364b9e99bb480dd25e1f0284c8555a30dca56ab59e10e8a95da4c6f97c5e8.txt",
+      "sizeBytes": 4096,
+      "language": "rust"
+    },
+    {
+      "siteId": "00000000-0000-0000-0000-0000publish01",
+      "revisionOid": "abcdef0123456789abcdef0123456789abcdef01",
+      "path": "assets/logo.png",
+      "displayMode": "binary",
+      "sizeBytes": 16384
+    },
+    {
+      "siteId": "00000000-0000-0000-0000-0000publish01",
+      "revisionOid": "abcdef0123456789abcdef0123456789abcdef01",
+      "path": "tests/data/big-blob.bin",
+      "displayMode": "too_large",
+      "sizeBytes": 8388608
+    },
+    {
+      "siteId": "00000000-0000-0000-0000-0000publish01",
+      "revisionOid": "abcdef0123456789abcdef0123456789abcdef01",
+      "path": ".env.local",
+      "displayMode": "ignored",
+      "sizeBytes": 0
+    }
+  ]
+}

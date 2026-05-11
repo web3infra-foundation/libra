@@ -2,7 +2,7 @@
 
 > 最后编写时间：2026-03-31
 
-与 [switch.md](switch.md) 联动时，仅提前落地 Cross-Cutting Improvement **B**（`--help` EXAMPLES）；`A/F/G` 仍留待 [README.md](README.md#第六批辅助命令p2-增强) 中 `checkout` 的完整现代化批次统一处理。
+与 [switch.md](switch.md) 联动时，仅提前落地 Cross-Cutting Improvement **B**（`--help` EXAMPLES）；`A/F/G` 仍留待 [README.md](README.md#后续批次基于本轮-review-重排) 第 30 批中 `checkout` 的完整现代化批次统一处理。
 
 本文是 `checkout` 的**兼容性收口计划**，用于和 [switch.md](switch.md) 同步落地，避免 `switch` 的 typed error 改造把 `checkout` 的现有行为搞坏。
 
@@ -11,7 +11,7 @@
 **范围说明：**
 
 - **本次落地**：`checkout` 对 `switch::ensure_clean_status()` 新返回类型的适配、`--help` EXAMPLES、相关回归测试补强。
-- **留待后续**：`checkout` 自身完整的 JSON 输出、显式 `StableErrorCode`、执行层/渲染层拆分、typed `CheckoutError` 统一建模，仍按 [README.md](README.md#第六批辅助命令p2-增强) 的第六批执行。
+- **留待后续**：`checkout` 自身完整的 JSON 输出、显式 `StableErrorCode`、执行层/渲染层拆分、typed `CheckoutError` 统一建模，仍按 [README.md](README.md#后续批次基于本轮-review-重排) 的第 30 批执行。
 
 因此，本文**不是**把 `checkout` 提前升级为完整现代化命令，而是记录与 `switch` 联动时必须一起收口的最小兼容面。
 
@@ -75,7 +75,7 @@
 
 **本次非目标：**
 
-- **不实现 `checkout --json` / `--machine` 结构化成功输出**。这属于第六批完整现代化范围
+- **不实现 `checkout --json` / `--machine` 结构化成功输出**。这属于第 30 批完整现代化范围
 - **不引入完整 `CheckoutError` typed enum**
 - **不改写 `get_remote()` 的业务语义**。remote auto-track + pull 现有流程保持不变
 - **不统一 `checkout` 和 `switch` 的成功文案**。`checkout` 继续保留自己的兼容语气，例如 `Already on {branch}`（无引号）
@@ -87,7 +87,7 @@
 1. **switch 联动优先，checkout 行为稳定优先**：`switch` 改 helper 签名时，`checkout` 必须同步，但不能借机改掉现有命令行为
 2. **只替换脆弱实现，不扩大本批范围**：本次只把字符串匹配换成 `SwitchError` 变体匹配，不顺手做 JSON / typed error 全量重构
 3. **checkout 保持自己的对外文案**：即使内部依赖 `switch`，外部仍是 `checkout` 语义，不和 `switch` 强行统一
-4. **未来完整现代化留在第六批**：本次文档必须显式给未来 `CheckoutError` / JSON 输出留边界，避免与 README 排期冲突
+4. **未来完整现代化留在第 30 批**：本次文档必须显式给未来 `CheckoutError` / JSON 输出留边界，避免与 README 排期冲突
 
 ### 特性 1：`switch::ensure_clean_status()` 新返回类型适配
 
@@ -157,22 +157,22 @@ EXAMPLES:
 - `run_switch()` 仍保持私有；`checkout` 不复用 `switch` 的执行层结果结构
 - `checkout` 的完整 JSON / typed error / render split 不在本次联动范围内
 
-### 特性 4：第六批完整现代化的预留边界
+### 特性 4：第 30 批完整现代化的预留边界
 
-按照 [README.md](README.md#第六批辅助命令p2-增强)，`checkout` 的完整改造仍留在第六批。届时再单独推进：
+按照 [README.md](README.md#后续批次基于本轮-review-重排)，`checkout` 的完整改造仍留在第 30 批。届时再单独推进：
 
 - `CheckoutError` typed enum
 - 显式 `StableErrorCode`
 - `run_checkout()` + `render_checkout_output()` 执行/渲染拆分
 - `checkout --json` 成功输出（至少覆盖 show-current / switch-local / create / remote-track）
 
-本次**不提前设计这些 schema 细节**，只要求当前兼容收口不能阻碍第六批未来落地。
+本次**不提前设计这些 schema 细节**，只要求当前兼容收口不能阻碍第 30 批未来落地。
 
 ### 本次联动中的 Cross-Cutting Improvements 约束
 
 | ID | 本次是否落地 | checkout 中的处理 |
 |----|-------------|------------------|
-| **A** | 否 | 当前兼容收口不引入新的 `StableErrorCode` / 退出码模型，继续保持既有 `checkout` 行为；完整退出码现代化留第六批 |
+| **A** | 否 | 当前兼容收口不引入新的 `StableErrorCode` / 退出码模型，继续保持既有 `checkout` 行为；完整退出码现代化留第 30 批 |
 | **B** | 是 | 补齐 `--help` EXAMPLES 段，与 `switch` / `init` / `config` 风格保持一致 |
 | **F** | 否 | 本次不为 `checkout` 单独设计 fuzzy suggestion；与分支目标相关的提示增强由 `switch` 侧承接 |
 | **G** | 否 | 本次不新增 Issues URL 规则；待 `checkout` 自身进入 typed error / 显式错误码阶段后再统一定义 |
@@ -202,7 +202,7 @@ EXAMPLES:
 
 #### 不新增 `checkout_json_test.rs`
 
-本次不实现 `checkout --json`，因此**不新增** `checkout_json_test.rs`。该测试文件留待第六批完整现代化时引入。
+本次不实现 `checkout --json`，因此**不新增** `checkout_json_test.rs`。该测试文件留待第 30 批完整现代化时引入。
 
 ### 质量验收
 

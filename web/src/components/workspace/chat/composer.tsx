@@ -21,6 +21,10 @@ type Mode = "Plan" | "Build";
 type Props = {
   /** Submit handler; receives the trimmed draft and is responsible for delivering it. */
   onSubmit: (draft: string) => void;
+  /** When true the composer renders in read-only mode — Phase 1 default. */
+  disabled?: boolean;
+  /** Optional explanation surfaced under the textarea when disabled. */
+  disabledReason?: string;
 };
 
 /**
@@ -29,18 +33,17 @@ type Props = {
  * Boundary: an all-whitespace draft is treated as empty — the Send button is
  * disabled and the keyboard shortcut is a no-op.
  */
-export function Composer({ onSubmit }: Props) {
+export function Composer({ onSubmit, disabled = false, disabledReason }: Props) {
   const [draft, setDraft] = useState("");
   const [mode, setMode] = useState<Mode>("Plan");
 
   function submit() {
+    if (disabled) return;
     if (!draft.trim()) return;
     onSubmit(draft);
     setDraft("");
   }
 
-  // Enter submits, Shift+Enter inserts a newline (the textarea native default
-  // for Shift+Enter is preserved by not preventing default in that branch).
   function onKey(e: KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -48,7 +51,7 @@ export function Composer({ onSubmit }: Props) {
     }
   }
 
-  const canSend = draft.trim().length > 0;
+  const canSend = !disabled && draft.trim().length > 0;
 
   return (
     <div className="border-t border-rule bg-paper px-8 pb-5 pt-3">
@@ -71,17 +74,27 @@ export function Composer({ onSubmit }: Props) {
         </div>
         <textarea
           rows={2}
-          placeholder="Reply to the agent, or steer the next step…"
+          placeholder={
+            disabled
+              ? (disabledReason ?? "Browser write control is not yet attached")
+              : "Reply to the agent, or steer the next step…"
+          }
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={onKey}
-          className="min-h-[44px] w-full resize-none border-none bg-transparent px-3.5 py-3 text-[13.5px] leading-[1.55] text-ink outline-none placeholder:text-ink-3"
+          disabled={disabled}
+          className={cn(
+            "min-h-[44px] w-full resize-none border-none bg-transparent px-3.5 py-3 text-[13.5px] leading-[1.55] outline-none placeholder:text-ink-3",
+            disabled ? "text-ink-3" : "text-ink",
+          )}
         />
         <div className="flex items-center justify-between px-3.5 pb-2 pt-1.5">
           <div className="flex items-center gap-2.5 text-[11px] text-ink-3">
-            <span className="mono text-[10.5px]">claude-sonnet-4.5</span>
-            <span>·</span>
-            <span>read-only tools in Phase 0/1, sandboxed in Phase 2</span>
+            {disabled ? (
+              <span>{disabledReason ?? "read-only · browser write disabled"}</span>
+            ) : (
+              <span>read-only tools in Phase 0/1, sandboxed in Phase 2</span>
+            )}
           </div>
           <button
             type="button"

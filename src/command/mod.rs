@@ -9,6 +9,7 @@
 //! rendering consequences.
 
 pub mod add;
+pub mod agent;
 pub mod automation;
 pub mod bisect;
 pub mod blame;
@@ -29,6 +30,7 @@ pub mod diff;
 pub mod fetch;
 pub mod graph;
 pub mod grep;
+pub mod hooks;
 pub mod index_pack;
 pub mod init;
 pub mod lfs;
@@ -36,6 +38,7 @@ pub mod log;
 pub mod merge;
 pub mod mv;
 pub mod open;
+pub mod publish;
 pub mod pull;
 pub mod push;
 pub mod rebase;

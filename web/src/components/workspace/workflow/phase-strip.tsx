@@ -3,7 +3,7 @@
 import { Fragment } from "react";
 
 import { IconCheck } from "@/components/icons";
-import { PHASES } from "@/lib/mock";
+import { PHASES } from "@/lib/code-ui/phases";
 import { cn } from "@/lib/utils";
 
 type Props = {

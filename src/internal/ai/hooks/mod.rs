@@ -38,5 +38,6 @@ pub use provider::{HookProvider, ProviderHookCommand, ProviderInstallOptions};
 pub use providers::{claude_provider, find_provider, gemini_provider, supported_provider_names};
 pub use runner::HookRunner;
 pub use runtime::{
-    AI_SESSION_SCHEMA, AI_SESSION_TYPE, build_ai_session_id, process_hook_event_from_stdin,
+    AI_SESSION_SCHEMA, AI_SESSION_TYPE, HookTarget, build_ai_session_id,
+    process_hook_event_from_stdin, process_hook_event_with_target,
 };

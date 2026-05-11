@@ -3,12 +3,17 @@
 import type { ReactNode } from "react";
 
 import { IconArrow, IconX } from "@/components/icons";
-import type { ExecutionRun, IntentDoc, PlanStep, StepStatus } from "@/lib/mock";
 import { cn } from "@/lib/utils";
 
 import { Markdown } from "./markdown";
 import { statusMeta } from "./status-meta";
-import type { DetailState } from "./types";
+import type {
+  DetailState,
+  ExecutionRun,
+  IntentDoc,
+  PlanStep,
+  StepStatus,
+} from "./types";
 
 type Props = {
   detail: DetailState | null;

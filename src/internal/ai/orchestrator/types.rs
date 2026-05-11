@@ -592,6 +592,10 @@ pub enum TaskRuntimeEvent {
         tool_name: String,
         result: Result<ToolOutput, String>,
     },
+    UsageUpdated {
+        usage: CompletionUsageSummary,
+        wall_clock_ms: u64,
+    },
 }
 
 pub trait OrchestratorObserver: Send + Sync {

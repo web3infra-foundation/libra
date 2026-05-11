@@ -33,7 +33,7 @@
 **本批非目标：**
 - 不引入交互式 restore
 - 不改变底层 tree/index 恢复算法
-- 不为 `checkout` 提前承诺完整 JSON 契约（完整现代化仍留第六批）
+- 不为 `checkout` 提前承诺完整 JSON 契约（完整现代化仍留 [README.md](README.md#后续批次基于本轮-review-重排) 第 30 批）
 
 ## 验证方式
 

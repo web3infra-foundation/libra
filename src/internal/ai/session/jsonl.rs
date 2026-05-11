@@ -14,6 +14,7 @@ use uuid::Uuid;
 use super::state::SessionState;
 use crate::internal::ai::{
     context_budget::{CompactionEvent, ContextFrameEvent, MemoryAnchorEvent, MemoryAnchorReplay},
+    goal::GoalEventEnvelope,
     runtime::event::Event,
 };
 
@@ -32,6 +33,12 @@ pub enum SessionEvent {
     ContextFrame(ContextFrameEvent),
     CompactionEvent(CompactionEvent),
     MemoryAnchor(MemoryAnchorEvent),
+    /// OC-Phase 6 Goal mode envelope (P6.1 schema only — supervisor wiring
+    /// in P6.3). The variant exists from day one so the JSONL stream
+    /// stays byte-stable as later PRs start emitting Goal events; readers
+    /// running an older binary skip unknown `goal_event` payloads via
+    /// the `parse_session_event_value` `unknown` branch.
+    Goal(GoalEventEnvelope),
 }
 
 /// Full session-state snapshot event.
@@ -68,12 +75,25 @@ impl SessionEvent {
         Self::MemoryAnchor(event)
     }
 
+    pub fn goal(event: GoalEventEnvelope) -> Self {
+        Self::Goal(event)
+    }
+
     pub fn apply_to(&self, current: &mut Option<SessionState>) {
         match self {
             Self::SessionSnapshot(event) => {
                 *current = Some(event.state.clone());
             }
-            Self::ContextFrame(_) | Self::CompactionEvent(_) | Self::MemoryAnchor(_) => {}
+            // P6.1 schema-only: Goal envelopes do NOT mutate the
+            // legacy `SessionState`. Replay into a `GoalState` lives
+            // in `crate::internal::ai::goal::state::replay`, called
+            // by the supervisor (P6.3). Listing the variant here
+            // makes the no-op explicit so a future maintainer does
+            // not assume an oversight.
+            Self::ContextFrame(_)
+            | Self::CompactionEvent(_)
+            | Self::MemoryAnchor(_)
+            | Self::Goal(_) => {}
         }
     }
 }
@@ -85,6 +105,7 @@ impl Event for SessionEvent {
             Self::ContextFrame(event) => event.event_kind(),
             Self::CompactionEvent(event) => event.event_kind(),
             Self::MemoryAnchor(event) => event.event_kind(),
+            Self::Goal(event) => event.event_kind(),
         }
     }
 
@@ -94,6 +115,7 @@ impl Event for SessionEvent {
             Self::ContextFrame(event) => event.event_id(),
             Self::CompactionEvent(event) => event.event_id(),
             Self::MemoryAnchor(event) => event.event_id(),
+            Self::Goal(event) => event.event_id(),
         }
     }
 
@@ -107,6 +129,7 @@ impl Event for SessionEvent {
             Self::ContextFrame(event) => event.event_summary(),
             Self::CompactionEvent(event) => event.event_summary(),
             Self::MemoryAnchor(event) => event.event_summary(),
+            Self::Goal(event) => event.event_summary(),
         }
     }
 }
@@ -252,6 +275,12 @@ impl SessionJsonlStore {
                 }
                 SessionEvent::SessionSnapshot(_) => {}
                 SessionEvent::MemoryAnchor(_) => {}
+                // OC-Phase 6 P6.1: Goal envelopes do not contribute to
+                // `SessionContextReplay`. Goal state is replayed by
+                // `crate::internal::ai::goal::state::replay`, called by
+                // the supervisor (P6.3). Listed explicitly so an
+                // exhaustiveness regression surfaces here.
+                SessionEvent::Goal(_) => {}
             }
         }
         Ok(replay)
@@ -293,6 +322,11 @@ fn parse_session_event_value(value: Value) -> Result<Option<SessionEvent>, serde
         "context_frame" => serde_json::from_value(value).map(Some),
         "compaction_event" => serde_json::from_value(value).map(Some),
         "memory_anchor" => serde_json::from_value(value).map(Some),
+        // OC-Phase 6 P6.1: Goal envelope. Old binaries that predate
+        // P6.1 fall through to the `unknown` branch below and skip
+        // the event without surfacing an error; this branch lets a
+        // P6.1-aware binary parse the envelope into the `Goal` variant.
+        "goal" => serde_json::from_value(value).map(Some),
         unknown => {
             tracing::warn!(event_kind = unknown, "skipping unknown session event");
             Ok(None)

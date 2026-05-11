@@ -19,6 +19,23 @@
 
 ---
 
+## 计划可信度与事实复核协议
+
+本文档和 `docs/improvement/**` 中的子计划不能靠“此前 Review 已通过”来获得长期可信度。任何计划在进入实现或继续标记为“已落地”前，必须重新跑一轮事实复核；没有新证据时只能写“待核”或“依赖某批次交付”，不能写成代码事实。
+
+**必须复核的证据：**
+- **代码事实**：用 `rg` / `cargo test` / `cargo run -- <cmd> --help` 直接验证。所有“已落地”“已存在”“无冲突”声明必须能指向当前工作树中的文件、测试或命令输出。
+- **链接事实**：相对链接必须指向现存文件；已合并或删除的旧计划（例如原 `code.md` / `tui.md`）必须改指向 [agent.md](agent.md) 的对应 Part。
+- **占位事实**：可执行脚本、CI 命令、迁移版本、baseline commit、CODEOWNERS handle、GitHub required-check 名称不得以 placeholder 形式进入可落地步骤。确实需要未来值时，该步骤必须 fail-fast 并把“需要维护者填值”列为阻塞验收项。
+- **验收事实**：每个计划必须有可运行的验证命令、涉及文件、风险/非目标边界；涉及安全、迁移、数据写入、外部 API 或兼容 surface 的计划还必须有负向测试和 rollback/cleanup 说明。
+- **生产错误处理**：任何实施计划触及 Rust 生产代码时，必须把 `unwrap()` / `expect()` / `panic!()` 扫描纳入验收；除测试或带 `// INVARIANT:` 的显然不可能失败路径外，新增或保留都视为 P1。
+
+**循环退出条件：**
+
+只有当本轮复核没有发现新的 P0/P1 漏洞、所有 P2/P3 都被明确登记为非阻塞 follow-up、且上面的证据全部可复现时，才能把计划称为“本轮可执行”。不要在文档中写“100% 完成/无风险/无未决”这类不可证伪表述；用“本轮事实复核通过”替代。
+
+---
+
 ## 改进顺序
 
 ### 批次依赖约束（避免文档状态冲突）
@@ -33,7 +50,7 @@
 
 - `config` 已交付 `config_kv`、`resolve_env()`、vault key 管理与 `vault` 命令吸收；`init`、`clone`、`push/pull` 等命令已在此基础上切换读取链路。
 - `init` 已交付 `run_init()`、顶层渲染层拆分、separate-layout 全链路移除，以及嵌套 fetch 的静默子级 `OutputConfig` 约束；后续文档可直接把这些能力写成“当前代码已具备”。
-- `clone` 已整体落地，复用 `init` 的纯执行层与 `config` 的解析/认证基础设施。成功 schema（`CloneOutput`）、显式错误码、typed checkout 失败传播与 cleanup warning 可见性均已完成；详见 [commands/clone.md](commands/clone.md) 实施记录。性能优化留后续批次。
+- `clone` 已整体落地，复用 `init` 的纯执行层与 `config` 的解析/认证基础设施。成功 schema（`CloneOutput`）、显式错误码、typed checkout 失败传播与 cleanup warning 可见性均已完成；详见 [docs/commands/clone.md](../commands/clone.md) 实施记录。性能优化留后续批次。
 
 后续各命令子计划如依赖前一批次交付项，应在“已完成前置条件与当前代码状态”中明确区分：
 
@@ -49,7 +66,7 @@
 |------|------|--------|--------|
 | **1** | `config` | ✅ 已落地 | vault-backed 存储；子命令风格；SSH/GPG key 管理；env vault；吸收 vault 命令功能（详见下方专节） |
 | **2** | `init` | ✅ 已落地 | 作为 `clone` / 转发路径的已交付基线；后续仅维护回归测试与文档同步 |
-| **3** | `clone` | ✅ 已落地 | 结构化成功输出（`--json`/`--machine`）；显式 `StableErrorCode`；network/auth hint；checkout 失败传播；cleanup warning 可见性；阶段性 human 进度（详见 [commands/clone.md](commands/clone.md)） |
+| **3** | `clone` | ✅ 已落地 | 结构化成功输出（`--json`/`--machine`）；显式 `StableErrorCode`；network/auth hint；checkout 失败传播；cleanup warning 可见性；阶段性 human 进度（详见 [docs/commands/clone.md](../commands/clone.md)） |
 | **4** | `add` | ✅ 已落地 | 执行层/渲染层拆分（`run_add()` → `AddOutput`）；JSON/machine 结构化输出；成功摘要；`--dry-run`/`--verbose` 输出经 `OutputConfig` 管控；显式 `StableErrorCode`；ignored/failed 按 warning 处理并接入 `--exit-code-on-warning`（详见 [add.md](add.md)） |
 | **5** | `status` | ✅ 已落地 | `StatusData` 共享数据层消除重复计算；upstream tracking（human/JSON/porcelain v2）；显式 `StableErrorCode`；新增 `--exit-code` dirty → exit `1`；颜色控制统一到 `OutputConfig`（详见 [status.md](status.md)） |
 | **6** | `commit` | ✅ 已落地 | `CommitError`（18 变体）typed enum + 显式 `StableErrorCode`；`run_commit()` + `render_commit_output()` 执行/渲染拆分；JSON 向后兼容扩展（+`branch`/`amend`/`signoff`/`conventional`/`signed`）；hook I/O 隔离；`--help` EXAMPLES（详见 [commit.md](commit.md)） |
@@ -272,7 +289,7 @@ agent.md 内部分工：
 - [Push 命令改进详细计划](push.md) ✅ 已落地
 - [Pull 命令改进详细计划](pull.md) ✅ 已落地
 - [Switch 命令改进详细计划](switch.md) ✅ 已落地
-- [Checkout 命令改进详细计划（第二批兼容收口）](checkout.md) ✅ 已落地（完整现代化留第六批）
+- [Checkout 命令改进详细计划（第二批兼容收口）](checkout.md) ✅ 已落地（完整现代化留第 30 批）
 - [Reset 命令改进详细计划](reset.md) ✅ 已落地
 - [Tag 命令改进详细计划](tag.md) ✅ 已落地
 - [Branch 命令改进详细计划](branch.md) ✅ 已落地（仍有少量 legacy wrapper 待继续迁移）
@@ -303,7 +320,7 @@ agent.md 内部分工：
 
 ## 命令改进实施记录
 
-- [Clone 命令改进实施记录](commands/clone.md)
+- [Clone 命令改进实施记录](../commands/clone.md)
 
 ---
 
@@ -346,3 +363,4 @@ agent.md 内部分工：
 2. `cargo clippy --all-targets --all-features -- -D warnings` 无警告
 3. `source .env.test && cargo test --all` 全部通过
 4. **测试覆盖规则**：凡纳入迁移范围的命令、内部模块和转发路径，都必须有对应的集成测试覆盖新 config_kv 读写链路。不维护固定测试列表，以迁移范围清单为准
+5. **计划复核规则**：若本次改动更新 `docs/improvement/**`，必须按“计划可信度与事实复核协议”重跑链接、状态、placeholder、验收命令和生产 `unwrap()` / `expect()` 扫描；发现漂移先修计划，再实现代码

@@ -525,6 +525,11 @@ pub struct App<M: CompletionModel> {
     auto_classify_first_user_message: bool,
     /// Monotonic id source for browser transcript artifacts.
     next_code_ui_item_id: u64,
+    /// Active Goal session for this `libra code` invocation, if any
+    /// (`/goal start <objective>` or `--goal "<objective>"`).
+    /// Shared by both the TUI slash-command surface and the Code
+    /// Control NDJSON `goal.*` methods (OC-Phase 6 P6.5 / P6.6).
+    goal_session: Option<super::goal_session::GoalSession>,
 }
 
 impl<M: CompletionModel + Clone + 'static> App<M>
@@ -646,6 +651,7 @@ where
             default_network_access: app_config.default_network_access,
             auto_classify_first_user_message: app_config.auto_classify_first_user_message,
             next_code_ui_item_id: 1,
+            goal_session: None,
         }
     }
 
@@ -971,6 +977,90 @@ where
                 let result = self.reclaim_local_controller().await;
                 let _ = ack.send(result);
             }
+            TuiControlCommand::GoalStart { objective, ack } => {
+                let result = self.goal_session_start_from_control(objective);
+                let _ = ack.send(result);
+            }
+            TuiControlCommand::GoalStatus { ack } => {
+                let result = self.goal_session_status_from_control();
+                let _ = ack.send(result);
+            }
+            TuiControlCommand::GoalCancel { reason, ack } => {
+                let result = self.goal_session_cancel_from_control(reason);
+                let _ = ack.send(result);
+            }
+        }
+    }
+
+    /// `goal.start { objective }` — create an active Goal mirroring
+    /// `/goal start <objective>`. Refuses if a Goal is already
+    /// active in this session. The Code Control client receives
+    /// the rendered status so it can display the goal id without a
+    /// follow-up `goal.status` call.
+    fn goal_session_start_from_control(
+        &mut self,
+        objective: String,
+    ) -> Result<String, TuiControlError> {
+        use super::goal_session::{GoalSession, GoalSessionError, render_goal_status};
+        if self.goal_session.as_ref().is_some_and(|s| !s.is_terminal()) {
+            return Err(TuiControlError::GoalAlreadyActive);
+        }
+        // Reuse the session id for both `thread_id` and
+        // `session_id` on the spec — the schema accepts any string
+        // for those fields, and this keeps the in-memory Goal
+        // bound to the running TUI session.
+        let session_id = self.session.id.clone();
+        let actor = goal_actor_for_session(self);
+        match GoalSession::create(session_id.clone(), session_id, objective, actor) {
+            Ok(session) => {
+                let rendered = render_goal_status(session.state());
+                self.goal_session = Some(session);
+                Ok(rendered)
+            }
+            Err(GoalSessionError::InvalidObjective { source }) => {
+                Err(TuiControlError::GoalInvalidObjective(source.to_string()))
+            }
+            Err(other) => Err(TuiControlError::Internal(other.to_string())),
+        }
+    }
+
+    /// `goal.status` — render the active Goal's snapshot, or
+    /// `GoalNotActive` if none.
+    fn goal_session_status_from_control(&self) -> Result<String, TuiControlError> {
+        use super::goal_session::render_goal_status;
+        match self.goal_session.as_ref() {
+            Some(session) => Ok(render_goal_status(session.state())),
+            None => Err(TuiControlError::GoalNotActive),
+        }
+    }
+
+    /// `goal.cancel { reason }` — append `GoalEvent::Cancelled` to
+    /// the active session and clear the slot. Refuses if no Goal is
+    /// active or if the active Goal is already terminal.
+    fn goal_session_cancel_from_control(
+        &mut self,
+        reason: String,
+    ) -> Result<String, TuiControlError> {
+        use super::goal_session::{GoalSessionError, render_goal_status};
+        let actor = goal_actor_for_session(self);
+        let Some(session) = self.goal_session.as_mut() else {
+            return Err(TuiControlError::GoalNotActive);
+        };
+        match session.cancel(reason, actor) {
+            Ok(outcome) => {
+                let rendered = render_goal_status(&outcome.state);
+                // Per opencode.md:665 a Cancelled session is
+                // terminal; clear the slot so a subsequent
+                // `goal.start` succeeds without an explicit
+                // teardown call.
+                self.goal_session = None;
+                Ok(rendered)
+            }
+            Err(GoalSessionError::NotActive) => {
+                self.goal_session = None;
+                Err(TuiControlError::GoalNotActive)
+            }
+            Err(other) => Err(TuiControlError::Internal(other.to_string())),
         }
     }
 
@@ -4325,6 +4415,28 @@ where
                     TurnInputSource::Local,
                 );
             }
+            BuiltinCommand::Run => {
+                // `/run` mirrors `/chat`'s plan-bypass but defers
+                // the allowed-tool decision to the launch-time
+                // `--context` / `--agent` selection rather than
+                // pinning a read-only set. Passing `None` lets
+                // `default_chat_allowed_tools` pick up
+                // `config.allowed_tools` (set from
+                // `registry.filter_by_intent(...)` at startup).
+                // Wave 5 generation matrix uses this so
+                // `--context dev` actually exposes `apply_patch`.
+                let request = args.trim();
+                if request.is_empty() {
+                    self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                        "Usage: /run <prompt>".to_string(),
+                    )));
+                    self.schedule_draw();
+                    return;
+                }
+                self.widget.clear_dag_panel();
+                self.sync_mux_input_context();
+                self.submit_direct_agent_message(request.to_string(), None, TurnInputSource::Local);
+            }
             BuiltinCommand::Model => {
                 let info = format!(
                     "Provider: {}\nModel: {}",
@@ -4497,9 +4609,75 @@ where
                 self.sync_mux_input_context();
                 self.schedule_draw();
             }
+            BuiltinCommand::Agents => {
+                // OC-Phase 5 P5.4: declarative agents.toml is not yet wired
+                // through the TUI session config (lands with the dispatcher
+                // integration in P5.5 + later). Until then, surface an
+                // actionable placeholder so the slash command exists as a
+                // discoverable UX surface.
+                self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                    "Multi-agent declarative config (`agents.toml`) is not yet loaded by this \
+                     session. See `docs/improvement/opencode.md` OC-Phase 5 for the rollout \
+                     plan."
+                        .to_string(),
+                )));
+            }
+            BuiltinCommand::Budget => {
+                // Same gating as Agents — budget enforcement is implemented
+                // (`src/internal/ai/agent/budget.rs`) but the runtime tracker
+                // is not yet plumbed into the TUI session.
+                self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                    "Per-session / per-agent budget tracker is not yet plumbed through this \
+                     TUI session. The `[code.budget]` config schema and enforcement primitive \
+                     are in place; runtime wiring lands in OC-Phase 5 P5.5."
+                        .to_string(),
+                )));
+            }
+            BuiltinCommand::Goal => {
+                let message = self.format_goal_command_response(args);
+                self.widget
+                    .add_cell(Box::new(AssistantHistoryCell::new(message)));
+            }
             BuiltinCommand::Quit => {
                 self.request_user_exit();
             }
+        }
+    }
+
+    /// Render the response cell for a `/goal …` invocation. The
+    /// parser lives in [`super::goal_command::parse_goal_subcommand`];
+    /// this helper dispatches the typed result into the App's
+    /// goal-session methods (the same methods the Code Control
+    /// NDJSON `goal.*` handlers call), so both surfaces share one
+    /// authority for state mutation (OC-Phase 6 P6.5 / P6.6). The
+    /// `criteria add` arm stays parse-only because `CriteriaRevised`
+    /// envelopes flow through the supervisor's apply path —
+    /// integration ships once `run_tool_loop` integrates.
+    fn format_goal_command_response(&mut self, args: &str) -> String {
+        use super::goal_command::{GoalSubcommand, parse_goal_subcommand};
+        match parse_goal_subcommand(args) {
+            Ok(GoalSubcommand::Start { objective }) => {
+                match self.goal_session_start_from_control(objective) {
+                    Ok(rendered) => format!("Goal started.\n{rendered}"),
+                    Err(err) => format!("`/goal start` failed: {}", err.message()),
+                }
+            }
+            Ok(GoalSubcommand::Status) => match self.goal_session_status_from_control() {
+                Ok(rendered) => rendered,
+                Err(err) => err.message(),
+            },
+            Ok(GoalSubcommand::Cancel { reason }) => {
+                match self.goal_session_cancel_from_control(reason) {
+                    Ok(rendered) => format!("Goal cancelled.\n{rendered}"),
+                    Err(err) => format!("`/goal cancel` failed: {}", err.message()),
+                }
+            }
+            Ok(GoalSubcommand::CriteriaAdd { text }) => format!(
+                "`/goal criteria add` parsed.\n  Description: {text}\n\
+                 Appending criteria mid-Goal needs the supervisor's `CriteriaRevised` \
+                 envelope path, which lands once `run_tool_loop` integrates."
+            ),
+            Err(err) => err.to_string(),
         }
     }
 
@@ -5938,6 +6116,18 @@ where
                                 turn_id: self.turn_id,
                                 event: AgentEvent::ThinkingDelta {
                                     delta: delta.clone(),
+                                },
+                            });
+                        }
+                        TaskRuntimeEvent::UsageUpdated {
+                            usage,
+                            wall_clock_ms,
+                        } => {
+                            let _ = self.tx.send(AppEvent::AgentEvent {
+                                turn_id: self.turn_id,
+                                event: AgentEvent::UsageUpdated {
+                                    usage: usage.clone(),
+                                    wall_clock_ms: *wall_clock_ms,
                                 },
                             });
                         }
@@ -10355,6 +10545,17 @@ fn should_forward_phase0_model_text_delta(_delta: &str) -> bool {
 fn should_route_plain_message_to_plan(text: &str) -> bool {
     let trimmed = text.trim_start();
     !trimmed.trim().is_empty() && !trimmed.starts_with('/')
+}
+
+/// Build the [`GoalActor`] attribution for actions taken inside the
+/// active session. Today we always attribute to the local user;
+/// once the controller-lease layer threads automation actor metadata
+/// through (P6.6 follow-up for the `Automation` actor variant), this
+/// function will branch on the active controller.
+fn goal_actor_for_session<M: CompletionModel>(
+    _app: &App<M>,
+) -> crate::internal::ai::goal::GoalActor {
+    crate::internal::ai::goal::GoalActor::User { id: None }
 }
 
 fn is_global_quit_command_input(text: &str) -> bool {

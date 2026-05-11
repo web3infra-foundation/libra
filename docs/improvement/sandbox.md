@@ -2,16 +2,51 @@
 
 ## 所属计划
 
-AI Agent 子系统专项计划，与 [code.md](code.md) 并列。两者的边界：
+AI Agent 子系统专项计划，与 [agent.md](agent.md) Part B 并列。两者的边界：
 
-- [code.md](code.md)：负责 Phase 0–4 工作流、Snapshot/Event/Projection 对象模型、provider bootstrap。
+- [agent.md](agent.md) Part B：负责 Phase 0–4 工作流、Snapshot/Event/Projection 对象模型、provider bootstrap。
 - 本计划：负责 `libra code` 在宿主机上执行 Shell / ApplyPatch / Write 等 mutating tool 时的**操作系统级隔离层**，保障 provider / AI agent 失控时的爆炸半径。
 
 ## Context
 
 AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击面最集中的入口：提示词注入、恶意 MCP server、失控的 provider 调用都可能通过 Shell tool 直达宿主机。当前 Libra 已经具备多档 `SandboxPolicy`、Seatbelt 策略拼装、Linux 外部 helper、审批审计与危险命令解析等基础设施（见 [src/internal/ai/sandbox/](../../src/internal/ai/sandbox/)），但相较 Claude Code 官方公开的 Bubblewrap 方案仍有若干关键缺口，包括：**Linux 沙箱依赖的外部二进制缺失时静默降级**、**Seatbelt 允许 `file-read*` 导致敏感路径默认可读**、**无 `--new-session` 防护 TIOCSTI 终端注入**、**无每命令 0o700 tmp 清理**、**无危险挂载拒绝清单**、**无 `libra sandbox status` 自检**。
 
-本计划对齐 Claude Code 官方沙箱文档（`code.claude.com/docs/en/sandboxing`）与 Bubblewrap 工程实践，目标是把 Libra 在 AI Agent 失控场景下的实际爆炸半径降到与 Claude Code 相当的水平，并保证改动与 [code.md](code.md) 的 Runtime 正式写入层兼容。**网络服务访问采取默认拒绝（default deny）策略**：沙箱内除 loopback 外的一切出站连接默认被 OS 层阻断，只能通过显式白名单放行。
+本计划对齐 Claude Code 官方沙箱文档（`code.claude.com/docs/en/sandboxing`）与 Bubblewrap 工程实践，目标是把 Libra 在 AI Agent 失控场景下的实际爆炸半径降到与 Claude Code 相当的水平，并保证改动与 [agent.md](agent.md) Part B 的 Runtime 正式写入层兼容。**网络服务访问采取默认拒绝（default deny）策略**：沙箱内除 loopback 外的一切出站连接默认被 OS 层阻断，只能通过显式白名单放行。
+
+## 0.16.2 落地审计快照（2026-05-05）
+
+### 审计范围
+
+- 代码版本：`libra 0.16.2`（`Cargo.toml`）
+- 审计对象：本计划“阶段 1～阶段 7”是否已在主代码路径落地（不按文档目标推断，以代码事实为准）
+
+### 审计结论
+
+- **阶段 1～阶段 7 仍未实质落地**，整体状态仍是“前置基线已具备 + 计划项待实施”。
+- 与上次审计相比，`sandbox` 关键缺口（静默降级、`--new-session`、敏感路径拒读、per-command tmp、危险挂载拒绝、`sandbox status`、网络三态）没有进入主干实现。
+
+### 分阶段状态（0.16.2）
+
+| 阶段 | 目标 | 现状 |
+|---|---|---|
+| 阶段 1 | `SandboxEnforcement` + `libra sandbox status` | 未落地 |
+| 阶段 2 | 内建 bwrap 直调 + seccomp | 未落地 |
+| 阶段 3 | `setsid` / `--new-session` | 未落地 |
+| 阶段 4 | 敏感路径拒读（`deny_read`） | 未落地 |
+| 阶段 5 | 每命令 0o700 tmp + 清理 | 未落地 |
+| 阶段 6 | 危险挂载拒绝清单 | 未落地 |
+| 阶段 7 | 网络三态 + allowlist/proxy | 未落地 |
+
+### 关键证据（代码锚点）
+
+- 仍然是 Linux helper 缺失后 `warn` 并回退到无沙箱：`src/internal/ai/sandbox/runtime.rs:270-290`。
+- 仍无 `SandboxEnforcement`、`EnforcementFailed`、`NetworkEnforcementFailed` 类型/错误分支（`src/internal/ai/sandbox/policy.rs`、`runtime.rs`）。
+- 仍没有 `libra sandbox status` 子命令入口：`src/cli.rs:170-302`，且 `src/command/` 下无 `sandbox.rs`。
+- Linux 仍是外部 helper 参数转发路径（`--sandbox-policy` / `--use-bwrap-sandbox`），无内建 `create_bwrap_command_args`：`src/internal/ai/sandbox/runtime.rs:323-340`。
+- macOS 读权限仍是 `(allow file-read*)` 全放行：`src/internal/ai/sandbox/runtime.rs:354`。
+- 执行路径仍未注入 per-command 私有 tmp，也无 finally 清理：`src/internal/ai/sandbox/mod.rs:986-1061`。
+- `writable_roots` 仅规范化/去重，未做危险路径拒绝：`src/internal/ai/sandbox/policy.rs:117-159`。
+- 网络模型仍是 `Restricted/Enabled` + `bool network_access`，不是 `Denied/Allowlist/Full`：`src/internal/ai/sandbox/policy.rs:27-33`、`src/internal/ai/sandbox/mod.rs:750-760`、`src/command/code.rs:357-364`。
 
 ## 已完成前置条件与当前代码状态
 
@@ -34,17 +69,17 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 - 会话级审批缓存 `ApprovalStore`
 - tree-sitter bash 解析 + 安全命令白/黑名单
 - 沙箱拒绝关键词触发升级重试提示（mod.rs:178-186）
-- 默认 10 秒超时、100 KiB 输出上限（mod.rs:175、[src/internal/ai/tools/handlers/shell.rs:35](../../src/internal/ai/tools/handlers/shell.rs:35)）
+- 默认 60 秒超时、100 KiB 输出上限（[src/internal/ai/sandbox/mod.rs](../../src/internal/ai/sandbox/mod.rs) `DEFAULT_TIMEOUT_MS=60_000`、[src/internal/ai/tools/handlers/shell.rs](../../src/internal/ai/tools/handlers/shell.rs)）
 
 **Worktree FUSE overlay** [src/command/worktree-fuse.rs](../../src/command/worktree-fuse.rs)
 - 基于 `libfuse_fs::overlayfs` 的 COW 隔离，与 AI 沙箱解耦，当前仅服务 `git worktree --fuse`，尚未接入 AI 命令执行
 
 ### 基于当前代码的 Review 结论
 
-- Linux 外部 helper 缺失时走 `tracing::warn!` 后"裸跑"（runtime.rs:224-228），这是**静默安全降级**，用户无感知。
-- Seatbelt 策略对读操作使用 `(allow file-read*)` 全盘放行（runtime.rs:293），`~/.ssh` / `~/.aws` / `~/.netrc` / 浏览器 cookie / 各类 token 默认可被 agent 读取并外发。
+- Linux 外部 helper 缺失时走 `tracing::warn!` 后“裸跑”（runtime.rs:270-290），这是**静默安全降级**，用户无感知。
+- Seatbelt 策略对读操作使用 `(allow file-read*)` 全盘放行（runtime.rs:354），`~/.ssh` / `~/.aws` / `~/.netrc` / 浏览器 cookie / 各类 token 默认可被 agent 读取并外发。
 - `create_seatbelt_command_args` 与外部 Linux helper 都没有对沙箱进程做 `setsid` / `--new-session`，TIOCSTI 终端注入路径未封堵。
-- `CommandSpec::env` 目前由调用方传入，未专门为沙箱进程准备 0o700 私有 tmp，`$TMPDIR` 直接复用宿主。
+- `CommandSpec::env` 目前由调用方传入，`run_command_spec` 未专门为沙箱进程准备 0o700 私有 tmp，`$TMPDIR` 直接复用宿主。
 - `WorkspaceWrite::writable_roots` 装载不做危险路径校验，用户若为兼容 Docker 工具链写入 `/var/run/docker.sock`，沙箱一挂即可逃逸。
 - 缺少 `libra sandbox status` 入口，用户无法确认当前 `SandboxType` 的实际生效状态。
 
@@ -64,7 +99,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 **后续维护目标：**
 
 - WSL2 二次嵌套 / Docker-in-Docker 环境的自适应弱隔离告警
-- 与 [code.md](code.md) Runtime `write_run` / `write_tool_invocation` 的联动审计（沙箱拒绝事件 → `Evidence[E]`）
+- 与 [agent.md](agent.md) Part B Runtime `write_run` / `write_tool_invocation` 的联动审计（沙箱拒绝事件 → `Evidence[E]`）
 
 **本批非目标：**
 
@@ -170,7 +205,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
    - 注入到 `CommandSpec::env` 的 `TMPDIR` / `TEMP` / `TMP`
 2. **命令退出后异步清理**
    - 在 `run_command_spec` 的 Drop / finally 路径 `tokio::fs::remove_dir_all`
-   - 清理失败不阻塞主流程，走 `tracing::warn!` 并记录 `ToolInvocation[E]` 元数据（详见 [code.md](code.md) 的 Runtime 正式写入层）
+   - 清理失败不阻塞主流程，走 `tracing::warn!` 并记录 `ToolInvocation[E]` 元数据（详见 [agent.md](agent.md) Part B 的 Runtime 正式写入层）
 3. **cleanupAfterCommand 对齐**
    - macOS 下若出现 Seatbelt "ghost dotfiles"（允许写 + 实际被 deny → 0 字节占位），也在清理阶段统一擦除
 
@@ -247,7 +282,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 
 5. **审批与审计**
    - 任何 `NetworkAccess` 升级（`Denied → Allowlist`、`Allowlist → Full`）必须经过 `ExecApprovalRequest` 审批通道
-   - 网络拒绝事件（连接被 OS 或代理阻断）写入 `ToolInvocation[E]` + `Evidence[E]`（详见 [code.md](code.md) Runtime 正式写入层）
+   - 网络拒绝事件（连接被 OS 或代理阻断）写入 `ToolInvocation[E]` + `Evidence[E]`（详见 [agent.md](agent.md) Part B Runtime 正式写入层）
    - `libra sandbox status` 输出 `network.mode` / `network.allowlist` / `proxy_backend` / `effective_enforcement`
 
 6. **兼容性处理**
@@ -270,9 +305,9 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 | `libra sandbox status` 子命令 | 新增 `src/command/sandbox.rs` + [src/cli.rs](../../src/cli.rs) | 参考 [src/command/worktree.rs](../../src/command/worktree.rs) 的子命令模式、第一批 `OutputConfig` / `emit_json_data()` / `info_println!()` |
 | 配置读取（`.libra/sandbox.toml`） | [src/internal/ai/sandbox/mod.rs](../../src/internal/ai/sandbox/mod.rs) | 第一批 `config_kv` / `resolve_env()`（详见 [config.md](config.md)） |
 
-## 与 code.md 的交接契约
+## 与 agent.md Part B 的交接契约
 
-- **Runtime 正式写入**：沙箱拒绝事件、enforcement 失败、危险挂载拒绝必须落到 [code.md](code.md) Runtime 的 `ToolInvocation[E]` + `Evidence[E]`，不能藏在 tracing 日志里
+- **Runtime 正式写入**：沙箱拒绝事件、enforcement 失败、危险挂载拒绝必须落到 [agent.md](agent.md) Part B Runtime 的 `ToolInvocation[E]` + `Evidence[E]`，不能藏在 tracing 日志里
 - **Phase 边界**：沙箱策略的选择与降级发生在 Phase 2 `CodexTaskExecutor` / `CompletionTaskExecutor` 进入 Runtime 写入之前；Phase 0 / 1 的 readonly tools 默认走 `SandboxPolicy::ReadOnly` + `SandboxEnforcement::Required`
 - **Projection**：`libra sandbox status` 输出可作为 Projection 读取消费者（UI / MCP / diagnostics），但不成为真相源
 

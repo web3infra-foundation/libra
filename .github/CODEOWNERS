@@ -14,6 +14,14 @@
 /COMPATIBILITY.md                       @web3infra-foundation/libra-maintainers
 /docs/improvement/compatibility/        @web3infra-foundation/libra-maintainers
 
+# Publish track (Cloudflare-backed publishing)
+/docs/improvement/publish.md            @web3infra-foundation/libra-maintainers
+/docs/commands/publish.md               @web3infra-foundation/libra-maintainers
+/sql/publish/                           @web3infra-foundation/libra-maintainers
+/src/internal/publish/                  @web3infra-foundation/libra-maintainers
+/tests/data/publish/                    @web3infra-foundation/libra-maintainers
+/worker/migrations/                     @web3infra-foundation/libra-maintainers
+
 # CI / governance
 /.github/                               @web3infra-foundation/libra-maintainers
 /.gitattributes                         @web3infra-foundation/libra-maintainers

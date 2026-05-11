@@ -577,6 +577,58 @@ DROP TABLE IF EXISTS `agent_usage_stats`;
 "#,
             ),
         },
+        // CEX-EntireIO Phase 1.1: external-agent capture catalog. Uses
+        // `include_str!` to keep DDL out of the Rust file — the path resolves
+        // from `src/internal/db/migration.rs` (three `..` segments to repo
+        // root, then descend into `sql/migrations/`).
+        Migration {
+            version: 2026050303,
+            name: "agent_capture",
+            up: include_str!("../../../sql/migrations/2026050303_agent_capture.sql"),
+            down: Some(include_str!(
+                "../../../sql/migrations/2026050303_agent_capture_down.sql"
+            )),
+        },
+        // CEX-EntireIO Phase 2.1 follow-up: relax `agent_checkpoint.parent_commit`
+        // to NULLable so the runtime can distinguish "user branch unborn / no
+        // HEAD" from "lookup error" — see Codex review round 1 NEEDS-CHANGES.
+        Migration {
+            version: 2026050501,
+            name: "agent_checkpoint_parent_nullable",
+            up: include_str!(
+                "../../../sql/migrations/2026050501_agent_checkpoint_parent_nullable.sql"
+            ),
+            down: Some(include_str!(
+                "../../../sql/migrations/2026050501_agent_checkpoint_parent_nullable_down.sql"
+            )),
+        },
+        // OC-Phase 2 P2.5: persistent `Always`-reply ruleset, populated when
+        // a user clicks "Always" on a permission prompt and reloaded on the
+        // next session. See docs/improvement/opencode.md "Permission Ruleset
+        // 与 Approval 反馈协议".
+        Migration {
+            version: 2026050601,
+            name: "approved_permission",
+            up: include_str!("../../../sql/migrations/2026050601_approved_permission.sql"),
+            down: Some(include_str!(
+                "../../../sql/migrations/2026050601_approved_permission_down.sql"
+            )),
+        },
+        // OC-Phase 5 P5.2: add the `agent_name` dimension to
+        // `agent_usage_stats` so the multi-agent runtime can attribute spend
+        // to a specific agent profile (planner / explorer / reviewer / …)
+        // on top of the existing (provider, model) aggregation. Additive;
+        // legacy rows keep `agent_name = NULL` and remain queryable through
+        // the existing indexes. See docs/improvement/opencode.md OC-Phase 5
+        // P5.2.
+        Migration {
+            version: 2026050801,
+            name: "agent_usage_stats_agent_name",
+            up: include_str!("../../../sql/migrations/2026050801_agent_usage_stats_agent_name.sql"),
+            down: Some(include_str!(
+                "../../../sql/migrations/2026050801_agent_usage_stats_agent_name_down.sql"
+            )),
+        },
     ]
 }
 
@@ -675,12 +727,13 @@ mod tests {
 
     #[test]
     fn builtin_runner_registers_current_builtin_migrations() {
-        // CEX-15 and CEX-16 now ship built-in migrations. Keep this count
-        // explicit so future migrations update this test with the registry.
+        // Bump this assertion whenever a new migration is registered in
+        // `builtin_migrations()` so silent registry regressions surface
+        // here in addition to `tests/db_migration_test.rs`.
         let runner = builtin_runner().expect("CEX-12.5 builtin registry must build clean");
-        assert_eq!(runner.len(), 2);
+        assert_eq!(runner.len(), 6);
         assert!(!runner.is_empty());
-        assert_eq!(runner.max_registered_version(), Some(2026050302));
+        assert_eq!(runner.max_registered_version(), Some(2026050801));
     }
 
     #[test]

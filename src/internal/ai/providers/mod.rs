@@ -32,12 +32,26 @@
 //! | `ollama`    | Ollama (local)   | None                     | `http://127.0.0.1:11434/v1` |
 
 pub mod anthropic;
+pub mod capability;
 pub mod deepseek;
+pub mod error;
+pub mod factory;
 #[cfg(feature = "test-provider")]
 pub mod fake;
 pub mod gemini;
 pub mod kimi;
 pub mod ollama;
 pub mod openai;
-pub(crate) mod openai_compat;
+pub mod openai_compat;
+pub mod runtime;
+pub mod transform;
+pub mod wire_helpers;
 pub mod zhipu;
+
+pub use capability::{ModelCapability, ModelCost};
+pub use error::{
+    ProviderError, RetryPolicy, StreamErrorKind, parse_api_error, parse_stream_error_kind,
+};
+pub use factory::{ProviderBuildOptions, ProviderFactory, ProviderFactoryError};
+pub use runtime::{AnyCompletionModel, AnyCompletionRawResponse};
+pub use transform::{ProviderTransform, TransformError, transform_for, variant};

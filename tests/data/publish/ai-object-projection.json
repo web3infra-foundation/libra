@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "siteId": "00000000-0000-0000-0000-0000publish01",
+  "revisionOid": "abcdef0123456789abcdef0123456789abcdef01",
+  "objectType": "Thread",
+  "objectId": "thread-2026-05-09-001",
+  "layer": "projection",
+  "sourceRefs": [
+    "agent_session/4a4f6c7e-e0bc-4cf9-9a17-9d1bd5c4ec01"
+  ],
+  "relationships": [
+    {
+      "kind": "groups",
+      "fromObjectType": "Thread",
+      "fromObjectId": "thread-2026-05-09-001",
+      "toObjectType": "Run",
+      "toObjectId": "run-2026-05-09-001"
+    },
+    {
+      "kind": "groups",
+      "fromObjectType": "Thread",
+      "fromObjectId": "thread-2026-05-09-001",
+      "toObjectType": "Run",
+      "toObjectId": "run-2026-05-09-002"
+    }
+  ],
+  "payload": {
+    "threadId": "thread-2026-05-09-001",
+    "title": "Implement publish.md Phase 0",
+    "runCount": 2,
+    "lastActivityAt": "2026-05-09T13:00:00Z"
+  },
+  "redaction": {
+    "mode": "default",
+    "rulesVersion": "2026.05.09-1"
+  },
+  "removedFields": []
+}

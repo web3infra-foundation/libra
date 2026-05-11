@@ -280,6 +280,17 @@ impl SecretRedactor {
                 "x-code-controller-token=",
                 "x-libra-control-token:",
                 "x-libra-control-token=",
+                // Wave 7 / PR 7 — path-component patterns. Common
+                // `LIBRA_LOG_FILE` paths injected by automation
+                // clients can embed secret-like substrings as
+                // directory segments (e.g.
+                // `/tmp/abc-secret-key-xyz/libra.log`). Treating
+                // `secret-` / `secret_` as markers ensures the
+                // remainder of that path component is replaced
+                // with `[REDACTED]` before it reaches the
+                // diagnostics response.
+                "secret-",
+                "secret_",
             ]
             .into_iter()
             .map(str::to_string)

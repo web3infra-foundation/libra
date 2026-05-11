@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "siteId": "00000000-0000-0000-0000-0000publish01",
+  "refName": "refs/tags/v1.1.0-rc",
+  "refType": "tag",
+  "shortName": "v1.1.0-rc",
+  "targetOid": "0011223344556677889900112233445566778899",
+  "revisionOid": "112233445566778899aabbccddeeff0011223344",
+  "isDefault": false,
+  "syncRunId": "11111111-aaaa-bbbb-cccc-deadbeef0001",
+  "updatedAt": "2026-05-09T13:25:30Z"
+}

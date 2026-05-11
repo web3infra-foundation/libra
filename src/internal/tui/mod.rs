@@ -54,6 +54,12 @@ mod history_cell;
 mod markdown_render;
 // Built-in slash command parser.
 mod slash_command;
+// Typed parser for the `/goal` subcommand family.
+mod goal_command;
+// In-memory Goal session state (Created/Cancelled lifecycle) shared
+// between the TUI `/goal` slash commands and the Code Control
+// `goal.*` NDJSON methods.
+mod goal_session;
 // Spinner/elapsed-time status indicator.
 mod status_indicator;
 // Crossterm bootstrap and event streaming.

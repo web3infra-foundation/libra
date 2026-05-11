@@ -124,12 +124,22 @@ fn is_retryable_error(err: &CompletionError) -> bool {
 fn is_retryable_provider_message(message: &str) -> bool {
     let msg = message.to_ascii_lowercase();
     [
+        // HTTP status branches (`docs/improvement/opencode.md` line 1109).
         "status 429",
         "status 500",
         "status 502",
         "status 503",
         "status 504",
+        // 429 rate-limit (line 1110).
         "rate limit",
+        // Stream-error codes from the doc taxonomy table
+        // (`docs/improvement/opencode.md` lines 1101-1102): both must
+        // classify as retryable transients per `StreamErrorKind::Transient`.
+        "server_is_overloaded",
+        "server_error",
+        // Generic transient hints we have observed from production
+        // providers — the doc table treats unknown stream codes as
+        // `Transient` (line 1101 default), so these stay retryable.
         "temporarily unavailable",
         "temporarily overloaded",
         "overloaded",

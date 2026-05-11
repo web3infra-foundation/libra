@@ -437,8 +437,11 @@ fn build_messages(
                             // Serialize the tool result value to a JSON string so
                             // it can be embedded in the `content` field of a
                             // ToolResult block (which expects a string, not an object).
-                            let content = serde_json::to_string(&tool_result.result)
-                                .unwrap_or_else(|_| tool_result.result.to_string());
+                            // Shared with openai_compat via wire_helpers so a fix to
+                            // the fallback rule lands in both provider builders at once.
+                            let content = crate::internal::ai::providers::wire_helpers::serialize_tool_result_content(
+                                &tool_result.result,
+                            );
                             content_blocks.push(AnthropicContentBlock::ToolResult {
                                 tool_use_id: tool_result.id.clone(),
                                 content,
@@ -846,5 +849,322 @@ mod tests {
         assert_eq!(parsed[0].name, "list_dir");
         assert_eq!(parsed[0].description, "List directory contents");
         assert_eq!(parsed[0].input_schema["type"], "object");
+    }
+
+    // ---------------------------------------------------------------------
+    // OC-Phase 4 P4.2 — wire-level quirk tests
+    //
+    // Each test pins one Anthropic-specific quirk so a future refactor of
+    // `build_messages` cannot silently regress the wire contract.
+    // ---------------------------------------------------------------------
+
+    use crate::internal::ai::completion::{ToolResult, UserContent, message::OneOrMany};
+
+    /// Quirk: Anthropic requires every assistant `messages[i].content` array
+    /// to carry at least one block. An assistant turn whose canonical
+    /// content is *only* empty Text would otherwise serialise to an empty
+    /// array and be rejected with a 400. The wire builder injects a
+    /// single-space Text block as a placeholder.
+    #[test]
+    fn quirk_empty_assistant_text_gets_whitespace_placeholder() {
+        let request = CompletionRequest {
+            chat_history: vec![Message::Assistant {
+                id: None,
+                reasoning_content: None,
+                content: OneOrMany::One(AssistantContent::Text(Text {
+                    text: String::new(),
+                })),
+            }],
+            ..Default::default()
+        };
+        let (_, messages) = build_messages(&request).unwrap();
+        let json = serde_json::to_value(&messages).unwrap();
+        let blocks = &json[0]["content"];
+        assert_eq!(blocks.as_array().map(|a| a.len()), Some(1));
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[0]["text"], " ");
+    }
+
+    /// Quirk: when an assistant turn carries an empty Text part **and** a
+    /// ToolCall, the Text part is dropped (anthropic ignores empty text
+    /// blocks) and the ToolUse alone keeps the message non-empty — the
+    /// whitespace placeholder is *not* inserted.
+    #[test]
+    fn quirk_assistant_with_tool_call_drops_empty_text_without_placeholder() {
+        let request = CompletionRequest {
+            chat_history: vec![Message::Assistant {
+                id: None,
+                reasoning_content: None,
+                content: OneOrMany::Many(vec![
+                    AssistantContent::Text(Text {
+                        text: String::new(),
+                    }),
+                    AssistantContent::ToolCall(ToolCall {
+                        id: "call_1".to_string(),
+                        name: "shell".to_string(),
+                        function: Function {
+                            name: "shell".to_string(),
+                            arguments: serde_json::json!({"cmd": "ls"}),
+                        },
+                    }),
+                ]),
+            }],
+            ..Default::default()
+        };
+        let (_, messages) = build_messages(&request).unwrap();
+        let json = serde_json::to_value(&messages).unwrap();
+        let blocks = json[0]["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 1, "only the ToolUse block should remain");
+        assert_eq!(blocks[0]["type"], "tool_use");
+        assert_eq!(blocks[0]["id"], "call_1");
+    }
+
+    /// Quirk: a user message containing exactly one Text block uses the
+    /// `String` shorthand on the wire (smaller payload, mirrors official
+    /// SDK ergonomics).
+    #[test]
+    fn quirk_user_single_text_uses_string_shorthand() {
+        let request = CompletionRequest {
+            chat_history: vec![Message::user("hello")],
+            ..Default::default()
+        };
+        let (_, messages) = build_messages(&request).unwrap();
+        let json = serde_json::to_value(&messages).unwrap();
+        // String shorthand serialises as a JSON string, not an array.
+        assert!(json[0]["content"].is_string(), "expected string shorthand");
+        assert_eq!(json[0]["content"], "hello");
+    }
+
+    /// Quirk: a user message with multiple parts (Text + ToolResult)
+    /// always emits the `Array` form. The shorthand path is single-block
+    /// only; multi-block content cannot collapse.
+    #[test]
+    fn quirk_user_multiple_parts_emits_array_form() {
+        let request = CompletionRequest {
+            chat_history: vec![Message::User {
+                content: OneOrMany::Many(vec![
+                    UserContent::Text(Text {
+                        text: "look at this".to_string(),
+                    }),
+                    UserContent::ToolResult(ToolResult {
+                        id: "call_1".to_string(),
+                        name: "shell".to_string(),
+                        result: serde_json::json!({"ok": true}),
+                    }),
+                ]),
+            }],
+            ..Default::default()
+        };
+        let (_, messages) = build_messages(&request).unwrap();
+        let json = serde_json::to_value(&messages).unwrap();
+        let blocks = json[0]["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[1]["type"], "tool_result");
+        assert_eq!(blocks[1]["tool_use_id"], "call_1");
+    }
+
+    /// Quirk: a `ToolResult.result` value is serialised to a JSON string
+    /// before being embedded in the `tool_result.content` field. Shared
+    /// with openai_compat via `wire_helpers::serialize_tool_result_content`
+    /// so the fallback rule cannot drift.
+    #[test]
+    fn quirk_tool_result_value_is_json_stringified() {
+        let request = CompletionRequest {
+            chat_history: vec![
+                Message::Assistant {
+                    id: None,
+                    reasoning_content: None,
+                    content: OneOrMany::One(AssistantContent::ToolCall(ToolCall {
+                        id: "call_1".to_string(),
+                        name: "shell".to_string(),
+                        function: Function {
+                            name: "shell".to_string(),
+                            arguments: serde_json::json!({}),
+                        },
+                    })),
+                },
+                Message::User {
+                    content: OneOrMany::One(UserContent::ToolResult(ToolResult {
+                        id: "call_1".to_string(),
+                        name: "shell".to_string(),
+                        result: serde_json::json!({"stdout": "ok", "exit": 0}),
+                    })),
+                },
+            ],
+            ..Default::default()
+        };
+        let (_, messages) = build_messages(&request).unwrap();
+        let json = serde_json::to_value(&messages).unwrap();
+        // Second message is the user turn carrying the tool result.
+        let result_block = &json[1]["content"][0];
+        assert_eq!(result_block["type"], "tool_result");
+        assert_eq!(result_block["tool_use_id"], "call_1");
+        // The `content` field is a string (NOT an embedded object).
+        assert!(result_block["content"].is_string());
+        let parsed: serde_json::Value =
+            serde_json::from_str(result_block["content"].as_str().unwrap()).unwrap();
+        assert_eq!(parsed, serde_json::json!({"stdout": "ok", "exit": 0}));
+    }
+
+    /// Quirk: Anthropic does not yet support image content in the wire
+    /// builder. The pre-flight check returns NotImplemented with a clear
+    /// message rather than letting an Image part vanish silently.
+    #[test]
+    fn quirk_image_content_returns_not_implemented() {
+        use crate::internal::ai::completion::message::Image;
+        let request = CompletionRequest {
+            chat_history: vec![Message::User {
+                content: OneOrMany::One(UserContent::Image(Image {
+                    data: "base64".to_string(),
+                    mime_type: Some("image/png".to_string()),
+                })),
+            }],
+            ..Default::default()
+        };
+        let err = build_messages(&request).expect_err("Image must error");
+        let msg = err.to_string();
+        assert!(
+            msg.to_lowercase().contains("image"),
+            "error must mention image, got: {msg}"
+        );
+        assert!(matches!(err, CompletionError::NotImplemented(_)));
+    }
+
+    /// Quirk: a request with only a System message (no user/assistant) and
+    /// no preamble emits no `messages` entries but populates the `system`
+    /// field. The runtime would reject sending such a request to the API,
+    /// but the wire builder should still produce a valid intermediate
+    /// shape so callers can compose it before adding the user turn.
+    #[test]
+    fn quirk_system_only_request_populates_system_field() {
+        let request = CompletionRequest {
+            chat_history: vec![Message::System {
+                content: OneOrMany::One(UserContent::Text(Text {
+                    text: "you are helpful".to_string(),
+                })),
+            }],
+            ..Default::default()
+        };
+        let (system, messages) = build_messages(&request).unwrap();
+        assert_eq!(system.as_deref(), Some("you are helpful"));
+        assert!(messages.is_empty());
+    }
+
+    /// Quirk: an empty preamble + empty system messages produces `system =
+    /// None` rather than an empty string. Anthropic rejects an empty
+    /// system field; this test guards the no-system path.
+    #[test]
+    fn quirk_empty_system_yields_none() {
+        let request = CompletionRequest {
+            preamble: Some(String::new()),
+            chat_history: vec![Message::user("hi")],
+            ..Default::default()
+        };
+        let (system, _) = build_messages(&request).unwrap();
+        assert!(system.is_none());
+    }
+
+    /// Quirk (parse_response): whitespace-only Text blocks in an assistant
+    /// response are dropped. Anthropic occasionally emits a leading or
+    /// trailing whitespace block alongside meaningful content; preserving
+    /// it would surface as empty `AssistantContent::Text` to the agent
+    /// loop, which would then loop on the empty string trying to interpret
+    /// it.
+    #[test]
+    fn quirk_parse_response_drops_whitespace_only_text_blocks() {
+        let response = AnthropicResponse {
+            id: "msg_1".to_string(),
+            r#type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![
+                AnthropicContentBlock::Text {
+                    text: "   \n  ".to_string(),
+                },
+                AnthropicContentBlock::Text {
+                    text: "actual answer".to_string(),
+                },
+            ],
+            model: "claude-3-5-sonnet-latest".to_string(),
+            stop_reason: Some("end_turn".to_string()),
+            usage: AnthropicUsage {
+                input_tokens: 1,
+                output_tokens: 1,
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
+            },
+        };
+        let parts = parse_response(&response);
+        assert_eq!(parts.len(), 1, "whitespace-only block dropped");
+        match &parts[0] {
+            AssistantContent::Text(text) => assert_eq!(text.text, "actual answer"),
+            other => panic!("unexpected content {other:?}"),
+        }
+    }
+
+    /// Quirk (parse_response): `Image` and `ToolResult` content blocks are
+    /// request-only constructs and must be silently ignored if they ever
+    /// appear in an assistant response (defensive against a future API
+    /// change). This pins the current behaviour.
+    #[test]
+    fn quirk_parse_response_ignores_request_only_block_types() {
+        let response = AnthropicResponse {
+            id: "msg_1".to_string(),
+            r#type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![
+                AnthropicContentBlock::Image {
+                    source: AnthropicImageSource {
+                        r#type: "base64".to_string(),
+                        media_type: "image/png".to_string(),
+                        data: "ignored".to_string(),
+                    },
+                },
+                AnthropicContentBlock::ToolResult {
+                    tool_use_id: "call_x".to_string(),
+                    content: "ignored".to_string(),
+                    is_error: None,
+                },
+                AnthropicContentBlock::Text {
+                    text: "answer".to_string(),
+                },
+            ],
+            model: "claude-3-5-sonnet-latest".to_string(),
+            stop_reason: Some("end_turn".to_string()),
+            usage: AnthropicUsage {
+                input_tokens: 1,
+                output_tokens: 1,
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
+            },
+        };
+        let parts = parse_response(&response);
+        assert_eq!(parts.len(), 1, "only Text block survives");
+        assert!(matches!(&parts[0], AssistantContent::Text(t) if t.text == "answer"));
+    }
+
+    /// Quirk (parse_response): an empty content array (Anthropic returns
+    /// no blocks at all — extremely rare but possible at stop_reason
+    /// boundaries) yields an empty `AssistantContent` vec. The agent
+    /// loop interprets this as "no progress" and either retries or
+    /// terminates depending on its repeat-call detector.
+    #[test]
+    fn quirk_parse_response_handles_empty_content_array() {
+        let response = AnthropicResponse {
+            id: "msg_1".to_string(),
+            r#type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![],
+            model: "claude-3-5-sonnet-latest".to_string(),
+            stop_reason: Some("end_turn".to_string()),
+            usage: AnthropicUsage {
+                input_tokens: 1,
+                output_tokens: 0,
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
+            },
+        };
+        let parts = parse_response(&response);
+        assert!(parts.is_empty());
     }
 }

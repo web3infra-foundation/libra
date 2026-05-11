@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "siteId": "00000000-0000-0000-0000-0000publish01",
+  "revisionOid": "abcdef0123456789abcdef0123456789abcdef01",
+  "objectType": "RunEvent",
+  "objectId": "run-event-2026-05-09-001-step-3",
+  "layer": "event",
+  "sourceRefs": [
+    "agent_session/4a4f6c7e-e0bc-4cf9-9a17-9d1bd5c4ec01/events/3"
+  ],
+  "relationships": [
+    {
+      "kind": "emittedBy",
+      "fromObjectType": "RunEvent",
+      "fromObjectId": "run-event-2026-05-09-001-step-3",
+      "toObjectType": "Run",
+      "toObjectId": "run-2026-05-09-001"
+    }
+  ],
+  "payload": {
+    "runId": "run-2026-05-09-001",
+    "step": 3,
+    "kind": "tool_call",
+    "toolName": "shell",
+    "recordedAt": "2026-05-09T12:30:15Z",
+    "result": "succeeded"
+  },
+  "redaction": {
+    "mode": "default",
+    "rulesVersion": "2026.05.09-1"
+  },
+  "removedFields": []
+}

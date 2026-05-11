@@ -4,7 +4,11 @@
 //! a pass/fail result; they do not modify objects or worktrees. Validation-decision
 //! tests cover accepted, rejected, and incomplete evidence outcomes.
 
-use std::{path::Path, time::Instant};
+use std::{
+    collections::BTreeSet,
+    path::{Component, Path, PathBuf},
+    time::Instant,
+};
 
 use serde_json::json;
 
@@ -93,9 +97,13 @@ async fn run_command_check(
         }
     };
 
+    let effective_working_dir = effective_check_working_dir(&command, working_dir, task)
+        .unwrap_or_else(|| working_dir.to_path_buf());
+
     if let (Some(spec), Some(task)) = (spec, task) {
         let args = json!({ "command": command });
-        if let Err(violation) = policy::evaluate_tool_call(spec, task, "shell", &args, working_dir)
+        if let Err(violation) =
+            policy::evaluate_tool_call(spec, task, "shell", &args, &effective_working_dir)
         {
             return GateResult {
                 check_id: check.id.clone(),
@@ -121,7 +129,7 @@ async fn run_command_check(
 
     let result = run_shell_command(
         &command,
-        working_dir,
+        &effective_working_dir,
         Some(timeout_secs.saturating_mul(1000)),
         max_output_bytes,
         sandbox,
@@ -152,6 +160,165 @@ async fn run_command_check(
         duration_ms,
         timed_out,
     }
+}
+
+fn effective_check_working_dir(
+    command: &str,
+    working_dir: &Path,
+    task: Option<&TaskSpec>,
+) -> Option<PathBuf> {
+    let marker = project_marker_for_command(command)?;
+    if working_dir.join(marker.filename).is_file() {
+        // Project root sits at working_dir already; no relocation needed.
+        return None;
+    }
+
+    // First, prefer a manifest path declared on the task contract — that is
+    // authoritative when present. Fall back to a single-subdir filesystem walk
+    // so gates still locate the project when the contract is too coarse (e.g.
+    // a generic gate inheriting only an empty contract). The walk is bounded
+    // to direct children to avoid surprising paths.
+    if let Some(task) = task
+        && let Some(dir) = task_scoped_manifest_dir(working_dir, task, marker.filename)
+    {
+        return Some(dir);
+    }
+    discover_single_child_with_marker(working_dir, marker.filename)
+}
+
+/// Recognise a build command and return its project-root marker file.
+struct ProjectMarker {
+    filename: &'static str,
+}
+
+fn project_marker_for_command(command: &str) -> Option<ProjectMarker> {
+    if command.contains("--manifest-path") {
+        return None;
+    }
+
+    let token = first_shell_token_after_env_assignments(command)?;
+    match token {
+        // Rust toolchain — Cargo.toml at the crate root.
+        "cargo" | "cross" | "wasm-pack" | "trunk" | "maturin" => Some(ProjectMarker {
+            filename: "Cargo.toml",
+        }),
+        // JS/TS toolchain — package.json at the project root.
+        "npm" | "pnpm" | "yarn" | "bun" | "npx" | "pnpx" => Some(ProjectMarker {
+            filename: "package.json",
+        }),
+        _ => None,
+    }
+}
+
+/// Walk the immediate children of `working_dir` and return the one containing
+/// `marker_filename` if and only if exactly one such child exists. Returning
+/// `None` on ambiguity is intentional: silently picking a project root in a
+/// multi-package workspace would be more confusing than the original error.
+fn discover_single_child_with_marker(working_dir: &Path, marker_filename: &str) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(working_dir).ok()?;
+    let mut found: Option<PathBuf> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        if path.join(marker_filename).is_file() {
+            if found.is_some() {
+                // Multiple candidates — bail out.
+                return None;
+            }
+            found = Some(path);
+        }
+    }
+    found
+}
+
+fn first_shell_token_after_env_assignments(command: &str) -> Option<&str> {
+    command
+        .split_whitespace()
+        .find(|token| !is_env_assignment_token(token))
+}
+
+fn is_env_assignment_token(token: &str) -> bool {
+    let Some((name, _)) = token.split_once('=') else {
+        return false;
+    };
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn task_scoped_manifest_dir(
+    working_dir: &Path,
+    task: &TaskSpec,
+    marker_filename: &str,
+) -> Option<PathBuf> {
+    let mut candidates = BTreeSet::new();
+
+    for raw_path in task
+        .contract
+        .touch_files
+        .iter()
+        .chain(task.contract.write_scope.iter())
+        .chain(task.scope_in.iter())
+    {
+        let Some(relative) = scoped_relative_path(working_dir, raw_path) else {
+            continue;
+        };
+
+        let manifest = if relative
+            .file_name()
+            .is_some_and(|name| name == marker_filename)
+        {
+            working_dir.join(&relative)
+        } else {
+            working_dir.join(&relative).join(marker_filename)
+        };
+
+        if manifest.is_file()
+            && let Some(parent) = manifest.parent()
+        {
+            candidates.insert(parent.to_path_buf());
+        }
+    }
+
+    if candidates.len() == 1 {
+        candidates.into_iter().next()
+    } else {
+        None
+    }
+}
+
+fn scoped_relative_path(working_dir: &Path, raw_path: &str) -> Option<PathBuf> {
+    let trimmed = raw_path.trim().trim_start_matches("./");
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let path = Path::new(trimmed);
+    let relative = if path.is_absolute() {
+        path.strip_prefix(working_dir).ok()?.to_path_buf()
+    } else {
+        path.to_path_buf()
+    };
+
+    if relative.components().any(|component| {
+        matches!(
+            component,
+            Component::Prefix(_) | Component::RootDir | Component::ParentDir
+        )
+    }) {
+        return None;
+    }
+
+    Some(relative)
 }
 
 #[cfg(test)]
@@ -289,5 +456,103 @@ mod tests {
         let result = run_check(&check, dir.path()).await;
         assert!(result.passed);
         assert!(result.stdout.contains("hello"));
+    }
+
+    #[test]
+    fn project_marker_recognises_known_toolchains() {
+        assert!(project_marker_for_command("cargo fmt --all --check").is_some());
+        assert!(project_marker_for_command("cross build --release").is_some());
+        assert!(project_marker_for_command("wasm-pack build --target web").is_some());
+        assert!(project_marker_for_command("npm run lint").is_some());
+        assert!(project_marker_for_command("pnpm test").is_some());
+        assert!(project_marker_for_command("yarn build").is_some());
+        // Explicit manifest path opts out of relocation.
+        assert!(
+            project_marker_for_command("cargo fmt --manifest-path foo/Cargo.toml --all").is_none()
+        );
+        // Env assignments are skipped when locating the program token.
+        assert!(
+            project_marker_for_command("CARGO_TARGET_DIR=/tmp/t cargo clippy -- -D warnings")
+                .is_some()
+        );
+        // Unknown commands are not relocated.
+        assert!(project_marker_for_command("make test").is_none());
+    }
+
+    #[test]
+    fn discover_single_child_with_marker_finds_unique_subdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let project = root.join("linked");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::write(project.join("Cargo.toml"), "[package]\nname=\"linked\"").unwrap();
+        // A sibling without Cargo.toml must not confuse the search.
+        std::fs::create_dir(root.join("docs")).unwrap();
+
+        let found = discover_single_child_with_marker(root, "Cargo.toml");
+        assert_eq!(found.as_deref(), Some(project.as_path()));
+    }
+
+    #[test]
+    fn discover_single_child_with_marker_bails_on_ambiguity() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for name in ["a", "b"] {
+            let sub = root.join(name);
+            std::fs::create_dir(&sub).unwrap();
+            std::fs::write(sub.join("Cargo.toml"), "[package]\nname=\"x\"").unwrap();
+        }
+        assert!(discover_single_child_with_marker(root, "Cargo.toml").is_none());
+    }
+
+    #[test]
+    fn effective_check_working_dir_relocates_subdir_cargo_project_via_walk() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let project = root.join("linked");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::write(project.join("Cargo.toml"), "[package]\nname=\"linked\"").unwrap();
+
+        // No task contract — relocation should fall back to filesystem walk.
+        let dir_picked = effective_check_working_dir("cargo fmt --all --check", root, None);
+        assert_eq!(dir_picked.as_deref(), Some(project.as_path()));
+    }
+
+    #[test]
+    fn effective_check_working_dir_keeps_root_when_manifest_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname=\"x\"").unwrap();
+        // Even though a subdir has its own Cargo.toml, the root manifest wins.
+        let project = root.join("linked");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::write(project.join("Cargo.toml"), "[package]\nname=\"linked\"").unwrap();
+
+        let dir_picked = effective_check_working_dir("cargo fmt --all --check", root, None);
+        assert!(dir_picked.is_none());
+    }
+
+    #[test]
+    fn effective_check_working_dir_relocates_npm_subdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let project = root.join("web");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::write(project.join("package.json"), "{\"name\":\"web\"}").unwrap();
+
+        let dir_picked = effective_check_working_dir("npm run lint", root, None);
+        assert_eq!(dir_picked.as_deref(), Some(project.as_path()));
+    }
+
+    #[test]
+    fn effective_check_working_dir_ignores_unknown_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let project = root.join("linked");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::write(project.join("Cargo.toml"), "[package]\nname=\"linked\"").unwrap();
+
+        let dir_picked = effective_check_working_dir("make test", root, None);
+        assert!(dir_picked.is_none());
     }
 }

@@ -137,6 +137,15 @@ pub struct ApprovalCachePolicy {
     pub protected_branches: Vec<String>,
     pub allowed_network_domains: Vec<String>,
     pub no_cache_unknown_network: bool,
+    /// OC-Phase 2 P2.5 projection: persistent `Always`-reply approvals
+    /// loaded from the `approved_permission` SQLite table for the active
+    /// project. `None` when the runtime has not yet populated it (the
+    /// default for `Default::default()` and any in-memory test that does
+    /// not reach the database). When populated, the rules merge into the
+    /// in-memory permission ruleset before per-session rules so a cached
+    /// approval survives a process restart but a session-level deny can
+    /// still escalate.
+    pub approved_ruleset: Option<crate::internal::ai::permission::ApprovedRuleset>,
 }
 
 impl Default for ApprovalCachePolicy {
@@ -151,6 +160,7 @@ impl Default for ApprovalCachePolicy {
             ],
             allowed_network_domains: Vec::new(),
             no_cache_unknown_network: false,
+            approved_ruleset: None,
         }
     }
 }
@@ -1866,6 +1876,7 @@ mod tests {
                 protected_branches: vec!["main".to_string()],
                 allowed_network_domains: Vec::new(),
                 no_cache_unknown_network: false,
+                approved_ruleset: None,
             },
         };
 
@@ -1925,6 +1936,7 @@ mod tests {
             protected_branches: Vec::new(),
             allowed_network_domains: vec!["github.com".to_string()],
             no_cache_unknown_network: true,
+            approved_ruleset: None,
         };
 
         assert!(

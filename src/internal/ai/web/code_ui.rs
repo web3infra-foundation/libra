@@ -352,6 +352,25 @@ pub struct CodeUiAckResponse {
     pub accepted: bool,
 }
 
+/// `POST /api/code/goal/start` body. The objective is validated
+/// at the App layer against the same `GoalSpec::new` shape rules
+/// (non-empty after trim, ≤ MAX_OBJECTIVE_LEN bytes); the wire
+/// shape itself is permissive so the validator's error messages
+/// surface verbatim through the response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeUiGoalStartRequest {
+    pub objective: String,
+}
+
+/// `POST /api/code/goal/cancel` body. The reason flows into the
+/// `GoalEvent::Cancelled` envelope's audit-log payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeUiGoalCancelRequest {
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CodeUiDiagnosticsPorts {
@@ -383,7 +402,11 @@ pub struct CodeUiDiagnostics {
 }
 
 impl CodeUiDiagnostics {
-    fn redact(mut self, redactor: &SecretRedactor) -> Self {
+    /// Wave 7 / PR 7 — exposed `pub(crate)` so the
+    /// `code_diagnostics_handler` in `mod.rs` can apply it before
+    /// serialising the response. Internal-only — automation
+    /// clients never construct this themselves.
+    pub(crate) fn redact(mut self, redactor: &SecretRedactor) -> Self {
         redact_string(&mut self.provider, redactor);
         redact_option_string(&mut self.model, redactor);
         redact_option_string(&mut self.thread_id, redactor);
@@ -486,6 +509,19 @@ impl CodeUiSession {
                 .iter_mut()
                 .find(|item| item.id == entry_id)
             {
+                // Skip late-arriving deltas for entries that have already been
+                // finalized (e.g. by `cancel_turn` flipping the status to
+                // `cancelled`). Re-flagging a settled entry as `streaming`
+                // would resurrect the perpetual typing indicator we just
+                // cleared. The TUI flow uses live statuses like `thinking`
+                // alongside `streaming: true` while the agent is still
+                // producing output, so we only short-circuit on terminal
+                // statuses (`completed`, `error`, `cancelled`).
+                if let Some(status) = entry.status.as_deref()
+                    && matches!(status, "completed" | "error" | "cancelled")
+                {
+                    return;
+                }
                 let content = entry.content.get_or_insert_with(String::new);
                 content.push_str(delta);
                 entry.streaming = true;
@@ -615,6 +651,36 @@ pub trait CodeUiCommandAdapter: Send + Sync {
         ))
     }
 
+    /// `goal.start` — create an active Goal in this session
+    /// (OC-Phase 6 P6.6). Returns the rendered status of the new
+    /// Goal so callers can echo it without a follow-up
+    /// `goal.status`. Default implementation returns "not
+    /// supported" so non-TUI adapters (headless, web-only Codex)
+    /// don't have to opt in until they grow Goal mode support.
+    async fn goal_start(&self, _objective: String) -> anyhow::Result<String> {
+        Err(anyhow!(
+            "This libra code session does not support Goal mode"
+        ))
+    }
+
+    /// `goal.status` — render the active Goal's snapshot, or an
+    /// error if none. Default implementation returns "not
+    /// supported".
+    async fn goal_status(&self) -> anyhow::Result<String> {
+        Err(anyhow!(
+            "This libra code session does not support Goal mode"
+        ))
+    }
+
+    /// `goal.cancel` — explicit user-driven cancellation of the
+    /// active Goal. Returns the rendered status post-cancel.
+    /// Default implementation returns "not supported".
+    async fn goal_cancel(&self, _reason: String) -> anyhow::Result<String> {
+        Err(anyhow!(
+            "This libra code session does not support Goal mode"
+        ))
+    }
+
     async fn shutdown(&self) -> anyhow::Result<()> {
         Ok(())
     }
@@ -669,6 +735,79 @@ pub struct CodeUiRuntimeHandle {
     controller_lease_duration: Duration,
 }
 
+/// Bag of constructor options for [`CodeUiRuntimeHandle::build_with_options`].
+///
+/// Existing call sites continue to use [`CodeUiRuntimeHandle::build`] /
+/// [`CodeUiRuntimeHandle::build_with_control`] with the default 120 s lease
+/// TTL. Tests that need to exercise lease expiry without sleeping for two
+/// minutes pass a custom `lease_duration` through this struct.
+#[derive(Debug, Clone)]
+pub struct CodeUiRuntimeOptions {
+    pub browser_write_enabled: bool,
+    pub automation_write_enabled: bool,
+    pub initial_controller: CodeUiInitialController,
+    /// Override for the controller-lease TTL. `None` keeps the production
+    /// default (`DEFAULT_BROWSER_CONTROLLER_LEASE_SECS` = 120 s). Only set
+    /// from `cfg(feature = "test-provider")` paths.
+    pub lease_duration: Option<Duration>,
+}
+
+impl CodeUiRuntimeOptions {
+    pub fn new(
+        browser_write_enabled: bool,
+        automation_write_enabled: bool,
+        initial_controller: CodeUiInitialController,
+    ) -> Self {
+        Self {
+            browser_write_enabled,
+            automation_write_enabled,
+            initial_controller,
+            lease_duration: None,
+        }
+    }
+}
+
+/// Test-only override for the controller-lease TTL.
+///
+/// Production builds always return `Ok(None)` so the runtime keeps the
+/// default 120 s lease. Under `cfg(feature = "test-provider")`, the helper
+/// reads `LIBRA_CODE_LEASE_DURATION_MS` from the environment and rejects
+/// bogus inputs (zero, negative, non-integer) so a typo'd test fixture
+/// fails loudly at session spawn instead of silently keeping the
+/// production default.
+///
+/// The error type is `String` so callers in both `CliResult` and
+/// `anyhow::Result` flows can wrap it — neither dependency is brought in
+/// by `code_ui.rs`.
+pub fn test_lease_duration_override() -> Result<Option<Duration>, String> {
+    #[cfg(feature = "test-provider")]
+    {
+        let raw = match std::env::var("LIBRA_CODE_LEASE_DURATION_MS") {
+            Ok(value) => value,
+            Err(_) => return Ok(None),
+        };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        let millis: i64 = trimmed.parse().map_err(|_| {
+            format!(
+                "LIBRA_CODE_LEASE_DURATION_MS must be a positive integer in milliseconds (got '{raw}')",
+            )
+        })?;
+        if millis <= 0 {
+            return Err(format!(
+                "LIBRA_CODE_LEASE_DURATION_MS must be greater than zero (got '{raw}')",
+            ));
+        }
+        Ok(Some(Duration::milliseconds(millis)))
+    }
+    #[cfg(not(feature = "test-provider"))]
+    {
+        Ok(None)
+    }
+}
+
 impl CodeUiRuntimeHandle {
     pub async fn build(
         adapter: Arc<dyn CodeUiProviderAdapter>,
@@ -684,7 +823,22 @@ impl CodeUiRuntimeHandle {
         automation_write_enabled: bool,
         initial_controller: CodeUiInitialController,
     ) -> Arc<Self> {
-        let (fixed, local_tui_owner) = match initial_controller {
+        Self::build_with_options(
+            adapter,
+            CodeUiRuntimeOptions::new(
+                browser_write_enabled,
+                automation_write_enabled,
+                initial_controller,
+            ),
+        )
+        .await
+    }
+
+    pub async fn build_with_options(
+        adapter: Arc<dyn CodeUiProviderAdapter>,
+        options: CodeUiRuntimeOptions,
+    ) -> Arc<Self> {
+        let (fixed, local_tui_owner) = match options.initial_controller {
             CodeUiInitialController::Unclaimed => (None, None),
             CodeUiInitialController::Fixed {
                 kind,
@@ -713,14 +867,16 @@ impl CodeUiRuntimeHandle {
 
         let handle = Arc::new(Self {
             adapter,
-            browser_write_enabled,
-            automation_write_enabled,
+            browser_write_enabled: options.browser_write_enabled,
+            automation_write_enabled: options.automation_write_enabled,
             controller_state: Arc::new(Mutex::new(CodeUiControllerRuntimeState {
                 fixed,
                 local_tui_owner,
                 active_lease: None,
             })),
-            controller_lease_duration: Duration::seconds(DEFAULT_BROWSER_CONTROLLER_LEASE_SECS),
+            controller_lease_duration: options
+                .lease_duration
+                .unwrap_or_else(|| Duration::seconds(DEFAULT_BROWSER_CONTROLLER_LEASE_SECS)),
         });
         handle.sync_controller_snapshot().await;
         handle
@@ -940,6 +1096,49 @@ impl CodeUiRuntimeHandle {
             .map_err(CodeUiApiError::unsupported_from_error)
     }
 
+    /// `goal.start { objective }` — open an active Goal in this
+    /// session. Requires controller write-access (a controller
+    /// token validated against the active lease) because creating
+    /// a Goal is a session-mutating operation. Returns the freshly
+    /// rendered status string so callers don't need a follow-up
+    /// `goal.status` (OC-Phase 6 P6.6).
+    pub async fn goal_start(
+        &self,
+        token: Option<&str>,
+        objective: String,
+    ) -> Result<String, CodeUiApiError> {
+        self.ensure_controller_write_access(token).await?;
+        self.adapter
+            .goal_start(objective)
+            .await
+            .map_err(CodeUiApiError::unsupported_from_error)
+    }
+
+    /// `goal.status` — return the active Goal's rendered snapshot.
+    /// **Read-only**, so no controller token is required at this
+    /// layer; the HTTP handler still loopback-gates the request.
+    pub async fn goal_status(&self) -> Result<String, CodeUiApiError> {
+        self.adapter
+            .goal_status()
+            .await
+            .map_err(CodeUiApiError::unsupported_from_error)
+    }
+
+    /// `goal.cancel { reason }` — explicit cancellation of the
+    /// active Goal. Requires controller write-access; mirrors
+    /// `cancel_turn` in shape and audit policy.
+    pub async fn goal_cancel(
+        &self,
+        token: Option<&str>,
+        reason: String,
+    ) -> Result<String, CodeUiApiError> {
+        self.ensure_controller_write_access(token).await?;
+        self.adapter
+            .goal_cancel(reason)
+            .await
+            .map_err(CodeUiApiError::unsupported_from_error)
+    }
+
     pub async fn shutdown(&self) -> anyhow::Result<()> {
         self.adapter.shutdown().await
     }
@@ -1144,6 +1343,51 @@ impl CodeUiApiError {
     }
 }
 
+/// Wave 2 / PR 2 — single source-of-truth catalogue of every
+/// Code UI error code the API exposes, paired with the HTTP status
+/// it MUST resolve to. Per `docs/improvement/test.md` §5.20, this
+/// list is enforced by `code_ui_error_code_contract*` in `tests`
+/// below: any new error code added by a constructor OR emitted by
+/// a route handler as an inline `WebApiError {…}` literal must be
+/// appended here, otherwise the test fails. The list is also the
+/// reference for `docs/automation/local-tui-control.md` and the
+/// Worker frontend error rendering.
+///
+/// Codex pass-1 P3: the list is grouped by gate-rejection layer
+/// (loopback first, then body limit, then control-token, then
+/// controller lease, then read/runtime) so a reviewer can see at
+/// a glance which check produced a given code. Do NOT re-sort
+/// alphabetically — the gate ordering is part of the contract
+/// and matches the §5.3 / §5.4 specification.
+pub fn code_ui_error_codes() -> &'static [(&'static str, u16)] {
+    &[
+        // Layer ordering: route handlers reject non-loopback first.
+        ("LOOPBACK_REQUIRED", 403),
+        // Then the body-limit middleware (write surface only).
+        ("PAYLOAD_TOO_LARGE", 413),
+        // Then automation control-token gate.
+        ("CONTROL_DISABLED", 403),
+        ("MISSING_CONTROL_TOKEN", 403),
+        ("INVALID_CONTROL_TOKEN", 403),
+        // Then controller (lease) state machine.
+        ("MISSING_CONTROLLER_TOKEN", 403),
+        ("INVALID_CONTROLLER_TOKEN", 403),
+        ("INVALID_CONTROLLER_KIND", 400),
+        ("CONTROLLER_CONFLICT", 409),
+        ("BROWSER_CONTROL_DISABLED", 403),
+        ("AUTOMATION_CONTROLLER_REQUIRED", 403),
+        // Tail: read-side and runtime-availability errors.
+        ("CODE_UI_UNAVAILABLE", 404),
+        ("INVALID_QUERY_PARAM", 400),
+        ("STORAGE_PATH_INVALID", 500),
+        ("STATUS_UNAVAILABLE", 500),
+        ("THREAD_LIST_FAILED", 500),
+        ("DB_UNAVAILABLE", 500),
+        ("INTERNAL_ERROR", 500),
+        ("UNSUPPORTED_OPERATION", 422),
+    ]
+}
+
 #[derive(Clone)]
 pub struct ReadOnlyCodeUiAdapter {
     session: Arc<CodeUiSession>,
@@ -1323,12 +1567,221 @@ mod tests {
         ))
     }
 
+    /// Wave 12 / PR 12 — Codex pass-1 fix: pin the
+    /// `docs/automation/local-tui-control.md` "Error code reference"
+    /// table against `code_ui_error_codes()` so a code-only
+    /// addition can't silently desync the publicly-documented
+    /// contract. Parses every Markdown row whose first cell is
+    /// a backtick-wrapped identifier and compares the
+    /// `(code, status)` set against the source-of-truth table.
+    #[test]
+    fn code_ui_error_code_listing_matches_authoritative_doc() {
+        let doc_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("docs/automation/local-tui-control.md");
+        let doc =
+            std::fs::read_to_string(&doc_path).expect("read docs/automation/local-tui-control.md");
+        let mut doc_pairs: Vec<(String, u16)> = Vec::new();
+        for line in doc.lines() {
+            // Markdown table rows look like `| \`CODE\` | 403 | gate description |`.
+            // Skip header / separator rows and any row whose first
+            // cell isn't a backtick-wrapped identifier.
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with('|') {
+                continue;
+            }
+            let cells: Vec<&str> = trimmed.split('|').map(str::trim).collect();
+            // Expected shape: ["", code, status, description, ""].
+            if cells.len() < 4 {
+                continue;
+            }
+            let code_cell = cells[1];
+            if !(code_cell.starts_with('`') && code_cell.ends_with('`')) {
+                continue;
+            }
+            let code = code_cell.trim_matches('`');
+            // Reject the header separator (`| --- | --- | --- |`).
+            if code.is_empty() || code.chars().all(|c| c == '-' || c.is_whitespace()) {
+                continue;
+            }
+            let status: u16 = match cells[2].parse() {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            doc_pairs.push((code.to_string(), status));
+        }
+        let source_pairs: Vec<(String, u16)> = code_ui_error_codes()
+            .iter()
+            .map(|(code, status)| ((*code).to_string(), *status))
+            .collect();
+        assert!(
+            !doc_pairs.is_empty(),
+            "error code reference table not found in docs/automation/local-tui-control.md",
+        );
+        assert_eq!(
+            doc_pairs, source_pairs,
+            "docs/automation/local-tui-control.md error code table is out of sync with code_ui_error_codes(); regenerate the table to match (order matters — the table mirrors the runtime gate ordering).",
+        );
+    }
+
     #[test]
     fn attach_request_defaults_to_browser_kind() {
         let request: CodeUiControllerAttachRequest =
             serde_json::from_value(serde_json::json!({ "clientId": "browser-1" })).unwrap();
 
         assert_eq!(request.kind, CodeUiControllerKind::Browser);
+    }
+
+    /// Wave 2 / PR 2 — error code source-of-truth contract.
+    ///
+    /// `code_ui_error_codes()` lists every Code UI error code the
+    /// API may return. Per `docs/improvement/test.md` §5.20 we
+    /// pin both:
+    ///
+    /// 1. the (code, status) tuples themselves are stable — any
+    ///    drift breaks the documented HTTP contract; and
+    /// 2. each documented constructor (`CodeUiApiError::*`) and
+    ///    runtime path that produces a code in the list still
+    ///    resolves to the listed status. Adding a new constructor
+    ///    that produces an unlisted code makes the
+    ///    `produced_codes_are_listed` assertion fail.
+    #[test]
+    fn code_ui_error_code_contract_pins_status_per_code() {
+        // 1. Status mapping must be deterministic.
+        let catalogue = code_ui_error_codes();
+        // The catalogue must be free of duplicates so callers can
+        // index it as a map without losing entries.
+        let mut seen = std::collections::HashSet::new();
+        for (code, _status) in catalogue {
+            assert!(
+                seen.insert(*code),
+                "code_ui_error_codes() duplicates the entry for '{code}'",
+            );
+        }
+
+        // 2. Walk the constructors that produce a fixed (code,
+        //    status) pair and assert each one matches the
+        //    catalogue. Adding a new producer requires extending
+        //    both the catalogue AND this list — a missing entry
+        //    fails on the lookup.
+        let map: std::collections::HashMap<&'static str, u16> = catalogue.iter().copied().collect();
+        let cases: Vec<(CodeUiApiError, &'static str)> = vec![
+            (CodeUiApiError::unavailable(), "CODE_UI_UNAVAILABLE"),
+            (
+                CodeUiApiError::forbidden("LOOPBACK_REQUIRED", "remote"),
+                "LOOPBACK_REQUIRED",
+            ),
+            (
+                CodeUiApiError::forbidden("CONTROL_DISABLED", "no token"),
+                "CONTROL_DISABLED",
+            ),
+            (
+                CodeUiApiError::forbidden("MISSING_CONTROL_TOKEN", "missing"),
+                "MISSING_CONTROL_TOKEN",
+            ),
+            (
+                CodeUiApiError::forbidden("INVALID_CONTROL_TOKEN", "bad"),
+                "INVALID_CONTROL_TOKEN",
+            ),
+            (
+                CodeUiApiError::forbidden("MISSING_CONTROLLER_TOKEN", "missing lease"),
+                "MISSING_CONTROLLER_TOKEN",
+            ),
+            (
+                CodeUiApiError::forbidden("INVALID_CONTROLLER_TOKEN", "bad lease"),
+                "INVALID_CONTROLLER_TOKEN",
+            ),
+            (
+                CodeUiApiError::bad_request("INVALID_CONTROLLER_KIND", "kind"),
+                "INVALID_CONTROLLER_KIND",
+            ),
+            (
+                CodeUiApiError::conflict("CONTROLLER_CONFLICT", "held"),
+                "CONTROLLER_CONFLICT",
+            ),
+            (
+                CodeUiApiError::forbidden("BROWSER_CONTROL_DISABLED", "off"),
+                "BROWSER_CONTROL_DISABLED",
+            ),
+            (
+                CodeUiApiError::forbidden("AUTOMATION_CONTROLLER_REQUIRED", "lease"),
+                "AUTOMATION_CONTROLLER_REQUIRED",
+            ),
+            (
+                CodeUiApiError::bad_request("INVALID_QUERY_PARAM", "limit"),
+                "INVALID_QUERY_PARAM",
+            ),
+            (
+                CodeUiApiError::unsupported_from_error(anyhow::anyhow!("operation refused")),
+                "UNSUPPORTED_OPERATION",
+            ),
+        ];
+        for (err, expected_code) in cases {
+            assert_eq!(
+                err.code, expected_code,
+                "constructor produced code '{}' but caller expected '{}'",
+                err.code, expected_code,
+            );
+            let expected_status = map.get(expected_code).copied().unwrap_or_else(|| {
+                panic!(
+                    "code '{expected_code}' is missing from code_ui_error_codes(); \
+                     update the catalogue when adding new error codes",
+                )
+            });
+            assert_eq!(
+                err.status, expected_status,
+                "code '{expected_code}' resolved to status {} but the catalogue says {}",
+                err.status, expected_status,
+            );
+        }
+    }
+
+    /// Codex pass-1 P2 — inline-producer coverage for the
+    /// catalogue. The codes listed below are emitted as inline
+    /// `WebApiError { … }` literals from `web::mod` rather than
+    /// via the `CodeUiApiError` constructors above. Pinning their
+    /// (code, status) shape here makes the catalogue's
+    /// "single-source-of-truth" claim true for the WHOLE error
+    /// surface, not just the constructor surface.
+    ///
+    /// The literal shapes mirror the inline producers in
+    /// `src/internal/ai/web/mod.rs` (search for the code string
+    /// to find the producer). When refactoring an inline literal
+    /// into a named helper, move the corresponding case into
+    /// `code_ui_error_code_contract_pins_status_per_code` above.
+    #[test]
+    fn code_ui_error_code_contract_pins_status_for_inline_producers() {
+        let catalogue = code_ui_error_codes();
+        let map: std::collections::HashMap<&'static str, u16> = catalogue.iter().copied().collect();
+        // (code string, observed status) pairs — assert both halves
+        // appear in the catalogue and resolve to the listed status.
+        let inline_cases: &[(&str, u16)] = &[
+            // mod.rs `enforce_code_write_body_limit` /
+            // `code_control_body_too_large_response`.
+            ("PAYLOAD_TOO_LARGE", 413),
+            // mod.rs `parse_optional_u64` (?limit/?offset parser).
+            ("INVALID_QUERY_PARAM", 400),
+            // mod.rs `code_threads_handler` storage path build.
+            ("STORAGE_PATH_INVALID", 500),
+            // mod.rs `code_threads_handler` thread-list query path.
+            ("DB_UNAVAILABLE", 500),
+            ("THREAD_LIST_FAILED", 500),
+            // mod.rs `code_goal_status_handler` response coerce.
+            ("STATUS_UNAVAILABLE", 500),
+            // mod.rs `WebApiError::From<serde_json::Error>` fallback.
+            ("INTERNAL_ERROR", 500),
+        ];
+        for (code, observed_status) in inline_cases {
+            let expected = map.get(code).copied().unwrap_or_else(|| {
+                panic!(
+                    "code '{code}' is in the inline-producer test list but missing from \
+                     code_ui_error_codes(); update the catalogue when adding inline producers",
+                )
+            });
+            assert_eq!(
+                expected, *observed_status,
+                "inline producer for '{code}' emits status {observed_status} but the catalogue says {expected}",
+            );
+        }
     }
 
     #[derive(Clone)]

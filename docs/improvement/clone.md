@@ -51,6 +51,7 @@
   - fetch 内部的 progress 格式（NDJSON、progress bar 渲染等）由 fetch 改进批次负责，clone 批次不做任何改动
 - **不在 JSON 中暴露 pack 下载统计**。`fetch_repository_safe()` 当前不返回结构化统计（objects_fetched / bytes_received），在 fetch 改进前不把这类字段写进对外 schema
 - **不改变 vault 策略**。clone 始终 `vault: true`，与 init 的默认行为一致
+- **不在本批实现 Cloudflare D1/R2 source scheme**。该能力由 [publish.md](publish.md) Phase 5 纳入发布交付，见下方“后续特性”；不能阻塞当前 clone 输出、错误码和 checkout 修复
 
 ### 设计原则
 
@@ -61,6 +62,66 @@
 5. **清理失败不静默**：`cleanup_failed_clone()` 的 io::Error 应作为 warning 输出到 stderr，而非仅 tracing::error
 6. **non-bare clone 只有在 checkout 完成后才算成功**：remote/refs 配置完成但工作树恢复失败，必须整体视为 clone 失败
 7. **成功 schema 必须忠实表达 empty remote**：不伪造分支名；对“没有任何可 checkout 分支”的成功场景使用显式空值
+
+### 后续特性：Cloudflare D1/R2 source scheme（由 publish 计划纳入交付）
+
+Cloudflare 上的仓库恢复不新增 `libra publish download`，也不把下载参数塞进 `libra publish`。恢复入口应属于 `libra clone`，通过现有 `CloneArgs.remote_repo` 位置参数识别 Libra 自有的 Cloudflare source scheme。
+
+落地要求归属 [publish.md](publish.md) Phase 5：实现 publish 功能时，必须同步完成本节定义的 `libra+cloud://` clone source 首版能力。
+
+建议 CLI 形态：
+
+```bash
+libra clone libra+cloud://<clone-domain>/<slug> [LOCAL_PATH]
+libra clone libra+cloud://<clone-domain>/repo/<repo_id> [LOCAL_PATH]
+libra clone "libra+cloud://<clone-domain>/<slug>?ref=<branch|tag|full-ref>" [LOCAL_PATH]
+libra clone "libra+cloud://<clone-domain>/<slug>?revision=<oid|latest>" [LOCAL_PATH]
+```
+
+接口边界：
+
+- `libra+cloud://` 表示 Libra 发布/备份到 Cloudflare D1/R2 后的恢复源，不表示通用 Cloudflare URL。
+- `clone-domain` 是本地 Cloudflare/Libra 配置中的 source namespace，通常等于 Worker 的公开 host，例如 `code.example.com` 或 `<worker>.<account>.workers.dev`；CLI 用它选择 D1/R2 配置，不从 Worker 页面下载仓库。
+- `slug` 是 clone-domain 下的 URL-safe 单段站点标识；`repo/<repo_id>` 面向脚本和自动化，避免 slug rename 后失效。
+- `ref` 接受 branch/tag 短名或完整 `refs/heads/...`、`refs/tags/...`；branch/tag 同名时短名必须失败并提示使用完整 ref。
+- `revision` 只接受 `latest` 或完整 revision/object id；`ref` 和 `revision` 互斥。
+- v1 publish 会提交所有本地 branch/tag refs；clone 默认恢复全部已发布 refs，并 checkout default ref。`?ref=` 只决定 checkout 目标，不裁剪本地恢复的 refs 集合。
+- 第一批 Cloudflare clone 只保证完整 non-bare clone。`--branch`、`--depth`、`--single-branch`、`--bare` 如果暂未实现，必须返回 `CliInvalidArguments` 并给出明确 hint，不能静默降级为完整 clone。
+- Worker 页面不提供下载端点，也不承担仓库恢复权限。CLI 使用本地 Cloudflare 凭据，经 D1 REST/R2 API 或现有 cloud storage client 读取数据。
+
+执行流程：
+
+1. 在 `execute_clone()` 的 remote discovery 前解析 `remote_repo`；命中 `libra+cloud://` 时进入 Cloudflare clone 分支，普通 Git/SSH/本地路径继续走现有 fetch discovery。
+2. 从本地 `clone_domains.<clone-domain>` Cloudflare 配置或 vault 解析 D1/R2 访问参数；缺少配置时返回配置类错误和 actionable hint。
+3. 通过 D1 解析 `(clone_domain, slug)` 或 `(clone_domain, repo_id)` 以及 `ref/revision`，读取 `repositories`、`object_index`、`publish_refs`、refs metadata 和完整 AI object model 索引。
+4. 校验 R2 中存在完整 Git object 集合。publish 的代码预览 snapshot 只能用于页面展示，不能作为 clone 的源码真相；对象缺失必须失败并提示先运行 `libra cloud sync` 或重新发布完整数据。
+5. 复用 `run_init()` 初始化本地仓库，再按 object_index/refs metadata 写入对象、refs、HEAD 和 config。
+6. non-bare clone 必须完成 checkout 后才返回成功；checkout 失败进入 `CheckoutFailed` 路径并清理本批创建的目标目录。
+7. 如果 D1/R2 中有 AI object model 数据，按 [AI Object Model Reference](../agent/ai-object-model-reference.md) 恢复 snapshot/event/projection objects、关系图和本地 AI 版本索引；不要从已 redaction 的 publish payload 反推被移除字段。
+
+结构化输出后续以加法方式扩展，避免破坏本批 `CloneOutput`：
+
+```json
+{
+  "source_kind": "cloudflare",
+  "cloud_site": {
+    "clone_domain": "code.example.com",
+    "slug": "libra-main",
+    "repo_id": "repo_...",
+    "ref": "refs/heads/main",
+    "revision": "latest"
+  }
+}
+```
+
+测试要求：
+
+- `parse_cloud_clone_source()` 覆盖 clone domain、slug、repo_id、ref query、revision query、非法 scheme、非法 domain、非法 ref、非法 revision、`ref` 和 `revision` 同时出现。
+- Cloudflare domain resolver 覆盖未配置 domain、domain 指向错误 D1/R2、slug rename 后 `repo/<repo_id>` 可恢复。
+- Cloudflare ref resolver 覆盖 branch/tag 同名冲突、短名唯一解析、完整 ref 解析和 default ref fallback。
+- Cloudflare source 与暂不支持的 clone flags 组合必须失败，并验证错误码、exit code 和 hint。
+- 使用 mock D1/R2 验证全部 branch/tag refs 恢复、缺失对象失败、latest/default/ref revision 解析和 checkout 失败清理。
+- 验证 `libra clone libra+cloud://<clone-domain>/<slug> --json` 的 stdout 只有一个 clone envelope，且新增字段为可选字段，不影响普通 Git clone schema。
 
 ### 特性 1：执行层与渲染层拆分
 

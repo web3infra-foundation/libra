@@ -443,6 +443,7 @@ impl TaskMuxState {
                     break;
                 }
             }
+            TaskRuntimeEvent::UsageUpdated { .. } => {}
         }
     }
 
@@ -2858,5 +2859,62 @@ mod tests {
 
         // Dependency suffix should reference the upstream task ordinals.
         assert!(rendered.contains("dep 01,02") || rendered.contains("dep 02,01"));
+    }
+
+    /// Wave 10 §5.8 closure — minimal TUI render smoke for an
+    /// empty `ChatWidget`. Pins that `render` does not panic on
+    /// a freshly-constructed widget against an 80x24 buffer and
+    /// that the bottom pane surfaces the configured cwd / git
+    /// branch hints. Hand-written buffer assertions; no `insta`
+    /// dependency added per the §5.8 doc fallback.
+    #[test]
+    fn render_empty_chatwidget_surfaces_bottom_pane_branch_label() {
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        let mut widget = ChatWidget::new();
+        widget
+            .bottom_pane
+            .set_cwd(std::path::PathBuf::from("/tmp/wave10-tui-render"));
+        widget
+            .bottom_pane
+            .set_git_branch(Some("wave-10-render".to_string()));
+        let _cursor = widget.render(area, &mut buf);
+        let mut rendered_lines = Vec::with_capacity(area.height as usize);
+        for y in 0..area.height {
+            rendered_lines.push(row_text(&buf, y, area.width));
+        }
+        let rendered = rendered_lines.join("\n");
+        assert!(
+            rendered.contains("wave-10-render"),
+            "bottom pane must surface the configured git branch label;\nrendered:\n{rendered}",
+        );
+    }
+
+    /// Wave 10 §5.8 closure — minimal TUI render smoke for a
+    /// `ChatWidget` carrying one assistant transcript entry.
+    /// Pins that the assistant text appears in the rendered
+    /// buffer so downstream rendering changes that drop or
+    /// double-render history cells fail loudly.
+    #[test]
+    fn render_chatwidget_with_assistant_cell_includes_response_text() {
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        let mut widget = ChatWidget::new();
+        widget
+            .bottom_pane
+            .set_cwd(std::path::PathBuf::from("/tmp/wave10-tui-render"));
+        widget.add_cell(Box::new(AssistantHistoryCell::new(
+            "Wave10TuiRenderSmokeAssistantMarker".to_string(),
+        )));
+        let _cursor = widget.render(area, &mut buf);
+        let mut rendered_lines = Vec::with_capacity(area.height as usize);
+        for y in 0..area.height {
+            rendered_lines.push(row_text(&buf, y, area.width));
+        }
+        let rendered = rendered_lines.join("\n");
+        assert!(
+            rendered.contains("Wave10TuiRenderSmokeAssistantMarker"),
+            "assistant cell text must appear in the rendered buffer;\nrendered:\n{rendered}",
+        );
     }
 }

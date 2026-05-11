@@ -19,6 +19,12 @@ pub enum BuiltinCommand {
     Clear,
     /// `/chat` — bypass the plan workflow and send a direct chat message.
     Chat,
+    /// `/run` — like `/chat` but inherits the launch-time tool
+    /// allowlist (driven by `--context` / `--agent`) instead of
+    /// pinning a read-only set. Lets `--context dev` reach
+    /// `apply_patch` / `shell` without going through the plan
+    /// workflow, which is what the Wave 5 generation matrix needs.
+    Run,
     /// `/model` — print the current model and provider in a system cell.
     Model,
     /// `/status` — show the current agent status.
@@ -41,6 +47,19 @@ pub enum BuiltinCommand {
     Anchors,
     /// `/undo` — roll back the latest uncommitted AI file-edit batch.
     Undo,
+    /// `/agents` — show declarative `[code.agents.<name>]` table from
+    /// `agents.toml` (OC-Phase 5 P5.4).
+    Agents,
+    /// `/budget` — show running session/per-agent/goal budget totals
+    /// against the configured `[code.budget]` thresholds (OC-Phase 5
+    /// P5.4).
+    Budget,
+    /// `/goal` — Goal mode controls (`start`, `status`, `cancel`,
+    /// `criteria add`). The subcommand parser lives in
+    /// [`super::goal_command::parse_goal_subcommand`]; the dispatch
+    /// arm in `app.rs` invokes it on every `/goal …` invocation
+    /// (OC-Phase 6 P6.5).
+    Goal,
     /// `/quit` — exit the application cleanly.
     Quit,
 }
@@ -56,6 +75,7 @@ impl BuiltinCommand {
             Self::Help => "help",
             Self::Clear => "clear",
             Self::Chat => "chat",
+            Self::Run => "run",
             Self::Model => "model",
             Self::Status => "status",
             Self::Usage => "usage",
@@ -67,6 +87,9 @@ impl BuiltinCommand {
             Self::Approvals => "approvals",
             Self::Anchors => "anchors",
             Self::Undo => "undo",
+            Self::Agents => "agents",
+            Self::Budget => "budget",
+            Self::Goal => "goal",
             Self::Quit => "quit",
         }
     }
@@ -81,6 +104,7 @@ impl BuiltinCommand {
             Self::Help => "Show available commands",
             Self::Clear => "Clear conversation history",
             Self::Chat => "Send a direct chat message without plan workflow",
+            Self::Run => "Run agent directly with launch-time tool allowlist",
             Self::Model => "Show current model info",
             Self::Status => "Show current status",
             Self::Usage => "Show current session usage",
@@ -92,6 +116,9 @@ impl BuiltinCommand {
             Self::Approvals => "List or revoke cached approvals",
             Self::Anchors => "List, draft, confirm, revoke memory anchors",
             Self::Undo => "Undo latest AI file edit batch",
+            Self::Agents => "Show declarative agents.toml table",
+            Self::Budget => "Show running budget totals vs configured caps",
+            Self::Goal => "Goal mode controls: start/status/cancel/criteria",
             Self::Quit => "Quit the application",
         }
     }
@@ -107,6 +134,7 @@ impl BuiltinCommand {
             Self::Help,
             Self::Clear,
             Self::Chat,
+            Self::Run,
             Self::Model,
             Self::Status,
             Self::Usage,
@@ -118,6 +146,9 @@ impl BuiltinCommand {
             Self::Approvals,
             Self::Anchors,
             Self::Undo,
+            Self::Agents,
+            Self::Budget,
+            Self::Goal,
             Self::Quit,
         ]
     }
@@ -229,6 +260,24 @@ mod tests {
             Some((BuiltinCommand::Model, "gemini"))
         );
         assert_eq!(parse_builtin("/usage"), Some((BuiltinCommand::Usage, "")));
+        assert_eq!(parse_builtin("/agents"), Some((BuiltinCommand::Agents, "")));
+        assert_eq!(parse_builtin("/budget"), Some((BuiltinCommand::Budget, "")));
+        assert_eq!(
+            parse_builtin("/goal start ship feature X"),
+            Some((BuiltinCommand::Goal, "start ship feature X"))
+        );
+        assert_eq!(
+            parse_builtin("/goal status"),
+            Some((BuiltinCommand::Goal, "status"))
+        );
+        assert_eq!(
+            parse_builtin("/goal cancel user changed mind"),
+            Some((BuiltinCommand::Goal, "cancel user changed mind"))
+        );
+        assert_eq!(
+            parse_builtin("/usage --by=agent"),
+            Some((BuiltinCommand::Usage, "--by=agent"))
+        );
     }
 
     /// Scenario: command names are matched case-insensitively because users
@@ -250,15 +299,59 @@ mod tests {
         assert!(parse_builtin("").is_none());
     }
 
+    /// Scenario: OC-Phase 5 P5.4 introduced `/agents` and `/budget`. The
+    /// dedicated tests pin the canonical name + description as the
+    /// autocomplete popup contract — a typo in either field would be
+    /// silently shipped if only the parser side were tested. Iteration
+    /// order is also pinned positionally because the autocomplete
+    /// popup renders entries top-to-bottom in the order produced by
+    /// `all()`; reordering would shuffle the user-facing list silently.
+    #[test]
+    fn agents_and_budget_commands_have_documented_name_and_description() {
+        assert_eq!(BuiltinCommand::Agents.name(), "agents");
+        assert!(BuiltinCommand::Agents.description().contains("agents.toml"));
+        assert_eq!(BuiltinCommand::Budget.name(), "budget");
+        assert!(BuiltinCommand::Budget.description().contains("budget"));
+
+        // Pin the canonical `all()` order via slice equality so a
+        // future reorder of the iteration list is caught by this
+        // test, not by a confused user.
+        assert_eq!(
+            BuiltinCommand::all(),
+            &[
+                BuiltinCommand::Help,
+                BuiltinCommand::Clear,
+                BuiltinCommand::Chat,
+                BuiltinCommand::Run,
+                BuiltinCommand::Model,
+                BuiltinCommand::Status,
+                BuiltinCommand::Usage,
+                BuiltinCommand::Plan,
+                BuiltinCommand::Skill,
+                BuiltinCommand::Intent,
+                BuiltinCommand::Mux,
+                BuiltinCommand::Control,
+                BuiltinCommand::Approvals,
+                BuiltinCommand::Anchors,
+                BuiltinCommand::Undo,
+                BuiltinCommand::Agents,
+                BuiltinCommand::Budget,
+                BuiltinCommand::Goal,
+                BuiltinCommand::Quit,
+            ]
+        );
+    }
+
     /// Scenario: the autocomplete popup must list every built-in command. This
     /// test pins both the count (catches accidental dropouts when the enum is
     /// extended) and the inclusion of the most-used entries.
     #[test]
     fn all_hints_returns_all() {
         let hints = BuiltinCommand::all_hints();
-        assert_eq!(hints.len(), 15);
+        assert_eq!(hints.len(), 19);
         assert!(hints.iter().any(|(n, _)| n == "help"));
         assert!(hints.iter().any(|(n, _)| n == "chat"));
+        assert!(hints.iter().any(|(n, _)| n == "run"));
         assert!(hints.iter().any(|(n, _)| n == "usage"));
         assert!(hints.iter().any(|(n, _)| n == "quit"));
         assert!(hints.iter().any(|(n, _)| n == "plan"));
@@ -269,5 +362,7 @@ mod tests {
         assert!(hints.iter().any(|(n, _)| n == "approvals"));
         assert!(hints.iter().any(|(n, _)| n == "anchors"));
         assert!(hints.iter().any(|(n, _)| n == "undo"));
+        assert!(hints.iter().any(|(n, _)| n == "agents"));
+        assert!(hints.iter().any(|(n, _)| n == "budget"));
     }
 }

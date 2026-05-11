@@ -28,6 +28,16 @@ const THREAD_ID_METADATA_KEYS: &[&str] = &["thread_id", "threadId", "canonical_t
 /// Sessions are stored as append-only JSONL streams in a sessions directory.
 pub struct SessionStore {
     sessions_dir: PathBuf,
+    /// `true` when this store was constructed via
+    /// [`Self::from_storage_path_with_subdir`] — the only constructor that
+    /// permits [`Self::adopt_legacy_subdir_session_if_needed`] to migrate
+    /// from the pre-partition `sessions/<id>/` layout.
+    ///
+    /// We track intent explicitly rather than inferring from the path
+    /// shape because a storage root that is itself named `sessions` would
+    /// otherwise pass a path-basename guard and cause spurious migrations
+    /// for non-partitioned stores.
+    partitioned: bool,
 }
 
 #[derive(Debug)]
@@ -69,6 +79,7 @@ impl SessionStore {
     pub fn new(working_dir: &Path) -> Self {
         Self {
             sessions_dir: working_dir.join(".libra").join("sessions"),
+            partitioned: false,
         }
     }
 
@@ -76,7 +87,98 @@ impl SessionStore {
     pub fn from_storage_path(storage_path: &Path) -> Self {
         Self {
             sessions_dir: storage_path.join("sessions"),
+            partitioned: false,
         }
+    }
+
+    /// Create a store rooted at `{storage_path}/sessions/{subdir}/`. Used
+    /// by CEX-EntireIO Phase 3 (`docs/improvement/entire.md` §11.5) to
+    /// keep `libra code` and `libra agent` session locks in disjoint
+    /// subtrees so their `.lock` files cannot collide. Pre-existing
+    /// callers stay on [`Self::from_storage_path`] which preserves the
+    /// historical layout.
+    pub fn from_storage_path_with_subdir(storage_path: &Path, subdir: &str) -> Self {
+        Self {
+            sessions_dir: storage_path.join("sessions").join(subdir),
+            partitioned: true,
+        }
+    }
+
+    /// Move a single legacy session entry from `{sessions_dir}/../{id}` into
+    /// `{sessions_dir}/{id}` if the legacy entry exists and the new entry
+    /// does not. Returns `Ok(true)` if a migration happened, `Ok(false)` if
+    /// nothing to do.
+    ///
+    /// Designed for the CEX-EntireIO Phase 3 partition step (entire.md
+    /// §11.2): when an agent capture SessionStore is constructed under a
+    /// `agent/` subdir, we may still find old session directories at the
+    /// pre-partition path. Moving them in place keeps in-flight hook
+    /// lifecycles intact rather than starting a fresh session and losing
+    /// continuity.
+    ///
+    /// Round-1 review fixes:
+    /// - Adoption is gated on the explicit `partitioned` flag rather than
+    ///   on a path-basename guess; a storage root that itself happens to
+    ///   be named `sessions/` will not falsely qualify.
+    /// - When a non-stale legacy lock exists, the migration is skipped
+    ///   entirely — that lock signals a writer that may still be
+    ///   appending to the legacy directory, and renaming the directory
+    ///   from under it would split the event stream. The next adoption
+    ///   attempt picks the migration up after the writer drops or the
+    ///   lock ages out.
+    /// - The legacy lock file is *not* renamed into the new tree. The
+    ///   subsequent `lock_session` call acquires a fresh lock at the new
+    ///   path; carrying over a possibly-stale lock would cause that
+    ///   fresh acquisition to wait the full timeout on a held lock.
+    pub fn adopt_legacy_subdir_session_if_needed(&self, id: &str) -> io::Result<bool> {
+        if !self.partitioned {
+            return Ok(false);
+        }
+        let Some(parent) = self.sessions_dir.parent() else {
+            return Ok(false);
+        };
+        let legacy_root = parent.join(id);
+        let new_root = self.sessions_dir.join(id);
+        if !legacy_root.exists() || new_root.exists() {
+            return Ok(false);
+        }
+        // If a legacy lock file is present and not stale, treat that as
+        // signal of an in-flight writer on the old path. Skip and try
+        // again next time — once the writer drops the lock (or the lock
+        // ages out per `STALE_SESSION_LOCK_AGE`), adoption will pick up
+        // automatically.
+        let legacy_lock = parent.join(format!("{id}.lock"));
+        if legacy_lock.exists() && !self.is_stale_lock_at(&legacy_lock) {
+            return Ok(false);
+        }
+        fs::create_dir_all(&self.sessions_dir)?;
+        fs::rename(&legacy_root, &new_root)?;
+        // The legacy lock file is intentionally removed (best-effort)
+        // rather than renamed: a subsequent `lock_session` call will
+        // create a fresh lock under the new subdir, and any orphaned
+        // lock at the old path would otherwise cause that acquisition
+        // to wait the full `SESSION_LOCK_TIMEOUT` before declaring it
+        // stale.
+        if legacy_lock.exists() {
+            let _ = fs::remove_file(&legacy_lock);
+        }
+        Ok(true)
+    }
+
+    /// Static variant of the instance-level `is_stale_lock` used by the
+    /// adoption helper, since at that point we want to inspect a lock at
+    /// the legacy path (outside `sessions_dir`).
+    fn is_stale_lock_at(&self, lock_path: &Path) -> bool {
+        let Ok(metadata) = fs::metadata(lock_path) else {
+            return false;
+        };
+        let Ok(modified_at) = metadata.modified() else {
+            return false;
+        };
+        let Ok(elapsed) = modified_at.elapsed() else {
+            return false;
+        };
+        elapsed >= STALE_SESSION_LOCK_AGE
     }
 
     /// Create the sessions directory if it doesn't exist.
@@ -650,6 +752,142 @@ mod tests {
                 .join("events.jsonl")
                 .exists()
         );
+    }
+
+    /// CEX-EntireIO §11.2 Phase 3.4: a SessionStore created with a subdir
+    /// must rehome a clean legacy session that landed in the
+    /// pre-partition `sessions/<id>/` directory before the agent capture
+    /// hook runtime started using the `agent/` subdir. We mock the
+    /// pre-partition state by writing the session through the legacy
+    /// store, then asserting the subdir-aware store moves the directory
+    /// into place. The lock-file behaviour is asserted by sibling tests
+    /// (`adopt_legacy_subdir_session_skips_when_legacy_lock_is_fresh` and
+    /// `lock_session_after_adoption_completes_quickly`).
+    #[test]
+    fn adopt_legacy_subdir_session_moves_legacy_entry() {
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        let legacy_store = SessionStore::from_storage_path(tmp.path());
+        let session = SessionState::new("/tmp/agent-fixture");
+        legacy_store.save(&session).unwrap();
+        let id = session.id.clone();
+        let legacy_dir = tmp.path().join("sessions").join(&id);
+        assert!(legacy_dir.join("events.jsonl").exists());
+
+        let store = SessionStore::from_storage_path_with_subdir(tmp.path(), "agent");
+        let migrated = store.adopt_legacy_subdir_session_if_needed(&id).unwrap();
+        assert!(migrated, "first call should migrate");
+
+        let new_dir = tmp.path().join("sessions").join("agent").join(&id);
+        assert!(new_dir.join("events.jsonl").exists(), "session moved");
+        assert!(!legacy_dir.exists(), "legacy directory removed");
+
+        // Idempotency: running the adoption a second time is a no-op.
+        let again = store.adopt_legacy_subdir_session_if_needed(&id).unwrap();
+        assert!(!again, "second call is a no-op");
+    }
+
+    /// Symmetric guard: when there is no legacy entry to migrate, the
+    /// adoption call must be a no-op rather than producing spurious errors
+    /// or empty directories. This protects fresh installs that never had a
+    /// pre-partition layout.
+    #[test]
+    fn adopt_legacy_subdir_session_is_noop_without_legacy_entry() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = SessionStore::from_storage_path_with_subdir(tmp.path(), "agent");
+        let result = store
+            .adopt_legacy_subdir_session_if_needed("nonexistent-id")
+            .unwrap();
+        assert!(!result);
+    }
+
+    /// Round-1 review concern (gating): a non-partitioned store
+    /// (`from_storage_path` / `new`) must reject adoption even when a
+    /// legacy-shaped entry happens to exist below it. This catches the
+    /// pathological case where a storage root is itself named `sessions`
+    /// and would otherwise pass a path-basename guard.
+    #[test]
+    fn adopt_legacy_subdir_session_rejects_non_partitioned_store() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = SessionStore::from_storage_path(tmp.path());
+        // Plant a directory in the parent that *would* migrate if the
+        // partitioned flag were absent.
+        fs::create_dir_all(tmp.path().join("dummy-id")).unwrap();
+        let result = store
+            .adopt_legacy_subdir_session_if_needed("dummy-id")
+            .unwrap();
+        assert!(!result, "non-partitioned store must not adopt");
+    }
+
+    /// Round-1 review concern (lock-stream race): when the legacy lock
+    /// file is fresh (not stale by `STALE_SESSION_LOCK_AGE`), the
+    /// adoption MUST refuse to migrate, because a live writer might
+    /// still be appending to the legacy directory. Skipping protects
+    /// the event stream from being split across two parents.
+    #[test]
+    fn adopt_legacy_subdir_session_skips_when_legacy_lock_is_fresh() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Plant the legacy session directory and a fresh lock file.
+        let legacy_dir = tmp.path().join("sessions").join("agent-fixture");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        fs::write(legacy_dir.join("events.jsonl"), b"").unwrap();
+        let legacy_lock = tmp.path().join("sessions").join("agent-fixture.lock");
+        fs::write(&legacy_lock, b"").unwrap();
+
+        let store = SessionStore::from_storage_path_with_subdir(tmp.path(), "agent");
+        let migrated = store
+            .adopt_legacy_subdir_session_if_needed("agent-fixture")
+            .unwrap();
+        assert!(!migrated, "fresh legacy lock blocks migration");
+        assert!(legacy_dir.exists(), "legacy entry untouched");
+        assert!(
+            legacy_lock.exists(),
+            "legacy lock left in place for the writer"
+        );
+    }
+
+    /// Round-1 review concern (lock-acquire flow): after a successful
+    /// adoption with no legacy lock present, the call site immediately
+    /// tries to acquire a lock under the new subdir. This must succeed
+    /// quickly — the legacy lock file must not have been carried over
+    /// to the new path, otherwise `lock_session` would wait the full
+    /// timeout on a stale entry. We exercise the no-legacy-lock branch
+    /// here (the dominant case for an upgrade after a clean shutdown);
+    /// the fresh-lock branch is covered by
+    /// `adopt_legacy_subdir_session_skips_when_legacy_lock_is_fresh`.
+    #[test]
+    fn lock_session_after_adoption_completes_quickly() {
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        let legacy_dir = tmp.path().join("sessions").join("agent-fixture");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        fs::write(legacy_dir.join("events.jsonl"), b"").unwrap();
+
+        let store = SessionStore::from_storage_path_with_subdir(tmp.path(), "agent");
+        let migrated = store
+            .adopt_legacy_subdir_session_if_needed("agent-fixture")
+            .unwrap();
+        assert!(migrated, "no legacy lock present means migration proceeds");
+
+        // No lock should exist under the new path yet — this is the
+        // critical guarantee that `lock_session` will make a fresh one
+        // rather than waiting on a carried-over file.
+        let new_lock = tmp
+            .path()
+            .join("sessions")
+            .join("agent")
+            .join("agent-fixture.lock");
+        assert!(!new_lock.exists(), "no inherited lock at new location");
+
+        let started = std::time::Instant::now();
+        let lock = store.lock_session("agent-fixture").unwrap();
+        // The acquisition should be effectively instant (< the timeout).
+        assert!(
+            started.elapsed() < SESSION_LOCK_TIMEOUT,
+            "lock_session blocked on a stale carry-over"
+        );
+        assert!(new_lock.exists(), "fresh lock created under the new subdir");
+        drop(lock);
     }
 
     #[test]

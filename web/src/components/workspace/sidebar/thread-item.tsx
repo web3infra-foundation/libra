@@ -1,20 +1,29 @@
 /**
  * Single row in the sidebar's thread list.
  *
- * Renders the thread title (single line, ellipsis), the current phase
+ * Renders the thread title (single line, ellipsis), an optional phase chip
  * (`P{n} · {label}`), and a relative-time chip. Active rows are highlighted
  * with a paper background and an accent rail on the left edge.
  */
 "use client";
 
 import { cn } from "@/lib/utils";
-import type { Thread } from "@/lib/mock";
+
+/** View-model row for the sidebar thread list. */
+export type ThreadRow = {
+  id: string;
+  title: string;
+  /** Relative timestamp (e.g. "1m", "2d") — backend formats these. */
+  ago: string;
+  /** Optional phase index used to compute the phase chip. */
+  phase?: number;
+};
 
 /** Props for {@link ThreadItem}. */
 type Props = {
-  thread: Thread;
+  thread: ThreadRow;
   /** Pre-resolved phase label (e.g. "Phase 2") so the row doesn't re-look-up. */
-  phaseLabel: string;
+  phaseLabel?: string;
   /** When true, applies the active highlight + accent rail. */
   active: boolean;
   /** Click handler — caller is responsible for selection state. */
@@ -50,14 +59,16 @@ export function ThreadItem({ thread, phaseLabel, active, onSelect }: Props) {
           {thread.title}
         </div>
         <div className="mt-0.5 flex items-center gap-2">
-          <span
-            className={cn(
-              "mono text-[10px] tracking-[0.03em]",
-              active ? "text-accent" : "text-ink-3",
-            )}
-          >
-            P{thread.phase} · {phaseLabel}
-          </span>
+          {typeof thread.phase === "number" && phaseLabel && (
+            <span
+              className={cn(
+                "mono text-[10px] tracking-[0.03em]",
+                active ? "text-accent" : "text-ink-3",
+              )}
+            >
+              P{thread.phase} · {phaseLabel}
+            </span>
+          )}
           <span className="text-[11px] text-ink-3">{thread.ago}</span>
         </div>
       </div>
