@@ -16,13 +16,19 @@
 //!     of `--stdio` and `--web-only`. Pins that the conflict is
 //!     surfaced as a usage error before any runtime work runs.
 //!
+//!   * **Item 3 — dual-reachability smoke**: same `libra code`
+//!     process responds on BOTH the web HTTP transport
+//!     (`/api/code/session`) AND the MCP Streamable HTTP
+//!     transport (`<mcpUrl>` POST `initialize`). Proves the two
+//!     entry points share a process. Full write-and-observe
+//!     consistency (one entry writes, the other observes via
+//!     SSE) needs richer harness wiring and is split out.
+//!
 //! Coverage deferred (still §5.14 P1 work):
-//!   * Item 3 — dual-entry consistency where MCP `tools/call`
-//!     and web `/messages` both touch the same thread and SSE
-//!     observers see both writes. Needs richer harness wiring
-//!     (parallel MCP rmcp client + matrix attach SSE reader on
-//!     the same `CodeSession`); split out as its own
-//!     roadmap-sized PR.
+//!   * Item 3 full — dual-entry consistency where MCP
+//!     `tools/call` and web `/messages` both touch the same
+//!     thread and SSE observers see both writes. Needs parallel
+//!     write/observe coordination on the same CodeSession.
 
 #[cfg(feature = "test-provider")]
 mod harness;
@@ -151,6 +157,90 @@ fn libra_code_stdio_web_only_combo_is_rejected_at_arg_parse() -> Result<()> {
     assert!(
         combined.contains("cannot") || combined.contains("conflicts"),
         "expected a conflict-style error mentioning the mutex; got:\n{combined}",
+    );
+    Ok(())
+}
+
+/// Wave 9 §5.14 item 3 smoke — dual-reachability. After spawn,
+/// the same `libra code` process must respond on BOTH:
+///   * the web HTTP transport (proven via the existing
+///     `session.snapshot()` GET `/api/code/session`), AND
+///   * the MCP Streamable HTTP transport (proven via a fresh
+///     reqwest POST to `<mcpUrl>` with a JSON-RPC `initialize`
+///     payload).
+///
+/// The MCP transport is gated on the `Mcp-Session-Id` header
+/// pattern from `tests/e2e_mcp_flow.rs`: initialize must succeed
+/// (status `200 OK` + the response carries an `Mcp-Session-Id`
+/// response header). This does NOT walk the full handshake
+/// (notifications/initialized + tools/list) — that's covered by
+/// `e2e_mcp_flow.rs` already; this test's contribution is
+/// proving both surfaces are reachable on the SAME process,
+/// which is the §5.14 item 3 reachability promise.
+///
+/// Full write-and-observe (MCP write → web SSE observes) is
+/// the deferred multi-PR follow-up.
+#[cfg(feature = "test-provider")]
+#[test]
+#[serial]
+fn libra_code_serves_both_web_and_mcp_transports_on_same_process() -> Result<()> {
+    let session = CodeSession::spawn(CodeSessionOptions::new(
+        "code-mcp-dual-reachability",
+        fixture_path(),
+    ))?;
+
+    // 1. Web reachability — drive the existing snapshot accessor
+    //    so the failure mode is identical to other tests that
+    //    rely on web HTTP.
+    let snapshot = session.snapshot().context("web /api/code/session probe")?;
+    assert!(
+        snapshot.get("sessionId").and_then(|v| v.as_str()).is_some(),
+        "web /api/code/session must surface a sessionId after spawn; got {snapshot:?}",
+    );
+
+    // 2. MCP reachability — POST a JSON-RPC initialize to the
+    //    Streamable HTTP transport on the same process. The
+    //    Mcp-Session-Id response header is the success contract
+    //    (per `tests/e2e_mcp_flow.rs:291` "Server did not return
+    //    Mcp-Session-Id header on initialize").
+    let mcp_url = session
+        .mcp_url()
+        .ok_or_else(|| anyhow::anyhow!("control.json did not surface mcpUrl after spawn"))?
+        .to_string();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .context("build mcp probe client")?;
+    let init_payload = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": { "name": "libra-dual-reach-probe", "version": "0.0.0" }
+        }
+    });
+    let response = client
+        .post(&mcp_url)
+        .header("Content-Type", "application/json")
+        .header("Accept", "text/event-stream, application/json")
+        .json(&init_payload)
+        .send()
+        .with_context(|| format!("MCP initialize POST to {mcp_url} failed"))?;
+    let status = response.status();
+    let session_id = response
+        .headers()
+        .get("Mcp-Session-Id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    if !status.is_success() {
+        let body = response.text().unwrap_or_default();
+        bail!("MCP initialize returned non-success status {status}: {body}");
+    }
+    assert!(
+        session_id.is_some_and(|id| !id.is_empty()),
+        "MCP initialize must return a non-empty Mcp-Session-Id header so a downstream automation client can continue the handshake",
     );
     Ok(())
 }
