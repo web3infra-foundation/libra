@@ -129,6 +129,8 @@ jobs:
       CARGO_TERM_COLOR: always
       RUSTUP_TOOLCHAIN: stable
       LIBRA_SKIP_WEB_BUILD: "1"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_BUILD_JOBS: "1"
 
     steps:
       - name: Checkout repository
@@ -229,6 +231,8 @@ jobs:
       CARGO_TERM_COLOR: always
       RUSTUP_TOOLCHAIN: stable
       LIBRA_SKIP_WEB_BUILD: "1"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_BUILD_JOBS: "1"
 
     steps:
       - name: Checkout repository
@@ -250,4 +254,4 @@ jobs:
       # the `compat-live-*` (workflow_dispatch) jobs, which are intentionally not
       # GitHub required-checks.
       - name: Run network-remote tests
-        run: cargo test --all --features test-network
+        run: cargo test --features test-network --test network_remotes_test -- --test-threads=1

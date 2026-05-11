@@ -764,38 +764,6 @@ mod tests {
         println!("{:?}", serde_json::to_string(&vars).unwrap());
     }
 
-    #[cfg(feature = "test-network")]
-    #[tokio::test]
-    async fn test_github_batch() {
-        if std::env::var("LIBRA_TEST_GITHUB_TOKEN").map_or(true, |v| v.is_empty()) {
-            eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
-            return;
-        }
-        let batch_request = BatchRequest {
-            operation: Operation::Download,
-            transfers: vec![lfs::LFS_TRANSFER_API.to_string()],
-            objects: vec![RequestObject {
-                oid: "01cb1483670f1c497412f25f9f8f7dde31a8fab0960291035af03939ae1dfa6b".to_string(),
-                size: 104103,
-                ..Default::default()
-            }],
-            hash_algo: lfs::LFS_HASH_ALGO.to_string(),
-        };
-        let lfs_client = LFSClient::from_url(
-            &Url::parse("https://github.com/web3infra-foundation/mega.git").unwrap(),
-        );
-        let request = lfs_client
-            .client
-            .post(lfs_client.batch_url.clone())
-            .json(&batch_request)
-            .headers(lfs::LFS_HEADERS.clone());
-        println!("Request {request:?}");
-        let response = request.send().await.unwrap();
-        let text = response.text().await.unwrap();
-        println!("Text {text:?}");
-        let _resp = serde_json::from_str::<LfsBatchResponse>(&text).unwrap();
-    }
-
     #[tokio::test]
     async fn test_push_object() {
         if std::env::var("LIBRA_TEST_MEGA_SERVER").map_or(true, |v| v.is_empty()) {

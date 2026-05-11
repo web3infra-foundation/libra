@@ -90,7 +90,7 @@ jobs:
     runs-on: [self-hosted]
     steps:
       - uses: actions/checkout@v5
-      - run: cargo test --all --features test-network
+      - run: cargo test --features test-network --test network_remotes_test -- --test-threads=1
 ```
 
 `codeql.yml` matrix 命名：

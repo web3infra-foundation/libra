@@ -35,6 +35,7 @@ pub mod index_pack;
 pub mod init;
 pub mod lfs;
 pub mod log;
+pub mod ls_remote;
 pub mod merge;
 pub mod mv;
 pub mod open;
