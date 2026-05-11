@@ -257,13 +257,13 @@ C2 把 `.github/workflows/base.yml` 与 `.github/workflows/codeql.yml` 的 `name
 
 ## 测试与验收
 
-- [ ] `git check-attr text src/cli.rs` 返回 `text: set`。
-- [ ] `git check-attr binary docs/image/banner.png` 返回 `binary: set`。
-- [ ] `COMPATIBILITY.md` 的 "Top-level commands" 表逐一覆盖 `src/cli.rs::Commands` 变体（含 hidden 命令）；`submodule` / `sparse-checkout` 等不存在于 CLI 的 Git 命令必须放在 "intentionally absent" 表，不能混入顶层命令表。
-- [ ] `COMPATIBILITY.md` 中 `lfs` 命令行与 Git LFS filter / hooks 兼容说明分开描述，不再出现笼统的 "LFS unsupported"。
+- [x] (v0.17.11) [`.gitattributes`](../../../.gitattributes) 中 `*.rs` 规则声明 `text eol=lf`，覆盖 `src/cli.rs` 这类 Rust 源文件。
+- [x] (v0.17.11) [`.gitattributes`](../../../.gitattributes) 中 `*.png` 规则声明 `binary`，覆盖 `docs/image/banner.png` 这类 PNG 资产。
+- [ ] `COMPATIBILITY.md` 的 "Top-level commands" 表逐一覆盖 `src/cli.rs::Commands` 变体（含 hidden 命令）；当前仍缺 `automation` / `usage` / `ls-remote` / `symbolic-ref` / `publish` / `agent` / hidden `hooks`。`submodule` / `sparse-checkout` 等不存在于 CLI 的 Git 命令必须放在 "intentionally absent" 表，不能混入顶层命令表。
+- [x] (v0.17.11) `COMPATIBILITY.md` 中 `lfs` 命令行与 Git LFS filter / hooks 兼容说明分开描述，不再出现笼统的 "LFS unsupported"。
 - [ ] CODEOWNERS 在 PR 上自动请求评审（GitHub UI 验证）。
-- [ ] [`docs/improvement/README.md`](../README.md) 中 "全局层面改进" 表新增一行指向 [`compatibility/README.md`](README.md)。
-- [ ] [`docs/commands/README.md`](../../commands/README.md) 中现有顶层命令索引覆盖 `code-control`；checkout / bisect hidden 标记在对应 C5 / C4 批次处理。
+- [x] (v0.17.11) [`docs/improvement/README.md`](../README.md) 中 "全局层面改进" 表新增一行指向 [`compatibility/README.md`](README.md)。
+- [x] (v0.17.11) [`docs/commands/README.md`](../../commands/README.md) 中现有顶层命令索引覆盖 `code-control`；checkout / bisect hidden 标记在对应 C5 / C4 批次处理。
 
 ## 风险与缓解
 

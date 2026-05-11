@@ -183,7 +183,7 @@ Skipped: (none)
 - [x] `bisect run` 中脚本返回 128 时终止 bisect 并产生 `BISECT_RUN_FAILED` 错误码。
 - [x] `bisect view` 在 active bisect 中显示当前状态；不在 bisect 中时返回 `NOT_IN_BISECT`。
 - [x] `docs/commands/bisect.md` 与命令实际输出一致。
-- [ ] 本轮最终回归需再次运行 `cargo test bisect_test` 或覆盖它的 `cargo test --all`。
+- [x] (v0.17.11) 本轮最终回归已运行 `cargo test --test command_test bisect_test`。
 - [ ] 完整 JSON / machine schema 仍未交付，归后续 CLIG error/render 收口，不属于 C4 `run` / `view` surface gate。
 
 ## 风险与缓解

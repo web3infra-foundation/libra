@@ -119,14 +119,15 @@ libra clone https://github.com/user/repo --depth 1 --single-branch
 
 ## 测试与验收
 
-- [ ] `cargo run -- fetch --help` 输出包含 `--depth <N>`，且不包含 "experimental" 字样。
-- [ ] `cargo run -- fetch origin main --depth 1` 执行成功；产生的 `.libra` 元数据反映 shallow 状态。
-- [ ] 集成测试覆盖：
-  - 单分支仓库 + `--depth 1`。
-  - 多分支仓库 + `--depth 3` + `--all`（depth 应作用于全部 remote）。
-  - 已经是浅克隆的仓库再次 `fetch --depth 1`（幂等性 / 不应报错）。
-- [ ] `COMPATIBILITY.md` 中 fetch / clone 行已更新。
-- [ ] `cargo test fetch_test` 全部通过。
+- [x] (v0.17.11) `cargo run -- fetch --help` 输出包含 `--depth <N>`，且不包含 "experimental" 字样。
+- [x] (v0.17.11) `cargo run -- fetch origin --depth 1` 对本地 remote 执行成功，并保持 fetch JSON envelope。
+- [ ] `.libra` 元数据持久化 shallow boundary 状态；当前代码只向 upload-pack 发送 deepen 请求并忽略 `shallow` / `unshallow` 响应帧，尚未把边界写入本地元数据。
+- [x] (v0.17.11) 集成测试覆盖单分支仓库 + `--depth 1`。
+- [x] (v0.17.11) 集成测试覆盖多分支仓库 + `--depth 3` + `--all`（depth 应作用于全部 remote）。
+- [x] (v0.17.11) 集成测试覆盖 full fetch 后再次 `fetch --depth 1` 幂等成功。
+- [ ] 已经是 shallow 边界的仓库再次 `fetch --depth 1` 幂等成功；当前测试明确把该方向列为未落地限制。
+- [x] (v0.17.11) `COMPATIBILITY.md` 中 fetch / clone 行已更新。
+- [x] (v0.17.11) `cargo test --test command_test fetch_test` 全部通过。
 
 ## 风险与缓解
 

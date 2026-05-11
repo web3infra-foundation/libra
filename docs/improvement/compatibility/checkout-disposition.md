@@ -110,7 +110,7 @@ COMMANDS:
 - [x] EXAMPLES 中分支类示例包含 "prefer: libra switch" 提示；文档明确文件恢复使用 `libra restore`，而不是 `libra checkout -- <path>`。
 - [x] [`tests/compat/checkout_alias_help.rs`](../../../tests/compat/checkout_alias_help.rs) 断言覆盖顶层可见性和 help banner。
 - [x] `COMPATIBILITY.md` checkout 行已更新。
-- [ ] 本轮最终回归需再次运行 `cargo test checkout_test` 或覆盖它的 `cargo test --all`。
+- [x] (v0.17.11) 本轮最终回归已运行 `cargo test --test command_test checkout_test`。
 
 ## 风险与缓解
 

@@ -174,12 +174,12 @@ Cleared 3 stash entries.
 
 ## 测试与验收
 
-- [ ] `cargo run -- stash --help` 列出 `show` / `branch` / `clear`。
-- [ ] `cargo run -- stash show` / `stash show stash@{1}` / `stash show --name-only` 各自通过用例。
-- [ ] `cargo run -- stash branch <new-name>` 在新建分支后正确 apply 并 drop。
-- [ ] `cargo run -- stash clear` 默认行为：交互模式下要求确认；`--force` 跳过；JSON 模式直接执行不询问。
-- [ ] JSON 输出与 [`docs/commands/stash.md`](../../commands/stash.md) schema 一致。
-- [ ] `cargo test stash_test` 全部通过。
+- [x] (v0.17.11) `cargo run -- stash --help` 列出 `show` / `branch` / `clear`，由 `test_stash_help_lists_show_branch_clear` 和 `tests/compat/stash_subcommand_surface.rs` 覆盖。
+- [x] (v0.17.11) `cargo run -- stash show` / `stash show stash@{1}` / `stash show --name-only` 各自通过用例。
+- [x] (v0.17.11) `cargo run -- stash branch <new-name>` 在新建分支后正确 apply 并 drop。
+- [x] (v0.17.11) `cargo run -- stash clear` 默认行为：非 JSON human 模式要求 `--force`；`--force` 跳过；JSON 输出路径由测试覆盖。
+- [x] (v0.17.11) JSON 输出与 [`docs/commands/stash.md`](../../commands/stash.md) schema 一致。
+- [x] (v0.17.11) `cargo test --test command_test stash_test` 全部通过。
 
 ## 风险与缓解
 

@@ -157,7 +157,7 @@ Error: cannot delete dirty worktree '../dirty-feature' (uncommitted changes)
 - [x] `worktree remove --delete-dir <dirty-path>` 返回 conflict 类稳定错误码并保留目录与 registry 记录。
 - [x] 集成测试覆盖：clean + delete-dir / dirty + delete-dir / clean + 不带 flag。
 - [x] `COMPATIBILITY.md` worktree 行已更新为默认保留目录、`--delete-dir` opt-in 删除。
-- [ ] 本轮最终回归需再次运行 `cargo test worktree_test` 或覆盖它的 `cargo test --all`。
+- [x] (v0.17.11) 本轮最终回归已运行 `cargo test --test command_test worktree_test`。
 
 ## 风险与缓解
 

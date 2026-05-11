@@ -857,20 +857,21 @@ v1 使用 gitignore 子集：
 
 **Acceptance criteria:**
 
-- [ ] 新建根目录 `worker/` Next.js + React + TypeScript 项目，并接入 `@opennextjs/cloudflare`。
-- [ ] `wrangler.jsonc` 包含 OpenNext `main` / `assets`、D1/R2 bindings、`nodejs_compat` 和 observability。
+- [x] (v0.17.11) 新建根目录 `worker/` Next.js + React + TypeScript 项目，并接入 `@opennextjs/cloudflare`。
+- [x] (v0.17.11) `wrangler.jsonc` 包含 OpenNext `main` / `assets`、D1/R2 bindings、`nodejs_compat` 和 observability。
 - [ ] 运行 `wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts`，服务端代码使用生成类型，不手写 Env。
-- [ ] 新增 Worker 模板 manifest，确认 root `worker/` source-only 文件能被 Libra package/binary 嵌入，且生成目录、`.env*` 和凭据文件被排除。
-- [ ] server-only helper 通过 `getCloudflareContext()` 读取 `LIBRA_PUBLISH_DB` 和 `LIBRA_PUBLISH_BUCKET`。
-- [ ] API endpoints 按本文 Worker API 表实现。
-- [ ] Worker API 支持 refs 列表，以及按 `ref` 或 `revision` 浏览 tree/file；同名 branch/tag 必须返回 ambiguous ref 错误。
-- [ ] Worker API 支持 AI object list/detail/graph 查询，并按 object type、layer、revision/ref 分页过滤。
-- [ ] 所有 SQL 使用 prepared statement。
-- [ ] 所有 R2 key 都来自 D1 published rows，禁止从 URL 参数直接拼接 R2 key。
-- [ ] React client components 只能调用 `/api/*`，不得导入 server-only binding helper。
-- [ ] private visibility 缺少或无法验证 `Cf-Access-Jwt-Assertion` 时返回 403。
-- [ ] disabled site 返回 410，不读取 R2 bundle。
-- [ ] fixture 能写入 Miniflare D1/R2 并通过 API round-trip。
+- [x] (v0.17.11) 新增 Worker 模板 manifest，确认 root `worker/` source-only 文件能被 Libra package/binary 嵌入，且生成目录、`.env*` 和凭据文件被排除。
+- [x] (v0.17.11) server-only helper 通过 `getCloudflareContext()` 读取 `LIBRA_PUBLISH_DB` 和 `LIBRA_PUBLISH_BUCKET`。
+- [x] (v0.17.11) API endpoints 按本文 Worker API 表实现。
+- [x] (v0.17.11) Worker API 支持 refs 列表，以及按 `ref` 或 `revision` 浏览 tree/file；同名 branch/tag 必须返回 ambiguous ref 错误。
+- [x] (v0.17.11) Worker API 支持 AI object list/detail/graph 查询，并按 object type、layer、revision/ref 分页过滤。
+- [x] (v0.17.11) 所有 SQL 使用 prepared statement。
+- [x] (v0.17.11) 所有 R2 key 都来自 D1 published rows，禁止从 URL 参数直接拼接 R2 key。
+- [x] (v0.17.11) React client components 只能调用 `/api/*`，不得导入 server-only binding helper。
+- [x] (v0.17.11) private visibility 缺少或无法验证 `Cf-Access-Jwt-Assertion` 时返回 403。
+- [x] (v0.17.11) disabled site 返回 410，不读取 R2 bundle。
+- [x] (v0.17.11) FakeD1/FakeR2 route fixture 能通过 API round-trip。
+- [ ] Miniflare D1/R2 fixture round-trip 尚未落地。
 
 **Verification:**
 
@@ -879,7 +880,7 @@ v1 使用 gitignore 子集：
 - [ ] `pnpm --dir worker cf-typegen`
 - [ ] `pnpm --dir worker test`
 - [ ] `pnpm --dir worker exec tsc --noEmit`
-- [ ] `cargo test publish_worker_template_embed_test`
+- [x] (v0.17.9) `cargo test --test publish_worker_template_embed_test`
 - [ ] `cargo package --allow-dirty --list | rg '^worker/(app|components|lib|public|migrations|package.json|pnpm-lock.yaml|next.config|open-next.config|wrangler.jsonc|tsconfig.json)'`
 
 **Dependencies:** Phase 0, Phase 2
