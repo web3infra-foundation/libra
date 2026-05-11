@@ -68,7 +68,7 @@
 
 ### 特性 1：CommitError typed error enum
 
-**当前问题：** `execute_impl()` 内部大量使用 `.map_err(|e| format!(...))` 生成 `String` 错误，再通过 `CommitExecError` 桥接到 `CliError`。`classify_commit_error()` 基于消息子串推断错误码，脆弱且不完整。
+**历史问题（已修复）：** `execute_impl()` 内部曾大量使用 `.map_err(|e| format!(...))` 生成 `String` 错误，再通过 `CommitExecError` 桥接到 `CliError`。`classify_commit_error()` 基于消息子串推断错误码，脆弱且不完整。
 
 **修正后的方案：**
 
@@ -162,7 +162,7 @@ pub enum CommitError {
 
 ### 特性 2：执行层与渲染层拆分
 
-**当前问题：** `execute_impl()` 是一个 233 行单体函数，混合执行逻辑和输出渲染。`emit_commit_summary()` 虽然独立存在，但整个成功路径的元数据没有结构化收集。
+**历史问题（已修复）：** `execute_impl()` 曾是一个 233 行单体函数，混合执行逻辑和输出渲染。`emit_commit_summary()` 虽然独立存在，但整个成功路径的元数据没有结构化收集。
 
 **修正后的方案：**
 
@@ -406,7 +406,7 @@ amend：
 
 ### 特性 4：Helper 函数错误类型改造
 
-**当前问题：** 核心 helper 函数全部返回 `Result<T, String>`，上层通过 `format!()` 生成错误消息，导致错误上下文丢失。
+**历史问题（已修复）：** 核心 helper 函数曾全部返回 `Result<T, String>`，上层通过 `format!()` 生成错误消息，导致错误上下文丢失。
 
 **修正后的方案：**
 
