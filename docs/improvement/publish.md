@@ -714,16 +714,16 @@ v1 使用 gitignore 子集：
 
 **Acceptance criteria:**
 
-- [ ] 新增 `docs/commands/publish.md` 草案。
-- [ ] 新增 `sql/publish/0001_publish.sql`。
-- [ ] 新增 `worker/migrations/0001_publish.sql`，并有测试验证与源 SQL 一致。
-- [ ] 新增 publish JSON fixture：site、refs、revision、manifest、file metadata、AI objects、AI bundle、AI graph、sync run。
-- [ ] 新增 Rust serde contract 类型或测试 fixture 解析路径。
+- [x] (v0.17.10) 新增 `docs/commands/publish.md` 草案。
+- [x] (v0.17.10) 新增 `sql/publish/0001_publish.sql`。
+- [x] (v0.17.10) 新增 `worker/migrations/0001_publish.sql`，并有测试验证与源 SQL 一致。
+- [x] (v0.17.10) 新增 publish JSON fixture：site、refs、revision、manifest、file metadata、AI objects、AI bundle、AI graph、sync run。
+- [x] (v0.17.10) 新增 Rust serde contract 类型或测试 fixture 解析路径。
 
 **Verification:**
 
-- [ ] `cargo test publish_schema_contract`
-- [ ] `cargo test publish_contract_round_trip`
+- [x] `cargo test publish_schema_contract`
+- [x] `cargo test publish_contract_round_trip`
 
 **Dependencies:** None
 
@@ -735,16 +735,16 @@ v1 使用 gitignore 子集：
 
 **Acceptance criteria:**
 
-- [ ] `src/command/cloud.rs` 新增结构化 helper，例如 `run_cloud_sync(ctx) -> CloudSyncReport`。
-- [ ] `execute_sync()` 只负责调用 helper 和渲染现有输出。
-- [ ] helper 返回对象数量、失败数量、metadata 状态、agent capture 状态。
-- [ ] helper 不直接 `println!`。
-- [ ] 现有 cloud 测试和文档输出不回归。
+- [x] (v0.17.10) `src/command/cloud.rs` 新增结构化 helper，例如 `run_cloud_sync(ctx) -> CloudSyncReport`。
+- [x] (v0.17.10) `execute_sync()` 只负责调用 helper 和渲染现有输出。
+- [x] (v0.17.10) helper 返回对象数量、失败数量、metadata 状态、agent capture 状态。
+- [x] (v0.17.10) helper 不直接 `println!`。
+- [x] (v0.17.10) 现有 cloud 测试和文档输出不回归。
 
 **Verification:**
 
-- [ ] `cargo test cloud_storage_backup_test`
-- [ ] `cargo test --test command_test cloud`
+- [x] `cargo test --test cloud_storage_backup_test`
+- [x] `cargo test --test command_test cloud`
 
 **Dependencies:** Phase 0
 
@@ -756,17 +756,17 @@ v1 使用 gitignore 子集：
 
 **Acceptance criteria:**
 
-- [ ] 新增 `src/utils/storage/publish_storage.rs`。
-- [ ] `PublishStorage` 支持 JSON 和 bytes round-trip，key 有路径安全校验。
-- [ ] `D1Client::ensure_publish_schema()` 能执行 `sql/publish/0001_publish.sql`。
-- [ ] `D1Client` 增加 upsert/list 方法：site、revision、files、AI objects、AI versions、sync runs。
-- [ ] 所有新增错误都有可读 context，不使用生产路径 `unwrap()` / `expect()`。
+- [x] (v0.17.10) 新增 `src/utils/storage/publish_storage.rs`。
+- [x] (v0.17.10) `PublishStorage` 支持 JSON 和 bytes round-trip，key 有路径安全校验。
+- [x] (v0.17.10) `D1Client::ensure_publish_schema()` 能执行 `sql/publish/0001_publish.sql`。
+- [x] (v0.17.10) `D1Client` 增加 upsert/list 方法：site、revision、files、AI objects、AI versions、sync runs。
+- [x] (v0.17.10) 所有新增错误都有可读 context，不使用生产路径 `unwrap()` / `expect()`。
 
 **Verification:**
 
-- [ ] `cargo test publish_storage_test`
-- [ ] `cargo test publish_d1_client_test`
-- [ ] `cargo clippy --all-targets --all-features -- -D warnings`
+- [x] `cargo test publish_storage`
+- [x] `cargo test publish_migration`
+- [x] `cargo clippy --all-targets --all-features -- -D warnings`
 
 **Dependencies:** Phase 0
 
@@ -1002,7 +1002,8 @@ cargo +nightly fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test publish_schema_contract
 cargo test publish_contract_round_trip
-cargo test publish_storage_test
+cargo test publish_storage
+cargo test publish_migration
 cargo test publish_refs_test
 cargo test publish_snapshot_test
 cargo test publish_ai_object_model_contract_test
