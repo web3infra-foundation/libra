@@ -1222,6 +1222,16 @@ impl CodeSession {
                     .context("failed to read control info file")?;
                 let info: ControlInfo =
                     serde_json::from_str(&info_text).context("failed to parse control info")?;
+                // The runtime writes `control.json` TWICE for non-stdio
+                // launches: once after the web server binds (mcpUrl=null,
+                // see `src/command/code.rs:817`) and again after the MCP
+                // server binds (mcpUrl populated, see `code.rs:832`).
+                // Wait for the second write so consumers like
+                // `mcp_url()` always see the populated value.
+                if info.mcp_url.is_none() {
+                    thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
                 let _ = fs::write(self.logs_dir.join("control.json"), &info_text);
                 self.base_url = info.base_url;
                 self.mcp_url = info.mcp_url;
