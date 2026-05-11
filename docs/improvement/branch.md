@@ -4,11 +4,11 @@
 
 同时落地 [Cross-Cutting Improvements A/B/F/G](README.md#全局层面改进贯穿所有命令)。
 
-> 当前工作区实现已按本文范围落地一部分改动；以下内容改为记录已落地能力、剩余遗漏和后续收口项。
+> **实施状态：✅ 已落地** — `BranchError` typed enum、`BranchOutput` JSON / machine schema、`run_branch()` / `render_branch_output()` 分层、主要稳定错误码、fuzzy suggestion、human 确认消息和 `--help` EXAMPLES 均已交付。本文档保留为已交付契约的实现规格。
 
 ### 已完成前置条件与当前代码状态
 
-第一批全部 8 个命令的主改造已在当前代码库落地。`branch` 是第二批（状态变更确认命令）中管理分支的命令，JSON 已覆盖主要操作，但错误建模和 human 输出一致性仍未完全现代化。
+第一批全部 8 个命令的主改造已在当前代码库落地。`branch` 是第二批（状态变更确认命令）中管理分支的命令，JSON、typed error、human 输出和帮助示例已覆盖主要操作。
 
 **已确认落地的基线：**
 
@@ -25,9 +25,7 @@
 - human 路径已覆盖 create / delete-safe / force-delete / rename / set-upstream / show-current 的确认输出
 - `after_help` 已同时包含 compatibility notes 和 EXAMPLES
 
-**基于当前代码的 Review 结论（已改进部分 vs 仍需改进部分）：**
-
-已改进（当前代码已具备）：
+**基于当前代码的 Review 结论：**
 
 - **JSON 已覆盖主要操作**：`BranchOutput` + `run_branch()` 已支持 list / create / delete / rename / set-upstream / show-current，list schema 也已保持向后兼容
 - **大部分命令层错误已带显式 `StableErrorCode`**：invalid name、already exists、invalid commit、branch not found、detached HEAD、I/O 写失败等主要路径已显式映射
@@ -39,11 +37,11 @@
 - **`--help` EXAMPLES 已落地**：帮助文本已同时保留 compatibility notes 和示例
 - **现有测试已验证关键契约**：`branch_test.rs` 已覆盖 invalid start point error code、detached HEAD set-upstream 和 JSON create schema
 
-仍需改进：
+后续维护项：
 
-- **`internal::branch` 兼容 wrapper 仍保留 lossy 返回类型**：`list_branches_with_conn()` / `find_branch_with_conn()` / `delete_branch_with_conn()` 仍为了兼容旧调用点返回 `Vec` / `Option` / `()`；虽然现在会显式记录错误日志，但后续仍建议继续迁移旧调用方到 `*_result` API
-- **仍有少量旧调用点未直接使用 fallible API**：例如非第二批范围内的旧命令和工具模块，后续可继续把分支查询失败从“best effort”迁移到显式传播
-- **`DelegatedCli` 仍是兼容边界**：`switch` / `checkout` 相关委托路径当前仍通过 `DelegatedCli` 透传，后续如需更细粒度 typed error 可再拆分
+- **`internal::branch` 兼容 wrapper 仍保留 lossy 返回类型**：`list_branches_with_conn()` / `find_branch_with_conn()` / `delete_branch_with_conn()` 为旧调用点保留 `Vec` / `Option` / `()` wrapper；这是兼容债，后续继续迁移到 `*_result` API
+- **少量旧调用点仍可继续迁移到 fallible API**：非第二批范围内的旧命令和工具模块可继续把分支查询失败从 best-effort 迁移到显式传播
+- **`DelegatedCli` 是兼容边界**：`switch` / `checkout` 相关委托路径当前通过 `DelegatedCli` 透传；后续如需更细粒度 typed error 可再拆分
 
 ### 目标与非目标
 

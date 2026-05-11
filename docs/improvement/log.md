@@ -8,7 +8,7 @@
 
 第一批全部 8 个命令（config、init、clone、add、status、commit、push、pull）的主改造已在当前代码库落地。`log` 是第三批（历史查询命令）中最关键的命令，AI Agent / MCP 场景依赖结构化提交列表。
 
-> 当前工作区实现已按本文范围落地一部分改动；以下内容改为记录已落地能力、剩余遗漏和后续收口项。
+> **实施状态：✅ 已落地（用户契约）** — `run_log()` / `LogOutput`、JSON / machine 输出、主要稳定错误码、refs best-effort、历史 blob strict failure 和 `--help` EXAMPLES 均已交付。完整 `LogError` + human render split 是后续跨命令内部收口，不阻塞第三批验收。
 
 **已确认落地的基线：**
 
@@ -31,9 +31,7 @@
 - patch / stat 路径在历史 blob 缺失时已改为显式 `RepoCorrupt` 失败，不再错误回退到工作区内容
 - `tests/command/log_test.rs` 已覆盖 JSON schema、author 过滤统计、无效日期 / decorate 参数和坏 ref 元数据回归
 
-**基于当前代码的 Review 结论（已改进部分 vs 仍需改进部分）：**
-
-已改进（当前代码已具备）：
+**基于当前代码的 Review 结论：**
 
 - **JSON / machine 输出已落地**：`run_log()` + `LogOutput` 已提供结构化提交列表，author/date/path 过滤会直接反映到 JSON 结果
 - **主要参数错误已带显式错误码**：空分支、无效日期、无效 `--decorate` 选项都已接入 `StableErrorCode`
@@ -41,10 +39,10 @@
 - **`--decorate=no` 回归已修复**：禁用 decoration 时不再因为无关 branch ref 损坏而阻塞普通 `log` 输出
 - **命令文档已与现状对齐**：`docs/commands/log.md` 已记录 JSON schema 和错误码约定
 
-仍需改进：
+后续维护项：
 
-- **尚未引入统一 `LogError` + human render split**：这属于内部统一重构，已从第三批用户契约中拆出，留待后续跨命令 error/render 收口统一处理
-- **第三批计划文档需要继续收口**：本文后续章节仍保留完整设计稿写法，后续可继续压缩为“现状 + follow-up”格式，但不阻塞第三批验收
+- **统一 `LogError` + human render split**：这属于内部统一重构，已从第三批用户契约中拆出，留待后续跨命令 error/render 收口统一处理
+- **第三批计划文档维护**：本文后续章节保留设计稿写法作为实现规格；后续可继续压缩为“现状 + follow-up”格式，但不阻塞第三批验收
 
 ### 目标与非目标
 
@@ -75,7 +73,7 @@
 
 ### 特性 1：LogError typed error enum
 
-**当前问题：** 错误散落在 `execute_safe()` 内部，使用 `CliError::fatal()` 无显式错误码。
+**历史设计目标（用户契约已落地，内部统一收口后续处理）：** 早期错误散落在 `execute_safe()` 内部，使用 `CliError::fatal()` 无显式错误码；当前主要用户可见错误路径已接入稳定错误码，完整 `LogError` enum 留给后续跨命令收口。
 
 **方案：**
 
@@ -123,7 +121,7 @@ pub enum LogError {
 
 ### 特性 2：执行层与渲染层拆分
 
-**当前问题：** `execute_safe()` 直接在内部做 commit walking、格式化和输出，约 240 行混合逻辑。
+**历史设计目标（用户契约已落地，内部统一收口后续处理）：** 早期 `execute_safe()` 直接在内部做 commit walking、格式化和输出，约 240 行混合逻辑；当前 JSON 执行层已通过 `run_log()` / `LogOutput` 拆出，human render 的完整统一留给后续跨命令收口。
 
 **方案：**
 
