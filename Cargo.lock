@@ -476,7 +476,7 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "bcrypt"
-version = "0.17.7"
+version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "abaf6da45c74385272ddf00e1ac074c7d8a6c1a1dda376902bd6a427522a8b2c"
 dependencies = [
@@ -3288,8 +3288,9 @@ checksum = "b5b646652bf6661599e1da8901b3b9522896f01e736bad5f723fe7a3a27f899d"
 
 [[package]]
 name = "libfuse-fs"
-version = "0.1.12"
-source = "git+https://github.com/rk8s-dev/rk8s?branch=main#ef84d5e739b48c9c1d0286a2649383f224cb2073"
+version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d61be2a0235d6a5ba30064c172f12d5465da0f013281a0e6675604d0781496e9"
 dependencies = [
  "async-trait",
  "bitflags 2.11.0",
@@ -3334,7 +3335,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libra"
-version = "0.17.1"
+version = "0.17.8"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -5367,8 +5368,9 @@ dependencies = [
 
 [[package]]
 name = "rfuse3"
-version = "0.0.7"
-source = "git+https://github.com/rk8s-dev/rk8s?branch=main#ef84d5e739b48c9c1d0286a2649383f224cb2073"
+version = "0.0.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c5d7bea55817b58bd3a706ac0671f9aedc06d2d91e2f68272bd4fbe62f817d2b"
 dependencies = [
  "aligned_box",
  "async-notify",

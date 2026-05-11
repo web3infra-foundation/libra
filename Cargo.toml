@@ -1,6 +1,6 @@
 [package]
 name = "libra"
-version = "0.17.7"
+version = "0.17.8"
 edition = "2024"
 
 [features]
@@ -113,14 +113,10 @@ libvault = { version = "0.2.2", features = ["storage_sqlite"] }
 base64 = "0.22.1"
 
 [target.'cfg(unix)'.dependencies] # only on Unix
-libfuse-fs = "0.1.12"
+libfuse-fs = "0.1.13"
 pager = "0.16.1"
 libc = "0.2"
-rfuse3 = { version = "0.0.7", features = ["tokio-runtime", "unprivileged"] }
-
-[patch.crates-io]
-rfuse3 = { git = "https://github.com/rk8s-dev/rk8s", branch = "main" }
-libfuse-fs = { git = "https://github.com/rk8s-dev/rk8s", branch = "main" }
+rfuse3 = { version = "0.0.8", features = ["tokio-runtime", "unprivileged"] }
 
 [dev-dependencies]
 serial_test = { version = "3.4.0", default-features = false, features = ["async"] }
