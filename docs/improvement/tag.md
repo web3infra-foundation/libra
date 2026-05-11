@@ -4,7 +4,7 @@
 
 同时落地 [Cross-Cutting Improvements A/B/F/G](README.md#全局层面改进贯穿所有命令)。
 
-> 当前工作区实现已按本文范围落地一部分改动；以下内容改为记录已落地能力、剩余遗漏和后续收口项。
+> **实施状态：✅ 已落地** — `TagError` typed enum、`TagOutput` JSON / machine schema、`run_tag()` / `render_tag_output()` 分层、human 成功确认、重复创建 hint、quiet delete、broken-ref delete 和 lightweight tag 双契约回归均已交付。本文档保留为已交付契约的实现规格。
 
 ### 已完成前置条件与当前代码状态
 
@@ -25,9 +25,7 @@
 - create / delete / find major error path 已在命令层映射显式 `StableErrorCode`
 - quiet delete、malformed ref delete 和 JSON schema 已有回归测试覆盖
 
-**基于当前代码的 Review 结论（已改进部分 vs 仍需改进部分）：**
-
-已改进（当前代码已具备）：
+**基于当前代码的 Review 结论：**
 
 - **结构化输出已落地**：`run_tag()` + `TagOutput` 已覆盖 list / create / delete 三类操作，`--json` / `--machine` 可直接使用
 - **主要命令层错误已带显式 `StableErrorCode`**：重复创建、HEAD unborn、tag not found、delete I/O 失败、repo read failure 等路径已有稳定错误码
@@ -37,20 +35,16 @@
 - **human 成功反馈已统一**：lightweight / annotated create 与 delete 都已输出单行确认消息
 - **`--help` EXAMPLES 已落地**
 - **quiet / malformed ref delete 回归已覆盖**：当前测试已覆盖 quiet delete、删除损坏 tag ref、JSON delete `hash = null` 等边界
-
-仍需改进：
-
-- **legacy 说明尚未完全清理**：本文后文仍有少量历史设计叙述，需要继续收口为“现状 + follow-up”格式
-- **human / JSON 双契约需持续维护**：lightweight tag 当前保持 `message: null` 的 machine 契约，同时 human `-n` 列表仍显示 commit message；后续需要继续用回归测试锁住这一行为
+- **human / JSON 双契约已有回归**：lightweight tag 保持 `message: null` 的 machine 契约，同时 human `-n` 列表仍显示 commit message
 
 ### 目标与非目标
 
 **已完成目标：**
 - `TagError` typed error enum、显式 `StableErrorCode`、统一 `run_tag()` / `render_tag_output()` 分层、human 成功确认消息、create 失败来源结构化映射和 `--help` EXAMPLES 已落地
 
-**后续收口目标：**
+**后续维护目标：**
 - 继续维护 lightweight tag 的 human / machine 双契约和边界回归测试
-- 持续清理本文残留的历史设计说明，使计划文档完全反映当前实现
+- 后续新增 tag signing、`--sort` 或 `--verify` 时保持 additive JSON schema 演化
 
 **本批非目标：**
 - **不重写 `internal::tag` 底层业务语义**。允许做类型收紧和错误建模调整（例如 `create()` 返回 `CreateTagError`），但不改变 tag 创建/删除/查询的语义行为
@@ -279,14 +273,14 @@ EXAMPLES:
 #### `tests/command/tag_test.rs`（核心执行路径扩展）
 
 - **（已有）** 重复 tag 错误码、basic creation、annotated tag、force tag、list、delete、annotation lines
-- **（新增）`TagError` 变体覆盖**：
+- **（已覆盖）`TagError` 变体覆盖**：
   - `NotFound`：删除不存在 tag 返回 exit `129` + `LBR-CLI-003`
   - `MissingName`：无 tag 名返回 exit `129` + `LBR-CLI-002`
   - `HeadUnborn`：空仓库创建 tag 返回 exit `128` + `LBR-REPO-003`
-- **（新增）quiet / delete 输出约束**：`--quiet tag -d` 不应污染 stdout；human delete 保持确认消息
-- **（新增）human create 输出统一**：lightweight / annotated create 均输出单行确认消息，不再依赖 `show_tag_safe()` 打印详情
-- **（新增）force 失败路径回归**：`-f` 遇到对象存储失败时必须保留原有 ref，不得丢 tag
-- **（修复）全角括号**：将 `（lightweight tag）` 等改为 `(lightweight tag)`
+- **（已覆盖）quiet / delete 输出约束**：`--quiet tag -d` 不应污染 stdout；human delete 保持确认消息
+- **（已覆盖）human create 输出统一**：lightweight / annotated create 均输出单行确认消息，不再依赖 `show_tag_safe()` 打印详情
+- **（已覆盖）force 失败路径回归**：`-f` 遇到对象存储失败时必须保留原有 ref，不得丢 tag
+- **（已修复）全角括号**：将 `（lightweight tag）` 等改为 `(lightweight tag)`
 
 #### `tests/command/tag_test.rs`（JSON schema 稳定性扩展）
 
