@@ -48,16 +48,18 @@ libra publish init \
 ```
 
 - Confirms the current directory is a Libra repo.
-- Reuses or generates `libra.repoid`.
-- Writes `publish.*` keys into `ConfigKv`.
+- Reuses the current repository root as the template target.
+- Writes `.libra/publish/worker-template-manifest.json` with the
+  embedded template version, render policy, and SHA-256 baseline for
+  each managed file.
 - `--max-preview-bytes <bytes>`: per-file preview cap (must be
   `> 0`; the CLI rejects `0` because a zero cap publishes no file
   previews — pass a positive byte count or omit the flag to use the
   default).
-- Materialises `worker/` from the embedded Worker template using the
-  `worker_template_manifest.json` ruleset: missing files are written
-  fresh, unmodified template files may be patched, user-modified
-  files are preserved with conflict markers.
+- Materialises `worker/` from the embedded Worker template. Missing
+  files are written fresh, byte-identical template files are left as
+  current, and user-modified or symlinked paths fail closed with
+  `LBR-CONFLICT-002`; no conflict markers are written.
 - Does **not** require Cloudflare connectivity; D1 / R2 credentials
   are validated at sync time.
 

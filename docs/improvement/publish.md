@@ -219,8 +219,8 @@ Build/deploy scripts：
 
 - 目标目录固定为当前仓库根目录 `worker/`。
 - 缺失文件直接从嵌入模板写入。
-- 纯模板文件如果上次生成后未被用户修改，可以随 Libra 升级覆盖。
-- 用户已修改的文件不得静默覆盖；只能更新 `LIBRA MANAGED` 标记块，或输出冲突和 diff 提示用户处理。
+- v0.17.9 已落地的首版只写入缺失文件、对 byte-identical 模板文件 no-op，并在用户修改或 symlink 路径上 fail closed；manifest-aware patch/upgrade 仍是后续 `status/deploy` 切片的任务。
+- 用户已修改的文件不得静默覆盖；后续只能更新 `LIBRA MANAGED` 标记块，或输出冲突和 diff 提示用户处理。
 - `wrangler.jsonc`、`.dev.vars.example` 等环境相关文件使用模板变量渲染 `worker_name`、D1 database、R2 bucket、clone domain、visibility 和 Access 占位配置；禁止把 Cloudflare API token 写入模板文件。
 - 物化后写入 `.libra/publish/worker-template-manifest.json`，记录已生成模板版本、文件 hash 和用户修改检测基线。
 
@@ -893,7 +893,7 @@ v1 使用 gitignore 子集：
 **Acceptance criteria:**
 
 - [ ] 接收 Claude Design 设计产物，并在根目录 `worker/` 中落地路由、组件、样式、状态和静态资源；实现偏差必须记录在 PR 说明中。
-- [ ] `libra publish init` 从 Libra 嵌入模板生成/patch 目标仓库根目录 `worker/`，不依赖 Libra 源码 checkout，不覆盖用户修改，并写入 `.libra/publish/worker-template-manifest.json`。
+- [x] (v0.17.9) `libra publish init` 从 Libra 嵌入模板生成目标仓库根目录 `worker/`，不依赖 Libra 源码 checkout；当前实现写入缺失文件、保留 byte-identical 文件，遇到用户修改或 symlink 路径 fail closed，不覆盖，并写入 `.libra/publish/worker-template-manifest.json`。
 - [ ] `libra publish status` 展示 Worker 模板 `missing/current/modified/outdated/conflicted` 状态；`conflicted` 时 `publish deploy` fail closed。
 - [ ] Next.js + React 前端能按设计包展示 repo、branch/tag 切换、tree、file viewer、AI object model 浏览、AI versions list/detail、sync status 和 visibility 状态。
 - [ ] 长路径、空仓库、无 AI 数据、binary/too_large 文件都有空态。
