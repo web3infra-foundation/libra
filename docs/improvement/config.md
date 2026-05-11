@@ -1252,16 +1252,18 @@ EXAMPLES:
 说明：`<remote-name>` 需替换为仓库中实际的 remote 名称；若仓库只有一个默认 remote，通常为 `origin`
 
 **实施清单：**
-- [ ] 删除 `src/command/vault.rs`
-- [ ] 从 `src/cli.rs` 中移除 `vault` 子命令注册
-- [ ] 删除 `tests/command/vault_test.rs` 和 `tests/command/vault_cli_test.rs`
-- [ ] `src/internal/vault.rs` **保留**，作为加密基础设施继续被 config 使用
-- [ ] 将 vault 测试用例中的功能覆盖迁移到 config 测试中：
+- [x] 删除 `src/command/vault.rs`
+- [x] 从 `src/cli.rs` 中移除 `vault` 子命令注册
+- [x] 删除 `tests/command/vault_test.rs` 和 `tests/command/vault_cli_test.rs`
+- [x] `src/internal/vault.rs` **保留**，作为加密基础设施继续被 config 使用
+- [x] 将 vault 测试用例中的功能覆盖迁移到 config 测试中：
   - `vault generate-ssh-key` → `config generate-ssh-key --remote origin` 测试
   - `vault generate-gpg-key` → `config generate-gpg-key` 测试
   - `vault gpg-public-key` → `config get vault.gpg.pubkey` 测试
   - `vault ssh-public-key` → `config get vault.ssh.origin.pubkey` 测试
   - vault init / unseal / encrypt / decrypt → config set 敏感 key 的加密存储测试
+
+**2026-05-11 复核证据**：`src/command/vault.rs`、`tests/command/vault_test.rs`、`tests/command/vault_cli_test.rs` 已不存在；`src/cli.rs` / `src/command/mod.rs` / `tests/command/mod.rs` 不再注册 `vault` 子命令；`src/internal/vault.rs` 保留；`tests/command/config_test.rs` 覆盖 `config generate-ssh-key --remote origin`、`config generate-gpg-key`、`config get vault.gpg.pubkey`、`config get vault.ssh.origin.pubkey` 以及敏感 key 加密路径。
 
 ---
 
