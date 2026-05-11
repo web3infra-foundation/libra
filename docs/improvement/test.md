@@ -2,14 +2,14 @@
 
 ## 概述
 
-`libra code` 是仓库目前最复杂的子命令：一条入口同时拉起 TUI、HTTP/SSE Web 服务、MCP 服务、AI Agent 工具循环、Codex 旁路、Local TUI Automation Control。代码侧近 30 个 commit 几乎全部围绕 `web/code-ui/orchestrator`，但测试侧仅覆盖到部分维度：
+`libra code` 是仓库目前最复杂的子命令：一条入口同时拉起 TUI、HTTP/SSE Web 服务、MCP 服务、AI Agent 工具循环、Codex 旁路、Local TUI Automation Control。当前测试侧已经从最初的 smoke 覆盖扩展到 L2 数据驱动矩阵、L3 live 模型 gate 与多条纵深面专项测试：
 
 - L0 单元/契约：headless / projection / wire / codex 默认 TUI 守卫，以及 tool loop / session jsonl / redaction / wire 序列化等通过 Code 路径间接受益的测试。
 - L2 PTY+HTTP smoke：[tests/code_ui_scenarios.rs](../../tests/code_ui_scenarios.rs) 已覆盖 attach/detach/cancel/conflict/oversize 等 13 条场景。
-- L2 数据驱动：[tests/code_ui_remote_lease_matrix.rs](../../tests/code_ui_remote_lease_matrix.rs) 仅 4 条 lease case 在跑；`tests/data/code_ui_remote/` 下 SSE/state/security/generation/model_generation 五个矩阵的 JSON 已就位但**没有 Rust runner**。
-- L3 真实模型：仅 AI 子系统层面有 ollama gate 与 deepseek 直连测试，**未与 `libra code` 服务路径打通**。
+- L2 数据驱动：[tests/code_ui_remote_lease_matrix.rs](../../tests/code_ui_remote_lease_matrix.rs) 已覆盖 10 条 lease case；SSE/state/security/generation/approval/model_generation 均已有 Rust runner。
+- L3 真实模型：[tests/code_ui_remote_model_generation_matrix.rs](../../tests/code_ui_remote_model_generation_matrix.rs) 已接入 `libra code` 服务路径，默认由 `.env.test` + `LIBRA_RUN_LIVE=1` gate 驱动 DeepSeek live case；nightly 工作流仍依赖 maintainer 配置 `DEEPSEEK_API_KEY` 后收集连续稳定性。
 
-本文目标：给出整个 `libra code` 功能的端到端测试范围地图。第 5 节按“功能面 × 测试分层 × 现状/缺口/优先级”组织 20 项纵深面；第 6 节内嵌已有的 L2 远端矩阵方案；第 7–10 节给出统一的覆盖矩阵、文件清单、验证命令和 12 PR Wave roadmap。本文是规划文档，实施按 Wave 拆分 PR；每个 PR 保持现有 smoke 不回归。
+本文目标：给出整个 `libra code` 功能的端到端测试范围地图，并把历史 Wave 规划与当前实现状态对齐。第 5 节按“功能面 × 测试分层 × 现状/缺口/优先级”组织 20 项纵深面；第 6 节内嵌 L2 远端矩阵方案；第 7–10 节给出统一覆盖矩阵、文件清单、验证命令和 12 PR Wave roadmap。当前剩余项集中在 Wave 9 binary 级 Codex/MCP write-observe、Wave 10 provider negative path/TUI 复杂状态，以及 Wave 12 长时 SSE soak；不要再把已落地的 harness/matrix 文件列为前置阻塞。
 
 ---
 
@@ -19,33 +19,35 @@
 
 | 组件 | 状态 | 路径/说明 |
 |---|---|---|
-| 数据驱动矩阵骨架 | ✅ 就位 | `tests/harness/matrix.rs`：已定义 `CaseFile`、`Case`、`Step`（Attach/Detach/Submit/Sleep/WaitSnapshot）、`AuthMode`、`TokenSource`、`TokenSlot`、断言求值器 |
-| PTY Session Harness | ✅ 就位 | `tests/harness/code_session.rs`：`CodeSession::spawn()`、`snapshot()`、`matrix_attach/detach/submit()`、`with_control_observe()`、`with_lease_duration_ms()` |
+| 数据驱动矩阵骨架 | ✅ 就位 | `tests/harness/matrix.rs`：已定义 `CaseFile`、`Case`、`Step`（Attach/Detach/Submit/Sleep/WaitSnapshot/OpenEventStream/WaitEvent/RespondInteraction/ReadRepoFile/RunRepoCommand 等）、`AuthMode`、`TokenSource`、`TokenSlot`、断言求值器 |
+| PTY Session Harness | ✅ 就位 | `tests/harness/code_session.rs`：`CodeSession::spawn()`、`snapshot()`、`matrix_attach/detach/submit()`、`open_event_stream()`、`respond_interaction()`、`read_repo_file()`、`run_repo_command()`、`with_control_observe()`、`with_lease_duration_ms()` |
 | Lease TTL override | ✅ 就位 | `src/internal/ai/web/code_ui.rs` 有 `test_lease_duration_override()`；`src/command/code.rs` 在 `cfg(feature = "test-provider")` 下解析 `LIBRA_CODE_LEASE_DURATION_MS` |
 | 全部 JSON 数据文件 | ✅ 就位 | `tests/data/code_ui_remote/` 下 6 个矩阵 JSON + `provider_fixtures/` 下 4 个 fake fixture |
 | 现有 L2 smoke | ✅ 就位 | `tests/code_ui_scenarios.rs` 13 条 case（10 条 `#[cfg(feature = "test-provider")]` + 3 条 browser） |
-| 现有 L2 lease | ⚠️ 部分 | `tests/code_ui_remote_lease_matrix.rs` 仅 macro 了 4 条 case（共 9 条） |
-| Inline 网络层测试 | ⚠️ 部分 | `src/internal/ai/web/mod.rs` `mod tests` 已有 loopback、control auth、body limit、audit 单测 |
+| 现有 L2 lease | ✅ 就位 | `tests/code_ui_remote_lease_matrix.rs` 已覆盖 10 条 case（含 observe-mode automation attach 拒绝） |
+| 现有 L2 远端矩阵 | ✅ 就位 | SSE 7/7、Generation 3/3、Approval 3/3、State 7/7、Security 6/6、Model generation 2/2 live-gated runner |
+| Inline 网络层测试 | ✅ 就位 | `src/internal/ai/web/mod.rs` `mod tests` 已覆盖 loopback、control auth、body limit、audit、route-level loopback gate |
 | Executor 单元测试 | ⚠️ 部分 | `src/internal/ai/orchestrator/executor.rs` `mod tests` 已有 mock model 和基础 tool loop 测试 |
 | WS 库 | ✅ 就位 | `tokio-tungstenite = "0.29.0"` 已在 `Cargo.toml` `[dependencies]`，可用于 Codex mock WS |
 
-### 2.2 缺失的前置依赖（必须在对应 Wave 开始前解决）
+### 2.2 依赖裁决与剩余前置条件
 
-| 依赖 | 影响 Wave | 解决方式 | 备注 |
+| 依赖 / 条件 | 影响 Wave | 当前裁决 | 备注 |
 |---|---|---|---|
-| `insta` | PR 10（TUI 快照） | `Cargo.toml [dev-dependencies]` 新增 `insta = "1.40"` | 用于 `ratatui::backend::TestBackend` 快照比对；若团队不希望引入新依赖，可降级为手动 `Buffer::cell` 断言 |
-| `httpmock` | PR 10（Provider boot） | `Cargo.toml [dev-dependencies]` 新增 `httpmock = "2.0"` | 用于 stub 各 provider 的首次 completion HTTP 请求；可用 `axum::Server` 手写 mock 替代，但 `httpmock` 更轻量 |
-| `event_stream.rs` | PR 1 / PR 4（SSE） | **新建文件** `tests/harness/event_stream.rs` | 当前 harness 没有 SSE reader；这是 SSE 矩阵的硬性阻塞项 |
+| `insta` | PR 10（TUI 快照） | 未采用 | 当前 TUI smoke 采用 inline buffer 断言；更复杂快照仍可作为 quick-follow 引入 |
+| `httpmock` | PR 10（Provider boot） | 未采用 | Provider boot 复用 `axum` mock server，无需新增 dev-dependency |
+| `event_stream.rs` | PR 1 / PR 4（SSE） | ✅ 已落地 | `tests/harness/event_stream.rs` 已提供 blocking SSE reader，并由 SSE matrix 使用 |
+| `.env.test` + `DEEPSEEK_API_KEY` | PR 11（Model generation L3） | 运行条件 | live 矩阵 runner 已落地；nightly 稳定性指标依赖 maintainer 配置 secret 并等待 5 个 run |
 
-> **AI 编码落地原则**：如果一个 Wave 的前置依赖未解决，必须在该 Wave 的 PR 描述中把“添加依赖”列为首条 commit，或把该 Wave 整体后移到依赖就绪之后。
+> **AI 编码落地原则**：不要重复实现已落地的前置文件；后续变更应聚焦当前 Wave 状态表中仍标记 partial/deferred 的具体缺口。
 
 ### 2.3 可行性分级
 
 | 分级 | 含义 | 包含项 |
 |---|---|---|
-| 🟢 可直接编码 | 文件/类型已存在，只需扩写或新增同结构文件 | Lease 扩 9/9、State/Security/Generation runner、inline loopback test、error code L0、executor 扩写 |
-| 🟡 需新增中等复杂度组件 | 需要新建文件或新增 enum variant，但有明确模式可参考 | `event_stream.rs`、matrix 新增 `Step`/`ProviderRef` variant、`CodeSession` 新增 HTTP helper、CLI dispatch L1 |
-| 🔴 需架构决策或外部依赖 | 依赖未安装、或涉及跨模块可见性改动、或 CI 秘钥配置 | TUI 快照（缺 `insta`）、Provider boot（缺 `httpmock`）、Model generation L3（需 `.env.test` + nightly CI）、Codex mock WS（虽可行但工作量大） |
+| 🟢 可直接编码 | 文件/类型已存在，只需扩写或新增同结构文件 | Provider missing-key / `--api-base` negative path、TUI complex-state buffer 断言、executor 继续扩写 |
+| 🟡 需新增中等复杂度组件 | 需要补齐 binary 级编排或跨入口观察，但已有明确 helper 可参考 | Codex binary boot smoke、MCP `tools/call` → web SSE full write-and-observe、SIGTERM-mid-turn resume |
+| 🔴 需外部运行条件 | 依赖 CI secret、长时间 soak 或 nightly 稳定性窗口 | Model generation 5-day pass-rate gate、1 小时真网 SSE soak |
 
 ---
 
@@ -91,7 +93,7 @@ CI 默认门：L0+L1 必跑；L2 在 `test-provider` 下必跑；L3 仅 nightly 
 | Control mode | CLI 只有 `observe` / `write`，见 [src/command/code.rs](../../src/command/code.rs) 的 `ControlMode` | 原方案里的 `--control read` 不存在，应改为默认 `observe`；`CodeSessionOptions::with_control_observe()` 已存在 |
 | Fake provider | [src/internal/ai/providers/fake/fixture.rs](../../src/internal/ai/providers/fake/fixture.rs) 已支持 `text`、`tool_call`、`error` 和 `stream` delta | tool case 的风险不是缺 `tool_call` variant，而是需要避免重复命中同一 tool_call 造成循环 |
 | Env file | [src/command/code.rs](../../src/command/code.rs) 已支持 `--env-file` 且 TUI mode 接受 `.env.test` | 真实模型矩阵要默认传仓库根目录 `.env.test`，不能只跑 fake provider |
-| Loopback inline test | [src/internal/ai/web/mod.rs](../../src/internal/ai/web/mod.rs) 的 `mod tests` 已能直接使用 private `code_router()` / `code_write_router()` | 不需要把 `build_router` 提升为 `pub(crate)`；但**缺少**带 `ConnectInfo` 的路由级 403 测试 |
+| Loopback inline test | [src/internal/ai/web/mod.rs](../../src/internal/ai/web/mod.rs) 的 `mod tests` 已能直接使用 private `code_router()` / `code_write_router()` | 不需要把 `build_router` 提升为 `pub(crate)`；route-level 403 已由 Wave 2 覆盖 |
 | SSE lagged | `/events` 使用 `BroadcastStream` 后对 lagged error 静默丢弃，不会发 `event: lagged` | P0 不做强行制造 lag 的跨进程测试，只测重连和 initial replay |
 | Lease TTL override | [src/internal/ai/web/code_ui.rs](../../src/internal/ai/web/code_ui.rs) 已新增 `CodeUiRuntimeOptions` 与 `test_lease_duration_override()`，在 `cfg(feature = "test-provider")` 下读 `LIBRA_CODE_LEASE_DURATION_MS` | 已就位，矩阵直接消费即可 |
 | Tool-loop max_turns | [src/internal/ai/orchestrator/executor.rs](../../src/internal/ai/orchestrator/executor.rs) 已把 Implementation 24→48、Analysis 24→32 | 边界值测试需要新增 |
@@ -101,22 +103,22 @@ CI 默认门：L0+L1 必跑；L2 在 `test-provider` 下必跑；L3 仅 nightly 
 | 维度 | 当前 | 扩写后 |
 |---|---|---|
 | CLI 模式 / 互斥 / 解析 | 隐式触发 | L1 dispatch 测试覆盖每条模式与互斥错误码 |
-| Provider boot / flag passthrough | 仅 fake + ollama gate | 每个 provider httpmock smoke；thinking/reasoning/stream 字段 passthrough |
-| HTTP 读路由 + loopback gate 顺序 | 缺 | inline route test + security 矩阵 |
-| HTTP 写路由 lease 矩阵 | 4/9 | 9/9 + observe 模式 |
-| SSE | 无 runner | event_stream harness + 7 条 case |
+| Provider boot / flag passthrough | 7/7 reachable providers 已覆盖 | 仍需 missing-key / `--api-base` negative path quick-follow |
+| HTTP 读路由 + loopback gate 顺序 | 已覆盖 | inline route test + security 矩阵 |
+| HTTP 写路由 lease 矩阵 | 10/10 | 9 条原 lease case + observe-mode automation attach 拒绝 |
+| SSE | 7/7 | event_stream harness + SSE matrix |
 | Local TUI Control 锁 / 审计 | 1 条 instance conflict | advisory lock、stale PID、audit redaction L0 |
-| TUI 渲染 | 无 | TestBackend + insta 快照（需先加 `insta` 依赖） |
-| Tool ACL × context × policy | 隐式 | dev/review/research × 5 种 approval-policy 矩阵 |
-| Apply-Patch 文件生成(fake) | 无 runner | generation_cases.json 全量 + 失败分支 |
-| Approval / Interaction E2E | 无 | accept/reject/apply_to_future/并发 pending |
+| TUI 渲染 | 2 条 inline buffer smoke | complex-state 快照仍为 quick-follow；当前未引入 `insta` |
+| Tool ACL × context × policy | 6/6 | 含 MCP bridge 前缀防退化 |
+| Apply-Patch 文件生成(fake) | 3/3 | generation_cases.json 全量 + 失败分支 |
+| Approval / Interaction E2E | 3/3 | accept/reject/apply_to_future；并发 pending 仍按 P1 拆出 |
 | Orchestrator gate 边界 | 一条 review rejection | max_turns 47/49、workspace 越界、network deny、FUSE 回退 |
 | Codex 旁路运行时 | 静态守卫 | mock WS app-server + plan-first 拦截 |
-| MCP 双入口一致 | 单端 | HTTP + stdio 双入口同 thread 一致 |
-| Session resume / kill 重启 | 无 | SIGTERM kill 重启，transcript 完整恢复 |
-| 性能 smoke | 无 | 100k transcript / 长 SSE / 并发 / threads（`#[ignore]`） |
-| 真实模型生成 | 无 | DeepSeek `deepseek-v4-flash` 完整闭环 |
-| 错误码契约 | 散落 | L0 single-source mapping + 文档注脚 |
+| MCP 双入口一致 | partial | control.json mcpUrl + --stdio mutex + dual-reachability smoke；full write-and-observe 仍 deferred |
+| Session resume / kill 重启 | partial | happy-path resume 已覆盖；SIGTERM-mid-turn 仍 deferred |
+| 性能 smoke | 3 条 ignored smoke | 10 并发 `/threads`、100k transcript、1k event SSE；1 小时真网 soak 仍 deferred |
+| 真实模型生成 | runner 已落地 | DeepSeek `deepseek-v4-flash` live gate 已接入；5-day pass-rate 等待 secret/nightly |
+| 错误码契约 | 已覆盖 | L0 single-source mapping + 文档同步测试 |
 
 ---
 
@@ -139,58 +141,50 @@ CI 默认门：L0+L1 必跑；L2 在 `test-provider` 下必跑；L3 仅 nightly 
 
 ### 5.2 Provider 配置与启动
 
-- **现状 ⚠️**：fake provider 完全覆盖；DeepSeek/OpenAI/Anthropic/Gemini/Kimi/Zhipu/Ollama/Codex 在 Code 路径下只有 ollama L3 gate 和 codex 静态守卫。
+- **现状 ✅⚠️**：fake provider 完全覆盖；DeepSeek/OpenAI/Anthropic/Gemini/Kimi/Zhipu/Ollama provider boot 7/7 已经在 Code 路径下通过 `tests/helpers/mock_provider_server.rs` 覆盖。Codex 仍按 §5.13 独立处理。
 - **缺口**：
-  - 每个 provider 至少一条 boot smoke：CLI → 客户端构造 → 第一次 completion 请求成功（`httpmock` 返回 stub）。
-  - DeepSeek `--deepseek-thinking` / `--deepseek-reasoning-effort` / `--deepseek-stream` 透传到请求 body。
-  - Kimi `--kimi-thinking` / `--kimi-stream`、Ollama `--ollama-thinking` / `--ollama-compact-tools` 同上。
-  - 缺 API Key 时的可读错误（`anyhow::Context` 链）。
-  - `--api-base` 覆盖默认 base URL。
+  - 已完成：每个 reachable provider 至少一条 boot smoke；DeepSeek/Kimi/Ollama 相关 thinking/reasoning/stream/compact-tools 旗标透传。
+  - 仍待 quick-follow：缺 API Key 时的可读错误（`anyhow::Context` 链）。
+  - 仍待 quick-follow：`--api-base` 覆盖默认 base URL 的显式回归。
 - **优先级**：P1（Codex 除外，见 5.13）。
-- **测试位置**：**L1 新增** `tests/code_provider_boot_test.rs` + `tests/code_provider_flag_passthrough_test.rs`，用 `httpmock` 起本地 stub，捕获 outgoing request body。
-- **AI 落地提示**：**前置阻塞项**——`Cargo.toml` 必须先加 `httpmock`。若团队不希望引入 `httpmock`，可用 `tests/helpers/` 中已有的 `mock_completion_model.rs` 模式（手写 `axum` oneshot）替代，但需额外工作量。
+- **测试位置**：**L1 已新增** `tests/code_provider_boot_test.rs`，用 `tests/helpers/mock_provider_server.rs` 捕获 outgoing request body。
+- **AI 落地提示**：不要再引入 `httpmock` 作为前置依赖；当前实现已选择 `axum` mock server。
 
 ### 5.3 HTTP 读路由 + loopback gate
 
-- **现状 ⚠️**：`/session` 由 `code_ui_scenarios.rs` 间接验证；`/diagnostics`、`/threads` 几乎无专项；`/events` 完全未跑。
+- **现状 ✅**：`/session`、`/diagnostics`、`/threads` 与 loopback gate 已由 inline route test 和 security matrix 覆盖；`/events` 已由 SSE matrix 覆盖。
 - **缺口**：
   - `/session` 完整 schema（含 `controller`、`status`、`activeInteractionId`、`patchsets`）。
   - `/diagnostics` 字段齐全且全部 secret 字段经 redactor。
   - `/threads?limit/offset` 边界：`limit=abc` → 400 `INVALID_QUERY_PARAM`；`limit=10000` → clamp 到 200；空集 → `[]`。
   - 任意读路由 non-loopback 客户端 → 403 `LOOPBACK_REQUIRED`（loopback 校验**先于** body/token 校验，错误码顺序固定）。
 - **优先级**：P0。
-- **测试位置**：**L1 新增** [src/internal/ai/web/mod.rs](../../src/internal/ai/web/mod.rs) `mod tests` 内 inline test：用 `code_router()` + `ConnectInfo(192.0.2.10:4000)` 直击各路由 → 403。无需修改 `build_router` 可见性。**L2 配合** `code_ui_remote_security_matrix.rs` 复用 `security_cases.json`。
-- **AI 落地提示**：参考 `mod tests` 中已有的 `code_write_body_limit_returns_json_error` 模式：`app.oneshot(request).await`。对读路由需要构造带 `ConnectInfo` 扩展的 `Request`，可用 `tower::ServiceExt::oneshot` + `axum::extract::connect_info::MockConnectInfo` 或直接在 `Request` 扩展中插入 `SocketAddr`。
+- **测试位置**：**L1 已新增** [src/internal/ai/web/mod.rs](../../src/internal/ai/web/mod.rs) `mod tests` route-level loopback checks；**L2 已新增** `code_ui_remote_security_matrix.rs`。
+- **AI 落地提示**：新增读/写路由时继续先断言 loopback gate，再断言 body/token 语义，避免错误码顺序退化。
 
 ### 5.4 HTTP 写路由 + Controller Lease 状态机
 
-- **现状 ⚠️**：lease 矩阵 4 条 case 已跑；[tests/data/code_ui_remote/lease_cases.json](../../tests/data/code_ui_remote/lease_cases.json) 共 9 条 P0，runner 仅 macroed 4 条；`/messages` 大 body / busy / 422 在 `code_ui_scenarios.rs` 已覆盖；`/interactions/{id}` 仅 `INTERACTION_NOT_ACTIVE` 一条。
+- **现状 ✅**：[tests/code_ui_remote_lease_matrix.rs](../../tests/code_ui_remote_lease_matrix.rs) 已接入 10 条 case：9 条原 lease P0 + `--control observe` 下 automation attach 的 `CONTROL_DISABLED` 回归；`/messages` 大 body / busy / 422 仍由 `code_ui_scenarios.rs` 与 state matrix 覆盖；approval interaction P0 已由 approval matrix 覆盖。
 - **缺口**：
-  - 把 lease_cases.json 9 条全部接入 `lease_case!()` 宏。
-  - 短 TTL 真过期重新 attach（`LIBRA_CODE_LEASE_DURATION_MS` 已落地）。
-  - `--control observe` 下 automation attach → 403 `CONTROL_DISABLED`；`CodeSessionOptions::with_control_observe()` **已存在**，只需在矩阵中配置 `"control": "observe"`。
-  - 同 client 续约 vs 不同 client conflict 的 token 失效顺序。
-  - `/interactions/{id}` 写路径：approval 接受/拒绝、`selected_option`、`answers` 字段、`apply_to_future` 缓存、超时。
-  - `/control/cancel` idle 期间的 422 / `SESSION_BUSY` 文档化。
+  - 已完成：lease_cases.json 全量接入 `lease_case!()` 宏。
+  - 已完成：短 TTL 真过期重新 attach（`LIBRA_CODE_LEASE_DURATION_MS`）。
+  - 已完成：`--control observe` 下 automation attach → 403 `CONTROL_DISABLED`。
+  - 已完成：同 client 续约 vs 不同 client conflict 的 token 失效顺序。
+  - 已完成：approval 接受/拒绝/`apply_to_future` 三条 P0。
+  - 仍待 P1：多个 pending interaction 并发的 ID 路由。
 - **优先级**：P0。
-- **测试位置**：**L2 扩展** lease matrix 9/9；**L1 新增** approval interaction state machine 单测（在 `code_ui.rs` 内直接构造 pending interaction 驱动）。
-- **AI 落地提示**：`tests/code_ui_remote_lease_matrix.rs` 已有 `lease_case!` 宏，新增 case 只需在文件底部加一行 `lease_case!(lease_xxx);`，对应 `lease_cases.json` 中已有的 case name。已存在的 5 条未接入 case 名称见该 JSON。
+- **测试位置**：**L2 已扩展** lease matrix 10/10；approval P0 由 `tests/code_ui_remote_approval_matrix.rs` 覆盖。
+- **AI 落地提示**：新增 lease case 时仍保持“一条 JSON case + 一条 `lease_case!()`”的 cargo 输出定位。
 
 ### 5.5 SSE 事件流
 
-- **现状 ❌**：完全无 Rust 客户端；[tests/data/code_ui_remote/sse_cases.json](../../tests/data/code_ui_remote/sse_cases.json) 7 条已写好，但**没有 runner**。
+- **现状 ✅**：`tests/harness/event_stream.rs` 与 [tests/code_ui_remote_sse_matrix.rs](../../tests/code_ui_remote_sse_matrix.rs) 已落地，7 条 `sse_cases.json` case 全部有 Rust runner。
 - **缺口**：
-  - SSE blocking client：`tests/harness/event_stream.rs`（**新建文件**，独立 `reqwest::blocking`、per-read timeout、1 MiB 行上限、EOF 与 timeout 区分）。
-  - 初次连接 replay 全量 `session_updated` snapshot。
-  - submit → `status_changed: thinking` → tool_call → `status_changed: idle` 的事件序列与 `seq` 单调性。
-  - attach/detach 触发 `controller_changed`。
-  - 双订阅者均收到 submit 引发的事件（broadcast fan-out）。
-  - 断开重连后 initial replay 含最新 transcript（不丢）。
-  - streaming fixture 下 transcript 单调增长，无丢字。
-  - **降级 P2**：lagged stream 跨进程稳定再现困难，仅做 in-process broadcast 单测。
+  - 已完成：blocking SSE client、initial replay、status/session/controller events、双订阅者、断线重连 replay、streaming fixture 单调增长。
+  - 仍待 P2：lagged stream 跨进程稳定再现困难，仅做 in-process broadcast 单测或长时 soak。
 - **优先级**：P0。
-- **测试位置**：**L2 新增** `tests/harness/event_stream.rs` + `tests/code_ui_remote_sse_matrix.rs`。**L0 新增** SSE 解析器单元（`event:` / `data:` 行 + 空行分块）。
-- **AI 落地提示**：`event_stream.rs` 是**硬性阻塞项**，必须在 Wave 1 完成。签名建议：
+- **测试位置**：**L2 已新增** `tests/harness/event_stream.rs` + `tests/code_ui_remote_sse_matrix.rs`；perf smoke 覆盖 1k event monotonic seq。
+- **AI 落地提示**：后续扩展继续复用现有 API：
   ```rust
   pub struct EventStream { /* reqwest::blocking::Response */ }
   impl EventStream {
@@ -224,13 +218,13 @@ CI 默认门：L0+L1 必跑；L2 在 `test-provider` 下必跑；L3 仅 nightly 
 
 ### 5.8 TUI 渲染快照
 
-- **现状 ❌**：除 `ai_usage_tui_test.rs` 外，TUI 渲染没有快照测试；`libra code` 进入 TUI 后的 ratatui Buffer 未被验证。
+- **现状 ✅⚠️**：除 `ai_usage_tui_test.rs` 外，`libra code` TUI 已落地 2 条 inline buffer smoke；复杂状态快照仍是 quick-follow。
 - **缺口**：
-  - `insta` / `ratatui::backend::TestBackend` 快照：初始空 transcript、收到 assistant delta、approval prompt 弹窗、错误 banner、controller reclaim 状态条。
+  - 仍待：更复杂的 `ratatui::backend::TestBackend` 覆盖，包含初始空 transcript、收到 assistant delta、approval prompt 弹窗、错误 banner、controller reclaim 状态条。
   - 关键键位：`Ctrl+C` 取消、`q` 退出、approval 选择 yes/no/always、滚动键。
 - **优先级**：P1。
-- **测试位置**：**L1 新增** `tests/code_tui_render_test.rs` + `tests/snapshots/`，使用 `TestBackend` 渲染 `App` 不同 state。
-- **AI 落地提示**：**前置阻塞项**——必须先给 `Cargo.toml` 加 `insta = "1.40"`。`ratatui = "0.30.0"` 已在 deps。若不加 `insta`，可改用 `assert_eq!(buffer.cell(x, y).symbol(), "expected")` 手动断言，但维护成本高。
+- **测试位置**：**L1 已新增** inline buffer render smoke；如果后续要引入快照，再新增 `tests/snapshots/`。
+- **AI 落地提示**：当前裁决是不引入 `insta`；quick-follow 优先沿用 inline `Buffer::cell` 断言，除非复杂状态明显需要快照。
 
 ### 5.9 Tool ACL / context / approval policy
 
@@ -240,29 +234,29 @@ CI 默认门：L0+L1 必跑；L2 在 `test-provider` 下必跑；L3 仅 nightly 
   - tool ACL × `--approval-policy` 矩阵：`never` / `on-failure` / `on-request` / `untrusted` / `allow-all` 各跑一条 fake fixture，断言 approval interaction 是否产生。
   - `--network-access deny` 下 WebSearch / Shell `curl` 被 gate 拦截。
 - **优先级**：P0。
-- **测试位置**：**L1 新增** `tests/code_tool_acl_test.rs`，直接调用 `HeadlessCodeRuntime` + 不同 context/policy 组合。
+- **测试位置**：**L1 已新增** `tests/code_tool_acl_test.rs`，直接调用 `HeadlessCodeRuntime` + 不同 context/policy 组合。
 
 ### 5.10 Apply-Patch 与文件生成(fake)
 
-- **现状 ❌**：[tests/data/code_ui_remote/generation_cases.json](../../tests/data/code_ui_remote/generation_cases.json) 3 条 case 已写好，**runner 缺失**。
+- **现状 ✅**：[tests/code_ui_remote_generation_matrix.rs](../../tests/code_ui_remote_generation_matrix.rs) 已覆盖 [tests/data/code_ui_remote/generation_cases.json](../../tests/data/code_ui_remote/generation_cases.json) 的 3 条 case。
 - **缺口**：
   - fake fixture 返回 `apply_patch` → 临时 repo 出现完整 Rust 文件 → `rustc --test` 通过。
   - SSE 订阅期间触发同一生成请求 → 至少观测到 `executing_tool` 或 `session_updated` 含 patch 结果。
   - 失败分支：fixture 返回非法 patch → final snapshot status=`error`，**临时 repo 不留半写文件**。
 - **优先级**：P0。
-- **测试位置**：**L2 新增** `tests/code_ui_remote_generation_matrix.rs` + provider_fixtures，详见 §6.4 Wave 3。
+- **测试位置**：**L2 已新增** `tests/code_ui_remote_generation_matrix.rs` + provider_fixtures，详见 §6.4 Wave 3。
 
 ### 5.11 Approval / Interaction 端到端
 
-- **现状 ⚠️**：`ai_approval_ttl_test.rs` 覆盖 cache 策略，但 Code UI 的端到端 approval **未覆盖**。
+- **现状 ✅⚠️**：`ai_approval_ttl_test.rs` 覆盖 cache 策略；Code UI 的端到端 approval P0 已由 [tests/code_ui_remote_approval_matrix.rs](../../tests/code_ui_remote_approval_matrix.rs) 覆盖。
 - **缺口**：
-  - **P0**：fake fixture 触发 `Shell` tool → 因 `--approval-policy on-request` 进入 `awaiting_interaction` → harness POST `/interactions/{id}` 接受 → tool 执行 → assistant 完成。
-  - **P0**：拒绝路径：harness POST `approved=false` → tool 返回拒绝结果 → assistant 看到拒绝。
-  - **P0**：`apply_to_future` 缓存：第二次同 tool 自动通过（`accept_all` 触发 `approve_session` cache key，需要两轮使用相同 command + cwd 才能命中）。
+  - 已完成：fake fixture 触发 `Shell` tool → 因 `--approval-policy on-request` 进入 `awaiting_interaction` → harness POST `/interactions/{id}` 接受 → tool 执行 → assistant 完成。
+  - 已完成：拒绝路径：harness POST `approved=false` → tool 返回拒绝结果 → assistant 看到拒绝。
+  - 已完成：`apply_to_future` 缓存：第二次同 tool 自动通过。
   - **P1**：多个 pending interaction 并发的 ID 路由。降级原因：fake provider 每轮只发一个 tool_call，单 turn 并发需要扩展 fixture schema 支持 parallel tool calls，与 §5.13 之外的工作量不相称；P0 三条已经覆盖 ID 寻址正确性（每轮单 pending 也是 ID 路由的最小用例）。
 - **优先级**：P0（前三条），P1（并发降级）。
-- **测试位置**：**L2 新增** `tests/code_ui_approval_flow_test.rs`，扩展 `code_session.rs` 的 `respond_interaction()` helper。
-- **AI 落地提示**：`CodeSession` 已有 `browser_respond_interaction()` 和 `respond_interaction_expect_error()`，但缺少通用的 `respond_interaction(id, approved, selected_option, apply_to_future)`。建议新增：
+- **测试位置**：**L2 已新增** `tests/code_ui_remote_approval_matrix.rs`，并扩展 `code_session.rs` 的 `respond_interaction()` helper。
+- **AI 落地提示**：`CodeSession` 已有通用的 `respond_interaction(id, approved, selected_option, apply_to_future)`；新增 case 应直接复用：
   ```rust
   pub fn respond_interaction(
       &self,
@@ -287,91 +281,92 @@ CI 默认门：L0+L1 必跑；L2 在 `test-provider` 下必跑；L3 仅 nightly 
 
 ### 5.13 Codex 旁路运行时
 
-- **现状 ⚠️**：仅 [tests/code_codex_default_tui_test.rs](../../tests/code_codex_default_tui_test.rs) 静态守卫；运行时无端到端。
+- **现状 ⚠️**：[tests/code_codex_default_tui_test.rs](../../tests/code_codex_default_tui_test.rs) 提供静态守卫；[tests/code_codex_runtime_test.rs](../../tests/code_codex_runtime_test.rs) 已有 `--codex-port 0` validation smoke、`MockCodexWsServer` helper 和 handshake round-trip smoke，但尚未把 `libra code --provider codex` binary 级路径完整链入 mock WS。
 - **缺口**：
-  - 启动一个本地伪 Codex app-server（mock WebSocket 服务），`libra code --provider codex --codex-port <port>` 连上 → 收 notification → 落到 `.libra/objects/` 与 history index。
+  - 仍待：启动一个本地伪 Codex app-server（mock WebSocket 服务），`libra code --provider codex --codex-port <port>` 连上 → 收 notification → 落到 `.libra/objects/` 与 history index。
   - Codex plan-first（`--plan-mode true`）：在 plan approve 之前拒绝执行。
   - Codex 断开重连。
 - **优先级**：P1。
-- **测试位置**：**L2 新增** `tests/code_codex_runtime_test.rs` + 简易 mock WS server（用 `tokio-tungstenite` 接受连接 + 回放固定脚本）。
-- **AI 落地提示**：`tokio-tungstenite` 已在 `Cargo.toml`。mock WS server 可仿照 `tests/helpers/mock_codex.rs` 的 `MockCodexServer` 模式。注意 Codex 路径使用 JSON-RPC over WebSocket，需按 Codex 协议握手。
+- **测试位置**：**L2 已新增并需扩展** `tests/code_codex_runtime_test.rs` + 简易 mock WS server（用 `tokio-tungstenite` 接受连接 + 回放固定脚本）。
+- **AI 落地提示**：`tokio-tungstenite` 已在 `Cargo.toml`。继续在现有 `MockCodexWsServer` 上补 binary 级 boot / plan-mode / reconnect，不要另起并行 helper。
 
 ### 5.14 MCP 服务双入口一致
 
-- **现状 ✅**：[tests/mcp_integration_test.rs](../../tests/mcp_integration_test.rs)、[tests/e2e_mcp_flow.rs](../../tests/e2e_mcp_flow.rs) 覆盖资源/工具列表与 initialize 握手。
+- **现状 ✅⚠️**：[tests/mcp_integration_test.rs](../../tests/mcp_integration_test.rs)、[tests/e2e_mcp_flow.rs](../../tests/e2e_mcp_flow.rs) 覆盖资源/工具列表与 initialize 握手；[tests/code_mcp_dual_entry_test.rs](../../tests/code_mcp_dual_entry_test.rs) 已覆盖 control.json mcpUrl、`--stdio` mutex 和同进程 web/MCP dual-reachability smoke。
 - **缺口**（Code 路径）：
-  - `libra code` 启动后 MCP server 的端口号写入 `--control-info-file`（automation 发现）。
-  - `--stdio` 模式下 web + tui 不启的互斥。
-  - MCP `tools/call` 与 web `/messages` 双入口对同一 thread 的状态一致性（一个写，另一个 SSE 看到）。
+  - 已完成：`libra code` 启动后 MCP server 的端口号写入 `--control-info-file`（automation 发现）。
+  - 已完成：`--stdio` 模式下 web + tui 不启的互斥。
+  - 仍待：MCP `tools/call` 与 web `/messages` 双入口对同一 thread 的状态一致性（一个写，另一个 SSE 看到）。
 - **优先级**：P1。
-- **测试位置**：**L1 新增** `tests/code_mcp_dual_entry_test.rs` 跑双入口同步。
+- **测试位置**：**L1 已新增并需扩展** `tests/code_mcp_dual_entry_test.rs`。
 
 ### 5.15 Diagnostics 与 Secret Redaction
 
 - **现状 ✅**：[tests/diagnostics_redaction_test.rs](../../tests/diagnostics_redaction_test.rs)、[tests/redaction_contract_test.rs](../../tests/redaction_contract_test.rs) 在 AI 层面覆盖。
 - **缺口**：
-  - HTTP `/api/code/diagnostics` 返回值经 `SecretRedactor::default_runtime()`。
-  - `LIBRA_LOG_FILE` 中 secret-like path 被脱敏（来自 `security_cases.json`）。
-  - Audit JSON 在 redaction 后无 token 原文。
+  - 已完成：HTTP `/api/code/diagnostics` 返回值经 `SecretRedactor::default_runtime()`。
+  - 已完成：`LIBRA_LOG_FILE` 中 secret-like path 被脱敏（来自 `security_cases.json`）。
+  - 已完成：Audit JSON 在 redaction 后无 token 原文。
 - **优先级**：P1。
-- **测试位置**：**L2 新增** `code_ui_remote_security_matrix.rs` runner（已有 JSON）。
+- **测试位置**：**L2 已新增** `code_ui_remote_security_matrix.rs` runner。
 
 ### 5.16 Session / History 持久化(Code 路径)
 
 - **现状 ✅**：[tests/ai_session_jsonl_test.rs](../../tests/ai_session_jsonl_test.rs)、[tests/ai_storage_flow_test.rs](../../tests/ai_storage_flow_test.rs) 覆盖底层。
 - **缺口**（Code 路径）：
-  - `--resume <thread_id>` 启动时 transcript 完整恢复，`status=idle`。
-  - 中途 kill `libra code`（SIGTERM）→ 重启 `--resume` → 最新 turn 继续。
+  - 已完成：`--resume <thread_id>` 启动时 transcript 完整恢复，`status=idle`。
+  - 仍待：中途 kill `libra code`（SIGTERM）→ 重启 `--resume` → 最新 turn 继续。
   - 并发同一 thread 的两个 `libra code` 实例（应被 control-instance lock 拦截，见 5.6）。
 - **优先级**：P1。
-- **测试位置**：**L2 新增** `tests/code_resume_test.rs`。
+- **测试位置**：**L2 已新增并需扩展** `tests/code_resume_test.rs`。
 
 ### 5.17 并发边界 / 体积限制
 
-- **现状 ⚠️**：`code_ui_scenarios.rs` 覆盖 256 KiB 边界与第二浏览器 conflict。
+- **现状 ✅**：`code_ui_scenarios.rs` 覆盖 256 KiB 边界与第二浏览器 conflict；[tests/code_ui_remote_state_matrix.rs](../../tests/code_ui_remote_state_matrix.rs) 已覆盖 7 条 state case。
 - **缺口**（`state_cases.json` 已写 8 条）：
-  - 两线程并发 attach → 一胜一负（200 / 409）。
-  - thinking 中二次 submit → 409 `SESSION_BUSY`。
-  - cancel idle → 409 `SESSION_BUSY` 且文档化。
-  - 257 KiB / 1 MiB 拒绝且不挂死。
-  - streaming 进行中 detach → assistant 状态收敛到 idle 而非死锁。
+  - 已完成：两线程并发 attach → 一胜一负（200 / 409）。
+  - 已完成：thinking 中二次 submit → 409 `SESSION_BUSY`。
+  - 已完成：cancel idle → 409 `SESSION_BUSY` 且文档化。
+  - 已完成：257 KiB / 1 MiB 拒绝且不挂死。
+  - Deferred：streaming 进行中 detach → assistant 状态收敛到 idle 而非死锁。
 - **优先级**：P1。
-- **测试位置**：**L2 新增** `tests/code_ui_remote_state_matrix.rs` runner（JSON 已就位）。
+- **测试位置**：**L2 已新增** `tests/code_ui_remote_state_matrix.rs` runner。
 
 ### 5.18 性能与稳定性 smoke
 
-- **现状 ❌**。
+- **现状 ✅⚠️**：`tests/code_ui_perf_smoke_test.rs` 已有 3 条 `#[ignore]` smoke；长时真网 soak 仍 deferred。
 - **缺口**：
-  - 100k 行 transcript 下 `/session` 序列化耗时上限（如 < 200 ms）。
-  - SSE 长连接 1 小时不漏 event（缩比版：5 分钟 + 1000 events）。
-  - 10 并发 `/threads` 查询不死锁。
+  - 已完成：100k 行 transcript 下 `/session` 序列化耗时上限（默认 < 500 ms，可由 `LIBRA_PERF_CEILING_MS` 调整）。
+  - 已完成：1 000 events SSE broadcast monotonic seq。
+  - 已完成：10 并发 `/threads` 查询不死锁。
+  - 仍待：1 小时真网 SSE soak，需独立 nightly job。
 - **优先级**：P2。
-- **测试位置**：**L2 新增** `tests/code_ui_perf_smoke_test.rs`，`#[ignore]` + `LIBRA_RUN_PERF=1` 时跑。
+- **测试位置**：**L2 已新增** `tests/code_ui_perf_smoke_test.rs`，`#[ignore]` + `LIBRA_RUN_PERF=1` 时跑。
 
 ### 5.19 真实模型生成
 
-- **现状 ❌**：[tests/data/code_ui_remote/model_generation_cases.json](../../tests/data/code_ui_remote/model_generation_cases.json) 2 条 P0 case 已写，runner 缺；`.env.test` 路由缺。
-- **缺口**：见 §6.4 Wave 4 详细规约。
+- **现状 ✅⚠️**：[tests/code_ui_remote_model_generation_matrix.rs](../../tests/code_ui_remote_model_generation_matrix.rs) 已接入 [tests/data/code_ui_remote/model_generation_cases.json](../../tests/data/code_ui_remote/model_generation_cases.json) 的 2 条 P0 case；`.env.test` 路由与 DeepSeek thinking/high-reasoning 自动注入已落地。
+- **缺口**：见 §6.4 Wave 4 详细规约。剩余是运行条件与稳定性指标，不是实现文件缺口。
 - **优先级**：P0（条件：CI nightly + `LIBRA_RUN_LIVE=1`）。
-- **测试位置**：**L3 新增** `tests/code_ui_remote_model_generation_matrix.rs` + `harness::matrix` 扩 `ProviderRef::ModelFromEnvFile` 分支。
+- **测试位置**：**L3 已新增** `tests/code_ui_remote_model_generation_matrix.rs` + `harness::matrix` 的 `ProviderSpec::ModelFromEnvFile` 分支。
 
 ### 5.20 错误码契约同步
 
-- **现状 ⚠️**：错误码散落在 `code_ui.rs` 的 `CodeUiApiError` 与文档中。
-- **缺口**：单一 source-of-truth + 测试断言。
+- **现状 ✅**：错误码已有 source-of-truth + 测试断言，并同步 [docs/automation/local-tui-control.md](../automation/local-tui-control.md)。
+- **缺口**：新增 error code 时必须继续更新测试断言和文档注脚。
 - **优先级**：P1。
-- **测试位置**：**L0 新增** `code_ui::error::tests` 列出全部 ErrorCode → status 的映射，并在 [docs/automation/local-tui-control.md](../automation/local-tui-control.md) 加注脚同步。
-- **AI 落地提示**：`CodeUiApiError` 是 `pub struct` 含 `status: u16, code: String, message: String`。建议新增一个 `code_ui_error_codes()` 函数返回 `Vec<(&'static str, StatusCode)>`，然后在 `mod tests` 中遍历断言每个 code 与 status 的对应关系。新增 error code 时开发者必须同步更新该列表，否则测试编译失败。
+- **测试位置**：**L0 已新增** `code_ui::error::tests` 列出全部 ErrorCode → status 的映射，并与 [docs/automation/local-tui-control.md](../automation/local-tui-control.md) 同步。
+- **AI 落地提示**：新增 error code 时开发者必须同步更新该列表，否则测试编译失败。
 
 ---
 
 ## L2 远端矩阵
 
-本节是 §5 中 5.4 / 5.5 / 5.10 / 5.15 / 5.17 / 5.19 的合并实施细节。原“L2 远端测试落地”方案完整保留在此。
+本节是 §5 中 5.4 / 5.5 / 5.10 / 5.15 / 5.17 / 5.19 的合并实施细节。历史“L2 远端测试落地”方案已基本实现；本节保留当前设计约束和剩余 deferred 项。
 
 ### 6.1 可行性判断
 
-**可直接落地：**
+**已落地：**
 
 - controller attach 的 missing/invalid control token、invalid kind、conflict、detach、stale token、same client renewal。
 - SSE initial replay、status_changed、session_updated、controller_changed、双订阅者、断线后重连读取最新 snapshot。
@@ -379,28 +374,28 @@ CI 默认门：L0+L1 必跑；L2 在 `test-provider` 下必跑；L3 仅 nightly 
 - 并发 attach 一胜一负、busy submit、256 KiB 边界、1 MiB drain 不挂死、cancel idle 返回文档化错误。
 - diagnostics redaction、`/threads` query validation/clamp、route 级 non-loopback 拒绝顺序。
 
-**需要小改造后落地：**
+**已经完成的小改造：**
 
 - lease expiry L2：默认 TTL 是 120s，必须加 test-only TTL override（**已落地**于 [src/internal/ai/web/code_ui.rs](../../src/internal/ai/web/code_ui.rs) 的 `test_lease_duration_override()`）。
-- `--control observe` L2：当前 `CodeSession::spawn` 固定传 `--control write`，需要给 `CodeSessionOptions` 加控制模式（**已存在** `with_control_observe()`）。
-- SSE blocking client：当前 harness 没有 `/events` reader，需要新增 `event_stream.rs`（**唯一硬性阻塞项**）。
-- 模型能力测试：当前 `CodeSession::spawn` 固定 `--provider fake --fake-fixture ...`；需要新增 provider 配置，支持默认从 `.env.test` 启动 DeepSeek `deepseek-v4-flash`。
+- `--control observe` L2：`CodeSessionOptions::with_control_observe()` 已存在并被 security/lease case 使用。
+- SSE blocking client：`tests/harness/event_stream.rs` 已存在并被 SSE matrix 使用。
+- 模型能力测试：`ProviderSpec::ModelFromEnvFile` 已支持默认从 `.env.test` 启动 DeepSeek `deepseek-v4-flash`。
 
 **建议推迟或降级：**
 
 - “lagged stream 不死”跨进程测试容易依赖 socket backpressure 和 broadcast polling 时序，放到 P2 或以 in-process 单元测试覆盖解析器。
-- “cancel during executing tool phase”若要稳定命中 `executing_tool`，需要 fake fixture 支持一次性/序列化响应，或选择稳定长耗时 tool。当前先用数据文件记录候选，实现时若不稳定则降级到 L1。
+- “cancel during executing tool phase”若要稳定命中 `executing_tool`，需要 fake fixture 支持一次性/序列化响应，或选择稳定长耗时 tool。当前仍保留为 deferred 候选。
 
 ### 6.2 数据驱动设计
 
-新增 [tests/harness/matrix.rs](../../tests/harness/matrix.rs)（**已就位**），从 `tests/data/code_ui_remote/*.json` 读取 case。结构：
+[tests/harness/matrix.rs](../../tests/harness/matrix.rs) 已就位，从 `tests/data/code_ui_remote/*.json` 读取 case。结构：
 
 ```rust
 #[derive(Deserialize)]
 pub struct RemoteCase {
     pub name: String,
     pub priority: Priority,
-    pub provider: Option<ProviderRef>,
+    pub provider: Option<ProviderSpec>,
     pub fixture: Option<FixtureRef>,
     pub options: CaseOptions,
     pub steps: Vec<Step>,
@@ -415,15 +410,15 @@ pub struct RemoteCase {
 - `matrix::run(case)` 失败时统一拼接 `scenario '<name>' step '<step>' failed` 和 `CodeSession::debug_context()`。
 - 测试数据只描述动作和断言，不编码 Rust 闭包。复杂谓词通过枚举名实现，例如 `controller_kind_eq`、`transcript_contains`、`event_seen`。
 
-### 6.3 必要代码改动
+### 6.3 已落地的代码改动
 
 #### Harness
 
-修改 [tests/harness/code_session.rs](../../tests/harness/code_session.rs)：
+[tests/harness/code_session.rs](../../tests/harness/code_session.rs) 已完成以下扩展：
 
-- `CodeSessionOptions` 新增：
-  - `provider: CodeSessionProvider`，默认 `Fake { fixture }`。
-  - `with_model_from_env_test()`：默认读取 repo-root `.env.test`，解析 `LIBRA_CODE_TEST_PROVIDER` / `LIBRA_CODE_TEST_MODEL`，spawn 时传 `--env-file <repo>/.env.test --provider <provider> --model <model> --deepseek-thinking enabled --deepseek-reasoning-effort high`。
+- `CodeSessionOptions` 已新增：
+  - `provider_override: Option<String>` / `model_override: Option<String>`，默认仍走 fake fixture。
+  - `with_live_provider(provider, model)` + `with_env_file(path)`：默认读取 repo-root `.env.test`，解析 `LIBRA_CODE_TEST_PROVIDER` / `LIBRA_CODE_TEST_MODEL`，spawn 时传 `--env-file <repo>/.env.test --provider <provider> --model <model> --deepseek-thinking enabled --deepseek-reasoning-effort high`。
   - `control_write: bool`，默认 `true`；`with_control_observe()` 让 spawn 不传 `--control write`（**已存在**）。
   - `lease_duration_ms: Option<u64>`；spawn 时设置 `LIBRA_CODE_LEASE_DURATION_MS`（**已存在**）。
   - `extra_env: Vec<(String, String)>`；用于 diagnostics redaction / audit log 场景，并且要在 harness 默认 env 之后应用，保证 case 能覆盖 `LIBRA_LOG_FILE`。
@@ -433,7 +428,7 @@ pub struct RemoteCase {
   - 默认要求 `LIBRA_CODE_TEST_PROVIDER=deepseek` 且 `LIBRA_CODE_TEST_MODEL=deepseek-v4-flash`；若不是 deepseek，runner 应失败并提示该矩阵固定验证 DeepSeek thinking/high reasoning 模式。
   - `.env.test` 中还应包含 DeepSeek 凭证，例如 `DEEPSEEK_API_KEY` 和可选 DeepSeek base URL。
   - 模型矩阵默认 `--context dev --approval-policy never`，避免 classifier 额外消耗模型调用，并保证 workspace 内 `apply_patch` 不需要人工确认。
-- 新增通用 HTTP helper（以下方法当前**不存在**，需新增）：
+- 通用 HTTP helper 已新增，后续矩阵应复用这些方法：
   - `attach_automation_expect(...) -> Result<(StatusCode, Value)>`
   - `attach_kind_expect(kind, client_id, control_token_mode) -> Result<(StatusCode, Value)>`
   - `detach_with_token(client_id, controller_token) -> Result<(StatusCode, Value)>`
@@ -447,12 +442,12 @@ pub struct RemoteCase {
   - `open_event_stream(timeout) -> Result<EventStream>`
   - `respond_interaction(id, response) -> Result<(StatusCode, Value)>`
 
-新增 `tests/harness/event_stream.rs`：
+`tests/harness/event_stream.rs` 已新增：
 
 - 使用独立 `reqwest::blocking::Client`。不要复用全局 5s total timeout，而是设置 per-read timeout。
 - 手工解析 SSE block，只识别 `event:` 和 `data:`。
 - 单行上限 1 MiB，`next()` 超时返回 `Ok(None)`，EOF 返回明确错误。
-- 建议对外暴露：
+- 当前对外暴露：
   ```rust
   pub struct SseEvent { pub event: String, pub data: String }
   pub struct EventStream { /* private */ }
@@ -462,13 +457,13 @@ pub struct RemoteCase {
   }
   ```
 
-新增 / 扩展 [tests/harness/matrix.rs](../../tests/harness/matrix.rs)：
+[tests/harness/matrix.rs](../../tests/harness/matrix.rs) 已扩展：
 
 - 读取 `tests/data/code_ui_remote/*.json`。
 - 分发 step。
 - 把 `TokenSource::{current, stale, forged, none}` 和上一轮 attach/detach 的 token 状态保存在 runner context 中（**已实现**）。
 - 新增 `Step::OpenEventStream` / `Step::WaitEvent` / `Step::RespondInteraction`。
-- 新增 `ProviderRef::ModelFromEnvFile`。
+- 新增 `ProviderSpec::ModelFromEnvFile`。
 - 新增 assertion 谓词：`event_seen`、`transcript_contains`、`file_exists`、`repo_command_exit_0`。
 
 #### Runtime 短 TTL（已落地）
@@ -479,21 +474,21 @@ pub struct RemoteCase {
 
 #### Inline loopback tests
 
-在 [src/internal/ai/web/mod.rs](../../src/internal/ai/web/mod.rs) 的现有 `mod tests` 追加 route 级测试即可：
+在 [src/internal/ai/web/mod.rs](../../src/internal/ai/web/mod.rs) 的现有 `mod tests` 已追加 route 级测试：
 
 - `GET /api/code/session` 带 `ConnectInfo(192.0.2.10:4000)` 返回 403 / `LOOPBACK_REQUIRED`。
 - `POST /api/code/messages` 同样先返回 `LOOPBACK_REQUIRED`，证明 loopback 校验先于 body/controller token 校验。
 
-不需要修改 `build_router` 可见性。参考已有 `loopback_api_request_rejects_remote_clients` 模式，但需要构造完整 `Request` 并过 router。
+不需要修改 `build_router` 可见性。后续新增路由继续参考已有 `loopback_api_request_rejects_remote_clients` 模式，构造完整 `Request` 并过 router。
 
 ### 6.4 L2 远端 Wave 0–5
 
 #### Wave 0：基础设施
 
-1. 新增 `tests/data/code_ui_remote/` 数据目录（**已存在**）。
-2. 新增 `event_stream.rs` 和 `matrix.rs`（**matrix.rs 已就位，event_stream.rs 待补**）。
-3. 扩展 `CodeSessionOptions` 和通用 HTTP helper。
-4. 增加 test-only lease TTL override（**已落地**）。
+1. `tests/data/code_ui_remote/` 数据目录已存在。
+2. `event_stream.rs` 和 `matrix.rs` 已就位。
+3. `CodeSessionOptions` 和通用 HTTP helper 已扩展。
+4. test-only lease TTL override 已落地。
 
 验收：
 
@@ -504,7 +499,7 @@ cargo test --lib code_ui
 
 #### Wave 1：Controller Lease
 
-新增 / 扩展 [tests/code_ui_remote_lease_matrix.rs](../../tests/code_ui_remote_lease_matrix.rs)（**已存在，需 macro 扩到 9/9**），读取 [tests/data/code_ui_remote/lease_cases.json](../../tests/data/code_ui_remote/lease_cases.json)。
+[tests/code_ui_remote_lease_matrix.rs](../../tests/code_ui_remote_lease_matrix.rs) 已读取 [tests/data/code_ui_remote/lease_cases.json](../../tests/data/code_ui_remote/lease_cases.json)，并扩展到 10 条 `lease_case!()`。
 
 首批 P0 case：
 
@@ -518,11 +513,11 @@ cargo test --lib code_ui
 - wrong/stale token 不能 detach/submit。
 - 短 TTL 过期后旧 token 失效，新 client 可 attach。
 
-**AI 落地提示**：该文件当前有 4 条 `lease_case!` 调用，只需在文件末尾追加剩余 5 条。JSON 中已有完整 step 定义，无需改 JSON。
+**AI 落地提示**：该文件保持“一条 JSON case + 一条 `lease_case!()`”模式；新增 case 时不要重新写自定义 runner。
 
 #### Wave 2：SSE
 
-新增 `tests/code_ui_remote_sse_matrix.rs`，读取 [tests/data/code_ui_remote/sse_cases.json](../../tests/data/code_ui_remote/sse_cases.json)。
+`tests/code_ui_remote_sse_matrix.rs` 已新增，读取 [tests/data/code_ui_remote/sse_cases.json](../../tests/data/code_ui_remote/sse_cases.json)。
 
 首批 P0/P1 case：
 
@@ -534,11 +529,11 @@ cargo test --lib code_ui
 - 断开 SSE 后 submit，重连 initial replay 包含最新 transcript。
 - streaming fixture 的 transcript 内容单调增长。
 
-**AI 落地提示**：`event_stream.rs` 必须先完成。`matrix.rs` 需新增 `Step::OpenEventStream { name, timeout_ms }` 和 `Step::WaitEvent { name, event, timeout_ms, assertions }`。`CodeSession` 需新增 `open_event_stream(&self) -> Result<EventStream>`，URL 为 `self.url("/events")`。
+**AI 落地提示**：`event_stream.rs`、`Step::OpenEventStream`、`Step::WaitEvent` 与 `CodeSession::open_event_stream()` 均已存在；新增 SSE case 只需补 JSON 和对应 `sse_case!()`。
 
 #### Wave 3：Code 服务生成代码并测试
 
-新增 `tests/code_ui_remote_generation_matrix.rs`，读取 [tests/data/code_ui_remote/generation_cases.json](../../tests/data/code_ui_remote/generation_cases.json)。
+`tests/code_ui_remote_generation_matrix.rs` 已新增，读取 [tests/data/code_ui_remote/generation_cases.json](../../tests/data/code_ui_remote/generation_cases.json)。
 
 这组 case 必须覆盖完整闭环，而不是只断言 transcript：
 
@@ -563,7 +558,7 @@ cargo test --lib code_ui
 
 #### Wave 4：真实模型生成能力
 
-新增 `tests/code_ui_remote_model_generation_matrix.rs`，读取 [tests/data/code_ui_remote/model_generation_cases.json](../../tests/data/code_ui_remote/model_generation_cases.json)。
+`tests/code_ui_remote_model_generation_matrix.rs` 已新增，读取 [tests/data/code_ui_remote/model_generation_cases.json](../../tests/data/code_ui_remote/model_generation_cases.json)。
 
 该矩阵不是 fake fixture 回归，而是验证真实模型是否能通过 Code 服务完成代码生成：
 
@@ -605,7 +600,7 @@ libra code --env-file .env.test --provider "$LIBRA_CODE_TEST_PROVIDER" \
 
 #### Wave 5：State 和 Security
 
-新增：
+已新增：
 
 - `tests/code_ui_remote_state_matrix.rs`，读取 [tests/data/code_ui_remote/state_cases.json](../../tests/data/code_ui_remote/state_cases.json)。
 - `tests/code_ui_remote_security_matrix.rs`，读取 [tests/data/code_ui_remote/security_cases.json](../../tests/data/code_ui_remote/security_cases.json)。
@@ -625,68 +620,68 @@ libra code --env-file .env.test --provider "$LIBRA_CODE_TEST_PROVIDER" \
 
 ## 覆盖矩阵
 
-| # | 功能面 | L0 | L1 | L2 | L3 | 现状 | 优先级 |
+| # | 功能面 | L0 | L1 | L2 | L3 | 当前状态 | 剩余风险 |
 |---|---|---|---|---|---|---|---|
-| 5.1 | CLI 解析 / 模式分发 | – | new | – | – | ⚠️ | P0 |
-| 5.2 | Provider boot + flag passthrough | – | new | – | – | ⚠️ | P1 |
-| 5.3 | HTTP 读路由 + loopback gate | new | new | matrix | – | ⚠️ | P0 |
-| 5.4 | HTTP 写路由 + lease 状态机 | – | exist | matrix(扩) | – | ⚠️ | P0 |
-| 5.5 | SSE | new | – | new matrix | – | ❌ | P0 |
-| 5.6 | Local TUI Control 锁/审计 | new | – | exist+扩 | – | ⚠️ | P0/P1 |
-| 5.7 | Browser Control | – | – | exist+扩 | – | ✅⚠️ | P1 |
-| 5.8 | TUI 渲染快照 | – | new | – | – | ❌ | P1 |
-| 5.9 | Tool ACL / context / policy | – | new | – | – | ⚠️ | P0 |
-| 5.10 | Apply-Patch 生成(fake) | – | – | new matrix | – | ❌ | P0 |
-| 5.11 | Approval / Interaction E2E | – | – | new | – | ❌ | P0 |
-| 5.12 | Orchestrator gate / max_turns | – | exist+扩 | – | – | ⚠️ | P0 |
-| 5.13 | Codex 旁路运行时 | – | – | new(mock WS) | – | ⚠️ | P1 |
-| 5.14 | MCP 双入口一致 | – | new | exist | – | ⚠️ | P1 |
-| 5.15 | Diagnostics redaction | – | exist | new matrix | – | ✅⚠️ | P1 |
-| 5.16 | Session resume / kill | – | – | new | – | ❌ | P1 |
-| 5.17 | 并发 / size limits | – | – | new matrix | – | ⚠️ | P1 |
-| 5.18 | 性能 smoke | – | – | new(ignore) | – | ❌ | P2 |
-| 5.19 | 真实模型生成 | – | – | – | new matrix | ❌ | P0(nightly) |
-| 5.20 | 错误码契约 | new | – | – | – | ⚠️ | P1 |
+| 5.1 | CLI 解析 / 模式分发 | – | done | – | – | ✅ | 持续随 CLI option 增量维护 |
+| 5.2 | Provider boot + flag passthrough | – | done | – | – | ✅⚠️ | missing-key / `--api-base` quick-follow |
+| 5.3 | HTTP 读路由 + loopback gate | done | done | done | – | ✅ | 新路由需维持 loopback-first 错误顺序 |
+| 5.4 | HTTP 写路由 + lease 状态机 | – | done | done | – | ✅ | pending interaction 并发仍 P1 |
+| 5.5 | SSE | done | – | done | – | ✅⚠️ | lagged / 1 小时 soak deferred |
+| 5.6 | Local TUI Control 锁/审计 | done | – | partial | – | ⚠️ | stale PID / 自定义 token/info 文件仍 P1 |
+| 5.7 | Browser Control | – | – | partial | – | ✅⚠️ | reload / disabled-order / token-expiry grace |
+| 5.8 | TUI 渲染快照 | – | partial | – | – | ✅⚠️ | complex-state render quick-follow |
+| 5.9 | Tool ACL / context / policy | – | done | – | – | ✅ | 持续随 tool registry 增量维护 |
+| 5.10 | Apply-Patch 生成(fake) | – | – | done | – | ✅ | 持续随 fixture schema 增量维护 |
+| 5.11 | Approval / Interaction E2E | – | – | done | – | ✅⚠️ | 并发 pending 仍 P1 |
+| 5.12 | Orchestrator gate / max_turns | – | partial | – | – | ⚠️ | 继续扩 max_turns / contract violation |
+| 5.13 | Codex 旁路运行时 | – | – | partial | – | ⚠️ | binary boot / plan-mode / reconnect |
+| 5.14 | MCP 双入口一致 | – | partial | smoke | – | ⚠️ | MCP write-and-observe full path |
+| 5.15 | Diagnostics redaction | done | exist | done | – | ✅ | 持续随 diagnostics 字段增量维护 |
+| 5.16 | Session resume / kill | – | – | partial | – | ⚠️ | SIGTERM-mid-turn resume |
+| 5.17 | 并发 / size limits | – | – | done | – | ✅⚠️ | streaming detach during tool phase deferred |
+| 5.18 | 性能 smoke | – | – | done(ignore) | – | ✅⚠️ | 1 小时真网 SSE soak |
+| 5.19 | 真实模型生成 | – | – | – | done(gated) | ✅⚠️ | secret + 5-day nightly pass-rate |
+| 5.20 | 错误码契约 | done | – | – | – | ✅ | 新 error code 需同步文档和测试 |
 
 ---
 
 ## 关键文件路径
 
-### 待新增 — 基础设施
+### 已就位 — 基础设施
 
-- `tests/harness/event_stream.rs`（**新建，P0 阻塞项**）
-- 扩展 [tests/harness/code_session.rs](../../tests/harness/code_session.rs)：`with_model_from_env_test()`、`respond_interaction()`、`open_event_stream()`、`get_threads()`、`diagnostics_raw_text()`、`libra_log_text()`、`read_repo_file()`、`run_repo_command()`（**扩展现有文件**）
-- 扩展 [tests/harness/matrix.rs](../../tests/harness/matrix.rs)：`ProviderRef::ModelFromEnvFile`、`Step::OpenEventStream` / `WaitEvent`、`Step::RespondInteraction`（**扩展现有文件**）
+- `tests/harness/event_stream.rs`
+- [tests/harness/code_session.rs](../../tests/harness/code_session.rs)：`with_live_provider()`、`with_env_file()`、`respond_interaction()`、`open_event_stream()`、`get_threads()`、`diagnostics_raw_text()`、`libra_log_text()`、`read_repo_file()`、`run_repo_command()`
+- [tests/harness/matrix.rs](../../tests/harness/matrix.rs)：`ProviderSpec::ModelFromEnvFile`、`Step::OpenEventStream` / `WaitEvent`、`Step::RespondInteraction`
 
-### 待新增 — 矩阵 runner（数据已就位）
+### 已就位 — 矩阵 runner
 
 - `tests/code_ui_remote_sse_matrix.rs`（读 `sse_cases.json`）
 - `tests/code_ui_remote_generation_matrix.rs`（读 `generation_cases.json`）
 - `tests/code_ui_remote_model_generation_matrix.rs`（读 `model_generation_cases.json`）
 - `tests/code_ui_remote_state_matrix.rs`（读 `state_cases.json`）
 - `tests/code_ui_remote_security_matrix.rs`（读 `security_cases.json`）
+- `tests/code_ui_remote_approval_matrix.rs`（读 approval cases）
+- `tests/code_ui_remote_lease_matrix.rs`（读 `lease_cases.json`）
 
-### 待新增 — 纵深面
+### 已就位 / 已部分就位 — 纵深面
 
 - `tests/code_cli_dispatch_test.rs`
 - `tests/code_provider_boot_test.rs`
-- `tests/code_provider_flag_passthrough_test.rs`
 - `tests/code_tool_acl_test.rs`
-- `tests/code_ui_approval_flow_test.rs`
 - `tests/code_codex_runtime_test.rs`
 - `tests/code_mcp_dual_entry_test.rs`
 - `tests/code_resume_test.rs`
-- `tests/code_tui_render_test.rs` + `tests/snapshots/`（需先加 `insta` 依赖）
 - `tests/code_ui_perf_smoke_test.rs`（`#[ignore]`）
-- `tests/code_control_lock_test.rs`
+- TUI render smoke 当前为 inline buffer 断言；未采用 `tests/code_tui_render_test.rs` + `insta` 快照路线。
+- Approval flow 当前由 `tests/code_ui_remote_approval_matrix.rs` 覆盖，不再单独维护额外的 approval-flow 测试文件。
 
-### 待扩展 — 现有
+### 仍待扩展 — 现有
 
-- 扩展 [tests/code_ui_remote_lease_matrix.rs](../../tests/code_ui_remote_lease_matrix.rs) macro 覆盖到 9/9 case（**只需加 5 行**）。
-- 扩展 [src/internal/ai/web/mod.rs](../../src/internal/ai/web/mod.rs) `mod tests`：route-level loopback 拒绝顺序（**参考已有 `code_write_body_limit_returns_json_error` 模式**）。
-- 扩展 [src/internal/ai/orchestrator/executor.rs](../../src/internal/ai/orchestrator/executor.rs) `mod tests`：max_turns / contract violation 矩阵（**参考已有 `MockModel`/`ConditionalModel` 模式**）。
-- 扩展 [src/internal/ai/web/code_ui.rs](../../src/internal/ai/web/code_ui.rs) `mod tests`：interaction state machine、redaction 单测、错误码契约 L0（**参考已有 `RecordingCodeUiAdapter` 模式**）。
-- 同步 [docs/automation/local-tui-control.md](../automation/local-tui-control.md) 错误码 / 取消行为注脚。
+- 扩展 [src/internal/ai/orchestrator/executor.rs](../../src/internal/ai/orchestrator/executor.rs) `mod tests`：继续补 max_turns / contract violation 矩阵（参考已有 `MockModel`/`ConditionalModel` 模式）。
+- 扩展 [tests/code_codex_runtime_test.rs](../../tests/code_codex_runtime_test.rs)：binary 级 Codex boot、plan-mode、reconnect。
+- 扩展 [tests/code_mcp_dual_entry_test.rs](../../tests/code_mcp_dual_entry_test.rs)：MCP `tools/call` 写入与 web SSE 观察同线程编排。
+- 扩展 [tests/code_resume_test.rs](../../tests/code_resume_test.rs)：SIGTERM-mid-turn resume。
+- 扩展 provider boot/TUI render quick-follow：missing-key、`--api-base`、复杂状态 inline buffer 断言。
 
 ### 复用现有 fixture / data
 
@@ -710,9 +705,7 @@ cargo test --lib
 cargo test --lib code_ui
 cargo test --features test-provider --test code_cli_dispatch_test
 cargo test --features test-provider --test code_provider_boot_test
-cargo test --features test-provider --test code_provider_flag_passthrough_test
 cargo test --features test-provider --test code_tool_acl_test
-cargo test --features test-provider --test code_tui_render_test
 cargo test --features test-provider --test code_mcp_dual_entry_test
 
 # L2 PTY/HTTP（串行）
@@ -722,10 +715,9 @@ cargo test --features test-provider --test code_ui_remote_sse_matrix -- --test-t
 cargo test --features test-provider --test code_ui_remote_generation_matrix -- --test-threads=1
 cargo test --features test-provider --test code_ui_remote_state_matrix -- --test-threads=1
 cargo test --features test-provider --test code_ui_remote_security_matrix -- --test-threads=1
-cargo test --features test-provider --test code_ui_approval_flow_test -- --test-threads=1
+cargo test --features test-provider --test code_ui_remote_approval_matrix -- --test-threads=1
 cargo test --features test-provider --test code_resume_test -- --test-threads=1
 cargo test --features test-provider --test code_codex_runtime_test -- --test-threads=1
-cargo test --features test-provider --test code_control_lock_test -- --test-threads=1
 
 # L3（nightly / LIBRA_RUN_LIVE=1）
 LIBRA_RUN_LIVE=1 cargo test --features test-provider \
@@ -752,27 +744,26 @@ cargo test --all --all-features
 
 每个 PR 保持 [tests/code_ui_scenarios.rs](../../tests/code_ui_scenarios.rs) 现有 smoke 全绿；不要在同一 PR 中迁移旧 smoke 进矩阵。
 
-| PR | 主题 | 要点 | 可行性 | 阻塞项 |
+| PR | 主题 | 当前状态 | 剩余项 | 阻塞项 |
 |---|---|---|---|---|
-| 1 | 基础设施 | 扩 `code_session.rs` + `matrix.rs`，**新增 `event_stream.rs`**，只让 1 条 SSE case 跑通做收敛 | 🟡 | `event_stream.rs` 必须先完成 |
-| 2 | CLI / route P0 + 错误码契约 L0 | `code_cli_dispatch_test.rs` + `web/mod.rs` inline loopback test + `code_ui::error::tests` 单 source-of-truth | 🟢 | 无 |
-| 3 | Lease 全量 | lease matrix 9/9 + `--control observe` + audit redaction L0 | 🟢 | 无（`with_control_observe` 已存在） |
-| 4 | SSE 全量 | `code_ui_remote_sse_matrix.rs` + 7 条 case | 🟡 | 依赖 PR 1 的 `event_stream.rs` |
-| 5 | 生成 fake | `code_ui_remote_generation_matrix.rs` + provider_fixtures + apply_patch + 失败分支 | 🟢 | 无 |
-| 6 | Approval flow | `code_ui_approval_flow_test.rs` + `respond_interaction()` helper + accept / reject / `apply_to_future` 三条 P0 | 🟡 | 需新增 `respond_interaction` helper（并发 pending 已按 §5.11 P1 拆出，单 turn 单 pending 已覆盖 ID 路由最小集） |
-| 7 | State / Security 矩阵 | 复用已就位 JSON；state busy/body/parallel/streaming + security diagnostics/threads/audit | 🟢 | 无 |
-| 8 | Orchestrator gate / max_turns / Tool ACL | `executor.rs` mod tests 扩 + `code_tool_acl_test.rs` 矩阵 | 🟢 | 无 |
-| 9 | Codex runtime + MCP 双入口 + resume | mock WS server + `code_codex_runtime_test.rs` + `code_mcp_dual_entry_test.rs` + `code_resume_test.rs` | 🟡 | 需手写 Codex JSON-RPC WS mock |
-| 10 | TUI 快照 + provider boot/flag passthrough | `insta` 接入 + `httpmock` provider boot + flag passthrough | 🔴 | **必须先加 `insta` + `httpmock` 到 Cargo.toml** |
-| 11 | Model generation L3 | `.env.test` 路由 + `code_ui_remote_model_generation_matrix.rs` + nightly CI 工作流 | 🟡 | 需 CI 配置 `DEEPSEEK_API_KEY` + `.env.test` |
-| 12 | 性能 smoke + 错误码文档同步 | `code_ui_perf_smoke_test.rs`（`#[ignore]`）+ [docs/automation/local-tui-control.md](../automation/local-tui-control.md) 错误码注脚同步 | 🟢 | 无 |
+| 1 | 基础设施 | ✅ closed | 无 | 无 |
+| 2 | CLI / route P0 + 错误码契约 L0 | ✅ closed | 无 | 无 |
+| 3 | Lease 全量 | ✅ closed | 无 | 无 |
+| 4 | SSE 全量 | ✅ closed | 长时/lagged soak deferred | 无 |
+| 5 | 生成 fake | ✅ closed | 无 | 无 |
+| 6 | Approval flow | ✅ closed | 并发 pending P1 | 无 |
+| 7 | State / Security 矩阵 | ✅ closed | streaming detach candidate | 无 |
+| 8 | Orchestrator gate / max_turns / Tool ACL | ✅ mostly closed | executor max_turns/contract violation 继续扩写 | 无 |
+| 9 | Codex runtime + MCP 双入口 + resume | ⚠️ partial | Codex binary boot/plan/reconnect、MCP full write-and-observe、SIGTERM-mid-turn resume | 无新增依赖 |
+| 10 | TUI render + provider boot/flag passthrough | ⚠️ partial | missing-key、`--api-base`、复杂 TUI 状态 | 不再要求 `insta` / `httpmock` |
+| 11 | Model generation L3 | ✅ runner closed | 5-day pass-rate 需 secret/nightly 数据 | `DEEPSEEK_API_KEY` |
+| 12 | 性能 smoke + 错误码文档同步 | ✅ mostly closed | 1 小时真网 SSE soak | nightly job |
 
 每条 Wave 在 CI 上独立可门：失败仅阻塞当前 PR，不污染主干。
 
 **建议的并行策略**：
-- PR 1–3 可串行快速落地（基础设施 → CLI/错误码 → Lease）。
-- PR 4–8 在 PR 1 合并后可并行启动（它们只依赖 `event_stream.rs` 和已有 harness）。
-- PR 9–12 可独立并行，但 PR 10 必须等 Cargo.toml 审批通过。
+- PR 1–8 与 PR 11/12 的 runner/doc-code sync 已不再是前置瓶颈。
+- 后续并行工作应只围绕 PR 9/10 的明确 partial 项，以及 PR 12 的独立 nightly soak。
 
 ---
 
