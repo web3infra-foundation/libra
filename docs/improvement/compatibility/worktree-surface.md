@@ -6,17 +6,18 @@ C5（Audit P2）
 
 ## 已完成前置条件与当前代码状态
 
-### 已确认落地的基线
+### 已确认落地的基线（2026-05-11 复核）
 - [`src/command/worktree.rs`](../../../src/command/worktree.rs) 已实现 `add` / `list` / `lock` / `unlock` / `move` / `prune` / `remove` / `repair`，以及 Unix 下的 `umount` 子命令。
-- `worktree remove` 当前默认**不删除磁盘目录**（[`worktree.rs:715-742`](../../../src/command/worktree.rs#L715)）；docstring 明确写"The directory on disk is intentionally left untouched to avoid destructive behavior"。
-- `WorktreeSubcommand::Remove { path }` 当前没有 `--delete-dir` 或 `--force` flag。
+- `worktree remove` 当前默认**不删除磁盘目录**，继续保持非破坏默认。
+- `WorktreeSubcommand::Remove { path, delete_dir }` 已暴露 `--delete-dir`；显式传入后会先检查脏工作树，只有 clean worktree 才删除磁盘目录并从 registry 移除。
 - 第 31 批"mv / rm / worktree 结构化输出"尚未启动；当前 worktree 没有 `WorktreeOutput` schema 或 `WorktreeError` typed enum。
-- [`tests/command/worktree_test.rs`](../../../tests/command/worktree_test.rs) 已存在并覆盖基础 add / list / remove。
+- [`tests/command/worktree_test.rs`](../../../tests/command/worktree_test.rs) 已覆盖基础 add / list / remove，并包含 `--delete-dir` on/off 与 dirty 拒绝路径。
+- [`tests/compat/worktree_delete_dir.rs`](../../../tests/compat/worktree_delete_dir.rs) 已固定对外兼容契约：默认保留目录，`--delete-dir` 删除 clean 目录，dirty 时拒绝并保留 registry/目录。
 
 ### 基于当前代码的 Review 结论
-- 当前默认非破坏行为是有意的——避免在执行 `git worktree remove` 直觉下意外丢数据。
-- 但用户决策已确认：**保留默认行为，新增 `--delete-dir` 显式开关**对齐 Git 直觉。
-- 本批仅在 `WorktreeSubcommand::Remove` 加 flag + `remove` handler 增删盘分支；不动 `WorktreeOutput` / `WorktreeError`（这些归第 31 批）。
+- C5 的行为对齐已经落地：Libra 默认非破坏，显式 `--delete-dir` 才走 Git-style 删除目录。
+- 脏工作树保护已经是当前契约的一部分，不能在后续结构化输出批次中放宽或静默降级。
+- 第 31 批仍只拥有 `WorktreeOutput` / `WorktreeError` / JSON-machine 的完整现代化，不再拥有 `--delete-dir` 行为本身。
 
 ## 目标与非目标
 
@@ -150,13 +151,13 @@ Error: cannot delete dirty worktree '../dirty-feature' (uncommitted changes)
 
 ## 测试与验收
 
-- [ ] `cargo run -- worktree remove --help` 列出 `--delete-dir`。
-- [ ] `worktree remove <path>`（默认）后，`<path>` 目录仍存在；registry 中已移除。
-- [ ] `worktree remove --delete-dir <path>` 后，`<path>` 目录已不存在；`ls <path>` 报 not-found。
-- [ ] `worktree remove --delete-dir <dirty-path>` 返回 conflict 类稳定错误码（优先 `ConflictOperationBlocked`）并保留目录与 registry 记录。
-- [ ] 集成测试覆盖：clean + delete-dir / dirty + delete-dir / clean + 不带 flag。
-- [ ] `COMPATIBILITY.md` worktree 行已更新。
-- [ ] `cargo test worktree_test` 全部通过。
+- [x] `cargo run -- worktree remove --help` 列出 `--delete-dir`。
+- [x] `worktree remove <path>`（默认）后，`<path>` 目录仍存在；registry 中已移除。
+- [x] `worktree remove --delete-dir <path>` 后，`<path>` 目录已不存在；`ls <path>` 报 not-found。
+- [x] `worktree remove --delete-dir <dirty-path>` 返回 conflict 类稳定错误码并保留目录与 registry 记录。
+- [x] 集成测试覆盖：clean + delete-dir / dirty + delete-dir / clean + 不带 flag。
+- [x] `COMPATIBILITY.md` worktree 行已更新为默认保留目录、`--delete-dir` opt-in 删除。
+- [ ] 本轮最终回归需再次运行 `cargo test worktree_test` 或覆盖它的 `cargo test --all`。
 
 ## 风险与缓解
 

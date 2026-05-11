@@ -6,19 +6,19 @@ C2（Audit P1）
 
 ## 已完成前置条件与当前代码状态
 
-### 已确认的当前基线
-- [`.github/workflows/base.yml`](../../../.github/workflows/base.yml) 是当前主测试 workflow，已经拆成 `format` / `clippy` / `redundancy` / `test` 四个 job；对应显示名为 `Rustfmt Check` / `Clippy Check` / `Redundancy Check` / `Run Tests`，尚未采用兼容矩阵命名。
-- 当前 `clippy` job 运行的是 `cargo clippy -- -D warnings`，缺少 `--all-targets --all-features`，与 AGENTS.md 的 lint 要求不完全一致；C2 规范化时需同步修正命令参数。
-- 当前 `test` job 同时承担普通 `cargo test --all`、带 live secret 的测试环境变量、以及 TUI automation 场景；required-checks 与 live/secret 测试边界不够清晰。
-- [`.github/workflows/codeql.yml`](../../../.github/workflows/codeql.yml) 承担安全扫描，当前 matrix 生成 `Analyze (actions)` / `Analyze (rust)`；命名没有与 `compat-*` required-checks 体系统一。
-- [`.github/workflows/release.yml`](../../../.github/workflows/release.yml) 承担发布产物构建。
-- [`Cargo.toml`](../../../Cargo.toml) 中已存在 feature gate：`test-network` / `test-live-ai` / `test-live-cloud`，分别对应"需要网络"/"需要 LLM 凭据"/"需要云存储凭据"的测试集。
-- 仓库**缺失** `tests/compat/` 目录与跨命令兼容性回归汇编。
+### 已确认的当前基线（2026-05-11 复核）
+- [`.github/workflows/base.yml`](../../../.github/workflows/base.yml) 是当前主测试 workflow，已经拆成 `compat-rustfmt` / `compat-clippy` / `compat-web-check` / `compat-redundancy` / `compat-offline-core` / `compat-network-remotes` 六个唯一 display name。
+- `compat-clippy` 已运行 `cargo clippy --all-targets --all-features -- -D warnings`，并设置 `LIBRA_SKIP_WEB_BUILD=1` 避免 Rust lint job 被 Next.js export 成本污染。
+- `compat-offline-core` 运行 `cargo test --all`，并在同一 job 内显式运行 `--features test-provider` 的 TUI automation 场景；需要外部网络但不需要 secret 的 `network_remotes_test` 已拆到 `compat-network-remotes`。
+- [`.github/workflows/codeql.yml`](../../../.github/workflows/codeql.yml) 的 matrix job 名为 `security-codeql-actions` / `security-codeql-rust`。
+- [`.github/workflows/release.yml`](../../../.github/workflows/release.yml) 继续承担发布产物构建，不属于 C2 required-checks 重命名范围。
+- [`Cargo.toml`](../../../Cargo.toml) 中已存在 feature gate：`test-network` / `test-live-ai` / `test-live-cloud` / `test-provider`，分别对应网络、真实 LLM、真实云资源和本地 deterministic provider。
+- [`tests/compat/`](../../../tests/compat/) 已存在，并通过 `Cargo.toml` 的 `[[test]]` 条目接入 `checkout_alias_help` / `bisect_subcommand_surface` / `worktree_delete_dir` 等跨命令兼容性回归。
 
 ### 基于当前代码的 Review 结论
-- 当前 workflow 的显示名虽然不是单 job，但仍未形成稳定的 `compat-*` / `security-*` 命名约定；required-checks 迁移时容易混入旧名称或 matrix 自动生成名。
-- 三层 feature gate 已存在但没有被清晰映射到 workflow job 维度；live 矩阵无法稳定通过 PR required-checks，因为依赖外部凭据。
-- C4 / C5 的回归测试需要一个公共集结点，避免散落在各命令的 `tests/command/*_test.rs`。
+- C2 的代码侧命名和 job 拆分已落地；当前 remaining action 是平台侧 branch-protection required-checks 切换，仍必须由维护者在 GitHub UI 中执行。
+- live AI / live cloud 仍不应进入 required-checks；当前 workflow 只把 offline core、network-only 和 CodeQL 作为稳定 required-check 候选。
+- `tests/compat/` 已成为 C4 / C5 跨命令契约回归集结点；后续若新增 compatibility surface，应继续先在 `Cargo.toml` 加 `[[test]]`，再在 `tests/compat/README.md` 登记。
 
 ## 目标与非目标
 
@@ -160,11 +160,12 @@ tests/compat/
 
 ## 测试与验收
 
-- [ ] PR 触发后，GitHub Actions 页面出现 `compat-rustfmt` / `compat-clippy` / `compat-redundancy` / `compat-offline-core` / `compat-network-remotes` / `security-codeql-actions` / `security-codeql-rust` 七项 required job。
-- [ ] `gh pr checks <PR>` 输出中无重名 job。
-- [ ] `compat-rustfmt` / `compat-clippy` / `compat-offline-core` 任一失败时阻塞 PR。
-- [ ] `tests/compat/README.md` 已说明该目录被 `compat-offline-core` 选中，并列举 C4 / C5 待填充文件名。
-- [ ] [governance.md](governance.md) 已更新 required-checks 切换 checklist。
+- [x] [`.github/workflows/base.yml`](../../../.github/workflows/base.yml) 出现 `compat-rustfmt` / `compat-clippy` / `compat-web-check` / `compat-redundancy` / `compat-offline-core` / `compat-network-remotes` 唯一 display name。
+- [x] [`.github/workflows/codeql.yml`](../../../.github/workflows/codeql.yml) 的 CodeQL matrix 使用 `security-codeql-${{ matrix.language }}`，即 `security-codeql-actions` / `security-codeql-rust`。
+- [x] `compat-clippy` 使用 `cargo clippy --all-targets --all-features -- -D warnings`。
+- [x] [`tests/compat/README.md`](../../../tests/compat/README.md) 已说明该目录由 `compat-offline-core` 覆盖，并列出现有兼容性测试文件。
+- [x] [governance.md](governance.md) 已更新 required-checks 切换 checklist。
+- [ ] GitHub UI branch protection 已完成 required-checks 切换，并经 PR 页面验证新名称会阻塞失败检查。这是平台配置动作，不能由代码提交自动完成。
 
 ## 风险与缓解
 

@@ -6,28 +6,28 @@ C5（Audit P2）
 
 ## 已完成前置条件与当前代码状态
 
-### 已确认落地的基线
-- [`src/cli.rs:287-291`](../../../src/cli.rs#L287) 中 `Checkout` 标 `hide = true`；`libra --help` 顶层列表当前**不显示** checkout。
+### 已确认落地的基线（2026-05-11 复核）
+- [`src/cli.rs`](../../../src/cli.rs) 中 `Checkout` 已作为顶层可见命令暴露，about 文案明确为 branch compatibility surface，并推荐 `switch` / `restore`。
 - [`src/command/checkout.rs`](../../../src/command/checkout.rs) 已实现 checkout 的分支类基础语义（显示当前分支、切换本地分支、`-b` 新建并切换、远端同名分支 auto-track + pull）。内部使用 `restore` 将工作树 materialize 到目标 commit，但当前 CLI **不支持** `git checkout -- <path>` 形式的文件恢复；文件恢复仍由 `libra restore` 承担。
 - 第 30 批（reflog / checkout 完整现代化）尚未启动——`CheckoutError` typed enum / `CheckoutOutput` / JSON / render split 均不存在。
 - [docs/improvement/checkout.md](../checkout.md) 已记录"第二批兼容收口已落地，完整现代化留第 30 批"。
-- [`docs/commands/checkout.md`](../../commands/checkout.md) 已存在并说明 checkout 是兼容 surface；C5 需要把其中"hidden / 不 prominently featured"等旧表述改成"顶层可见但推荐 switch / restore"。
-- [`docs/commands/README.md`](../../commands/README.md) 当前把 checkout 标为 hidden；C5 必须同步更新命令索引。
-- 用户决策已确认：**取消 `hide = true`，正式作为分支类兼容入口**；文件恢复继续通过 `libra restore` 暴露。
+- [`docs/commands/checkout.md`](../../commands/checkout.md) 已说明 checkout 是兼容 surface；顶层索引不再标 hidden。
+- [`tests/compat/checkout_alias_help.rs`](../../../tests/compat/checkout_alias_help.rs) 已断言顶层 `--help` 包含 checkout，且 `checkout --help` 推荐 `switch` / `restore`。
+- 用户决策已落地：**取消隐藏，正式作为分支类兼容入口**；文件恢复继续通过 `libra restore` 暴露。
 
 ### 基于当前代码的 Review 结论
-- 隐藏 checkout 让该命令处于"存在但不解释"的状态；外部用户用 stock Git 心智进入项目时无法发现命令存在。
-- 第 30 批的完整现代化目标与本批的"取消 hide + 文案调整"互不冲突——后者只动 `src/cli.rs` 的标志位与 `--help` 文本，不动内部实现。
-- 取消 hide 后必须明确写"checkout 是分支类兼容入口；新流程推荐 switch，文件恢复推荐 restore"，避免新用户误以为 checkout 已完整覆盖 Git checkout 的所有重载语义。
+- C5 的可见性与 help banner 已落地；checkout 不再处于"存在但不可发现"状态。
+- 第 30 批的完整现代化目标与本批已落地的"取消 hide + 文案调整"互不冲突：后续只负责 typed error / JSON / render split，不应重新隐藏 checkout。
+- 当前 help 和 docs 已明确 checkout 是分支类兼容入口；新流程推荐 switch，文件恢复推荐 restore。
 
 ## 目标与非目标
 
-**目标：**
-- 在 [`src/cli.rs`](../../../src/cli.rs) 把 `Checkout` 的 `hide = true` 删除（或改 `hide = false`），让 `libra --help` 顶层列表显示 checkout。
-- 修改 [`src/command/checkout.rs`](../../../src/command/checkout.rs) 中已存在的 `CHECKOUT_EXAMPLES` 常量内容，加入 "branch compatibility surface; prefer switch / restore" 提示。
-- 在 [`docs/commands/checkout.md`](../../commands/checkout.md) 顶部加迁移说明：何时使用 checkout、何时推荐 switch / restore。
-- `COMPATIBILITY.md` 中 checkout 行更新为 `partial`，notes "branch compatibility surface; use restore for file restoration; full modernization pending batch 30"。
-- 在 [`tests/compat/checkout_alias_help.rs`](../../../tests/compat/checkout_alias_help.rs) 加一条断言：`libra --help` 顶层文本包含 "checkout"。
+**已落地目标：**
+- [`src/cli.rs`](../../../src/cli.rs) 已让 `Checkout` 在 `libra --help` 顶层列表显示。
+- [`src/command/checkout.rs`](../../../src/command/checkout.rs) 的 `CHECKOUT_EXAMPLES` 常量已加入 "branch compatibility surface; prefer switch / restore" 提示。
+- [`docs/commands/checkout.md`](../../commands/checkout.md) 已说明何时使用 checkout、何时推荐 switch / restore。
+- `COMPATIBILITY.md` 中 checkout 行已更新为 `partial`，notes "branch compatibility surface; use restore for file restoration; full modernization pending"。
+- [`tests/compat/checkout_alias_help.rs`](../../../tests/compat/checkout_alias_help.rs) 已断言：`libra --help` 顶层文本包含 "checkout"。
 
 **非目标：**
 - 不改 checkout 内部实现（typed error / JSON / render split 归第 30 批）。
@@ -37,19 +37,16 @@ C5（Audit P2）
 
 ## 设计要点
 
-### `src/cli.rs` 变更
+### `src/cli.rs` 现状
 
 ```rust
-// Before
-#[command(hide = true, ...)]
-Checkout(CheckoutArgs),
-
-// After
-#[command(after_help = command::checkout::CHECKOUT_EXAMPLES, ...)]
-Checkout(CheckoutArgs),
+#[command(
+    about = "Branch compatibility surface; prefer 'switch' for branches and 'restore' for files"
+)]
+Checkout(command::checkout::CheckoutArgs),
 ```
 
-去掉 `hide = true`（或显式写 `hide = false`，但 clap 默认就是 `false`，可直接省略）。
+`Checkout` 现在是顶层可见命令；help 文案保持兼容定位，不承诺文件恢复重载。
 
 ### `--help` banner 文案
 
@@ -98,7 +95,7 @@ COMMANDS:
 
 | 文件 | 操作 | 说明 |
 |-----|-----|-----|
-| [`src/cli.rs`](../../../src/cli.rs) | 修改 | 删除 `Checkout` 上的 `hide = true` |
+| [`src/cli.rs`](../../../src/cli.rs) | 已修改 | `Checkout` 顶层可见 |
 | [`src/command/checkout.rs`](../../../src/command/checkout.rs) | 修改 | 替换 `CHECKOUT_EXAMPLES` 常量内容为兼容提示文案 |
 | [`docs/commands/checkout.md`](../../commands/checkout.md) | 修改 | 顶部迁移说明：何时用 checkout / 何时推荐 switch / restore；删除 hidden 旧表述 |
 | [`docs/commands/README.md`](../../commands/README.md) | 修改 | 移除 checkout 的 hidden 标记，确保命令索引与顶层 help 一致 |
@@ -108,12 +105,12 @@ COMMANDS:
 
 ## 测试与验收
 
-- [ ] `cargo run -- --help` 顶层 COMMANDS 列表包含 `checkout`。
-- [ ] `cargo run -- checkout --help` 顶部出现 branch compatibility / prefer switch / restore 文案。
-- [ ] EXAMPLES 中分支类示例包含 "prefer: libra switch" 提示；文档明确文件恢复使用 `libra restore`，而不是 `libra checkout -- <path>`。
-- [ ] [`tests/compat/checkout_alias_help.rs`](../../../tests/compat/checkout_alias_help.rs) 断言通过。
-- [ ] `COMPATIBILITY.md` checkout 行已更新。
-- [ ] `cargo test checkout_test` 全部通过。
+- [x] `cargo run -- --help` 顶层 COMMANDS 列表包含 `checkout`。
+- [x] `cargo run -- checkout --help` 顶部出现 branch compatibility / prefer switch / restore 文案。
+- [x] EXAMPLES 中分支类示例包含 "prefer: libra switch" 提示；文档明确文件恢复使用 `libra restore`，而不是 `libra checkout -- <path>`。
+- [x] [`tests/compat/checkout_alias_help.rs`](../../../tests/compat/checkout_alias_help.rs) 断言覆盖顶层可见性和 help banner。
+- [x] `COMPATIBILITY.md` checkout 行已更新。
+- [ ] 本轮最终回归需再次运行 `cargo test checkout_test` 或覆盖它的 `cargo test --all`。
 
 ## 风险与缓解
 

@@ -102,8 +102,8 @@ C1（Audit P0）
 | cloud | intentionally-different | Libra cloud backup/restore extension, not a Git command |
 | cat-file | supported | -e does not support JSON |
 | index-pack | supported | hidden plumbing command |
-| checkout | partial | hidden branch compatibility surface; use `restore` for file restoration |
-| bisect | partial | start / bad / good / reset / skip / log supported; run / view / replay / terms not supported |
+| checkout | partial | visible branch compatibility surface; use `restore` for file restoration |
+| bisect | partial | start / bad / good / reset / skip / log / run / view supported; replay / terms deferred |
 
 ## Git commands intentionally absent from `src/cli.rs`
 
@@ -122,18 +122,18 @@ C1（Audit P0）
 - Repository asset storage policy: current committed binaries remain inline; optional future Git LFS rules are tracked below as a repository governance decision, not as the `libra lfs` command status.
 ```
 
-### COMPATIBILITY.md 未来更新路线图（供 C1–C6 执行参考）
+### COMPATIBILITY.md 更新路线图（C4/C5 已部分落地）
 
-以下 roadmap 仅供维护者跟踪，**不应写入 C1 创建的 `COMPATIBILITY.md`**。各批次落地时按各自子文档的“COMPATIBILITY.md 行更新”指令修改事实表。
+以下 roadmap 仅供维护者跟踪，**不应写入 C1 创建的 `COMPATIBILITY.md`**。各批次落地时按各自子文档的“COMPATIBILITY.md 行更新”指令修改事实表。2026-05-11 复核：C4 的 `bisect run/view` surface、C5 的 checkout 可见性和 worktree `--delete-dir` 已落地，表中对应行保留为事实索引。
 
 | Command | 当前 Tier | 批次 | 落地后 Tier | 落地后 Notes |
 |---------|-----------|------|-------------|--------------|
 | fetch | partial | C3 | supported | `--depth` public flag |
 | clone | partial | C3 | partial | `--depth` / `--single-branch` supported; `--sparse` unsupported; `--recurse-submodules` unsupported |
 | stash | partial | C4 | partial | `show` / `branch` / `clear` added; `create` / `store` deferred |
-| bisect | partial | C4 | partial | `run` / `view` added; `replay` / `terms` deferred |
-| checkout | partial | C5 | partial | visible branch compatibility surface; use `restore` for file restoration |
-| worktree | intentionally-different | C5 | intentionally-different | `remove` keeps disk dir by default; `--delete-dir` for Git-style behavior |
+| bisect | partial | C4 ✅ | partial | `run` / `view` added; `replay` / `terms` deferred |
+| checkout | partial | C5 ✅ | partial | visible branch compatibility surface; use `restore` for file restoration |
+| worktree | intentionally-different | C5 ✅ | intentionally-different | `remove` keeps disk dir by default; `--delete-dir` for Git-style behavior |
 | submodule | — | C6 | unsupported | intentional product boundary (see compatibility/declined.md) |
 | sparse-checkout | — | C6 | unsupported | no public sparse checkout command |
 

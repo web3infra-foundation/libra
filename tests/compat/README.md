@@ -19,17 +19,18 @@ directly under `tests/compat/` are reachable only when added as `[[test]]`
 entries in `Cargo.toml` (`path = "tests/compat/<name>.rs"`); see Cargo
 docs.
 
-For now `tests/compat/` is a planned集结点 — files listed below are
-populated by C4 / C5 as those batches land.
+`tests/compat/` is now an active集结点: C4 / C5 have populated the first
+surface-contract tests, and future compatibility batches should add their own
+top-level `[[test]]` entries in `Cargo.toml`.
 
-## Planned files (filled in by C4 / C5 / C-future)
+## Files
 
 | File | Owning batch | Coverage |
 |------|--------------|----------|
 | `stash_subcommand_surface.rs` | C4 | `stash --help` lists `show` / `branch` / `clear`; cross-subcommand JSON schema agreement |
-| `bisect_subcommand_surface.rs` | C4 | `bisect --help` lists `run` / `view`; exit-code semantics 0 / 125 / 128 |
+| `bisect_subcommand_surface.rs` | C4 | `bisect --help` lists `run` / `view`; EXAMPLES banner is wired |
 | `worktree_delete_dir.rs` | C5 | `worktree remove` with and without `--delete-dir`; dirty-worktree refusal |
-| `checkout_alias_help.rs` | C5 | top-level `--help` includes `checkout`; the help banner mentions `prefer switch / restore` |
+| `checkout_alias_help.rs` | C5 | top-level `--help` includes `checkout`; the help banner mentions `switch` / `restore` |
 | `matrix_alignment.rs` | C-future | `COMPATIBILITY.md` ↔ `src/cli.rs::Commands` enum drift detection |
 
 ## Authoring guidelines

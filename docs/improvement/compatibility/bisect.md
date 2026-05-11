@@ -6,20 +6,18 @@ C4（Audit P2）；同时承担 bisect 模块"首次入计划"职责。
 
 ## 已完成前置条件与当前代码状态
 
-### 已确认落地的基线
-- [`src/command/bisect.rs`](../../../src/command/bisect.rs) 已实现 `Start` / `Bad` / `Good` / `Reset` / `Skip` / `Log` 六个子命令。
-- [`src/cli.rs`](../../../src/cli.rs) 中 `Bisect` enum 已暴露上述六个 variant（cli.rs:325-356）。
-- [`tests/command/bisect_test.rs`](../../../tests/command/bisect_test.rs) 已存在并覆盖人工 bisect 流程。
-- [`docs/commands/bisect.md`](../../commands/bisect.md) 已存在，但当前显式说明 `bisect run` 不支持；C4 落地时必须把该设计理由改为新的 `run` / `view` 契约。
-- [`docs/commands/README.md`](../../commands/README.md) 当前把 `libra bisect` 标为 hidden，但 `src/cli.rs` 中 `Bisect` 没有 `hide = true`；C4 需要同步修正文档索引。
-- bisect 模块**尚未进入任何已落地的 CLIG 现代化批次**——没有 `BisectError` typed enum、没有 `BisectOutput`、没有 `run_bisect()` / `render_bisect_output()` 拆分、没有 JSON / machine 输出。
+### 已确认落地的基线（2026-05-11 复核）
+- [`src/command/bisect.rs`](../../../src/command/bisect.rs) 已实现 `Start` / `Bad` / `Good` / `Reset` / `Skip` / `Log` / `Run` / `View` 八个子命令，并暴露 `BISECT_EXAMPLES`。
+- [`src/cli.rs`](../../../src/cli.rs) 中 `Bisect` enum 已暴露 `run` / `view`，顶层命令没有隐藏。
+- [`tests/command/bisect_test.rs`](../../../tests/command/bisect_test.rs) 已覆盖人工 bisect、`view` 无状态错误、`run` 边界和 help banner。
+- [`tests/compat/bisect_subcommand_surface.rs`](../../../tests/compat/bisect_subcommand_surface.rs) 已固定 `bisect --help` 必须列出 `run` / `view` 并包含 EXAMPLES banner。
+- [`docs/commands/bisect.md`](../../commands/bisect.md) 已记录 `bisect run` 的 0 / 1..124 / 125 / 128+ 退出码语义和 `bisect view` 契约。
+- bisect 仍未进入完整 CLIG 现代化批次：没有 `BisectOutput` JSON schema、没有全量 `BisectError` typed enum、没有 `run_bisect()` / `render_bisect_output()` 完整拆分。这部分已从 C4 surface 补齐中剥离，归 README 后续 `reflog / checkout` 之后的跨命令 error/render 收口处理。
 
 ### 基于当前代码的 Review 结论
-- 当前 bisect 命令的对外契约是"人工 bisect 可用、自动化 bisect 缺失"。审计 P2 把 `bisect run` 列为"自动化定位回归的关键能力"。
-- `bisect run` 是脚本驱动定位的核心入口；缺它意味着 CI 中的回归定位必须手写循环。
-- `bisect view` / `bisect visualize` 是查看当前 bisect 状态与剩余候选 commit 的便利入口。
-- `bisect replay` / `bisect terms` 属于小众工作流，本批不做。
-- 因为 bisect 没有完整 CLIG 基线，本批做"surface 补齐 + 最小现代化基础"二合一：补 `run` / `view` 子命令的同时，把模块至少升级到具备 `BisectError` 与 `BisectOutput` 的最小可演化形态；完整 typed error / render split 收口归后续批次（README 后续批次 32 之后）。
+- C4 的自动化 surface 已落地：`bisect run` 可驱动脚本并按 Git-compatible exit code 自动标记 good/bad/skip，`bisect view` 可查看当前状态。
+- `bisect replay` / `bisect terms` 仍按 [declined.md](declined.md) 的显式延后项处理，不属于当前交付缺口。
+- 完整 CLIG JSON / machine / typed error modernization 仍是后续内部一致性工作；它不能反向把 C4 的 `run` / `view` surface 重新标成未落地。
 
 ## 目标与非目标
 
@@ -178,14 +176,15 @@ Skipped: (none)
 
 ## 测试与验收
 
-- [ ] `cargo run -- bisect --help` 列出 `run` / `view`。
-- [ ] `bisect run` 在故意失败的 commit 上正确收敛到 first-bad；步数与 skipped 列表与 JSON 输出一致。
-- [ ] `bisect run` 能正确透传被测命令自身的 flags，例如 `libra bisect run cargo test -- --ignored`。
-- [ ] `bisect run` 中脚本返回 125 时正确 skip 并继续。
-- [ ] `bisect run` 中脚本返回 128 时终止 bisect 并产生 `BISECT_RUN_FAILED` 错误码。
-- [ ] `bisect view` 在 active bisect 中显示当前状态；不在 bisect 中时返回 `NOT_IN_BISECT`。
-- [ ] `cargo test bisect_test` 全部通过。
-- [ ] `docs/commands/bisect.md` 与命令实际输出一致。
+- [x] `cargo run -- bisect --help` 列出 `run` / `view`。
+- [x] `bisect run` 在故意失败的 commit 上正确收敛到 first-bad；human 输出记录步数与 skipped 数。
+- [x] `bisect run` 能正确透传被测命令自身的 flags，例如 `libra bisect run cargo test -- --ignored`。
+- [x] `bisect run` 中脚本返回 125 时正确 skip 并继续。
+- [x] `bisect run` 中脚本返回 128 时终止 bisect 并产生 `BISECT_RUN_FAILED` 错误码。
+- [x] `bisect view` 在 active bisect 中显示当前状态；不在 bisect 中时返回 `NOT_IN_BISECT`。
+- [x] `docs/commands/bisect.md` 与命令实际输出一致。
+- [ ] 本轮最终回归需再次运行 `cargo test bisect_test` 或覆盖它的 `cargo test --all`。
+- [ ] 完整 JSON / machine schema 仍未交付，归后续 CLIG error/render 收口，不属于 C4 `run` / `view` surface gate。
 
 ## 风险与缓解
 
