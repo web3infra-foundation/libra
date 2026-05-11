@@ -25,6 +25,7 @@ pub mod code_control;
 pub mod code_control_files;
 pub mod commit;
 pub mod config;
+pub mod db;
 pub mod describe;
 pub mod diff;
 pub mod fetch;

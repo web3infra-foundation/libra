@@ -19,10 +19,10 @@ use git_internal::hash::{HashKind, set_hash_kind};
 
 use crate::{
     command,
-    internal::{config::ConfigKv, db},
+    internal::{config::ConfigKv, db, db::SchemaCompatibility},
     utils,
     utils::{
-        error::{CliError, CliResult},
+        error::{CliError, CliResult, StableErrorCode},
         output::OutputConfig,
     },
 };
@@ -273,6 +273,8 @@ enum Commands {
     Open(command::open::OpenArgs),
     #[command(about = "Manage repository configurations", alias = "cfg")]
     Config(command::config::ConfigArgs),
+    #[command(about = "Inspect and upgrade the repository database schema")]
+    Db(command::db::DbArgs),
     #[command(about = "Manage the log of reference changes (e.g., HEAD, branches)")]
     Reflog(command::reflog::ReflogArgs),
     #[command(
@@ -693,36 +695,111 @@ fn repo_not_found_error(path: Option<&Path>) -> CliError {
     error
 }
 
-fn command_preflight_storage(command: &Commands) -> CliResult<Option<std::path::PathBuf>> {
+struct CommandPreflight {
+    storage: Option<std::path::PathBuf>,
+    check_schema: bool,
+    set_hash_kind: bool,
+}
+
+impl CommandPreflight {
+    fn none() -> Self {
+        Self {
+            storage: None,
+            check_schema: false,
+            set_hash_kind: false,
+        }
+    }
+
+    fn repo(storage: std::path::PathBuf) -> Self {
+        Self {
+            storage: Some(storage),
+            check_schema: true,
+            set_hash_kind: true,
+        }
+    }
+
+    fn repo_without_schema_guard(storage: std::path::PathBuf) -> Self {
+        Self {
+            storage: Some(storage),
+            check_schema: false,
+            set_hash_kind: false,
+        }
+    }
+}
+
+fn command_preflight(command: &Commands) -> CliResult<CommandPreflight> {
     match command {
         Commands::Init(_)
         | Commands::Clone(_)
         | Commands::Open(_)
         | Commands::CodeControl(_)
-        | Commands::LsRemote(_) => Ok(None),
+        | Commands::LsRemote(_) => Ok(CommandPreflight::none()),
         #[cfg(unix)]
         Commands::Worktree(command::worktree::WorktreeArgs {
             command: command::worktree::WorktreeSubcommand::Umount { .. },
-        }) => Ok(None),
+        }) => Ok(CommandPreflight::none()),
         // Config global/system scopes don't require a repository.
-        Commands::Config(cfg) if cfg.global || cfg.system => Ok(None),
+        Commands::Config(cfg) if cfg.global || cfg.system => Ok(CommandPreflight::none()),
         Commands::Code(code_args) => {
             let working_dir = command::code::resolve_code_preflight_working_dir(code_args)?;
             let storage = utils::util::try_get_storage_path(Some(working_dir.clone()))
                 .map_err(|_| repo_not_found_error(Some(&working_dir)))?;
-            Ok(Some(storage))
+            Ok(CommandPreflight::repo(storage))
         }
         Commands::Graph(graph_args) => {
             let storage = utils::util::try_get_storage_path(graph_args.repo.clone())
                 .map_err(|_| repo_not_found_error(graph_args.repo.as_deref()))?;
-            Ok(Some(storage))
+            Ok(CommandPreflight::repo(storage))
+        }
+        Commands::Db(_) => {
+            let storage =
+                utils::util::try_get_storage_path(None).map_err(|_| repo_not_found_error(None))?;
+            Ok(CommandPreflight::repo_without_schema_guard(storage))
         }
         _ => {
             let storage =
                 utils::util::try_get_storage_path(None).map_err(|_| repo_not_found_error(None))?;
-            Ok(Some(storage))
+            Ok(CommandPreflight::repo(storage))
         }
     }
+}
+
+async fn check_database_schema_for_storage(storage: &Path) -> CliResult<()> {
+    let db_path = storage.join(utils::util::DATABASE);
+    match db::inspect_database_schema(&db_path).await.map_err(|error| {
+        CliError::fatal(format!(
+            "failed to inspect repository database '{}': {}",
+            db_path.display(),
+            error
+        ))
+        .with_stable_code(StableErrorCode::RepoCorrupt)
+    })? {
+        SchemaCompatibility::Compatible { .. } => Ok(()),
+        SchemaCompatibility::UpgradeRequired {
+            current_version,
+            latest_version,
+        } => Err(CliError::fatal(format!(
+            "repository database schema is out of date (current: {}, required: {latest_version})",
+            format_schema_version(current_version)
+        ))
+        .with_stable_code(StableErrorCode::RepoCorrupt)
+        .with_hint("run 'libra db upgrade' in this repository to upgrade the database schema.")),
+        SchemaCompatibility::UnsupportedFuture {
+            current_version,
+            latest_version,
+        } => Err(CliError::fatal(format!(
+            "repository database schema version {current_version} is newer than this Libra binary supports (latest supported: {})",
+            format_schema_version(latest_version)
+        ))
+        .with_stable_code(StableErrorCode::RepoCorrupt)
+        .with_hint("install a newer Libra binary before running commands in this repository.")),
+    }
+}
+
+fn format_schema_version(version: Option<i64>) -> String {
+    version
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "none".to_string())
 }
 
 fn is_error_codes_help_topic(argv: &[String]) -> bool {
@@ -855,8 +932,14 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
     if let Commands::Tag(tag_args) = &args.command {
         command::tag::validate_cli_args(tag_args)?;
     }
-    if let Some(storage) = command_preflight_storage(&args.command)? {
-        set_local_hash_kind_for_storage(&storage).await?;
+    let preflight = command_preflight(&args.command)?;
+    if let Some(storage) = preflight.storage.as_deref() {
+        if preflight.check_schema {
+            check_database_schema_for_storage(storage).await?;
+        }
+        if preflight.set_hash_kind {
+            set_local_hash_kind_for_storage(storage).await?;
+        }
     }
     // Resolve global output flags into a single config before dispatching.
     let output = OutputConfig::resolve(
@@ -944,6 +1027,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Open(cmd_args) => command::open::execute_safe(cmd_args, &output).await?,
         Commands::Pull(cmd_args) => command::pull::execute_safe(cmd_args, &output).await?,
         Commands::Config(cmd_args) => command::config::execute_safe(cmd_args, &output).await?,
+        Commands::Db(cmd_args) => command::db::execute_safe(cmd_args, &output).await?,
         Commands::Checkout(cmd_args) => command::checkout::execute_safe(cmd_args, &output).await?,
         Commands::Reflog(cmd_args) => command::reflog::execute_safe(cmd_args, &output).await?,
         Commands::Worktree(cmd_args) => command::worktree::execute_safe(cmd_args, &output).await?,
@@ -1046,7 +1130,10 @@ mod tests {
     fn worktree_umount_preflight_does_not_require_repo() {
         let cli = Cli::try_parse_from(["libra", "worktree", "umount", "/tmp/libra-task"]).unwrap();
 
-        assert!(matches!(command_preflight_storage(&cli.command), Ok(None)));
+        let preflight = command_preflight(&cli.command).unwrap();
+        assert!(preflight.storage.is_none());
+        assert!(!preflight.check_schema);
+        assert!(!preflight.set_hash_kind);
     }
 
     /// Scenario: clap's built-in Levenshtein matcher should suggest `init` for the

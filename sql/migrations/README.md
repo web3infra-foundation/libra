@@ -34,8 +34,11 @@ Forward DDL **must be idempotent** at the SQL level:
 
 Rationale: legacy databases initialized via `sqlite_20260309_init.sql` may
 already contain tables that an early migration tries to create. Idempotent
-DDL means the runner can safely apply every migration on every connect; the
-`schema_versions` table is the bookkeeping layer, not the safety layer.
+DDL means the explicit upgrade command can safely apply every pending
+migration; the `schema_versions` table is the bookkeeping layer, not the
+safety layer. Normal command connections do not apply migrations implicitly.
+They check compatibility first and ask the user to run `libra db upgrade` when
+the repository is stale.
 
 ## Transaction-unsafe DDL is forbidden
 
@@ -82,8 +85,8 @@ the binary). Instead, every migration is registered in
 
 When adding a new migration:
 
-1. Drop the SQL into `sql/migrations/NNNN_<name>.sql` (and optionally
-   `NNNN_<name>.down.sql`).
+1. Drop the SQL into `sql/migrations/YYYYMMDDNN_<name>.sql` (and optionally
+   `YYYYMMDDNN_<name>_down.sql`).
 2. Add a corresponding entry to `builtin_migrations()` in
    `src/internal/db/migration.rs`, with the SQL embedded via
    `include_str!`. **Path**: from `src/internal/db/migration.rs` the
@@ -112,9 +115,12 @@ helpers in `db.rs`. Subsequent CEXes have populated this directory.
 | `2026050301`  | `automation_log`    | inline in `builtin_migrations()`                |
 | `2026050302`  | `agent_usage_stats` | inline in `builtin_migrations()`                |
 | `2026050303`  | `agent_capture`     | `2026050303_agent_capture{,_down}.sql`          |
+| `2026050501`  | `agent_checkpoint_parent_nullable` | `2026050501_agent_checkpoint_parent_nullable{,_down}.sql` |
+| `2026050601`  | `approved_permission` | `2026050601_approved_permission{,_down}.sql`  |
+| `2026050801`  | `agent_usage_stats_agent_name` | `2026050801_agent_usage_stats_agent_name{,_down}.sql` |
 
-The first two migrations stayed inline for stability; new migrations move to
-the file + `include_str!` form.
+The first two migrations stayed inline for stability; newer migrations use the
+file + `include_str!` form.
 
 ## `include_str!` example
 

@@ -1597,29 +1597,19 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn update_object_index_upgrades_generic_blob_to_agent_specific_o_type() {
-        use sea_orm::{ConnectionTrait, Database, Schema, Statement};
+        use sea_orm::{ConnectionTrait, Statement};
 
         let tmp = tempdir().unwrap();
         let db_path = tmp.path().join(crate::utils::util::DATABASE);
-        std::fs::File::create(&db_path).expect("touch db");
-        let url = format!("sqlite://{}", db_path.display());
-        let conn = Database::connect(&url).await.expect("connect");
-
-        // Build the minimum schema required by `update_object_index_once`:
-        // the `object_index` table.
-        let schema = Schema::new(conn.get_database_backend());
-        let mut create_stmt = schema.create_table_from_entity(object_index::Entity);
-        create_stmt.if_not_exists();
-        conn.execute(conn.get_database_backend().build(&create_stmt))
+        let conn = db::create_database(db_path.to_str().expect("test database path is UTF-8"))
             .await
-            .unwrap();
+            .expect("create database");
 
         // Seed a generic-blob row that mimics the standard storage path.
         // The repo_id matches the sentinel returned by
-        // `resolve_repo_id_for_index` when the config table is absent
-        // (which is the case in this minimal-schema fixture). That keeps
-        // the seeded row aligned with what `update_object_index_once`
-        // queries.
+        // `resolve_repo_id_for_index` when `libra.repoid` is absent. That
+        // keeps the seeded row aligned with what `update_object_index_once`
+        // queries while preserving the full current schema contract.
         const OID: &str = "abcdef1234567890abcdef1234567890abcdef12";
         let backend = conn.get_database_backend();
         conn.execute(Statement::from_sql_and_values(

@@ -46,7 +46,9 @@ fn builtin_migrations_register_current_schema_migrations() {
     let names: Vec<&str> = migrations.iter().map(|migration| migration.name).collect();
     assert_eq!(
         versions,
-        vec![2026050301, 2026050302, 2026050303, 2026050501, 2026050601]
+        vec![
+            2026050301, 2026050302, 2026050303, 2026050501, 2026050601, 2026050801
+        ]
     );
     assert_eq!(
         names,
@@ -56,13 +58,14 @@ fn builtin_migrations_register_current_schema_migrations() {
             "agent_capture",
             "agent_checkpoint_parent_nullable",
             "approved_permission",
+            "agent_usage_stats_agent_name",
         ]
     );
 
     let runner = builtin_runner().expect("builtin registry must build clean");
     assert!(!runner.is_empty());
-    assert_eq!(runner.len(), 5);
-    assert_eq!(runner.max_registered_version(), Some(2026050601));
+    assert_eq!(runner.len(), 6);
+    assert_eq!(runner.max_registered_version(), Some(2026050801));
 }
 
 // ---------------------------------------------------------------------------
@@ -919,11 +922,10 @@ async fn failing_up_migration_leaves_schema_versions_unchanged() {
 }
 
 // ---------------------------------------------------------------------------
-// Codex r4 P1#2 fix: fresh-init path (`db::create_database`) and reopen path
-// (`db::establish_connection`) must converge to the same `schema_versions`
-// state. This regression guards against `create_database` skipping the
-// migration runner (which would leave fresh DBs without the bookkeeping
-// table until first reopen).
+// Fresh-init path (`db::create_database`) must create a database that can be
+// reopened by `db::establish_connection` without applying implicit migrations.
+// This guards both sides of the explicit-upgrade contract: init creates the
+// current schema, while ordinary connections only verify compatibility.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -940,9 +942,9 @@ async fn fresh_create_database_runs_migrations_just_like_reopen() {
         "fresh create_database must run migrations and create schema_versions"
     );
 
-    // Reopen path: connect to a different brand-new file via
-    // establish_connection (which goes through the migration runner
-    // unconditionally). Schema must converge.
+    // Reopen path: connect to a different freshly created file via
+    // establish_connection. Schema must already be current before the
+    // connection check runs.
     let reopen_dir = tempfile::tempdir().unwrap();
     let reopen_path = reopen_dir.path().join("reopen.db");
     let reopen_path_str = reopen_path.to_str().unwrap();
@@ -952,7 +954,7 @@ async fn fresh_create_database_runs_migrations_just_like_reopen() {
     let reopen_conn = establish_connection(reopen_path_str).await.unwrap();
     assert!(
         table_exists(&reopen_conn, "schema_versions").await,
-        "establish_connection path must also create schema_versions"
+        "establish_connection path must see schema_versions from create_database"
     );
 
     // Both paths produce identical `schema_versions` shape.
@@ -961,6 +963,44 @@ async fn fresh_create_database_runs_migrations_just_like_reopen() {
     assert_eq!(
         fresh_cols, reopen_cols,
         "fresh and reopen paths must produce identical schema_versions shape"
+    );
+}
+
+#[tokio::test]
+async fn establish_connection_refuses_stale_schema_without_upgrading() {
+    use libra::internal::db::{create_database, establish_connection};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("stale.db");
+    let path_str = path.to_str().unwrap();
+    let conn = create_database(path_str).await.unwrap();
+
+    let runner = builtin_runner().expect("builtin runner builds clean");
+    runner
+        .rollback_to(&conn, 2026050601)
+        .await
+        .expect("roll back latest migration");
+    conn.close().await.unwrap();
+
+    let err = establish_connection(path_str)
+        .await
+        .expect_err("ordinary connect must refuse stale schema");
+    let message = err.to_string();
+    assert!(
+        message.contains("libra db upgrade"),
+        "error should direct users to explicit upgrade, got: {message}"
+    );
+
+    let raw = connect(&format!("sqlite://{}", path.display())).await;
+    let current = builtin_runner()
+        .expect("builtin runner builds clean")
+        .current_version_readonly(&raw)
+        .await
+        .expect("read current version");
+    assert_eq!(current, Some(2026050601));
+    assert!(
+        !column_exists(&raw, "agent_usage_stats", "agent_name").await,
+        "ordinary connect must not apply the pending agent_name migration"
     );
 }
 
@@ -996,7 +1036,9 @@ async fn run_builtin_migrations_applies_current_builtin_registry() {
         .expect("run_builtin_migrations");
     assert_eq!(
         applied,
-        vec![2026050301, 2026050302, 2026050303, 2026050501, 2026050601]
+        vec![
+            2026050301, 2026050302, 2026050303, 2026050501, 2026050601, 2026050801
+        ]
     );
     assert!(table_exists(&conn, "schema_versions").await);
     assert!(table_exists(&conn, "automation_log").await);
@@ -1004,6 +1046,8 @@ async fn run_builtin_migrations_applies_current_builtin_registry() {
     assert!(table_exists(&conn, "agent_session").await);
     assert!(table_exists(&conn, "agent_checkpoint").await);
     assert!(table_exists(&conn, "approved_permission").await);
+    assert!(column_exists(&conn, "agent_usage_stats", "agent_name").await);
+    assert!(index_exists(&conn, "idx_agent_usage_stats_agent_name_provider_model").await);
 }
 
 /// OC-Phase 2 P2.5 regression guard: `approved_permission` survives an
@@ -1024,13 +1068,13 @@ async fn approved_permission_up_down_up_round_trip() {
     assert!(table_exists(&conn, "approved_permission").await);
     assert!(index_exists(&conn, "idx_approved_permission_project").await);
 
-    // Down: roll the new migration off again. Target the previous version
-    // so only `2026050601` reverses; the older migrations stay applied.
+    // Down: roll approved_permission off again. Newer migrations stacked above
+    // it must roll back first, while the older migrations stay applied.
     let rolled = runner
         .rollback_to(&conn, 2026050501)
         .await
         .expect("rollback past approved_permission");
-    assert_eq!(rolled, vec![2026050601]);
+    assert_eq!(rolled, vec![2026050801, 2026050601]);
     assert!(
         !table_exists(&conn, "approved_permission").await,
         "down migration must drop the table"
@@ -1039,15 +1083,21 @@ async fn approved_permission_up_down_up_round_trip() {
         !index_exists(&conn, "idx_approved_permission_project").await,
         "down migration must drop the index"
     );
+    assert!(
+        !column_exists(&conn, "agent_usage_stats", "agent_name").await,
+        "newer migration down must remove the agent_name column"
+    );
 
-    // Up again: re-create the table + index with no `IF NOT EXISTS` collision.
+    // Up again: re-create the table + indexes with no `IF NOT EXISTS` collision.
     let reapplied = runner
         .run_pending(&conn)
         .await
         .expect("second up reapplies cleanly");
-    assert_eq!(reapplied, vec![2026050601]);
+    assert_eq!(reapplied, vec![2026050601, 2026050801]);
     assert!(table_exists(&conn, "approved_permission").await);
     assert!(index_exists(&conn, "idx_approved_permission_project").await);
+    assert!(column_exists(&conn, "agent_usage_stats", "agent_name").await);
+    assert!(index_exists(&conn, "idx_agent_usage_stats_agent_name_provider_model").await);
 }
 
 // ---------------------------------------------------------------------------
@@ -1076,4 +1126,20 @@ async fn index_exists(conn: &DatabaseConnection, name: &str) -> bool {
     .await
     .expect("query")
     .is_some()
+}
+
+async fn column_exists(conn: &DatabaseConnection, table: &str, column: &str) -> bool {
+    let backend = conn.get_database_backend();
+    let escaped_table = table.replace('`', "``");
+    let rows = conn
+        .query_all(Statement::from_string(
+            backend,
+            format!("PRAGMA table_info(`{escaped_table}`)"),
+        ))
+        .await
+        .expect("table_info");
+    rows.iter().any(|row| {
+        let name: String = row.try_get_by_index(1).expect("column name");
+        name == column
+    })
 }

@@ -232,25 +232,24 @@ impl MigrationRunner {
         conn: &DatabaseConnection,
     ) -> Result<Option<i64>, MigrationError> {
         ensure_schema_versions_table(conn).await?;
-        let backend = conn.get_database_backend();
-        let row = conn
-            .query_one(Statement::from_string(
-                backend,
-                "SELECT MAX(version) FROM schema_versions",
-            ))
-            .await?;
-        let Some(row) = row else { return Ok(None) };
-        // SQLite returns NULL for `MAX(version)` when the table is empty;
-        // sea-orm surfaces that as `Option<i64>`. We forward the None.
-        // CONTRACT (Codex r5 P1#1): decode failures must propagate — a
-        // type-drifted `version` column would otherwise silently report
-        // "empty registry" and trigger a re-run of every migration.
-        let version: Option<i64> = row.try_get_by_index(0).map_err(|err| {
-            MigrationError::Database(DbErr::Custom(format!(
-                "schema_versions.version decode failed: {err}"
-            )))
-        })?;
-        Ok(version)
+        max_schema_version(conn).await
+    }
+
+    /// Read the highest applied version without creating or mutating
+    /// `schema_versions`.
+    ///
+    /// This is the preflight path for normal CLI commands: when a newer Libra
+    /// binary sees an older repository, the check must report "upgrade
+    /// required" instead of silently creating tracking tables or applying
+    /// migrations.
+    pub async fn current_version_readonly(
+        &self,
+        conn: &DatabaseConnection,
+    ) -> Result<Option<i64>, MigrationError> {
+        if !schema_versions_table_exists(conn).await? {
+            return Ok(None);
+        }
+        max_schema_version(conn).await
     }
 
     /// Apply every registered migration whose version is greater than the
@@ -380,6 +379,40 @@ async fn ensure_schema_versions_table(conn: &DatabaseConnection) -> Result<(), M
     conn.execute(Statement::from_string(backend, SCHEMA_VERSIONS_DDL))
         .await?;
     Ok(())
+}
+
+async fn schema_versions_table_exists(conn: &DatabaseConnection) -> Result<bool, MigrationError> {
+    let backend = conn.get_database_backend();
+    let row = conn
+        .query_one(Statement::from_sql_and_values(
+            backend,
+            "SELECT 1 FROM sqlite_master WHERE type = ? AND name = ? LIMIT 1",
+            ["table".into(), "schema_versions".into()],
+        ))
+        .await?;
+    Ok(row.is_some())
+}
+
+async fn max_schema_version(conn: &DatabaseConnection) -> Result<Option<i64>, MigrationError> {
+    let backend = conn.get_database_backend();
+    let row = conn
+        .query_one(Statement::from_string(
+            backend,
+            "SELECT MAX(version) FROM schema_versions",
+        ))
+        .await?;
+    let Some(row) = row else { return Ok(None) };
+    // SQLite returns NULL for `MAX(version)` when the table is empty; sea-orm
+    // surfaces that as `Option<i64>`. We forward the None.
+    // CONTRACT (Codex r5 P1#1): decode failures must propagate — a type-drifted
+    // `version` column would otherwise silently report "empty registry" and
+    // trigger a re-run of every migration.
+    let version: Option<i64> = row.try_get_by_index(0).map_err(|err| {
+        MigrationError::Database(DbErr::Custom(format!(
+            "schema_versions.version decode failed: {err}"
+        )))
+    })?;
+    Ok(version)
 }
 
 /// Apply one migration atomically. Returns `true` when this call inserted
@@ -643,6 +676,18 @@ pub fn builtin_runner() -> Result<MigrationRunner, MigrationError> {
     let mut runner = MigrationRunner::new();
     runner.extend(builtin_migrations())?;
     Ok(runner)
+}
+
+/// Highest schema version this Libra build knows how to create.
+pub fn latest_builtin_schema_version() -> Result<Option<i64>, MigrationError> {
+    Ok(builtin_runner()?.max_registered_version())
+}
+
+/// Read the current built-in schema version without mutating the database.
+pub async fn current_builtin_schema_version_readonly(
+    conn: &DatabaseConnection,
+) -> Result<Option<i64>, MigrationError> {
+    builtin_runner()?.current_version_readonly(conn).await
 }
 
 /// Run all built-in migrations on the given connection. This is the

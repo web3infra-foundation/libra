@@ -4,7 +4,7 @@
 //! - Open SQLite databases under `.libra/libra.db` (per-repo) and
 //!   `~/.libra/config.db` (global), cached by path.
 //! - Bootstrap the schema from the embedded `sqlite_20260309_init.sql`.
-//! - Run idempotent on-connect migrations:
+//! - Run idempotent schema upgrades only from explicit creation / upgrade paths:
 //!   - [`ensure_config_kv_schema`] adds the `config_kv` table to old DBs.
 //!   - [`ensure_ai_projection_schema`] adds the AI projection tables (using
 //!     the bootstrap section delimited by `BEGIN/END AI PROJECTION SCHEMA`).
@@ -37,6 +37,32 @@ use sea_orm::{
 
 use crate::utils::path;
 
+/// Result of applying repository database schema upgrades.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemaUpgradeReport {
+    pub previous_version: Option<i64>,
+    pub current_version: Option<i64>,
+    pub latest_version: Option<i64>,
+    pub applied_versions: Vec<i64>,
+}
+
+/// Compatibility between an on-disk database and this Libra build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SchemaCompatibility {
+    Compatible {
+        current_version: Option<i64>,
+        latest_version: Option<i64>,
+    },
+    UpgradeRequired {
+        current_version: Option<i64>,
+        latest_version: i64,
+    },
+    UnsupportedFuture {
+        current_version: i64,
+        latest_version: Option<i64>,
+    },
+}
+
 // #[cfg(not(test))]
 // use tokio::sync::OnceCell;
 
@@ -62,12 +88,14 @@ fn normalize_path_for_sqlite(db_path: &str) -> String {
 
 /// Establish a connection to the database with the default 30-second busy timeout.
 ///
-/// Functional scope: opens the file, applies all idempotent on-connect
-/// migrations (`config_kv`, AI projection, AI runtime contract).
+/// Functional scope: opens the file and verifies its recorded schema version is
+/// compatible with this Libra build. This function does not apply migrations;
+/// callers must use [`upgrade_database_schema`] for explicit upgrades.
 ///
 /// Boundary conditions:
 /// - Returns `IOError(NotFound)` if the database file does not exist on disk.
-/// - Schema migrations failures are surfaced as `IOError::other` with context.
+/// - Stale or future schema versions are surfaced as `IOError::other` with an
+///   actionable upgrade/newer-binary hint.
 #[allow(dead_code)]
 pub async fn establish_connection(db_path: &str) -> Result<DatabaseConnection, IOError> {
     establish_connection_with_busy_timeout(db_path, Duration::from_secs(30)).await
@@ -76,8 +104,9 @@ pub async fn establish_connection(db_path: &str) -> Result<DatabaseConnection, I
 /// Establish a SQLite connection with a caller-specified busy timeout.
 ///
 /// This is useful for best-effort/background jobs that should fail fast on lock
-/// contention instead of waiting for long periods. The same migrations as
-/// [`establish_connection`] are applied.
+/// contention instead of waiting for long periods. Like
+/// [`establish_connection`], it verifies compatibility but does not apply
+/// migrations.
 #[allow(dead_code)]
 pub async fn establish_connection_with_busy_timeout(
     db_path: &str,
@@ -97,29 +126,7 @@ pub async fn establish_connection_with_busy_timeout(
     let conn = Database::connect(option)
         .await
         .map_err(|err| IOError::other(format!("Database connection error: {err:?}")))?;
-    ensure_config_kv_schema(&conn)
-        .await
-        .map_err(|err| IOError::other(format!("Failed to ensure config_kv schema: {err}")))?;
-    ensure_ai_projection_schema(&conn)
-        .await
-        .map_err(|err| IOError::other(format!("Failed to ensure AI projection schema: {err}")))?;
-    ensure_ai_runtime_contract_schema(&conn)
-        .await
-        .map_err(|err| {
-            IOError::other(format!(
-                "Failed to ensure AI runtime contract schema: {err}"
-            ))
-        })?;
-    // CEX-12.5: apply every migration registered in
-    // `migration::builtin_migrations`. The runner is idempotent — on a
-    // fresh DB or a legacy DB it ensures the `schema_versions` tracking
-    // table and runs only the migrations whose `version` is not already
-    // recorded. Future persistence-touching CEXes plug in by adding to
-    // `builtin_migrations`; no new `ensure_*_schema` helpers should be
-    // added here.
-    migration::run_builtin_migrations(&conn)
-        .await
-        .map_err(|err| IOError::other(format!("Failed to run schema migrations: {err}")))?;
+    ensure_database_schema_is_compatible(&conn).await?;
     Ok(conn)
 }
 // #[cfg(not(test))]
@@ -159,7 +166,7 @@ static TEST_DB_CONNECTIONS: Lazy<Mutex<HashMap<PathBuf, DbConn>>> =
 /// - Verifies the file exists; missing files evict any stale cache entry and
 ///   return `IOError(NotFound)`.
 /// - Returns a clone of the cached `DbConn` on hit.
-/// - On miss, opens a new connection (running all on-connect migrations) and
+/// - On miss, opens a new compatible connection without applying migrations and
 ///   re-acquires the lock to publish it. The double-check pattern is used to
 ///   avoid two threads racing to install the same connection.
 async fn get_or_init_db_conn_instance(db_path: PathBuf) -> io::Result<DbConn> {
@@ -245,6 +252,100 @@ async fn get_db_conn_for_path(db_path: &Path) -> io::Result<DatabaseConnection> 
         )
     })?;
     establish_connection(db_path).await
+}
+
+/// Open an existing SQLite database without applying any schema changes.
+///
+/// Normal command preflight uses this to inspect `schema_versions` without
+/// accidentally upgrading an older repository before the user has explicitly run
+/// `libra db upgrade`.
+pub async fn open_database_without_migrations(db_path: &Path) -> io::Result<DatabaseConnection> {
+    if !db_path.exists() {
+        return Err(IOError::new(
+            ErrorKind::NotFound,
+            format!("Database file does not exist: {}", db_path.display()),
+        ));
+    }
+    let db_path = db_path.to_str().ok_or_else(|| {
+        IOError::new(
+            ErrorKind::InvalidData,
+            format!("Database path is not valid UTF-8: {}", db_path.display()),
+        )
+    })?;
+    connect_database(db_path).await
+}
+
+/// Inspect whether an existing repository DB can be used by this Libra build.
+///
+/// This function is intentionally read-only. It does not create
+/// `schema_versions`, run idempotent DDL, or apply pending migrations.
+pub async fn inspect_database_schema(db_path: &Path) -> io::Result<SchemaCompatibility> {
+    let conn = open_database_without_migrations(db_path).await?;
+    inspect_database_schema_for_connection(&conn).await
+}
+
+/// Explicitly upgrade an existing repository database to the schema known by this
+/// Libra build.
+pub async fn upgrade_database_schema(db_path: &Path) -> io::Result<SchemaUpgradeReport> {
+    let conn = open_database_without_migrations(db_path).await?;
+    apply_database_schema_upgrades(&conn).await
+}
+
+async fn inspect_database_schema_for_connection(
+    conn: &DatabaseConnection,
+) -> io::Result<SchemaCompatibility> {
+    let current = migration::current_builtin_schema_version_readonly(conn)
+        .await
+        .map_err(|err| IOError::other(format!("Failed to read schema version: {err}")))?;
+    let latest = migration::latest_builtin_schema_version()
+        .map_err(|err| IOError::other(format!("Failed to inspect built-in migrations: {err}")))?;
+
+    match (current, latest) {
+        (_, None) => Ok(SchemaCompatibility::Compatible {
+            current_version: current,
+            latest_version: latest,
+        }),
+        (Some(current), Some(latest)) if current == latest => Ok(SchemaCompatibility::Compatible {
+            current_version: Some(current),
+            latest_version: Some(latest),
+        }),
+        (Some(current), Some(latest)) if current > latest => {
+            Ok(SchemaCompatibility::UnsupportedFuture {
+                current_version: current,
+                latest_version: Some(latest),
+            })
+        }
+        (current, Some(latest)) => Ok(SchemaCompatibility::UpgradeRequired {
+            current_version: current,
+            latest_version: latest,
+        }),
+    }
+}
+
+async fn ensure_database_schema_is_compatible(conn: &DatabaseConnection) -> io::Result<()> {
+    match inspect_database_schema_for_connection(conn).await? {
+        SchemaCompatibility::Compatible { .. } => Ok(()),
+        SchemaCompatibility::UpgradeRequired {
+            current_version,
+            latest_version,
+        } => Err(IOError::other(format!(
+            "Repository database schema is out of date (current: {}, required: {latest_version}). Run 'libra db upgrade' in this repository.",
+            format_schema_version(current_version)
+        ))),
+        SchemaCompatibility::UnsupportedFuture {
+            current_version,
+            latest_version,
+        } => Err(IOError::other(format!(
+            "Repository database schema version {current_version} is newer than this Libra binary supports (latest supported: {}). Install a newer Libra binary.",
+            format_schema_version(latest_version)
+        ))),
+    }
+}
+
+fn format_schema_version(version: Option<i64>) -> String {
+    version
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "none".to_string())
 }
 
 /// Embedded canonical SQLite schema. Compiled into the binary via `include_str!`.
@@ -409,6 +510,50 @@ async fn connect_database(db_path: &str) -> io::Result<DatabaseConnection> {
         .map_err(|err| IOError::other(format!("Database connection error: {err:?}")))
 }
 
+async fn apply_database_schema_upgrades(
+    conn: &DatabaseConnection,
+) -> io::Result<SchemaUpgradeReport> {
+    let previous_version = migration::current_builtin_schema_version_readonly(conn)
+        .await
+        .map_err(|err| IOError::other(format!("Failed to read schema version: {err}")))?;
+    let latest_version = migration::latest_builtin_schema_version()
+        .map_err(|err| IOError::other(format!("Failed to inspect built-in migrations: {err}")))?;
+
+    ensure_config_kv_schema(conn)
+        .await
+        .map_err(|err| IOError::other(format!("Failed to ensure config_kv schema: {err}")))?;
+    ensure_ai_projection_schema(conn)
+        .await
+        .map_err(|err| IOError::other(format!("Failed to ensure AI projection schema: {err}")))?;
+    ensure_ai_runtime_contract_schema(conn)
+        .await
+        .map_err(|err| {
+            IOError::other(format!(
+                "Failed to ensure AI runtime contract schema: {err}"
+            ))
+        })?;
+    // CEX-12.5: apply every migration registered in
+    // `migration::builtin_migrations`. The runner is idempotent — on a
+    // fresh DB or a legacy DB it ensures the `schema_versions` tracking
+    // table and runs only the migrations whose `version` is not already
+    // recorded. Future persistence-touching CEXes plug in by adding to
+    // `builtin_migrations`; no new `ensure_*_schema` helpers should be
+    // added here.
+    let applied_versions = migration::run_builtin_migrations(conn)
+        .await
+        .map_err(|err| IOError::other(format!("Failed to run schema migrations: {err}")))?;
+    let current_version = migration::current_builtin_schema_version_readonly(conn)
+        .await
+        .map_err(|err| IOError::other(format!("Failed to read schema version: {err}")))?;
+
+    Ok(SchemaUpgradeReport {
+        previous_version,
+        current_version,
+        latest_version,
+        applied_versions,
+    })
+}
+
 /// Create a new SQLite database file at the specified path.
 /// **should only be called in init or test**
 /// - `db_path` is the path to the SQLite database file.
@@ -441,13 +586,11 @@ pub async fn create_database(db_path: &str) -> io::Result<DatabaseConnection> {
             // the migrations belatedly. The acceptance criterion in
             // `docs/improvement/agent.md` line 313 requires fresh and
             // existing repos to converge to the same schema after init.
-            migration::run_builtin_migrations(&conn)
-                .await
-                .map_err(|err| {
-                    IOError::other(format!(
-                        "Failed to run schema migrations on fresh database: {err}"
-                    ))
-                })?;
+            apply_database_schema_upgrades(&conn).await.map_err(|err| {
+                IOError::other(format!(
+                    "Failed to run schema migrations on fresh database: {err}"
+                ))
+            })?;
             Ok(conn)
         }
         _ => Err(IOError::other("Failed to connect to new database.")),
@@ -774,7 +917,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_establish_connection_backfills_ai_projection_tables() {
+    async fn test_upgrade_database_schema_backfills_ai_projection_tables() {
         let mut db_path_buf = std::env::temp_dir();
         db_path_buf.push("test_ai_projection_backfill.db");
         let db_path = db_path_buf.to_str().unwrap();
@@ -785,7 +928,10 @@ mod tests {
 
         fs::File::create(db_path).unwrap();
 
-        let conn = establish_connection(db_path).await.unwrap();
+        upgrade_database_schema(Path::new(db_path)).await.unwrap();
+        let conn = open_database_without_migrations(Path::new(db_path))
+            .await
+            .unwrap();
         let backend = conn.get_database_backend();
         let stmt = Statement::from_sql_and_values(
             backend,
@@ -812,7 +958,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_establish_connection_backfills_ai_projection_schema_for_core_only_db() {
+    async fn test_upgrade_database_schema_backfills_ai_projection_schema_for_core_only_db() {
         let mut db_path_buf = std::env::temp_dir();
         db_path_buf.push("test_ai_projection_backfill_core_only.db");
         let db_path = db_path_buf.to_str().unwrap();
@@ -832,7 +978,10 @@ mod tests {
             .unwrap();
         conn.close().await.unwrap();
 
-        let conn = establish_connection(db_path).await.unwrap();
+        upgrade_database_schema(Path::new(db_path)).await.unwrap();
+        let conn = open_database_without_migrations(Path::new(db_path))
+            .await
+            .unwrap();
         let backend = conn.get_database_backend();
 
         let ai_stmt = Statement::from_sql_and_values(

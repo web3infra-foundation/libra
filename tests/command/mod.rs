@@ -305,6 +305,7 @@ mod restore_test;
 mod rev_list_test;
 mod rev_parse_test;
 mod revert_test;
+mod schema_upgrade_test;
 mod shortlog_test;
 mod show_ref_test;
 mod show_test;
