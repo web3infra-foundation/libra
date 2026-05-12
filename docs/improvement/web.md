@@ -33,7 +33,7 @@
 | 区域 | 已落地 | 仍需收口 |
 |------|--------|----------|
 | Wire contract | `CodeUiSessionSnapshot`、8 个 capability flag、5 个 interaction kind、3 类 controller 初始模式、serde golden | 在 `docs/commands/code.md` 增补稳定字段表，避免只靠测试表达契约 |
-| API | `/api/repo/status` 复用 `libra status --json` envelope；`/api/code/threads` 复用 `ThreadProjection::list_active`，`limit` clamp 到 200；写路径统一 body limit/audit | SSE `BroadcastStream` 目前对 `Lagged` 是静默丢弃，需显式触发 full snapshot recover 或发送可识别事件 |
+| API | `/api/repo/status` 复用 `libra status --json` envelope；`/api/code/threads` 复用 `ThreadProjection::list_active`，`limit` clamp 到 200；写路径统一 body limit/audit；SSE lag 已恢复为完整 `session_updated` snapshot | 继续补齐 Web API client / component / browser smoke 测试 |
 | Frontend data | `CodeUiProvider` 首屏拉 repo/status/session/threads，连接 SSE，status debounce 5s；Chat/Sidebar/Workflow/Summary/Diff/Terminal/Settings 都走 live store | 需要 API client 单测、组件测试、browser smoke；长 transcript/diff/tool output 的主线程保护仍不足 |
 | Browser write | `BrowserControllerProvider` lazy attach，token 只在内存；submit/respond/cancel/detach 已接线；`BROWSER_CONTROL_DISABLED` 等错误能显示 | 需要覆盖五类 interaction 的组件测试和 lease 过期/多 tab UI 行为；audit log 断言还应进入 scenario |
 | TUI write bridge | `--browser-control loopback` 打开 browser write；TUI default 保持 `off`；TUI reclaim 会清 browser lease | 需要继续验证 `{off, loopback} x {host} x {TUI, web-only}` 的矩阵数据驱动化 |
@@ -51,7 +51,7 @@
 | Git 状态 | `GET /api/repo/status` | 已落地，返回 `{ ok, command: "status", data }`，shape 与 `libra status --json` 一致 |
 | Thread 列表 | `GET /api/code/threads?limit&offset` | 已落地，active non-archived projection，`limit` 默认 50，最大 200 |
 | 初始 session | `GET /api/code/session` | 已落地，返回完整 `CodeUiSessionSnapshot`；无 runtime 时 `CODE_UI_UNAVAILABLE` |
-| 实时更新 | `GET /api/code/events` | 已落地，SSE event type 为 `session_updated` / `status_changed` / `controller_changed`；仍需修复 `Lagged` 可观测性 |
+| 实时更新 | `GET /api/code/events` | 已落地，SSE event type 为 `session_updated` / `status_changed` / `controller_changed`；`Lagged` 会恢复为完整 `session_updated` snapshot |
 | 诊断 | `GET /api/code/diagnostics` | 已落地，redacted runtime info |
 | 取得 lease | `POST /api/code/controller/attach` | browser body `{ clientId, kind: "browser" }`；automation attach 额外要求 `X-Libra-Control-Token` |
 | 释放 lease | `POST /api/code/controller/detach` | `X-Code-Controller-Token`；automation lease 额外要求 control token |

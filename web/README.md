@@ -24,7 +24,7 @@ The browser only talks to its same-origin server. The Rust side enforces loopbac
 | `/api/repo` | GET | Repository identity (`id`, `name`, `description`). |
 | `/api/repo/status` | GET | Working-tree status — same JSON envelope as `libra status --json` (`{ ok, command: "status", data }`). |
 | `/api/code/session` | GET | Initial `CodeUiSessionSnapshot`. |
-| `/api/code/events` | GET (SSE) | `session_updated` / `status_changed` / `controller_changed` frames; clients fall back to `GET /api/code/session` on `Lagged` or disconnect. |
+| `/api/code/events` | GET (SSE) | `session_updated` / `status_changed` / `controller_changed` frames; server lag emits a full `session_updated` snapshot, and clients fall back to `GET /api/code/session` on disconnect. |
 | `/api/code/threads?limit&offset` | GET | Active thread projections for the sidebar (`{ items, nextOffset }`). |
 | `/api/code/diagnostics` | GET | Redacted runtime info (PID, ports, log file, controller). |
 | `/api/code/controller/attach` | POST | Issue a lease (`{ clientId, kind: "browser" }`). Returns `controllerToken`. |
