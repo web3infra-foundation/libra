@@ -14,11 +14,11 @@
 //! (or `wait_for_codex_ready`-style probe) can connect and complete
 //! a single round trip without an actual Codex binary.
 //!
-//! Future §5.13 work (full handshake + thread/start + notification
-//! replay + persistence assertions) builds on this same helper by
-//! extending the request matcher; the on-disk format is small enough
-//! that this single file should remain the only mock infrastructure
-//! for the entire §5.13 closure.
+//! §5.13 follow-up work (notification replay, persistence assertions,
+//! and reconnect behavior) should build on this same helper by extending
+//! the request matcher; the on-disk format is small enough that this
+//! single file should remain the only mock infrastructure for the
+//! remaining §5.13 closure.
 
 use std::{
     net::SocketAddr,

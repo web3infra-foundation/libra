@@ -17,31 +17,54 @@
 //!     `libra code --provider codex` boot end-to-end against the
 //!     mock; landing the helper now de-risks the protocol
 //!     plumbing for that future work.
+//!   * A real `libra code --provider codex` process can boot
+//!     against that mock through the normal `--codex-port` /
+//!     managed-app-server path. The test pins that the binary
+//!     emits `initialize` and `thread/start`, and that codex's
+//!     default plan-mode instructions are present in the
+//!     `thread/start` payload.
 //!
 //! Coverage still deferred (extends the same helper):
-//!   * End-to-end `libra code --provider codex --codex-port
-//!     <mock>` boot that completes the handshake, receives
-//!     notifications, and asserts persistence to
-//!     `.libra/objects/`. Needs the binary's
-//!     `start_managed_codex_server` indirection swapped for the
-//!     mock — a separate PR worth.
-//!   * Codex `--plan-mode true` plan-approve gate enforcement.
 //!   * Codex disconnect / reconnect resilience.
 
+#[cfg(feature = "test-provider")]
+mod harness;
 mod helpers;
 
-use std::{path::PathBuf, process::Command, time::Duration};
+use std::{
+    path::PathBuf,
+    process::Command,
+    thread,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, bail};
 use futures_util::{SinkExt, StreamExt};
+#[cfg(feature = "test-provider")]
+use harness::{CodeSession, CodeSessionOptions};
 use helpers::mock_codex_ws_server::{MockCodexWsConfig, MockCodexWsServer};
 use serde_json::json;
+#[cfg(feature = "test-provider")]
+use serial_test::serial;
 use tokio_tungstenite::tungstenite::Message;
 
 fn libra_bin_path() -> PathBuf {
     std::env::var_os("CARGO_BIN_EXE_libra")
         .map(PathBuf::from)
         .expect("CARGO_BIN_EXE_libra is set for integration tests")
+}
+
+#[cfg(feature = "test-provider")]
+fn fixture_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/code_ui/basic_chat.json")
+}
+
+#[cfg(feature = "test-provider")]
+fn fake_codex_bin_path() -> Result<String> {
+    let path = std::env::current_exe().context("failed to resolve current test binary path")?;
+    path.to_str()
+        .map(str::to_owned)
+        .context("current test binary path is not valid UTF-8")
 }
 
 /// Initialise a libra repo in a tempdir so `libra code` does not
@@ -221,4 +244,99 @@ async fn mock_codex_ws_server_handles_initialize_and_thread_start_round_trip() -
         Some("thread/start"),
     );
     Ok(())
+}
+
+/// Wave 9 §5.13 binary boot smoke — real `libra code` process
+/// against the mock Codex app-server.
+///
+/// The production path always calls `start_managed_codex_server`,
+/// which first spawns `--codex-bin app-server --listen <ws_url>`
+/// and then probes the chosen `--codex-port`. To keep the test
+/// deterministic without the real Codex binary, the mock binds
+/// the selected port first and `--codex-bin <current-test-binary>`
+/// satisfies the child-spawn contract. The readiness probe and the actual
+/// Code UI runtime then connect to the mock WebSocket endpoint.
+#[cfg(feature = "test-provider")]
+#[test]
+#[serial]
+fn libra_code_provider_codex_boots_against_mock_app_server() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new().context("create tokio runtime")?;
+    let server = runtime.block_on(MockCodexWsServer::start(MockCodexWsConfig {
+        thread_id: Some("wave-9-binary-codex-thread".to_string()),
+    }))?;
+    let port = server.port().to_string();
+    let fake_codex_bin = fake_codex_bin_path()?;
+
+    let _session = CodeSession::spawn(
+        CodeSessionOptions::new("code-codex-binary-boot", fixture_path())
+            .with_live_provider("codex", "codex-test")
+            .push_extra_cli_arg("--codex-port")
+            .push_extra_cli_arg(port)
+            .push_extra_cli_arg("--codex-bin")
+            .push_extra_cli_arg(fake_codex_bin),
+    )?;
+
+    let captured = wait_for_codex_methods(
+        &server,
+        &["initialize", "thread/start"],
+        Duration::from_secs(10),
+    )?;
+    let methods = captured
+        .iter()
+        .filter_map(|request| request.get("method").and_then(|value| value.as_str()))
+        .collect::<Vec<_>>();
+    assert!(
+        methods.contains(&"initialize") && methods.contains(&"thread/start"),
+        "binary codex boot must issue initialize and thread/start; got {methods:?}",
+    );
+
+    let thread_start = captured
+        .iter()
+        .find(|request| {
+            request.get("method").and_then(|value| value.as_str()) == Some("thread/start")
+        })
+        .ok_or_else(|| anyhow::anyhow!("captured requests did not include thread/start"))?;
+    assert_eq!(
+        thread_start
+            .pointer("/params/model")
+            .and_then(|value| value.as_str()),
+        Some("codex-test"),
+        "thread/start must forward the selected model; got {thread_start}",
+    );
+    assert!(
+        thread_start
+            .pointer("/params/developerInstructions")
+            .is_some_and(|value| value.is_string()),
+        "codex defaults to plan mode, so thread/start must include developerInstructions; got {thread_start}",
+    );
+    assert!(
+        thread_start
+            .pointer("/params/baseInstructions")
+            .is_some_and(|value| value.is_string()),
+        "codex defaults to plan mode, so thread/start must include baseInstructions; got {thread_start}",
+    );
+    Ok(())
+}
+
+#[cfg(feature = "test-provider")]
+fn wait_for_codex_methods(
+    server: &MockCodexWsServer,
+    expected: &[&str],
+    timeout: Duration,
+) -> Result<Vec<serde_json::Value>> {
+    let deadline = Instant::now() + timeout;
+    let mut last = Vec::new();
+    while Instant::now() < deadline {
+        let captured = server.captured_requests();
+        if expected.iter().all(|method| {
+            captured.iter().any(|request| {
+                request.get("method").and_then(|value| value.as_str()) == Some(*method)
+            })
+        }) {
+            return Ok(captured);
+        }
+        last = captured;
+        thread::sleep(Duration::from_millis(100));
+    }
+    bail!("timed out waiting for codex methods {expected:?}; captured requests: {last:?}")
 }
