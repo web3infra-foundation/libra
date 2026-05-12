@@ -28,7 +28,9 @@ mod command_safety;
 pub mod policy;
 pub mod runtime;
 
-pub use policy::{NetworkAccess, SandboxPermissions, SandboxPolicy, WritableRoot};
+pub use policy::{
+    NetworkAccess, SandboxPermissions, SandboxPolicy, SandboxPolicyError, WritableRoot,
+};
 pub use runtime::{
     CommandSpec, ExecEnv, SandboxManager, SandboxTransformError, SandboxTransformRequest,
     SandboxType,

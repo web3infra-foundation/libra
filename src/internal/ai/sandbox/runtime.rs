@@ -12,7 +12,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
-use super::{SandboxPermissions, SandboxPolicy};
+use super::{SandboxPermissions, SandboxPolicy, SandboxPolicyError};
 #[cfg(unix)]
 use crate::utils::fuse;
 
@@ -170,6 +170,8 @@ pub enum SandboxTransformError {
     WindowsSandboxNotImplemented,
     #[error("sandboxed command execution is not supported on this platform")]
     UnsupportedPlatform,
+    #[error(transparent)]
+    InvalidPolicy(#[from] SandboxPolicyError),
 }
 
 #[derive(Default)]
@@ -239,6 +241,12 @@ impl SandboxManager {
 
         if spec.program.is_empty() {
             return Err(SandboxTransformError::MissingProgram);
+        }
+
+        if !spec.sandbox_permissions.requires_escalated_permissions()
+            && let Some(policy) = policy
+        {
+            policy.validate_writable_roots_with_cwd(sandbox_policy_cwd)?;
         }
 
         let mut env = spec.env;
@@ -537,6 +545,70 @@ mod tests {
             .expect("transform should fallback");
         assert_eq!(transformed.sandbox, SandboxType::None);
         assert!(!transformed.command.is_empty());
+    }
+
+    #[test]
+    fn transform_rejects_dangerous_writable_roots_before_execution() {
+        let manager = SandboxManager::new();
+        let cwd = std::env::temp_dir();
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![PathBuf::from("/var/run/docker.sock")],
+            network_access: false,
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
+        };
+        let request = SandboxTransformRequest {
+            spec: CommandSpec::shell(
+                "echo ok",
+                cwd.clone(),
+                Some(1_000),
+                SandboxPermissions::UseDefault,
+                None,
+            ),
+            policy: Some(&policy),
+            sandbox_policy_cwd: &cwd,
+            linux_sandbox_exe: None,
+            use_linux_sandbox_bwrap: false,
+        };
+
+        let error = manager
+            .transform(request)
+            .expect_err("dangerous writable roots must be rejected");
+
+        assert!(
+            error.to_string().contains("Docker socket access"),
+            "unexpected error: {error}",
+        );
+    }
+
+    #[test]
+    fn escalated_transform_bypasses_dangerous_writable_root_validation() {
+        let manager = SandboxManager::new();
+        let cwd = std::env::temp_dir();
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![PathBuf::from("/var/run/docker.sock")],
+            network_access: false,
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
+        };
+        let request = SandboxTransformRequest {
+            spec: CommandSpec::shell(
+                "echo ok",
+                cwd.clone(),
+                Some(1_000),
+                SandboxPermissions::RequireEscalated,
+                None,
+            ),
+            policy: Some(&policy),
+            sandbox_policy_cwd: &cwd,
+            linux_sandbox_exe: None,
+            use_linux_sandbox_bwrap: false,
+        };
+
+        let transformed = manager
+            .transform(request)
+            .expect("explicit escalation should bypass sandbox policy validation");
+        assert_eq!(transformed.sandbox, SandboxType::None);
     }
 
     #[test]

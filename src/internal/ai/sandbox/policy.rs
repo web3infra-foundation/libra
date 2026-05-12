@@ -4,7 +4,10 @@
 //! as denied operations. Hardening contract tests cover path traversal, shell command,
 //! and workspace-scope boundaries.
 
-use std::path::{Path, PathBuf};
+use std::{
+    ffi::OsStr,
+    path::{Component, Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -60,6 +63,14 @@ pub enum SandboxPolicy {
     },
 }
 
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum SandboxPolicyError {
+    #[error(
+        "refusing writable_root '{root}' because {reason}; choose a non-privileged project directory, expose the tool through a narrow proxy, or rerun with explicit escalated permissions if host-level access is intentional"
+    )]
+    DangerousWritableRoot { root: PathBuf, reason: &'static str },
+}
+
 impl Default for SandboxPolicy {
     fn default() -> Self {
         Self::WorkspaceWrite {
@@ -111,10 +122,27 @@ impl SandboxPolicy {
         }
     }
 
+    pub fn validate_writable_roots_with_cwd(&self, cwd: &Path) -> Result<(), SandboxPolicyError> {
+        for root in self.writable_root_paths_with_cwd(cwd) {
+            validate_writable_root(&root)?;
+        }
+        Ok(())
+    }
+
     /// Returns writable roots resolved against the current working directory.
     /// Each writable root has protected subpaths (for example `.git`, `.libra`)
     /// that remain read-only.
     pub fn get_writable_roots_with_cwd(&self, cwd: &Path) -> Vec<WritableRoot> {
+        self.writable_root_paths_with_cwd(cwd)
+            .into_iter()
+            .map(|root| WritableRoot {
+                read_only_subpaths: protected_subpaths(&root),
+                root,
+            })
+            .collect()
+    }
+
+    fn writable_root_paths_with_cwd(&self, cwd: &Path) -> Vec<PathBuf> {
         match self {
             Self::DangerFullAccess | Self::ExternalSandbox { .. } | Self::ReadOnly => Vec::new(),
             Self::WorkspaceWrite {
@@ -148,12 +176,6 @@ impl SandboxPolicy {
                 }
 
                 roots
-                    .into_iter()
-                    .map(|root| WritableRoot {
-                        read_only_subpaths: protected_subpaths(&root),
-                        root,
-                    })
-                    .collect()
             }
         }
     }
@@ -173,6 +195,72 @@ fn push_root_unique(roots: &mut Vec<PathBuf>, root: PathBuf) {
         return;
     }
     roots.push(normalized);
+}
+
+fn validate_writable_root(root: &Path) -> Result<(), SandboxPolicyError> {
+    let lexical = normalize_path_lexically(root);
+    if let Some(reason) = dangerous_writable_root_reason(&lexical) {
+        return Err(SandboxPolicyError::DangerousWritableRoot {
+            root: lexical,
+            reason,
+        });
+    }
+
+    if let Ok(canonical) = root.canonicalize() {
+        let canonical = normalize_path_lexically(&canonical);
+        if let Some(reason) = dangerous_writable_root_reason(&canonical) {
+            return Err(SandboxPolicyError::DangerousWritableRoot {
+                root: canonical,
+                reason,
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn normalize_path_lexically(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push("..");
+                }
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    normalized
+}
+
+fn dangerous_writable_root_reason(path: &Path) -> Option<&'static str> {
+    if path == Path::new("/") {
+        return Some("it would make the whole host filesystem writable from the sandbox");
+    }
+    for sensitive_root in ["/proc", "/sys", "/dev"] {
+        if path == Path::new(sensitive_root) || path.starts_with(sensitive_root) {
+            return Some("kernel and device files can be used to escape or weaken the sandbox");
+        }
+    }
+    if path.file_name() == Some(OsStr::new("docker.sock")) {
+        return Some("Docker socket access is equivalent to host-level container control");
+    }
+    if path.file_name() == Some(OsStr::new("containerd.sock")) {
+        return Some("containerd socket access is equivalent to host-level container control");
+    }
+    if path == Path::new("/run/containerd/containerd.sock")
+        || path == Path::new("/var/run/containerd/containerd.sock")
+    {
+        return Some("containerd socket access is equivalent to host-level container control");
+    }
+    if path.starts_with("/var/run/libvirt") || path.starts_with("/run/libvirt") {
+        return Some("libvirt control sockets can start privileged host resources");
+    }
+    None
 }
 
 fn protected_subpaths(root: &Path) -> Vec<PathBuf> {
@@ -215,5 +303,73 @@ mod tests {
 
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].root, PathBuf::from("/tmp/workspace"));
+    }
+
+    #[test]
+    fn dangerous_socket_writable_roots_are_rejected() {
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![
+                PathBuf::from("/var/run/docker.sock"),
+                PathBuf::from("/tmp/project"),
+            ],
+            network_access: false,
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
+        };
+
+        let error = policy
+            .validate_writable_roots_with_cwd(Path::new("/tmp/workspace"))
+            .expect_err("docker socket writable roots must be rejected");
+
+        assert!(error.to_string().contains("Docker socket access"));
+    }
+
+    #[test]
+    fn nested_docker_socket_roots_are_rejected() {
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![PathBuf::from("tools/docker.sock")],
+            network_access: false,
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
+        };
+
+        let error = policy
+            .validate_writable_roots_with_cwd(Path::new("/tmp/workspace"))
+            .expect_err("glob-style docker.sock writable roots must be rejected");
+
+        assert!(error.to_string().contains("Docker socket access"));
+    }
+
+    #[test]
+    fn kernel_and_device_writable_roots_are_rejected() {
+        for root in ["/", "/proc", "/proc/self", "/sys", "/dev", "/dev/null"] {
+            let policy = SandboxPolicy::WorkspaceWrite {
+                writable_roots: vec![PathBuf::from(root)],
+                network_access: false,
+                exclude_tmpdir_env_var: true,
+                exclude_slash_tmp: true,
+            };
+
+            assert!(
+                policy
+                    .validate_writable_roots_with_cwd(Path::new("/tmp/workspace"))
+                    .is_err(),
+                "{root} must not be accepted as a writable sandbox root",
+            );
+        }
+    }
+
+    #[test]
+    fn safe_workspace_writable_roots_are_accepted() {
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![PathBuf::from("src")],
+            network_access: false,
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
+        };
+
+        policy
+            .validate_writable_roots_with_cwd(Path::new("/tmp/workspace"))
+            .expect("ordinary workspace roots should be accepted");
     }
 }

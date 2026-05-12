@@ -9,7 +9,7 @@ AI Agent 子系统专项计划，与 [agent.md](agent.md) Part B 并列。两者
 
 ## Context
 
-AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击面最集中的入口：提示词注入、恶意 MCP server、失控的 provider 调用都可能通过 Shell tool 直达宿主机。当前 Libra 已经具备多档 `SandboxPolicy`、Seatbelt 策略拼装、Linux 外部 helper、审批审计与危险命令解析等基础设施（见 [src/internal/ai/sandbox/](../../src/internal/ai/sandbox/)），但相较 Claude Code 官方公开的 Bubblewrap 方案仍有若干关键缺口，包括：**Linux 沙箱依赖的外部二进制缺失时静默降级**、**Seatbelt 允许 `file-read*` 导致敏感路径默认可读**、**无 `--new-session` 防护 TIOCSTI 终端注入**、**无每命令 0o700 tmp 清理**、**无危险挂载拒绝清单**、**无 `libra sandbox status` 自检**。
+AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击面最集中的入口：提示词注入、恶意 MCP server、失控的 provider 调用都可能通过 Shell tool 直达宿主机。当前 Libra 已经具备多档 `SandboxPolicy`、Seatbelt 策略拼装、Linux 外部 helper、审批审计、危险命令解析与危险 writable root 拒绝（见 [src/internal/ai/sandbox/](../../src/internal/ai/sandbox/)），但相较 Claude Code 官方公开的 Bubblewrap 方案仍有若干关键缺口，包括：**Linux 沙箱依赖的外部二进制缺失时静默降级**、**Seatbelt 允许 `file-read*` 导致敏感路径默认可读**、**无 `--new-session` 防护 TIOCSTI 终端注入**、**无每命令 0o700 tmp 清理**、**无 `libra sandbox status` 自检**。
 
 本计划对齐 Claude Code 官方沙箱文档（`code.claude.com/docs/en/sandboxing`）与 Bubblewrap 工程实践，目标是把 Libra 在 AI Agent 失控场景下的实际爆炸半径降到与 Claude Code 相当的水平，并保证改动与 [agent.md](agent.md) Part B 的 Runtime 正式写入层兼容。**网络服务访问采取默认拒绝（default deny）策略**：沙箱内除 loopback 外的一切出站连接默认被 OS 层阻断，只能通过显式白名单放行。
 
@@ -45,8 +45,14 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 - Linux 仍是外部 helper 参数转发路径（`--sandbox-policy` / `--use-bwrap-sandbox`），无内建 `create_bwrap_command_args`：`src/internal/ai/sandbox/runtime.rs:323-340`。
 - macOS 读权限仍是 `(allow file-read*)` 全放行：`src/internal/ai/sandbox/runtime.rs:354`。
 - 执行路径仍未注入 per-command 私有 tmp，也无 finally 清理：`src/internal/ai/sandbox/mod.rs:986-1061`。
-- `writable_roots` 仅规范化/去重，未做危险路径拒绝：`src/internal/ai/sandbox/policy.rs:117-159`。
 - 网络模型仍是 `Restricted/Enabled` + `bool network_access`，不是 `Denied/Allowlist/Full`：`src/internal/ai/sandbox/policy.rs:27-33`、`src/internal/ai/sandbox/mod.rs:750-760`、`src/command/code.rs:357-364`。
+
+## 0.17.25 增量收口（2026-05-12）
+
+- **阶段 6 已落地**：`SandboxPolicy::validate_writable_roots_with_cwd()` 会拒绝 `/`、`/proc`、`/sys`、`/dev`、Docker/containerd socket、libvirt 控制路径，以及 `**/docker.sock` / `**/containerd.sock` 形态的危险 writable root。
+- **执行入口已接线**：`SandboxManager::transform()` 在非 escalated 调用进入命令构造前先执行上述校验；错误通过 `SandboxTransformError::InvalidPolicy` 返回给 shell tool，而不是继续构造裸命令。
+- **显式升级仍可绕过**：`SandboxPermissions::RequireEscalated` 表达用户批准的宿主级访问；该路径继续走 `SandboxType::None`，但必须由审批/提升权限流程显式触发。
+- **回归覆盖**：`policy.rs` 覆盖 socket、kernel/device 路径和普通 workspace root；`runtime.rs` 覆盖危险 root 在 transform 阶段被拒绝，以及 explicit escalation 绕过策略校验。
 
 ## 已完成前置条件与当前代码状态
 
@@ -57,6 +63,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 - `WritableRoot` 写入根 + 保护子路径（`.git` / `.libra` / `.codex` / `.agents`）
 - 路径通过 `canonicalize` 规范化（policy.rs:164-170）
 - `/tmp` 与 `TMPDIR` 由策略显式纳入写入根
+- 危险 writable root 拒绝：`/`、`/proc`、`/sys`、`/dev`、Docker/containerd socket、libvirt 控制路径，以及 `**/docker.sock` / `**/containerd.sock`
 
 **运行时层** [src/internal/ai/sandbox/runtime.rs](../../src/internal/ai/sandbox/runtime.rs)
 - macOS：`sandbox-exec` + 动态 `.sbpl` 模板（runtime.rs:282-313），`seatbelt_base_policy.sbpl` / `seatbelt_network_policy.sbpl` 已嵌入
@@ -80,7 +87,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 - Seatbelt 策略对读操作使用 `(allow file-read*)` 全盘放行（runtime.rs:354），`~/.ssh` / `~/.aws` / `~/.netrc` / 浏览器 cookie / 各类 token 默认可被 agent 读取并外发。
 - `create_seatbelt_command_args` 与外部 Linux helper 都没有对沙箱进程做 `setsid` / `--new-session`，TIOCSTI 终端注入路径未封堵。
 - `CommandSpec::env` 目前由调用方传入，`run_command_spec` 未专门为沙箱进程准备 0o700 私有 tmp，`$TMPDIR` 直接复用宿主。
-- `WorkspaceWrite::writable_roots` 装载不做危险路径校验，用户若为兼容 Docker 工具链写入 `/var/run/docker.sock`，沙箱一挂即可逃逸。
+- `WorkspaceWrite::writable_roots` 已拒绝危险挂载清单；剩余风险是尚未把拒绝事件写成 agent Runtime 的 `ToolInvocation[E]` / `Evidence[E]` 结构化记录。
 - 缺少 `libra sandbox status` 入口，用户无法确认当前 `SandboxType` 的实际生效状态。
 
 ## 目标与非目标
@@ -93,7 +100,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 - **P0** **网络服务默认拒绝**：沙箱内出站网络默认在 OS 层阻断（macOS Seatbelt 不注入网络策略 / Linux bwrap `--unshare-net`），仅放行 loopback；白名单只能通过显式配置放行
 - **P1** 收紧 Seatbelt 读权限，对默认敏感路径（`~/.ssh`、`~/.aws`、`~/.gnupg`、`~/.netrc`、`~/.config/gcloud`、`~/.kube` 等）默认拒读
 - **P1** 每命令 0o700 专属 tmp，退出即清
-- **P1** 危险挂载拒绝清单（`/var/run/docker.sock` / `containerd.sock` / `/proc` / `/sys` / `/dev`）
+- **P1 ✅** 危险挂载拒绝清单（`/var/run/docker.sock` / `containerd.sock` / `/proc` / `/sys` / `/dev`）
 - **P1** 新增 `libra sandbox status` 子命令，输出当前生效的隔离模式与降级告警
 
 **后续维护目标：**
@@ -118,7 +125,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 | G4 | 默认拒绝 + 域名白名单的网络策略 | 仅 `network_access: bool`；enforcement 依赖环境变量 + 部分 Seatbelt 策略，未在 Linux 默认 `--unshare-net` | ★★★ | 阶段 7 本轮 OS 层 default deny + 白名单配置；域名过滤代理单列 |
 | G5 | 每命令 0o700 tmp + `cleanupAfterCommand()` | 无专属 tmp | ★★ | 阶段 5 |
 | G6 | 内置 Seccomp 过滤器 | 依赖外部 helper | ★★ | 阶段 2（随 bwrap 直调） |
-| G7 | 明确警示 Docker socket 挂入 = 逃逸 | `writable_roots` 不校验 | ★★ | 阶段 6 |
+| G7 | 明确警示 Docker socket 挂入 = 逃逸 | 已在 `SandboxPolicy` + `SandboxManager::transform()` 拒绝危险 writable root | ✅ | 阶段 6 已落地 |
 | G8 | `/sandbox` 自检状态 | 无 | ★ | 阶段 1（随 `sandbox status` 子命令） |
 | G9 | 嵌套容器 / WSL 的自适应降级告警 | 无 | ★ | 后续维护 |
 | G10 | Windows 规划中 | 同样未实现 | — | 本轮不处理 |
@@ -209,16 +216,16 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 3. **cleanupAfterCommand 对齐**
    - macOS 下若出现 Seatbelt "ghost dotfiles"（允许写 + 实际被 deny → 0 字节占位），也在清理阶段统一擦除
 
-### 阶段 6：危险挂载拒绝（P1）
+### 阶段 6：危险挂载拒绝（P1，已落地）
 
 **目标**：用户/配置错误不能让沙箱"自己打开后门"。
 
 1. **`WorkspaceWrite::writable_roots` 装载校验**（`policy.rs`）
-   - 拒绝清单：`/var/run/docker.sock`、`/run/docker.sock`、`/run/containerd/containerd.sock`、`/proc`、`/sys`、`/dev`、`/var/run/libvirt/*`、`/` 本身
-   - 支持 glob 匹配（例如 `**/docker.sock`）
+   - 已拒绝：`/var/run/docker.sock`、`/run/docker.sock`、`/run/containerd/containerd.sock`、`/proc`、`/sys`、`/dev`、`/var/run/libvirt/*`、`/` 本身
+   - 已覆盖 glob 风险：`**/docker.sock` 与 `**/containerd.sock` 形态按文件名拒绝
 2. **错误信息**
-   - 遵循 CLAUDE.md "用户友好错误信息" 约束：指出是哪条 writable_root 被拒、原因（可能导致容器逃逸）、建议（改为挂载到非特权代理路径或关闭该工具链集成）
-   - 映射到显式 `StableErrorCode`
+   - 已按用户友好约束指出被拒的 writable root、拒绝原因和最小修复方向（改用非特权项目目录、窄代理，或显式提升权限）
+   - 当前错误通过 `SandboxTransformError::InvalidPolicy` 进入 tool 层；显式 `StableErrorCode` 仍等待 `libra sandbox status` / sandbox command surface 一并设计
 
 ### 阶段 7：网络服务默认拒绝 + 白名单放行（P0）
 
@@ -318,7 +325,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 1. [src/internal/ai/sandbox/policy.rs](../../src/internal/ai/sandbox/policy.rs)
    - `SandboxEnforcement` 的 serde round-trip
    - `sensitive_read_paths()` 在不同 `$HOME` 下的展开结果
-   - `writable_roots` 含 `/var/run/docker.sock` 时的拒绝路径
+   - `writable_roots` 含 `/var/run/docker.sock` 时的拒绝路径（已覆盖）
    - `NetworkAccess::{Denied, Allowlist, Full}` 序列化 + 老 `network_access: bool` 迁移
    - `NetworkService` 的 host 通配符匹配、端口列表、高敏感端口（22 / 3389）默认拒绝
    - `SandboxPolicy::default()` 的 `NetworkAccess` 分支应为 `Denied`
@@ -334,7 +341,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 
 1. **静默降级**：`enforcement=Required` 且 helper / bwrap 均缺失 → 执行返回 `EnforcementFailed`
 2. **敏感读拒绝**：临时 `HOME` 下建 `~/.ssh/id_rsa` 伪文件，agent 通过 Shell tool `cat ~/.ssh/id_rsa` 应非零退出且 stderr 命中 `SANDBOX_DENIED_KEYWORDS`
-3. **危险挂载拒绝**：`writable_roots` 含 `/var/run/docker.sock` → `SandboxPolicy` 装载失败，错误消息包含用户可读提示
+3. **危险挂载拒绝（已覆盖）**：`writable_roots` 含 `/var/run/docker.sock` → `SandboxManager::transform()` 在命令构造前失败，错误消息包含用户可读提示
 4. **0o700 tmp 清理**：任一沙箱命令退出后，`<SystemTmp>/libra-sandbox-<uuid>/` 已被移除；失败路径也至少清一次
 5. **`--new-session` 生效（Linux only）**：沙箱内 `ps -o pid,sid,pgid,tty` 应显示 `tty=?`
 6. **`libra sandbox status` 契约**：JSON 输出包含 `platform` / `sandbox_type` / `enforcement` / `writable_roots` / `network.mode` / `network.allowlist` / `proxy_backend` / `bwrap_available` / `helper_path`；退出码与全局三级模型一致
