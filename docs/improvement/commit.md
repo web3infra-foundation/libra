@@ -32,9 +32,9 @@
 - **`missing_identity_error()` 已显式映射**：`commit.rs:313` 返回 `CommitError::IdentityMissing(...)`；该变体在 `commit.rs:187` 显式映射到 `StableErrorCode::AuthMissingCredentials` 并附 actionable hint，不再依赖消息子串推断
 - **测试覆盖已交付**：JSON schema 稳定性测试、CommitError 全变体单元映射测试、CLI 级集成测试均已就绪（详见 README 第 67-68 行 commit 已落地说明）
 
-**仍保留的低优先级收口项（不阻断验收）：**
+**保留的兼容面（不阻断验收）：**
 
-- legacy `execute()` 包装层（`commit.rs:765`）仍以 `OutputConfig::default()` 调用 `execute_safe()`；CLI 主路径不走它（顶层 dispatcher 直接调用 `execute_safe(args, &output)`），因此这是兼容包装层的收尾项，可独立小修
+- legacy `execute()` 包装层仍以 `OutputConfig::default()` 调用 `execute_safe()`；CLI 主路径不走它（顶层 dispatcher 直接调用 `execute_safe(args, &output)`），但测试辅助和本地 helper 仍复用该兼容入口，因此当前刻意保留
 - `commit.rs` 的生产 `unwrap()` / `expect()` 审计已收口：当前仅保留 `new_reflog_context()` 中的 `ObjectHash::from_bytes(...)`，并已用 `// INVARIANT:` 说明零填充且长度正确的 hash 字节永远可解析；其余 `unwrap()` / `expect()` 均位于测试代码
 
 ### 目标与非目标
