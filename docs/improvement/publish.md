@@ -804,13 +804,14 @@ v1 使用 gitignore 子集：
 
 **Acceptance criteria:**
 
-- [ ] `src/command/publish.rs` 新增 `sync`、`status`。
-- [ ] 顶层 CLI 注册 `Publish` 命令。
-- [ ] `sync` 默认发布所有本地 branch/tag refs；`sync --ref` 只做定向同步，不能更新完整 refs generation。
-- [ ] `sync --dry-run` 不写 D1/R2。
-- [ ] `sync --json` 输出 site id、refs count、revision count、default ref、latest revision oid、file count、AI object count、AI bundle count、warnings。
+- [x] (v0.17.53) `src/command/publish.rs` 新增 `status` 和离线 `sync --dry-run`；非 dry-run 的 D1/R2 sync 仍返回 `LBR-UNSUPPORTED-001`。
+- [x] (v0.17.51) 顶层 CLI 注册 `Publish` 命令。
+- [x] (v0.17.53) `sync --dry-run` 默认规划所有本地 branch/tag refs；`sync --ref` 只做定向规划，并在 JSON 中标记不会更新完整 refs generation。
+- [ ] `sync` 非 dry-run 默认发布所有本地 branch/tag refs；`sync --ref` 只做定向同步，不能更新完整 refs generation。
+- [x] (v0.17.53) `sync --dry-run` 不写 D1/R2，也不创建 `.libra/publish` 本地发布状态。
+- [x] (v0.17.53) `sync --dry-run --json` 输出 site id、refs count、revision count、default ref、latest revision oid、file count、AI object count、AI bundle count、warnings。
 - [ ] `status --json` 能对比本地 branch/tag refs 和 D1 published refs。
-- [ ] dirty 工作区 warning 和 `--fail-on-dirty` 语义有测试。
+- [x] (v0.17.53) dirty 工作区 warning 和 `--fail-on-dirty` 语义有测试。
 
 **Verification:**
 
@@ -941,8 +942,8 @@ v1 使用 gitignore 子集：
 
 ### Checkpoint A：本地 dry-run 可用
 
-- [ ] `libra publish sync --dry-run` 能输出将发布的 code/AI 计划。
-- [ ] 不需要 Cloudflare 凭据也能跑完 preflight。
+- [x] (v0.17.53) `libra publish sync --dry-run` 能输出将发布的本地 refs、revision、file counts 和 AI count/bundle count 计划；完整 AI exporter 仍归 Phase 3。
+- [x] (v0.17.53) 不需要 Cloudflare 凭据也能跑完 preflight。
 - [ ] 高风险文件能阻断或 warning。
 
 ### Checkpoint B：云端数据闭环

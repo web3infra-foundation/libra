@@ -24,18 +24,31 @@ use std::{
     fs, io,
     io::Write,
     path::{Component, Path, PathBuf},
+    str::FromStr,
 };
 
 use clap::{Parser, Subcommand};
+use git_internal::{
+    hash::ObjectHash,
+    internal::object::{commit::Commit, tree::Tree, types::ObjectType},
+};
 use ring::digest::{SHA256, digest};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    internal::publish::worker_template::{
-        MANIFEST, RenderPolicy, WorkerTemplate, embed_path_is_allowed,
+    command::{load_object, status},
+    internal::{
+        branch::Branch,
+        head::Head,
+        publish::{
+            snapshot::{RefInput, detect_ambiguous_short_refs, validate_oid, validate_ref_name},
+            worker_template::{MANIFEST, RenderPolicy, WorkerTemplate, embed_path_is_allowed},
+        },
+        tag::{self, TagObject},
     },
     utils::{
         error::{CliError, CliResult, StableErrorCode},
+        object_ext::TreeExt,
         output::{self, CommandOutput, OutputConfig},
         util,
     },
@@ -205,7 +218,13 @@ pub async fn execute_safe(args: PublishArgs, output: &OutputConfig) -> CliResult
             let result = run_publish_init_at_root(&repo_root, &init_args)?;
             output::emit(&result, output)
         }
-        PublishCommand::Sync(_) => unsupported_publish_subcommand("sync"),
+        PublishCommand::Sync(sync_args) => {
+            if !sync_args.dry_run {
+                return unsupported_publish_subcommand("sync");
+            }
+            let result = run_publish_sync_dry_run(&sync_args).await?;
+            output::emit(&result, output)
+        }
         PublishCommand::Status(_) => {
             let repo_root = util::try_working_dir().map_err(|source| {
                 CliError::fatal(format!("failed to resolve Libra repository root: {source}"))
@@ -266,6 +285,431 @@ impl CommandOutput for PublishInitOutput {
         writeln!(writer, "  files current: {}", self.files_current)?;
         Ok(())
     }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishSyncDryRunOutput {
+    dry_run: bool,
+    site_id: Option<String>,
+    selected_ref: Option<String>,
+    refs_count: usize,
+    revision_count: usize,
+    default_ref: Option<String>,
+    latest_revision_oid: Option<String>,
+    file_count: usize,
+    ai_object_count: usize,
+    ai_bundle_count: usize,
+    updates_full_refs_generation: bool,
+    refs: Vec<PublishSyncRefOutput>,
+    revisions: Vec<PublishSyncRevisionOutput>,
+    warnings: Vec<String>,
+}
+
+impl CommandOutput for PublishSyncDryRunOutput {
+    fn render_human(&self, writer: &mut dyn Write, output: &OutputConfig) -> io::Result<()> {
+        if output.quiet {
+            return Ok(());
+        }
+        writeln!(writer, "Publish dry-run plan")?;
+        writeln!(writer, "  refs: {}", self.refs_count)?;
+        writeln!(writer, "  revisions: {}", self.revision_count)?;
+        writeln!(
+            writer,
+            "  default ref: {}",
+            self.default_ref.as_deref().unwrap_or("<none>")
+        )?;
+        writeln!(
+            writer,
+            "  latest revision: {}",
+            self.latest_revision_oid.as_deref().unwrap_or("<none>")
+        )?;
+        writeln!(writer, "  files: {}", self.file_count)?;
+        writeln!(writer, "  AI objects: {}", self.ai_object_count)?;
+        writeln!(writer, "  AI bundles: {}", self.ai_bundle_count)?;
+        writeln!(
+            writer,
+            "  updates full refs generation: {}",
+            self.updates_full_refs_generation
+        )?;
+        if !self.warnings.is_empty() {
+            writeln!(writer, "  warnings:")?;
+            for warning in &self.warnings {
+                writeln!(writer, "    - {warning}")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishSyncRefOutput {
+    ref_name: String,
+    target_oid: String,
+    revision_oid: String,
+    is_default: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishSyncRevisionOutput {
+    revision_oid: String,
+    ref_count: usize,
+    file_count: usize,
+    ai_object_count: usize,
+    ai_bundle_count: usize,
+}
+
+async fn run_publish_sync_dry_run(args: &SyncArgs) -> CliResult<PublishSyncDryRunOutput> {
+    validate_publish_sync_args(args)?;
+
+    let all_refs = collect_publish_refs().await?;
+    if all_refs.is_empty() {
+        return Err(
+            CliError::failure("no local branch or tag refs are available to publish")
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint("create a commit on a local branch or tag a commit before publishing."),
+        );
+    }
+
+    let selected_refs = select_publish_refs(&all_refs, args.r#ref.as_deref())?;
+    let default_ref = resolve_publish_default_ref(&all_refs).await?;
+    let selected_ref = if args.r#ref.is_some() {
+        selected_refs
+            .first()
+            .map(|publish_ref| publish_ref.ref_name.clone())
+    } else {
+        None
+    };
+    let mut warnings = inspect_publish_dirty(args.fail_on_dirty).await?;
+    if selected_ref.is_some() {
+        warnings.push(
+            "targeted --ref dry-run will not update the complete published refs generation"
+                .to_string(),
+        );
+    }
+    if args.force {
+        warnings.push("--force has no effect during dry-run".to_string());
+    }
+    if !args.allow_sensitive_path.is_empty() {
+        warnings.push(
+            "--allow-sensitive-path is recorded for sync planning but dry-run does not evaluate \
+             site visibility"
+                .to_string(),
+        );
+    }
+
+    let mut revision_ref_counts: BTreeMap<String, usize> = BTreeMap::new();
+    for publish_ref in &selected_refs {
+        *revision_ref_counts
+            .entry(publish_ref.revision_oid.clone())
+            .or_default() += 1;
+    }
+
+    let mut revisions = Vec::with_capacity(revision_ref_counts.len());
+    for (revision_oid, ref_count) in revision_ref_counts {
+        let file_count = count_revision_files(&revision_oid)?;
+        revisions.push(PublishSyncRevisionOutput {
+            revision_oid,
+            ref_count,
+            file_count,
+            ai_object_count: 0,
+            ai_bundle_count: 0,
+        });
+    }
+
+    let file_count = revisions.iter().map(|revision| revision.file_count).sum();
+    let ai_object_count = revisions
+        .iter()
+        .map(|revision| revision.ai_object_count)
+        .sum();
+    let ai_bundle_count = revisions
+        .iter()
+        .map(|revision| revision.ai_bundle_count)
+        .sum();
+    let latest_revision_oid = default_ref
+        .as_ref()
+        .and_then(|name| {
+            selected_refs
+                .iter()
+                .find(|publish_ref| &publish_ref.ref_name == name)
+        })
+        .or_else(|| selected_refs.first())
+        .map(|publish_ref| publish_ref.revision_oid.clone());
+
+    let refs = selected_refs
+        .into_iter()
+        .map(|publish_ref| {
+            let is_default = default_ref
+                .as_ref()
+                .is_some_and(|name| name == &publish_ref.ref_name);
+            PublishSyncRefOutput {
+                ref_name: publish_ref.ref_name,
+                target_oid: publish_ref.target_oid,
+                revision_oid: publish_ref.revision_oid,
+                is_default,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    Ok(PublishSyncDryRunOutput {
+        dry_run: true,
+        site_id: None,
+        selected_ref,
+        refs_count: refs.len(),
+        revision_count: revisions.len(),
+        default_ref,
+        latest_revision_oid,
+        file_count,
+        ai_object_count,
+        ai_bundle_count,
+        updates_full_refs_generation: args.r#ref.is_none(),
+        refs,
+        revisions,
+        warnings,
+    })
+}
+
+fn validate_publish_sync_args(args: &SyncArgs) -> CliResult<()> {
+    match args.ai_redaction.as_str() {
+        "default" | "strict" => Ok(()),
+        value => Err(CliError::command_usage(format!(
+            "invalid --ai-redaction value '{value}'; expected 'default' or 'strict'"
+        ))),
+    }
+}
+
+async fn collect_publish_refs() -> CliResult<Vec<RefInput>> {
+    let branches = Branch::list_branches_result(None).await.map_err(|source| {
+        CliError::fatal(format!(
+            "failed to list local branches for publish dry-run: {source}"
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid)
+    })?;
+    let mut refs = Vec::new();
+    for branch in branches {
+        let target_oid = branch.commit.to_string();
+        refs.push(RefInput {
+            ref_name: format!("refs/heads/{}", branch.name),
+            target_oid: target_oid.clone(),
+            revision_oid: target_oid,
+        });
+    }
+
+    let tags = tag::list().await.map_err(|source| {
+        CliError::fatal(format!(
+            "failed to list local tags for publish dry-run: {source}"
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid)
+    })?;
+    for publish_tag in tags {
+        let ref_name = format!("refs/tags/{}", publish_tag.name);
+        let (target_oid, revision_oid) = match publish_tag.object {
+            TagObject::Commit(commit) => {
+                let oid = commit.id.to_string();
+                (oid.clone(), oid)
+            }
+            TagObject::Tag(tag_object) => {
+                let revision_oid = match tag_object.object_type {
+                    ObjectType::Commit => tag_object.object_hash,
+                    ObjectType::Tag => util::get_commit_base_typed(&publish_tag.name)
+                        .await
+                        .map_err(|source| {
+                            CliError::fatal(format!(
+                                "failed to peel publish tag '{}' to a commit: {source}",
+                                publish_tag.name
+                            ))
+                            .with_stable_code(StableErrorCode::RepoStateInvalid)
+                        })?,
+                    target_type => {
+                        return Err(CliError::failure(format!(
+                            "publish tag '{}' does not point to a commit; target type is \
+                             {target_type}",
+                            publish_tag.name
+                        ))
+                        .with_stable_code(StableErrorCode::CliInvalidTarget)
+                        .with_hint("publish only branch and tag refs that resolve to commits."));
+                    }
+                };
+                (tag_object.id.to_string(), revision_oid.to_string())
+            }
+            TagObject::Tree(_) | TagObject::Blob(_) => {
+                return Err(CliError::failure(format!(
+                    "publish tag '{}' does not point to a commit",
+                    publish_tag.name
+                ))
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint("publish only branch and tag refs that resolve to commits."));
+            }
+        };
+        refs.push(RefInput {
+            ref_name,
+            target_oid,
+            revision_oid,
+        });
+    }
+
+    refs.sort_by(|left, right| left.ref_name.cmp(&right.ref_name));
+    for publish_ref in &refs {
+        validate_ref_name(&publish_ref.ref_name).map_err(snapshot_ref_error)?;
+        validate_oid(&publish_ref.target_oid).map_err(snapshot_ref_error)?;
+        validate_oid(&publish_ref.revision_oid).map_err(snapshot_ref_error)?;
+    }
+    Ok(refs)
+}
+
+fn select_publish_refs(all_refs: &[RefInput], selected: Option<&str>) -> CliResult<Vec<RefInput>> {
+    let Some(raw_ref) = selected else {
+        return Ok(all_refs.to_vec());
+    };
+    let trimmed = raw_ref.trim();
+    if trimmed.is_empty() || trimmed != raw_ref {
+        return Err(CliError::command_usage(
+            "--ref must be a non-empty branch, tag, or full refs/heads/* / refs/tags/* name",
+        ));
+    }
+
+    let selected_full_ref = if raw_ref.starts_with("refs/") {
+        validate_ref_name(raw_ref).map_err(snapshot_ref_error)?;
+        raw_ref.to_string()
+    } else {
+        let ambiguous = detect_ambiguous_short_refs(all_refs);
+        if ambiguous.iter().any(|short| short == raw_ref) {
+            return Err(CliError::failure(format!(
+                "ambiguous publish ref '{raw_ref}' matches both a branch and a tag"
+            ))
+            .with_stable_code(StableErrorCode::CliInvalidTarget)
+            .with_hint(format!(
+                "use 'refs/heads/{raw_ref}' or 'refs/tags/{raw_ref}' to select one."
+            )));
+        }
+
+        let matches = all_refs
+            .iter()
+            .filter(|publish_ref| publish_short_ref_name(&publish_ref.ref_name) == Some(raw_ref))
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [publish_ref] => publish_ref.ref_name.clone(),
+            [] => {
+                return Err(CliError::failure(format!(
+                    "publish ref '{raw_ref}' was not found among local branches or tags"
+                ))
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint("run 'libra show-ref --heads --tags' to inspect publishable refs."));
+            }
+            _ => {
+                return Err(CliError::failure(format!(
+                    "ambiguous publish ref '{raw_ref}' matches multiple refs"
+                ))
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint("use a full refs/heads/* or refs/tags/* name to select one."));
+            }
+        }
+    };
+
+    all_refs
+        .iter()
+        .find(|publish_ref| publish_ref.ref_name == selected_full_ref)
+        .cloned()
+        .map(|publish_ref| vec![publish_ref])
+        .ok_or_else(|| {
+            CliError::failure(format!(
+                "publish ref '{selected_full_ref}' was not found among local branches or tags"
+            ))
+            .with_stable_code(StableErrorCode::CliInvalidTarget)
+            .with_hint("run 'libra show-ref --heads --tags' to inspect publishable refs.")
+        })
+}
+
+fn publish_short_ref_name(full_ref: &str) -> Option<&str> {
+    full_ref
+        .strip_prefix("refs/heads/")
+        .or_else(|| full_ref.strip_prefix("refs/tags/"))
+}
+
+async fn resolve_publish_default_ref(all_refs: &[RefInput]) -> CliResult<Option<String>> {
+    let head = Head::current_result().await.map_err(|source| {
+        CliError::fatal(format!(
+            "failed to resolve HEAD while planning publish dry-run: {source}"
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid)
+    })?;
+    if let Head::Branch(branch_name) = head {
+        let full_ref = format!("refs/heads/{branch_name}");
+        if all_refs
+            .iter()
+            .any(|publish_ref| publish_ref.ref_name == full_ref)
+        {
+            return Ok(Some(full_ref));
+        }
+    }
+
+    Ok(all_refs
+        .iter()
+        .find(|publish_ref| publish_ref.ref_name == "refs/heads/main")
+        .or_else(|| {
+            all_refs
+                .iter()
+                .find(|publish_ref| publish_ref.ref_name.starts_with("refs/heads/"))
+        })
+        .or_else(|| all_refs.first())
+        .map(|publish_ref| publish_ref.ref_name.clone()))
+}
+
+async fn inspect_publish_dirty(fail_on_dirty: bool) -> CliResult<Vec<String>> {
+    let staged = status::changes_to_be_committed_safe()
+        .await
+        .map_err(CliError::from)?;
+    let unstaged = status::changes_to_be_staged().map_err(CliError::from)?;
+    let staged_count = staged.polymerization().len();
+    let unstaged_count = unstaged.polymerization().len();
+    if staged_count == 0 && unstaged_count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let message = format!(
+        "dirty working tree has {staged_count} staged path(s) and {unstaged_count} unstaged or \
+         untracked path(s); dry-run plans committed refs only"
+    );
+    if fail_on_dirty {
+        Err(CliError::fatal(message)
+            .with_stable_code(StableErrorCode::RepoStateInvalid)
+            .with_hint(
+                "commit, stash, or discard local changes before running with --fail-on-dirty.",
+            ))
+    } else {
+        Ok(vec![message])
+    }
+}
+
+fn count_revision_files(revision_oid: &str) -> CliResult<usize> {
+    let commit_oid = ObjectHash::from_str(revision_oid).map_err(|source| {
+        CliError::fatal(format!(
+            "publish revision oid '{revision_oid}' is invalid: {source}"
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid)
+    })?;
+    let commit: Commit = load_object(&commit_oid).map_err(|source| {
+        CliError::fatal(format!(
+            "failed to load publish revision commit '{revision_oid}': {source}"
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid)
+    })?;
+    let tree: Tree = load_object(&commit.tree_id).map_err(|source| {
+        CliError::fatal(format!(
+            "failed to load publish revision tree '{}' for commit '{revision_oid}': {source}",
+            commit.tree_id
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid)
+    })?;
+    Ok(tree.get_plain_items().len())
+}
+
+fn snapshot_ref_error(source: impl std::error::Error) -> CliError {
+    CliError::failure(format!("invalid publish ref plan: {source}"))
+        .with_stable_code(StableErrorCode::CliInvalidTarget)
+        .with_hint("publish only refs/heads/* and refs/tags/* entries with valid object ids.")
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]

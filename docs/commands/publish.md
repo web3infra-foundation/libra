@@ -2,15 +2,19 @@
 
 Prepare Libra's read-only Cloudflare Worker publish surface.
 
-Current implementation status in v0.17.51:
+Current implementation status in v0.17.53:
 
 - `libra publish init` materialises the embedded Worker template under
   `worker/` and records `.libra/publish/worker-template-manifest.json`.
 - `libra publish status` reports the local Worker template state as
   `missing`, `current`, `modified`, `outdated`, or `conflicted`.
-- `libra publish sync`, `deploy`, and `unpublish` are registered CLI
-  surfaces, but they currently return `LBR-UNSUPPORTED-001` with a
-  pointer to `docs/improvement/publish.md`.
+- `libra publish sync --dry-run` scans local branch/tag refs, validates
+  `--ref`, reports dirty-tree warnings, and emits the local publish
+  plan without Cloudflare credentials.
+- `libra publish sync` without `--dry-run`, `deploy`, and `unpublish`
+  are registered CLI surfaces, but they currently return
+  `LBR-UNSUPPORTED-001` with a pointer to
+  `docs/improvement/publish.md`.
 - The full code/ref/AI snapshot upload, cloud status comparison, Worker
   deploy, and unpublish flows remain tracked in
   `docs/improvement/publish.md`.
@@ -28,9 +32,10 @@ libra publish unpublish [OPTIONS]
 ## Description
 
 `libra publish` is being developed as the outward-facing counterpart
-to `libra cloud`. The shipped slice is the local Worker-template
-initialisation step; it does not upload repository snapshots, mutate
-Cloudflare D1/R2 state, deploy a Worker, or implement Git protocol.
+to `libra cloud`. The shipped slices are local Worker-template
+initialisation, local Worker-template status, and offline sync
+dry-runs; they do not upload repository snapshots, mutate Cloudflare
+D1/R2 state, deploy a Worker, or implement Git protocol.
 
 ## Subcommands
 
@@ -76,10 +81,26 @@ libra publish sync [--ref <branch|tag|full-ref>]
                    [--json]
 ```
 
-Current behavior: this subcommand is not implemented. It exits with
-`LBR-UNSUPPORTED-001` and does not read or write Cloudflare D1/R2.
-The flags are reserved for the Phase 4 sync plan in
-`docs/improvement/publish.md`.
+Current behavior:
+
+- `--dry-run` scans local `refs/heads/*` and `refs/tags/*`, dedupes by
+  revision oid, counts files in each unique commit tree, and emits a
+  plan. It does not read or write Cloudflare D1/R2 and does not require
+  Cloudflare credentials.
+- `--ref <branch|tag|full-ref>` filters the dry-run to one branch or
+  tag. If a short name exists as both a branch and a tag, the command
+  fails with `LBR-CLI-003` and asks for `refs/heads/<name>` or
+  `refs/tags/<name>`.
+- Dirty worktrees emit a warning because the dry-run plans committed
+  refs only. `--fail-on-dirty` converts that condition into
+  `LBR-REPO-003`.
+- `--json` returns `siteId` (`null` until cloud config lands),
+  `refsCount`, `revisionCount`, `defaultRef`, `latestRevisionOid`,
+  `fileCount`, `aiObjectCount`, `aiBundleCount`, `warnings`, and the
+  selected ref/revision details.
+- Without `--dry-run`, this subcommand still exits with
+  `LBR-UNSUPPORTED-001`; the D1/R2 upload path remains tracked in
+  `docs/improvement/publish.md`.
 
 ### `libra publish status`
 
