@@ -9,7 +9,7 @@
 - L2 数据驱动：[tests/code_ui_remote_lease_matrix.rs](../../tests/code_ui_remote_lease_matrix.rs) 已覆盖 10 条 lease case；SSE/state/security/generation/approval/model_generation 均已有 Rust runner。
 - L3 真实模型：[tests/code_ui_remote_model_generation_matrix.rs](../../tests/code_ui_remote_model_generation_matrix.rs) 已接入 `libra code` 服务路径，默认由 `.env.test` + `LIBRA_RUN_LIVE=1` gate 驱动 DeepSeek live case；nightly 工作流仍依赖 maintainer 配置 `DEEPSEEK_API_KEY` 后收集连续稳定性。
 
-本文目标：给出整个 `libra code` 功能的端到端测试范围地图，并把历史 Wave 规划与当前实现状态对齐。第 5 节按“功能面 × 测试分层 × 现状/缺口/优先级”组织 20 项纵深面；第 6 节内嵌 L2 远端矩阵方案；第 7–10 节给出统一覆盖矩阵、文件清单、验证命令和 12 PR Wave roadmap。当前剩余项集中在 Wave 9 binary 级 Codex/MCP write-observe、Wave 10 provider negative path/TUI 复杂状态，以及 Wave 12 长时 SSE soak；不要再把已落地的 harness/matrix 文件列为前置阻塞。
+本文目标：给出整个 `libra code` 功能的端到端测试范围地图，并把历史 Wave 规划与当前实现状态对齐。第 5 节按“功能面 × 测试分层 × 现状/缺口/优先级”组织 20 项纵深面；第 6 节内嵌 L2 远端矩阵方案；第 7–10 节给出统一覆盖矩阵、文件清单、验证命令和 12 PR Wave roadmap。当前剩余项集中在 Wave 9 binary 级 Codex/MCP write-observe 与 Wave 12 长时 SSE soak；不要再把已落地的 harness/matrix 文件列为前置阻塞。
 
 ---
 
@@ -128,15 +128,10 @@ CI 默认门：L0+L1 必跑；L2 在 `test-provider` 下必跑；L3 仅 nightly 
 
 ### 5.1 CLI 解析与模式分发
 
-- **现状 ⚠️**：仅通过 `code_ui_scenarios.rs` 隐式触发 TUI 模式；`--web` / `--stdio` / `--resume` / `--cwd` / `--repo` / `--env-file` 没有专项断言。
-- **缺口**：
-  - `--web` 无终端、`--stdio` 无 web、`--mcp-port 0` 端口动态分配。
-  - `--resume <thread_id>` 取回历史 transcript（连接 `.libra/objects/`）。
-  - `--env-file` 同时驱动 provider 凭证 + `LIBRA_*` 行为开关。
-  - 互斥校验：同时给 `--web` 和 `--stdio` 必须报错。
-  - `--plan-mode` 默认值矩阵（Codex=true，其它=false）。
-- **优先级**：P0。
-- **测试位置**：**L1 新增** `tests/code_cli_dispatch_test.rs`，直接调用 `Code::Args::parse_from(...)` 加部分 `execute()` 短路路径，断言模式选择与错误。
+- **现状 ✅**：`tests/code_cli_dispatch_test.rs` 已专项覆盖 `--web` / `--web-only` / `--stdio` 互斥、`--mcp-port 0`、`--port 0`、`--env-file`、`--repo`、`--cwd`、`--resume` 与 `--browser-control loopback` + `--stdio` 冲突；`src/command/code.rs` 单测覆盖 `--plan-mode` 默认/显式值矩阵。
+- **缺口**：无（5.1 已关闭）。
+- **优先级**：已完成。
+- **测试位置**：**L1 已覆盖** `tests/code_cli_dispatch_test.rs`；`--plan-mode` 由 `src/command/code.rs` `effective_plan_mode_*` 单测覆盖。
 - **AI 落地提示**：`src/command/code.rs` 的 `CodeArgs` 已用 `clap` derive。测试只需 `CodeArgs::try_parse_from(["code", "--web"])` 等组合，断言 `Ok` / `Err` 和具体错误消息。不要 spawn 子进程。
 
 ### 5.2 Provider 配置与启动
@@ -617,9 +612,9 @@ libra code --env-file .env.test --provider "$LIBRA_CODE_TEST_PROVIDER" \
 | 5.3 | HTTP 读路由 + loopback gate | done | done | done | – | ✅ | 新路由需维持 loopback-first 错误顺序 |
 | 5.4 | HTTP 写路由 + lease 状态机 | – | done | done | – | ✅ | pending interaction 并发仍 P1 |
 | 5.5 | SSE | done | – | done | – | ✅⚠️ | lagged / 1 小时 soak deferred |
-| 5.6 | Local TUI Control 锁/审计 | done | – | partial | – | ⚠️ | stale PID / 自定义 token/info 文件仍 P1 |
-| 5.7 | Browser Control | – | – | partial | – | ✅⚠️ | reload / disabled-order / token-expiry grace |
-| 5.8 | TUI 渲染快照 | – | partial | – | – | ✅⚠️ | complex-state render quick-follow |
+| 5.6 | Local TUI Control 锁/审计 | done | done | done | – | ✅ | 无 |
+| 5.7 | Browser Control | – | – | done | – | ✅ | 无 |
+| 5.8 | TUI 渲染快照 | – | done | done | – | ✅ | 无 |
 | 5.9 | Tool ACL / context / policy | – | done | – | – | ✅ | 持续随 tool registry 增量维护 |
 | 5.10 | Apply-Patch 生成(fake) | – | – | done | – | ✅ | 持续随 fixture schema 增量维护 |
 | 5.11 | Approval / Interaction E2E | – | – | done | – | ✅⚠️ | 并发 pending 仍 P1 |
@@ -745,7 +740,7 @@ cargo test --all --all-features
 | 7 | State / Security 矩阵 | ✅ closed | streaming detach candidate | 无 |
 | 8 | Orchestrator gate / max_turns / Tool ACL | ✅ mostly closed | executor max_turns/contract violation 继续扩写 | 无 |
 | 9 | Codex runtime + MCP 双入口 + resume | ⚠️ partial | Codex binary boot/plan/reconnect、MCP full write-and-observe、SIGTERM-mid-turn resume | 无新增依赖 |
-| 10 | TUI render + provider boot/flag passthrough | ⚠️ partial | provider missing-key / `--api-base` 已闭合；复杂 TUI 状态仍待 | 不再要求 `insta` / `httpmock` |
+| 10 | TUI render + provider boot/flag passthrough | ✅ closed | provider boot 7/7、missing-key、`--api-base`、TUI 复杂状态 render 均已闭合 | 不再要求 `insta` / `httpmock` |
 | 11 | Model generation L3 | ✅ runner closed | 5-day pass-rate 需 secret/nightly 数据 | `DEEPSEEK_API_KEY` |
 | 12 | 性能 smoke + 错误码文档同步 | ✅ mostly closed | 1 小时真网 SSE soak | nightly job |
 
@@ -753,7 +748,7 @@ cargo test --all --all-features
 
 **建议的并行策略**：
 - PR 1–8 与 PR 11/12 的 runner/doc-code sync 已不再是前置瓶颈。
-- 后续并行工作应只围绕 PR 9/10 的明确 partial 项，以及 PR 12 的独立 nightly soak。
+- 后续并行工作应只围绕 PR 9 的明确 partial 项，以及 PR 12 的独立 nightly soak。
 
 ---
 
@@ -761,7 +756,7 @@ cargo test --all --all-features
 
 - **不在同一矩阵里混真实/伪 provider**：model_generation 单独矩阵，文件名带 `model_` 前缀，避免误跑。
 - **lagged SSE / cancel-during-tool 降级 P2**：跨进程稳定性差，改为 in-process 单测覆盖解析器/状态机即可。
-- **TUI 渲染用 `TestBackend` + 快照**：不要起真实 PTY 验 ratatui buffer——成本高、抖动大；快照足够锁回归。
+- **TUI 渲染用 `TestBackend` / inline buffer 断言**：不要起真实 PTY 验 ratatui buffer——成本高、抖动大；当前不引入 `insta`，用稳定文本/符号断言锁回归。
 - **Codex 旁路用 mock WebSocket**：不在 CI 拉真 Codex 二进制；行为契约由本仓库定义即可。
 - **不为 `--web` / `--stdio` 互斥单独写 L2**：L1 dispatch test 直接打 `Args::parse_from(...)` 验错误已足够。
 - **真实模型矩阵固定 DeepSeek**：其它 provider 可另建可选矩阵，避免默认验收语义漂移。
@@ -782,7 +777,7 @@ cargo test --all --all-features
 
 ## 当前 Wave 状态（2026-05-10 同步）
 
-Wave 1–9 + Wave 12 部分已完成；Wave 10 / 11 / 12 部分均按 Codex pass-1 review 拆为独立后续 PR：
+Wave 1–8、Wave 10、Wave 11 与 Wave 12 部分已完成；Wave 9 / Wave 12 剩余项均按 Codex pass-1 review 拆为独立后续 PR：
 
 | Wave | 状态 | 备注 |
 |---|---|---|
@@ -795,8 +790,8 @@ Wave 1–9 + Wave 12 部分已完成；Wave 10 / 11 / 12 部分均按 Codex pass
 | 7 | ✅ closed | State 7/7 + Security 6/6 + diagnostics SecretRedactor wire-up |
 | 8 | ✅ closed | Tool ACL 6/6（含 MCP bridge 前缀防退化） |
 | 9 | ⚠️ partial | `--resume` CLI 表面 3 条（unknown UUID、unknown 非 UUID 字符串、happy-path 跨进程恢复 transcript）；§5.16 closure criterion ✅；§5.13 partial — `--codex-port 0` validation smoke + `MockCodexWsServer` helper（tokio-tungstenite，accept WS handshake、回 initialize/thread/start JSON-RPC envelope）+ 端到端 round-trip smoke ✅；§5.14 item 1/2/3-smoke ✅（control.json mcpUrl + --stdio mutex + 同进程 web/MCP dual-reachability via `Mcp-Session-Id` 头）；§5.13 binary 级 boot smoke (libra code --provider codex 真实链入 mock + plan-mode + reconnect) 仍未交付（roadmap-sized）；§5.14 item 3 full write-and-observe (MCP `tools/call` → web SSE 观察) 仍未交付（roadmap-sized）；§5.16 SIGTERM-mid-turn 仍未交付 |
-| 10 | ⚠️ partial | §5.2 provider boot 7/7 reachable providers 已落地（DeepSeek+flags、OpenAI、Anthropic、Kimi+flags、Ollama+flag、Zhipu、Gemini）经 `tests/helpers/mock_provider_server.rs`（无新增 dev-dep，复用 `axum`）+ 新增 `GeminiClient::with_base_url` test-only 构造器；§5.2 missing-key / `--api-base` quick-follow 已闭合；Codex 见 §5.13；§5.8 TUI 快照已落地 2 条 inline buffer 断言（无 `insta`）；剩余 §5.8 复杂场景 quick-follow |
+| 10 | ✅ closed | §5.2 provider boot 7/7 reachable providers 已落地（DeepSeek+flags、OpenAI、Anthropic、Kimi+flags、Ollama+flag、Zhipu、Gemini）经 `tests/helpers/mock_provider_server.rs`（无新增 dev-dep，复用 `axum`）+ 新增 `GeminiClient::with_base_url` test-only 构造器；§5.2 missing-key / `--api-base` quick-follow 已闭合；Codex 见 §5.13；§5.8 TUI 复杂状态已由 TestBackend / inline buffer 覆盖 |
 | 11 | ✅ closed | `tests/harness/matrix.rs` 已加 `ProviderSpec::ModelFromEnvFile` + DeepSeek thinking/high-reasoning 自动注入；`tests/code_ui_remote_model_generation_matrix.rs` 在 `LIBRA_RUN_LIVE=1` 下真正调用矩阵；`.github/workflows/model-generation-nightly.yml` 提供每日 cron + `workflow_dispatch`，需 maintainer 配置 `DEEPSEEK_API_KEY` secret 后才会运行；regression L0 测试（`build_session_options_for_*_provider_*`）锁定 DeepSeek 旗标注入逻辑 |
 | 12 | ✅ closed | 错误码 doc/code sync L0 测试 + perf smoke 3 条（10 并发 `/threads`、100k transcript snapshot 序列化 < 500ms 可由 `LIBRA_PERF_CEILING_MS` 调整、SSE broadcast 1 000 events monotonic seq L1）`#[ignore]` + `LIBRA_RUN_PERF=1`；唯一 deferred 项是 1-小时真网 SSE soak（独立 nightly job） |
 
-落地完成判定的全部门：剩余阻塞项均为明确的 roadmap-sized 多 PR 工作 —— Wave 9 §5.13 binary 级 boot smoke（让 libra code --provider codex 真实链入 `MockCodexWsServer`，含 plan-mode gate + reconnect 资源轮转）和 §5.14 item 3 full write-and-observe（MCP `tools/call` 写入与 web `/messages` SSE 观察的同线程编排）。已闭合：Wave 9 §5.13 partial（`--codex-port 0` validation + `MockCodexWsServer` 协议 helper + handshake round-trip smoke）、§5.14 item 1/2/3-smoke、§5.16 happy-path、Wave 10 §5.2 全量 7/7 provider + missing-key / `--api-base` quick-follow、Wave 10 §5.8 TUI render smoke。Wave 10 剩余 quick-follow 是复杂 TUI 状态 buffer 断言，不阻塞。Wave 11 已具备完整工作流（harness wiring + 每日 nightly + L0 regression）；剩余条件（5 天连续 ≥ 90% 通过率）依赖 maintainer 配置 `DEEPSEEK_API_KEY` 并等待 5 个 nightly run。Wave 12 perf smoke 现含 1k events SSE broadcast monotonic 验证；1-小时真网 SSE soak 需独立 nightly job。当前仓库状态对应"基础矩阵已落地 + Wave 11/12 已 wire + Wave 9 / 10 部分 deferred"。
+落地完成判定的全部门：剩余阻塞项均为明确的 roadmap-sized 多 PR 工作 —— Wave 9 §5.13 binary 级 boot smoke（让 libra code --provider codex 真实链入 `MockCodexWsServer`，含 plan-mode gate + reconnect 资源轮转）和 §5.14 item 3 full write-and-observe（MCP `tools/call` 写入与 web `/messages` SSE 观察的同线程编排）。已闭合：Wave 9 §5.13 partial（`--codex-port 0` validation + `MockCodexWsServer` 协议 helper + handshake round-trip smoke）、§5.14 item 1/2/3-smoke、§5.16 happy-path、Wave 10 §5.2 全量 7/7 provider + missing-key / `--api-base` quick-follow、Wave 10 §5.8 TUI render 复杂状态。Wave 11 已具备完整工作流（harness wiring + 每日 nightly + L0 regression）；剩余条件（5 天连续 ≥ 90% 通过率）依赖 maintainer 配置 `DEEPSEEK_API_KEY` 并等待 5 个 nightly run。Wave 12 perf smoke 现含 1k events SSE broadcast monotonic 验证；1-小时真网 SSE soak 需独立 nightly job。当前仓库状态对应"基础矩阵已落地 + Wave 10/11/12 已 wire + Wave 9 部分 deferred"。
