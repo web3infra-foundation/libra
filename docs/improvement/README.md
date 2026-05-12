@@ -26,7 +26,7 @@
 **必须复核的证据：**
 - **代码事实**：用 `rg` / `cargo test` / `cargo run -- <cmd> --help` 直接验证。所有“已落地”“已存在”“无冲突”声明必须能指向当前工作树中的文件、测试或命令输出。
 - **链接事实**：相对链接必须指向现存文件；已合并或删除的旧计划（例如原 `code.md` / `tui.md`）必须改指向 [agent.md](agent.md) 的对应 Part。
-- **占位事实**：可执行脚本、CI 命令、迁移版本、baseline commit、CODEOWNERS handle、GitHub required-check 名称不得以 placeholder 形式进入可落地步骤。确实需要未来值时，该步骤必须 fail-fast 并把“需要维护者填值”列为阻塞验收项。
+- **占位事实**：可执行脚本、CI 命令、迁移版本、baseline commit、GitHub required-check 名称不得以 placeholder 形式进入可落地步骤。确实需要未来值时，该步骤必须 fail-fast 并把“需要维护者填值”列为阻塞验收项。
 - **验收事实**：每个计划必须有可运行的验证命令、涉及文件、风险/非目标边界；涉及安全、迁移、数据写入、外部 API 或兼容 surface 的计划还必须有负向测试和 rollback/cleanup 说明。
 - **生产错误处理**：任何实施计划触及 Rust 生产代码时，必须把 `unwrap()` / `expect()` / `panic!()` 扫描纳入验收；除测试或带 `// INVARIANT:` 的显然不可能失败路径外，新增或保留都视为 P1。
 
