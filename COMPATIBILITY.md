@@ -27,6 +27,8 @@ batch document.
 | clone | partial | `--depth` and `--single-branch` supported; `--sparse` unsupported (see [docs/improvement/compatibility/declined.md#d10-clone---sparse-与顶层-sparse-checkout-命令](docs/improvement/compatibility/declined.md#d10-clone---sparse-与顶层-sparse-checkout-命令)); `--recurse-submodules` unsupported (see [docs/improvement/compatibility/declined.md#d4-clone---recurse-submodules](docs/improvement/compatibility/declined.md#d4-clone---recurse-submodules)) |
 | code | intentionally-different | Libra AI extension, not a Git command |
 | code-control | intentionally-different | Libra AI automation extension, not a Git command |
+| automation | intentionally-different | Libra AI automation rules/history extension, not a Git command |
+| usage | intentionally-different | Libra AI provider/model usage reporting extension, not a Git command |
 | graph | intentionally-different | Libra AI graph inspection extension, not a Git command |
 | add | partial | sparse-checkout flag unsupported |
 | rm | partial | `--force` / `--dry-run` / `--quiet` not exposed |
@@ -40,6 +42,8 @@ batch document.
 | shortlog | supported | |
 | show | supported | |
 | show-ref | supported | |
+| ls-remote | supported | |
+| symbolic-ref | partial | Supports local `HEAD` only; other symbolic refs are rejected because Libra stores refs in SQLite |
 | branch | supported | |
 | tag | supported | |
 | commit | supported | |
@@ -61,9 +65,13 @@ batch document.
 | remote | supported | |
 | open | supported | |
 | config | supported | vault-backed |
+| db | intentionally-different | Libra repository database schema inspection/upgrade extension, not a Git command |
 | reflog | supported | |
 | worktree | intentionally-different | `remove` keeps disk dir by default (no implicit data loss). Use `--delete-dir` for Git-style behavior; the flag refuses on a dirty worktree |
 | cloud | intentionally-different | Libra cloud backup/restore extension, not a Git command |
+| publish | intentionally-different | Libra Cloudflare publish extension, not a Git command |
+| agent | intentionally-different | Libra external-agent capture extension, not a Git command |
+| hooks | intentionally-different | Hidden compatibility entry for hook configs installed by `libra agent enable` |
 | cat-file | supported | `-e` does not support JSON |
 | index-pack | supported | hidden plumbing command |
 | checkout | partial | branch compatibility surface (visible in top-level help); prefer `switch` for branches and `restore` for files. Full modernization (typed error / JSON / render split) pending |

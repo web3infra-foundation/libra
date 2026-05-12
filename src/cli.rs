@@ -287,7 +287,7 @@ enum Commands {
     Cloud(command::cloud::CloudArgs),
 
     #[command(
-        about = "Read-only publish of code, refs and AI object model to Cloudflare Workers (D1/R2)"
+        about = "Materialise the read-only Cloudflare Worker template; sync/deploy are not yet implemented"
     )]
     Publish(command::publish::PublishArgs),
 

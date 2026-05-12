@@ -42,7 +42,7 @@ use crate::{
 };
 
 #[derive(Parser, Debug)]
-#[command(about = "Read-only publish to Cloudflare Workers (D1/R2)")]
+#[command(about = "Materialise the read-only Cloudflare Worker template")]
 pub struct PublishArgs {
     #[command(subcommand)]
     pub command: PublishCommand,
@@ -50,15 +50,15 @@ pub struct PublishArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum PublishCommand {
-    /// Initialise the local publish config + Worker scaffold.
+    /// Materialise the local Worker template scaffold.
     Init(InitArgs),
-    /// Sync code, refs and AI object model to D1/R2.
+    /// Reserved for the planned D1/R2 sync implementation.
     Sync(SyncArgs),
-    /// Show the local↔cloud publish state.
+    /// Reserved for the planned local/cloud status report.
     Status(StatusArgs),
-    /// Build + deploy the Cloudflare Worker.
+    /// Reserved for the planned Cloudflare Worker deploy flow.
     Deploy(DeployArgs),
-    /// Mark the published site disabled (410 from Worker API).
+    /// Reserved for the planned unpublish flow.
     Unpublish(UnpublishArgs),
 }
 
@@ -128,18 +128,10 @@ pub struct SyncArgs {
     /// criteria for the CAS latest-revision conflict path.
     #[arg(long)]
     pub force: bool,
-
-    /// Emit machine-readable JSON output.
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(Parser, Debug)]
-pub struct StatusArgs {
-    /// Emit machine-readable JSON output.
-    #[arg(long)]
-    pub json: bool,
-}
+pub struct StatusArgs {}
 
 #[derive(Parser, Debug)]
 pub struct DeployArgs {

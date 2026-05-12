@@ -11,54 +11,76 @@ The `libra code` command starts an interactive TUI (with a background web server
 ## Example
 
 ```bash
-$ libra
+$ libra --help
 
-Usage: libra <COMMAND>
+Libra: An AI native version control system for monorepo and trunk-based development.
+
+Usage: libra [OPTIONS] <COMMAND>
 
 Commands:
-  init         Initialize a new repository
-  clone        Clone a repository into a new directory
-  code         Start Libra Code interactive TUI (with background web server)
-  graph        Inspect an AI thread version graph in a TUI
-  add          Add file contents to the index
-  rm           Remove files from the working tree and from the index
-  restore      Restore working tree files
-  status       Show the working tree status
-  clean        Remove untracked files from the working tree
-  stash        Stash the changes in a dirty working directory away
-  lfs          Large File Storage
-  log          Show commit logs
-  show         Show various types of objects
-  branch       List, create, or delete branches
-  tag          Create a new tag
-  commit       Record changes to the repository
-  switch       Switch branches
-  rebase       Reapply commits on top of another base tip
-  merge        Merge changes
-  reset        Reset current HEAD to specified state
-  rev-parse    Parse and normalize revision names and repository paths
-  rev-list     List commit objects reachable from a revision
-  ls-remote    List references in a remote repository
-  cherry-pick  Apply the changes introduced by some existing commits
-  push         Update remote refs along with associated objects
-  fetch        Download objects and refs from another repository
-  pull         Fetch from and integrate with another repository or a local branch
-  diff         Show changes between commits, commit and working tree, etc
-  blame        Show author and history of each line of a file
-  bisect       Find the commit that introduced a bug by binary search
-  revert       Revert some existing commits
-  remote       Manage set of tracked repositories
-  open         Open the repository in the browser
-  config       Manage repository configurations
-  vault        Manage vault-backed signing and SSH keys
-  reflog       Manage the log of reference changes (e.g., HEAD, branches)
-  worktree     Manage multiple working trees attached to this repository
-  cloud        Cloud backup and restore operations (D1/R2)
-  help         Print this message or the help of the given subcommand(s)
+  init          Initialize a new repository
+  clone         Clone a repository into a new directory
+  code          Start Libra Code interactive TUI (with background web server)
+  code-control  Drive a local Libra Code TUI automation control session
+  automation    Manage AI automation rules and history
+  usage         Report AI provider/model usage
+  graph         Inspect an AI thread version graph in a TUI
+  add           Add file contents to the index
+  rm            Remove files from the working tree and from the index
+  restore       Restore working tree files
+  status        Show the working tree status
+  clean         Remove untracked files from the working tree
+  stash         Stash the changes in a dirty working directory away
+  lfs           Large File Storage
+  log           Show commit logs
+  shortlog      Summarize 'git log' output
+  show          Show various types of objects
+  show-ref      List references in a local repository
+  ls-remote     List references in a remote repository
+  symbolic-ref  Read or update the symbolic HEAD ref
+  branch        List, create, or delete branches
+  tag           Create a new tag
+  commit        Record changes to the repository
+  switch        Switch branches
+  rebase        Reapply commits on top of another base tip
+  merge         Merge changes
+  reset         Reset current HEAD to specified state
+  rev-parse     Parse and normalize revision names and repository paths
+  rev-list      List commit objects reachable from a revision
+  mv            Move or rename a file, a directory, or a symlink
+  describe      Give an object a human readable name based on an available ref
+  cherry-pick   Apply the changes introduced by some existing commits
+  push          Update remote refs along with associated objects
+  fetch         Download objects and refs from another repository
+  pull          Fetch from and integrate with another repository or a local branch
+  diff          Show changes between commits, commit and working tree, etc
+  grep          Search for patterns in tracked files
+  blame         Show author and history of each line of a file
+  revert        Revert some existing commits
+  remote        Manage set of tracked repositories
+  open          Open the repository in the browser
+  config        Manage repository configurations
+  db            Inspect and upgrade the repository database schema
+  reflog        Manage the log of reference changes (e.g., HEAD, branches)
+  worktree      Manage multiple working trees attached to this repository
+  cloud         Cloud backup and restore operations (D1/R2)
+  publish       Materialise the read-only Cloudflare Worker template; sync/deploy are not yet implemented
+  agent         Manage external-agent capture (Claude Code, Gemini, ...)
+  cat-file      Provide content, type or size info for repository objects
+  checkout      Branch compatibility surface; prefer 'switch' for branches and 'restore' for files
+  bisect        Use binary search to find the commit that introduced a bug
+  help          Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help     Print help
-  -V, --version  Print version
+  -J, --json[=<FORMAT>]       Emit machine-readable JSON to stdout
+      --machine               Strict machine mode
+      --no-pager              Disable automatic pager (less) for long output
+      --color <WHEN>          When to use terminal colors
+  -q, --quiet                 Suppress standard stdout output
+      --exit-code-on-warning  Return non-zero exit code when a warning is emitted
+      --progress <MODE>       Control progress output for long-running operations
+  -h, --help                  Print help
+  -V, --version               Print version
 ```
 
 ---
@@ -365,7 +387,7 @@ libra config get vault.ssh.origin.pubkey
 libra config generate-gpg-key [--name <user>] [--email <mail>]
 ```
 
-See `docs/commands/config/README.md` for the full `libra config` command reference and migration notes.
+See `docs/commands/config.md` for the full `libra config` command reference and migration notes.
 
 ### GitHub End-to-End Verification (libvault + Git conversion)
 

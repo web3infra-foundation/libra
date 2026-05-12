@@ -1,9 +1,16 @@
 # `libra publish`
 
-Publish a Libra repository as a read-only Cloudflare Worker site, and
-sync code + AI object model snapshots to Cloudflare D1/R2 so the
-companion `libra clone libra+cloud://...` flow can restore the full
-repository elsewhere.
+Prepare Libra's read-only Cloudflare Worker publish surface.
+
+Current implementation status in v0.17.13:
+
+- `libra publish init` materialises the embedded Worker template under
+  `worker/` and records `.libra/publish/worker-template-manifest.json`.
+- `libra publish sync`, `status`, `deploy`, and `unpublish` are
+  registered CLI surfaces, but they currently return
+  `LBR-UNSUPPORTED-001` with a pointer to `docs/improvement/publish.md`.
+- The full code/ref/AI snapshot upload, Worker deploy, status reporting,
+  and unpublish flows remain tracked in `docs/improvement/publish.md`.
 
 ## Synopsis
 
@@ -17,20 +24,10 @@ libra publish unpublish [OPTIONS]
 
 ## Description
 
-`libra publish` is the outward-facing counterpart to `libra cloud`:
-
-- `libra cloud sync` keeps a private Cloudflare D1/R2 backup of Git
-  objects + agent capture for one repository; the data is *not*
-  browsable by humans.
-- `libra publish` builds an additional, read-only site on top of that
-  backup. The site renders branch/tag/tree/file views, the redacted
-  Libra AI object model, and the publish status — all served by a
-  Cloudflare Worker compiled from the `worker/` Next.js + React
-  template that ships with the Libra binary.
-
-`libra publish` does **not** implement Git protocol. Restoring a full
-repository from Cloudflare uses `libra clone libra+cloud://<clone-domain>/<slug>`;
-see `libra clone --help` and `docs/commands/clone.md`.
+`libra publish` is being developed as the outward-facing counterpart
+to `libra cloud`. The shipped slice is the local Worker-template
+initialisation step; it does not upload repository snapshots, mutate
+Cloudflare D1/R2 state, deploy a Worker, or implement Git protocol.
 
 ## Subcommands
 
@@ -38,8 +35,8 @@ see `libra clone --help` and `docs/commands/clone.md`.
 
 ```
 libra publish init \
-    --slug <slug> \
-    --clone-domain <clone-domain> \
+    [--slug <slug>] \
+    [--clone-domain <clone-domain>] \
     [--display-origin <origin>] \
     [--name <human-name>] \
     [--visibility public|private] \
@@ -52,16 +49,17 @@ libra publish init \
 - Writes `.libra/publish/worker-template-manifest.json` with the
   embedded template version, render policy, and SHA-256 baseline for
   each managed file.
-- `--max-preview-bytes <bytes>`: per-file preview cap (must be
-  `> 0`; the CLI rejects `0` because a zero cap publishes no file
-  previews — pass a positive byte count or omit the flag to use the
-  default).
+- Accepts the site-shaping flags listed above for forward
+  compatibility. The current implementation does not persist those
+  values to repository config; it only uses the CLI parser to validate
+  flag shape.
+- `--max-preview-bytes <bytes>`: must be `> 0`; the CLI rejects `0`
+  before the template is written.
 - Materialises `worker/` from the embedded Worker template. Missing
   files are written fresh, byte-identical template files are left as
   current, and user-modified or symlinked paths fail closed with
   `LBR-CONFLICT-002`; no conflict markers are written.
-- Does **not** require Cloudflare connectivity; D1 / R2 credentials
-  are validated at sync time.
+- Does **not** require Cloudflare connectivity.
 
 ### `libra publish sync`
 
@@ -75,47 +73,10 @@ libra publish sync [--ref <branch|tag|full-ref>]
                    [--json]
 ```
 
-- Default: scans `refs/heads/*` and `refs/tags/*`, dedupes by target
-  revision, builds one snapshot per unique revision, and uploads code
-  manifests + file previews + the full AI object model bundle.
-- `--ref <branch|tag|full-ref>`: targeted sync. Branch/tag short
-  names are accepted; an ambiguous short name (a branch and tag of
-  the same name) fails with a hint to use the full ref. Targeted sync
-  cannot advance the "all refs published" generation — use the
-  default invocation for production releases.
-- `--dry-run`: scans + plans without writing to D1 / R2.
-- `--fail-on-dirty`: a dirty working tree fails the run instead of
-  emitting a warning.
-- `--ai-redaction strict`: removes prompt-like, tool-payload-like,
-  path-like, and provider-detail-like fields from the AI object
-  bundle while preserving every object envelope, relationship edge,
-  and index entry. Visibility (public/private) and `--ai-redaction`
-  compose; the AI object **type coverage** is fixed and not affected
-  by either knob.
-- `--allow-sensitive-path <path>`: opt-out of the built-in deny
-  rules for the named path. Repeatable. Only honored when the
-  site's `publish.visibility` is `private`; on `public` sites the
-  flag is rejected to keep secrets out of public publishes.
-- `--force`: re-upload every file/object even if `is_synced` is
-  set, and resolve a CAS conflict on `publish_sites.latest_revision_oid`
-  by force-advancing the pointer. Use after a manual recovery; the
-  conflict path normally requires a fresh `sync` invocation.
-- `--json`: emits a stable machine-readable envelope: `site_id`,
-  `refs_count`, `revision_count`, `default_ref`, `latest_revision_oid`,
-  `file_count`, `ai_object_count`, `ai_bundle_count`, `warnings`.
-
-Write order (so a partial publish is never visible to readers):
-
-1. R2 file blobs + AI object JSONs + AI bundle.
-2. D1 `publish_revisions` row marked `syncing`.
-3. D1 `publish_files`, `publish_ai_objects`, `publish_ai_versions`
-   rows.
-4. CAS update of `publish_sites.latest_revision_oid` and
-   `refs_generation`; `publish_revisions.status` flips to `published`
-   atomically.
-
-A failure at any point writes `publish_sync_runs.status = failed` and
-leaves `latest_revision_oid` / `refs_generation` untouched.
+Current behavior: this subcommand is not implemented. It exits with
+`LBR-UNSUPPORTED-001` and does not read or write Cloudflare D1/R2.
+The flags are reserved for the Phase 4 sync plan in
+`docs/improvement/publish.md`.
 
 ### `libra publish status`
 
@@ -123,22 +84,8 @@ leaves `latest_revision_oid` / `refs_generation` untouched.
 libra publish status [--json]
 ```
 
-- `--json`: emits a stable machine-readable envelope with the same
-  fields documented below. Without `--json`, output is a
-  human-readable summary.
-
-Reports:
-
-- Local repo id, site id, slug, visibility.
-- Clone domain, display origin, generated clone URL, stable repo
-  clone URL.
-- Per-ref diff between local `refs/heads/*` + `refs/tags/*` and the
-  D1 `publish_refs` table — added, removed, moved, missing-snapshot.
-- Most recent `publish_sync_runs` row: status, warnings, file count,
-  AI object count, AI bundle count.
-- Worker template state: `missing` / `current` / `modified` /
-  `outdated` / `conflicted` (the last makes `publish deploy` fail
-  closed).
+Current behavior: this subcommand is not implemented. It exits with
+`LBR-UNSUPPORTED-001` and does not inspect Cloudflare D1/R2 state.
 
 ### `libra publish deploy`
 
@@ -146,22 +93,9 @@ Reports:
 libra publish deploy [--skip-deploy]
 ```
 
-- `--skip-deploy`: run the build + migration steps but skip the
-  final `wrangler deploy`. Useful for CI smoke tests that need to
-  verify the project builds cleanly without touching production.
-
-Behaviour:
-
-- Verifies the Worker template state is not `conflicted`.
-- Runs `pnpm --dir worker build` (Next.js + OpenNext for Cloudflare).
-- Applies D1 migrations from `worker/migrations/`.
-- Invokes `wrangler deploy`.
-- Prints the browse URL, the domain-qualified clone URL
-  (`libra+cloud://<clone-domain>/<slug>`), and the stable
-  `repo/<repo_id>` clone URL.
-
-A failed deploy preserves all sync data; the next `publish sync` is
-not rolled back.
+Current behavior: this subcommand is not implemented. It exits with
+`LBR-UNSUPPORTED-001` and does not run `pnpm`, `wrangler`, or D1
+migrations.
 
 ### `libra publish unpublish`
 
@@ -169,24 +103,17 @@ not rolled back.
 libra publish unpublish [--yes]
 ```
 
-- `--yes`: skip the interactive confirmation prompt. Required for
-  unattended invocations (CI, scripts) since unpublish flips the
-  Worker's response to 410 immediately.
-
-Behaviour:
-
-- Sets `publish_sites.status = 'disabled'`. The Worker API
-  immediately returns 410 for that site and skips R2 reads.
-- Does **not** delete D1 rows or R2 objects; recovery via
-  `libra clone libra+cloud://...` from the disabled site is not
-  guaranteed and is out of scope for v1.
-- Does **not** automatically revoke Cloudflare Worker routes; emits a
-  hint for the operator to remove the route in Cloudflare's
-  dashboard.
+Current behavior: this subcommand is not implemented. It exits with
+`LBR-UNSUPPORTED-001` and does not mutate local config, Cloudflare D1,
+R2, Worker routes, or Worker deployment state.
 
 ## Configuration
 
-`libra publish init` writes the following keys into `ConfigKv`:
+`libra publish init` currently does not write publish keys into
+`ConfigKv`. It records only the Worker template manifest described in
+the Files section.
+
+The planned Phase 4 configuration keys are:
 
 | Key | Description |
 |-----|-------------|
@@ -199,10 +126,10 @@ Behaviour:
 | `publish.worker_name` | Wrangler worker name. |
 | `publish.max_preview_bytes` | Per-file preview size cap. |
 
-Cloudflare credentials, account ids, and API tokens are read from
-the same `LIBRA_D1_*` / `LIBRA_STORAGE_*` environment variables that
-`libra cloud` uses. They are never written into the Worker template
-or to `ConfigKv`.
+The planned sync/deploy implementation will read Cloudflare
+credentials, account ids, and API tokens from the same `LIBRA_D1_*` /
+`LIBRA_STORAGE_*` environment variables that `libra cloud` uses. They
+are never written into the Worker template or to `ConfigKv`.
 
 ## Files
 
@@ -214,8 +141,8 @@ or to `ConfigKv`.
   already exists, so column-level CHECK additions in 0001 never
   reach existing databases.
 - `worker/migrations/<NNNN>_*.sql` — byte-equal mirrors of every
-  file under `sql/publish/`, applied by `wrangler d1 migrations
-  apply` at deploy time. The
+  file under `sql/publish/`, reserved for the planned
+  `wrangler d1 migrations apply` step in `libra publish deploy`. The
   `publish_schema_contract_worker_mirror_is_byte_equal` test walks
   both directories and refuses any drift.
 - `worker/` — Next.js + React + OpenNext-for-Cloudflare project. Ships
@@ -229,12 +156,12 @@ or to `ConfigKv`.
 
 ## D1 schema migrations
 
-The publish D1 schema is materialised from the source-of-truth files
-under `sql/publish/`, applied by `wrangler d1 migrations apply`
-during `libra publish deploy`. Each `.sql` file under `sql/publish/`
-has a byte-equal mirror under `worker/migrations/` (the
-`publish_schema_contract_worker_mirror_is_byte_equal` Rust test
-walks both directories and refuses any drift).
+The publish D1 schema source already lives under `sql/publish/`, and
+each `.sql` file has a byte-equal mirror under `worker/migrations/`
+(the `publish_schema_contract_worker_mirror_is_byte_equal` Rust test
+walks both directories and refuses any drift). Current
+`libra publish deploy` does not apply these migrations yet; that
+behavior remains part of the Phase 4 deploy plan.
 
 Current chain:
 
@@ -268,8 +195,9 @@ yields the same end state as applying the chain incrementally.
 
 ## See also
 
-- `libra clone` — restore a Libra repository from Cloudflare D1 / R2
-  via the `libra+cloud://<clone-domain>/<slug>` source scheme.
+- `libra clone` — the planned restore path for Cloudflare D1 / R2
+  via the `libra+cloud://<clone-domain>/<slug>` source scheme. Current
+  builds recognize that scheme but return `LBR-UNSUPPORTED-001`.
 - `libra cloud` — private Cloudflare backup that `publish` builds on
   top of.
 - `docs/improvement/publish.md` — internal design + phased rollout.
