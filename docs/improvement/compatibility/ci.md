@@ -142,14 +142,14 @@ tests/compat/
 | `compat-live-ai`（占位） | `test-live-ai` | ❌ | workflow_dispatch / scheduled |
 | `compat-live-cloud`（占位） | `test-live-cloud` | ❌ | workflow_dispatch / scheduled |
 
-### required-checks 切换 checklist（由维护者在 GitHub UI 执行）
+### required-checks 平台切换 runbook（由维护者在 GitHub UI 执行）
 
 写进 [governance.md](governance.md)：
 
-- [ ] Settings → Branches → main 的 "Require status checks" 列表，删除旧 `Rustfmt Check` / `Clippy Check` / `Redundancy Check` / `Run Tests` / `Analyze (...)` 名称。
-- [ ] 添加 `compat-rustfmt` / `compat-clippy` / `compat-redundancy` / `compat-offline-core` / `compat-network-remotes` / `security-codeql-actions` / `security-codeql-rust`。
-- [ ] 不要把 `compat-live-*` 加入 required（凭据敏感）。
-- [ ] 验证：故意提交一个会失败的 fmt 改动，PR 显示 `compat-rustfmt` 失败并阻塞合并。
+- Settings → Branches → main 的 "Require status checks" 列表，删除旧 `Rustfmt Check` / `Clippy Check` / `Redundancy Check` / `Run Tests` / `Analyze (...)` 名称。
+- 添加 `compat-rustfmt` / `compat-clippy` / `compat-redundancy` / `compat-offline-core` / `compat-network-remotes` / `security-codeql-actions` / `security-codeql-rust`。
+- 不要把 `compat-live-*` 加入 required（凭据敏感）。
+- 验证：故意提交一个会失败的 fmt 改动，PR 显示 `compat-rustfmt` 失败并阻塞合并。
 
 ## 关键文件与改动
 
@@ -172,7 +172,7 @@ tests/compat/
 - [x] [`scripts/check_compat_matrix.sh`](../../../scripts/check_compat_matrix.sh) 能在 `COMPATIBILITY.md` 顶层命令表遗漏或多列 `src/cli.rs::Commands` 变体时 fail-fast。
 - [x] [`compat_matrix_alignment`](../../../tests/compat/matrix_alignment.rs) 已通过 Cargo `[[test]]` 接入 `cargo test --all`。
 - [x] [governance.md](governance.md) 已更新 required-checks 切换 checklist。
-- [ ] GitHub UI branch protection 已完成 required-checks 切换，并经 PR 页面验证新名称会阻塞失败检查。这是平台配置动作，不能由代码提交自动完成。
+- 外部平台确认：GitHub UI branch protection 完成 required-checks 切换后，经 PR 页面验证新名称会阻塞失败检查。该项不能由代码提交自动完成，不计入本仓库代码验收 checkbox。
 
 ## 风险与缓解
 

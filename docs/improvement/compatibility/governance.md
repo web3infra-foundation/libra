@@ -191,29 +191,29 @@ tests/data/** -text
 
 `.github/CODEOWNERS` 不作为 C1 的 improvement 产物维护。若未来需要 Code Owners review，维护者应在独立治理流程中确认团队 handle、仓库权限和 branch protection，再单独引入对应配置；本计划不保存半可执行的 CODEOWNERS 占位。
 
-### 分支保护建议（不在本批自动启用）
+### 分支保护平台 Runbook（不计入代码 improvement 验收）
 
-写进 governance.md 的"GitHub UI 配置 checklist"小节，由维护者按以下逐项在 Settings → Branches → Branch protection rules 启用：
+以下内容是维护者在 GitHub UI 中执行的外部平台 runbook，不是仓库代码提交可以自动完成的 improvement 交付物，也不作为本批代码验收的未完成 checkbox：
 
-- [ ] 要求 PR 才能合并；禁止直接 push 到 `main`。
-- [ ] 至少 1 个 reviewer 批准。
-- [ ] 如平台治理另行要求，启用 Code Owners review；本 improvement 不维护 `.github/CODEOWNERS`。
-- [ ] 要求 status checks 通过——配合 C2 落地后的唯一 job 名：`compat-rustfmt` / `compat-clippy` / `compat-redundancy` / `compat-offline-core` / `compat-network-remotes` / `security-codeql-actions` / `security-codeql-rust`（live 矩阵不作为 required，因受网络/凭据影响）。
-- [ ] 启用 linear history。
-- [ ] 禁止 force push。
-- [ ] 视团队执行情况启用 signed commits（与 contributing.md 中 PGP 要求对齐）。
+- 要求 PR 才能合并；禁止直接 push 到 `main`。
+- 至少 1 个 reviewer 批准。
+- 如平台治理另行要求，启用 Code Owners review；本 improvement 不维护 `.github/CODEOWNERS`。
+- 要求 status checks 通过——配合 C2 落地后的唯一 job 名：`compat-rustfmt` / `compat-clippy` / `compat-redundancy` / `compat-offline-core` / `compat-network-remotes` / `security-codeql-actions` / `security-codeql-rust`（live 矩阵不作为 required，因受网络/凭据影响）。
+- 启用 linear history。
+- 禁止 force push。
+- 视团队执行情况启用 signed commits（与 contributing.md 中 PGP 要求对齐）。
 
-### required-checks 切换 checklist（C2 落地后由维护者在 GitHub UI 执行）
+### required-checks 平台切换 runbook（C2 落地后由维护者在 GitHub UI 执行）
 
 C2 把 `.github/workflows/base.yml` 与 `.github/workflows/codeql.yml` 的 `name:` 字段
 统一到 `compat-*` / `security-*` 命名后，旧的 required-checks 标识（`Rustfmt Check`
 等）已经不会再出现。维护者必须按以下顺序在 GitHub UI 切换：
 
-- [ ] Settings → Branches → main → "Require status checks" 列表，移除旧名称：`Rustfmt Check` / `Clippy Check` / `Redundancy Check` / `Run Tests` / `Analyze (...)`。
-- [ ] 同一列表中加入新名称：`compat-rustfmt` / `compat-clippy` / `compat-redundancy` / `compat-offline-core` / `compat-network-remotes` / `security-codeql-actions` / `security-codeql-rust`。
-- [ ] **不要**把 `compat-live-ai` / `compat-live-cloud`（占位 / 未来 workflow_dispatch）加入 required-checks——这些依赖外部凭据，会让 PR 阻塞在配置外因素上。
-- [ ] 在临时分支故意提交一个会失败的 fmt 改动，确认 PR 显示 `compat-rustfmt` 失败并阻塞合并。
-- [ ] 在临时分支故意 lint 失败，确认 `compat-clippy` 阻塞合并。
+- Settings → Branches → main → "Require status checks" 列表，移除旧名称：`Rustfmt Check` / `Clippy Check` / `Redundancy Check` / `Run Tests` / `Analyze (...)`。
+- 同一列表中加入新名称：`compat-rustfmt` / `compat-clippy` / `compat-redundancy` / `compat-offline-core` / `compat-network-remotes` / `security-codeql-actions` / `security-codeql-rust`。
+- **不要**把 `compat-live-ai` / `compat-live-cloud`（占位 / 未来 workflow_dispatch）加入 required-checks——这些依赖外部凭据，会让 PR 阻塞在配置外因素上。
+- 在临时分支故意提交一个会失败的 fmt 改动，确认 PR 显示 `compat-rustfmt` 失败并阻塞合并。
+- 在临时分支故意 lint 失败，确认 `compat-clippy` 阻塞合并。
 
 切换完成前不要 merge C2 自身——若 main 已经在跑新 job 名而 branch protection 还
 锁着旧名，所有 PR 会出现"required check 永远 pending"。
