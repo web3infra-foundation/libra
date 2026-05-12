@@ -182,6 +182,7 @@ pub struct SandboxTransformRequest<'a> {
     pub linux_sandbox_exe: Option<&'a PathBuf>,
     pub use_linux_sandbox_bwrap: bool,
     pub enforcement: SandboxEnforcement,
+    pub deny_read_paths: &'a [PathBuf],
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -259,12 +260,15 @@ impl SandboxManager {
             linux_sandbox_exe,
             use_linux_sandbox_bwrap,
             enforcement,
+            deny_read_paths,
         } = request;
 
         #[cfg(not(target_os = "linux"))]
         let _ = use_linux_sandbox_bwrap;
         #[cfg(not(target_os = "linux"))]
         let _ = linux_sandbox_exe;
+        #[cfg(not(target_os = "macos"))]
+        let _ = deny_read_paths;
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let _ = sandbox_policy_cwd;
 
@@ -306,8 +310,12 @@ impl SandboxManager {
                 #[cfg(target_os = "macos")]
                 {
                     let policy = policy.ok_or(SandboxTransformError::UnsupportedPlatform)?;
-                    let mut seatbelt_args =
-                        create_seatbelt_command_args(command, policy, sandbox_policy_cwd);
+                    let mut seatbelt_args = create_seatbelt_command_args(
+                        command,
+                        policy,
+                        sandbox_policy_cwd,
+                        deny_read_paths,
+                    );
                     let mut full = Vec::with_capacity(1 + seatbelt_args.len());
                     full.push(MACOS_PATH_TO_SEATBELT_EXECUTABLE.to_string());
                     full.append(&mut seatbelt_args);
@@ -423,6 +431,7 @@ fn create_seatbelt_command_args(
     command: Vec<String>,
     sandbox_policy: &SandboxPolicy,
     sandbox_policy_cwd: &Path,
+    deny_read_paths: &[PathBuf],
 ) -> Vec<String> {
     const SEATBELT_BASE_POLICY: &str = include_str!("seatbelt_base_policy.sbpl");
     const SEATBELT_NETWORK_POLICY: &str = include_str!("seatbelt_network_policy.sbpl");
@@ -432,7 +441,7 @@ fn create_seatbelt_command_args(
     let file_read_policy = "; allow read-only file operations\n(allow file-read*)";
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let (sensitive_read_policy, sensitive_read_params) =
-        build_macos_sensitive_read_policy(home.as_deref());
+        build_macos_sensitive_read_policy(home.as_deref(), deny_read_paths);
     let network_policy = if sandbox_policy.has_full_network_access() {
         SEATBELT_NETWORK_POLICY
     } else {
@@ -455,8 +464,16 @@ fn create_seatbelt_command_args(
 }
 
 #[cfg(target_os = "macos")]
-fn build_macos_sensitive_read_policy(home: Option<&Path>) -> (String, Vec<(String, PathBuf)>) {
-    let paths = sensitive_read_paths(home);
+fn build_macos_sensitive_read_policy(
+    home: Option<&Path>,
+    deny_read_paths: &[PathBuf],
+) -> (String, Vec<(String, PathBuf)>) {
+    let mut paths = sensitive_read_paths(home);
+    for path in deny_read_paths {
+        if !paths.iter().any(|existing| existing == path) {
+            paths.push(path.clone());
+        }
+    }
     let mut params = Vec::with_capacity(paths.len());
     let mut policy = String::from("; deny sensitive host credential reads\n");
 
@@ -620,6 +637,7 @@ mod tests {
             linux_sandbox_exe: None,
             use_linux_sandbox_bwrap: false,
             enforcement: SandboxEnforcement::BestEffort,
+            deny_read_paths: &[],
         };
 
         let transformed = manager
@@ -653,6 +671,7 @@ mod tests {
             linux_sandbox_exe: None,
             use_linux_sandbox_bwrap: false,
             enforcement: SandboxEnforcement::Required,
+            deny_read_paths: &[],
         };
 
         let error = manager
@@ -689,6 +708,7 @@ mod tests {
             linux_sandbox_exe: None,
             use_linux_sandbox_bwrap: false,
             enforcement: SandboxEnforcement::BestEffort,
+            deny_read_paths: &[],
         };
 
         let error = manager
@@ -724,6 +744,7 @@ mod tests {
             linux_sandbox_exe: None,
             use_linux_sandbox_bwrap: false,
             enforcement: SandboxEnforcement::Required,
+            deny_read_paths: &[],
         };
 
         let transformed = manager
@@ -898,7 +919,9 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_sensitive_read_policy_denies_home_credentials() {
-        let (policy, params) = build_macos_sensitive_read_policy(Some(Path::new("/Users/tester")));
+        let extra = vec![PathBuf::from("/Users/tester/Library/Cookies")];
+        let (policy, params) =
+            build_macos_sensitive_read_policy(Some(Path::new("/Users/tester")), &extra);
 
         assert!(policy.contains("(deny file-read*"));
         assert!(policy.contains("SENSITIVE_READ_0"));
@@ -916,6 +939,11 @@ mod tests {
             params
                 .iter()
                 .any(|(_, path)| path == Path::new("/etc/shadow"))
+        );
+        assert!(
+            params
+                .iter()
+                .any(|(_, path)| path == Path::new("/Users/tester/Library/Cookies"))
         );
     }
 }

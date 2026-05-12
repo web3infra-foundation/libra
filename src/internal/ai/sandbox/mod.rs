@@ -6,6 +6,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    fs,
     io::ErrorKind,
     path::{Path, PathBuf},
     process::Stdio,
@@ -15,6 +16,7 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use ring::digest::{SHA256, digest};
+use serde::Deserialize;
 const DEFAULT_APPROVAL_SCOPE: &str = "interactive";
 pub const DEFAULT_APPROVAL_TTL: Duration = Duration::from_secs(300);
 
@@ -60,6 +62,7 @@ pub struct SandboxRuntimeConfig {
     pub linux_sandbox_exe: Option<PathBuf>,
     pub use_linux_sandbox_bwrap: bool,
     pub enforcement: SandboxEnforcement,
+    pub deny_read_paths: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -827,6 +830,7 @@ const STREAM_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 const COMMAND_TMPDIR_PREFIX: &str = "libra-sandbox-";
 const COMMAND_TMPDIR_CREATE_ATTEMPTS: usize = 8;
 const SANDBOX_ENFORCEMENT_ENV: &str = "LIBRA_SANDBOX_ENFORCEMENT";
+const SANDBOX_CONFIG_FILE: &str = "sandbox.toml";
 #[cfg(unix)]
 const COMMAND_TMPDIR_MODE: u32 = 0o700;
 const SANDBOX_DENIED_KEYWORDS: [&str; 7] = [
@@ -1186,6 +1190,7 @@ fn build_command_from_spec(
         .map(|config| config.use_linux_sandbox_bwrap)
         .unwrap_or_else(|| env_flag_enabled("LIBRA_USE_LINUX_SANDBOX_BWRAP"));
     let enforcement = resolve_sandbox_enforcement(sandbox_runtime)?;
+    let deny_read_paths = resolve_deny_read_paths(&sandbox_policy_cwd, sandbox_runtime)?;
     let manager = SandboxManager::new();
     let exec_env = manager
         .transform(SandboxTransformRequest {
@@ -1195,9 +1200,86 @@ fn build_command_from_spec(
             linux_sandbox_exe: linux_sandbox_exe.as_ref(),
             use_linux_sandbox_bwrap,
             enforcement,
+            deny_read_paths: &deny_read_paths,
         })
         .map_err(|err| err.to_string())?;
     exec_env.into_command()
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SandboxConfigFile {
+    #[serde(default)]
+    deny_read: Vec<PathBuf>,
+}
+
+fn resolve_deny_read_paths(
+    cwd: &Path,
+    sandbox_runtime: Option<&SandboxRuntimeConfig>,
+) -> Result<Vec<PathBuf>, String> {
+    let mut paths = load_sandbox_config_file(cwd)?.deny_read;
+    if let Some(config) = sandbox_runtime {
+        paths.extend(config.deny_read_paths.iter().cloned());
+    }
+
+    let mut resolved = Vec::with_capacity(paths.len());
+    for path in paths {
+        push_unique_path(&mut resolved, resolve_deny_read_path(cwd, path));
+    }
+    Ok(resolved)
+}
+
+fn load_sandbox_config_file(cwd: &Path) -> Result<SandboxConfigFile, String> {
+    let path = sandbox_config_path(cwd);
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Ok(SandboxConfigFile::default());
+        }
+        Err(error) => {
+            return Err(format!(
+                "failed to read sandbox config `{}`: {error}",
+                path.display()
+            ));
+        }
+    };
+
+    toml::from_str::<SandboxConfigFile>(&contents).map_err(|error| {
+        format!(
+            "failed to parse sandbox config `{}`: {error}",
+            path.display()
+        )
+    })
+}
+
+fn sandbox_config_path(cwd: &Path) -> PathBuf {
+    crate::utils::util::try_get_storage_path(Some(cwd.to_path_buf()))
+        .unwrap_or_else(|_| cwd.join(crate::utils::util::ROOT_DIR))
+        .join(SANDBOX_CONFIG_FILE)
+}
+
+fn resolve_deny_read_path(cwd: &Path, path: PathBuf) -> PathBuf {
+    let path_text = path.to_string_lossy();
+    if path_text == "~" {
+        if let Some(home) = dirs::home_dir() {
+            return home;
+        }
+    } else if let Some(rest) = path_text.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
+    }
+
+    if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    }
+}
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if !paths.iter().any(|existing| existing == &path) {
+        paths.push(path);
+    }
 }
 
 fn resolve_sandbox_enforcement(
@@ -1664,6 +1746,69 @@ mod tests {
             .expect("runtime config enforcement should be accepted");
 
         assert_eq!(enforcement, SandboxEnforcement::Required);
+    }
+
+    #[test]
+    fn sandbox_config_absent_yields_empty_deny_read_paths() {
+        let temp = tempfile::tempdir().expect("tempdir for sandbox config");
+
+        let paths =
+            resolve_deny_read_paths(temp.path(), None).expect("missing config should be accepted");
+
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn sandbox_config_deny_read_paths_resolve_relative_and_absolute_entries() {
+        let temp = tempfile::tempdir().expect("tempdir for sandbox config");
+        let libra_dir = temp.path().join(crate::utils::util::ROOT_DIR);
+        std::fs::create_dir_all(&libra_dir).expect("create .libra dir");
+        std::fs::write(
+            libra_dir.join(SANDBOX_CONFIG_FILE),
+            r#"deny_read = ["relative/secrets", "/var/secret-token"]"#,
+        )
+        .expect("write sandbox config");
+
+        let paths = resolve_deny_read_paths(temp.path(), None).expect("config should parse");
+
+        assert_eq!(
+            paths,
+            vec![
+                temp.path().join("relative/secrets"),
+                PathBuf::from("/var/secret-token"),
+            ]
+        );
+    }
+
+    #[test]
+    fn sandbox_runtime_config_appends_deny_read_paths() {
+        let temp = tempfile::tempdir().expect("tempdir for sandbox config");
+        let config = SandboxRuntimeConfig {
+            deny_read_paths: vec![PathBuf::from("/runtime/secret")],
+            ..SandboxRuntimeConfig::default()
+        };
+
+        let paths = resolve_deny_read_paths(temp.path(), Some(&config))
+            .expect("runtime config paths should resolve");
+
+        assert_eq!(paths, vec![PathBuf::from("/runtime/secret")]);
+    }
+
+    #[test]
+    fn sandbox_config_parse_errors_are_user_facing() {
+        let temp = tempfile::tempdir().expect("tempdir for sandbox config");
+        let libra_dir = temp.path().join(crate::utils::util::ROOT_DIR);
+        std::fs::create_dir_all(&libra_dir).expect("create .libra dir");
+        std::fs::write(libra_dir.join(SANDBOX_CONFIG_FILE), "deny_read = [")
+            .expect("write invalid sandbox config");
+
+        let error = resolve_deny_read_paths(temp.path(), None)
+            .expect_err("invalid TOML should be reported");
+
+        assert!(
+            error.contains("failed to parse sandbox config"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

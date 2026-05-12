@@ -32,7 +32,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 | 阶段 1 | `SandboxEnforcement` + `libra sandbox status` | 部分落地：`sandbox status` 与 `Required` 拒绝降级已落地；默认 `PreferStrict` / 审批确认仍待实现 |
 | 阶段 2 | 内建 bwrap 直调 + seccomp | 未落地 |
 | 阶段 3 | `setsid` / `--new-session` | 部分落地：sandbox 子进程 Unix `setsid()` 已落地；内建 bwrap `--new-session` 仍待阶段 2 |
-| 阶段 4 | 敏感路径拒读（`deny_read`） | 部分落地：macOS Seatbelt 默认敏感路径拒读已落地；配置扩展与 Linux bwrap 遮蔽仍待实现 |
+| 阶段 4 | 敏感路径拒读（`deny_read`） | 部分落地：macOS Seatbelt 默认敏感路径拒读与 `.libra/sandbox.toml deny_read` 已落地；Linux bwrap 遮蔽仍待实现 |
 | 阶段 5 | 每命令 0o700 tmp + 清理 | 已落地（0.17.37） |
 | 阶段 6 | 危险挂载拒绝清单 | 已落地（0.17.25） |
 | 阶段 7 | 网络三态 + allowlist/proxy | 未落地 |
@@ -43,7 +43,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 - `SandboxEnforcement` 与 `EnforcementFailed` 已落地；`NetworkEnforcementFailed` 仍需随阶段 7 网络三态一起引入。
 - `libra sandbox status` 已提供自检入口，输出平台、当前可用后端、当前 enforcement、writable roots、network/proxy 占位、helper/bwrap/Seatbelt 探测和降级告警；`required` 模式会把内部沙箱缺失报告为将失败，而不是描述为可接受降级。
 - Linux 仍是外部 helper 参数转发路径（`--sandbox-policy` / `--use-bwrap-sandbox`），无内建 `create_bwrap_command_args`：`src/internal/ai/sandbox/runtime.rs:323-340`。
-- macOS 读权限仍保留 `(allow file-read*)` 作为项目可读基线，但已在其后追加默认敏感路径 `(deny file-read* ...)` 规则；配置扩展和 Linux bwrap 遮蔽仍未落地。
+- macOS 读权限仍保留 `(allow file-read*)` 作为项目可读基线，但已在其后追加默认敏感路径和 `.libra/sandbox.toml deny_read` 的 `(deny file-read* ...)` 规则；Linux bwrap 遮蔽仍未落地。
 - `run_command_spec` 已在每次执行前创建 `libra-sandbox-<uuid>` 私有 tmp、覆盖 `TMPDIR` / `TEMP` / `TMP`，并在命令退出后清理；清理失败目前记录 `tracing::warn!`。
 - 网络模型仍是 `Restricted/Enabled` + `bool network_access`，不是 `Denied/Allowlist/Full`：`src/internal/ai/sandbox/policy.rs:27-33`、`src/internal/ai/sandbox/mod.rs:750-760`、`src/command/code.rs:357-364`。
 
@@ -81,7 +81,15 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 - **阶段 4 macOS 基线已落地**：`sensitive_read_paths()` 定义默认敏感读取清单，覆盖 HOME 下的 `.ssh`、`.aws`、`.gnupg`、`.netrc`、`.config/gcloud`、`.kube`、`.config/libra/vault` 以及 `/etc/shadow`。
 - **Seatbelt 拒读已接线**：`create_seatbelt_command_args()` 在 `(allow file-read*)` 后追加参数化 `(deny file-read* (subpath ...))`，保持项目文件可读，同时默认挡住常见 credential 目录。
 - **回归覆盖**：策略层测试验证默认清单；macOS runtime 测试验证 Seatbelt deny policy 与参数表包含 HOME credential 路径和 `/etc/shadow`。
-- **仍待收口**：`.libra/sandbox.toml deny_read` 配置扩展、Linux bwrap `--tmpfs` 遮蔽、更广泛的浏览器/token 路径清单仍是阶段 4 后续工作。
+- **仍待收口**：Linux bwrap `--tmpfs` 遮蔽、更广泛的浏览器/token 默认路径清单仍是阶段 4 后续工作。
+
+## 0.17.47 增量收口（2026-05-12）
+
+- **自定义 deny_read 已落地**：`src/internal/ai/sandbox/mod.rs` 现在读取 `.libra/sandbox.toml` 的 `deny_read = [...]`，缺文件时 no-op，读取或 TOML 解析失败时返回用户可读错误。
+- **路径解析契约**：`deny_read` 支持绝对路径、相对 sandbox cwd 的路径，以及 `~/...` HOME 展开；runtime-provided `SandboxRuntimeConfig::deny_read_paths` 会追加到同一清单并去重。
+- **Seatbelt 接线**：macOS Seatbelt policy 会把默认敏感路径和自定义 `deny_read` 路径合并后生成参数化 `(deny file-read* (subpath ...))`。
+- **回归覆盖**：新增测试覆盖缺失配置 no-op、相对/绝对路径解析、runtime config 追加和 TOML parse error；macOS policy 测试覆盖自定义 deny 路径进入参数表。
+- **仍待收口**：Linux bwrap 的 `--tmpfs` 遮蔽仍待阶段 2/4 合并推进；网络三态仍在阶段 7。
 
 ## 已完成前置条件与当前代码状态
 
@@ -114,7 +122,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 ### 基于当前代码的 Review 结论
 
 - Linux 外部 helper 缺失时，默认 `BestEffort` 仍走 `tracing::warn!` 后“裸跑”；显式 `Required` 已返回 `EnforcementFailed`，不再无感知降级。
-- Seatbelt 策略对读操作仍使用 `(allow file-read*)` 全局基线，但已拒读默认敏感路径（`~/.ssh` / `~/.aws` / `~/.gnupg` / `~/.netrc` / `~/.config/gcloud` / `~/.kube` / `.config/libra/vault` / `/etc/shadow`）；浏览器 cookie 等更广的本地敏感面仍待 deny_read 配置扩展覆盖。
+- Seatbelt 策略对读操作仍使用 `(allow file-read*)` 全局基线，但已拒读默认敏感路径（`~/.ssh` / `~/.aws` / `~/.gnupg` / `~/.netrc` / `~/.config/gcloud` / `~/.kube` / `.config/libra/vault` / `/etc/shadow`），并支持 `.libra/sandbox.toml deny_read` 追加本地路径；浏览器 cookie 等更广的默认清单仍可继续扩展。
 - `ExecEnv::into_command()` 会对实际启用的 macOS Seatbelt / Linux helper sandbox 子进程执行 `setsid()`；内建 bwrap 的 `--new-session` 参数仍待阶段 2 一并实现。
 - `run_command_spec` 已覆盖调用方传入的 `TMPDIR` / `TEMP` / `TMP` 并在命令后清理；剩余风险是清理失败仅进入 tracing，尚未写入 agent Runtime 的结构化 Evidence。
 - `WorkspaceWrite::writable_roots` 已拒绝危险挂载清单；剩余风险是尚未把拒绝事件写成 agent Runtime 的 `ToolInvocation[E]` / `Evidence[E]` 结构化记录。
@@ -151,7 +159,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 |---|---|---|---|---|
 | G1 | Linux 沙箱开箱即用（bwrap 直调） | 依赖外部 `libra-linux-sandbox` 二进制，未配置时 warn + 裸跑 | ★★★ | 阶段 1 + 阶段 2 |
 | G2 | `--new-session` 阻断 TIOCSTI | sandbox 子进程已 `setsid()`；内建 bwrap `--new-session` 仍待阶段 2 | ★★★ | 阶段 3 部分落地 |
-| G3 | tmpfs 空白根 + `--ro-bind` 精选注入 | macOS Seatbelt 已拒读默认敏感路径；Linux bwrap 遮蔽与自定义 deny_read 仍待实现 | ★★ | 阶段 4 部分落地 |
+| G3 | tmpfs 空白根 + `--ro-bind` 精选注入 | macOS Seatbelt 已拒读默认敏感路径并支持自定义 deny_read；Linux bwrap 遮蔽仍待实现 | ★★ | 阶段 4 部分落地 |
 | G4 | 默认拒绝 + 域名白名单的网络策略 | 仅 `network_access: bool`；enforcement 依赖环境变量 + 部分 Seatbelt 策略，未在 Linux 默认 `--unshare-net` | ★★★ | 阶段 7 本轮 OS 层 default deny + 白名单配置；域名过滤代理单列 |
 | G5 | 每命令 0o700 tmp + `cleanupAfterCommand()` | 已在 `run_command_spec` 前后注入并清理私有 tmp；清理失败 Evidence 仍待 Runtime 接线 | ✅ | 阶段 5 已落地 |
 | G6 | 内置 Seccomp 过滤器 | 依赖外部 helper | ★★ | 阶段 2（随 bwrap 直调） |
@@ -223,7 +231,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 
 1. **引入 `sensitive_read_paths()`**（`policy.rs`）
    - 已新增默认清单：`~/.ssh`、`~/.aws`、`~/.gnupg`、`~/.netrc`、`~/.config/gcloud`、`~/.kube`、`~/.config/libra/vault`、`/etc/shadow`
-   - 支持用户在 `.libra/sandbox.toml` 的 `deny_read` 字段追加自定义路径（与 Claude Code `denyRead` 语义对齐）
+   - 已支持用户在 `.libra/sandbox.toml` 的 `deny_read` 字段追加自定义路径（与 Claude Code `denyRead` 语义对齐）
 2. **macOS Seatbelt 策略**
    - 已在 `create_seatbelt_command_args` 的 `file_read_policy` 之后追加 `(deny file-read* (subpath "..."))`，对每个敏感路径做参数化拒绝
    - 保持 `(allow file-read*)` 的全局放行基线（避免 agent 无法读项目文件和依赖），依赖 deny 规则覆盖敏感子树
@@ -231,7 +239,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
    - 对敏感路径执行 `--tmpfs <sensitive_path>`（在沙箱内遮蔽为空目录）
    - 对 `~/` 本身不做 `--tmpfs`，只遮蔽子树，保证 shell 能正常启动
 4. **配置加载**
-   - `.libra/sandbox.toml` 解析入口放在 [src/internal/ai/sandbox/mod.rs](../../src/internal/ai/sandbox/mod.rs)，沿用第一批已交付的 vault / config 基础设施（详见 [config.md](config.md) 的 `config_kv` / `resolve_env()`）
+   - `.libra/sandbox.toml` 解析入口已放在 [src/internal/ai/sandbox/mod.rs](../../src/internal/ai/sandbox/mod.rs)；缺文件时 no-op，解析/读取错误返回用户可读错误。
 
 ### 阶段 5：每命令 0o700 tmp + 退出清理（P1，已落地）
 
