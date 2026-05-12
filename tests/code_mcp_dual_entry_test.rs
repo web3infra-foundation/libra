@@ -25,12 +25,9 @@
 //!     through web `/messages` is observed by a live web SSE
 //!     subscriber and is then visible through MCP `tools/call`
 //!     `list_tasks` on the same process.
-//!
-//! Coverage deferred (still §5.14 P1 work):
-//!   * Item 3 remaining direction — MCP-originated `tools/call`
-//!     writes are not currently wired into Code UI transcript
-//!     broadcasting, so MCP write → web SSE observe remains a
-//!     roadmap-sized follow-up.
+//!   * **Item 3 — MCP→web consistency**: a task created through
+//!     MCP `tools/call create_task` is broadcast through the Code
+//!     UI read model and observed by a live web SSE subscriber.
 
 #[cfg(feature = "test-provider")]
 mod harness;
@@ -531,6 +528,60 @@ fn web_message_turn_is_observable_through_sse_and_mcp_task_list() -> Result<()> 
         tasks_text.contains(&format!("TUI: {user_text}")) || tasks_text.contains(marker),
         "MCP list_tasks must expose the web-submitted turn text; got:\n{tasks_text}",
     );
+    Ok(())
+}
+
+/// Wave 9 §5.14 item 3 consistency — MCP write → web SSE observe.
+///
+/// External MCP clients write workflow objects through the same
+/// `LibraMcpServer` instance that the TUI bridge uses. This test
+/// pins the reverse direction from the web→MCP case above:
+///
+///   1. initialize an MCP client against the runtime's `mcpUrl`;
+///   2. subscribe to web SSE before writing;
+///   3. call MCP `tools/call create_task`;
+///   4. assert the web SSE `session_updated` snapshot contains a
+///      transcript entry for the MCP-created task.
+#[cfg(feature = "test-provider")]
+#[test]
+#[serial]
+fn mcp_created_task_is_observable_through_web_sse() -> Result<()> {
+    let session = CodeSession::spawn(CodeSessionOptions::new(
+        "code-mcp-write-web-sse",
+        fixture_path(),
+    ))?;
+    let mcp_url = session
+        .mcp_url()
+        .ok_or_else(|| anyhow::anyhow!("control.json did not surface mcpUrl after spawn"))?
+        .to_string();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .context("build MCP consistency client")?;
+    let mcp_session_id = mcp_initialize(&client, &mcp_url)?;
+    let mut events = session.open_event_stream()?;
+
+    let marker = "mcp-originated-create-task-marker";
+    let title = format!("MCP task {marker}");
+    let value = mcp_call_tool(
+        &client,
+        &mcp_url,
+        &mcp_session_id,
+        100,
+        "create_task",
+        json!({
+            "title": title,
+            "description": "Created by an external MCP client for dual-entry consistency.",
+            "status": "created",
+        }),
+    )?;
+    let result_text = mcp_result_text(&value);
+    assert!(
+        result_text.contains("Task created with ID:"),
+        "MCP create_task should return the created task id; got:\n{result_text}",
+    );
+
+    let _payload = wait_for_sse_transcript(&mut events, marker, Duration::from_secs(10))?;
     Ok(())
 }
 

@@ -776,6 +776,7 @@ async fn execute_web_only(args: &CodeArgs) -> CliResult<()> {
             None => build_placeholder_web_code_ui_runtime(args, &working_dir).await,
         }
     };
+    mcp_server.set_code_ui_session(code_ui_runtime.adapter().session());
 
     let web_handle = match start_web_server(
         &args.host,
@@ -2681,6 +2682,9 @@ where
         .await
     };
     let code_ui_session = code_ui_runtime.adapter().session();
+    params
+        .mcp_server
+        .set_code_ui_session(code_ui_session.clone());
     let code_ui_runtime_for_app = code_ui_runtime.clone();
 
     let control_thread_id = session_canonical_thread_id(&session);

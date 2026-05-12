@@ -26,6 +26,7 @@
 //! `plan_step_event`, `run_usage`.
 use std::{collections::HashMap, path::PathBuf, process::Stdio};
 
+use chrono::Utc;
 use git_internal::internal::object::{
     context::{ContextItem, ContextItemKind, ContextSnapshot, SelectionStrategy},
     context_frame::{ContextFrame, FrameKind},
@@ -74,6 +75,7 @@ use crate::{
             },
             mcp::server::LibraMcpServer,
             util::normalize_commit_anchor,
+            web::code_ui::{CodeUiTaskSnapshot, CodeUiTranscriptEntry, CodeUiTranscriptEntryKind},
         },
         head::Head,
     },
@@ -834,6 +836,14 @@ fn parse_task_event_kind(status: &str) -> Result<TaskEventKind, ErrorData> {
         "cancelled" => Ok(TaskEventKind::Cancelled),
         _ => Err(ErrorData::invalid_params("invalid task status", None)),
     }
+}
+
+fn parse_created_uuid(result: &CallToolResult) -> Option<Uuid> {
+    result.content.iter().find_map(|content| {
+        let text = content.as_text().map(|text| text.text.as_str())?;
+        let id = text.split("ID:").nth(1)?.trim();
+        Uuid::parse_str(id).ok()
+    })
 }
 
 fn parse_run_event_kind(status: &str) -> Result<RunEventKind, ErrorData> {
@@ -1668,12 +1678,26 @@ impl LibraMcpServer {
         ctx: RequestContext<RoleServer>,
         Parameters(params): Parameters<CreateTaskParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let title = params.title.clone();
+        let status = params
+            .status
+            .as_deref()
+            .map(parse_task_event_kind)
+            .transpose()?
+            .unwrap_or(TaskEventKind::Created);
         let actor = self.resolve_actor(
             &ctx,
             params.actor_kind.as_deref(),
             params.actor_id.as_deref(),
         )?;
-        self.create_task_impl(params, actor).await
+        let result = self.create_task_impl(params, actor).await?;
+        if !result.is_error.unwrap_or(false)
+            && let Some(task_id) = parse_created_uuid(&result)
+        {
+            self.emit_code_ui_mcp_task_created(task_id, &title, &status)
+                .await;
+        }
+        Ok(result)
     }
 
     /// Core implementation of create_task, callable without RequestContext for testing.
@@ -1763,6 +1787,46 @@ impl LibraMcpServer {
             "Task created with ID: {}",
             task.header().object_id()
         ))]))
+    }
+
+    async fn emit_code_ui_mcp_task_created(
+        &self,
+        task_id: Uuid,
+        title: &str,
+        status: &TaskEventKind,
+    ) {
+        let Some(session) = self.code_ui_session() else {
+            return;
+        };
+        let now = Utc::now();
+        let status_label = task_status_label(status).to_string();
+        let task_id = task_id.to_string();
+        session
+            .upsert_task(CodeUiTaskSnapshot {
+                id: task_id.clone(),
+                title: Some(title.to_string()),
+                status: status_label.clone(),
+                details: Some("Created through MCP create_task".to_string()),
+                updated_at: now,
+            })
+            .await;
+        session
+            .upsert_transcript_entry(CodeUiTranscriptEntry {
+                id: format!("mcp-task-created-{task_id}"),
+                kind: CodeUiTranscriptEntryKind::InfoNote,
+                title: Some("MCP task created".to_string()),
+                content: Some(format!("MCP create_task: {title} ({status_label})")),
+                status: Some("completed".to_string()),
+                streaming: false,
+                metadata: json!({
+                    "source": "mcp",
+                    "tool": "create_task",
+                    "taskId": task_id,
+                }),
+                created_at: now,
+                updated_at: now,
+            })
+            .await;
     }
 
     #[tool(description = "List recent tasks")]
