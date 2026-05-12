@@ -1241,6 +1241,58 @@ impl CodeSession {
         Ok(())
     }
 
+    /// Ask the spawned TUI to terminate without first sending `/quit`.
+    ///
+    /// Unlike [`Self::shutdown`], this exercises OS-level process termination
+    /// while preserving any session snapshots the runtime already flushed.
+    pub fn terminate_without_cleanup(&mut self) -> Result<()> {
+        if let Some(child) = self.child.as_mut() {
+            #[cfg(unix)]
+            {
+                if let Some(pid) = child.process_id() {
+                    let result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+                    if result != 0 {
+                        return Err(std::io::Error::last_os_error())
+                            .with_context(|| format!("failed to SIGTERM libra code child {pid}"));
+                    }
+                } else {
+                    child.kill().context("failed to kill libra code child")?;
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                child.kill().context("failed to kill libra code child")?;
+            }
+
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                if child
+                    .try_wait()
+                    .context("failed to poll terminated libra code child")?
+                    .is_some()
+                {
+                    child
+                        .wait()
+                        .context("failed to wait for terminated libra code child")?;
+                    self.child = None;
+                    self.join_reader();
+                    return Ok(());
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+
+            child
+                .kill()
+                .context("failed to SIGKILL libra code child after SIGTERM timeout")?;
+            child
+                .wait()
+                .context("failed to wait for killed libra code child after SIGTERM timeout")?;
+            self.child = None;
+        }
+        self.join_reader();
+        Ok(())
+    }
+
     fn wait_for_control_info(
         &mut self,
         timeout: Duration,

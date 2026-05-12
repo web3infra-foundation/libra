@@ -34,15 +34,11 @@
 //! outcome through both the live HTTP snapshot and the artifact
 //! dir the harness writes for every spawn.
 //!
-//! What this test does NOT cover (deferred):
-//!   * The §5.16 SIGTERM-mid-turn case — would race the
-//!     synchronous fake provider's assistant flush.
-
 #[cfg(feature = "test-provider")]
 mod harness;
 
 #[cfg(feature = "test-provider")]
-use std::{path::PathBuf, process::Command};
+use std::{path::PathBuf, process::Command, time::Duration};
 
 #[cfg(feature = "test-provider")]
 use anyhow::{Context, Result, bail};
@@ -53,6 +49,8 @@ use serial_test::serial;
 
 #[cfg(feature = "test-provider")]
 const FIXTURE: &str = "tests/fixtures/code_ui/basic_chat.json";
+#[cfg(feature = "test-provider")]
+const DELAYED_FIXTURE: &str = "tests/fixtures/code_ui/delayed_chat.json";
 
 #[cfg(feature = "test-provider")]
 fn fixture_path() -> PathBuf {
@@ -60,10 +58,38 @@ fn fixture_path() -> PathBuf {
 }
 
 #[cfg(feature = "test-provider")]
+fn delayed_fixture_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(DELAYED_FIXTURE)
+}
+
+#[cfg(feature = "test-provider")]
 fn libra_bin_path() -> PathBuf {
     std::env::var_os("CARGO_BIN_EXE_libra")
         .map(PathBuf::from)
         .expect("CARGO_BIN_EXE_libra is set for integration tests")
+}
+
+#[cfg(feature = "test-provider")]
+fn snapshot_status(snapshot: &serde_json::Value) -> Option<&str> {
+    snapshot.get("status").and_then(|v| v.as_str())
+}
+
+#[cfg(feature = "test-provider")]
+fn transcript_contains(snapshot: &serde_json::Value, needle: &str) -> bool {
+    snapshot
+        .get("transcript")
+        .and_then(|v| v.as_array())
+        .is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                let matches = |key: &str| {
+                    entry
+                        .get(key)
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| s.contains(needle))
+                };
+                matches("content") || matches("title")
+            })
+        })
 }
 
 #[cfg(feature = "test-provider")]
@@ -245,28 +271,85 @@ fn resume_with_chat_session_id_restores_prior_transcript() -> Result<()> {
     .with_context(|| format!("resume spawn for session_id '{session_id}'"))?;
 
     let snapshot = resumed.snapshot().context("snapshot post-resume")?;
-    let transcript = snapshot
-        .get("transcript")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| {
-            anyhow::anyhow!("resumed snapshot lacked a transcript array; got {snapshot:?}")
-        })?;
-    let restored = transcript.iter().any(|entry| {
-        // Transcript entries serialise to camelCase; the user
-        // message text lands in `content` for chat entries and
-        // `title` for some entry kinds. Match either to keep the
-        // assertion robust against the entry-kind classification.
-        let matches = |key: &str| {
-            entry
-                .get(key)
-                .and_then(|v| v.as_str())
-                .is_some_and(|s| s.contains(user_message))
-        };
-        matches("content") || matches("title")
-    });
     assert!(
-        restored,
+        transcript_contains(&snapshot, user_message),
         "resumed transcript did not include the original user message '{user_message}';\nsnapshot: {snapshot}"
+    );
+    Ok(())
+}
+
+/// Wave 9 §5.16 — SIGTERM-mid-turn resume.
+///
+/// The TUI saves the session immediately after accepting a user
+/// message, before the provider finishes the assistant response.
+/// This test holds the fake provider in a delayed response, sends
+/// SIGTERM without `/quit`, then re-spawns with `--resume` and
+/// proves the latest submitted user turn is still present.
+#[cfg(feature = "test-provider")]
+#[test]
+#[serial]
+fn resume_after_sigterm_mid_turn_restores_latest_submitted_message() -> Result<()> {
+    let case_name = "code-resume-sigterm-mid-turn";
+    let user_message = "slow-resume-mid-turn";
+
+    let repo_root = tempfile::Builder::new()
+        .prefix(&format!("{case_name}-"))
+        .tempdir()
+        .context("failed to create resume tempdir")?;
+    let repo_dir = repo_root.path().join("repo");
+    std::fs::create_dir_all(&repo_dir).context("failed to create repo subdir")?;
+    run_libra_init(&repo_dir)?;
+
+    let session_id = {
+        let mut session = CodeSession::spawn(
+            CodeSessionOptions::new(format!("{case_name}-spawn"), delayed_fixture_path())
+                .with_existing_repo_dir(repo_dir.clone()),
+        )
+        .context("first spawn (SIGTERM mid-turn)")?;
+        session
+            .attach_automation(case_name)
+            .context("attach automation before delayed submit")?;
+        let status = session
+            .submit_message(&format!("/chat {user_message}"))
+            .context("submit delayed chat turn")?;
+        if !status.is_success() {
+            bail!("submit returned non-success status {status}");
+        }
+
+        let snapshot = session
+            .wait_for_snapshot(Duration::from_secs(10), |snapshot| {
+                snapshot_status(snapshot) == Some("thinking")
+                    && transcript_contains(snapshot, user_message)
+            })
+            .context("wait for delayed turn to enter thinking state")?;
+        let id = snapshot
+            .get("sessionId")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                anyhow::anyhow!("snapshot did not surface a sessionId field; got {snapshot:?}")
+            })?;
+        session
+            .terminate_without_cleanup()
+            .context("SIGTERM libra code mid-turn")?;
+        id
+    };
+
+    let resumed = CodeSession::spawn(
+        CodeSessionOptions::new(format!("{case_name}-resume"), delayed_fixture_path())
+            .with_existing_repo_dir(repo_dir.clone())
+            .with_resume_thread(&session_id),
+    )
+    .with_context(|| format!("resume spawn for session_id '{session_id}'"))?;
+
+    let snapshot = resumed
+        .wait_for_snapshot(Duration::from_secs(10), |snapshot| {
+            transcript_contains(snapshot, user_message)
+        })
+        .context("wait for resumed transcript to include mid-turn user message")?;
+    assert!(
+        transcript_contains(&snapshot, user_message),
+        "resumed transcript did not include the SIGTERM-mid-turn user message '{user_message}';\nsnapshot: {snapshot}"
     );
     Ok(())
 }
