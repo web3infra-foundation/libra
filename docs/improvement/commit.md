@@ -35,7 +35,7 @@
 **仍保留的低优先级收口项（不阻断验收）：**
 
 - legacy `execute()` 包装层（`commit.rs:765`）仍以 `OutputConfig::default()` 调用 `execute_safe()`；CLI 主路径不走它（顶层 dispatcher 直接调用 `execute_safe(args, &output)`），因此这是兼容包装层的收尾项，可独立小修
-- `commit.rs` 全文 `unwrap()` / `expect()` 共 23 处，多数位于 `#[cfg(test)]` 块，少量生产路径（如 `ObjectHash::from_bytes(...)` 字节解析）需要后续审计是否真的不可恢复，可独立小修
+- `commit.rs` 的生产 `unwrap()` / `expect()` 审计已收口：当前仅保留 `new_reflog_context()` 中的 `ObjectHash::from_bytes(...)`，并已用 `// INVARIANT:` 说明零填充且长度正确的 hash 字节永远可解析；其余 `unwrap()` / `expect()` 均位于测试代码
 
 ### 目标与非目标
 
