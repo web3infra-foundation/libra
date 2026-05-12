@@ -182,11 +182,21 @@ fn code_write_router() -> Router<WebAppState> {
         .layer(middleware::from_fn(enforce_code_write_body_limit))
 }
 
-async fn static_handler(uri: axum::http::Uri) -> impl IntoResponse {
+async fn static_handler(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+) -> impl IntoResponse {
     use crate::command::web_assets::WebAssets;
 
     let path = uri.path().trim_start_matches('/');
     if path.contains("..") {
+        return (StatusCode::NOT_FOUND, "404 Not Found").into_response();
+    }
+    if !remote_addr.ip().is_loopback() {
+        if should_show_remote_notice(path, &headers) {
+            return remote_notice_response(remote_addr, &headers);
+        }
         return (StatusCode::NOT_FOUND, "404 Not Found").into_response();
     }
 
@@ -222,6 +232,90 @@ async fn static_handler(uri: axum::http::Uri) -> impl IntoResponse {
         },
         None => (StatusCode::NOT_FOUND, "404 Not Found").into_response(),
     }
+}
+
+fn should_show_remote_notice(path: &str, headers: &HeaderMap) -> bool {
+    if path.starts_with("api/") {
+        return false;
+    }
+    let accepts_html = headers
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_none_or(|value| value.contains("text/html") || value.contains("*/*"));
+    if !accepts_html {
+        return false;
+    }
+    path.is_empty()
+        || path.ends_with('/')
+        || path.ends_with(".html")
+        || std::path::Path::new(path).extension().is_none()
+}
+
+fn remote_notice_response(remote_addr: SocketAddr, headers: &HeaderMap) -> Response {
+    use crate::command::web_assets::WebAssets;
+
+    let asset_path = remote_notice_asset_path(headers);
+    let Some(content) = WebAssets::get(asset_path) else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "embedded remote access notice is missing",
+        )
+            .into_response();
+    };
+    let Ok(template) = std::str::from_utf8(&content.data) else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "embedded remote access notice is not valid UTF-8",
+        )
+            .into_response();
+    };
+    let bind = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("(unknown)");
+    let body = template
+        .replace("__LIBRA_BIND__", &escape_html(bind))
+        .replace(
+            "__LIBRA_REMOTE__",
+            &escape_html(&remote_addr.ip().to_string()),
+        )
+        .replace("__LIBRA_VERSION__", env!("CARGO_PKG_VERSION"))
+        .replace("__LIBRA_COMMIT__", "unknown");
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        body,
+    )
+        .into_response()
+}
+
+fn remote_notice_asset_path(headers: &HeaderMap) -> &'static str {
+    headers
+        .get(header::ACCEPT_LANGUAGE)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| {
+            value
+                .split(',')
+                .next()
+                .is_some_and(|language| language.trim().to_ascii_lowercase().starts_with("zh"))
+        })
+        .map(|_| "remote-notice/zh-CN/index.html")
+        .unwrap_or("remote-notice/index.html")
+}
+
+fn escape_html(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
 }
 
 async fn repo_info_handler(
@@ -1328,11 +1422,82 @@ mod tests {
 
     #[tokio::test]
     async fn static_handler_rejects_parent_directory_segments() {
-        let response = static_handler(Uri::from_static("/../index.html"))
-            .await
-            .into_response();
+        let response = static_handler(
+            ConnectInfo(SocketAddr::from((Ipv4Addr::LOCALHOST, 4000))),
+            HeaderMap::new(),
+            Uri::from_static("/../index.html"),
+        )
+        .await
+        .into_response();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn static_handler_shows_remote_notice_for_non_loopback_html() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ACCEPT, "text/html".parse().unwrap());
+        headers.insert(header::HOST, "0.0.0.0:3020".parse().unwrap());
+        let response = static_handler(
+            ConnectInfo(SocketAddr::from((Ipv4Addr::new(192, 0, 2, 10), 4000))),
+            headers,
+            Uri::from_static("/"),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        assert!(content_type.starts_with("text/html"));
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("loopback"), "html: {html}");
+        assert!(html.contains("0.0.0.0:3020"), "html: {html}");
+        assert!(html.contains("192.0.2.10"), "html: {html}");
+        assert!(!html.contains("<script"), "remote notice must be zero JS");
+        assert!(
+            !html.contains("token"),
+            "remote notice must not expose tokens"
+        );
+    }
+
+    #[tokio::test]
+    async fn static_handler_returns_404_for_non_loopback_assets() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ACCEPT, "image/svg+xml".parse().unwrap());
+        let response = static_handler(
+            ConnectInfo(SocketAddr::from((Ipv4Addr::new(192, 0, 2, 10), 4000))),
+            headers,
+            Uri::from_static("/logo.svg"),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn static_handler_selects_chinese_remote_notice() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ACCEPT, "text/html".parse().unwrap());
+        headers.insert(header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9".parse().unwrap());
+        let response = static_handler(
+            ConnectInfo(SocketAddr::from((Ipv4Addr::new(192, 0, 2, 10), 4000))),
+            headers,
+            Uri::from_static("/"),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("仅限本机访问"), "html: {html}");
+        assert!(!html.contains("<script"), "remote notice must be zero JS");
     }
 
     /// Wave 3 / PR 3 §5.6 — control-audit `client_id` field

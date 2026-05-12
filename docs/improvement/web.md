@@ -38,7 +38,7 @@
 | Browser write | `BrowserControllerProvider` lazy attach，token 只在内存；submit/respond/cancel/detach 已接线；`BROWSER_CONTROL_DISABLED` 等错误能显示 | 需要覆盖五类 interaction 的组件测试和 lease 过期/多 tab UI 行为；audit log 断言还应进入 scenario |
 | TUI write bridge | `--browser-control loopback` 打开 browser write；TUI default 保持 `off`；TUI reclaim 会清 browser lease | 需要继续验证 `{off, loopback} x {host} x {TUI, web-only}` 的矩阵数据驱动化 |
 | Headless web-only | Ollama v0 可由浏览器驱动直接 turn，capabilities 为 `messageInput`、`streamingText`、`toolCalls`；provider bootstrap 复用 `ProviderFactory` | 缺 mutating tools sandbox/approval、request-user-input、session persistence/resume、plan/patchset |
-| Docs | [web/README.md](../../web/README.md) 与 [docs/commands/code.md](../commands/code.md) 已描述 live API、browser-control、token 分工、256 KiB 限制 | 本文需要作为后续 PR 的剩余工作清单；remote notice 还只是 brief，未实现 |
+| Docs | [web/README.md](../../web/README.md) 与 [docs/commands/code.md](../commands/code.md) 已描述 live API、browser-control、token 分工、256 KiB 限制 | 本文需要作为后续 PR 的剩余工作清单；remote notice 已落地，仍需后续扩展浏览器端组件/客户端测试 |
 
 ## API 边界
 
@@ -93,18 +93,18 @@ LIBRA_ENABLE_TEST_PROVIDER=1 cargo test --features test-provider \
   -- --test-threads=1
 ```
 
-### Phase B：Remote Access Notice
+### Phase B：Remote Access Notice（已落地）
 
 **目标：** 远程访问 `--host 0.0.0.0` 时不再加载一个永远 403 的 SPA，而是展示明确的 loopback-only 静态说明页。
 
-**当前状态：** 未实现。[static_handler](../../src/internal/ai/web/mod.rs) 现在没有 `ConnectInfo<SocketAddr>`，`web/out/` 也没有 `remote-notice/` 资产。
+**当前状态：** 已实现。[static_handler](../../src/internal/ai/web/mod.rs) 读取 `ConnectInfo<SocketAddr>`；非 loopback 客户端访问 HTML navigation 时返回零 JS remote notice，asset / API fallback 返回 404，避免启动 SPA。英文与中文静态页位于 [web/public/remote-notice/](../../web/public/remote-notice/) 并同步进入 [web/out/remote-notice/](../../web/out/remote-notice/)。
 
 **任务：**
 
-- 将 `static_handler` 改成可读取 `ConnectInfo<SocketAddr>`。非 loopback 且请求 HTML 时返回 `remote-notice/index.html`；asset 请求返回 404，避免 SPA bootstrap。
-- 新增英文/中文零 JS 静态页：`web/out/remote-notice/index.html` 与 `web/out/remote-notice/zh-CN/index.html`。页面只展示 bind、remote IP、版本、commit 占位符，不展示 thread/provider/path/token。
-- 按 `Accept-Language` 选择中文页；Rust 响应阶段替换 `__LIBRA_BIND__`、`__LIBRA_REMOTE__`、`__LIBRA_VERSION__`、`__LIBRA_COMMIT__`。
-- 增加 server 单测：模拟非 loopback `ConnectInfo` 请求 `/`，断言 200、`text/html`、body 含 `loopback`，且不含 `<script`。
+- [x] 将 `static_handler` 改成可读取 `ConnectInfo<SocketAddr>`。非 loopback 且请求 HTML 时返回 `remote-notice/index.html`；asset 请求返回 404，避免 SPA bootstrap。
+- [x] 新增英文/中文零 JS 静态页：`web/out/remote-notice/index.html` 与 `web/out/remote-notice/zh-CN/index.html`。页面只展示 bind、remote IP、版本、commit 占位符，不展示 thread/provider/path/token。
+- [x] 按 `Accept-Language` 选择中文页；Rust 响应阶段替换 `__LIBRA_BIND__`、`__LIBRA_REMOTE__`、`__LIBRA_VERSION__`、`__LIBRA_COMMIT__`。
+- [x] 增加 server 单测：模拟非 loopback `ConnectInfo` 请求 `/`，断言 200、`text/html`、body 含 `loopback`，且不含 `<script`。
 
 **硬约束：**
 

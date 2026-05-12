@@ -106,6 +106,8 @@ Selecting `loopback` is rejected when `--host` is not a loopback address, and th
 
 Browser write requests share the same 256 KiB body limit and audit-sink wiring as automation control. The browser persists the lease only in memory; reloading the page drops the lease and the next write reattaches.
 
+When the server is bound to a non-loopback host, non-loopback browsers receive a static remote access notice for HTML navigation instead of the SPA. The notice is zero JavaScript, includes only bind/remote/version/commit placeholders, and asset/API fallbacks return 404 so remote clients cannot probe session state.
+
 When `--browser-control loopback` is requested and the browser holds the active lease, the TUI initial controller is `LocalTui` (visible owner, can be reclaimed) instead of `Fixed { Tui }` (permanently blocking). If the TUI also wants to drive writes, `--control write` must be supplied alongside `--browser-control loopback`; the two writers serialize through the same `TuiControlCommand` channel.
 
 For `--web-only` non-Codex providers (`--provider ollama` is the canonical Phase 3 verification path), Libra builds a [`HeadlessCodeRuntime`](../../src/internal/ai/web/headless.rs) that runs the agent's tool loop directly so the browser can drive a real session — no terminal required. Headless mode currently advertises `messageInput`, `streamingText`, and `toolCalls` capabilities; `interactiveApprovals`, `planUpdates`, and `patchsets` light up once the corresponding workflow integrations land.
@@ -140,7 +142,7 @@ libra code
 # Start with Anthropic Claude
 libra code --provider anthropic --model claude-sonnet-4-20250514
 
-# Run web-only on a custom port for remote access
+# Bind web-only on all interfaces; remote browsers see a loopback-only notice
 libra code --web-only --port 8080 --host 0.0.0.0
 
 # Run MCP over stdio for Claude Desktop integration

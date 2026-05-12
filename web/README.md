@@ -16,7 +16,7 @@ pnpm build          # static export → web/out/
 
 ## Live API contract (Phase 0–4)
 
-The browser only talks to its same-origin server. The Rust side enforces loopback at every `/api/*` route, so this client does not host-check. Source of truth: `src/internal/ai/web/mod.rs`.
+The browser only talks to its same-origin server. The Rust side enforces loopback at every `/api/*` route, so this client does not host-check. Non-loopback HTML navigation receives the embedded `remote-notice/` static page instead of the SPA, and non-loopback asset/API fallbacks return 404. Source of truth: `src/internal/ai/web/mod.rs`.
 
 | Endpoint | Verb | Purpose |
 |----------|------|---------|
