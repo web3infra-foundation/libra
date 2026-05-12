@@ -20,26 +20,37 @@
 //!     process responds on BOTH the web HTTP transport
 //!     (`/api/code/session`) AND the MCP Streamable HTTP
 //!     transport (`<mcpUrl>` POST `initialize`). Proves the two
-//!     entry points share a process. Full write-and-observe
-//!     consistency (one entry writes, the other observes via
-//!     SSE) needs richer harness wiring and is split out.
+//!     entry points share a process.
+//!   * **Item 3 — web→MCP consistency**: a message submitted
+//!     through web `/messages` is observed by a live web SSE
+//!     subscriber and is then visible through MCP `tools/call`
+//!     `list_tasks` on the same process.
 //!
 //! Coverage deferred (still §5.14 P1 work):
-//!   * Item 3 full — dual-entry consistency where MCP
-//!     `tools/call` and web `/messages` both touch the same
-//!     thread and SSE observers see both writes. Needs parallel
-//!     write/observe coordination on the same CodeSession.
+//!   * Item 3 remaining direction — MCP-originated `tools/call`
+//!     writes are not currently wired into Code UI transcript
+//!     broadcasting, so MCP write → web SSE observe remains a
+//!     roadmap-sized follow-up.
 
 #[cfg(feature = "test-provider")]
 mod harness;
 
 #[cfg(feature = "test-provider")]
-use std::{path::PathBuf, process::Command};
+use std::{
+    path::PathBuf,
+    process::Command,
+    thread,
+    time::{Duration, Instant},
+};
 
 #[cfg(feature = "test-provider")]
 use anyhow::{Context, Result, bail};
 #[cfg(feature = "test-provider")]
 use harness::{CodeSession, CodeSessionOptions};
+#[cfg(feature = "test-provider")]
+use reqwest::StatusCode;
+#[cfg(feature = "test-provider")]
+use serde_json::{Value, json};
 #[cfg(feature = "test-provider")]
 use serial_test::serial;
 
@@ -53,6 +64,232 @@ fn libra_bin_path() -> PathBuf {
     std::env::var_os("CARGO_BIN_EXE_libra")
         .map(PathBuf::from)
         .expect("CARGO_BIN_EXE_libra is set for integration tests")
+}
+
+#[cfg(feature = "test-provider")]
+fn parse_sse_data(sse_text: &str) -> Vec<String> {
+    sse_text
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix("data:")
+                .or_else(|| line.strip_prefix("data: "))
+                .map(|d| d.trim().to_string())
+        })
+        .filter(|d| !d.is_empty())
+        .collect()
+}
+
+#[cfg(feature = "test-provider")]
+fn mcp_post(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    session_id: Option<&str>,
+    body: &Value,
+) -> Result<(StatusCode, String)> {
+    let mut request = client
+        .post(url)
+        .header("Content-Type", "application/json")
+        .header("Accept", "text/event-stream, application/json");
+    if let Some(session_id) = session_id {
+        request = request.header("Mcp-Session-Id", session_id);
+    }
+
+    let response = request
+        .json(body)
+        .send()
+        .with_context(|| format!("MCP POST to {url} failed"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .context("failed to read MCP response body")?;
+    Ok((status, body))
+}
+
+#[cfg(feature = "test-provider")]
+fn first_json_rpc_sse_body(method: &str, body: &str) -> Result<Value> {
+    let data = parse_sse_data(body);
+    let first = data
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("MCP {method} response had no SSE data lines: {body}"))?;
+    serde_json::from_str(first)
+        .with_context(|| format!("failed to parse MCP {method} JSON-RPC result: {first}"))
+}
+
+#[cfg(feature = "test-provider")]
+fn mcp_initialize(client: &reqwest::blocking::Client, mcp_url: &str) -> Result<String> {
+    let initialize = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": { "name": "libra-code-mcp-dual-entry", "version": "0.0.0" }
+        }
+    });
+    let response = client
+        .post(mcp_url)
+        .header("Content-Type", "application/json")
+        .header("Accept", "text/event-stream, application/json")
+        .json(&initialize)
+        .send()
+        .with_context(|| format!("MCP initialize POST to {mcp_url} failed"))?;
+    let status = response.status();
+    let session_id = response
+        .headers()
+        .get("Mcp-Session-Id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let body = response
+        .text()
+        .context("failed to read MCP initialize body")?;
+    if !status.is_success() {
+        bail!("MCP initialize returned non-success status {status}: {body}");
+    }
+    let session_id = session_id.ok_or_else(|| {
+        anyhow::anyhow!("MCP initialize did not return Mcp-Session-Id header: {body}")
+    })?;
+    if session_id.is_empty() {
+        bail!("MCP initialize returned an empty Mcp-Session-Id header");
+    }
+
+    let init_result = first_json_rpc_sse_body("initialize", &body)?;
+    if init_result.get("id") != Some(&Value::from(1)) || init_result.get("result").is_none() {
+        bail!("MCP initialize returned malformed JSON-RPC result: {init_result}");
+    }
+
+    let initialized = json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized",
+        "params": {}
+    });
+    let (status, body) = mcp_post(client, mcp_url, Some(&session_id), &initialized)
+        .context("failed to send MCP initialized notification")?;
+    if !status.is_success() {
+        bail!("MCP initialized notification failed with {status}: {body}");
+    }
+
+    Ok(session_id)
+}
+
+#[cfg(feature = "test-provider")]
+fn mcp_call_tool(
+    client: &reqwest::blocking::Client,
+    mcp_url: &str,
+    session_id: &str,
+    request_id: u64,
+    name: &str,
+    arguments: Value,
+) -> Result<Value> {
+    let request = json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": name,
+            "arguments": arguments,
+        },
+        "id": request_id,
+    });
+    let (status, body) = mcp_post(client, mcp_url, Some(session_id), &request)
+        .with_context(|| format!("failed to call MCP tool {name}"))?;
+    if !status.is_success() {
+        bail!("MCP tools/call {name} failed with {status}: {body}");
+    }
+    let value = first_json_rpc_sse_body(name, &body)?;
+    if value.get("id") != Some(&Value::from(request_id)) || value.get("result").is_none() {
+        bail!("MCP tools/call {name} returned malformed JSON-RPC result: {value}");
+    }
+    Ok(value)
+}
+
+#[cfg(feature = "test-provider")]
+fn mcp_result_text(value: &Value) -> String {
+    value
+        .pointer("/result/content")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(feature = "test-provider")]
+fn event_payload_transcript_contains(payload: &Value, needle: &str) -> bool {
+    payload
+        .pointer("/data/transcript")
+        .and_then(Value::as_array)
+        .is_some_and(|transcript| {
+            transcript.iter().any(|entry| {
+                let matches = |key: &str| {
+                    entry
+                        .get(key)
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| value.contains(needle))
+                };
+                matches("content") || matches("title")
+            })
+        })
+}
+
+#[cfg(feature = "test-provider")]
+fn wait_for_sse_transcript(
+    events: &mut harness::EventStream,
+    needle: &str,
+    timeout: Duration,
+) -> Result<Value> {
+    let deadline = Instant::now() + timeout;
+    let mut last_event = "<none>".to_string();
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let Some(event) = events.next_event(remaining.min(Duration::from_secs(1)))? else {
+            continue;
+        };
+        last_event = format!("event={} data={}", event.event, event.data);
+        if event.event != "session_updated" {
+            continue;
+        }
+        let payload: Value = serde_json::from_str(&event.data)
+            .with_context(|| format!("failed to parse SSE payload: {}", event.data))?;
+        if event_payload_transcript_contains(&payload, needle) {
+            return Ok(payload);
+        }
+    }
+    bail!("timed out waiting for SSE transcript to contain {needle:?}; last event: {last_event}")
+}
+
+#[cfg(feature = "test-provider")]
+fn wait_for_mcp_task(
+    client: &reqwest::blocking::Client,
+    mcp_url: &str,
+    session_id: &str,
+    needle: &str,
+    timeout: Duration,
+) -> Result<String> {
+    let deadline = Instant::now() + timeout;
+    let mut last_text = String::new();
+    let mut request_id = 10_u64;
+    while Instant::now() < deadline {
+        let value = mcp_call_tool(
+            client,
+            mcp_url,
+            session_id,
+            request_id,
+            "list_tasks",
+            json!({ "limit": 20 }),
+        )?;
+        let text = mcp_result_text(&value);
+        if text.contains(needle) {
+            return Ok(text);
+        }
+        last_text = text;
+        request_id += 1;
+        thread::sleep(Duration::from_millis(200));
+    }
+    bail!("timed out waiting for MCP list_tasks to contain {needle:?}; last tasks:\n{last_text}")
 }
 
 /// Wave 9 §5.14 item 1 — automation MCP discovery.
@@ -175,11 +412,7 @@ fn libra_code_stdio_web_only_combo_is_rejected_at_arg_parse() -> Result<()> {
 /// response header). This does NOT walk the full handshake
 /// (notifications/initialized + tools/list) — that's covered by
 /// `e2e_mcp_flow.rs` already; this test's contribution is
-/// proving both surfaces are reachable on the SAME process,
-/// which is the §5.14 item 3 reachability promise.
-///
-/// Full write-and-observe (MCP write → web SSE observes) is
-/// the deferred multi-PR follow-up.
+/// proving both surfaces are reachable on the SAME process.
 #[cfg(feature = "test-provider")]
 #[test]
 #[serial]
@@ -241,6 +474,62 @@ fn libra_code_serves_both_web_and_mcp_transports_on_same_process() -> Result<()>
     assert!(
         session_id.is_some_and(|id| !id.is_empty()),
         "MCP initialize must return a non-empty Mcp-Session-Id header so a downstream automation client can continue the handshake",
+    );
+    Ok(())
+}
+
+/// Wave 9 §5.14 item 3 consistency — web write → web SSE +
+/// MCP observe.
+///
+/// The same `libra code` process exposes web `/messages`, web
+/// `/events`, and MCP Streamable HTTP. This test drives all three:
+///
+///   1. initialize an MCP client against the runtime's `mcpUrl`;
+///   2. subscribe to web SSE before writing;
+///   3. submit a message through the web automation endpoint;
+///   4. assert the SSE stream observes that transcript update;
+///   5. poll MCP `tools/call list_tasks` until it sees the TUI
+///      turn-tracking Task created from the same user text.
+///
+/// This pins the currently implemented consistency direction.
+/// MCP-originated tool writes are still not broadcast into Code UI
+/// transcript state, so that opposite direction remains explicit
+/// roadmap work rather than an overclaimed test assertion.
+#[cfg(feature = "test-provider")]
+#[test]
+#[serial]
+fn web_message_turn_is_observable_through_sse_and_mcp_task_list() -> Result<()> {
+    let mut session = CodeSession::spawn(CodeSessionOptions::new(
+        "code-mcp-web-message-consistency",
+        fixture_path(),
+    ))?;
+    let mcp_url = session
+        .mcp_url()
+        .ok_or_else(|| anyhow::anyhow!("control.json did not surface mcpUrl after spawn"))?
+        .to_string();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .context("build MCP consistency client")?;
+    let mcp_session_id = mcp_initialize(&client, &mcp_url)?;
+
+    let mut events = session.open_event_stream()?;
+    session.attach_automation("code-mcp-web-message-consistency")?;
+
+    let marker = "mcp-dual-web-observe-marker";
+    let user_text = format!("/chat {marker}");
+    session.submit_message(&user_text)?;
+    let _payload = wait_for_sse_transcript(&mut events, marker, Duration::from_secs(10))?;
+    let tasks_text = wait_for_mcp_task(
+        &client,
+        &mcp_url,
+        &mcp_session_id,
+        marker,
+        Duration::from_secs(10),
+    )?;
+    assert!(
+        tasks_text.contains(&format!("TUI: {user_text}")) || tasks_text.contains(marker),
+        "MCP list_tasks must expose the web-submitted turn text; got:\n{tasks_text}",
     );
     Ok(())
 }
