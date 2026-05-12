@@ -9,21 +9,21 @@ AI Agent 子系统专项计划，与 [agent.md](agent.md) Part B 并列。两者
 
 ## Context
 
-AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击面最集中的入口：提示词注入、恶意 MCP server、失控的 provider 调用都可能通过 Shell tool 直达宿主机。当前 Libra 已经具备多档 `SandboxPolicy`、Seatbelt 策略拼装、Linux 外部 helper、审批审计、危险命令解析与危险 writable root 拒绝（见 [src/internal/ai/sandbox/](../../src/internal/ai/sandbox/)），但相较 Claude Code 官方公开的 Bubblewrap 方案仍有若干关键缺口，包括：**Linux 沙箱依赖的外部二进制缺失时静默降级**、**Seatbelt 允许 `file-read*` 导致敏感路径默认可读**、**无 `--new-session` 防护 TIOCSTI 终端注入**、**无每命令 0o700 tmp 清理**、**无 `libra sandbox status` 自检**。
+AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击面最集中的入口：提示词注入、恶意 MCP server、失控的 provider 调用都可能通过 Shell tool 直达宿主机。当前 Libra 已经具备多档 `SandboxPolicy`、Seatbelt 策略拼装、Linux 外部 helper、审批审计、危险命令解析、危险 writable root 拒绝、每命令 0o700 私有 tmp 清理与 `libra sandbox status` 自检（见 [src/internal/ai/sandbox/](../../src/internal/ai/sandbox/)），但相较 Claude Code 官方公开的 Bubblewrap 方案仍有若干关键缺口，包括：**Linux 沙箱依赖的外部二进制缺失时静默降级**、**Seatbelt 允许 `file-read*` 导致敏感路径默认可读**、**无 `--new-session` 防护 TIOCSTI 终端注入**、**无内建 bwrap 直调**、**网络三态 / allowlist / proxy 尚未落地**。
 
 本计划对齐 Claude Code 官方沙箱文档（`code.claude.com/docs/en/sandboxing`）与 Bubblewrap 工程实践，目标是把 Libra 在 AI Agent 失控场景下的实际爆炸半径降到与 Claude Code 相当的水平，并保证改动与 [agent.md](agent.md) Part B 的 Runtime 正式写入层兼容。**网络服务访问采取默认拒绝（default deny）策略**：沙箱内除 loopback 外的一切出站连接默认被 OS 层阻断，只能通过显式白名单放行。
 
-## 0.16.2 落地审计快照（2026-05-05）
+## 0.17.37 落地审计快照（2026-05-12）
 
 ### 审计范围
 
-- 代码版本：`libra 0.16.2`（`Cargo.toml`）
+- 代码版本：`libra 0.17.37`（`Cargo.toml`）
 - 审计对象：本计划“阶段 1～阶段 7”是否已在主代码路径落地（不按文档目标推断，以代码事实为准）
 
 ### 审计结论
 
-- **阶段 1～5 与阶段 7 仍未实质落地**，整体状态是“前置基线已具备 + 阶段 6 已收口 + 其余计划项待实施”。
-- 与 0.16.2 审计相比，`sandbox` 关键缺口中的危险 writable root 拒绝已进入主干；静默降级、`--new-session`、敏感路径拒读、per-command tmp、`sandbox status`、网络三态仍未进入主干实现。
+- **阶段 1 部分落地，阶段 5 与阶段 6 已收口，阶段 2～4 与阶段 7 仍待实施**。当前状态是“诊断面 + 危险挂载拒绝 + per-command tmp 已具备，强制隔离与更细粒度 OS 策略仍待落地”。
+- 与早期审计相比，`sandbox` 关键缺口中的危险 writable root 拒绝、`sandbox status` 与 per-command tmp 已进入主干；静默降级、`--new-session`、敏感路径拒读、内建 bwrap、网络三态仍未进入主干实现。
 
 ### 分阶段状态（当前代码）
 
@@ -33,7 +33,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 | 阶段 2 | 内建 bwrap 直调 + seccomp | 未落地 |
 | 阶段 3 | `setsid` / `--new-session` | 未落地 |
 | 阶段 4 | 敏感路径拒读（`deny_read`） | 未落地 |
-| 阶段 5 | 每命令 0o700 tmp + 清理 | 未落地 |
+| 阶段 5 | 每命令 0o700 tmp + 清理 | 已落地（0.17.37） |
 | 阶段 6 | 危险挂载拒绝清单 | 已落地（0.17.25） |
 | 阶段 7 | 网络三态 + allowlist/proxy | 未落地 |
 
@@ -44,7 +44,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 - `libra sandbox status` 已提供自检入口，输出平台、当前可用后端、best-effort enforcement、writable roots、network/proxy 占位、helper/bwrap/Seatbelt 探测和降级告警；但它只是诊断面，还没有把 Linux helper 缺失升级为运行时拒绝。
 - Linux 仍是外部 helper 参数转发路径（`--sandbox-policy` / `--use-bwrap-sandbox`），无内建 `create_bwrap_command_args`：`src/internal/ai/sandbox/runtime.rs:323-340`。
 - macOS 读权限仍是 `(allow file-read*)` 全放行：`src/internal/ai/sandbox/runtime.rs:354`。
-- 执行路径仍未注入 per-command 私有 tmp，也无 finally 清理：`src/internal/ai/sandbox/mod.rs:986-1061`。
+- `run_command_spec` 已在每次执行前创建 `libra-sandbox-<uuid>` 私有 tmp、覆盖 `TMPDIR` / `TEMP` / `TMP`，并在命令退出后清理；清理失败目前记录 `tracing::warn!`。
 - 网络模型仍是 `Restricted/Enabled` + `bool network_access`，不是 `Denied/Allowlist/Full`：`src/internal/ai/sandbox/policy.rs:27-33`、`src/internal/ai/sandbox/mod.rs:750-760`、`src/command/code.rs:357-364`。
 
 ## 0.17.25 增量收口（2026-05-12）
@@ -53,6 +53,13 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 - **执行入口已接线**：`SandboxManager::transform()` 在非 escalated 调用进入命令构造前先执行上述校验；错误通过 `SandboxTransformError::InvalidPolicy` 返回给 shell tool，而不是继续构造裸命令。
 - **显式升级仍可绕过**：`SandboxPermissions::RequireEscalated` 表达用户批准的宿主级访问；该路径继续走 `SandboxType::None`，但必须由审批/提升权限流程显式触发。
 - **回归覆盖**：`policy.rs` 覆盖 socket、kernel/device 路径和普通 workspace root；`runtime.rs` 覆盖危险 root 在 transform 阶段被拒绝，以及 explicit escalation 绕过策略校验。
+
+## 0.17.37 增量收口（2026-05-12）
+
+- **阶段 5 已落地**：`run_command_spec()` 现在会为每次 AI shell/tool 命令生成 `<SystemTmp>/libra-sandbox-<uuid>/`，并覆盖传入命令环境中的 `TMPDIR` / `TEMP` / `TMP`，避免复用宿主或调用方提供的临时目录。
+- **私有权限已固定**：Unix 平台创建目录时使用 0o700，并在创建后再次设置权限；非 Unix 平台至少保证每命令唯一目录。
+- **退出清理已接线**：命令成功、非零退出或命令构造失败后都会尝试 `remove_dir_all`；清理失败不覆盖命令结果，只写 `tracing::warn!`。
+- **回归覆盖**：`command_tmpdir_is_private_0700_and_cleanup_removes_it` 验证 0o700 与清理；`run_command_spec_injects_private_tmp_and_cleans_it` 验证环境覆盖、命令内可写和命令后清理。
 
 ## 已完成前置条件与当前代码状态
 
@@ -76,6 +83,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 - 会话级审批缓存 `ApprovalStore`
 - tree-sitter bash 解析 + 安全命令白/黑名单
 - 沙箱拒绝关键词触发升级重试提示（mod.rs:178-186）
+- 每次命令执行前注入私有 0o700 tmp，并在执行后清理 `TMPDIR` / `TEMP` / `TMP` 指向目录
 - 默认 60 秒超时、100 KiB 输出上限（[src/internal/ai/sandbox/mod.rs](../../src/internal/ai/sandbox/mod.rs) `DEFAULT_TIMEOUT_MS=60_000`、[src/internal/ai/tools/handlers/shell.rs](../../src/internal/ai/tools/handlers/shell.rs)）
 
 **Worktree FUSE overlay** [src/command/worktree-fuse.rs](../../src/command/worktree-fuse.rs)
@@ -86,9 +94,9 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 - Linux 外部 helper 缺失时走 `tracing::warn!` 后“裸跑”（runtime.rs:270-290），这是**静默安全降级**，用户无感知。
 - Seatbelt 策略对读操作使用 `(allow file-read*)` 全盘放行（runtime.rs:354），`~/.ssh` / `~/.aws` / `~/.netrc` / 浏览器 cookie / 各类 token 默认可被 agent 读取并外发。
 - `create_seatbelt_command_args` 与外部 Linux helper 都没有对沙箱进程做 `setsid` / `--new-session`，TIOCSTI 终端注入路径未封堵。
-- `CommandSpec::env` 目前由调用方传入，`run_command_spec` 未专门为沙箱进程准备 0o700 私有 tmp，`$TMPDIR` 直接复用宿主。
+- `run_command_spec` 已覆盖调用方传入的 `TMPDIR` / `TEMP` / `TMP` 并在命令后清理；剩余风险是清理失败仅进入 tracing，尚未写入 agent Runtime 的结构化 Evidence。
 - `WorkspaceWrite::writable_roots` 已拒绝危险挂载清单；剩余风险是尚未把拒绝事件写成 agent Runtime 的 `ToolInvocation[E]` / `Evidence[E]` 结构化记录。
-- 缺少 `libra sandbox status` 入口，用户无法确认当前 `SandboxType` 的实际生效状态。
+- `libra sandbox status` 已落地，用户可确认当前 `SandboxType` 诊断状态；剩余风险是 enforcement 仍为 `best_effort` 诊断，不会把 Linux helper 缺失升级为运行时拒绝。
 
 ## 目标与非目标
 
@@ -99,9 +107,9 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 - **P0** 内建 Bubblewrap 直调，摆脱对外部 `libra-linux-sandbox` 的强依赖
 - **P0** **网络服务默认拒绝**：沙箱内出站网络默认在 OS 层阻断（macOS Seatbelt 不注入网络策略 / Linux bwrap `--unshare-net`），仅放行 loopback；白名单只能通过显式配置放行
 - **P1** 收紧 Seatbelt 读权限，对默认敏感路径（`~/.ssh`、`~/.aws`、`~/.gnupg`、`~/.netrc`、`~/.config/gcloud`、`~/.kube` 等）默认拒读
-- **P1** 每命令 0o700 专属 tmp，退出即清
+- **P1 ✅** 每命令 0o700 专属 tmp，退出即清
 - **P1 ✅** 危险挂载拒绝清单（`/var/run/docker.sock` / `containerd.sock` / `/proc` / `/sys` / `/dev`）
-- **P1** 新增 `libra sandbox status` 子命令，输出当前生效的隔离模式与降级告警
+- **P1 ✅** 新增 `libra sandbox status` 子命令，输出当前生效的隔离模式与降级告警
 
 **后续维护目标：**
 
@@ -123,7 +131,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 | G2 | `--new-session` 阻断 TIOCSTI | 未设置 `setsid` / `--new-session` | ★★★ | 阶段 3 |
 | G3 | tmpfs 空白根 + `--ro-bind` 精选注入 | Seatbelt `(allow file-read*)` 全盘读 | ★★ | 阶段 4 |
 | G4 | 默认拒绝 + 域名白名单的网络策略 | 仅 `network_access: bool`；enforcement 依赖环境变量 + 部分 Seatbelt 策略，未在 Linux 默认 `--unshare-net` | ★★★ | 阶段 7 本轮 OS 层 default deny + 白名单配置；域名过滤代理单列 |
-| G5 | 每命令 0o700 tmp + `cleanupAfterCommand()` | 无专属 tmp | ★★ | 阶段 5 |
+| G5 | 每命令 0o700 tmp + `cleanupAfterCommand()` | 已在 `run_command_spec` 前后注入并清理私有 tmp；清理失败 Evidence 仍待 Runtime 接线 | ✅ | 阶段 5 已落地 |
 | G6 | 内置 Seccomp 过滤器 | 依赖外部 helper | ★★ | 阶段 2（随 bwrap 直调） |
 | G7 | 明确警示 Docker socket 挂入 = 逃逸 | 已在 `SandboxPolicy` + `SandboxManager::transform()` 拒绝危险 writable root | ✅ | 阶段 6 已落地 |
 | G8 | `/sandbox` 自检状态 | `libra sandbox status` 已输出 OS backend 与降级告警 | ✅ | 已落地 |
@@ -203,16 +211,17 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 4. **配置加载**
    - `.libra/sandbox.toml` 解析入口放在 [src/internal/ai/sandbox/mod.rs](../../src/internal/ai/sandbox/mod.rs)，沿用第一批已交付的 vault / config 基础设施（详见 [config.md](config.md) 的 `config_kv` / `resolve_env()`）
 
-### 阶段 5：每命令 0o700 tmp + 退出清理（P1）
+### 阶段 5：每命令 0o700 tmp + 退出清理（P1，已落地）
 
 **目标**：命令间不留 token / cookie / 缓存残留，不同 AI 调用之间互相不可见。
 
 1. **`run_command_spec` 前置**（`mod.rs`）
-   - 调用方进入前：`tokio::fs::create_dir`（mode=0o700）生成 `<SystemTmp>/libra-sandbox-<uuid>/`
-   - 注入到 `CommandSpec::env` 的 `TMPDIR` / `TEMP` / `TMP`
+   - 已在调用方进入前生成 `<SystemTmp>/libra-sandbox-<uuid>/`
+   - Unix 平台创建后固定 0o700 权限；非 Unix 平台至少保持每命令唯一目录
+   - 已覆盖注入到 `CommandSpec::env` 的 `TMPDIR` / `TEMP` / `TMP`
 2. **命令退出后异步清理**
-   - 在 `run_command_spec` 的 Drop / finally 路径 `tokio::fs::remove_dir_all`
-   - 清理失败不阻塞主流程，走 `tracing::warn!` 并记录 `ToolInvocation[E]` 元数据（详见 [agent.md](agent.md) Part B 的 Runtime 正式写入层）
+   - 已在 `run_command_spec` 返回前执行 `tokio::fs::remove_dir_all`
+   - 清理失败不阻塞主流程，当前走 `tracing::warn!`；记录 `ToolInvocation[E]` 元数据仍保留给 [agent.md](agent.md) Part B 的 Runtime 正式写入层
 3. **cleanupAfterCommand 对齐**
    - macOS 下若出现 Seatbelt "ghost dotfiles"（允许写 + 实际被 deny → 0 字节占位），也在清理阶段统一擦除
 

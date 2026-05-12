@@ -6,6 +6,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    io::ErrorKind,
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
@@ -21,6 +22,7 @@ use tokio::{
     io::AsyncReadExt,
     sync::{Mutex, mpsc::UnboundedSender, oneshot},
 };
+use uuid::Uuid;
 
 use super::runtime::hardening::{SafetyDecision, SafetyDisposition};
 
@@ -820,6 +822,10 @@ struct StreamState {
 const DEFAULT_TIMEOUT_MS: u64 = 60_000;
 const TIMEOUT_EXIT_CODE: i32 = 124;
 const STREAM_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
+const COMMAND_TMPDIR_PREFIX: &str = "libra-sandbox-";
+const COMMAND_TMPDIR_CREATE_ATTEMPTS: usize = 8;
+#[cfg(unix)]
+const COMMAND_TMPDIR_MODE: u32 = 0o700;
 const SANDBOX_DENIED_KEYWORDS: [&str; 7] = [
     "operation not permitted",
     "permission denied",
@@ -1018,6 +1024,20 @@ pub async fn run_shell_command_with_approval(
 }
 
 pub async fn run_command_spec(
+    mut spec: CommandSpec,
+    max_output_bytes: usize,
+    sandbox: Option<ToolSandboxContext>,
+    sandbox_runtime: Option<&SandboxRuntimeConfig>,
+) -> Result<SandboxExecOutput, String> {
+    let command_tmpdir = create_command_tmpdir()?;
+    inject_command_tmp_env(&mut spec, &command_tmpdir);
+
+    let output = run_command_spec_inner(spec, max_output_bytes, sandbox, sandbox_runtime).await;
+    cleanup_command_tmpdir(&command_tmpdir).await;
+    output
+}
+
+async fn run_command_spec_inner(
     spec: CommandSpec,
     max_output_bytes: usize,
     sandbox: Option<ToolSandboxContext>,
@@ -1092,6 +1112,62 @@ pub async fn run_command_spec(
         stderr,
         timed_out,
     })
+}
+
+fn create_command_tmpdir() -> Result<PathBuf, String> {
+    let system_tmp = std::env::temp_dir();
+    for _ in 0..COMMAND_TMPDIR_CREATE_ATTEMPTS {
+        let path = system_tmp.join(format!("{COMMAND_TMPDIR_PREFIX}{}", Uuid::new_v4()));
+        match create_private_command_tmpdir(&path) {
+            Ok(()) => return Ok(path),
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                return Err(format!(
+                    "failed to create private command tmp dir `{}`: {err}",
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    Err(format!(
+        "failed to allocate a unique private command tmp dir under `{}`",
+        system_tmp.display()
+    ))
+}
+
+#[cfg(unix)]
+fn create_private_command_tmpdir(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    let mut builder = std::fs::DirBuilder::new();
+    builder.mode(COMMAND_TMPDIR_MODE).create(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(COMMAND_TMPDIR_MODE))
+}
+
+#[cfg(not(unix))]
+fn create_private_command_tmpdir(path: &Path) -> std::io::Result<()> {
+    std::fs::create_dir(path)
+}
+
+fn inject_command_tmp_env(spec: &mut CommandSpec, command_tmpdir: &Path) {
+    let command_tmpdir = command_tmpdir.to_string_lossy().into_owned();
+    spec.env
+        .insert("TMPDIR".to_string(), command_tmpdir.clone());
+    spec.env.insert("TEMP".to_string(), command_tmpdir.clone());
+    spec.env.insert("TMP".to_string(), command_tmpdir);
+}
+
+async fn cleanup_command_tmpdir(path: &Path) {
+    match tokio::fs::remove_dir_all(path).await {
+        Ok(()) => {}
+        Err(err) if err.kind() == ErrorKind::NotFound => {}
+        Err(err) => tracing::warn!(
+            path = %path.display(),
+            error = %err,
+            "failed to cleanup private command tmp dir"
+        ),
+    }
 }
 
 fn build_command_from_spec(
@@ -1643,6 +1719,64 @@ mod tests {
     #[test]
     fn default_timeout_allows_typical_build_commands() {
         assert_eq!(DEFAULT_TIMEOUT_MS, 60_000);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_tmpdir_is_private_0700_and_cleanup_removes_it() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmpdir = create_command_tmpdir().expect("private command tmpdir should be created");
+        let metadata = std::fs::metadata(&tmpdir).expect("tmpdir metadata should be readable");
+
+        assert_eq!(metadata.permissions().mode() & 0o777, COMMAND_TMPDIR_MODE);
+
+        cleanup_command_tmpdir(&tmpdir).await;
+        assert!(!tmpdir.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_command_spec_injects_private_tmp_and_cleans_it() {
+        let temp = tempfile::tempdir().expect("tempdir for command tmp env test");
+        let caller_tmp = temp.path().join("caller-tmp");
+        std::fs::create_dir(&caller_tmp).expect("caller tmpdir should be created");
+        let mut spec = CommandSpec {
+            program: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "printf '%s\\n' \"$TMPDIR\"; touch \"$TMPDIR/probe\"; test \"$TMPDIR\" = \"$TEMP\"; test \"$TMPDIR\" = \"$TMP\"".to_string(),
+            ],
+            cwd: temp.path().to_path_buf(),
+            env: std::collections::HashMap::from([(
+                "TMPDIR".to_string(),
+                caller_tmp.to_string_lossy().into_owned(),
+            )]),
+            timeout_ms: Some(5_000),
+            sandbox_permissions: SandboxPermissions::UseDefault,
+            justification: None,
+        };
+        spec.env.insert(
+            "TEMP".to_string(),
+            caller_tmp.to_string_lossy().into_owned(),
+        );
+        spec.env
+            .insert("TMP".to_string(), caller_tmp.to_string_lossy().into_owned());
+
+        let output = run_command_spec(spec, 16 * 1024, None, None)
+            .await
+            .expect("command should run with private tmp env");
+
+        assert_eq!(output.exit_code, 0, "stderr: {}", output.stderr);
+        let command_tmpdir = PathBuf::from(output.stdout.trim());
+        assert_ne!(command_tmpdir, caller_tmp);
+        assert!(
+            command_tmpdir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(COMMAND_TMPDIR_PREFIX))
+        );
+        assert!(!command_tmpdir.exists());
     }
 
     #[test]
