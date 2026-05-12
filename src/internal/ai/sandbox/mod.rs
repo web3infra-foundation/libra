@@ -877,22 +877,44 @@ pub async fn run_shell_command_with_approval(
         justification.clone(),
     );
 
-    let requirement = approval
-        .as_ref()
-        .map(|ctx| {
-            shell_exec_approval_requirement(
-                ctx.policy,
-                sandbox.as_ref().map(|s| &s.policy),
-                &command,
-                spec.sandbox_permissions,
-                safety_decision.as_ref(),
-            )
-        })
-        .unwrap_or(ExecApprovalRequirement::Skip {
+    let allow_all_commands = if let Some(ctx) = approval.as_ref() {
+        let scope = ctx
+            .scope_key_prefix
+            .as_deref()
+            .unwrap_or(DEFAULT_APPROVAL_SCOPE);
+        ctx.store.lock().await.allow_all_commands_for_scope(scope)
+    } else {
+        false
+    };
+    let allow_all_bypasses_prompt = allow_all_commands
+        && !matches!(
+            safety_decision
+                .as_ref()
+                .map(|decision| &decision.disposition),
+            Some(SafetyDisposition::Deny)
+        );
+    let requirement = if allow_all_bypasses_prompt {
+        ExecApprovalRequirement::Skip {
             bypass_sandbox: false,
-        });
+        }
+    } else {
+        approval
+            .as_ref()
+            .map(|ctx| {
+                shell_exec_approval_requirement(
+                    ctx.policy,
+                    sandbox.as_ref().map(|s| &s.policy),
+                    &command,
+                    spec.sandbox_permissions,
+                    safety_decision.as_ref(),
+                )
+            })
+            .unwrap_or(ExecApprovalRequirement::Skip {
+                bypass_sandbox: false,
+            })
+    };
 
-    let mut already_approved = false;
+    let mut already_approved = allow_all_bypasses_prompt;
     if let Some(approval_ctx) = approval.as_ref() {
         match requirement {
             ExecApprovalRequirement::Skip { .. } => {}
@@ -1691,7 +1713,10 @@ mod tests {
             .await;
 
         assert_eq!(decision, ReviewDecision::ApprovedForSession);
-        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(TryRecvError::Empty | TryRecvError::Disconnected)
+        ));
     }
 
     #[tokio::test]
@@ -1797,7 +1822,88 @@ mod tests {
             .await;
 
         assert_eq!(second_decision, ReviewDecision::ApprovedForAllCommands);
-        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(TryRecvError::Empty | TryRecvError::Disconnected)
+        ));
+    }
+
+    #[tokio::test]
+    async fn allow_all_policy_runs_dangerous_shell_without_prompt() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let store = Arc::new(tokio::sync::Mutex::new(ApprovalStore::default()));
+        store.lock().await.approve_all_commands();
+        let ctx = ToolApprovalContext {
+            policy: AskForApproval::Never,
+            request_tx: tx,
+            store,
+            scope_key_prefix: None,
+            approval_ttl: DEFAULT_APPROVAL_TTL,
+            cache_policy: ApprovalCachePolicy::default(),
+        };
+        let temp = tempfile::tempdir().expect("tempdir for allow-all shell test");
+
+        let output = run_shell_command_with_approval(ShellCommandRequest {
+            call_id: "call-allow-all-shell".to_string(),
+            command: "rm -f libra-approval-test-nonexistent-file.txt".to_string(),
+            cwd: temp.path().to_path_buf(),
+            timeout_ms: Some(5_000),
+            max_output_bytes: 16 * 1024,
+            sandbox: None,
+            sandbox_runtime: None,
+            approval: Some(ctx),
+            justification: None,
+            safety_decision: None,
+        })
+        .await
+        .expect("allow-all approval policy should run without prompting");
+
+        assert_eq!(output.exit_code, 0);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(TryRecvError::Empty | TryRecvError::Disconnected)
+        ));
+    }
+
+    #[tokio::test]
+    async fn allow_all_policy_does_not_override_shell_safety_deny() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let store = Arc::new(tokio::sync::Mutex::new(ApprovalStore::default()));
+        store.lock().await.approve_all_commands();
+        let ctx = ToolApprovalContext {
+            policy: AskForApproval::Never,
+            request_tx: tx,
+            store,
+            scope_key_prefix: None,
+            approval_ttl: DEFAULT_APPROVAL_TTL,
+            cache_policy: ApprovalCachePolicy::default(),
+        };
+        let temp = tempfile::tempdir().expect("tempdir for allow-all shell deny test");
+
+        let error = run_shell_command_with_approval(ShellCommandRequest {
+            call_id: "call-allow-all-deny".to_string(),
+            command: "echo should-not-run".to_string(),
+            cwd: temp.path().to_path_buf(),
+            timeout_ms: Some(5_000),
+            max_output_bytes: 16 * 1024,
+            sandbox: None,
+            sandbox_runtime: None,
+            approval: Some(ctx),
+            justification: None,
+            safety_decision: Some(SafetyDecision::deny(
+                "test.deny",
+                "policy denial remains authoritative",
+                super::super::runtime::hardening::BlastRadius::Workspace,
+            )),
+        })
+        .await
+        .expect_err("safety deny should override allow-all approval cache");
+
+        assert!(error.contains("policy denial remains authoritative"));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(TryRecvError::Empty | TryRecvError::Disconnected)
+        ));
     }
 
     #[tokio::test]

@@ -216,6 +216,208 @@
           }
         }
       ]
+    },
+    {
+      "name": "approval_policy_never_blocks_shell_without_prompt",
+      "priority": "P0",
+      "options": {
+        "approvalPolicy": "never"
+      },
+      "steps": [
+        {
+          "name": "attach automation",
+          "op": "attach",
+          "kind": "automation",
+          "clientId": "approval-never",
+          "auth": "valid_control",
+          "expect": {
+            "status": 200,
+            "saveToken": "current"
+          }
+        },
+        {
+          "name": "submit shell-triggering prompt",
+          "op": "submit",
+          "text": "/run approval-shell-test: policy never should deny without an interaction",
+          "token": "current",
+          "auth": "valid_control",
+          "expect": {
+            "status": 200
+          }
+        },
+        {
+          "name": "wait for policy denial to drain",
+          "op": "waitSnapshot",
+          "expect": {
+            "assertions": [
+              "status_idle",
+              "tool_call_failed:shell-approval-1",
+              "transcript_contains_any:requires human approval but approval policy is never|dangerous command rejected by approval policy"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "approval_policy_on_failure_prompts_for_needs_human_shell",
+      "priority": "P0",
+      "options": {
+        "approvalPolicy": "on-failure"
+      },
+      "steps": [
+        {
+          "name": "attach automation",
+          "op": "attach",
+          "kind": "automation",
+          "clientId": "approval-on-failure",
+          "auth": "valid_control",
+          "expect": {
+            "status": 200,
+            "saveToken": "current"
+          }
+        },
+        {
+          "name": "submit shell-triggering prompt",
+          "op": "submit",
+          "text": "/run approval-shell-test: on-failure still prompts for needs-human shell safety",
+          "token": "current",
+          "auth": "valid_control",
+          "expect": {
+            "status": 200
+          }
+        },
+        {
+          "name": "wait for approval interaction",
+          "op": "waitInteractionPending",
+          "interactionId": "shell-approval-1",
+          "timeoutMs": 5000
+        },
+        {
+          "name": "reject the pending interaction",
+          "op": "respondInteraction",
+          "interactionId": "shell-approval-1",
+          "token": "current",
+          "auth": "valid_control",
+          "response": {
+            "approved": false
+          },
+          "expect": {
+            "status": 200
+          }
+        },
+        {
+          "name": "wait for rejection to drain",
+          "op": "waitSnapshot",
+          "expect": {
+            "assertions": [
+              "status_idle",
+              "tool_call_failed:shell-approval-1",
+              "interaction_resolved:shell-approval-1"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "approval_policy_untrusted_prompts_for_needs_human_shell",
+      "priority": "P0",
+      "options": {
+        "approvalPolicy": "untrusted"
+      },
+      "steps": [
+        {
+          "name": "attach automation",
+          "op": "attach",
+          "kind": "automation",
+          "clientId": "approval-untrusted",
+          "auth": "valid_control",
+          "expect": {
+            "status": 200,
+            "saveToken": "current"
+          }
+        },
+        {
+          "name": "submit shell-triggering prompt",
+          "op": "submit",
+          "text": "/run approval-shell-test: untrusted should prompt for needs-human shell safety",
+          "token": "current",
+          "auth": "valid_control",
+          "expect": {
+            "status": 200
+          }
+        },
+        {
+          "name": "wait for approval interaction",
+          "op": "waitInteractionPending",
+          "interactionId": "shell-approval-1",
+          "timeoutMs": 5000
+        },
+        {
+          "name": "reject the pending interaction",
+          "op": "respondInteraction",
+          "interactionId": "shell-approval-1",
+          "token": "current",
+          "auth": "valid_control",
+          "response": {
+            "approved": false
+          },
+          "expect": {
+            "status": 200
+          }
+        },
+        {
+          "name": "wait for rejection to drain",
+          "op": "waitSnapshot",
+          "expect": {
+            "assertions": [
+              "status_idle",
+              "tool_call_failed:shell-approval-1",
+              "interaction_resolved:shell-approval-1"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "approval_policy_allow_all_runs_shell_without_prompt",
+      "priority": "P0",
+      "options": {
+        "approvalPolicy": "allow-all"
+      },
+      "steps": [
+        {
+          "name": "attach automation",
+          "op": "attach",
+          "kind": "automation",
+          "clientId": "approval-allow-all",
+          "auth": "valid_control",
+          "expect": {
+            "status": 200,
+            "saveToken": "current"
+          }
+        },
+        {
+          "name": "submit shell-triggering prompt",
+          "op": "submit",
+          "text": "/run approval-shell-test: allow-all should execute without an interaction",
+          "token": "current",
+          "auth": "valid_control",
+          "expect": {
+            "status": 200
+          }
+        },
+        {
+          "name": "wait for shell to complete without prompting",
+          "op": "waitSnapshot",
+          "expect": {
+            "assertions": [
+              "status_idle",
+              "tool_call_completed:shell-approval-1",
+              "transcript_contains:Shell turn complete after harness response."
+            ]
+          }
+        }
+      ]
     }
   ]
 }

@@ -71,6 +71,14 @@ approval_case!(approval_accept_path_runs_shell_and_completes_assistant);
 approval_case!(approval_reject_path_propagates_rejection_to_transcript);
 #[cfg(feature = "test-provider")]
 approval_case!(approval_apply_to_future_caches_decision_for_subsequent_calls);
+#[cfg(feature = "test-provider")]
+approval_case!(approval_policy_never_blocks_shell_without_prompt);
+#[cfg(feature = "test-provider")]
+approval_case!(approval_policy_on_failure_prompts_for_needs_human_shell);
+#[cfg(feature = "test-provider")]
+approval_case!(approval_policy_untrusted_prompts_for_needs_human_shell);
+#[cfg(feature = "test-provider")]
+approval_case!(approval_policy_allow_all_runs_shell_without_prompt);
 
 #[cfg(not(feature = "test-provider"))]
 #[test]

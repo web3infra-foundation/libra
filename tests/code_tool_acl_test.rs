@@ -11,12 +11,10 @@
 //! intent-mapping or registry change can't silently expose
 //! mutating tools to a Review/Research session.
 //!
-//! `tool ACL × --approval-policy` and `--network-access deny`
-//! tracking listed in §5.9 are L2 follow-ups — the existing
-//! approval matrix (Wave 6) already pins one approval-policy
-//! path end-to-end, and the network-deny case touches the
-//! sandbox runtime context which is out of scope for an L1 ACL
-//! test.
+//! `tool ACL × --approval-policy` tracking listed in §5.9 is
+//! covered by `code_ui_remote_approval_matrix`; `--network-access
+//! deny` is covered by the orchestrator policy and `web_search`
+//! runtime tests because those gates live below the ACL filter.
 
 use std::sync::Arc;
 
