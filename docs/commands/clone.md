@@ -29,9 +29,12 @@ becomes the object store. Bare clones do not create `.libraignore`.
 
 The remote repository URL to clone from. Supports SSH (`git@host:user/repo.git`) and
 HTTPS (`https://host/user/repo.git`) protocols, as well as local filesystem paths.
-`libra+cloud://` publish sources are recognized and strictly validated, but full
-Cloudflare D1/R2 restore is not implemented yet; valid cloud sources currently return
-the Phase 5 not-implemented error instead of falling through to generic Git discovery.
+`libra+cloud://` publish sources are recognized and strictly validated. The clone
+domain must be configured locally before restore starts; otherwise Libra returns
+`LBR-AUTH-001` and does not create the destination directory. Full Cloudflare
+D1/R2 restore is not implemented yet; valid, configured cloud sources currently
+return the Phase 5 not-implemented error instead of falling through to generic
+Git discovery.
 
 ```bash
 libra clone git@github.com:user/repo.git
@@ -46,6 +49,14 @@ libra clone "libra+cloud://code.example.com/kepler-ledger?revision=latest"
 For `libra+cloud://`, the authority is the configured clone domain. The path must be
 either `/<slug>` or `/repo/<repo_id>`. Only one selector is allowed: `?ref=<branch|tag|full-ref>`
 or `?revision=<oid|latest>`.
+
+Required clone-domain config keys:
+
+```text
+cloud.clone_domains.<domain>.account_id
+cloud.clone_domains.<domain>.d1_database_id
+cloud.clone_domains.<domain>.r2_bucket
+```
 
 ### `[LOCAL_PATH]`
 

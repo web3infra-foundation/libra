@@ -46,6 +46,47 @@ fn run_libra_with_home(args: &[&str], cwd: &Path, home: &Path) -> std::process::
         .unwrap()
 }
 
+#[test]
+fn cloud_clone_missing_clone_domain_config_fails_before_restore_stub() {
+    let cwd = tempdir().unwrap();
+    let dest = cwd.path().join("restored");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "libra+cloud://code.example.com/kepler-ledger",
+            dest.to_str().unwrap(),
+        ],
+        cwd.path(),
+    );
+
+    assert!(
+        !output.status.success(),
+        "cloud clone without clone-domain config should fail"
+    );
+    let (_, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-AUTH-001");
+    assert!(
+        report
+            .message
+            .contains("clone domain 'code.example.com' is not configured"),
+        "error should identify the missing clone-domain config: {:?}",
+        report.message
+    );
+    assert!(
+        report
+            .hints
+            .iter()
+            .any(|hint| hint.contains("cloud.clone_domains.code.example.com.account_id")),
+        "hint should point at the clone-domain config keys: {:?}",
+        report.hints
+    );
+    assert!(
+        !dest.exists(),
+        "cloud clone config preflight must not create the destination"
+    );
+}
+
 fn run_git(args: &[&str], cwd: &Path) -> std::process::Output {
     Command::new("git")
         .args(args)

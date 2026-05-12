@@ -28,7 +28,7 @@ use crate::{
     },
     internal::{
         branch::{self, Branch},
-        config::{ConfigKv, RemoteConfig},
+        config::{ConfigKv, LocalIdentityTarget, RemoteConfig, read_cascaded_config_value},
         db::get_db_conn_instance,
         head::Head,
         protocol::DiscoveryResult,
@@ -161,6 +161,17 @@ pub enum CloneError {
     },
     #[error("failed to complete clone setup: {message}")]
     SetupFailed { message: String },
+    #[error("clone domain '{domain}' is not configured for libra+cloud restore")]
+    CloudCloneDomainNotConfigured {
+        domain: String,
+        missing_keys: String,
+    },
+    #[error("failed to read clone domain '{domain}' configuration: {source}")]
+    CloudCloneDomainConfigRead {
+        domain: String,
+        #[source]
+        source: anyhow::Error,
+    },
     #[error(
         "libra+cloud:// clone source recognised, but Phase 5 of \
          docs/improvement/publish.md is not yet implemented; tracking \
@@ -232,6 +243,24 @@ impl From<CloneError> for CliError {
             CloneError::SetupFailed { .. } => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::InternalInvariant)
                 .with_hint(format!("please report this issue at: {ISSUE_URL}")),
+            CloneError::CloudCloneDomainNotConfigured {
+                ref domain,
+                ref missing_keys,
+            } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::AuthMissingCredentials)
+                .with_detail("clone_domain", domain.clone())
+                .with_detail("missing_keys", missing_keys.clone())
+                .with_hint(format!(
+                    "configure cloud.clone_domains.{domain}.account_id, \
+                     cloud.clone_domains.{domain}.d1_database_id, and \
+                     cloud.clone_domains.{domain}.r2_bucket before cloning this source."
+                )),
+            CloneError::CloudCloneDomainConfigRead { ref domain, .. } => {
+                CliError::fatal(error.to_string())
+                    .with_stable_code(StableErrorCode::IoReadFailed)
+                    .with_detail("clone_domain", domain.clone())
+                    .with_hint("check the local/global Libra config database and vault state.")
+            }
             CloneError::CloudPublishSourceNotYetImplemented { .. } => {
                 // Codex pass-7 P1: surface the recognised but
                 // unimplemented Cloudflare publish clone source as a
@@ -628,7 +657,11 @@ async fn execute_clone_inner(
     // generic Git fetch path and emitting a confusing protocol
     // error.
     if args.remote_repo.starts_with("libra+cloud://") {
-        parse_cloud_publish_source(&args.remote_repo).map_err(|error| (error, None))?;
+        let source =
+            parse_cloud_publish_source(&args.remote_repo).map_err(|error| (error, None))?;
+        ensure_cloud_clone_domain_config(&source)
+            .await
+            .map_err(|error| (error, None))?;
         return Err((
             CloneError::CloudPublishSourceNotYetImplemented {
                 input: args.remote_repo.clone(),
@@ -741,7 +774,12 @@ async fn execute_clone_inner(
     })
 }
 
-fn parse_cloud_publish_source(input: &str) -> Result<(), CloneError> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CloudPublishSource {
+    clone_domain: String,
+}
+
+fn parse_cloud_publish_source(input: &str) -> Result<CloudPublishSource, CloneError> {
     let url = Url::parse(input).map_err(|source| CloneError::InvalidCloudPublishSource {
         input: input.to_string(),
         reason: format!("URL parse failed: {source}"),
@@ -754,6 +792,7 @@ fn parse_cloud_publish_source(input: &str) -> Result<(), CloneError> {
         .host_str()
         .ok_or_else(|| invalid_cloud_source(input, "clone domain is required"))?;
     validate_cloud_clone_domain(input, clone_domain)?;
+    let clone_domain = clone_domain.to_ascii_lowercase();
 
     let segments = url
         .path_segments()
@@ -812,7 +851,44 @@ fn parse_cloud_publish_source(input: &str) -> Result<(), CloneError> {
         validate_cloud_revision_selector(input, &selector)?;
     }
 
-    Ok(())
+    Ok(CloudPublishSource { clone_domain })
+}
+
+async fn ensure_cloud_clone_domain_config(source: &CloudPublishSource) -> Result<(), CloneError> {
+    let required_suffixes = ["account_id", "d1_database_id", "r2_bucket"];
+    let mut missing_keys = Vec::new();
+    let local_target = clone_config_local_target();
+
+    for suffix in required_suffixes {
+        let key = format!("cloud.clone_domains.{}.{}", source.clone_domain, suffix);
+        match read_cascaded_config_value(local_target, &key).await {
+            Ok(Some(_)) => {}
+            Ok(None) => missing_keys.push(key),
+            Err(source_error) => {
+                return Err(CloneError::CloudCloneDomainConfigRead {
+                    domain: source.clone_domain.clone(),
+                    source: source_error,
+                });
+            }
+        }
+    }
+
+    if missing_keys.is_empty() {
+        Ok(())
+    } else {
+        Err(CloneError::CloudCloneDomainNotConfigured {
+            domain: source.clone_domain.clone(),
+            missing_keys: missing_keys.join(", "),
+        })
+    }
+}
+
+fn clone_config_local_target() -> LocalIdentityTarget<'static> {
+    if util::try_get_storage_path(None).is_ok() {
+        LocalIdentityTarget::CurrentRepo
+    } else {
+        LocalIdentityTarget::None
+    }
 }
 
 fn invalid_cloud_source(input: &str, reason: &str) -> CloneError {
