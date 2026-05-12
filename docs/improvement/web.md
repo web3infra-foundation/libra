@@ -61,7 +61,7 @@
 
 ## 当前实现注意点
 
-- `CodeUiProvider` 在 SSE 错误后退避重连并重新拉 `GET /api/code/session`；但 server 端当前把 broadcast lag 错误过滤掉，frontend 不一定能观察到 `Lagged`。后续应让 server 在 lag 时发送一次 fresh snapshot，或关闭流让 client 走现有 reconnect 路径。
+- `CodeUiProvider` 在 SSE 错误后退避重连并重新拉 `GET /api/code/session`；server 端收到 `BroadcastStream::Lagged` 时已发送一次完整 `session_updated` snapshot，避免静默丢事件。
 - `controller.canWrite` 表示当前 controller state，不等价于 capability。UI 写控件必须同时检查 `capabilities.*`、session `status`、controller ownership 和 browser hook error。
 - `LocalTui` 与 `Fixed { Tui }` 语义不同：前者是可被 browser/automation lease 接管的可见 TUI owner，后者是只读观察时的永久阻断。
 - Headless v0 只注册 `read_file`、`list_dir`、`grep_files`、semantic read 类工具。不要在 approval routing 落地前注册 `apply_patch`、`shell`、`web_search`，否则会绕过 TUI 路径已有 sandbox/network policy。
@@ -79,7 +79,7 @@
 - 增加 store/controller hook 测试：首屏加载、`CODE_UI_UNAVAILABLE`、SSE error reconnect、status debounce、lease retry once、`CONTROLLER_CONFLICT` 不重试。
 - 增加组件测试：无 session 空态、read-only controller、`BROWSER_CONTROL_DISABLED`、pending interaction 五种 kind、streaming assistant message、empty diff、parse error、long diff collapse。
 - Rust：把 `tests/code_ui_scenarios.rs` 中 browser flow 的 audit log 断言补上；把 `/api/code/threads` invalid limit / clamp 场景纳入 Rust runner，而不是只停在 JSON 数据文件。
-- 修复 SSE lag 可观测性：`BroadcastStream` 收到 `Lagged` 时不能静默丢弃；至少要让 client 触发 full snapshot reload。
+- [x] 修复 SSE lag 可观测性：`BroadcastStream` 收到 `Lagged` 时不能静默丢弃；server 会发送一次完整 `session_updated` snapshot。
 
 **验收：**
 

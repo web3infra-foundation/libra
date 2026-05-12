@@ -23,7 +23,7 @@ use axum::{
 use futures_util::stream::{self, StreamExt};
 use serde::Serialize;
 use tokio::sync::oneshot;
-use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
 use uuid::Uuid;
 
 use self::code_ui::{
@@ -392,14 +392,28 @@ async fn code_events_handler(
     let receiver = runtime.subscribe();
 
     let initial_stream = stream::once(async move { Ok(code_ui_event_to_sse(initial_event)) });
-    let updates = BroadcastStream::new(receiver).filter_map(|message| async move {
-        match message {
-            Ok(event) => Some(Ok(code_ui_event_to_sse(event))),
-            Err(_) => None,
+    let updates = BroadcastStream::new(receiver).filter_map(move |message| {
+        let runtime = runtime.clone();
+        async move {
+            code_ui_broadcast_event_or_recovery(&runtime, message)
+                .await
+                .map(|event| Ok(code_ui_event_to_sse(event)))
         }
     });
 
     Ok(Sse::new(initial_stream.chain(updates)).keep_alive(KeepAlive::new()))
+}
+
+async fn code_ui_broadcast_event_or_recovery(
+    runtime: &Arc<CodeUiRuntimeHandle>,
+    message: Result<code_ui::CodeUiEventEnvelope, BroadcastStreamRecvError>,
+) -> Option<code_ui::CodeUiEventEnvelope> {
+    match message {
+        Ok(event) => Some(event),
+        Err(BroadcastStreamRecvError::Lagged(_)) => {
+            ensure_session_updated_event(&runtime.snapshot().await).ok()
+        }
+    }
 }
 
 async fn code_diagnostics_handler(
@@ -1115,6 +1129,29 @@ mod tests {
         },
     };
 
+    async fn test_code_ui_runtime() -> Arc<CodeUiRuntimeHandle> {
+        let session = CodeUiSession::new(initial_snapshot(
+            "/tmp/libra",
+            CodeUiProviderInfo {
+                provider: "test".to_string(),
+                model: Some("test-model".to_string()),
+                mode: None,
+                managed: false,
+            },
+            CodeUiCapabilities::default(),
+        ));
+        CodeUiRuntimeHandle::build_with_control(
+            ReadOnlyCodeUiAdapter::new(session, CodeUiCapabilities::default()),
+            false,
+            true,
+            CodeUiInitialController::LocalTui {
+                owner_label: "Terminal UI".to_string(),
+                reason: None,
+            },
+        )
+        .await
+    }
+
     #[test]
     fn loopback_api_request_allows_loopback_clients() {
         let ipv4 = SocketAddr::from((Ipv4Addr::LOCALHOST, 34567));
@@ -1498,6 +1535,22 @@ mod tests {
         let html = String::from_utf8(body.to_vec()).unwrap();
         assert!(html.contains("仅限本机访问"), "html: {html}");
         assert!(!html.contains("<script"), "remote notice must be zero JS");
+    }
+
+    #[tokio::test]
+    async fn sse_lag_recovers_with_full_session_snapshot_event() {
+        let runtime = test_code_ui_runtime().await;
+
+        let event =
+            code_ui_broadcast_event_or_recovery(&runtime, Err(BroadcastStreamRecvError::Lagged(3)))
+                .await
+                .expect("lagged receiver should produce recovery event");
+
+        assert_eq!(event.event_type, "session_updated");
+        assert_eq!(event.seq, 0);
+        let snapshot = crate::internal::ai::web::code_ui::snapshot_from_event(&event)
+            .expect("recovery event should contain full snapshot");
+        assert_eq!(snapshot.provider.provider, "test");
     }
 
     /// Wave 3 / PR 3 §5.6 — control-audit `client_id` field
