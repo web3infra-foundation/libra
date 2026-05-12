@@ -42,9 +42,9 @@
 - **`--help` EXAMPLES 已落地**
 - **JSON 回归测试已存在**：`tests/command/reset_test.rs` 已覆盖 `--json` schema、`--hard HEAD` restore 计数和 pathspec usage error
 
-仍需改进：
+仍需维护：
 
-- **rollback 边界需要继续回归保护**：reset 失败后 rollback 再失败时，必须保持主错误分类不变，避免把 repo corruption 误报成 worktree/I/O 错误
+- **rollback 边界已具备回归保护**：`test_merge_reset_failure_preserves_primary_error_category` 已验证 reset 失败后 rollback 再失败时仍保留主错误分类，避免把 repo corruption 误报成 worktree/I/O 错误；后续新增 rollback 路径时需保持该覆盖
 - **Cross-Cutting `G` 仍可继续增强**：如果后续引入真正的 internal-invariant 类兜底错误，可再统一附带 Issues URL
 
 ### 目标与非目标
@@ -53,7 +53,7 @@
 - `ResetError` typed error enum、typed helper、pathspec typed error、warning 管线、`run_reset()` / `render_reset_output()` 分层与 `--help` EXAMPLES 已落地
 
 **后续收口目标：**
-- 继续用回归测试锁住 rollback / warning / pathspec corruption 这些边界行为
+- 继续保持 rollback / warning / pathspec corruption 边界回归测试覆盖
 - 如后续增加 internal invariant 兜底错误，再统一接入 Issues URL
 
 **本批非目标：**
@@ -336,6 +336,6 @@ EXAMPLES:
 
 | 文件 | 改动类型 | 说明 |
 |------|---------|------|
-| `src/command/reset.rs` | **维护** | 保持已落地的 `ResetOutput` / `ResetError` / `run_reset()` / `render_reset_output()` / warning 管线 / JSON / human 确认消息 / `--help` EXAMPLES 不回退；后续仅维护 rollback 与边界回归 |
+| `src/command/reset.rs` | **维护** | 保持已落地的 `ResetOutput` / `ResetError` / `run_reset()` / `render_reset_output()` / warning 管线 / JSON / human 确认消息 / `--help` EXAMPLES / rollback 主错误分类保护不回退；后续仅维护边界回归 |
 | `tests/command/reset_test.rs` | **扩展** | 在现有 JSON / human 输出回归基础上，补齐 typed error、warning 路径与 help EXAMPLES 回归 |
 | `tests/command/reset_json_test.rs` | **可选拆分** | 若 `reset_test.rs` 中的 JSON 覆盖继续膨胀，可再拆出独立 schema 稳定性文件；当前不是阻断项 |
