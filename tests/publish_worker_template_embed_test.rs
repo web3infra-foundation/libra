@@ -124,6 +124,8 @@ fn embed_contains_critical_worker_entrypoints() {
         "app/layout.tsx",
         "app/page.tsx",
         "app/globals.css",
+        "app/fonts/inter-latin-variable.woff2",
+        "app/fonts/jetbrains-mono-latin-variable.woff2",
         "app/api/sites/[slug]/route.ts",
         "app/api/sites/[slug]/refs/route.ts",
         "app/api/sites/[slug]/tree/route.ts",

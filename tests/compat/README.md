@@ -19,7 +19,7 @@ directly under `tests/compat/` are reachable only when added as `[[test]]`
 entries in `Cargo.toml` (`path = "tests/compat/<name>.rs"`); see Cargo
 docs.
 
-`tests/compat/` is now an active集结点: C4 / C5 have populated the first
+`tests/compat/` is now an active集结点: C2 / C4 / C5 have populated the first
 surface-contract tests, and future compatibility batches should add their own
 top-level `[[test]]` entries in `Cargo.toml`.
 
@@ -31,7 +31,7 @@ top-level `[[test]]` entries in `Cargo.toml`.
 | `bisect_subcommand_surface.rs` | C4 | `bisect --help` lists `run` / `view`; EXAMPLES banner is wired |
 | `worktree_delete_dir.rs` | C5 | `worktree remove` with and without `--delete-dir`; dirty-worktree refusal |
 | `checkout_alias_help.rs` | C5 | top-level `--help` includes `checkout`; the help banner mentions `switch` / `restore` |
-| `matrix_alignment.rs` | C-future | `COMPATIBILITY.md` ↔ `src/cli.rs::Commands` enum drift detection |
+| `matrix_alignment.rs` | C2 | `COMPATIBILITY.md` ↔ `src/cli.rs::Commands` enum drift detection |
 
 ## Authoring guidelines
 

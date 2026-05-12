@@ -53,8 +53,6 @@
 //! Coverage deferred to follow-up PRs:
 //!   * Ollama `--ollama-compact-tools` flag (affects tool-schema
 //!     serialisation; needs a tool-bearing `CompletionRequest`).
-//!   * Missing-API-key error message + `--api-base` override
-//!     surface tests.
 
 mod helpers;
 

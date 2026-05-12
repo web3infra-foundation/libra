@@ -2,10 +2,11 @@
 //! remote-tracking refs, and honor prune/depth options.
 
 use std::{
-    collections::HashSet,
+    collections::{BTreeSet, HashSet},
     fs,
     io::{self, Error as IoError, Write},
     path::{Path, PathBuf},
+    str::FromStr,
     time::{Duration, Instant, SystemTime},
 };
 
@@ -134,13 +135,14 @@ impl RemoteClient {
         &self,
         have: &[String],
         want: &[String],
+        shallow: &[String],
         depth: Option<usize>,
     ) -> Result<FetchStream, IoError> {
         match self {
-            RemoteClient::Http(client) => client.fetch_objects(have, want, depth).await,
-            RemoteClient::Local(client) => client.fetch_objects(have, want, depth).await,
-            RemoteClient::Git(client) => client.fetch_objects(have, want, depth).await,
-            RemoteClient::Ssh(client) => client.fetch_objects(have, want, depth).await,
+            RemoteClient::Http(client) => client.fetch_objects(have, want, shallow, depth).await,
+            RemoteClient::Local(client) => client.fetch_objects(have, want, shallow, depth).await,
+            RemoteClient::Git(client) => client.fetch_objects(have, want, shallow, depth).await,
+            RemoteClient::Ssh(client) => client.fetch_objects(have, want, shallow, depth).await,
         }
     }
 }
@@ -1088,8 +1090,10 @@ pub(crate) async fn fetch_repository_with_result(
     want.sort();
     want.dedup();
     let have = current_have_safe().await?;
+    let shallow_boundaries = read_shallow_boundaries()?;
+    let shallow = shallow_boundaries.iter().cloned().collect::<Vec<_>>();
     let mut result_stream = remote_client
-        .fetch_objects(&have, &want, depth)
+        .fetch_objects(&have, &want, &shallow, depth)
         .await
         .map_err(|source| FetchError::FetchObjects {
             remote: remote_config.url.clone(),
@@ -1097,9 +1101,9 @@ pub(crate) async fn fetch_repository_with_result(
         })?;
 
     let task = format!("fetch {}", remote_config.name);
-    let pack_data = read_fetch_stream(&mut result_stream, output, &task).await?;
-    let objects_fetched = pack_object_count(&pack_data);
-    let pack_file = write_pack_and_index(&pack_data)?;
+    let fetch_data = read_fetch_stream(&mut result_stream, output, &task).await?;
+    let objects_fetched = pack_object_count(&fetch_data.pack_data);
+    let pack_file = write_pack_and_index(&fetch_data.pack_data)?;
     if let Some(pack_file) = pack_file {
         let index_version = match get_hash_kind() {
             HashKind::Sha1 => None,
@@ -1118,6 +1122,7 @@ pub(crate) async fn fetch_repository_with_result(
                 })?,
         }
     }
+    apply_shallow_updates(&fetch_data.shallow, &fetch_data.unshallow)?;
 
     let refs_updated =
         update_references(&remote_config, &refs, &ref_heads, remote_head, branch).await?;
@@ -1129,14 +1134,22 @@ pub(crate) async fn fetch_repository_with_result(
     })
 }
 
+#[derive(Default)]
+struct FetchStreamData {
+    pack_data: Vec<u8>,
+    shallow: Vec<String>,
+    unshallow: Vec<String>,
+}
+
 async fn read_fetch_stream(
     result_stream: &mut FetchStream,
     output: &OutputConfig,
     task: &str,
-) -> Result<Vec<u8>, FetchError> {
+) -> Result<FetchStreamData, FetchError> {
     let mut reader = StreamReader::new(result_stream);
-    let mut pack_data = Vec::new();
+    let mut data_out = FetchStreamData::default();
     let mut reach_pack = false;
+    let mut saw_shallow_response = false;
     let render_progress = matches!(output.progress, ProgressMode::Text);
     let json_progress = matches!(output.progress, ProgressMode::Json);
     let bar = render_progress.then(ProgressBar::new_spinner);
@@ -1148,7 +1161,31 @@ async fn read_fetch_stream(
             .await
             .map_err(|source| FetchError::PacketRead { source })?;
         if len == 0 {
+            if !reach_pack && saw_shallow_response {
+                saw_shallow_response = false;
+                continue;
+            }
             break;
+        }
+        if !reach_pack {
+            if let Some(oid) = parse_shallow_packet(&data, b"shallow ") {
+                data_out.shallow.push(oid);
+                saw_shallow_response = true;
+                continue;
+            }
+            if let Some(oid) = parse_shallow_packet(&data, b"unshallow ") {
+                data_out.unshallow.push(oid);
+                saw_shallow_response = true;
+                continue;
+            }
+            if data.starts_with(b"PACK") {
+                reach_pack = true;
+                data_out.pack_data.extend(&data);
+                if let Some(progress) = &progress {
+                    progress.tick(data_out.pack_data.len() as u64);
+                }
+                continue;
+            }
         }
         if data.len() >= 5 && data[0] == 1 && &data[1..5] == b"PACK" {
             reach_pack = true;
@@ -1158,16 +1195,17 @@ async fn read_fetch_stream(
             if let Some((&code, payload)) = data.split_first() {
                 match code {
                     1 => {
-                        let bytes_per_sec = pack_data.len() as f64 / time.elapsed().as_secs_f64();
-                        let total = util::auto_unit_bytes(pack_data.len() as u64);
+                        let bytes_per_sec =
+                            data_out.pack_data.len() as f64 / time.elapsed().as_secs_f64();
+                        let total = util::auto_unit_bytes(data_out.pack_data.len() as u64);
                         let bps = util::auto_unit_bytes(bytes_per_sec as u64);
                         if let Some(bar) = &bar {
                             bar.set_message(format!("Receiving objects: {total:.2} | {bps:.2}/s"));
                             bar.tick();
                         }
-                        pack_data.extend(payload);
+                        data_out.pack_data.extend(payload);
                         if let Some(progress) = &progress {
-                            progress.tick(pack_data.len() as u64);
+                            progress.tick(data_out.pack_data.len() as u64);
                         }
                     }
                     2 => print_remote_progress(payload, render_progress, bar.as_ref()),
@@ -1216,7 +1254,13 @@ async fn read_fetch_stream(
         progress.finish();
     }
 
-    Ok(pack_data)
+    Ok(data_out)
+}
+
+fn parse_shallow_packet(data: &[u8], prefix: &[u8]) -> Option<String> {
+    let raw = data.strip_prefix(prefix)?;
+    let text = std::str::from_utf8(raw).ok()?.trim();
+    (!text.is_empty()).then(|| text.to_string())
 }
 
 fn print_remote_progress(payload: &[u8], render_progress: bool, bar: Option<&ProgressBar>) {
@@ -1298,6 +1342,99 @@ fn write_pack_and_index(pack_data: &[u8]) -> Result<Option<String>, FetchError> 
         })?;
 
     Ok(Some(pack_file.to_string_lossy().into_owned()))
+}
+
+fn shallow_file_path() -> Result<PathBuf, FetchError> {
+    util::try_get_storage_path(None)
+        .map(|storage| storage.join("shallow"))
+        .map_err(|source| FetchError::LocalState {
+            message: format!("failed to locate repository storage for shallow metadata: {source}"),
+        })
+}
+
+fn read_shallow_boundaries() -> Result<BTreeSet<String>, FetchError> {
+    let path = shallow_file_path()?;
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+        Err(source) => {
+            return Err(FetchError::LocalState {
+                message: format!(
+                    "failed to read shallow metadata '{}': {source}",
+                    path.display()
+                ),
+            });
+        }
+    };
+
+    let mut boundaries = BTreeSet::new();
+    for (line_no, line) in content.lines().enumerate() {
+        let oid = line.trim();
+        if oid.is_empty() {
+            continue;
+        }
+        ObjectHash::from_str(oid).map_err(|source| FetchError::LocalState {
+            message: format!(
+                "invalid shallow metadata entry at '{}:{}': {source}",
+                path.display(),
+                line_no + 1
+            ),
+        })?;
+        boundaries.insert(oid.to_string());
+    }
+    Ok(boundaries)
+}
+
+fn write_shallow_boundaries(boundaries: &BTreeSet<String>) -> Result<(), FetchError> {
+    let path = shallow_file_path()?;
+    if boundaries.is_empty() {
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(FetchError::LocalState {
+                    message: format!(
+                        "failed to remove shallow metadata '{}': {source}",
+                        path.display()
+                    ),
+                });
+            }
+        }
+        return Ok(());
+    }
+
+    let mut content = String::new();
+    for oid in boundaries {
+        content.push_str(oid);
+        content.push('\n');
+    }
+    fs::write(&path, content).map_err(|source| FetchError::LocalState {
+        message: format!(
+            "failed to write shallow metadata '{}': {source}",
+            path.display()
+        ),
+    })
+}
+
+fn apply_shallow_updates(shallow: &[String], unshallow: &[String]) -> Result<(), FetchError> {
+    if shallow.is_empty() && unshallow.is_empty() {
+        return Ok(());
+    }
+
+    let mut boundaries = read_shallow_boundaries()?;
+    for oid in shallow {
+        ObjectHash::from_str(oid).map_err(|source| FetchError::LocalState {
+            message: format!("remote sent invalid shallow boundary '{oid}': {source}"),
+        })?;
+        boundaries.insert(oid.clone());
+    }
+    for oid in unshallow {
+        ObjectHash::from_str(oid).map_err(|source| FetchError::LocalState {
+            message: format!("remote sent invalid unshallow boundary '{oid}': {source}"),
+        })?;
+        boundaries.remove(oid);
+    }
+    write_shallow_boundaries(&boundaries)
 }
 
 async fn update_references(
@@ -1467,6 +1604,7 @@ async fn current_have_safe() -> Result<Vec<String>, FetchError> {
 
     let mut have = Vec::new();
     let mut have_set: HashSet<String> = HashSet::new();
+    let shallow_boundaries = read_shallow_boundaries()?;
 
     // Phase 1: every local + remote-tracking branch tip becomes a `have`,
     // unconditionally. These are the commits the server is most likely to
@@ -1507,6 +1645,9 @@ async fn current_have_safe() -> Result<Vec<String>, FetchError> {
         let oid = item.commit.to_string();
         if have_set.insert(oid.clone()) {
             have.push(oid);
+        }
+        if shallow_boundaries.contains(&item.commit.to_string()) {
+            continue;
         }
 
         let commit: Commit =

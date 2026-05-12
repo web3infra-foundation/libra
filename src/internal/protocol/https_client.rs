@@ -173,11 +173,12 @@ impl HttpsClient {
         &self,
         have: &[String],
         want: &[String],
+        shallow: &[String],
         depth: Option<usize>,
     ) -> Result<FetchStream, IoError> {
         // POST $GIT_URL/git-upload-pack HTTP/1.0
         let url = self.url.join("git-upload-pack").unwrap();
-        let body = generate_upload_pack_content(have, want, depth);
+        let body = generate_upload_pack_content(have, want, shallow, depth);
         tracing::debug!("fetch_objects with body: {:?}", body);
 
         let res = BasicAuth::send(|| async {

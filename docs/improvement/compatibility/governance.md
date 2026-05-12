@@ -9,23 +9,23 @@ C1（Audit P0）
 ### 已确认的当前基线
 - [`docs/improvement/README.md`](../README.md) 已记录第 1–8 批 CLIG 现代化命令清单与对外契约。
 - [`src/cli.rs`](../../../src/cli.rs) 中 `Commands` enum 是 4-tier 矩阵的事实来源；任何新增/删除子命令都必须同步更新 `COMPATIBILITY.md`。
-- 仓库根目前**缺失**：`COMPATIBILITY.md`、`.gitattributes`、`.github/CODEOWNERS`。
+- 仓库根已存在 [`COMPATIBILITY.md`](../../../COMPATIBILITY.md)、[`.gitattributes`](../../../.gitattributes)、[`.github/CODEOWNERS`](../../../.github/CODEOWNERS)；后续变更必须保持这三处与本计划同步。
 - 仓库已存在二进制资源：[`docs/image/banner.png`](../../image/banner.png)、[`docs/video/demo-20260224.gif`](../../video/demo-20260224.gif)。
 - [`docs/contributing.md`](../../contributing.md) 已要求 DCO 与 PGP 签名，但尚未在 GitHub 平台层把 required-checks 显式化。
 
 ### 基于当前代码的 Review 结论
-- 治理文件缺失会让"承诺到哪一层"始终停留在 README 一句话；用户用 stock Git 心智来期待 Libra，差异成本最终回流到维护者。
+- 治理文件已落地，剩余风险在于这些文件与代码、命令文档和 GitHub branch-protection UI 的持续同步；用户用 stock Git 心智来期待 Libra，差异成本最终回流到维护者。
 - 二进制资源未声明 binary 属性，会让历史 diff 与跨平台 checkout 产生未知风险，但当前体量不必立刻迁 LFS。
-- CODEOWNERS 缺失意味着 `src/command/**` 和 `src/internal/ai/**` 在评审时责任模糊。
+- CODEOWNERS 已把 `src/command/**`、`src/internal/**`、AI/TUI、publish、CI 与文档路径路由到维护团队；仍需在 GitHub UI 验证团队存在并自动请求评审。
 - 原矩阵骨架未覆盖 `src/cli.rs::Commands` 中全部顶层命令，尤其遗漏 `rm` / `mv` / `grep` / `rev-parse` / `rev-list` / `lfs` / `cloud` / `code` / `code-control` / `graph` 等实际命令。C1 落地时必须以代码枚举为事实来源逐行填充，不能只列 Git 常见命令。
 - LFS 需要拆开描述：`libra lfs` 是已存在命令；Git LFS 的 `.gitattributes` filter / hooks 兼容层是另一件事，不能把二者合并写成单一 `unsupported`。
 
 ## 目标与非目标
 
 **目标：**
-- 新建 `COMPATIBILITY.md`（4-tier）作为对外承诺的事实表。
-- 新建仓库根 `.gitattributes` 覆盖文本归一化与已有二进制资源。
-- 新建 `.github/CODEOWNERS` 路由代码、文档、CI、AI 子系统的评审责任。
+- 维护 `COMPATIBILITY.md`（4-tier）作为对外承诺的事实表。
+- 维护仓库根 `.gitattributes` 覆盖文本归一化与已有二进制资源。
+- 维护 `.github/CODEOWNERS` 路由代码、文档、CI、AI 子系统的评审责任。
 - 同步 [`docs/commands/README.md`](../../commands/README.md) 的现有命令索引，至少补上已存在但缺索引的 `code-control`；checkout / bisect 的 hidden 标记分别由 C5 / C4 处理。
 - 在本文件中给出"未来若启用 LFS 的叠加规则"伪代码，但**本批不启用 LFS**。
 
@@ -88,7 +88,7 @@ C1（Audit P0）
 | describe | supported | |
 | cherry-pick | supported | |
 | push | partial | local file remote rejected (intentional, see push.md) |
-| fetch | partial | --depth not exposed in CLI |
+| fetch | supported | --depth public flag |
 | pull | partial | --ff-only / --rebase / --squash subset |
 | diff | supported | |
 | grep | supported | |
@@ -128,7 +128,7 @@ C1（Audit P0）
 
 | Command | 当前 Tier | 批次 | 落地后 Tier | 落地后 Notes |
 |---------|-----------|------|-------------|--------------|
-| fetch | partial | C3 | supported | `--depth` public flag |
+| fetch | supported | C3 ✅ | supported | `--depth` public flag |
 | clone | partial | C3 | partial | `--depth` / `--single-branch` supported; `--sparse` unsupported; `--recurse-submodules` unsupported |
 | stash | partial | C4 | partial | `show` / `branch` / `clear` added; `create` / `store` deferred |
 | bisect | partial | C4 ✅ | partial | `run` / `view` added; `replay` / `terms` deferred |
@@ -216,7 +216,7 @@ tests/data/** -text
 /docs/improvement/agent.md              @web3infra-foundation/libra-ai-maintainers
 ```
 
-具体团队 handle 由维护者在落地时填写真实 GitHub 团队名；上面的 `@web3infra-foundation/libra-*` 仅为示意。
+当前仓库的 [`.github/CODEOWNERS`](../../../.github/CODEOWNERS) 已使用这些 `@web3infra-foundation/libra-*` 团队 handle，并额外覆盖 publish track 路径。平台层仍需维护者在 GitHub UI 验证团队存在、具备仓库权限，并启用 Code Owners review。
 
 ### 分支保护建议（不在本批自动启用）
 
@@ -249,9 +249,9 @@ C2 把 `.github/workflows/base.yml` 与 `.github/workflows/codeql.yml` 的 `name
 
 | 文件 | 操作 | 说明 |
 |-----|-----|-----|
-| [`/COMPATIBILITY.md`](../../../COMPATIBILITY.md) | 新建 | 仓库根，4-tier 矩阵 |
-| [`/.gitattributes`](../../../.gitattributes) | 新建 | 仓库根，文本归一化 + binary 声明 |
-| [`/.github/CODEOWNERS`](../../../.github/CODEOWNERS) | 新建 | 评审责任路由 |
+| [`/COMPATIBILITY.md`](../../../COMPATIBILITY.md) | 维护 | 仓库根，4-tier 矩阵 |
+| [`/.gitattributes`](../../../.gitattributes) | 维护 | 仓库根，文本归一化 + binary 声明 |
+| [`/.github/CODEOWNERS`](../../../.github/CODEOWNERS) | 维护 | 评审责任路由 |
 | [`docs/improvement/README.md`](../README.md) | 修改 | "全局层面改进" 表追加 I 行 |
 | [`docs/commands/README.md`](../../commands/README.md) | 修改 | 同步现有命令索引，补 `code-control` |
 
@@ -267,6 +267,6 @@ C2 把 `.github/workflows/base.yml` 与 `.github/workflows/codeql.yml` 的 `name
 
 ## 风险与缓解
 
-1. **CODEOWNERS 团队 handle 不存在** → 缓解：落地时由维护者用真实 GitHub 团队名替换占位符；初期可用单个 handle 兜底，后续再细分。
+1. **CODEOWNERS 团队或平台配置未生效** → 缓解：维护者在 GitHub UI 验证团队存在、具备仓库权限，并确认 PR 会自动请求 Code Owners review；必要时先用单个真实 maintainer handle 兜底。
 2. **`.gitattributes` 影响历史 diff 显示** → 缓解：text=auto eol=lf 对已有 LF 文件无效；仅在新平台 checkout 时归一化。
-3. **`COMPATIBILITY.md` 与代码不同步** → 缓解：在 C2 的 `compat-offline-core` job 中加入 `scripts/check_compat_matrix.sh`（C2 实现），扫描 `src/cli.rs` Commands 变体并对比矩阵行。
+3. **`COMPATIBILITY.md` 与代码不同步** → 缓解：C2 已在 `compat-offline-core` job 中加入 `scripts/check_compat_matrix.sh`，并通过 `tests/compat/matrix_alignment.rs` 接入 `cargo test --all`，扫描 `src/cli.rs` Commands 变体并对比矩阵行。

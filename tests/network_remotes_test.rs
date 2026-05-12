@@ -51,7 +51,7 @@ async fn https_upload_pack_returns_pack_data() {
 
     let have = Vec::new();
     let mut result_stream = client
-        .fetch_objects(&have, &want, Some(1))
+        .fetch_objects(&have, &want, &[], Some(1))
         .await
         .expect("upload-pack request should succeed");
 

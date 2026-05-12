@@ -1,6 +1,6 @@
 [package]
 name = "libra"
-version = "0.17.13"
+version = "0.17.15"
 edition = "2024"
 
 [features]
@@ -154,3 +154,7 @@ path = "tests/compat/worktree_delete_dir.rs"
 [[test]]
 name = "compat_checkout_alias_help"
 path = "tests/compat/checkout_alias_help.rs"
+
+[[test]]
+name = "compat_matrix_alignment"
+path = "tests/compat/matrix_alignment.rs"

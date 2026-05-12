@@ -3,22 +3,17 @@
 /*
  * Libra publish — paper-navy design system.
  *
- * Mirror of the static design package (`worker/Libra Static Screens.html` +
- * `worker/tokens.css`) shipped with Phase 0. The static HTML screens are
- * visual references; this stylesheet ports the design tokens, type stack
- * and component primitives onto the Next.js + Tailwind v4 build that
- * actually deploys to Cloudflare.
+ * Ports the publish design tokens, type stack and component primitives
+ * onto the Next.js + Tailwind v4 build that deploys to Cloudflare.
  *
  * Sources of truth:
  *   - Palette: paper / paper-deep / ink-deep / gold (warm + restrained).
- *   - Type:    Inter (sans), JetBrains Mono (mono), Source Serif 4 (brand).
+ *   - Type:    Inter (sans), JetBrains Mono (mono), Georgia fallback (brand).
  *   - Layout:  sidebar (desktop) / icon-rail (tablet) / topbar+drawer (mobile).
  */
 
 :root {
   /* Type stacks */
-  --font-sans: "Inter", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --font-serif: "Source Serif 4", "Source Serif Pro", Georgia, serif;
 
   /* Paper-navy palette */
@@ -81,7 +76,7 @@
   html, body { min-height: 100dvh; }
   body {
     margin: 0;
-    font-family: var(--font-sans);
+    font-family: var(--font-sans), ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     font-size: 14px;
     line-height: 1.5;
     color: var(--ink);
@@ -89,7 +84,7 @@
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
   }
-  pre, code { font-family: var(--font-mono); font-feature-settings: "calt" 0; }
+  pre, code { font-family: var(--font-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-feature-settings: "calt" 0; }
   ::selection { background: var(--gold-tint); color: var(--ink-deep); }
 
   :focus { outline: none; }
@@ -108,7 +103,7 @@
 }
 
 @layer components {
-  .lb-mono { font-family: var(--font-mono); font-feature-settings: "calt" 0; }
+  .lb-mono { font-family: var(--font-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-feature-settings: "calt" 0; }
   .lb-serif { font-family: var(--font-serif); }
   .lb-brand {
     font-family: var(--font-serif);
@@ -119,7 +114,7 @@
   }
 
   .lb-eyebrow {
-    font-family: var(--font-sans);
+    font-family: var(--font-sans), ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     font-size: 11px;
     font-weight: 600;
     letter-spacing: 0.08em;
@@ -127,7 +122,7 @@
     color: var(--ink-soft);
   }
   .lb-meta {
-    font-family: var(--font-sans);
+    font-family: var(--font-sans), ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     font-size: 12.5px;
     color: var(--ink-soft);
     line-height: 1.45;
@@ -135,7 +130,7 @@
   .lb-meta-soft { color: var(--ink-faint); }
 
   .lb-h1 {
-    font-family: var(--font-sans);
+    font-family: var(--font-sans), ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     font-size: 24px;
     font-weight: 600;
     letter-spacing: -0.01em;
@@ -144,7 +139,7 @@
     margin: 0;
   }
   .lb-h2 {
-    font-family: var(--font-sans);
+    font-family: var(--font-sans), ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     font-size: 16px;
     font-weight: 600;
     letter-spacing: -0.005em;
@@ -162,7 +157,7 @@
     border-radius: var(--r-1);
     border: 1px solid var(--paper-line);
     background: var(--paper);
-    font-family: var(--font-sans);
+    font-family: var(--font-sans), ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     font-size: 11.5px;
     color: var(--ink-mid);
     white-space: nowrap;
@@ -196,7 +191,7 @@
     border-radius: var(--r-1);
     padding: 12px 14px;
     overflow: auto;
-    font-family: var(--font-mono);
+    font-family: var(--font-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     font-size: 13px;
     line-height: 1.55;
     color: var(--ink-deep);

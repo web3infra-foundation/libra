@@ -37,7 +37,7 @@
 | Frontend data | `CodeUiProvider` 首屏拉 repo/status/session/threads，连接 SSE，status debounce 5s；Chat/Sidebar/Workflow/Summary/Diff/Terminal/Settings 都走 live store | 需要 API client 单测、组件测试、browser smoke；长 transcript/diff/tool output 的主线程保护仍不足 |
 | Browser write | `BrowserControllerProvider` lazy attach，token 只在内存；submit/respond/cancel/detach 已接线；`BROWSER_CONTROL_DISABLED` 等错误能显示 | 需要覆盖五类 interaction 的组件测试和 lease 过期/多 tab UI 行为；audit log 断言还应进入 scenario |
 | TUI write bridge | `--browser-control loopback` 打开 browser write；TUI default 保持 `off`；TUI reclaim 会清 browser lease | 需要继续验证 `{off, loopback} x {host} x {TUI, web-only}` 的矩阵数据驱动化 |
-| Headless web-only | Ollama v0 可由浏览器驱动直接 turn，capabilities 为 `messageInput`、`streamingText`、`toolCalls` | 缺 provider factory 复用、mutating tools sandbox/approval、request-user-input、session persistence/resume、plan/patchset |
+| Headless web-only | Ollama v0 可由浏览器驱动直接 turn，capabilities 为 `messageInput`、`streamingText`、`toolCalls`；provider bootstrap 复用 `ProviderFactory` | 缺 mutating tools sandbox/approval、request-user-input、session persistence/resume、plan/patchset |
 | Docs | [web/README.md](../../web/README.md) 与 [docs/commands/code.md](../commands/code.md) 已描述 live API、browser-control、token 分工、256 KiB 限制 | 本文需要作为后续 PR 的剩余工作清单；remote notice 还只是 brief，未实现 |
 
 ## API 边界
@@ -118,7 +118,7 @@ LIBRA_ENABLE_TEST_PROVIDER=1 cargo test --features test-provider \
 
 **任务：**
 
-- 将 `build_non_codex_headless_runtime()` 收敛到 `ProviderFactory`，避免 Ollama 与 TUI provider bootstrap 分叉。
+- 已完成：`build_non_codex_headless_runtime()` 的 Ollama 路径收敛到 `ProviderFactory`，避免 Ollama 与 TUI provider bootstrap 分叉。
 - 为 headless runtime 接入 `ToolRuntimeContext`、sandbox、approval store、network policy、usage recorder；mutating tools 必须通过 `CodeUiInteractionRequest` 显示 approval，不允许静默执行。
 - 支持 `request_user_input`、`approval`、`sandbox_approval` 写回 `CodeUiInteractionResponse`。
 - 接入 session persistence：`--resume <thread_id>` 能恢复 transcript、pending interaction、basic history；成功 turn 写回 session store。
@@ -184,7 +184,7 @@ LIBRA_ENABLE_TEST_PROVIDER=1 cargo test --features test-provider \
 |----|------|------------|
 | PR 1 | Phase A：frontend client/store/controller/component tests + SSE lag recover | web lint/build + code_ui scenarios |
 | PR 2 | Phase B：remote notice static assets + `static_handler` remote HTML routing | curl + Rust handler tests |
-| PR 3 | Phase C.1：headless ProviderFactory 收敛 + runtime context 注入（仍只读工具） | headless tests + provider smoke |
+| PR 3 | Phase C.1：headless ProviderFactory 收敛已完成；runtime context 注入（仍只读工具）待做 | headless tests + provider smoke |
 | PR 4 | Phase C.2：headless approvals/request-user-input/mutating tools | browser interaction scenarios |
 | PR 5 | Phase D：workflow/summary/diff/terminal 完整映射与长数据保护 | component tests + browser smoke |
 | PR 6 | Phase E：CI/docs/release gate | full gate command |

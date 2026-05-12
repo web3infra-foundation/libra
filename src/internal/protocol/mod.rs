@@ -196,6 +196,7 @@ pub fn parse_discovered_references(
 pub fn generate_upload_pack_content(
     have: &[String],
     want: &[String],
+    shallow: &[String],
     depth: Option<usize>,
 ) -> Bytes {
     let mut buf = BytesMut::new();
@@ -220,6 +221,10 @@ pub fn generate_upload_pack_content(
         } else {
             add_pkt_line_string(&mut buf, format!("want {w}\n").to_string());
         }
+    }
+
+    for oid in shallow {
+        add_pkt_line_string(&mut buf, format!("shallow {oid}\n"));
     }
 
     // Add deepen line if depth is specified

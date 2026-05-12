@@ -170,9 +170,10 @@ for some time; C3 surfaces it on the CLI and binds the contract:
 - `--depth N` limits fetching to the latest `N` commits per remote branch.
 - It composes with `--all`: a shallow fetch across all configured remotes is
   `libra fetch --all --depth N`.
-- A full-history fetch followed by `fetch --depth N` is idempotent. Re-fetching
-  an already-shallow repository at the same depth remains a tracked limitation
-  until shallow boundary metadata is persisted locally.
+- A full-history fetch followed by `fetch --depth N` is idempotent.
+- Re-fetching an already-shallow repository at the same depth is also
+  idempotent: Libra persists server-advertised shallow boundaries in
+  `.libra/shallow` and sends them during later upload-pack negotiation.
 - Sparse checkout (`clone --sparse`) is **not** part of this contract — see
   [`docs/improvement/compatibility/declined.md`](../improvement/compatibility/declined.md)
   for why sparse-checkout is intentionally deferred.

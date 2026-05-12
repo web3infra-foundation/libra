@@ -14,11 +14,12 @@ C2（Audit P1）
 - [`.github/workflows/release.yml`](../../../.github/workflows/release.yml) 继续承担发布产物构建，不属于 C2 required-checks 重命名范围。
 - [`Cargo.toml`](../../../Cargo.toml) 中已存在 feature gate：`test-network` / `test-live-ai` / `test-live-cloud` / `test-provider`，分别对应网络、真实 LLM、真实云资源和本地 deterministic provider。
 - [`tests/compat/`](../../../tests/compat/) 已存在，并通过 `Cargo.toml` 的 `[[test]]` 条目接入 `checkout_alias_help` / `bisect_subcommand_surface` / `worktree_delete_dir` 等跨命令兼容性回归。
+- [`scripts/check_compat_matrix.sh`](../../../scripts/check_compat_matrix.sh) 与 [`tests/compat/matrix_alignment.rs`](../../../tests/compat/matrix_alignment.rs) 已把 `COMPATIBILITY.md` 顶层命令表和 `src/cli.rs::Commands` 的漂移检测接入本地测试与 CI。
 
 ### 基于当前代码的 Review 结论
 - C2 的代码侧命名和 job 拆分已落地；当前 remaining action 是平台侧 branch-protection required-checks 切换，仍必须由维护者在 GitHub UI 中执行。
 - live AI / live cloud 仍不应进入 required-checks；当前 workflow 只把 offline core、network-only 和 CodeQL 作为稳定 required-check 候选。
-- `tests/compat/` 已成为 C4 / C5 跨命令契约回归集结点；后续若新增 compatibility surface，应继续先在 `Cargo.toml` 加 `[[test]]`，再在 `tests/compat/README.md` 登记。
+- `tests/compat/` 已成为 C2 / C4 / C5 跨命令契约回归集结点；后续若新增 compatibility surface，应继续先在 `Cargo.toml` 加 `[[test]]`，再在 `tests/compat/README.md` 登记。
 
 ## 目标与非目标
 
@@ -30,14 +31,15 @@ C2（Audit P1）
   - `compat-offline-core`
   - `compat-network-remotes`
 - 把 codeql.yml 的 matrix job 名规范为 `security-codeql-actions` / `security-codeql-rust`，避免同一 workflow 内 matrix check 名称重复。
-- 新建 `tests/compat/` 占位目录，作为 C4 / C5 跨命令兼容性回归的集结点。
+- 维护 `tests/compat/` 目录，作为 C2 / C4 / C5 跨命令兼容性回归的集结点。
+- 新增 `scripts/check_compat_matrix.sh` 和 `tests/compat/matrix_alignment.rs`，把 `COMPATIBILITY.md` 与 `src/cli.rs::Commands` 的顶层命令覆盖关系变成 fail-fast gate。
 - 在 [governance.md](governance.md) 给出 required-checks 切换 checklist，由维护者在 GitHub UI 执行。
 
 **非目标：**
 - 不引入 live AI / live cloud 作为 required check（这两个保留为可选 / 手动触发，因依赖外部凭据）。
 - 不重写 release.yml。
 - 不引入新的 CI 提供商或缓存策略。
-- 不在本批落地"COMPATIBILITY.md 与 src/cli.rs 一致性"自动校验脚本的实现，仅在 C2 文档中规划占位（实际脚本由 C1 落地后的迭代补足）。
+- 不把 `COMPATIBILITY.md` 的每个 tier/notes 语义做语义化判定；本批只自动校验顶层命令覆盖关系，tier 内容仍由人工 Review 负责。
 
 ## 设计要点
 
@@ -117,7 +119,7 @@ tests/compat/
 ├── bisect_subcommand_surface.rs # C4 填充：run / view + 退出码语义
 ├── worktree_delete_dir.rs       # C5 填充：--delete-dir on/off 行为差异
 ├── checkout_alias_help.rs       # C5 填充：取消 hide 后顶层 help 可见性
-└── matrix_alignment.rs          # 占位：未来 COMPATIBILITY.md 与 src/cli.rs 一致性校验
+└── matrix_alignment.rs          # C2：COMPATIBILITY.md 与 src/cli.rs 一致性校验
 ```
 
 约定：
@@ -155,7 +157,10 @@ tests/compat/
 |-----|-----|-----|
 | [`.github/workflows/base.yml`](../../../.github/workflows/base.yml) | 修改 | 现有质量门重命名为 `compat-*`；普通测试与 network/live 测试拆清 |
 | [`.github/workflows/codeql.yml`](../../../.github/workflows/codeql.yml) | 修改 | matrix job 重命名为 `security-codeql-actions` / `security-codeql-rust` |
+| [`scripts/check_compat_matrix.sh`](../../../scripts/check_compat_matrix.sh) | 新建 | `src/cli.rs::Commands` ↔ `COMPATIBILITY.md` 顶层命令漂移检测 |
 | [`tests/compat/README.md`](../../../tests/compat/README.md) | 新建 | 目录用途说明 + 文件命名约定 |
+| [`tests/compat/matrix_alignment.rs`](../../../tests/compat/matrix_alignment.rs) | 新建 | 通过 Cargo test 运行矩阵漂移检测脚本 |
+| [`Cargo.toml`](../../../Cargo.toml) | 修改 | 注册 `compat_matrix_alignment` 集成测试 |
 | [`docs/improvement/compatibility/governance.md`](governance.md) | 追加 | required-checks 切换 checklist 小节 |
 
 ## 测试与验收
@@ -164,6 +169,8 @@ tests/compat/
 - [x] [`.github/workflows/codeql.yml`](../../../.github/workflows/codeql.yml) 的 CodeQL matrix 使用 `security-codeql-${{ matrix.language }}`，即 `security-codeql-actions` / `security-codeql-rust`。
 - [x] `compat-clippy` 使用 `cargo clippy --all-targets --all-features -- -D warnings`。
 - [x] [`tests/compat/README.md`](../../../tests/compat/README.md) 已说明该目录由 `compat-offline-core` 覆盖，并列出现有兼容性测试文件。
+- [x] [`scripts/check_compat_matrix.sh`](../../../scripts/check_compat_matrix.sh) 能在 `COMPATIBILITY.md` 顶层命令表遗漏或多列 `src/cli.rs::Commands` 变体时 fail-fast。
+- [x] [`compat_matrix_alignment`](../../../tests/compat/matrix_alignment.rs) 已通过 Cargo `[[test]]` 接入 `cargo test --all`。
 - [x] [governance.md](governance.md) 已更新 required-checks 切换 checklist。
 - [ ] GitHub UI branch protection 已完成 required-checks 切换，并经 PR 页面验证新名称会阻塞失败检查。这是平台配置动作，不能由代码提交自动完成。
 

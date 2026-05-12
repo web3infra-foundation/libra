@@ -1166,6 +1166,7 @@ impl CodeUiRuntimeHandle {
             ));
         };
 
+        let mut should_sync_after_error = false;
         let lease = {
             let mut state = self.controller_state.lock().await;
             let now = Utc::now();
@@ -1175,9 +1176,14 @@ impl CodeUiRuntimeHandle {
                 .is_some_and(|lease| lease.expires_at <= now)
             {
                 state.active_lease = None;
+                should_sync_after_error = true;
             }
 
             let Some(lease) = state.active_lease.as_mut() else {
+                drop(state);
+                if should_sync_after_error {
+                    self.sync_controller_snapshot().await;
+                }
                 return Err(CodeUiApiError::conflict(
                     "CONTROLLER_CONFLICT",
                     "No client currently controls this session",
@@ -1916,6 +1922,41 @@ mod tests {
             .expect_err("stale token must not keep write access");
         assert_eq!(stale_error.status, 403);
         assert_eq!(stale_error.code, "INVALID_CONTROLLER_TOKEN");
+    }
+
+    #[tokio::test]
+    async fn expired_browser_controller_write_failure_syncs_snapshot() {
+        let session = test_session();
+        let mut options =
+            CodeUiRuntimeOptions::new(true, false, CodeUiInitialController::Unclaimed);
+        options.lease_duration = Some(Duration::milliseconds(1));
+        let runtime = CodeUiRuntimeHandle::build_with_options(
+            ReadOnlyCodeUiAdapter::new(session.clone(), CodeUiCapabilities::default()),
+            options,
+        )
+        .await;
+
+        let attach = runtime
+            .attach_browser_controller("browser-a")
+            .await
+            .expect("browser controller should attach");
+        let attached_snapshot = runtime.snapshot().await;
+        assert_eq!(
+            attached_snapshot.controller.kind,
+            CodeUiControllerKind::Browser
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let error = runtime
+            .submit_message(Some(&attach.controller_token), "after expiry".to_string())
+            .await
+            .expect_err("expired browser token must not write");
+        assert_eq!(error.status, 409);
+        assert_eq!(error.code, "CONTROLLER_CONFLICT");
+
+        let stale_snapshot = runtime.snapshot().await;
+        assert_eq!(stale_snapshot.controller.kind, CodeUiControllerKind::None);
+        assert!(!stale_snapshot.controller.can_write);
     }
 
     #[tokio::test]

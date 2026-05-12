@@ -1,5 +1,22 @@
 import type { Metadata } from "next";
+import localFont from "next/font/local";
 import "./globals.css";
+
+const inter = localFont({
+  src: "./fonts/inter-latin-variable.woff2",
+  variable: "--font-sans",
+  weight: "100 900",
+  display: "swap",
+  fallback: ["Arial", "system-ui", "sans-serif"],
+});
+
+const jetBrainsMono = localFont({
+  src: "./fonts/jetbrains-mono-latin-variable.woff2",
+  variable: "--font-mono",
+  weight: "100 800",
+  display: "swap",
+  fallback: ["ui-monospace", "SFMono-Regular", "Menlo", "monospace"],
+});
 
 export const metadata: Metadata = {
   title: "Libra · publish",
@@ -14,15 +31,11 @@ export default function RootLayout({
   readonly children: React.ReactNode;
 }) {
   return (
-    <html lang="en" suppressHydrationWarning>
-      <head>
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
-        <link
-          href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Source+Serif+4:ital,wght@0,400;0,500;1,500&display=swap"
-          rel="stylesheet"
-        />
-      </head>
+    <html
+      lang="en"
+      suppressHydrationWarning
+      className={`${inter.variable} ${jetBrainsMono.variable}`}
+    >
       <body>{children}</body>
     </html>
   );

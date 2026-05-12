@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import type { NextRequest } from "next/server";
 import { setTestEnv } from "./stubs/opennext-cloudflare";
 import { FakeD1 } from "./fixtures/fake-d1";
 import { FakeR2 } from "./fixtures/fake-r2";
@@ -17,11 +18,42 @@ import { GET as aiGraphGet } from "@/app/api/sites/[slug]/ai/graph/route";
 
 const HOST = "code.example.com";
 
-function makeRequest(path: string, init: RequestInit = {}): Request {
+type ApiBody = {
+  readonly ok: boolean;
+  readonly data: {
+    readonly site: { readonly slug: string };
+    readonly defaultRef: { readonly refName: string };
+    readonly latestRevision: { readonly revisionOid: string };
+    readonly refs: readonly { readonly refType: string }[];
+    readonly refsGeneration: number;
+    readonly path: string;
+    readonly entries: readonly { readonly path: string; readonly entryKind: string }[];
+    readonly file: { readonly path: string; readonly displayMode: string };
+    readonly content: { readonly body: string } | null;
+    readonly latestSyncRun: { readonly status: string; readonly warnings: readonly unknown[] };
+    readonly versions: readonly { readonly aiVersionId: string }[];
+    readonly objects: readonly { readonly objectType: string }[];
+    readonly payload: { readonly payload: { readonly summary: string } };
+    readonly version: { readonly aiVersionId: string; readonly bundleSha256: string };
+    readonly bundle: unknown;
+    readonly nodes: readonly { readonly objectType: string }[];
+  };
+};
+
+type ErrorBody = {
+  readonly ok: false;
+  readonly code: string;
+};
+
+function makeRequest(path: string, init: RequestInit = {}): NextRequest {
   return new Request(`https://${HOST}${path}`, {
     ...init,
     headers: { Host: HOST, ...(init.headers ?? {}) },
-  });
+  }) as unknown as NextRequest;
+}
+
+async function jsonBody<T>(response: Response): Promise<T> {
+  return (await response.json()) as T;
 }
 
 let d1: FakeD1;
@@ -43,7 +75,7 @@ describe("/api/sites/[slug]", () => {
       params: Promise.resolve({ slug: "libra-demo" }),
     });
     expect(response.status).toBe(200);
-    const body = await response.json();
+    const body = await jsonBody<ApiBody>(response);
     expect(body.ok).toBe(true);
     expect(body.data.site.slug).toBe("libra-demo");
     expect(body.data.defaultRef.refName).toBe("refs/heads/main");
@@ -54,7 +86,7 @@ describe("/api/sites/[slug]", () => {
       params: Promise.resolve({ slug: "unknown" }),
     });
     expect(response.status).toBe(404);
-    const body = await response.json();
+    const body = await jsonBody<ErrorBody>(response);
     expect(body).toMatchObject({ ok: false, code: "SITE_NOT_FOUND" });
   });
   it("returns 410 for disabled site", async () => {
@@ -63,7 +95,7 @@ describe("/api/sites/[slug]", () => {
       params: Promise.resolve({ slug: "libra-demo" }),
     });
     expect(response.status).toBe(410);
-    const body = await response.json();
+    const body = await jsonBody<ErrorBody>(response);
     expect(body).toMatchObject({ ok: false, code: "SITE_DISABLED" });
   });
 });
@@ -73,7 +105,7 @@ describe("/api/sites/[slug]/refs", () => {
     const all = await refsGet(makeRequest("/api/sites/libra-demo/refs"), {
       params: Promise.resolve({ slug: "libra-demo" }),
     });
-    const allBody = await all.json();
+    const allBody = await jsonBody<ApiBody>(all);
     expect(allBody.data.refs).toHaveLength(4);
     expect(allBody.data.refsGeneration).toBe(7);
 
@@ -81,7 +113,7 @@ describe("/api/sites/[slug]/refs", () => {
       makeRequest("/api/sites/libra-demo/refs?type=branch"),
       { params: Promise.resolve({ slug: "libra-demo" }) },
     );
-    const branchBody = await branchOnly.json();
+    const branchBody = await jsonBody<ApiBody>(branchOnly);
     expect(branchBody.data.refs.every((row: { refType: string }) => row.refType === "branch")).toBe(true);
   });
 });
@@ -92,7 +124,7 @@ describe("/api/sites/[slug]/tree", () => {
       params: Promise.resolve({ slug: "libra-demo" }),
     });
     expect(response.status).toBe(200);
-    const body = await response.json();
+    const body = await jsonBody<ApiBody>(response);
     expect(body.data.path).toBe("");
     const paths = body.data.entries.map((entry: { path: string; entryKind: string }) => entry.path);
     const kinds = Object.fromEntries(
@@ -111,7 +143,7 @@ describe("/api/sites/[slug]/tree", () => {
     const response = await treeGet(makeRequest("/api/sites/libra-demo/tree?path=src"), {
       params: Promise.resolve({ slug: "libra-demo" }),
     });
-    const body = await response.json();
+    const body = await jsonBody<ApiBody>(response);
     expect(body.data.entries.map((e: { path: string }) => e.path)).toEqual(["src/lib.rs"]);
   });
   it("returns 409 for ambiguous short ref", async () => {
@@ -132,7 +164,7 @@ describe("/api/sites/[slug]/tree", () => {
       { params: Promise.resolve({ slug: "libra-demo" }) },
     );
     expect(response.status).toBe(409);
-    const body = await response.json();
+    const body = await jsonBody<ErrorBody>(response);
     expect(body).toMatchObject({ ok: false, code: "AMBIGUOUS_REF" });
   });
 });
@@ -144,9 +176,9 @@ describe("/api/sites/[slug]/file", () => {
       { params: Promise.resolve({ slug: "libra-demo" }) },
     );
     expect(response.status).toBe(200);
-    const body = await response.json();
+    const body = await jsonBody<ApiBody>(response);
     expect(body.data.file.path).toBe("README.md");
-    expect(body.data.content.body).toContain("Hello from publish snapshot");
+    expect(body.data.content?.body).toContain("Hello from publish snapshot");
   });
   it("returns metadata-only for binary files (no R2 leak)", async () => {
     const response = await fileGet(
@@ -154,7 +186,7 @@ describe("/api/sites/[slug]/file", () => {
       { params: Promise.resolve({ slug: "libra-demo" }) },
     );
     expect(response.status).toBe(200);
-    const body = await response.json();
+    const body = await jsonBody<ApiBody>(response);
     expect(body.data.file.displayMode).toBe("binary");
     expect(body.data.content).toBeNull();
     expect(JSON.stringify(body)).not.toMatch(/r2_key/);
@@ -184,7 +216,7 @@ describe("/api/sites/[slug]/status", () => {
       { params: Promise.resolve({ slug: "libra-demo" }) },
     );
     expect(response.status).toBe(200);
-    const body = await response.json();
+    const body = await jsonBody<ApiBody>(response);
     expect(body.data.latestSyncRun.status).toBe("succeeded");
     expect(body.data.latestSyncRun.warnings).toEqual([]);
   });
@@ -197,7 +229,7 @@ describe("/api/sites/[slug]/ai/*", () => {
       { params: Promise.resolve({ slug: "libra-demo" }) },
     );
     expect(response.status).toBe(200);
-    const body = await response.json();
+    const body = await jsonBody<ApiBody>(response);
     expect(body.data.versions[0]?.aiVersionId).toBe("ai-version-2026-05-09-001");
   });
   it("lists ai objects + filters by type and layer", async () => {
@@ -205,7 +237,7 @@ describe("/api/sites/[slug]/ai/*", () => {
       makeRequest("/api/sites/libra-demo/ai/objects?type=Intent&layer=snapshot"),
       { params: Promise.resolve({ slug: "libra-demo" }) },
     );
-    const body = await response.json();
+    const body = await jsonBody<ApiBody>(response);
     expect(body.data.objects).toHaveLength(1);
     expect(body.data.objects[0]?.objectType).toBe("Intent");
   });
@@ -216,7 +248,7 @@ describe("/api/sites/[slug]/ai/*", () => {
       ),
       { params: Promise.resolve({ slug: "libra-demo", type: "Intent", id: "intent-2026-05-09-001" }) },
     );
-    const body = await response.json();
+    const body = await jsonBody<ApiBody>(response);
     expect(body.data.payload.payload.summary).toBe("Publish demo intent");
   });
 
@@ -237,7 +269,7 @@ describe("/api/sites/[slug]/ai/*", () => {
       { params: Promise.resolve({ slug: "libra-demo", id: "ai-version-2026-05-09-001" }) },
     );
     expect(response.status).toBe(200);
-    const body = await response.json();
+    const body = await jsonBody<ApiBody>(response);
     expect(body.data.version.aiVersionId).toBe("ai-version-2026-05-09-001");
     expect(body.data.version.bundleSha256).toMatch(/^[0-9a-f]{64}$/);
     // Codex pass-3 P1 + pass-4 P2: r2Key/bundleKey must not leak
@@ -254,7 +286,7 @@ describe("/api/sites/[slug]/ai/*", () => {
       { params: Promise.resolve({ slug: "libra-demo" }) },
     );
     expect(response.status).toBe(200);
-    const body = await response.json();
+    const body = await jsonBody<ApiBody>(response);
     expect(Array.isArray(body.data.nodes)).toBe(true);
     expect(body.data.nodes[0]?.objectType).toBe("Intent");
   });
@@ -270,7 +302,7 @@ describe("/api/sites/[slug]/ai/*", () => {
       { params: Promise.resolve({ slug: "libra-demo", id: "ai-version-2026-05-09-001" }) },
     );
     expect(response.status).toBe(500);
-    const body = await response.json();
+    const body = await jsonBody<ErrorBody>(response);
     expect(body).toMatchObject({ ok: false, code: "R2_OBJECT_CORRUPT" });
   });
 });
@@ -288,7 +320,7 @@ describe("private visibility", () => {
       params: Promise.resolve({ slug: "libra-demo" }),
     });
     expect(response.status).toBe(403);
-    const body = await response.json();
+    const body = await jsonBody<ErrorBody>(response);
     expect(body).toMatchObject({ ok: false, code: "ACCESS_REQUIRED" });
   });
   it("fails closed when Access env is missing", async () => {

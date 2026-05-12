@@ -1012,3 +1012,33 @@ async fn test_fetch_full_then_shallow_is_idempotent() {
     let second = run_libra_command(&["fetch", "origin", "--depth", "1"], &repo_dir);
     assert_cli_success(&second, "second fetch --depth 1 after full");
 }
+
+#[tokio::test]
+#[serial]
+async fn test_fetch_shallow_then_shallow_is_idempotent() {
+    // C3 follow-up: once a shallow boundary has been created locally,
+    // re-running the same shallow fetch should still negotiate cleanly.
+    let (_temp_root, repo_dir, _current_branch, pushed_commit) =
+        setup_local_fetch_cli_fixture().await;
+
+    let first = run_libra_command(&["--json", "fetch", "origin", "--depth", "1"], &repo_dir);
+    assert_cli_success(&first, "first fetch --depth 1");
+    let first_json = parse_json_stdout(&first);
+    assert!(
+        first_json["data"]["remotes"][0]["objects_fetched"]
+            .as_u64()
+            .is_some_and(|count| count > 0),
+        "first shallow fetch must materialize at least one object: {first_json:?}"
+    );
+
+    let shallow_path = repo_dir.join(".libra").join("shallow");
+    let shallow = fs::read_to_string(&shallow_path)
+        .expect("first shallow fetch must persist .libra/shallow metadata");
+    assert!(
+        shallow.lines().any(|line| line.trim() == pushed_commit),
+        "shallow metadata must contain the fetched boundary {pushed_commit}; got {shallow:?}"
+    );
+
+    let second = run_libra_command(&["fetch", "origin", "--depth", "1"], &repo_dir);
+    assert_cli_success(&second, "second fetch --depth 1 after shallow");
+}

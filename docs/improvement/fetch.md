@@ -56,5 +56,6 @@ fetch 基线上叠加一个用户决策：把 `fetch_repository(..., depth)` 已
 - `clone --depth` 已存在；`COMPATIBILITY.md` 与 `docs/commands/clone.md` 同步
   记为 `supported`。`clone --sparse` / `clone --recurse-submodules` 显式登记
   `unsupported`，链接 [`compatibility/declined.md`](compatibility/declined.md)。
-- 测试覆盖在 `tests/command/fetch_test.rs` 增量补齐 ≥3 条浅克隆用例（单分支
-  depth 1、`--all --depth N`、已 shallow 仓库幂等 fetch）。
+- 测试覆盖在 `tests/command/fetch_test.rs` 增量补齐浅克隆用例（单分支
+  depth 1、`--all --depth N`、full→shallow 幂等、shallow→shallow 幂等和
+  `.libra/shallow` boundary 持久化）。

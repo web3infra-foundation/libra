@@ -172,6 +172,42 @@ fn browser_controller_attach_submit_detach_roundtrip() -> Result<()> {
     session.shutdown()
 }
 
+/// Browser reloads re-attach with the same `clientId`. That path should renew
+/// the existing lease and keep the same writer token instead of treating the
+/// tab as a conflicting second browser.
+#[cfg(feature = "test-provider")]
+#[test]
+#[serial]
+fn browser_same_client_reconnect_renews_existing_lease() -> Result<()> {
+    let mut session = CodeSession::spawn(
+        CodeSessionOptions::new("browser-reconnect", fixture("basic_chat"))
+            .with_browser_control_loopback(),
+    )?;
+
+    let first_token = session.attach_browser("scenario-browser-reconnect")?;
+    session.wait_for_snapshot(Duration::from_secs(10), |snapshot| {
+        controller_kind(snapshot) == Some("browser")
+    })?;
+
+    let second_token = session.attach_browser("scenario-browser-reconnect")?;
+    assert_eq!(
+        first_token, second_token,
+        "same-client browser reconnect should renew the existing lease",
+    );
+
+    let (status, body) = session.browser_submit_message(&second_token, "/chat hello")?;
+    assert!(
+        status.is_success(),
+        "renewed browser token must stay writable, got {status}: {body}",
+    );
+    session.wait_for_snapshot(Duration::from_secs(10), |snapshot| {
+        status_eq(snapshot, "idle")
+            && transcript_contains(snapshot, "fake assistant: hello from the PTY harness")
+    })?;
+
+    session.shutdown()
+}
+
 /// `--browser-control` defaults to `off` for the harness's TUI fixture, so
 /// without `with_browser_control_loopback()` an attach must come back with
 /// `BROWSER_CONTROL_DISABLED` and the runtime stays controlled by the TUI.
@@ -190,6 +226,35 @@ fn browser_attach_rejected_when_control_disabled() -> Result<()> {
 
     let snapshot = session.snapshot()?;
     assert_ne!(controller_kind(&snapshot), Some("browser"));
+
+    session.shutdown()
+}
+
+/// Once a browser lease expires, the next attempted browser write should
+/// reject the stale token and publish the reclaimed TUI controller state.
+#[cfg(feature = "test-provider")]
+#[test]
+#[serial]
+fn browser_expired_controller_token_is_rejected_and_releases_snapshot() -> Result<()> {
+    let mut session = CodeSession::spawn(
+        CodeSessionOptions::new("browser-expired-token", fixture("basic_chat"))
+            .with_browser_control_loopback()
+            .with_lease_duration_ms(50),
+    )?;
+
+    let token = session.attach_browser("scenario-browser-expired-token")?;
+    session.wait_for_snapshot(Duration::from_secs(10), |snapshot| {
+        controller_kind(snapshot) == Some("browser")
+    })?;
+
+    std::thread::sleep(Duration::from_millis(100));
+    let (status, body) = session.browser_submit_message(&token, "/chat hello")?;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(error_code(&body), Some("CONTROLLER_CONFLICT"));
+
+    session.wait_for_snapshot(Duration::from_secs(10), |snapshot| {
+        controller_kind(snapshot) == Some("tui")
+    })?;
 
     session.shutdown()
 }

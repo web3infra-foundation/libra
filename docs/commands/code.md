@@ -60,12 +60,12 @@ When the TUI exits and Libra can derive the canonical thread ID, `libra code` pr
 
 | Value | Description | API Key Env | Base URL Override |
 |-------|-------------|-------------|-------------------|
-| `gemini` | Google Gemini (default: gemini-2.5-flash) | `GEMINI_API_KEY` | -- |
-| `openai` | OpenAI (default: gpt-4o-mini) | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
-| `anthropic` | Anthropic (default: claude-3.5-sonnet) | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
-| `deepseek` | DeepSeek | `DEEPSEEK_API_KEY` | -- |
-| `kimi` | Moonshot AI Kimi (default: kimi-k2.6) | `MOONSHOT_API_KEY` | `MOONSHOT_BASE_URL`, `--kimi-thinking` |
-| `zhipu` | Zhipu GLM (default: glm-5) | `ZHIPU_API_KEY` | `ZHIPU_BASE_URL` |
+| `gemini` | Google Gemini (default: gemini-2.5-flash) | `GEMINI_API_KEY` | `--api-base` |
+| `openai` | OpenAI (default: gpt-4o-mini) | `OPENAI_API_KEY` | `--api-base`, `OPENAI_BASE_URL` |
+| `anthropic` | Anthropic (default: claude-3.5-sonnet) | `ANTHROPIC_API_KEY` | `--api-base`, `ANTHROPIC_BASE_URL` |
+| `deepseek` | DeepSeek | `DEEPSEEK_API_KEY` | `--api-base` |
+| `kimi` | Moonshot AI Kimi (default: kimi-k2.6) | `MOONSHOT_API_KEY` | `--api-base`, `MOONSHOT_BASE_URL`, `--kimi-thinking` |
+| `zhipu` | Zhipu GLM (default: glm-5) | `ZHIPU_API_KEY` | `--api-base`, `ZHIPU_BASE_URL` |
 | `ollama` | Ollama (local models and direct Cloud API) | `OLLAMA_API_KEY` for direct Cloud API | `OLLAMA_BASE_URL`, `OLLAMA_THINK`, `OLLAMA_COMPACT_TOOLS`, `--api-base`, `--ollama-thinking`, or `--ollama-compact-tools` |
 | `codex` | Codex app-server | -- | `--codex-bin` / `--codex-port` |
 

@@ -273,7 +273,7 @@ agent.md 内部分工：
 - **Part A（Step 1.x / Step 2.x）**：Agent 子系统两步演进——单 Agent 基线补齐 + 三层 sub-agent 架构。Part A 的 `--resume` 章节聚焦 JSONL session 字节层（header + tail N 快速恢复 / append-only 崩溃恢复）
 - **Part B（Implementation Phase 0-5 + Wave 1A/1B/1C）**：`libra code` 的 Phase Workflow 状态机（Phase 0 Intent / Phase 1 Plan / Phase 2 Execution / Phase 3 Validation / Phase 4 Decision）、`Runtime` formal write 层、Snapshot / Event / Projection 对象模型、provider TaskExecutor、`--resume <thread_id>` 的 phase-aware 恢复合同。**Wave 1C claudecode 硬删除已完成（2026-05-02 baseline 验证：`src/internal/ai/claudecode/` 不存在，CLI 仅保留迁移提示）**
 - **Part C（Phase 0-6）**：Local TUI Automation Control——`--control` CLI / token + lease 鉴权 / HTTP control endpoints / redaction / audit。Part C 与 Part B 的 Implementation Phase 3 协同：Part C 的 `Automation` lease 是 Phase 3 真相源统一的子集
-- **`from_env() → resolve_env()` 改造**：归属 agent.md Part B Implementation Phase 5（Security / Permission / Diagnostics / Testing Hardening）；当前 6 个 provider（gemini / openai / anthropic / deepseek / zhipu / ollama 加上 kimi）仍在用 `from_env()`，是 Part B Phase 5 的待收口项
+- **`from_env() → resolve_env()` 改造**：归属 agent.md Part B Implementation Phase 5（Security / Permission / Diagnostics / Testing Hardening）。`libra code` TUI 与 Ollama headless web-only bootstrap 已切到 `ProviderFactory` + `--env-file` / process-env 解析；剩余收口项是 provider crate 公开 `from_env()` 构造器的保留策略，以及 vault/env 统一接入
 - agent.md 内部 Part A / Part B / Part C 的冲突，以 Part A Changelog 中最近一次明确修订为准
 
 ---
@@ -350,11 +350,9 @@ agent.md 内部分工：
 
 `config.md` 设计原则 #5 只说明这项改造**不属于 config 批次本身**；该 follow-up 现已并入 [agent.md](agent.md) Part B（原 `code.md`）的 Implementation Phase 5（Security / Permission / Diagnostics / Testing Hardening），不再作为"命令批次全部结束后再处理"的独立尾项。
 
-**2026-05-02 baseline 验证**：当前涉及 7 个 provider（gemini / openai / anthropic / deepseek / zhipu / ollama / kimi）的 `Client::from_env()` 入口仍在使用，对应文件：
-- `src/internal/ai/providers/{gemini,openai,anthropic,deepseek,zhipu,kimi}/client.rs::from_env()`
-- `src/internal/ai/providers/ollama/client.rs::from_env()`
+**2026-05-12 复核**：`libra code` TUI 的 direct provider bootstrap 已经通过 `ProviderFactory` 统一解析 API key、base URL 和 `OLLAMA_COMPACT_TOOLS`，并由 `build_helper_missing_api_key_errors_name_canonical_env_vars` / `build_helper_honors_cli_api_base_for_deepseek` 锁定缺 key 与 `--api-base` 行为。`--web-only --provider ollama` headless v0 也复用同一 ProviderFactory bootstrap。provider crate 中仍保留 `Client::from_env()` 作为程序化构造器或 legacy helper。
 
-实施时应与 `libra code` 的 provider bootstrap、vault/env 优先级、diagnostics 和 Runtime 启动路径一起收口，使 `vault.env.*` 配置对 AI provider 生效且不再与 `from_env()` 双轨并存。
+后续实施应聚焦：明确 provider crate 公开 `from_env()` 是否继续作为低层 API 保留，并把 `vault.env.*` 配置接入 AI provider bootstrap / diagnostics / Runtime 启动路径，避免 vault/env 与 process-env 长期双轨。
 
 ---
 

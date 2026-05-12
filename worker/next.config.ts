@@ -6,9 +6,6 @@ const nextConfig: NextConfig = {
   experimental: {
     typedRoutes: false,
   },
-  eslint: {
-    ignoreDuringBuilds: false,
-  },
   typescript: {
     ignoreBuildErrors: false,
   },

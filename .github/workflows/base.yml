@@ -179,6 +179,9 @@ jobs:
           command -v rg
           rg --version
 
+      - name: Check compatibility matrix drift
+        run: bash scripts/check_compat_matrix.sh
+
       - name: Run tests (L1 + L2 + L3)
         env:
           LIBRA_TEST_GITHUB_TOKEN: ${{ secrets.LIBRA_TEST_GITHUB_TOKEN }}

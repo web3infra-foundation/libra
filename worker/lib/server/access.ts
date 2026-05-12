@@ -171,10 +171,16 @@ async function verifyAccessJwtInner(
     false,
     ["verify"],
   );
-  const signed = new TextEncoder().encode(`${headerB64}.${payloadB64}`);
-  const sig = base64UrlToBytes(signatureB64);
+  const signed = toArrayBuffer(new TextEncoder().encode(`${headerB64}.${payloadB64}`));
+  const sig = toArrayBuffer(base64UrlToBytes(signatureB64));
   const ok = await crypto.subtle.verify("RSASSA-PKCS1-v1_5", cryptoKey, sig, signed);
   if (!ok) throw deny("Access JWT signature verification failed");
+}
+
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer as ArrayBuffer;
 }
 
 function deny(message: string): PublishApiError {

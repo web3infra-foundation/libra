@@ -101,7 +101,6 @@ use crate::{
                 TaskIntent, ToolLoopConfig,
                 profile::{AgentProfileRouter, load_profiles},
             },
-            client::CompletionClient,
             codex as agent_codex,
             commands::{CommandDispatcher, load_commands},
             completion::{
@@ -115,17 +114,8 @@ use crate::{
             projection::{ProjectionRebuilder, ProjectionResolver, ThreadBundle},
             prompt::{ContextMode, SystemPromptBuilder},
             providers::{
-                anthropic::CLAUDE_3_5_SONNET,
-                gemini::GEMINI_2_5_FLASH,
-                kimi::KIMI_K2_6,
-                // OllamaClient stays imported because the headless web
-                // runtime path (`build_non_codex_headless_runtime`) still
-                // constructs the client directly. The other provider Client
-                // aliases were dropped when the TUI dispatch migrated to
-                // `ProviderFactory`.
-                ollama::Client as OllamaClient,
-                openai::GPT_4O_MINI,
-                zhipu::GLM_5,
+                anthropic::CLAUDE_3_5_SONNET, gemini::GEMINI_2_5_FLASH, kimi::KIMI_K2_6,
+                openai::GPT_4O_MINI, zhipu::GLM_5,
             },
             runtime::{ToolBoundaryRuntime, TracingAuditSink},
             sandbox::{
@@ -1001,10 +991,6 @@ fn strip_inline_env_comment(value: &str) -> &str {
     value
 }
 
-fn provider_env_value(env_file: &CodeEnvFile, key: &str) -> Option<String> {
-    provider_env_value_with_lookup(env_file, key, |key| std::env::var(key).ok())
-}
-
 fn provider_env_value_with_lookup(
     env_file: &CodeEnvFile,
     key: &str,
@@ -1025,14 +1011,14 @@ fn provider_env_value_with_lookup(
 /// because it bypasses `AnyCompletionModel` entirely (managed app-server
 /// runtime).
 ///
-/// Env resolution flows through [`provider_env_value`] for **every** provider,
-/// not just Deepseek / Kimi as before. The precedence is `--env-file` first
-/// then process env (documented on `--env-file` itself), and applies to API
-/// keys, base URLs, and the boolean `OLLAMA_COMPACT_TOOLS` flag. Gemini /
-/// OpenAI / Anthropic / Zhipu used to read only from process env via
-/// `from_env()`; this widens them to consult `--env-file` first as well, so
-/// a value defined in the env-file now wins over a stale process-env value
-/// for those providers.
+/// Env resolution flows through [`provider_env_value_with_lookup`] for
+/// **every** provider, not just Deepseek / Kimi as before. The precedence is
+/// `--env-file` first then process env (documented on `--env-file` itself),
+/// and applies to API keys, base URLs, and the boolean `OLLAMA_COMPACT_TOOLS`
+/// flag. Gemini / OpenAI / Anthropic / Zhipu used to read only from process
+/// env via `from_env()`; this widens them to consult `--env-file` first as
+/// well, so a value defined in the env-file now wins over a stale process-env
+/// value for those providers.
 ///
 /// The function returns the resolved model name AND the effective provider
 /// name string so the caller can tag usage / UI metadata against the agent's
@@ -1053,6 +1039,21 @@ fn build_any_completion_model_for_args(
     args: &CodeArgs,
     env_file: &CodeEnvFile,
     working_dir: &std::path::Path,
+) -> CliResult<(
+    crate::internal::ai::providers::AnyCompletionModel,
+    String,
+    String,
+)> {
+    build_any_completion_model_for_args_with_lookup(args, env_file, working_dir, |key| {
+        std::env::var(key).ok()
+    })
+}
+
+fn build_any_completion_model_for_args_with_lookup(
+    args: &CodeArgs,
+    env_file: &CodeEnvFile,
+    working_dir: &std::path::Path,
+    env_lookup: impl Fn(&str) -> Option<String>,
 ) -> CliResult<(
     crate::internal::ai::providers::AnyCompletionModel,
     String,
@@ -1131,28 +1132,30 @@ fn build_any_completion_model_for_args(
 
     // 4. Resolve API key / base URL by provider id (string-keyed so the
     //    agent override flows through to env-var lookup).
+    let resolve_env = |key: &str| provider_env_value_with_lookup(env_file, key, &env_lookup);
+
     let api_key = match provider_id_str.as_str() {
-        provider_id::GEMINI => provider_env_value(env_file, "GEMINI_API_KEY"),
-        provider_id::OPENAI => provider_env_value(env_file, "OPENAI_API_KEY"),
-        provider_id::ANTHROPIC => provider_env_value(env_file, "ANTHROPIC_API_KEY"),
-        provider_id::DEEPSEEK => provider_env_value(env_file, "DEEPSEEK_API_KEY"),
-        provider_id::KIMI => provider_env_value(env_file, "MOONSHOT_API_KEY"),
-        provider_id::ZHIPU => provider_env_value(env_file, "ZHIPU_API_KEY"),
-        provider_id::OLLAMA => provider_env_value(env_file, "OLLAMA_API_KEY"),
+        provider_id::GEMINI => resolve_env("GEMINI_API_KEY"),
+        provider_id::OPENAI => resolve_env("OPENAI_API_KEY"),
+        provider_id::ANTHROPIC => resolve_env("ANTHROPIC_API_KEY"),
+        provider_id::DEEPSEEK => resolve_env("DEEPSEEK_API_KEY"),
+        provider_id::KIMI => resolve_env("MOONSHOT_API_KEY"),
+        provider_id::ZHIPU => resolve_env("ZHIPU_API_KEY"),
+        provider_id::OLLAMA => resolve_env("OLLAMA_API_KEY"),
         #[cfg(feature = "test-provider")]
         provider_id::FAKE => None,
         _ => None,
     };
 
+    let cli_api_base = args.api_base.clone();
     let api_base = match provider_id_str.as_str() {
-        provider_id::ANTHROPIC => provider_env_value(env_file, "ANTHROPIC_BASE_URL"),
-        provider_id::OPENAI => provider_env_value(env_file, "OPENAI_BASE_URL"),
-        provider_id::KIMI => provider_env_value(env_file, "MOONSHOT_BASE_URL"),
-        provider_id::ZHIPU => provider_env_value(env_file, "ZHIPU_BASE_URL"),
-        provider_id::OLLAMA => args
-            .api_base
-            .clone()
-            .or_else(|| provider_env_value(env_file, "OLLAMA_BASE_URL")),
+        provider_id::ANTHROPIC => cli_api_base.or_else(|| resolve_env("ANTHROPIC_BASE_URL")),
+        provider_id::OPENAI => cli_api_base.or_else(|| resolve_env("OPENAI_BASE_URL")),
+        provider_id::DEEPSEEK => cli_api_base,
+        provider_id::GEMINI => cli_api_base,
+        provider_id::KIMI => cli_api_base.or_else(|| resolve_env("MOONSHOT_BASE_URL")),
+        provider_id::ZHIPU => cli_api_base.or_else(|| resolve_env("ZHIPU_BASE_URL")),
+        provider_id::OLLAMA => cli_api_base.or_else(|| resolve_env("OLLAMA_BASE_URL")),
         _ => None,
     };
 
@@ -1173,7 +1176,7 @@ fn build_any_completion_model_for_args(
     // otherwise users with `OLLAMA_COMPACT_TOOLS=1` in their environment
     // would silently lose compact-schema mode after this migration.
     let ollama_compact_tools = args.ollama_compact_tools
-        || provider_env_value(env_file, "OLLAMA_COMPACT_TOOLS")
+        || resolve_env("OLLAMA_COMPACT_TOOLS")
             .map(|raw| {
                 matches!(
                     raw.trim().to_ascii_lowercase().as_str(),
@@ -1339,43 +1342,6 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
     let env_file = load_code_env_file(args.env_file.as_deref())?;
     let browser_control = resolve_browser_control_mode(&args)?;
     let control_runtime = prepare_control_runtime(&args, &working_dir).await?;
-
-    // Validate --api-base: only honored for Ollama via CLI flag. Other providers
-    // accept custom base URLs through their respective environment variables.
-    //
-    // The warning is keyed off `args.provider` because the agent override
-    // (OC-Phase 2 P2.4) is resolved later, inside the factory helper. When
-    // `--agent` is set we suppress the warning entirely — the effective
-    // provider may be Ollama via the agent's binding, in which case
-    // `--api-base` is meaningful, or it may be a non-Ollama provider that
-    // ignores the flag. Either way the user explicitly opted into the
-    // agent and is best served by silence here.
-    if args.agent.is_none()
-        && args.api_base.is_some()
-        && !matches!(args.provider, CodeProvider::Ollama | CodeProvider::Codex)
-    {
-        eprintln!(
-            "warning: --api-base is only honored for the ollama provider; \
-             use provider-specific env vars (e.g. OPENAI_BASE_URL) for others; ignoring"
-        );
-    } else if args.provider == CodeProvider::Ollama
-        && let Some(ref base_url) = args.api_base
-    {
-        match Url::parse(base_url) {
-            Ok(u) if u.scheme() == "http" || u.scheme() == "https" => {}
-            Ok(u) => {
-                return Err(CliError::command_usage(format!(
-                    "--api-base must use http or https (got {})",
-                    u.scheme()
-                )));
-            }
-            Err(e) => {
-                return Err(CliError::command_usage(format!(
-                    "--api-base is not a valid URL: {e}"
-                )));
-            }
-        }
-    }
 
     let task_intent = task_intent_for_context(args.context);
     // OC-Phase 2 P2.4: resolve `--agent <name>` once before any provider-
@@ -1938,12 +1904,10 @@ fn build_headless_tool_registry(working_dir: &Path) -> Arc<ToolRegistry> {
 /// in `docs/improvement/web.md`). Other non-Codex providers continue to
 /// receive the placeholder runtime until each provider's client is wired in.
 ///
-/// TODO(opencode OC-Phase 1+): converge this path on `ProviderFactory` so the
-/// headless and TUI flows share a single dispatch site. Today the headless
-/// flow still constructs the Ollama client directly, which means future
-/// non-Codex providers must be wired in twice (here and in
-/// [`build_any_completion_model_for_args`]) — a maintenance hazard the doc
-/// explicitly calls out as a divergence to fix.
+/// Ollama now reuses the same [`ProviderFactory`] bootstrap as TUI mode, so
+/// API-key/base-URL resolution stays in one place. Other non-Codex providers
+/// still fall back to the placeholder until the headless runtime has the
+/// provider-specific product contract and tests for them.
 async fn build_non_codex_headless_runtime(
     args: &CodeArgs,
     working_dir: &Path,
@@ -1951,28 +1915,8 @@ async fn build_non_codex_headless_runtime(
 ) -> CliResult<Option<Arc<CodeUiRuntimeHandle>>> {
     match args.provider {
         CodeProvider::Ollama => {
-            let mut client = if let Some(base_url) = &args.api_base {
-                OllamaClient::with_base_url(base_url)
-            } else {
-                OllamaClient::from_env()
-            };
-            if args.ollama_compact_tools {
-                client = client.with_compact_tool_schema(true);
-            }
-            if client.missing_required_cloud_api_key() {
-                return Err(CliError::auth(
-                    "OLLAMA_API_KEY is required when using Ollama Cloud directly (set --api-base https://ollama.com or OLLAMA_BASE_URL=https://ollama.com)",
-                ));
-            }
-            let model_name = match args.model.clone() {
-                Some(m) => m,
-                None => {
-                    return Err(CliError::command_usage(
-                        "--model is required when using --provider ollama (e.g. --model llama3.2)",
-                    ));
-                }
-            };
-            let model = client.completion_model(&model_name);
+            let (model, model_name, _) =
+                build_any_completion_model_for_args(args, &CodeEnvFile::default(), working_dir)?;
             Ok(Some(
                 build_headless_web_code_ui_runtime(
                     args,
@@ -3423,6 +3367,20 @@ fn validate_mode_args(args: &CodeArgs, _output: &OutputConfig) -> Result<(), Str
     if args.provider == CodeProvider::Codex && args.api_base.is_some() {
         return Err("--api-base is not supported with --provider=codex".to_string());
     }
+    if let Some(base_url) = args.api_base.as_deref() {
+        match Url::parse(base_url) {
+            Ok(u) if u.scheme() == "http" || u.scheme() == "https" => {}
+            Ok(u) => {
+                return Err(format!(
+                    "--api-base must use http or https (got {})",
+                    u.scheme()
+                ));
+            }
+            Err(e) => {
+                return Err(format!("--api-base is not a valid URL: {e}"));
+            }
+        }
+    }
 
     if args.provider != CodeProvider::Ollama && args.ollama_thinking.is_some() {
         return Err(
@@ -3547,9 +3505,17 @@ fn reject_non_tui_flags(args: &CodeArgs, mode: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::{
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
 
-    use tokio::sync::mpsc::unbounded_channel;
+    use axum::{Json, Router, routing::post};
+    use serde_json::{Value, json};
+    use tokio::{
+        net::TcpListener,
+        sync::{Mutex as AsyncMutex, mpsc::unbounded_channel},
+    };
 
     use super::*;
 
@@ -3591,6 +3557,61 @@ mod tests {
             plan_mode: None,
             goal: None,
         }
+    }
+
+    fn canned_openai_compat_response() -> Value {
+        json!({
+            "id": "test-completion",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "test-model",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "ok"
+                    },
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 1,
+                "completion_tokens": 1,
+                "total_tokens": 2
+            }
+        })
+    }
+
+    async fn start_chat_completions_stub() -> (
+        String,
+        Arc<AsyncMutex<Vec<Value>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let captured = Arc::new(AsyncMutex::new(Vec::new()));
+        let app = Router::new().route(
+            "/chat/completions",
+            post({
+                let captured = captured.clone();
+                move |Json(body): Json<Value>| {
+                    let captured = captured.clone();
+                    async move {
+                        captured.lock().await.push(body);
+                        Json(canned_openai_compat_response())
+                    }
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock provider listener");
+        let base_url = format!("http://{}", listener.local_addr().expect("local addr"));
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("mock provider server runs");
+        });
+        (base_url, captured, handle)
     }
 
     #[test]
@@ -4553,6 +4574,103 @@ no_cache_unknown_network = true
             msg.contains("anthropic"),
             "error must list the known provider ids: {msg}"
         );
+    }
+
+    #[test]
+    fn build_helper_missing_api_key_errors_name_canonical_env_vars() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cases: &[(CodeProvider, Option<&str>, Option<&str>, &str)] = &[
+            (CodeProvider::Gemini, None, None, "GEMINI_API_KEY"),
+            (CodeProvider::Openai, None, None, "OPENAI_API_KEY"),
+            (CodeProvider::Anthropic, None, None, "ANTHROPIC_API_KEY"),
+            (CodeProvider::Deepseek, None, None, "DEEPSEEK_API_KEY"),
+            (CodeProvider::Kimi, None, None, "MOONSHOT_API_KEY"),
+            (CodeProvider::Zhipu, None, None, "ZHIPU_API_KEY"),
+            (
+                CodeProvider::Ollama,
+                Some("llama3.2"),
+                Some("https://ollama.com"),
+                "OLLAMA_API_KEY",
+            ),
+        ];
+
+        for (provider, model, api_base, expected_env) in cases {
+            let mut args = base_args();
+            args.provider = *provider;
+            args.model = model.map(str::to_string);
+            args.api_base = api_base.map(str::to_string);
+            let err = build_any_completion_model_for_args_with_lookup(
+                &args,
+                &CodeEnvFile::default(),
+                tmp.path(),
+                |_| None,
+            )
+            .expect_err("missing api key path must fire");
+            let msg = err.to_string();
+            assert!(
+                msg.contains(expected_env),
+                "expected {expected_env} in missing-key error for {provider:?}, got: {msg}"
+            );
+            assert!(
+                msg.contains("is not set") || msg.contains("is required"),
+                "missing-key error should be readable and actionable for {provider:?}, got: {msg}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn build_helper_honors_cli_api_base_for_deepseek() {
+        let (base_url, captured, server) = start_chat_completions_stub().await;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut args = base_args();
+        args.provider = CodeProvider::Deepseek;
+        args.model = Some("deepseek-chat".to_string());
+        args.api_base = Some(base_url);
+        let mut env_file = CodeEnvFile::default();
+        env_file
+            .values
+            .insert("DEEPSEEK_API_KEY".to_string(), "test-key".to_string());
+
+        let (model, model_name, provider_id) =
+            build_any_completion_model_for_args(&args, &env_file, tmp.path())
+                .expect("DeepSeek model builds with API key and custom base URL");
+        assert_eq!(provider_id, "deepseek");
+        assert_eq!(model_name, "deepseek-chat");
+
+        let request = CompletionRequest::new(vec![crate::internal::ai::completion::Message::user(
+            "hello",
+        )]);
+        let _response = model
+            .completion(request)
+            .await
+            .expect("custom --api-base endpoint should receive the request");
+
+        let bodies = captured.lock().await;
+        assert_eq!(bodies.len(), 1, "expected exactly one provider POST");
+        assert_eq!(
+            bodies[0].get("model").and_then(|value| value.as_str()),
+            Some("deepseek-chat"),
+            "DeepSeek request should reach the CLI-provided --api-base endpoint"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn headless_ollama_reuses_provider_factory_bootstrap() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut args = base_args();
+        args.provider = CodeProvider::Ollama;
+        args.model = Some("llama3.2".to_string());
+
+        let runtime = build_non_codex_headless_runtime(&args, tmp.path(), false)
+            .await
+            .expect("headless Ollama should build through ProviderFactory")
+            .expect("Ollama is the supported non-Codex headless provider");
+        let snapshot = runtime.snapshot().await;
+
+        assert_eq!(snapshot.provider.provider, "ollama");
+        assert_eq!(snapshot.provider.mode.as_deref(), Some("web-headless"));
+        assert_eq!(snapshot.provider.model.as_deref(), Some("llama3.2"));
     }
 
     /// Scenario: `--provider gemini --model gpt-foo --agent planner`

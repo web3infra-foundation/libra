@@ -24,7 +24,7 @@ export class FakeD1 {
     publish_sync_runs: [],
   };
 
-  prepare(sql: string): D1PreparedStatement {
+  prepare(sql: string): FakePreparedStatement {
     return new FakePreparedStatement(this, sql);
   }
 }
@@ -54,6 +54,10 @@ class FakePreparedStatement {
   async all<T>(): Promise<{ results: T[]; success: true; meta: Record<string, unknown> }> {
     const rows = this.executeSelect();
     return { results: rows as T[], success: true, meta: {} };
+  }
+
+  async raw<T = unknown[]>(): Promise<T[]> {
+    return this.executeSelect().map((row) => Object.values(row) as T);
   }
 
   async run(): Promise<{ success: true; meta: Record<string, unknown> }> {
@@ -257,6 +261,8 @@ function sortBy(a: Row, b: Row, keys: readonly string[]): number {
     const av = a[key];
     const bv = b[key];
     if (av === bv) continue;
+    if (av === undefined) return -1;
+    if (bv === undefined) return 1;
     if (av === null) return -1;
     if (bv === null) return 1;
     return av < bv ? -1 : 1;

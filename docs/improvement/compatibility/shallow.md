@@ -8,15 +8,16 @@ C3（Audit P1）
 
 ### 已确认落地的基线
 - [`src/command/clone.rs`](../../../src/command/clone.rs) 已暴露 `--depth` 和 `--single-branch`（[clone.rs:81-89](../../../src/command/clone.rs#L81)）。
-- [`src/command/fetch.rs`](../../../src/command/fetch.rs) 内部 `fetch_repository(..., depth: Option<usize>)` 已支持 depth 参数（fetch.rs:135 附近），但 `FetchArgs` 仅暴露 `repository` / `refspec` / `--all` 三个字段，**未暴露 `--depth`**。
-- 第 5 批 [fetch.md](../fetch.md) 与 [`tests/command/fetch_test.rs`](../../../tests/command/fetch_test.rs) 已覆盖 fetch 顶层 JSON / machine / 错误码契约，但浅克隆相关的端到端用例缺失。
-- [`docs/commands/clone.md`](../../commands/clone.md) 已包含 `--depth` 示例与参数对比；C3 只需复核它与最终 `COMPATIBILITY.md` 表述一致，不需要重写 clone 文档。
-- [`docs/commands/fetch.md`](../../commands/fetch.md) 当前参数对比仍写 "Shallow fetch: Not supported"，C3 公开 `fetch --depth` 时必须同步更新该行。
+- [`src/command/fetch.rs`](../../../src/command/fetch.rs) 已暴露 `--depth <N>`，并透传到 `fetch_repository_with_result(..., depth)`。
+- `fetch` 会处理 upload-pack 返回的 `shallow` / `unshallow` 响应帧，把 shallow boundary 持久化到 `.libra/shallow`，并在后续浅 fetch negotiation 中发送现有 boundary。
+- 第 5 批 [fetch.md](../fetch.md) 与 [`tests/command/fetch_test.rs`](../../../tests/command/fetch_test.rs) 已覆盖 fetch 顶层 JSON / machine / 错误码契约；C3 又补齐浅 fetch 端到端用例。
+- [`docs/commands/clone.md`](../../commands/clone.md) 已包含 `--depth` 示例与参数对比，并与最终 `COMPATIBILITY.md` 表述一致。
+- [`docs/commands/fetch.md`](../../commands/fetch.md) 参数表已把 shallow fetch 标为 supported，并说明 `.libra/shallow` 元数据行为。
 - `clone --sparse` 和 `clone --recurse-submodules` 都**未暴露**；前者依赖内部 sparse-checkout reader，后者依赖 submodule（README 已声明不在产品边界）。
 
 ### 基于当前代码的 Review 结论
-- 内部能力（depth）已经存在但没有公开入口，造成"功能似乎存在但没人知道能不能用"的困境，正是审计 P1 的典型示例。
-- `clone --depth` 已存在且命令文档已有示例，但根 `COMPATIBILITY.md` 还没有成为事实表；与 `fetch --depth` 同步公开后才是完整对外契约。
+- `fetch --depth` 已从内部能力变成稳定公开入口；命令文档、兼容矩阵和测试均已同步。
+- `clone --depth` 已存在且命令文档已有示例；根 `COMPATIBILITY.md` 已把 clone shallow / single-branch 现状列入事实表。
 - `clone --sparse` 不应在本批强行加 CLI——若内部不支持，宁可在 `COMPATIBILITY.md` 标 `unsupported` 也不发明半成品 flag。
 
 ## 目标与非目标
@@ -121,11 +122,11 @@ libra clone https://github.com/user/repo --depth 1 --single-branch
 
 - [x] (v0.17.11) `cargo run -- fetch --help` 输出包含 `--depth <N>`，且不包含 "experimental" 字样。
 - [x] (v0.17.11) `cargo run -- fetch origin --depth 1` 对本地 remote 执行成功，并保持 fetch JSON envelope。
-- [ ] `.libra` 元数据持久化 shallow boundary 状态；当前代码只向 upload-pack 发送 deepen 请求并忽略 `shallow` / `unshallow` 响应帧，尚未把边界写入本地元数据。
+- [x] (v0.17.14) `.libra` 元数据持久化 shallow boundary 状态；fetch 解析 `shallow` / `unshallow` 响应帧，写入 `.libra/shallow`，并在后续 upload-pack negotiation 中发送现有 boundary。
 - [x] (v0.17.11) 集成测试覆盖单分支仓库 + `--depth 1`。
 - [x] (v0.17.11) 集成测试覆盖多分支仓库 + `--depth 3` + `--all`（depth 应作用于全部 remote）。
 - [x] (v0.17.11) 集成测试覆盖 full fetch 后再次 `fetch --depth 1` 幂等成功。
-- [ ] 已经是 shallow 边界的仓库再次 `fetch --depth 1` 幂等成功；当前测试明确把该方向列为未落地限制。
+- [x] (v0.17.14) 已经是 shallow 边界的仓库再次 `fetch --depth 1` 幂等成功；`test_fetch_shallow_then_shallow_is_idempotent` 覆盖首轮对象落盘、`.libra/shallow` 写入和二次浅 fetch。
 - [x] (v0.17.11) `COMPATIBILITY.md` 中 fetch / clone 行已更新。
 - [x] (v0.17.11) `cargo test --test command_test fetch_test` 全部通过。
 

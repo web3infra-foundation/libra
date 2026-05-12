@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cn, shortRevision } from "@/lib/utils";
 
 /**
- * Clone command panel — paper-navy port of `_design_reference/routes/publish.jsx`.
+ * Clone command panel for the publish UI.
  *
  * Renders four immutable command shapes built from server-supplied
  * site identity (clone domain, slug, repo id) and the currently
