@@ -3185,6 +3185,71 @@ mod tests {
     }
 
     #[derive(Clone)]
+    struct ImplementationTurnLimitModel {
+        tool_turns_before_final: usize,
+    }
+
+    impl CompletionModel for ImplementationTurnLimitModel {
+        type Response = ();
+
+        async fn completion(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+            let tool_result_count = request
+                .chat_history
+                .iter()
+                .filter_map(|message| match message {
+                    Message::User { content } => Some(
+                        content
+                            .iter()
+                            .filter(|item| matches!(item, UserContent::ToolResult(_)))
+                            .count(),
+                    ),
+                    _ => None,
+                })
+                .sum::<usize>();
+
+            if tool_result_count >= self.tool_turns_before_final {
+                return Ok(CompletionResponse {
+                    content: vec![AssistantContent::Text(Text {
+                        text: "done".to_string(),
+                    })],
+                    reasoning_content: None,
+                    raw_response: (),
+                });
+            }
+
+            let (id, name, arguments) = if tool_result_count == 0 {
+                (
+                    "call_turn_limit_patch".to_string(),
+                    "apply_patch".to_string(),
+                    serde_json::json!({
+                        "input": "*** Begin Patch\n*** Update File: src/main.rs\n@@\n-fn main() {}\n+fn main() { println!(\"turn limit\"); }\n*** End Patch"
+                    }),
+                )
+            } else {
+                let dir_name = format!("probe_{tool_result_count}");
+                (
+                    format!("call_turn_limit_list_{tool_result_count}"),
+                    "list_dir".to_string(),
+                    serde_json::json!({ "dir_path": dir_name }),
+                )
+            };
+
+            Ok(CompletionResponse {
+                content: vec![AssistantContent::ToolCall(ToolCall {
+                    id,
+                    name: name.clone(),
+                    function: Function { name, arguments },
+                })],
+                reasoning_content: None,
+                raw_response: (),
+            })
+        }
+    }
+
+    #[derive(Clone)]
     struct RetryAfterNoWriteModel;
 
     impl CompletionModel for RetryAfterNoWriteModel {
@@ -4034,6 +4099,126 @@ mod tests {
                 .iter()
                 .any(|issue| issue.contains("Tool loop exceeded maximum turns"))
         );
+    }
+
+    #[test]
+    fn default_executor_max_turns_use_task_kind_defaults_and_override() {
+        assert_eq!(
+            default_executor_max_turns(&implementation_task(), None),
+            DEFAULT_IMPLEMENTATION_MAX_TURNS
+        );
+        assert_eq!(
+            default_executor_max_turns(&analysis_task(), None),
+            DEFAULT_ANALYSIS_MAX_TURNS
+        );
+        assert_eq!(
+            default_executor_max_turns(&implementation_task(), Some(7)),
+            7
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_implementation_task_allows_final_text_on_last_default_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        for index in 1..DEFAULT_IMPLEMENTATION_MAX_TURNS {
+            std::fs::create_dir_all(dir.path().join(format!("probe_{index}"))).unwrap();
+        }
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        let mut registry = ToolRegistry::with_working_dir(dir.path().to_path_buf());
+        registry.register("apply_patch", Arc::new(ApplyPatchHandler));
+        registry.register("list_dir", Arc::new(ListDirHandler));
+        let registry = Arc::new(registry);
+        let config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig {
+                repeat_detection_window: Some(DEFAULT_IMPLEMENTATION_MAX_TURNS + 1),
+                repeat_warning_threshold: Some(usize::MAX),
+                repeat_abort_threshold: Some(usize::MAX),
+                ..ToolLoopConfig::default()
+            },
+            max_retries: 0,
+            backoff_seconds: 0,
+            working_dir: dir.path().to_path_buf(),
+            spec: spec(),
+            reviewer_preamble: None,
+            dagrs_resume_checkpoint_id: None,
+            observer: None,
+            workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
+        };
+
+        let result = execute_task(
+            &implementation_task(),
+            &ImplementationTurnLimitModel {
+                tool_turns_before_final: DEFAULT_IMPLEMENTATION_MAX_TURNS - 1,
+            },
+            &registry,
+            &config,
+        )
+        .await;
+
+        assert_eq!(result.status, TaskNodeStatus::Completed);
+        assert_eq!(result.agent_output.as_deref(), Some("done"));
+        assert_eq!(
+            result.tool_calls.len(),
+            DEFAULT_IMPLEMENTATION_MAX_TURNS - 1
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("src/main.rs")).unwrap(),
+            "fn main() { println!(\"turn limit\"); }\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_implementation_task_reports_default_turn_limit_in_agent_output() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        for index in 1..=DEFAULT_IMPLEMENTATION_MAX_TURNS {
+            std::fs::create_dir_all(dir.path().join(format!("probe_{index}"))).unwrap();
+        }
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        let mut registry = ToolRegistry::with_working_dir(dir.path().to_path_buf());
+        registry.register("apply_patch", Arc::new(ApplyPatchHandler));
+        registry.register("list_dir", Arc::new(ListDirHandler));
+        let registry = Arc::new(registry);
+        let config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig {
+                repeat_detection_window: Some(DEFAULT_IMPLEMENTATION_MAX_TURNS + 1),
+                repeat_warning_threshold: Some(usize::MAX),
+                repeat_abort_threshold: Some(usize::MAX),
+                ..ToolLoopConfig::default()
+            },
+            max_retries: 0,
+            backoff_seconds: 0,
+            working_dir: dir.path().to_path_buf(),
+            spec: spec(),
+            reviewer_preamble: None,
+            dagrs_resume_checkpoint_id: None,
+            observer: None,
+            workspace_baseline: None,
+            fuse_state: FuseProvisionState::default(),
+        };
+
+        let result = execute_task(
+            &implementation_task(),
+            &ImplementationTurnLimitModel {
+                tool_turns_before_final: DEFAULT_IMPLEMENTATION_MAX_TURNS + 1,
+            },
+            &registry,
+            &config,
+        )
+        .await;
+
+        assert_eq!(result.status, TaskNodeStatus::Failed);
+        let agent_output = result
+            .agent_output
+            .as_deref()
+            .expect("failed result should include the turn-limit reason");
+        assert!(
+            agent_output.contains("Tool loop exceeded maximum turns (48)"),
+            "unexpected agent_output: {agent_output}"
+        );
+        assert_eq!(result.tool_calls.len(), DEFAULT_IMPLEMENTATION_MAX_TURNS);
     }
 
     #[tokio::test]
