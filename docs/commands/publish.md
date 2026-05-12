@@ -2,15 +2,18 @@
 
 Prepare Libra's read-only Cloudflare Worker publish surface.
 
-Current implementation status in v0.17.13:
+Current implementation status in v0.17.51:
 
 - `libra publish init` materialises the embedded Worker template under
   `worker/` and records `.libra/publish/worker-template-manifest.json`.
-- `libra publish sync`, `status`, `deploy`, and `unpublish` are
-  registered CLI surfaces, but they currently return
-  `LBR-UNSUPPORTED-001` with a pointer to `docs/improvement/publish.md`.
-- The full code/ref/AI snapshot upload, Worker deploy, status reporting,
-  and unpublish flows remain tracked in `docs/improvement/publish.md`.
+- `libra publish status` reports the local Worker template state as
+  `missing`, `current`, `modified`, `outdated`, or `conflicted`.
+- `libra publish sync`, `deploy`, and `unpublish` are registered CLI
+  surfaces, but they currently return `LBR-UNSUPPORTED-001` with a
+  pointer to `docs/improvement/publish.md`.
+- The full code/ref/AI snapshot upload, cloud status comparison, Worker
+  deploy, and unpublish flows remain tracked in
+  `docs/improvement/publish.md`.
 
 ## Synopsis
 
@@ -84,8 +87,24 @@ The flags are reserved for the Phase 4 sync plan in
 libra publish status [--json]
 ```
 
-Current behavior: this subcommand is not implemented. It exits with
-`LBR-UNSUPPORTED-001` and does not inspect Cloudflare D1/R2 state.
+Current behavior: this subcommand inspects only the local Worker
+template and manifest. It does not inspect Cloudflare D1/R2 state.
+
+The status is:
+
+- `missing`: the manifest or one or more embedded template files are
+  absent.
+- `current`: every embedded template file matches the current Libra
+  template and the manifest exists.
+- `modified`: a managed template file differs from both the current
+  embedded template and the manifest baseline.
+- `outdated`: a managed template file still matches the manifest
+  baseline, but Libra embeds a newer template version.
+- `conflicted`: the `worker/` root or a managed template path is a
+  symlink or non-file path.
+
+`--json` returns counts for total, current, missing, modified,
+outdated, and conflicted files.
 
 ### `libra publish deploy`
 

@@ -8,7 +8,8 @@ fn publish_reserved_subcommands_return_unsupported_without_clap_json_panic() {
     for args in [
         &["publish", "sync"][..],
         &["--json", "publish", "sync"][..],
-        &["publish", "status"][..],
+        &["publish", "deploy"][..],
+        &["publish", "unpublish"][..],
     ] {
         let output = run_libra_command(args, repo.path());
         assert!(
@@ -28,4 +29,23 @@ fn publish_reserved_subcommands_return_unsupported_without_clap_json_panic() {
             "{args:?} should explain that publish plumbing is not ready: {stderr}"
         );
     }
+}
+
+#[test]
+fn publish_status_reports_local_template_state() {
+    let repo = tempfile::tempdir().expect("temp repo");
+    init_repo_via_cli(repo.path());
+
+    let output = run_libra_command(&["--json", "publish", "status"], repo.path());
+
+    assert!(
+        output.status.success(),
+        "publish status should inspect the local template state: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\"status\": \"missing\""),
+        "status before publish init should be missing: {stdout}"
+    );
 }

@@ -2,9 +2,9 @@
 //!
 //! Per `docs/improvement/publish.md`, the publish CLI surface is
 //! `init` / `sync` / `status` / `deploy` / `unpublish`. `init` now
-//! materialises the embedded Worker template; the remaining subcommands
-//! still surface a clear "not yet implemented" message until their
-//! sync/deploy plumbing ships.
+//! materialises the embedded Worker template, and `status` reports local
+//! template drift. The remaining subcommands still surface a clear "not
+//! yet implemented" message until their sync/deploy plumbing ships.
 //!
 //! Each subcommand returns a `CliInvalidArguments`-style error
 //! pointing the user at:
@@ -28,7 +28,7 @@ use std::{
 
 use clap::{Parser, Subcommand};
 use ring::digest::{SHA256, digest};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     internal::publish::worker_template::{
@@ -42,7 +42,7 @@ use crate::{
 };
 
 #[derive(Parser, Debug)]
-#[command(about = "Materialise the read-only Cloudflare Worker template")]
+#[command(about = "Materialise and inspect the read-only Cloudflare Worker template")]
 pub struct PublishArgs {
     #[command(subcommand)]
     pub command: PublishCommand,
@@ -206,7 +206,14 @@ pub async fn execute_safe(args: PublishArgs, output: &OutputConfig) -> CliResult
             output::emit(&result, output)
         }
         PublishCommand::Sync(_) => unsupported_publish_subcommand("sync"),
-        PublishCommand::Status(_) => unsupported_publish_subcommand("status"),
+        PublishCommand::Status(_) => {
+            let repo_root = util::try_working_dir().map_err(|source| {
+                CliError::fatal(format!("failed to resolve Libra repository root: {source}"))
+                    .with_stable_code(StableErrorCode::RepoStateInvalid)
+            })?;
+            let result = run_publish_status_at_root(&repo_root)?;
+            output::emit(&result, output)
+        }
         PublishCommand::Deploy(_) => unsupported_publish_subcommand("deploy"),
         PublishCommand::Unpublish(_) => unsupported_publish_subcommand("unpublish"),
     }
@@ -220,20 +227,20 @@ struct TemplateFile {
     render_policy: RenderPolicy,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WorkerTemplateManifest {
     schema_version: u32,
-    template_version: &'static str,
-    worker_dir: &'static str,
+    template_version: String,
+    worker_dir: String,
     files: Vec<WorkerTemplateManifestFile>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WorkerTemplateManifestFile {
     path: String,
-    render_policy: &'static str,
+    render_policy: String,
     sha256: String,
 }
 
@@ -257,6 +264,63 @@ impl CommandOutput for PublishInitOutput {
         writeln!(writer, "  manifest: {}", self.manifest_path)?;
         writeln!(writer, "  files written: {}", self.files_written)?;
         writeln!(writer, "  files current: {}", self.files_current)?;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum WorkerTemplateStatus {
+    Missing,
+    Current,
+    Modified,
+    Outdated,
+    Conflicted,
+}
+
+impl WorkerTemplateStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::Current => "current",
+            Self::Modified => "modified",
+            Self::Outdated => "outdated",
+            Self::Conflicted => "conflicted",
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishStatusOutput {
+    worker_dir: String,
+    manifest_path: String,
+    template_version: &'static str,
+    status: WorkerTemplateStatus,
+    files_total: usize,
+    files_current: usize,
+    files_missing: usize,
+    files_modified: usize,
+    files_outdated: usize,
+    files_conflicted: usize,
+}
+
+impl CommandOutput for PublishStatusOutput {
+    fn render_human(&self, writer: &mut dyn Write, output: &OutputConfig) -> io::Result<()> {
+        if output.quiet {
+            return Ok(());
+        }
+        writeln!(writer, "Publish Worker template status")?;
+        writeln!(writer, "  status: {}", self.status.as_str())?;
+        writeln!(writer, "  worker: {}", self.worker_dir)?;
+        writeln!(writer, "  manifest: {}", self.manifest_path)?;
+        writeln!(writer, "  template version: {}", self.template_version)?;
+        writeln!(writer, "  files total: {}", self.files_total)?;
+        writeln!(writer, "  files current: {}", self.files_current)?;
+        writeln!(writer, "  files missing: {}", self.files_missing)?;
+        writeln!(writer, "  files modified: {}", self.files_modified)?;
+        writeln!(writer, "  files outdated: {}", self.files_outdated)?;
+        writeln!(writer, "  files conflicted: {}", self.files_conflicted)?;
         Ok(())
     }
 }
@@ -300,13 +364,13 @@ fn run_publish_init_at_root(repo_root: &Path, _args: &InitArgs) -> CliResult<Pub
 
     let manifest = WorkerTemplateManifest {
         schema_version: WORKER_TEMPLATE_MANIFEST_SCHEMA_VERSION,
-        template_version: env!("CARGO_PKG_VERSION"),
-        worker_dir: "worker",
+        template_version: env!("CARGO_PKG_VERSION").to_string(),
+        worker_dir: "worker".to_string(),
         files: files
             .iter()
             .map(|file| WorkerTemplateManifestFile {
                 path: file.path.clone(),
-                render_policy: render_policy_name(file.render_policy),
+                render_policy: render_policy_name(file.render_policy).to_string(),
                 sha256: file.sha256.clone(),
             })
             .collect(),
@@ -340,6 +404,121 @@ fn run_publish_init_at_root(repo_root: &Path, _args: &InitArgs) -> CliResult<Pub
         files_written,
         files_current,
     })
+}
+
+fn run_publish_status_at_root(repo_root: &Path) -> CliResult<PublishStatusOutput> {
+    let files = collect_worker_template_files()?;
+    let worker_dir = repo_root.join("worker");
+    let manifest_path = repo_root.join(WORKER_TEMPLATE_MANIFEST_PATH);
+    let manifest = read_worker_template_manifest(&manifest_path)?;
+    let manifest_hashes: BTreeMap<&str, &str> = manifest
+        .as_ref()
+        .map(|manifest| {
+            manifest
+                .files
+                .iter()
+                .map(|file| (file.path.as_str(), file.sha256.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut files_current = 0usize;
+    let mut files_missing = 0usize;
+    let mut files_modified = 0usize;
+    let mut files_outdated = 0usize;
+    let mut files_conflicted = 0usize;
+
+    for file in &files {
+        if first_existing_symlink_path(&worker_dir, &file.path)?.is_some() {
+            files_conflicted += 1;
+            continue;
+        }
+
+        let destination = worker_dir.join(&file.path);
+        let metadata = match fs::metadata(&destination) {
+            Ok(metadata) => metadata,
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                files_missing += 1;
+                continue;
+            }
+            Err(source) => {
+                return Err(CliError::io(format!(
+                    "failed to inspect Worker template file '{}': {source}",
+                    destination.display()
+                )));
+            }
+        };
+        if !metadata.is_file() {
+            files_conflicted += 1;
+            continue;
+        }
+
+        let existing = fs::read(&destination).map_err(|source| {
+            CliError::io(format!(
+                "failed to read existing Worker template file '{}': {source}",
+                destination.display()
+            ))
+        })?;
+        let existing_sha = hex::encode(digest(&SHA256, &existing).as_ref());
+        if existing_sha == file.sha256 {
+            files_current += 1;
+        } else if manifest_hashes
+            .get(file.path.as_str())
+            .is_some_and(|hash| *hash == existing_sha)
+        {
+            files_outdated += 1;
+        } else {
+            files_modified += 1;
+        }
+    }
+
+    let status = if files_conflicted > 0 {
+        WorkerTemplateStatus::Conflicted
+    } else if files_modified > 0 {
+        WorkerTemplateStatus::Modified
+    } else if files_outdated > 0 {
+        WorkerTemplateStatus::Outdated
+    } else if files_missing > 0 || manifest.is_none() {
+        WorkerTemplateStatus::Missing
+    } else {
+        WorkerTemplateStatus::Current
+    };
+
+    Ok(PublishStatusOutput {
+        worker_dir: "worker".to_string(),
+        manifest_path: WORKER_TEMPLATE_MANIFEST_PATH.to_string(),
+        template_version: env!("CARGO_PKG_VERSION"),
+        status,
+        files_total: files.len(),
+        files_current,
+        files_missing,
+        files_modified,
+        files_outdated,
+        files_conflicted,
+    })
+}
+
+fn read_worker_template_manifest(path: &Path) -> CliResult<Option<WorkerTemplateManifest>> {
+    let contents = match fs::read(path) {
+        Ok(contents) => contents,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(CliError::io(format!(
+                "failed to read Worker template manifest '{}': {source}",
+                path.display()
+            )));
+        }
+    };
+
+    serde_json::from_slice(&contents)
+        .map(Some)
+        .map_err(|source| {
+            CliError::fatal(format!(
+                "failed to parse Worker template manifest '{}': {source}",
+                path.display()
+            ))
+            .with_stable_code(StableErrorCode::RepoStateInvalid)
+        })
 }
 
 fn collect_worker_template_files() -> CliResult<Vec<TemplateFile>> {
@@ -726,6 +905,88 @@ mod tests {
     }
 
     #[test]
+    fn publish_status_reports_missing_before_init() {
+        let temp = tempfile::tempdir().expect("temp dir must be created");
+
+        let output = run_publish_status_at_root(temp.path())
+            .expect("status should inspect missing template");
+
+        assert_eq!(output.status, WorkerTemplateStatus::Missing);
+        assert_eq!(output.files_current, 0);
+        assert!(output.files_missing > 0);
+    }
+
+    #[test]
+    fn publish_status_reports_current_after_init() {
+        let temp = tempfile::tempdir().expect("temp dir must be created");
+        run_publish_init_at_root(temp.path(), &default_init_args())
+            .expect("publish init must materialize the template");
+
+        let output =
+            run_publish_status_at_root(temp.path()).expect("status should inspect template");
+
+        assert_eq!(output.status, WorkerTemplateStatus::Current);
+        assert_eq!(output.files_missing, 0);
+        assert_eq!(output.files_modified, 0);
+        assert_eq!(output.files_outdated, 0);
+        assert_eq!(output.files_conflicted, 0);
+        assert_eq!(output.files_current, output.files_total);
+    }
+
+    #[test]
+    fn publish_status_reports_modified_template_file() {
+        let temp = tempfile::tempdir().expect("temp dir must be created");
+        run_publish_init_at_root(temp.path(), &default_init_args())
+            .expect("publish init must materialize the template");
+        fs::write(
+            temp.path().join("worker/package.json"),
+            b"{\"custom\":true}\n",
+        )
+        .expect("custom package.json must be writable");
+
+        let output =
+            run_publish_status_at_root(temp.path()).expect("status should inspect template");
+
+        assert_eq!(output.status, WorkerTemplateStatus::Modified);
+        assert_eq!(output.files_modified, 1);
+    }
+
+    #[test]
+    fn publish_status_reports_outdated_template_file() {
+        let temp = tempfile::tempdir().expect("temp dir must be created");
+        run_publish_init_at_root(temp.path(), &default_init_args())
+            .expect("publish init must materialize the template");
+        let old_package = b"{\"old\":true}\n";
+        fs::write(temp.path().join("worker/package.json"), old_package)
+            .expect("old package.json must be writable");
+
+        let manifest_path = temp.path().join(WORKER_TEMPLATE_MANIFEST_PATH);
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("manifest must be readable"))
+                .expect("manifest must be valid JSON");
+        let old_sha = hex::encode(digest(&SHA256, old_package).as_ref());
+        let files = manifest["files"]
+            .as_array_mut()
+            .expect("manifest files must be an array");
+        let package = files
+            .iter_mut()
+            .find(|file| file["path"] == "package.json")
+            .expect("manifest must contain package.json");
+        package["sha256"] = Value::String(old_sha);
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).expect("manifest must serialize"),
+        )
+        .expect("manifest must be writable");
+
+        let output =
+            run_publish_status_at_root(temp.path()).expect("status should inspect template");
+
+        assert_eq!(output.status, WorkerTemplateStatus::Outdated);
+        assert_eq!(output.files_outdated, 1);
+    }
+
+    #[test]
     fn publish_init_refuses_to_overwrite_modified_template_file() {
         let temp = tempfile::tempdir().expect("temp dir must be created");
         let worker_dir = temp.path().join("worker");
@@ -776,5 +1037,22 @@ mod tests {
             !outside.join("package.json").exists(),
             "publish init must not write template files through a worker symlink"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publish_status_reports_worker_symlink_conflict() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("temp dir must be created");
+        let outside = temp.path().join("outside");
+        fs::create_dir(&outside).expect("outside dir must be created");
+        symlink(&outside, temp.path().join("worker")).expect("worker symlink must be created");
+
+        let output =
+            run_publish_status_at_root(temp.path()).expect("status should inspect symlink");
+
+        assert_eq!(output.status, WorkerTemplateStatus::Conflicted);
+        assert!(output.files_conflicted > 0);
     }
 }
