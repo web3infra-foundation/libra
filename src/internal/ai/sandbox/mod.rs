@@ -978,6 +978,44 @@ pub async fn run_shell_command_with_approval(
                 bypass_sandbox: true
             }
         );
+    if first_attempt_is_sandboxed
+        && let Some(reason) =
+            prefer_strict_sandbox_fallback_reason(sandbox.as_ref(), sandbox_runtime.as_ref())?
+    {
+        let Some(approval_ctx) = approval.as_ref() else {
+            return Err(format!(
+                "{reason}; no approval channel is available to confirm the sandbox downgrade"
+            ));
+        };
+        if matches!(approval_ctx.policy, AskForApproval::Never) {
+            return Err(format!(
+                "{reason}; approval policy is never, so Libra cannot confirm the sandbox downgrade"
+            ));
+        }
+        let decision = request_uncached_exec_approval(
+            approval_ctx,
+            ExecApprovalPrompt {
+                call_id: &call_id,
+                command: &command,
+                cwd: &cwd,
+                reason: Some(reason),
+                sandbox_policy: sandbox.as_ref().map(|s| &s.policy),
+                sandbox_permissions: SandboxPermissions::RequireEscalated,
+                is_retry: true,
+            },
+            Some("sandbox fallback approvals are not cached".to_string()),
+        )
+        .await;
+
+        if !decision.is_approved() {
+            match decision {
+                ReviewDecision::Denied => return Err("rejected by user".to_string()),
+                ReviewDecision::Abort => return Err("aborted by user".to_string()),
+                _ => {}
+            }
+        }
+    }
+
     let first_attempt_sandbox = if first_attempt_is_sandboxed {
         sandbox.clone()
     } else {
@@ -1282,6 +1320,53 @@ fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
     }
 }
 
+fn prefer_strict_sandbox_fallback_reason(
+    sandbox: Option<&ToolSandboxContext>,
+    sandbox_runtime: Option<&SandboxRuntimeConfig>,
+) -> Result<Option<String>, String> {
+    let Some(context) = sandbox else {
+        return Ok(None);
+    };
+    if context.permissions.requires_escalated_permissions()
+        || !sandbox_policy_needs_internal_backend(&context.policy)
+    {
+        return Ok(None);
+    }
+
+    let enforcement = resolve_sandbox_enforcement(sandbox_runtime)?;
+    if enforcement != SandboxEnforcement::PreferStrict {
+        return Ok(None);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let linux_sandbox_exe = sandbox_runtime
+            .and_then(|config| config.linux_sandbox_exe.clone())
+            .or_else(|| std::env::var_os("LIBRA_LINUX_SANDBOX_EXE").map(PathBuf::from));
+        if linux_sandbox_exe.is_none() {
+            return Ok(Some(
+                "sandbox enforcement is prefer_strict, but Linux sandbox helper is not configured and the built-in bwrap sandbox is not available yet; approve to run outside Libra's internal sandbox".to_string(),
+            ));
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        return Ok(Some(
+            "sandbox enforcement is prefer_strict, but this platform has no supported internal sandbox backend for the selected policy; approve to run outside Libra's internal sandbox".to_string(),
+        ));
+    }
+
+    Ok(None)
+}
+
+fn sandbox_policy_needs_internal_backend(policy: &SandboxPolicy) -> bool {
+    matches!(
+        policy,
+        SandboxPolicy::ReadOnly | SandboxPolicy::WorkspaceWrite { .. }
+    )
+}
+
 fn resolve_sandbox_enforcement(
     sandbox_runtime: Option<&SandboxRuntimeConfig>,
 ) -> Result<SandboxEnforcement, String> {
@@ -1345,6 +1430,45 @@ async fn request_exec_approval(
         },
     )
     .await
+}
+
+async fn request_uncached_exec_approval(
+    ctx: &ToolApprovalContext,
+    request: ExecApprovalPrompt<'_>,
+    cache_disabled_reason: Option<String>,
+) -> ReviewDecision {
+    let ExecApprovalPrompt {
+        call_id,
+        command,
+        cwd,
+        reason,
+        sandbox_policy,
+        sandbox_permissions,
+        is_retry,
+    } = request;
+    let (sandbox_label, network_access, writable_roots) =
+        approval_request_context(sandbox_policy, cwd, sandbox_permissions, is_retry);
+    let (response_tx, response_rx) = oneshot::channel();
+    if ctx
+        .request_tx
+        .send(ExecApprovalRequest {
+            call_id: call_id.to_string(),
+            command: command.to_string(),
+            cwd: cwd.to_path_buf(),
+            reason,
+            is_retry,
+            sandbox_label,
+            network_access,
+            writable_roots,
+            cache_disabled_reason,
+            response_tx,
+        })
+        .is_err()
+    {
+        return ReviewDecision::Denied;
+    }
+
+    response_rx.await.unwrap_or(ReviewDecision::Denied)
 }
 
 struct ExecApprovalPrompt<'a> {
@@ -1704,6 +1828,8 @@ async fn collect_stream(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    use serial_test::serial;
     use tokio::sync::mpsc::error::TryRecvError;
 
     use super::*;
@@ -2176,6 +2302,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn uncached_exec_approval_ignores_allow_all_command_cache() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let store = Arc::new(tokio::sync::Mutex::new(ApprovalStore::default()));
+        store.lock().await.approve_all_commands();
+        let ctx = ToolApprovalContext {
+            policy: AskForApproval::OnRequest,
+            request_tx: tx,
+            store,
+            scope_key_prefix: None,
+            approval_ttl: DEFAULT_APPROVAL_TTL,
+            cache_policy: ApprovalCachePolicy::default(),
+        };
+
+        let responder = tokio::spawn(async move {
+            let request = rx.recv().await.expect("uncached approval request expected");
+            assert_eq!(
+                request.cache_disabled_reason.as_deref(),
+                Some("sandbox fallback approvals are not cached")
+            );
+            let _ = request.response_tx.send(ReviewDecision::Denied);
+        });
+
+        let decision = request_uncached_exec_approval(
+            &ctx,
+            ExecApprovalPrompt {
+                call_id: "call-uncached",
+                command: "touch generated.txt",
+                cwd: Path::new("/tmp/workspace"),
+                reason: Some("sandbox fallback requires confirmation".to_string()),
+                sandbox_policy: None,
+                sandbox_permissions: SandboxPermissions::RequireEscalated,
+                is_retry: true,
+            },
+            Some("sandbox fallback approvals are not cached".to_string()),
+        )
+        .await;
+
+        responder.await.expect("responder task failed");
+        assert_eq!(decision, ReviewDecision::Denied);
+    }
+
+    #[tokio::test]
     async fn allow_all_policy_runs_dangerous_shell_without_prompt() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let store = Arc::new(tokio::sync::Mutex::new(ApprovalStore::default()));
@@ -2251,6 +2419,89 @@ mod tests {
             rx.try_recv(),
             Err(TryRecvError::Empty | TryRecvError::Disconnected)
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[serial(sandbox_env)]
+    async fn prefer_strict_missing_linux_helper_requires_fallback_approval() {
+        let _env_guard = EnvVarGuard::unset("LIBRA_LINUX_SANDBOX_EXE");
+        let temp = tempfile::tempdir().expect("tempdir for prefer-strict fallback test");
+        let marker = temp.path().join("should-not-run");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = ToolApprovalContext {
+            policy: AskForApproval::OnRequest,
+            request_tx: tx,
+            store: Arc::new(tokio::sync::Mutex::new(ApprovalStore::default())),
+            scope_key_prefix: None,
+            approval_ttl: DEFAULT_APPROVAL_TTL,
+            cache_policy: ApprovalCachePolicy::default(),
+        };
+
+        let run = tokio::spawn({
+            let cwd = temp.path().to_path_buf();
+            async move {
+                run_shell_command_with_approval(ShellCommandRequest {
+                    call_id: "call-prefer-strict-fallback".to_string(),
+                    command: "touch should-not-run".to_string(),
+                    cwd: cwd.clone(),
+                    timeout_ms: Some(5_000),
+                    max_output_bytes: 16 * 1024,
+                    sandbox: Some(ToolSandboxContext {
+                        policy: SandboxPolicy::WorkspaceWrite {
+                            writable_roots: vec![cwd],
+                            network_access: false,
+                            exclude_tmpdir_env_var: false,
+                            exclude_slash_tmp: false,
+                        },
+                        permissions: SandboxPermissions::UseDefault,
+                    }),
+                    sandbox_runtime: Some(SandboxRuntimeConfig {
+                        enforcement: SandboxEnforcement::PreferStrict,
+                        ..SandboxRuntimeConfig::default()
+                    }),
+                    approval: Some(ctx),
+                    justification: None,
+                    safety_decision: None,
+                })
+                .await
+            }
+        });
+
+        let request = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("prefer-strict fallback approval should be requested")
+            .expect("approval channel should stay open");
+        assert_eq!(request.command, "touch should-not-run");
+        assert_eq!(request.sandbox_label, "outside sandbox");
+        assert!(request.is_retry);
+        assert!(
+            request
+                .reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Linux sandbox helper is not configured"),
+            "unexpected reason: {:?}",
+            request.reason
+        );
+        assert_eq!(
+            request.cache_disabled_reason.as_deref(),
+            Some("sandbox fallback approvals are not cached")
+        );
+        request
+            .response_tx
+            .send(ReviewDecision::Denied)
+            .expect("approval receiver should be active");
+
+        let error = run
+            .await
+            .expect("prefer-strict run task should not panic")
+            .expect_err("denying fallback approval should stop execution");
+        assert_eq!(error, "rejected by user");
+        assert!(
+            !marker.exists(),
+            "command must not run after fallback approval is denied"
+        );
     }
 
     #[tokio::test]
@@ -2478,6 +2729,41 @@ mod tests {
             writable_roots: vec![cwd.to_path_buf()],
             cache_disabled_reason,
             response_tx,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl EnvVarGuard {
+        fn unset(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: this test helper is only used from tests serialized by
+            // `#[serial(sandbox_env)]`, so no sibling test mutates this env var
+            // concurrently.
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self { key, previous }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: the paired test is serialized by `#[serial(sandbox_env)]`,
+            // so restoring the process env cannot race with another mutation.
+            unsafe {
+                if let Some(previous) = &self.previous {
+                    std::env::set_var(self.key, previous);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
         }
     }
 }

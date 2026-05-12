@@ -9,7 +9,7 @@ AI Agent 子系统专项计划，与 [agent.md](agent.md) Part B 并列。两者
 
 ## Context
 
-AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击面最集中的入口：提示词注入、恶意 MCP server、失控的 provider 调用都可能通过 Shell tool 直达宿主机。当前 Libra 已经具备多档 `SandboxPolicy`、`SandboxEnforcement::Required`、Seatbelt 策略拼装、macOS 敏感路径拒读、Linux 外部 helper、sandbox 子进程 `setsid()`、审批审计、危险命令解析、危险 writable root 拒绝、每命令 0o700 私有 tmp 清理与 `libra sandbox status` 自检（见 [src/internal/ai/sandbox/](../../src/internal/ai/sandbox/)），但相较 Claude Code 官方公开的 Bubblewrap 方案仍有若干关键缺口，包括：**Linux 沙箱默认仍是 best-effort，未配置外部二进制时只有 `Required` 会拒绝降级**、**Linux bwrap 敏感路径遮蔽尚未落地**、**内建 bwrap `--new-session` 尚未落地**、**无内建 bwrap 直调**、**网络三态 / allowlist / proxy 尚未落地**。
+AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击面最集中的入口：提示词注入、恶意 MCP server、失控的 provider 调用都可能通过 Shell tool 直达宿主机。当前 Libra 已经具备多档 `SandboxPolicy`、`SandboxEnforcement::{Required, PreferStrict, BestEffort}`、Seatbelt 策略拼装、macOS 敏感路径拒读、Linux 外部 helper、sandbox 子进程 `setsid()`、审批审计、危险命令解析、危险 writable root 拒绝、每命令 0o700 私有 tmp 清理与 `libra sandbox status` 自检（见 [src/internal/ai/sandbox/](../../src/internal/ai/sandbox/)），但相较 Claude Code 官方公开的 Bubblewrap 方案仍有若干关键缺口，包括：**Linux 沙箱默认仍是 best-effort 兼容模式，`Required` 会拒绝降级，`PreferStrict` 会在 helper 缺失时要求审批确认后才允许裸跑**、**Linux bwrap 敏感路径遮蔽尚未落地**、**内建 bwrap `--new-session` 尚未落地**、**无内建 bwrap 直调**、**网络三态 / allowlist / proxy 尚未落地**。
 
 本计划对齐 Claude Code 官方沙箱文档（`code.claude.com/docs/en/sandboxing`）与 Bubblewrap 工程实践，目标是把 Libra 在 AI Agent 失控场景下的实际爆炸半径降到与 Claude Code 相当的水平，并保证改动与 [agent.md](agent.md) Part B 的 Runtime 正式写入层兼容。**网络服务访问采取默认拒绝（default deny）策略**：沙箱内除 loopback 外的一切出站连接默认被 OS 层阻断，只能通过显式白名单放行。
 
@@ -22,14 +22,14 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 
 ### 审计结论
 
-- **阶段 1、3、4 继续收口，阶段 5 与阶段 6 已收口，阶段 2、7 仍待实施**。当前状态是“诊断面 + 显式 required enforcement + sandbox 子进程新 session + macOS 敏感路径拒读 + 危险挂载拒绝 + per-command tmp 已具备，默认强制隔离与更细粒度 OS 策略仍待落地”。
-- 与早期审计相比，`sandbox` 关键缺口中的危险 writable root 拒绝、`sandbox status`、`SandboxEnforcement::Required`、sandbox 子进程 `setsid()`、macOS 敏感路径拒读与 per-command tmp 已进入主干；默认 `PreferStrict` 审批确认、内建 bwrap `--new-session`、Linux bwrap 敏感路径遮蔽、内建 bwrap、网络三态仍未进入主干实现。
+- **阶段 1 已收口，阶段 3、4 继续收口，阶段 5 与阶段 6 已收口，阶段 2、7 仍待实施**。当前状态是“诊断面 + 显式 required enforcement + prefer_strict 降级审批 + sandbox 子进程新 session + macOS 敏感路径拒读 + 危险挂载拒绝 + per-command tmp 已具备，默认强制隔离与更细粒度 OS 策略仍待落地”。
+- 与早期审计相比，`sandbox` 关键缺口中的危险 writable root 拒绝、`sandbox status`、`SandboxEnforcement::Required`、`SandboxEnforcement::PreferStrict` 降级审批、sandbox 子进程 `setsid()`、macOS 敏感路径拒读与 per-command tmp 已进入主干；内建 bwrap `--new-session`、Linux bwrap 敏感路径遮蔽、内建 bwrap、网络三态仍未进入主干实现。
 
 ### 分阶段状态（当前代码）
 
 | 阶段 | 目标 | 现状 |
 |---|---|---|
-| 阶段 1 | `SandboxEnforcement` + `libra sandbox status` | 部分落地：`sandbox status` 与 `Required` 拒绝降级已落地；默认 `PreferStrict` / 审批确认仍待实现 |
+| 阶段 1 | `SandboxEnforcement` + `libra sandbox status` | 已落地：`sandbox status`、`Required` 拒绝降级、`PreferStrict` 降级审批确认均已接线；默认仍保持 `BestEffort` 兼容模式 |
 | 阶段 2 | 内建 bwrap 直调 + seccomp | 未落地 |
 | 阶段 3 | `setsid` / `--new-session` | 部分落地：sandbox 子进程 Unix `setsid()` 已落地；内建 bwrap `--new-session` 仍待阶段 2 |
 | 阶段 4 | 敏感路径拒读（`deny_read`） | 部分落地：macOS Seatbelt 默认敏感路径拒读与 `.libra/sandbox.toml deny_read` 已落地；Linux bwrap 遮蔽仍待实现 |
@@ -39,7 +39,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 
 ### 关键证据（代码锚点）
 
-- Linux helper 缺失时，默认 `best_effort` 仍会 `warn` 并回退到无沙箱；但 `LIBRA_SANDBOX_ENFORCEMENT=required` 或 runtime config 设为 `Required` 时，`SandboxManager::transform()` 会返回 `SandboxTransformError::EnforcementFailed`。
+- Linux helper 缺失时，默认 `best_effort` 仍会 `warn` 并回退到无沙箱；`LIBRA_SANDBOX_ENFORCEMENT=required` 或 runtime config 设为 `Required` 时，`SandboxManager::transform()` 会返回 `SandboxTransformError::EnforcementFailed`；`prefer_strict` 在 shell approval 路径会先要求确认降级。
 - `SandboxEnforcement` 与 `EnforcementFailed` 已落地；`NetworkEnforcementFailed` 仍需随阶段 7 网络三态一起引入。
 - `libra sandbox status` 已提供自检入口，输出平台、当前可用后端、当前 enforcement、writable roots、network/proxy 占位、helper/bwrap/Seatbelt 探测和降级告警；`required` 模式会把内部沙箱缺失报告为将失败，而不是描述为可接受降级。
 - Linux 仍是外部 helper 参数转发路径（`--sandbox-policy` / `--use-bwrap-sandbox`），无内建 `create_bwrap_command_args`：`src/internal/ai/sandbox/runtime.rs:323-340`。
@@ -67,7 +67,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 - **Linux 静默降级已可关闭**：`SandboxManager::transform()` 在 `Required` 且内部 sandbox policy 需要 OS 后端时，不再允许 Linux helper 缺失后继续裸跑，而是返回 `SandboxTransformError::EnforcementFailed`。
 - **环境开关已接线**：`LIBRA_SANDBOX_ENFORCEMENT=required|prefer_strict|best_effort` 会影响 `libra code` 命令构造路径；无效值返回用户可读错误。
 - **诊断面同步**：`libra sandbox status` 的 `enforcement` 字段读取同一环境开关；`required` + Linux helper 缺失时告警会说明相关命令将失败。
-- **仍待收口**：`PreferStrict` 目前只作为稳定枚举值保留，尚未接入审批 UI 的“降级需确认”流程；内建 bwrap 未落地前，Linux required 模式仍依赖外部 helper。
+- **仍待收口**：内建 bwrap 未落地前，Linux required 模式仍依赖外部 helper。
 
 ## 0.17.45 增量收口（2026-05-12）
 
@@ -90,6 +90,14 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 - **Seatbelt 接线**：macOS Seatbelt policy 会把默认敏感路径和自定义 `deny_read` 路径合并后生成参数化 `(deny file-read* (subpath ...))`。
 - **回归覆盖**：新增测试覆盖缺失配置 no-op、相对/绝对路径解析、runtime config 追加和 TOML parse error；macOS policy 测试覆盖自定义 deny 路径进入参数表。
 - **仍待收口**：Linux bwrap 的 `--tmpfs` 遮蔽仍待阶段 2/4 合并推进；网络三态仍在阶段 7。
+
+## 0.17.48 增量收口（2026-05-12）
+
+- **阶段 1 `PreferStrict` 审批确认已落地**：当 Linux 内部沙箱需要生效、`LIBRA_SANDBOX_ENFORCEMENT=prefer_strict` 或 runtime config 设为 `PreferStrict`，且未配置 `LIBRA_LINUX_SANDBOX_EXE` 时，shell 执行会先通过 `ExecApprovalRequest` 要求用户确认降级。
+- **拒绝即停止执行**：用户拒绝、abort、approval channel 缺失，或 approval policy 为 `never` 时，命令不会在无内部沙箱下继续运行。
+- **审批不可缓存**：sandbox fallback confirmation 使用独立 uncached approval request，并在请求中标记 `cache_disabled_reason = "sandbox fallback approvals are not cached"`。
+- **回归覆盖**：Linux 单测验证 helper 缺失时会发出 outside-sandbox approval，拒绝后命令不会创建 marker 文件。
+- **仍待收口**：默认 enforcement 仍保持 `BestEffort` 以兼容既有运行环境；内建 bwrap 和网络三态仍分别在阶段 2、阶段 7。
 
 ## 已完成前置条件与当前代码状态
 
@@ -121,12 +129,12 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 
 ### 基于当前代码的 Review 结论
 
-- Linux 外部 helper 缺失时，默认 `BestEffort` 仍走 `tracing::warn!` 后“裸跑”；显式 `Required` 已返回 `EnforcementFailed`，不再无感知降级。
+- Linux 外部 helper 缺失时，默认 `BestEffort` 仍走 `tracing::warn!` 后“裸跑”；显式 `Required` 已返回 `EnforcementFailed`，`PreferStrict` 在 approval shell 路径会要求用户确认降级，不再无感知降级。
 - Seatbelt 策略对读操作仍使用 `(allow file-read*)` 全局基线，但已拒读默认敏感路径（`~/.ssh` / `~/.aws` / `~/.gnupg` / `~/.netrc` / `~/.config/gcloud` / `~/.kube` / `.config/libra/vault` / `/etc/shadow`），并支持 `.libra/sandbox.toml deny_read` 追加本地路径；浏览器 cookie 等更广的默认清单仍可继续扩展。
 - `ExecEnv::into_command()` 会对实际启用的 macOS Seatbelt / Linux helper sandbox 子进程执行 `setsid()`；内建 bwrap 的 `--new-session` 参数仍待阶段 2 一并实现。
 - `run_command_spec` 已覆盖调用方传入的 `TMPDIR` / `TEMP` / `TMP` 并在命令后清理；剩余风险是清理失败仅进入 tracing，尚未写入 agent Runtime 的结构化 Evidence。
 - `WorkspaceWrite::writable_roots` 已拒绝危险挂载清单；剩余风险是尚未把拒绝事件写成 agent Runtime 的 `ToolInvocation[E]` / `Evidence[E]` 结构化记录。
-- `libra sandbox status` 已落地，用户可确认当前 `SandboxType` 与 `SandboxEnforcement` 诊断状态；剩余风险是默认 enforcement 仍为 `BestEffort`，`PreferStrict` 审批确认尚未接线。
+- `libra sandbox status` 已落地，用户可确认当前 `SandboxType` 与 `SandboxEnforcement` 诊断状态；剩余风险是默认 enforcement 仍为 `BestEffort`，尚未切换为默认强制或默认询问。
 
 ## 目标与非目标
 
@@ -181,12 +189,12 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 2. **修改降级路径**（`runtime.rs:224-228`）
    - 已改为根据 `enforcement` 决策：
      - `Required` → `SandboxTransformError::EnforcementFailed { reason }` 返回给调用方
-     - `PreferStrict` → 枚举值已稳定，审批层弹用户确认（复用 `ExecApprovalRequest` 通道）仍待实现
+    - `PreferStrict` → 已在 shell approval 路径复用 `ExecApprovalRequest` 弹用户确认；拒绝时不得裸跑
      - `BestEffort` → 保留现状
 3. **新增 `libra sandbox status` 子命令（已落地）**
    - 已新增 `src/command/sandbox.rs`，挂到 [src/cli.rs](../../src/cli.rs) 顶层，并通过 [docs/commands/sandbox.md](../commands/sandbox.md) 记录输出契约。
    - JSON / machine / human 输出包含：当前平台、实际可用的 sandbox backend、当前 enforcement、writable roots、network access、helper 路径是否存在、Seatbelt / bwrap 探测结果和降级告警。
-   - `Required` 运行时拒绝路径已落地；稳定错误码与 `PreferStrict` 审批确认继续保留在阶段 1 剩余工作。
+   - `Required` 运行时拒绝路径已落地；`PreferStrict` 审批确认已落地。稳定错误码仍保留为后续兼容性细化。
 
 **本阶段非目标**：不改 Seatbelt 读权限、不实现 bwrap 直调（在阶段 2 / 阶段 4 分别处理）。
 
