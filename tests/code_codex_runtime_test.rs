@@ -43,6 +43,8 @@ use futures_util::{SinkExt, StreamExt};
 #[cfg(feature = "test-provider")]
 use harness::{CodeSession, CodeSessionOptions};
 use helpers::mock_codex_ws_server::{MockCodexWsConfig, MockCodexWsServer};
+#[cfg(feature = "test-provider")]
+use reqwest::StatusCode;
 use serde_json::json;
 #[cfg(feature = "test-provider")]
 use serial_test::serial;
@@ -65,6 +67,172 @@ fn fake_codex_bin_path() -> Result<String> {
     path.to_str()
         .map(str::to_owned)
         .context("current test binary path is not valid UTF-8")
+}
+
+#[cfg(feature = "test-provider")]
+fn mcp_post(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    session_id: Option<&str>,
+    body: &serde_json::Value,
+) -> Result<(StatusCode, String)> {
+    let mut request = client
+        .post(url)
+        .header("Content-Type", "application/json")
+        .header("Accept", "text/event-stream, application/json");
+    if let Some(session_id) = session_id {
+        request = request.header("Mcp-Session-Id", session_id);
+    }
+
+    let response = request
+        .json(body)
+        .send()
+        .with_context(|| format!("MCP POST to {url} failed"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .context("failed to read MCP response body")?;
+    Ok((status, body))
+}
+
+#[cfg(feature = "test-provider")]
+fn parse_sse_data(sse_text: &str) -> Vec<String> {
+    sse_text
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix("data:")
+                .or_else(|| line.strip_prefix("data: "))
+                .map(|data| data.trim().to_string())
+        })
+        .filter(|data| !data.is_empty())
+        .collect()
+}
+
+#[cfg(feature = "test-provider")]
+fn first_json_rpc_sse_body(method: &str, body: &str) -> Result<serde_json::Value> {
+    let data = parse_sse_data(body);
+    let first = data
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("MCP {method} response had no SSE data lines: {body}"))?;
+    serde_json::from_str(first)
+        .with_context(|| format!("failed to parse MCP {method} JSON-RPC result: {first}"))
+}
+
+#[cfg(feature = "test-provider")]
+fn mcp_initialize(client: &reqwest::blocking::Client, mcp_url: &str) -> Result<String> {
+    let initialize = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": { "name": "libra-code-codex-runtime", "version": "0.0.0" }
+        }
+    });
+    let response = client
+        .post(mcp_url)
+        .header("Content-Type", "application/json")
+        .header("Accept", "text/event-stream, application/json")
+        .json(&initialize)
+        .send()
+        .with_context(|| format!("MCP initialize POST to {mcp_url} failed"))?;
+    let status = response.status();
+    let session_id = response
+        .headers()
+        .get("Mcp-Session-Id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let body = response
+        .text()
+        .context("failed to read MCP initialize body")?;
+    if !status.is_success() {
+        bail!("MCP initialize returned non-success status {status}: {body}");
+    }
+    let session_id = session_id.ok_or_else(|| {
+        anyhow::anyhow!("MCP initialize did not return Mcp-Session-Id header: {body}")
+    })?;
+    let init_result = first_json_rpc_sse_body("initialize", &body)?;
+    if init_result.get("id") != Some(&serde_json::Value::from(1))
+        || init_result.get("result").is_none()
+    {
+        bail!("MCP initialize returned malformed JSON-RPC result: {init_result}");
+    }
+
+    let initialized = json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized",
+        "params": {}
+    });
+    let (status, body) = mcp_post(client, mcp_url, Some(&session_id), &initialized)
+        .context("failed to send MCP initialized notification")?;
+    if !status.is_success() {
+        bail!("MCP initialized notification failed with {status}: {body}");
+    }
+
+    Ok(session_id)
+}
+
+#[cfg(feature = "test-provider")]
+fn mcp_read_resource_text(
+    client: &reqwest::blocking::Client,
+    mcp_url: &str,
+    session_id: &str,
+    request_id: u64,
+    uri: &str,
+) -> Result<String> {
+    let request = json!({
+        "jsonrpc": "2.0",
+        "method": "resources/read",
+        "params": { "uri": uri },
+        "id": request_id,
+    });
+    let (status, body) = mcp_post(client, mcp_url, Some(session_id), &request)
+        .with_context(|| format!("failed to read MCP resource {uri}"))?;
+    if !status.is_success() {
+        bail!("MCP resources/read {uri} failed with {status}: {body}");
+    }
+    let value = first_json_rpc_sse_body("resources/read", &body)?;
+    if value.get("id") != Some(&serde_json::Value::from(request_id))
+        || value.get("result").is_none()
+    {
+        bail!("MCP resources/read {uri} returned malformed JSON-RPC result: {value}");
+    }
+    Ok(value
+        .pointer("/result/contents")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("text").and_then(serde_json::Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default())
+}
+
+#[cfg(feature = "test-provider")]
+fn wait_for_mcp_resource_text_contains(
+    client: &reqwest::blocking::Client,
+    mcp_url: &str,
+    session_id: &str,
+    uri: &str,
+    needle: &str,
+    timeout: Duration,
+) -> Result<String> {
+    let deadline = Instant::now() + timeout;
+    let mut last_text = String::new();
+    let mut request_id = 20_u64;
+    while Instant::now() < deadline {
+        let text = mcp_read_resource_text(client, mcp_url, session_id, request_id, uri)?;
+        if text.contains(needle) {
+            return Ok(text);
+        }
+        last_text = text;
+        request_id += 1;
+        thread::sleep(Duration::from_millis(200));
+    }
+    bail!("timed out waiting for MCP resource {uri} to contain {needle:?}; last text:\n{last_text}")
 }
 
 /// Initialise a libra repo in a tempdir so `libra code` does not
@@ -153,6 +321,7 @@ fn libra_code_codex_port_zero_is_rejected_at_arg_validation() -> Result<()> {
 async fn mock_codex_ws_server_handles_initialize_and_thread_start_round_trip() -> Result<()> {
     let server = MockCodexWsServer::start(MockCodexWsConfig {
         thread_id: Some("wave-9-§5-13-thread".to_string()),
+        ..Default::default()
     })
     .await?;
     let url = server.ws_url();
@@ -263,6 +432,7 @@ fn libra_code_provider_codex_boots_against_mock_app_server() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new().context("create tokio runtime")?;
     let server = runtime.block_on(MockCodexWsServer::start(MockCodexWsConfig {
         thread_id: Some("wave-9-binary-codex-thread".to_string()),
+        ..Default::default()
     }))?;
     let port = server.port().to_string();
     let fake_codex_bin = fake_codex_bin_path()?;
@@ -314,6 +484,81 @@ fn libra_code_provider_codex_boots_against_mock_app_server() -> Result<()> {
             .pointer("/params/baseInstructions")
             .is_some_and(|value| value.is_string()),
         "codex defaults to plan mode, so thread/start must include baseInstructions; got {thread_start}",
+    );
+    Ok(())
+}
+
+/// Wave 9 §5.13 notification persistence smoke — mock Codex
+/// `thread/started` notification is written to `.libra/objects/`
+/// and becomes visible through the MCP history index.
+#[cfg(feature = "test-provider")]
+#[test]
+#[serial]
+fn libra_code_provider_codex_persists_thread_started_notification() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new().context("create tokio runtime")?;
+    let thread_id = "wave-9-codex-persisted-thread";
+    let server = runtime.block_on(MockCodexWsServer::start(MockCodexWsConfig {
+        thread_id: Some(thread_id.to_string()),
+        emit_thread_started: true,
+    }))?;
+    let port = server.port().to_string();
+    let fake_codex_bin = fake_codex_bin_path()?;
+
+    let session = CodeSession::spawn(
+        CodeSessionOptions::new("code-codex-notification-persist", fixture_path())
+            .with_live_provider("codex", "codex-test")
+            .push_extra_cli_arg("--codex-port")
+            .push_extra_cli_arg(port)
+            .push_extra_cli_arg("--codex-bin")
+            .push_extra_cli_arg(fake_codex_bin),
+    )?;
+    let _captured = wait_for_codex_methods(
+        &server,
+        &["initialize", "thread/start"],
+        Duration::from_secs(10),
+    )?;
+
+    let mcp_url = session
+        .mcp_url()
+        .ok_or_else(|| anyhow::anyhow!("control.json did not surface mcpUrl after spawn"))?
+        .to_string();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .context("build MCP history client")?;
+    let mcp_session_id = mcp_initialize(&client, &mcp_url)?;
+    let event_index = wait_for_mcp_resource_text_contains(
+        &client,
+        &mcp_url,
+        &mcp_session_id,
+        "libra://objects/event",
+        thread_id,
+        Duration::from_secs(10),
+    )?;
+    let event_id = event_index
+        .lines()
+        .find(|line| line.contains(thread_id))
+        .and_then(|line| line.split_whitespace().next())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "event history index did not expose an event id for {thread_id}: {event_index}"
+            )
+        })?;
+    let event_json = mcp_read_resource_text(
+        &client,
+        &mcp_url,
+        &mcp_session_id,
+        200,
+        &format!("libra://object/{event_id}"),
+    )?;
+    assert!(
+        event_json.contains("\"status\":\"started\"")
+            || event_json.contains("\"status\": \"started\""),
+        "persisted thread event must record status=started; got:\n{event_json}",
+    );
+    assert!(
+        event_json.contains(thread_id),
+        "persisted thread event must include the Codex thread id; got:\n{event_json}",
     );
     Ok(())
 }

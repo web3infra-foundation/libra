@@ -87,7 +87,7 @@ use clap::Parser;
 use diffy::create_patch;
 use futures_util::{SinkExt, StreamExt};
 use git_internal::hash::ObjectHash;
-use history::{HistoryReader, HistoryRecorder, HistoryWriter};
+use history::{EventKind, HistoryReader, HistoryRecorder, HistoryWriter};
 use model::{
     ContextFrameEvent, ContextSnapshot, DecisionEvent, EvidenceEvent, IntentEvent, IntentSnapshot,
     PatchSetSnapshot, PlanSnapshot, PlanStepEvent, PlanStepSnapshot, ProvenanceSnapshot, RunEvent,
@@ -1891,7 +1891,7 @@ pub async fn start_code_ui_runtime(
                             lock_or_warn(&codex_session_clone, "code ui thread started update")
                         {
                             session.update_thread(CodexThread {
-                                id: started_thread_id,
+                                id: started_thread_id.clone(),
                                 status: ThreadStatus::Running,
                                 name: None,
                                 current_turn_id: None,
@@ -1899,6 +1899,18 @@ pub async fn start_code_ui_runtime(
                                 updated_at: Utc::now(),
                             });
                         }
+                        let history_recorder = history_recorder_clone.clone();
+                        let thread_event_payload = params.clone();
+                        tokio::spawn(async move {
+                            history_recorder
+                                .event(
+                                    EventKind::ThreadStatus,
+                                    &started_thread_id,
+                                    "started",
+                                    thread_event_payload,
+                                )
+                                .await;
+                        });
                     }
                     MethodKind::ThreadStatusChanged => {
                         if let Some(mut session) =

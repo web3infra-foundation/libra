@@ -37,6 +37,9 @@ pub struct MockCodexWsConfig {
     /// Optional canned thread id returned by `thread/start`. Defaults to
     /// `"libra-mock-thread"` when not set.
     pub thread_id: Option<String>,
+    /// When true, send a `thread/started` notification immediately after the
+    /// `thread/start` response.
+    pub emit_thread_started: bool,
 }
 
 /// Test-only WebSocket server mimicking the Codex app-server handshake.
@@ -71,6 +74,7 @@ impl MockCodexWsServer {
         let thread_id = config
             .thread_id
             .unwrap_or_else(|| "libra-mock-thread".to_string());
+        let emit_thread_started = config.emit_thread_started;
         let handle = tokio::spawn(async move {
             loop {
                 let (tcp_stream, _peer) = match listener.accept().await {
@@ -121,6 +125,23 @@ impl MockCodexWsServer {
                             .is_err()
                         {
                             break;
+                        }
+                        if emit_thread_started && method == "thread/start" {
+                            let notification = json!({
+                                "jsonrpc": "2.0",
+                                "method": "thread/started",
+                                "params": {
+                                    "threadId": thread_id,
+                                    "thread": { "id": thread_id },
+                                },
+                            });
+                            if write
+                                .send(Message::Text(notification.to_string().into()))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
                         }
                     }
                 });
