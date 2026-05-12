@@ -87,6 +87,9 @@ Current behavior:
   revision oid, counts files in each unique commit tree, and emits a
   plan. It does not read or write Cloudflare D1/R2 and does not require
   Cloudflare credentials.
+- Dry-run loads each planned revision's committed `.librapublishignore`
+  and applies the built-in publish deny rules. Denied paths are reported
+  as warnings with `builtin_credential` or `user_ignore` reasons.
 - `--ref <branch|tag|full-ref>` filters the dry-run to one branch or
   tag. If a short name exists as both a branch and a tag, the command
   fails with `LBR-CLI-003` and asks for `refs/heads/<name>` or
@@ -97,7 +100,8 @@ Current behavior:
 - `--json` returns `siteId` (`null` until cloud config lands),
   `refsCount`, `revisionCount`, `defaultRef`, `latestRevisionOid`,
   `fileCount`, `aiObjectCount`, `aiBundleCount`, `warnings`, and the
-  selected ref/revision details.
+  selected ref/revision details. Each revision entry also includes
+  `preflightDeniedCount`.
 - Without `--dry-run`, this subcommand still exits with
   `LBR-UNSUPPORTED-001`; the D1/R2 upload path remains tracked in
   `docs/improvement/publish.md`.

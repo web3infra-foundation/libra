@@ -30,7 +30,7 @@ use std::{
 use clap::{Parser, Subcommand};
 use git_internal::{
     hash::ObjectHash,
-    internal::object::{commit::Commit, tree::Tree, types::ObjectType},
+    internal::object::{blob::Blob, commit::Commit, tree::Tree, types::ObjectType},
 };
 use ring::digest::{SHA256, digest};
 use serde::{Deserialize, Serialize};
@@ -41,6 +41,7 @@ use crate::{
         branch::Branch,
         head::Head,
         publish::{
+            preflight::{DenyReason, Preflight, PreflightDecision},
             snapshot::{RefInput, detect_ambiguous_short_refs, validate_oid, validate_ref_name},
             worker_template::{MANIFEST, RenderPolicy, WorkerTemplate, embed_path_is_allowed},
         },
@@ -357,6 +358,7 @@ struct PublishSyncRevisionOutput {
     revision_oid: String,
     ref_count: usize,
     file_count: usize,
+    preflight_denied_count: usize,
     ai_object_count: usize,
     ai_bundle_count: usize,
 }
@@ -409,11 +411,20 @@ async fn run_publish_sync_dry_run(args: &SyncArgs) -> CliResult<PublishSyncDryRu
 
     let mut revisions = Vec::with_capacity(revision_ref_counts.len());
     for (revision_oid, ref_count) in revision_ref_counts {
-        let file_count = count_revision_files(&revision_oid)?;
+        let scan = scan_revision_files(&revision_oid)?;
+        for denied in &scan.denied_paths {
+            warnings.push(format!(
+                "publish preflight denied '{}' in revision {} ({})",
+                denied.path,
+                revision_oid,
+                preflight_reason_label(denied.reason)
+            ));
+        }
         revisions.push(PublishSyncRevisionOutput {
             revision_oid,
             ref_count,
-            file_count,
+            file_count: scan.file_count,
+            preflight_denied_count: scan.denied_paths.len(),
             ai_object_count: 0,
             ai_bundle_count: 0,
         });
@@ -683,7 +694,19 @@ async fn inspect_publish_dirty(fail_on_dirty: bool) -> CliResult<Vec<String>> {
     }
 }
 
-fn count_revision_files(revision_oid: &str) -> CliResult<usize> {
+#[derive(Debug)]
+struct RevisionDryRunScan {
+    file_count: usize,
+    denied_paths: Vec<PreflightDeniedPath>,
+}
+
+#[derive(Debug)]
+struct PreflightDeniedPath {
+    path: String,
+    reason: DenyReason,
+}
+
+fn scan_revision_files(revision_oid: &str) -> CliResult<RevisionDryRunScan> {
     let commit_oid = ObjectHash::from_str(revision_oid).map_err(|source| {
         CliError::fatal(format!(
             "publish revision oid '{revision_oid}' is invalid: {source}"
@@ -703,7 +726,57 @@ fn count_revision_files(revision_oid: &str) -> CliResult<usize> {
         ))
         .with_stable_code(StableErrorCode::RepoStateInvalid)
     })?;
-    Ok(tree.get_plain_items().len())
+    let items = tree.get_plain_items();
+    let preflight = preflight_for_revision_items(&items, revision_oid)?;
+    let mut denied_paths = Vec::new();
+    for (path, _) in &items {
+        if let PreflightDecision::Deny(reason) = preflight.evaluate(path, false) {
+            denied_paths.push(PreflightDeniedPath {
+                path: path.display().to_string(),
+                reason,
+            });
+        }
+    }
+
+    Ok(RevisionDryRunScan {
+        file_count: items.len(),
+        denied_paths,
+    })
+}
+
+fn preflight_for_revision_items(
+    items: &[(PathBuf, ObjectHash)],
+    revision_oid: &str,
+) -> CliResult<Preflight> {
+    let mut preflight = Preflight::new();
+    let ignore_path = Path::new(".librapublishignore");
+    let Some((_, ignore_oid)) = items.iter().find(|(path, _)| path == ignore_path) else {
+        return Ok(preflight);
+    };
+
+    let blob: Blob = load_object(ignore_oid).map_err(|source| {
+        CliError::fatal(format!(
+            "failed to load .librapublishignore for publish revision '{revision_oid}': {source}"
+        ))
+        .with_stable_code(StableErrorCode::RepoStateInvalid)
+    })?;
+    let text = std::str::from_utf8(&blob.data).map_err(|source| {
+        CliError::failure(format!(
+            ".librapublishignore in publish revision '{revision_oid}' is not valid UTF-8: \
+             {source}"
+        ))
+        .with_stable_code(StableErrorCode::CliInvalidTarget)
+        .with_hint("commit .librapublishignore as UTF-8 text before publishing.")
+    })?;
+    preflight.extend_with_ignore_text(text);
+    Ok(preflight)
+}
+
+fn preflight_reason_label(reason: DenyReason) -> &'static str {
+    match reason {
+        DenyReason::BuiltinCredential => "builtin_credential",
+        DenyReason::UserIgnore => "user_ignore",
+    }
 }
 
 fn snapshot_ref_error(source: impl std::error::Error) -> CliError {

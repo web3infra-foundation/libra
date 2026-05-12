@@ -157,3 +157,59 @@ fn publish_sync_dry_run_fail_on_dirty_rejects_dirty_tree() {
         report.message
     );
 }
+
+#[test]
+fn publish_sync_dry_run_warns_for_builtin_sensitive_paths() {
+    let repo = create_committed_repo_via_cli();
+    std::fs::write(repo.path().join(".env.local"), "SECRET=1\n").expect("write env file");
+    let add = run_libra_command(&["add", ".env.local"], repo.path());
+    assert_cli_success(&add, "stage sensitive file fixture");
+    let commit = run_libra_command(
+        &["commit", "-m", "add sensitive fixture", "--no-verify"],
+        repo.path(),
+    );
+    assert_cli_success(&commit, "commit sensitive file fixture");
+
+    let output = run_libra_command(&["--json", "publish", "sync", "--dry-run"], repo.path());
+    assert_cli_success(&output, "publish sync dry-run should warn but still plan");
+
+    let json = parse_json_stdout(&output);
+    let warnings = json["data"]["warnings"]
+        .as_array()
+        .expect("warnings should be an array");
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .is_some_and(|text| text.contains(".env.local") && text.contains("builtin"))),
+        "dry-run warnings should identify builtin sensitive path: {warnings:?}"
+    );
+}
+
+#[test]
+fn publish_sync_dry_run_warns_for_librapublishignore_paths() {
+    let repo = create_committed_repo_via_cli();
+    std::fs::write(repo.path().join(".librapublishignore"), "secret.txt\n")
+        .expect("write publish ignore");
+    std::fs::write(repo.path().join("secret.txt"), "redacted\n").expect("write ignored file");
+    let add = run_libra_command(&["add", ".librapublishignore", "secret.txt"], repo.path());
+    assert_cli_success(&add, "stage publish ignore fixture");
+    let commit = run_libra_command(
+        &["commit", "-m", "add publish ignore fixture", "--no-verify"],
+        repo.path(),
+    );
+    assert_cli_success(&commit, "commit publish ignore fixture");
+
+    let output = run_libra_command(&["--json", "publish", "sync", "--dry-run"], repo.path());
+    assert_cli_success(&output, "publish sync dry-run should warn but still plan");
+
+    let json = parse_json_stdout(&output);
+    let warnings = json["data"]["warnings"]
+        .as_array()
+        .expect("warnings should be an array");
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .is_some_and(|text| text.contains("secret.txt") && text.contains("user_ignore"))),
+        "dry-run warnings should identify .librapublishignore path: {warnings:?}"
+    );
+}

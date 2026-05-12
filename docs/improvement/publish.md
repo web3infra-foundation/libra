@@ -780,7 +780,8 @@ v1 使用 gitignore 子集：
 
 - [ ] 扫描 `refs/heads/*` 和 `refs/tags/*`，解析每个 ref 的目标 revision，并按 revision oid 去重。
 - [ ] 支持 `--ref <branch|tag|full-ref>` 的定向解析；branch/tag 短名冲突时失败并提示使用完整 ref。
-- [ ] 支持 `.librapublishignore` 和内置 deny 规则。
+- [x] (v0.17.54) `sync --dry-run` 读取每个 planned revision 中已提交的 `.librapublishignore`，并应用内置 deny 规则；命中项以 warning 输出路径和 `builtin_credential` / `user_ignore` reason。
+- [ ] 完整 snapshot upload 路径支持 `.librapublishignore` 和内置 deny 规则，并按 visibility/allowlist 决定 metadata-only、redaction 或失败。
 - [ ] 每个唯一 revision 的文本文件写入 R2；二进制/超大/ignored 文件只写 D1 metadata。
 - [ ] 生成 `refs.json`，以及每个唯一 revision 的 `code-manifest.json`、`ai/index.json`、AI object JSON、AI graph index 和 AI bundle。
 - [ ] AI exporter 覆盖 [AI Object Model Reference](../agent/ai-object-model-reference.md) 的全部 snapshot objects、event objects 和 Libra projection/runtime objects。
@@ -944,7 +945,7 @@ v1 使用 gitignore 子集：
 
 - [x] (v0.17.53) `libra publish sync --dry-run` 能输出将发布的本地 refs、revision、file counts 和 AI count/bundle count 计划；完整 AI exporter 仍归 Phase 3。
 - [x] (v0.17.53) 不需要 Cloudflare 凭据也能跑完 preflight。
-- [ ] 高风险文件能阻断或 warning。
+- [x] (v0.17.54) 高风险文件能 warning：dry-run 对 committed tree 的 `.librapublishignore` 与内置 deny 规则命中项输出 warning。
 
 ### Checkpoint B：云端数据闭环
 
