@@ -827,8 +827,8 @@ v1 使用 gitignore 子集：
 
 **Acceptance criteria:**
 
-- [ ] `src/command/clone.rs` 在 remote discovery 前识别 `libra+cloud://<clone-domain>/<slug>`、`libra+cloud://<clone-domain>/repo/<repo_id>`、`?ref=<branch|tag|full-ref>` 和 `?revision=<oid|latest>`。
-- [ ] scheme parser 对非法 scheme、非法 clone domain、非法 slug、非法 ref、非法 revision、缺失 slug/repo_id、`ref` 与 `revision` 同时出现返回 `CliInvalidArguments`，并给出可行动 hint。
+- [x] (v0.17.52) `src/command/clone.rs` 在 remote discovery 前识别并校验 `libra+cloud://<clone-domain>/<slug>`、`libra+cloud://<clone-domain>/repo/<repo_id>`、`?ref=<branch|tag|full-ref>` 和 `?revision=<oid|latest>`；完整 D1/R2 restore 仍返回 Phase 5 not-implemented。
+- [x] (v0.17.52) scheme parser 对非法 clone domain、非法 slug/repo_id、非法 ref、非法 revision、缺失 slug/repo_id、`ref` 与 `revision` 同时出现返回 `CliInvalidArguments`，并给出可行动 hint；非 `libra+cloud://` scheme 仍归普通 clone remote 解析。
 - [ ] Cloudflare clone 复用 publish/cloud 的本地配置和 vault 读取策略，通过 `clone_domains.<clone-domain>` 解析 D1/R2 访问参数；未配置该 domain 时必须失败并提示配置流程。
 - [ ] 通过 D1 用 `(clone_domain, slug)` 或 `(clone_domain, repo_id)` 解析 site；slug rename 不影响 `repo/<repo_id>` 稳定入口。
 - [ ] 通过 D1 解析 `repositories`、`object_index`、`publish_refs`、refs metadata 和 latest/default revision；通过 R2 读取完整 Git object 集合。
@@ -925,7 +925,7 @@ v1 使用 gitignore 子集：
 - [ ] public visibility 下 secret/redaction fixture 无泄漏。
 - [ ] live cloud gate 能完成 all-refs sync -> `libra clone libra+cloud://<clone-domain>/<slug>` restore -> Worker API refs/tree/file -> deploy smoke。
 - [ ] `docs/commands/publish.md` 更新为用户可读文档。
-- [ ] `docs/commands/clone.md` 更新 Cloudflare source scheme 用户文档，并明确这不是 `publish` 子命令。
+- [x] (v0.17.52) `docs/commands/clone.md` 更新 Cloudflare source scheme 用户文档，并明确这不是 `publish` 子命令。
 
 **Verification:**
 

@@ -17,6 +17,7 @@ use git_internal::{
 };
 use sea_orm::DatabaseTransaction;
 use serde::Serialize;
+use url::Url;
 
 use super::fetch::{self, RemoteSpecErrorKind};
 use crate::{
@@ -166,6 +167,8 @@ pub enum CloneError {
          the v1 release window for `libra clone {input}`"
     )]
     CloudPublishSourceNotYetImplemented { input: String },
+    #[error("invalid libra+cloud clone source '{input}': {reason}")]
+    InvalidCloudPublishSource { input: String, reason: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -244,6 +247,15 @@ impl From<CloneError> for CliError {
                         "Phase 5 of docs/improvement/publish.md is in progress; \
                          use the local CLI's existing `libra cloud restore` flow \
                          (or wait for the v1 release) to recover the repository.",
+                    )
+            }
+            CloneError::InvalidCloudPublishSource { .. } => {
+                CliError::command_usage(error.to_string())
+                    .with_stable_code(StableErrorCode::CliInvalidArguments)
+                    .with_hint(
+                        "use `libra+cloud://<clone-domain>/<slug>` or \
+                         `libra+cloud://<clone-domain>/repo/<repo_id>`; pass only one of \
+                         `?ref=<branch|tag|full-ref>` or `?revision=<oid|latest>`",
                     )
             }
         }
@@ -616,6 +628,7 @@ async fn execute_clone_inner(
     // generic Git fetch path and emitting a confusing protocol
     // error.
     if args.remote_repo.starts_with("libra+cloud://") {
+        parse_cloud_publish_source(&args.remote_repo).map_err(|error| (error, None))?;
         return Err((
             CloneError::CloudPublishSourceNotYetImplemented {
                 input: args.remote_repo.clone(),
@@ -726,6 +739,150 @@ async fn execute_clone_inner(
         let cleanup_warning = cleanup_failed_clone(&local_path, created_by_clone);
         (error, cleanup_warning)
     })
+}
+
+fn parse_cloud_publish_source(input: &str) -> Result<(), CloneError> {
+    let url = Url::parse(input).map_err(|source| CloneError::InvalidCloudPublishSource {
+        input: input.to_string(),
+        reason: format!("URL parse failed: {source}"),
+    })?;
+    if url.scheme() != "libra+cloud" {
+        return Err(invalid_cloud_source(input, "scheme must be libra+cloud"));
+    }
+
+    let clone_domain = url
+        .host_str()
+        .ok_or_else(|| invalid_cloud_source(input, "clone domain is required"))?;
+    validate_cloud_clone_domain(input, clone_domain)?;
+
+    let segments = url
+        .path_segments()
+        .map(|segments| segments.collect::<Vec<_>>())
+        .unwrap_or_default();
+    match segments.as_slice() {
+        [] | [""] => return Err(invalid_cloud_source(input, "slug or repo_id is required")),
+        [slug] => validate_cloud_slug(input, slug, "slug")?,
+        ["repo", repo_id] => validate_cloud_slug(input, repo_id, "repo_id")?,
+        _ => {
+            return Err(invalid_cloud_source(
+                input,
+                "path must be /<slug> or /repo/<repo_id>",
+            ));
+        }
+    }
+
+    let mut ref_selector: Option<String> = None;
+    let mut revision_selector: Option<String> = None;
+    for (key, value) in url.query_pairs() {
+        match key.as_ref() {
+            "ref" => {
+                if ref_selector.replace(value.into_owned()).is_some() {
+                    return Err(invalid_cloud_source(
+                        input,
+                        "ref selector appears more than once",
+                    ));
+                }
+            }
+            "revision" => {
+                if revision_selector.replace(value.into_owned()).is_some() {
+                    return Err(invalid_cloud_source(
+                        input,
+                        "revision selector appears more than once",
+                    ));
+                }
+            }
+            other => {
+                return Err(invalid_cloud_source(
+                    input,
+                    &format!("unsupported query parameter '{other}'"),
+                ));
+            }
+        }
+    }
+    if ref_selector.is_some() && revision_selector.is_some() {
+        return Err(invalid_cloud_source(
+            input,
+            "ref and revision selectors are mutually exclusive",
+        ));
+    }
+    if let Some(selector) = ref_selector {
+        validate_cloud_ref_selector(input, &selector)?;
+    }
+    if let Some(selector) = revision_selector {
+        validate_cloud_revision_selector(input, &selector)?;
+    }
+
+    Ok(())
+}
+
+fn invalid_cloud_source(input: &str, reason: &str) -> CloneError {
+    CloneError::InvalidCloudPublishSource {
+        input: input.to_string(),
+        reason: reason.to_string(),
+    }
+}
+
+fn validate_cloud_clone_domain(input: &str, domain: &str) -> Result<(), CloneError> {
+    if domain.is_empty() || domain.len() > 253 {
+        return Err(invalid_cloud_source(input, "clone domain is invalid"));
+    }
+    for label in domain.split('.') {
+        if label.is_empty()
+            || label.len() > 63
+            || label.starts_with('-')
+            || label.ends_with('-')
+            || !label
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+        {
+            return Err(invalid_cloud_source(input, "clone domain is invalid"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_cloud_slug(input: &str, value: &str, label: &str) -> Result<(), CloneError> {
+    if value.is_empty()
+        || value == "."
+        || value == ".."
+        || value.len() > 128
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        return Err(invalid_cloud_source(input, &format!("{label} is invalid")));
+    }
+    Ok(())
+}
+
+fn validate_cloud_ref_selector(input: &str, value: &str) -> Result<(), CloneError> {
+    if value.is_empty()
+        || value.trim() != value
+        || value.contains("..")
+        || value.starts_with('/')
+        || value.ends_with('/')
+        || value
+            .chars()
+            .any(|ch| ch.is_control() || matches!(ch, '?' | '#'))
+    {
+        return Err(invalid_cloud_source(input, "ref selector is invalid"));
+    }
+    Ok(())
+}
+
+fn validate_cloud_revision_selector(input: &str, value: &str) -> Result<(), CloneError> {
+    if value == "latest" {
+        return Ok(());
+    }
+    if value.len() < 4
+        || value.len() > 64
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || matches!(ch, 'a'..='f'))
+    {
+        return Err(invalid_cloud_source(input, "revision selector is invalid"));
+    }
+    Ok(())
 }
 
 async fn clone_into_destination(
@@ -1083,5 +1240,56 @@ mod tests {
 
         assert_eq!(cli.stable_code(), StableErrorCode::RepoCorrupt);
         assert_eq!(cli.exit_code(), 128);
+    }
+
+    #[test]
+    fn cloud_publish_source_accepts_slug_repo_and_selectors() {
+        for input in [
+            "libra+cloud://code.example.com/kepler-ledger",
+            "libra+cloud://code.example.com/repo/rp_8f4c1b",
+            "libra+cloud://code.example.com/kepler-ledger?ref=refs/tags/v1.0.0",
+            "libra+cloud://code.example.com/kepler-ledger?ref=feature/branch",
+            "libra+cloud://code.example.com/kepler-ledger?revision=latest",
+            "libra+cloud://code.example.com/kepler-ledger?revision=9a1f3e2c",
+        ] {
+            parse_cloud_publish_source(input).unwrap_or_else(|error| {
+                panic!("{input} should parse as a valid cloud publish source: {error}")
+            });
+        }
+    }
+
+    #[test]
+    fn cloud_publish_source_rejects_invalid_inputs() {
+        for (input, needle) in [
+            ("libra+cloud://bad_domain/repo", "clone domain"),
+            ("libra+cloud://code.example.com/", "slug or repo_id"),
+            ("libra+cloud://code.example.com/repo/", "repo_id"),
+            ("libra+cloud://code.example.com/bad slug", "slug is invalid"),
+            (
+                "libra+cloud://code.example.com/slug?ref=main&revision=latest",
+                "mutually exclusive",
+            ),
+            (
+                "libra+cloud://code.example.com/slug?revision=ABCDEF",
+                "revision selector",
+            ),
+            (
+                "libra+cloud://code.example.com/slug?ref=../main",
+                "ref selector",
+            ),
+            (
+                "libra+cloud://code.example.com/slug?foo=bar",
+                "unsupported query parameter",
+            ),
+        ] {
+            let error =
+                parse_cloud_publish_source(input).expect_err("invalid cloud source rejected");
+            assert!(
+                error.to_string().contains(needle),
+                "{input} should mention {needle:?}, got {error}",
+            );
+            let cli: CliError = error.into();
+            assert_eq!(cli.stable_code(), StableErrorCode::CliInvalidArguments);
+        }
     }
 }
