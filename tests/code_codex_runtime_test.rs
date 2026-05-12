@@ -22,13 +22,15 @@
 //!     managed-app-server path. The test pins that the binary
 //!     emits `initialize` and `thread/start`, and that codex's
 //!     default plan-mode instructions are present in the
-//!     `thread/start` payload.
+//!     `thread/start` payload. It also proves the managed startup
+//!     reconnects after the readiness probe's short-lived
+//!     WebSocket connection is dropped.
 //!   * Codex command-execution approval requests surface through
 //!     Code UI as pending interactions and are not resolved back to
 //!     Codex until the browser controller approves them.
 //!
 //! Coverage still deferred (extends the same helper):
-//!   * Codex disconnect / reconnect resilience.
+//!   * Mid-turn Codex process restart recovery.
 
 #[cfg(feature = "test-provider")]
 mod harness;
@@ -454,6 +456,11 @@ fn libra_code_provider_codex_boots_against_mock_app_server() -> Result<()> {
         &["initialize", "thread/start"],
         Duration::from_secs(10),
     )?;
+    assert!(
+        server.connection_count() >= 2,
+        "managed Codex startup must reconnect after the readiness probe disconnects; accepted {} connection(s)",
+        server.connection_count(),
+    );
     let methods = captured
         .iter()
         .filter_map(|request| request.get("method").and_then(|value| value.as_str()))

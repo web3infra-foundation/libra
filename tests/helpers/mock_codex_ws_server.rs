@@ -22,7 +22,10 @@
 
 use std::{
     net::SocketAddr,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use anyhow::{Context, Result};
@@ -62,6 +65,7 @@ pub struct MockCodexWsConfig {
 pub struct MockCodexWsServer {
     addr: SocketAddr,
     requests: Arc<Mutex<Vec<Value>>>,
+    connections: Arc<AtomicUsize>,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -76,6 +80,8 @@ impl MockCodexWsServer {
             .context("read mock codex ws address")?;
         let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
         let requests_for_task = requests.clone();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let connections_for_task = connections.clone();
         let thread_id = config
             .thread_id
             .unwrap_or_else(|| "libra-mock-thread".to_string());
@@ -87,6 +93,7 @@ impl MockCodexWsServer {
                     Ok(pair) => pair,
                     Err(_) => break,
                 };
+                connections_for_task.fetch_add(1, Ordering::SeqCst);
                 let requests = requests_for_task.clone();
                 let thread_id = thread_id.clone();
                 tokio::spawn(async move {
@@ -176,6 +183,7 @@ impl MockCodexWsServer {
         Ok(Self {
             addr,
             requests,
+            connections,
             handle: Some(handle),
         })
     }
@@ -198,6 +206,12 @@ impl MockCodexWsServer {
             .lock()
             .expect("captured requests mutex poisoned")
             .clone()
+    }
+
+    /// Number of WebSocket connections accepted by the mock, including probe
+    /// connections that disconnect before sending any JSON-RPC request.
+    pub fn connection_count(&self) -> usize {
+        self.connections.load(Ordering::SeqCst)
     }
 }
 
