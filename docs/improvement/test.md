@@ -25,7 +25,7 @@
 | 全部 JSON 数据文件 | ✅ 就位 | `tests/data/code_ui_remote/` 下 6 个矩阵 JSON + `provider_fixtures/` 下 4 个 fake fixture |
 | 现有 L2 smoke | ✅ 就位 | `tests/code_ui_scenarios.rs` 13 条 case（10 条 `#[cfg(feature = "test-provider")]` + 3 条 browser） |
 | 现有 L2 lease | ✅ 就位 | `tests/code_ui_remote_lease_matrix.rs` 已覆盖 10 条 case（含 observe-mode automation attach 拒绝） |
-| 现有 L2 远端矩阵 | ✅ 就位 | SSE 7/7、Generation 3/3、Approval 3/3、State 7/7、Security 6/6、Model generation 2/2 live-gated runner |
+| 现有 L2 远端矩阵 | ✅ 就位 | SSE 7/7、Generation 3/3、Approval 7/7、State 7/7、Security 6/6、Model generation 2/2 live-gated runner |
 | Inline 网络层测试 | ✅ 就位 | `src/internal/ai/web/mod.rs` `mod tests` 已覆盖 loopback、control auth、body limit、audit、route-level loopback gate |
 | Executor 单元测试 | ⚠️ 部分 | `src/internal/ai/orchestrator/executor.rs` `mod tests` 已有 mock model 和基础 tool loop 测试 |
 | WS 库 | ✅ 就位 | `tokio-tungstenite = "0.29.0"` 已在 `Cargo.toml` `[dependencies]`，可用于 Codex mock WS |
@@ -108,10 +108,10 @@ CI 默认门：L0+L1 必跑；L2 在 `test-provider` 下必跑；L3 仅 nightly 
 | HTTP 写路由 lease 矩阵 | 10/10 | 9 条原 lease case + observe-mode automation attach 拒绝 |
 | SSE | 7/7 | event_stream harness + SSE matrix |
 | Local TUI Control 锁 / 审计 | instance conflict + stale-PID takeover + custom-path security matrix + audit redaction L0 | 无本地 quick-follow |
-| TUI 渲染 | 2 条 inline buffer smoke | complex-state 快照仍为 quick-follow；当前未引入 `insta` |
+| TUI 渲染 | TestBackend / inline buffer smoke 已覆盖复杂状态 | 空 transcript、assistant delta、滚动窗口、approval prompt、retry error 与退出键契约均已覆盖；当前未引入 `insta` |
 | Tool ACL × context × policy | 6/6 | 含 MCP bridge 前缀防退化 |
 | Apply-Patch 文件生成(fake) | 3/3 | generation_cases.json 全量 + 失败分支 |
-| Approval / Interaction E2E | 3/3 | accept/reject/apply_to_future；并发 pending 仍按 P1 拆出 |
+| Approval / Interaction E2E | 7/7 | accept/reject/apply_to_future + `never` / `on-failure` / `untrusted` / `allow-all`；并发 pending 仍按 P1 拆出 |
 | Orchestrator gate 边界 | 一条 review rejection | max_turns 47/49、workspace 越界、network deny、FUSE 回退 |
 | Codex 旁路运行时 | 静态守卫 | mock WS app-server + plan-first 拦截 |
 | MCP 双入口一致 | partial | control.json mcpUrl + --stdio mutex + dual-reachability smoke；full write-and-observe 仍 deferred |
@@ -147,13 +147,9 @@ CI 默认门：L0+L1 必跑；L2 在 `test-provider` 下必跑；L3 仅 nightly 
 
 ### 5.3 HTTP 读路由 + loopback gate
 
-- **现状 ✅**：`/session`、`/diagnostics`、`/threads` 与 loopback gate 已由 inline route test 和 security matrix 覆盖；`/events` 已由 SSE matrix 覆盖。
-- **缺口**：
-  - `/session` 完整 schema（含 `controller`、`status`、`activeInteractionId`、`patchsets`）。
-  - `/diagnostics` 字段齐全且全部 secret 字段经 redactor。
-  - `/threads?limit/offset` 边界：`limit=abc` → 400 `INVALID_QUERY_PARAM`；`limit=10000` → clamp 到 200；空集 → `[]`。
-  - 任意读路由 non-loopback 客户端 → 403 `LOOPBACK_REQUIRED`（loopback 校验**先于** body/token 校验，错误码顺序固定）。
-- **优先级**：P0。
+- **现状 ✅**：`/session`、`/diagnostics`、`/threads` 与 loopback gate 已由 inline route test 和 security matrix 覆盖；`/events` 已由 SSE matrix 覆盖。覆盖项包括 `/session` 完整 schema（`controller`、`status`、`activeInteractionId`、`patchsets`）、`/diagnostics` secret redaction、`/threads?limit/offset` 边界（`limit=abc` → 400 `INVALID_QUERY_PARAM`，大 limit clamp 到 200，空集 `[]`）、以及任意读路由 non-loopback 客户端先返回 403 `LOOPBACK_REQUIRED`。
+- **缺口**：无（5.3 已关闭）。
+- **优先级**：已完成。
 - **测试位置**：**L1 已新增** [src/internal/ai/web/mod.rs](../../src/internal/ai/web/mod.rs) `mod tests` route-level loopback checks；**L2 已新增** `code_ui_remote_security_matrix.rs`。
 - **AI 落地提示**：新增读/写路由时继续先断言 loopback gate，再断言 body/token 语义，避免错误码顺序退化。
 
@@ -167,7 +163,7 @@ CI 默认门：L0+L1 必跑；L2 在 `test-provider` 下必跑；L3 仅 nightly 
   - 已完成：同 client 续约 vs 不同 client conflict 的 token 失效顺序。
   - 已完成：approval 接受/拒绝/`apply_to_future` 三条 P0，以及 `never` / `on-failure` / `untrusted` / `allow-all` policy 行为覆盖。
   - 仍待 P1：多个 pending interaction 并发的 ID 路由。
-- **优先级**：P0。
+- **优先级**：P0（功能已覆盖；长时/lagged soak 降级为 P2）。
 - **测试位置**：**L2 已扩展** lease matrix 10/10；approval P0 由 `tests/code_ui_remote_approval_matrix.rs` 覆盖。
 - **AI 落地提示**：新增 lease case 时仍保持“一条 JSON case + 一条 `lease_case!()`”的 cargo 输出定位。
 
@@ -188,7 +184,7 @@ CI 默认门：L0+L1 必跑；L2 在 `test-provider` 下必跑；L3 仅 nightly 
   }
   pub struct SseEvent { pub event: String, pub data: String }
   ```
-  `matrix.rs` 需要新增 `Step::OpenEventStream { name, timeout_ms }`、`Step::WaitEvent { name, event_type, timeout_ms }`。
+  `matrix.rs` 已有 `Step::OpenEventStream { name, timeout_ms }`、`Step::WaitEvent { name, event_type, timeout_ms }`，新增 SSE case 只需扩 JSON 与对应宏。
 
 ### 5.6 Local TUI Control 锁 / 审计
 
@@ -221,11 +217,8 @@ CI 默认门：L0+L1 必跑；L2 在 `test-provider` 下必跑；L3 仅 nightly 
 ### 5.10 Apply-Patch 与文件生成(fake)
 
 - **现状 ✅**：[tests/code_ui_remote_generation_matrix.rs](../../tests/code_ui_remote_generation_matrix.rs) 已覆盖 [tests/data/code_ui_remote/generation_cases.json](../../tests/data/code_ui_remote/generation_cases.json) 的 3 条 case。
-- **缺口**：
-  - fake fixture 返回 `apply_patch` → 临时 repo 出现完整 Rust 文件 → `rustc --test` 通过。
-  - SSE 订阅期间触发同一生成请求 → 至少观测到 `executing_tool` 或 `session_updated` 含 patch 结果。
-  - 失败分支：fixture 返回非法 patch → final snapshot status=`error`，**临时 repo 不留半写文件**。
-- **优先级**：P0。
+- **缺口**：无（5.10 已关闭）。已覆盖 fake fixture 返回 `apply_patch` → 临时 repo 出现完整 Rust 文件 → `rustc --test` 通过；SSE 订阅期间触发同一生成请求并观测 tool/patch 结果；非法 patch 失败分支 final snapshot status=`error` 且临时 repo 不留半写文件。
+- **优先级**：已完成。
 - **测试位置**：**L2 已新增** `tests/code_ui_remote_generation_matrix.rs` + provider_fixtures，详见 §6.4 Wave 3。
 
 ### 5.11 Approval / Interaction 端到端
