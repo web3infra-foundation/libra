@@ -87,6 +87,57 @@ fn cloud_clone_missing_clone_domain_config_fails_before_restore_stub() {
     );
 }
 
+#[test]
+fn cloud_clone_rejects_unsupported_git_style_options_before_config_lookup() {
+    let cwd = tempdir().unwrap();
+    let source = "libra+cloud://code.example.com/kepler-ledger";
+
+    for (name, leading_args, needle) in [
+        ("branch", vec!["clone", "--branch", "main"], "--branch"),
+        ("depth", vec!["clone", "--depth", "1"], "--depth"),
+        (
+            "single-branch",
+            vec!["clone", "--single-branch"],
+            "--single-branch",
+        ),
+        ("bare", vec!["clone", "--bare"], "--bare"),
+    ] {
+        let dest = cwd.path().join(format!("restored-{name}"));
+        let mut args = leading_args;
+        args.push(source);
+        args.push(dest.to_str().unwrap());
+
+        let output = run_libra(&args, cwd.path());
+        assert!(
+            !output.status.success(),
+            "{needle} cloud clone should fail before restore"
+        );
+        let (_, report) = parse_cli_error_stderr(&output.stderr);
+        assert_eq!(report.error_code, "LBR-CLI-002");
+        assert!(
+            report.message.contains(needle),
+            "error should identify the unsupported option: {:?}",
+            report.message
+        );
+        assert!(
+            report.message.contains("libra+cloud://"),
+            "error should identify the cloud source surface: {:?}",
+            report.message
+        );
+        assert!(
+            !report
+                .message
+                .contains("clone domain 'code.example.com' is not configured"),
+            "unsupported option should be rejected before config lookup: {:?}",
+            report.message
+        );
+        assert!(
+            !dest.exists(),
+            "unsupported cloud clone option must not create the destination"
+        );
+    }
+}
+
 fn run_git(args: &[&str], cwd: &Path) -> std::process::Output {
     Command::new("git")
         .args(args)

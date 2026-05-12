@@ -49,6 +49,10 @@ libra clone "libra+cloud://code.example.com/kepler-ledger?revision=latest"
 For `libra+cloud://`, the authority is the configured clone domain. The path must be
 either `/<slug>` or `/repo/<repo_id>`. Only one selector is allowed: `?ref=<branch|tag|full-ref>`
 or `?revision=<oid|latest>`.
+The first Cloudflare restore surface does not accept Git transport shaping flags:
+`--branch`, `--depth`, `--single-branch`, and `--bare` return `LBR-CLI-002`
+before clone-domain config lookup and before creating the destination directory.
+Use `?ref=<branch|tag|full-ref>` on the source URL to select a checkout target.
 
 Required clone-domain config keys:
 
@@ -72,6 +76,8 @@ libra clone git@github.com:user/repo.git my-dir
 
 Check out `<NAME>` instead of the remote's HEAD. The branch must exist on the remote;
 otherwise a "remote branch not found" error is raised.
+For `libra+cloud://` sources, use `?ref=<branch|tag|full-ref>` in the URL instead;
+`--branch` is rejected before restore starts.
 
 ```bash
 libra clone -b develop git@github.com:user/repo.git
@@ -81,6 +87,8 @@ libra clone -b develop git@github.com:user/repo.git
 
 Fetch only the history leading to the tip of a single branch (HEAD, or the branch given
 by `-b`). Reduces transfer size for large repositories when only one branch is needed.
+Only Git remotes support this transport optimization; `libra+cloud://` restore rejects it
+because the restored local repository must preserve all published refs.
 
 ```bash
 libra clone --single-branch -b main git@github.com:user/repo.git
@@ -90,6 +98,8 @@ libra clone --single-branch -b main git@github.com:user/repo.git
 
 Create a bare repository without a working tree. The destination directory becomes the
 object store directly. Useful for central/server-side repositories.
+Bare Cloudflare restores are not part of the first restore surface; `libra+cloud://`
+currently rejects `--bare` explicitly.
 
 ```bash
 libra clone --bare git@github.com:user/repo.git
@@ -99,6 +109,8 @@ libra clone --bare git@github.com:user/repo.git
 
 Create a shallow clone with history truncated to the specified number of commits.
 `N` must be a positive integer.
+Only Git remotes support shallow transfer. Cloudflare restore rejects `--depth`
+because it must download the complete published object set.
 
 ```bash
 libra clone --depth 1 git@github.com:user/repo.git

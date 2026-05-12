@@ -172,6 +172,12 @@ pub enum CloneError {
         #[source]
         source: anyhow::Error,
     },
+    #[error("{option} is not supported with libra+cloud:// clone sources: {reason}")]
+    UnsupportedCloudCloneOption {
+        option: &'static str,
+        reason: &'static str,
+        hint: &'static str,
+    },
     #[error(
         "libra+cloud:// clone source recognised, but Phase 5 of \
          docs/improvement/publish.md is not yet implemented; tracking \
@@ -261,6 +267,14 @@ impl From<CloneError> for CliError {
                     .with_detail("clone_domain", domain.clone())
                     .with_hint("check the local/global Libra config database and vault state.")
             }
+            CloneError::UnsupportedCloudCloneOption {
+                ref option,
+                ref hint,
+                ..
+            } => CliError::command_usage(error.to_string())
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_detail("option", option.to_string())
+                .with_hint(hint.to_string()),
             CloneError::CloudPublishSourceNotYetImplemented { .. } => {
                 // Codex pass-7 P1: surface the recognised but
                 // unimplemented Cloudflare publish clone source as a
@@ -659,6 +673,7 @@ async fn execute_clone_inner(
     if args.remote_repo.starts_with("libra+cloud://") {
         let source =
             parse_cloud_publish_source(&args.remote_repo).map_err(|error| (error, None))?;
+        validate_cloud_clone_option_compatibility(args).map_err(|error| (error, None))?;
         ensure_cloud_clone_domain_config(&source)
             .await
             .map_err(|error| (error, None))?;
@@ -852,6 +867,38 @@ fn parse_cloud_publish_source(input: &str) -> Result<CloudPublishSource, CloneEr
     }
 
     Ok(CloudPublishSource { clone_domain })
+}
+
+fn validate_cloud_clone_option_compatibility(args: &CloneArgs) -> Result<(), CloneError> {
+    if args.branch.is_some() {
+        return Err(CloneError::UnsupportedCloudCloneOption {
+            option: "--branch",
+            reason: "cloud source refs are selected in the source URL, not with Git branch flags",
+            hint: "use `?ref=<branch|tag|full-ref>` on the libra+cloud:// URL instead of `--branch`.",
+        });
+    }
+    if args.depth.is_some() {
+        return Err(CloneError::UnsupportedCloudCloneOption {
+            option: "--depth",
+            reason: "Cloudflare restore must download the complete published object set",
+            hint: "`--depth` is only supported for Git remotes; omit it for libra+cloud:// sources.",
+        });
+    }
+    if args.single_branch {
+        return Err(CloneError::UnsupportedCloudCloneOption {
+            option: "--single-branch",
+            reason: "Cloudflare restore must preserve all published refs in the local repository",
+            hint: "`--single-branch` is only supported for Git remotes; use `?ref=<branch|tag|full-ref>` to select the checkout target.",
+        });
+    }
+    if args.bare {
+        return Err(CloneError::UnsupportedCloudCloneOption {
+            option: "--bare",
+            reason: "Cloudflare restore currently targets a non-bare working repository",
+            hint: "`--bare` is only supported for Git remotes until libra+cloud:// restore grows bare-repository support.",
+        });
+    }
+    Ok(())
 }
 
 async fn ensure_cloud_clone_domain_config(source: &CloudPublishSource) -> Result<(), CloneError> {
