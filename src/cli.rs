@@ -188,6 +188,8 @@ enum Commands {
     Usage(command::usage::UsageArgs),
     #[command(about = "Inspect an AI thread version graph in a TUI")]
     Graph(command::graph::GraphArgs),
+    #[command(about = "Inspect AI sandbox diagnostics")]
+    Sandbox(command::sandbox::SandboxArgs),
     // The rest of the commands require a repository to be present
     #[command(about = "Add file contents to the index")]
     Add(command::add::AddArgs),
@@ -733,7 +735,8 @@ fn command_preflight(command: &Commands) -> CliResult<CommandPreflight> {
         | Commands::Clone(_)
         | Commands::Open(_)
         | Commands::CodeControl(_)
-        | Commands::LsRemote(_) => Ok(CommandPreflight::none()),
+        | Commands::LsRemote(_)
+        | Commands::Sandbox(_) => Ok(CommandPreflight::none()),
         #[cfg(unix)]
         Commands::Worktree(command::worktree::WorktreeArgs {
             command: command::worktree::WorktreeSubcommand::Umount { .. },
@@ -986,6 +989,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         }
         Commands::Usage(cmd_args) => command::usage::execute_safe(cmd_args, &output).await?,
         Commands::Graph(cmd_args) => command::graph::execute_safe(cmd_args, &output).await?,
+        Commands::Sandbox(cmd_args) => command::sandbox::execute_safe(cmd_args, &output).await?,
         Commands::Add(cmd_args) => command::add::execute_safe(cmd_args, &output).await?,
         Commands::Rm(cmd_args) => command::remove::execute_safe(cmd_args, &output).await?,
         Commands::Restore(cmd_args) => command::restore::execute_safe(cmd_args, &output).await?,

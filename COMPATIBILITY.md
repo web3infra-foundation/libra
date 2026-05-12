@@ -30,6 +30,7 @@ batch document.
 | automation | intentionally-different | Libra AI automation rules/history extension, not a Git command |
 | usage | intentionally-different | Libra AI provider/model usage reporting extension, not a Git command |
 | graph | intentionally-different | Libra AI graph inspection extension, not a Git command |
+| sandbox | intentionally-different | Libra AI sandbox diagnostics extension, not a Git command |
 | add | partial | sparse-checkout flag unsupported |
 | rm | partial | `--force` / `--dry-run` / `--quiet` not exposed |
 | mv | partial | sparse-checkout flag unsupported; `--skip-errors` not exposed |

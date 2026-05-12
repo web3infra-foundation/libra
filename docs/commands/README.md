@@ -104,6 +104,7 @@ Every Libra command accepts the following global flags:
 | `libra automation` | | List, run, and inspect AI automation rules | [automation.md](automation.md) |
 | `libra usage` | | Report and prune AI provider/model usage aggregates | [usage.md](usage.md) |
 | `libra graph` | | Inspect a Libra Code thread version graph in a dedicated TUI | [graph.md](graph.md) |
+| `libra sandbox` | | Inspect AI sandbox diagnostics, including OS backend availability and downgrade warnings | [sandbox.md](sandbox.md) |
 | `libra agent` | | Manage external-agent capture, checkpoints, hooks, and RPC adapters | [agent.md](agent.md) |
 
 ### Low-Level & Inspection

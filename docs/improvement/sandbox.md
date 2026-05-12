@@ -29,7 +29,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 
 | 阶段 | 目标 | 现状 |
 |---|---|---|
-| 阶段 1 | `SandboxEnforcement` + `libra sandbox status` | 未落地 |
+| 阶段 1 | `SandboxEnforcement` + `libra sandbox status` | 部分落地：`sandbox status` 已落地，强制隔离仍待实现 |
 | 阶段 2 | 内建 bwrap 直调 + seccomp | 未落地 |
 | 阶段 3 | `setsid` / `--new-session` | 未落地 |
 | 阶段 4 | 敏感路径拒读（`deny_read`） | 未落地 |
@@ -41,7 +41,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 
 - 仍然是 Linux helper 缺失后 `warn` 并回退到无沙箱：`src/internal/ai/sandbox/runtime.rs:270-290`。
 - 仍无 `SandboxEnforcement`、`EnforcementFailed`、`NetworkEnforcementFailed` 类型/错误分支（`src/internal/ai/sandbox/policy.rs`、`runtime.rs`）。
-- 仍没有 `libra sandbox status` 子命令入口：`src/cli.rs:170-302`，且 `src/command/` 下无 `sandbox.rs`。
+- `libra sandbox status` 已提供自检入口，输出平台、当前可用后端、best-effort enforcement、writable roots、network/proxy 占位、helper/bwrap/Seatbelt 探测和降级告警；但它只是诊断面，还没有把 Linux helper 缺失升级为运行时拒绝。
 - Linux 仍是外部 helper 参数转发路径（`--sandbox-policy` / `--use-bwrap-sandbox`），无内建 `create_bwrap_command_args`：`src/internal/ai/sandbox/runtime.rs:323-340`。
 - macOS 读权限仍是 `(allow file-read*)` 全放行：`src/internal/ai/sandbox/runtime.rs:354`。
 - 执行路径仍未注入 per-command 私有 tmp，也无 finally 清理：`src/internal/ai/sandbox/mod.rs:986-1061`。
@@ -126,7 +126,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 | G5 | 每命令 0o700 tmp + `cleanupAfterCommand()` | 无专属 tmp | ★★ | 阶段 5 |
 | G6 | 内置 Seccomp 过滤器 | 依赖外部 helper | ★★ | 阶段 2（随 bwrap 直调） |
 | G7 | 明确警示 Docker socket 挂入 = 逃逸 | 已在 `SandboxPolicy` + `SandboxManager::transform()` 拒绝危险 writable root | ✅ | 阶段 6 已落地 |
-| G8 | `/sandbox` 自检状态 | 无 | ★ | 阶段 1（随 `sandbox status` 子命令） |
+| G8 | `/sandbox` 自检状态 | `libra sandbox status` 已输出 OS backend 与降级告警 | ✅ | 已落地 |
 | G9 | 嵌套容器 / WSL 的自适应降级告警 | 无 | ★ | 后续维护 |
 | G10 | Windows 规划中 | 同样未实现 | — | 本轮不处理 |
 
@@ -145,10 +145,10 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
      - `Required` → `SandboxTransformError::EnforcementFailed { reason }` 返回给调用方
      - `PreferStrict` → 返回结构化警告，审批层弹用户确认（复用 `ExecApprovalRequest` 通道）
      - `BestEffort` → 保留现状
-3. **新增 `libra sandbox status` 子命令**
-   - 新增 `src/command/sandbox.rs`，挂到 [src/cli.rs](../../src/cli.rs) 顶层；遵循第一/二批已确立的 run/render 拆分模式（参考 [src/command/worktree.rs](../../src/command/worktree.rs)）
-   - JSON / machine / human 三种输出：当前平台、实际生效的 `SandboxType`、`SandboxEnforcement`、writable roots、network access、helper 路径是否存在、Seatbelt / bwrap 探测结果
-   - 显式 `StableErrorCode` 与 README 全局层面 A/B 项保持一致（退出码模型、`--help EXAMPLES`）
+3. **新增 `libra sandbox status` 子命令（已落地）**
+   - 已新增 `src/command/sandbox.rs`，挂到 [src/cli.rs](../../src/cli.rs) 顶层，并通过 [docs/commands/sandbox.md](../commands/sandbox.md) 记录输出契约。
+   - JSON / machine / human 输出包含：当前平台、实际可用的 sandbox backend、当前 `best_effort` enforcement、writable roots、network access、helper 路径是否存在、Seatbelt / bwrap 探测结果和降级告警。
+   - 当前仍未新增 `SandboxEnforcement` 的稳定错误码与运行时拒绝路径；这一部分继续保留在阶段 1 剩余工作。
 
 **本阶段非目标**：不改 Seatbelt 读权限、不实现 bwrap 直调（在阶段 2 / 阶段 4 分别处理）。
 
