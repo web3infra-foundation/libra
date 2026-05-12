@@ -107,7 +107,7 @@ CI 默认门：L0+L1 必跑；L2 在 `test-provider` 下必跑；L3 仅 nightly 
 | HTTP 读路由 + loopback gate 顺序 | 已覆盖 | inline route test + security 矩阵 |
 | HTTP 写路由 lease 矩阵 | 10/10 | 9 条原 lease case + observe-mode automation attach 拒绝 |
 | SSE | 7/7 | event_stream harness + SSE matrix |
-| Local TUI Control 锁 / 审计 | instance conflict + custom-path security matrix + audit redaction L0 | stale PID L2 takeover 仍为 quick-follow |
+| Local TUI Control 锁 / 审计 | instance conflict + stale-PID takeover + custom-path security matrix + audit redaction L0 | 无本地 quick-follow |
 | TUI 渲染 | 2 条 inline buffer smoke | complex-state 快照仍为 quick-follow；当前未引入 `insta` |
 | Tool ACL × context × policy | 6/6 | 含 MCP bridge 前缀防退化 |
 | Apply-Patch 文件生成(fake) | 3/3 | generation_cases.json 全量 + 失败分支 |
@@ -197,11 +197,10 @@ CI 默认门：L0+L1 必跑；L2 在 `test-provider` 下必跑；L3 仅 nightly 
 
 ### 5.6 Local TUI Control 锁 / 审计
 
-- **现状 ✅⚠️**：[docs/automation/local-tui-control.md](../automation/local-tui-control.md) 已规约；`code_ui_scenarios.rs` 覆盖 `CONTROL_INSTANCE_CONFLICT`；`harness_self_test::code_session_starts_tui_and_cleans_control_files` 在默认 harness custom path 模式下覆盖 `--control-token-file` / `--control-info-file` 文件创建、diagnostics 不泄露 token marker、shutdown 清理；`security_cases.json` 在 custom path 模式下覆盖 control/controller token 不进 diagnostics、secret-like `LIBRA_LOG_FILE` redaction、control audit log 不泄露 secret-like `clientId`；`code_control_files` 单测已覆盖默认 token 0600、宽权限拒绝、symlink 拒绝、stale `control.json` 不阻塞 lock、custom token/info path 独立 lock；`web::tests::sanitized_audit_client_id_*` 已覆盖 audit `client_id` 80 字符上限、控制字符替换、空值 fallback、marker redaction、按 char 截断。
-- **缺口**：
-  - 多实例 advisory lock + stale PID 接管仍缺 L2 进程级覆盖（spawn 一个 → kill -9 → 第二个能启）；当前只有 helper-level stale-info 单测。
-- **优先级**：P1（advisory lock）。
-- **测试位置**：后续只需补 **L2 扩展** `code_ui_scenarios.rs` 或新增 `tests/code_control_lock_test.rs` 的 stale-PID takeover；audit redaction 与 custom-path token 隔离已完成。
+- **现状 ✅**：[docs/automation/local-tui-control.md](../automation/local-tui-control.md) 已规约；`code_ui_scenarios.rs` 覆盖 `CONTROL_INSTANCE_CONFLICT` 与 `default_control_paths_restart_after_stale_pid_takeover`（spawn 一个 → SIGKILL → 第二个能用同一默认 control path 启动并替换 token）；`harness_self_test::code_session_starts_tui_and_cleans_control_files` 在默认 harness custom path 模式下覆盖 `--control-token-file` / `--control-info-file` 文件创建、diagnostics 不泄露 token marker、shutdown 清理；`security_cases.json` 在 custom path 模式下覆盖 control/controller token 不进 diagnostics、secret-like `LIBRA_LOG_FILE` redaction、control audit log 不泄露 secret-like `clientId`；`code_control_files` 单测已覆盖默认 token 0600、宽权限拒绝、symlink 拒绝、stale `control.json` 不阻塞 lock、custom token/info path 独立 lock；`web::tests::sanitized_audit_client_id_*` 已覆盖 audit `client_id` 80 字符上限、控制字符替换、空值 fallback、marker redaction、按 char 截断。
+- **缺口**：无（5.6 已关闭）。
+- **优先级**：已完成。
+- **测试位置**：**L2 已覆盖** `default_control_paths_reject_second_live_instance`、`default_control_paths_restart_after_stale_pid_takeover`、`harness_self_test::code_session_starts_tui_and_cleans_control_files`、`code_ui_remote_security_matrix`；**L1/L0 已覆盖** `code_control_files::*` 与 `web::tests::sanitized_audit_client_id_*`。
 
 ### 5.7 Browser Control
 

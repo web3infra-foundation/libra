@@ -295,6 +295,7 @@ impl CodeSession {
         };
         let libra_log = logs_dir.join("libra.log");
         let pty_log = logs_dir.join("pty.log");
+        let previous_info_text = fs::read_to_string(&info_path).ok();
 
         let pty_system = native_pty_system();
         let pair = pty_system
@@ -427,7 +428,7 @@ impl CodeSession {
                 .build()
                 .context("failed to build test HTTP client")?,
         };
-        session.wait_for_control_info(Duration::from_secs(30))?;
+        session.wait_for_control_info(Duration::from_secs(30), previous_info_text)?;
         Ok(session)
     }
 
@@ -1208,7 +1209,43 @@ impl CodeSession {
         Ok(())
     }
 
-    fn wait_for_control_info(&mut self, timeout: Duration) -> Result<()> {
+    /// Abruptly terminate the spawned TUI without sending `/quit`.
+    ///
+    /// This intentionally leaves default control files behind when the child is
+    /// killed with SIGKILL, letting stale-PID takeover tests prove a follow-up
+    /// process ignores old discovery metadata once the OS releases the lock.
+    pub fn kill_without_cleanup(&mut self) -> Result<()> {
+        if let Some(child) = self.child.as_mut() {
+            #[cfg(unix)]
+            {
+                if let Some(pid) = child.process_id() {
+                    let result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+                    if result != 0 {
+                        return Err(std::io::Error::last_os_error())
+                            .with_context(|| format!("failed to SIGKILL libra code child {pid}"));
+                    }
+                } else {
+                    child.kill().context("failed to kill libra code child")?;
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                child.kill().context("failed to kill libra code child")?;
+            }
+            child
+                .wait()
+                .context("failed to wait for killed libra code child")?;
+            self.child = None;
+        }
+        self.join_reader();
+        Ok(())
+    }
+
+    fn wait_for_control_info(
+        &mut self,
+        timeout: Duration,
+        previous_info_text: Option<String>,
+    ) -> Result<()> {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             if self.child_exited()? {
@@ -1220,6 +1257,10 @@ impl CodeSession {
             if self.info_path.exists() {
                 let info_text = fs::read_to_string(&self.info_path)
                     .context("failed to read control info file")?;
+                if previous_info_text.as_ref() == Some(&info_text) {
+                    thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
                 let info: ControlInfo =
                     serde_json::from_str(&info_text).context("failed to parse control info")?;
                 // The runtime writes `control.json` TWICE for non-stdio

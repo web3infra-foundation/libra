@@ -136,6 +136,50 @@ fn default_control_paths_reject_second_live_instance() -> Result<()> {
     session.shutdown()
 }
 
+#[cfg(feature = "test-provider")]
+#[test]
+#[serial]
+fn default_control_paths_restart_after_stale_pid_takeover() -> Result<()> {
+    let mut first = CodeSession::spawn(
+        CodeSessionOptions::new("stale-pid-first", fixture("basic_chat"))
+            .with_default_control_paths(),
+    )?;
+    let repo_dir = first.repo_dir().to_path_buf();
+    let token_path = first.token_path().to_path_buf();
+    let info_path = first.info_path().to_path_buf();
+    let first_token = first.control_token_value().to_string();
+
+    assert!(token_path.exists());
+    assert!(info_path.exists());
+
+    first.kill_without_cleanup()?;
+    assert!(
+        token_path.exists(),
+        "SIGKILL fixture should leave stale token file for takeover"
+    );
+    assert!(
+        info_path.exists(),
+        "SIGKILL fixture should leave stale control.json for takeover"
+    );
+
+    let mut second = CodeSession::spawn(
+        CodeSessionOptions::new("stale-pid-second", fixture("basic_chat"))
+            .with_default_control_paths()
+            .with_existing_repo_dir(repo_dir),
+    )?;
+    assert_eq!(second.token_path(), token_path.as_path());
+    assert_eq!(second.info_path(), info_path.as_path());
+    assert_ne!(
+        second.control_token_value(),
+        first_token,
+        "restart should replace the stale process control token"
+    );
+    let snapshot = second.snapshot()?;
+    assert_eq!(snapshot["provider"]["provider"], "fake");
+
+    second.shutdown()
+}
+
 /// Browser-controller end-to-end smoke. Spawns `libra code` with
 /// `--browser-control loopback`, attaches as a browser (no automation
 /// control token), submits a chat through the browser write surface, and
