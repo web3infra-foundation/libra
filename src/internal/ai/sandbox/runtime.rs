@@ -133,6 +133,7 @@ pub struct ExecEnv {
     pub sandbox_permissions: SandboxPermissions,
     pub justification: Option<String>,
     pub arg0: Option<String>,
+    pub new_session: bool,
 }
 
 impl ExecEnv {
@@ -146,9 +147,31 @@ impl ExecEnv {
         command.args(args);
         command.current_dir(self.cwd);
         command.envs(self.env);
+        if self.new_session {
+            configure_new_session(&mut command);
+        }
         Ok((command, self.timeout_ms))
     }
 }
+
+#[cfg(unix)]
+fn configure_new_session(command: &mut Command) {
+    // SAFETY: `pre_exec` runs in the child after fork and before exec. The
+    // closure only invokes the async-signal-safe `setsid(2)` syscall and
+    // converts its errno into an owned `std::io::Error`.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn configure_new_session(_command: &mut Command) {}
 
 pub struct SandboxTransformRequest<'a> {
     pub spec: CommandSpec,
@@ -350,6 +373,10 @@ impl SandboxManager {
             sandbox_permissions: spec.sandbox_permissions,
             justification: spec.justification,
             arg0,
+            new_session: matches!(
+                effective_sandbox,
+                SandboxType::MacosSeatbelt | SandboxType::LinuxSeccomp
+            ),
         })
     }
 }
@@ -577,6 +604,7 @@ mod tests {
             .transform(request)
             .expect("transform should fallback");
         assert_eq!(transformed.sandbox, SandboxType::None);
+        assert!(!transformed.new_session);
         assert!(!transformed.command.is_empty());
     }
 
@@ -680,6 +708,38 @@ mod tests {
             .transform(request)
             .expect("explicit escalation should bypass sandbox policy validation");
         assert_eq!(transformed.sandbox, SandboxType::None);
+        assert!(!transformed.new_session);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exec_env_new_session_runs_child_as_session_leader() {
+        let env = ExecEnv {
+            command: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "sleep 5".to_string(),
+            ],
+            cwd: std::env::temp_dir(),
+            env: HashMap::new(),
+            timeout_ms: Some(1_000),
+            sandbox: SandboxType::MacosSeatbelt,
+            sandbox_permissions: SandboxPermissions::UseDefault,
+            justification: None,
+            arg0: None,
+            new_session: true,
+        };
+        let (mut command, _) = env.into_command().expect("exec env should build");
+        let mut child = command.spawn().expect("child should spawn");
+        let pid = child.id().expect("spawned child should expose a pid");
+        // SAFETY: `getsid` only reads kernel process metadata for the spawned
+        // child PID while it is still alive.
+        let sid = unsafe { libc::getsid(pid as libc::pid_t) };
+        let _ = child.kill().await;
+        assert_eq!(
+            sid, pid as libc::pid_t,
+            "setsid should make the child its session leader; sid={sid} pid={pid}"
+        );
     }
 
     #[test]

@@ -9,7 +9,7 @@ AI Agent 子系统专项计划，与 [agent.md](agent.md) Part B 并列。两者
 
 ## Context
 
-AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击面最集中的入口：提示词注入、恶意 MCP server、失控的 provider 调用都可能通过 Shell tool 直达宿主机。当前 Libra 已经具备多档 `SandboxPolicy`、`SandboxEnforcement::Required`、Seatbelt 策略拼装、Linux 外部 helper、审批审计、危险命令解析、危险 writable root 拒绝、每命令 0o700 私有 tmp 清理与 `libra sandbox status` 自检（见 [src/internal/ai/sandbox/](../../src/internal/ai/sandbox/)），但相较 Claude Code 官方公开的 Bubblewrap 方案仍有若干关键缺口，包括：**Linux 沙箱默认仍是 best-effort，未配置外部二进制时只有 `Required` 会拒绝降级**、**Seatbelt 允许 `file-read*` 导致敏感路径默认可读**、**无 `--new-session` 防护 TIOCSTI 终端注入**、**无内建 bwrap 直调**、**网络三态 / allowlist / proxy 尚未落地**。
+AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击面最集中的入口：提示词注入、恶意 MCP server、失控的 provider 调用都可能通过 Shell tool 直达宿主机。当前 Libra 已经具备多档 `SandboxPolicy`、`SandboxEnforcement::Required`、Seatbelt 策略拼装、Linux 外部 helper、sandbox 子进程 `setsid()`、审批审计、危险命令解析、危险 writable root 拒绝、每命令 0o700 私有 tmp 清理与 `libra sandbox status` 自检（见 [src/internal/ai/sandbox/](../../src/internal/ai/sandbox/)），但相较 Claude Code 官方公开的 Bubblewrap 方案仍有若干关键缺口，包括：**Linux 沙箱默认仍是 best-effort，未配置外部二进制时只有 `Required` 会拒绝降级**、**Seatbelt 允许 `file-read*` 导致敏感路径默认可读**、**内建 bwrap `--new-session` 尚未落地**、**无内建 bwrap 直调**、**网络三态 / allowlist / proxy 尚未落地**。
 
 本计划对齐 Claude Code 官方沙箱文档（`code.claude.com/docs/en/sandboxing`）与 Bubblewrap 工程实践，目标是把 Libra 在 AI Agent 失控场景下的实际爆炸半径降到与 Claude Code 相当的水平，并保证改动与 [agent.md](agent.md) Part B 的 Runtime 正式写入层兼容。**网络服务访问采取默认拒绝（default deny）策略**：沙箱内除 loopback 外的一切出站连接默认被 OS 层阻断，只能通过显式白名单放行。
 
@@ -22,8 +22,8 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 
 ### 审计结论
 
-- **阶段 1 继续收口，阶段 5 与阶段 6 已收口，阶段 2～4 与阶段 7 仍待实施**。当前状态是“诊断面 + 显式 required enforcement + 危险挂载拒绝 + per-command tmp 已具备，默认强制隔离与更细粒度 OS 策略仍待落地”。
-- 与早期审计相比，`sandbox` 关键缺口中的危险 writable root 拒绝、`sandbox status`、`SandboxEnforcement::Required` 与 per-command tmp 已进入主干；默认 `PreferStrict` 审批确认、`--new-session`、敏感路径拒读、内建 bwrap、网络三态仍未进入主干实现。
+- **阶段 1 与阶段 3 继续收口，阶段 5 与阶段 6 已收口，阶段 2、4、7 仍待实施**。当前状态是“诊断面 + 显式 required enforcement + sandbox 子进程新 session + 危险挂载拒绝 + per-command tmp 已具备，默认强制隔离与更细粒度 OS 策略仍待落地”。
+- 与早期审计相比，`sandbox` 关键缺口中的危险 writable root 拒绝、`sandbox status`、`SandboxEnforcement::Required`、sandbox 子进程 `setsid()` 与 per-command tmp 已进入主干；默认 `PreferStrict` 审批确认、内建 bwrap `--new-session`、敏感路径拒读、内建 bwrap、网络三态仍未进入主干实现。
 
 ### 分阶段状态（当前代码）
 
@@ -31,7 +31,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 |---|---|---|
 | 阶段 1 | `SandboxEnforcement` + `libra sandbox status` | 部分落地：`sandbox status` 与 `Required` 拒绝降级已落地；默认 `PreferStrict` / 审批确认仍待实现 |
 | 阶段 2 | 内建 bwrap 直调 + seccomp | 未落地 |
-| 阶段 3 | `setsid` / `--new-session` | 未落地 |
+| 阶段 3 | `setsid` / `--new-session` | 部分落地：sandbox 子进程 Unix `setsid()` 已落地；内建 bwrap `--new-session` 仍待阶段 2 |
 | 阶段 4 | 敏感路径拒读（`deny_read`） | 未落地 |
 | 阶段 5 | 每命令 0o700 tmp + 清理 | 已落地（0.17.37） |
 | 阶段 6 | 危险挂载拒绝清单 | 已落地（0.17.25） |
@@ -69,6 +69,13 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 - **诊断面同步**：`libra sandbox status` 的 `enforcement` 字段读取同一环境开关；`required` + Linux helper 缺失时告警会说明相关命令将失败。
 - **仍待收口**：`PreferStrict` 目前只作为稳定枚举值保留，尚未接入审批 UI 的“降级需确认”流程；内建 bwrap 未落地前，Linux required 模式仍依赖外部 helper。
 
+## 0.17.45 增量收口（2026-05-12）
+
+- **阶段 3 部分落地**：`ExecEnv::into_command()` 在 Unix 平台对实际启用的 Libra 内部 sandbox 命令调用 `setsid()`，让 macOS Seatbelt / Linux helper 子进程脱离调用方 session。
+- **生效范围**：仅当 `effective_sandbox` 为 `MacosSeatbelt` 或 `LinuxSeccomp` 时启用；显式 escalated、`DangerFullAccess`、`ExternalSandbox` 和默认 fallback `SandboxType::None` 不会被这个路径隐式改写。
+- **回归覆盖**：`exec_env_new_session_runs_child_as_session_leader` 在 Unix 上验证 `setsid()` 后 child PID 与 session ID 一致；fallback / escalated transform 继续断言不会设置 `new_session`。
+- **仍待收口**：内建 bwrap 尚未落地，因此阶段 2 的 `--new-session` 参数覆盖仍是后续工作；Seatbelt 读权限收紧也仍在阶段 4。
+
 ## 已完成前置条件与当前代码状态
 
 ### 已确认落地的基线
@@ -101,7 +108,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 
 - Linux 外部 helper 缺失时，默认 `BestEffort` 仍走 `tracing::warn!` 后“裸跑”；显式 `Required` 已返回 `EnforcementFailed`，不再无感知降级。
 - Seatbelt 策略对读操作使用 `(allow file-read*)` 全盘放行（runtime.rs:354），`~/.ssh` / `~/.aws` / `~/.netrc` / 浏览器 cookie / 各类 token 默认可被 agent 读取并外发。
-- `create_seatbelt_command_args` 与外部 Linux helper 都没有对沙箱进程做 `setsid` / `--new-session`，TIOCSTI 终端注入路径未封堵。
+- `ExecEnv::into_command()` 会对实际启用的 macOS Seatbelt / Linux helper sandbox 子进程执行 `setsid()`；内建 bwrap 的 `--new-session` 参数仍待阶段 2 一并实现。
 - `run_command_spec` 已覆盖调用方传入的 `TMPDIR` / `TEMP` / `TMP` 并在命令后清理；剩余风险是清理失败仅进入 tracing，尚未写入 agent Runtime 的结构化 Evidence。
 - `WorkspaceWrite::writable_roots` 已拒绝危险挂载清单；剩余风险是尚未把拒绝事件写成 agent Runtime 的 `ToolInvocation[E]` / `Evidence[E]` 结构化记录。
 - `libra sandbox status` 已落地，用户可确认当前 `SandboxType` 与 `SandboxEnforcement` 诊断状态；剩余风险是默认 enforcement 仍为 `BestEffort`，`PreferStrict` 审批确认尚未接线。
@@ -136,7 +143,7 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 | # | Claude Code 做到 | Libra 现状 | 严重度 | 落地阶段 |
 |---|---|---|---|---|
 | G1 | Linux 沙箱开箱即用（bwrap 直调） | 依赖外部 `libra-linux-sandbox` 二进制，未配置时 warn + 裸跑 | ★★★ | 阶段 1 + 阶段 2 |
-| G2 | `--new-session` 阻断 TIOCSTI | 未设置 `setsid` / `--new-session` | ★★★ | 阶段 3 |
+| G2 | `--new-session` 阻断 TIOCSTI | sandbox 子进程已 `setsid()`；内建 bwrap `--new-session` 仍待阶段 2 | ★★★ | 阶段 3 部分落地 |
 | G3 | tmpfs 空白根 + `--ro-bind` 精选注入 | Seatbelt `(allow file-read*)` 全盘读 | ★★ | 阶段 4 |
 | G4 | 默认拒绝 + 域名白名单的网络策略 | 仅 `network_access: bool`；enforcement 依赖环境变量 + 部分 Seatbelt 策略，未在 Linux 默认 `--unshare-net` | ★★★ | 阶段 7 本轮 OS 层 default deny + 白名单配置；域名过滤代理单列 |
 | G5 | 每命令 0o700 tmp + `cleanupAfterCommand()` | 已在 `run_command_spec` 前后注入并清理私有 tmp；清理失败 Evidence 仍待 Runtime 接线 | ✅ | 阶段 5 已落地 |
@@ -196,12 +203,12 @@ AI Agent 在本地执行命令是 `libra code` 的核心能力，但也是攻击
 
 1. **macOS**（`create_seatbelt_command_args`）
    - 在 `seatbelt_base_policy.sbpl` 追加 `(deny iokit-open (iokit-user-client-class "IOTTYClient"))` 类规则
-   - 同时给 sandbox 子进程加 `setsid`（通过 `Command::pre_exec` 在 Unix 下设置 `setsid()`）
+   - 已给 sandbox 子进程加 `setsid`（通过 `Command::pre_exec` 在 Unix 下设置 `setsid()`）
 2. **Linux**（`create_bwrap_command_args` / 外部 helper）
-   - 内建 bwrap 参数追加 `--new-session`
-   - 外部 helper 的 CLI 契约里确认同名参数一致
+   - 外部 helper sandbox 子进程已通过 `ExecEnv` 进入新 session
+   - 内建 bwrap 参数追加 `--new-session` 仍待阶段 2 落地
 3. **单元测试**
-   - 在 Linux 沙箱内 `ps -o pid,sid,pgid,tty` 应显示 `tty=?`，与宿主 TTY 解绑
+   - 已通过 Unix 单测验证 `setsid()` 后 child PID 与 session ID 一致；完整 Linux bwrap `tty=?` 覆盖仍待阶段 2
 
 ### 阶段 4：Seatbelt 读权限收紧（P1）
 
