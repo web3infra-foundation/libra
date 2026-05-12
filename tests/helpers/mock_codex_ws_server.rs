@@ -40,6 +40,11 @@ pub struct MockCodexWsConfig {
     /// When true, send a `thread/started` notification immediately after the
     /// `thread/start` response.
     pub emit_thread_started: bool,
+    /// When true, send a command-execution approval notification immediately
+    /// after the first `turn/start` response. This models Codex plan-mode's
+    /// execution gate: Libra must surface the request to the user before it
+    /// replies with a resolve request.
+    pub emit_turn_command_approval: bool,
 }
 
 /// Test-only WebSocket server mimicking the Codex app-server handshake.
@@ -75,6 +80,7 @@ impl MockCodexWsServer {
             .thread_id
             .unwrap_or_else(|| "libra-mock-thread".to_string());
         let emit_thread_started = config.emit_thread_started;
+        let emit_turn_command_approval = config.emit_turn_command_approval;
         let handle = tokio::spawn(async move {
             loop {
                 let (tcp_stream, _peer) = match listener.accept().await {
@@ -133,6 +139,26 @@ impl MockCodexWsServer {
                                 "params": {
                                     "threadId": thread_id,
                                     "thread": { "id": thread_id },
+                                },
+                            });
+                            if write
+                                .send(Message::Text(notification.to_string().into()))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        if emit_turn_command_approval && method == "turn/start" {
+                            let notification = json!({
+                                "jsonrpc": "2.0",
+                                "method": "item/commandExecution/requestApproval",
+                                "params": {
+                                    "requestId": "codex-plan-gate-command-approval",
+                                    "itemId": "codex-plan-gate-command",
+                                    "threadId": thread_id,
+                                    "command": "touch should-not-run-before-plan-approval",
+                                    "description": "Codex requested command execution before proceeding",
                                 },
                             });
                             if write

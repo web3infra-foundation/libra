@@ -23,6 +23,9 @@
 //!     emits `initialize` and `thread/start`, and that codex's
 //!     default plan-mode instructions are present in the
 //!     `thread/start` payload.
+//!   * Codex command-execution approval requests surface through
+//!     Code UI as pending interactions and are not resolved back to
+//!     Codex until the browser controller approves them.
 //!
 //! Coverage still deferred (extends the same helper):
 //!   * Codex disconnect / reconnect resilience.
@@ -500,6 +503,7 @@ fn libra_code_provider_codex_persists_thread_started_notification() -> Result<()
     let server = runtime.block_on(MockCodexWsServer::start(MockCodexWsConfig {
         thread_id: Some(thread_id.to_string()),
         emit_thread_started: true,
+        ..Default::default()
     }))?;
     let port = server.port().to_string();
     let fake_codex_bin = fake_codex_bin_path()?;
@@ -559,6 +563,109 @@ fn libra_code_provider_codex_persists_thread_started_notification() -> Result<()
     assert!(
         event_json.contains(thread_id),
         "persisted thread event must include the Codex thread id; got:\n{event_json}",
+    );
+    Ok(())
+}
+
+/// Wave 9 §5.13 plan gate smoke — Codex must not receive an
+/// execution approval resolve until the Code UI user explicitly
+/// responds to the surfaced interaction.
+#[cfg(feature = "test-provider")]
+#[test]
+#[serial]
+fn libra_code_provider_codex_waits_for_user_before_execution_approval_resolve() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new().context("create tokio runtime")?;
+    let server = runtime.block_on(MockCodexWsServer::start(MockCodexWsConfig {
+        thread_id: Some("wave-9-codex-plan-gate-thread".to_string()),
+        emit_turn_command_approval: true,
+        ..Default::default()
+    }))?;
+    let port = server.port().to_string();
+    let fake_codex_bin = fake_codex_bin_path()?;
+
+    let session = CodeSession::spawn(
+        CodeSessionOptions::new("code-codex-plan-gate", fixture_path())
+            .with_live_provider("codex", "codex-test")
+            .with_browser_control_loopback()
+            .push_extra_cli_arg("--codex-port")
+            .push_extra_cli_arg(port)
+            .push_extra_cli_arg("--codex-bin")
+            .push_extra_cli_arg(fake_codex_bin),
+    )?;
+    let _captured = wait_for_codex_methods(
+        &server,
+        &["initialize", "thread/start"],
+        Duration::from_secs(10),
+    )?;
+
+    let browser_token = session.attach_browser("codex-plan-gate-browser")?;
+    let (status, body) =
+        session.browser_submit_message(&browser_token, "execute only after approval")?;
+    assert!(
+        status.is_success(),
+        "browser submit must succeed before approval gate assertion; got {status}: {body}",
+    );
+    let _captured = wait_for_codex_methods(&server, &["turn/start"], Duration::from_secs(10))?;
+
+    session.wait_for_snapshot(Duration::from_secs(10), |snapshot| {
+        snapshot
+            .pointer("/interactions")
+            .and_then(serde_json::Value::as_array)
+            .map(|interactions| {
+                interactions.iter().any(|interaction| {
+                    interaction
+                        .pointer("/id")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("codex-plan-gate-command-approval")
+                        && interaction
+                            .pointer("/status")
+                            .and_then(serde_json::Value::as_str)
+                            == Some("pending")
+                })
+            })
+            .unwrap_or(false)
+    })?;
+
+    let before_response = server.captured_requests();
+    assert!(
+        !before_response.iter().any(|request| {
+            request.get("method").and_then(serde_json::Value::as_str)
+                == Some("item/commandExecution/requestApproval/resolve")
+        }),
+        "Codex execution approval must not be resolved before user response; captured {before_response:?}",
+    );
+
+    let (status, body) =
+        session.browser_respond_interaction(&browser_token, "codex-plan-gate-command-approval")?;
+    assert!(
+        status.is_success(),
+        "browser approval response must succeed; got {status}: {body}",
+    );
+    let captured = wait_for_codex_methods(
+        &server,
+        &["item/commandExecution/requestApproval/resolve"],
+        Duration::from_secs(10),
+    )?;
+    let resolve = captured
+        .iter()
+        .find(|request| {
+            request.get("method").and_then(serde_json::Value::as_str)
+                == Some("item/commandExecution/requestApproval/resolve")
+        })
+        .ok_or_else(|| anyhow::anyhow!("captured requests did not include approval resolve"))?;
+    assert_eq!(
+        resolve
+            .pointer("/params/requestId")
+            .and_then(serde_json::Value::as_str),
+        Some("codex-plan-gate-command-approval"),
+        "approval resolve must target the surfaced interaction; got {resolve}",
+    );
+    assert_eq!(
+        resolve
+            .pointer("/params/approved")
+            .and_then(serde_json::Value::as_bool),
+        Some(true),
+        "approval resolve must carry the user's approval decision; got {resolve}",
     );
     Ok(())
 }
