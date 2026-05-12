@@ -1542,6 +1542,72 @@ mod tests {
     }
 
     #[test]
+    fn approval_dialog_renders_command_context_and_options() {
+        let mut pane = BottomPane::new();
+        pane.status = AgentStatus::AwaitingApproval;
+        pane.set_approval_dialog(
+            "Sandbox approval required".to_string(),
+            "cargo test --all".to_string(),
+            PathBuf::from("/tmp/libra"),
+            Some("Writes outside the workspace need explicit approval".to_string()),
+            true,
+            "workspace-write".to_string(),
+            true,
+            vec![PathBuf::from("/tmp/libra"), PathBuf::from("/tmp/shared")],
+            vec![
+                ("Approve".to_string(), "Run once".to_string()),
+                (
+                    "Approve Session".to_string(),
+                    "Allow matching commands".to_string(),
+                ),
+                (
+                    "Allow All Commands".to_string(),
+                    "Allow every command".to_string(),
+                ),
+                ("Deny".to_string(), "Reject".to_string()),
+                ("Abort Turn".to_string(), "Interrupt".to_string()),
+            ],
+        );
+        pane.exec_approval_selected = 2;
+
+        let area = Rect::new(0, 0, 96, pane.desired_height());
+        let mut buf = Buffer::empty(area);
+        let _ = pane.render(area, &mut buf);
+        let rendered = (0..area.height)
+            .map(|y| row_text(&buf, y, area.width))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Awaiting sandbox approval"));
+        assert!(rendered.contains("Sandbox approval required"));
+        assert!(rendered.contains("Retry: cargo test --all"));
+        assert!(rendered.contains("sandbox: workspace-write"));
+        assert!(rendered.contains("network: enabled"));
+        assert!(rendered.contains("cwd: /tmp/libra"));
+        assert!(rendered.contains("write roots: /tmp/libra, /tmp/shared"));
+        assert!(rendered.contains("Writes outside the workspace need explicit approval"));
+        assert!(rendered.contains("▸ Allow All Commands"));
+        assert!(rendered.contains("Deny"));
+    }
+
+    #[test]
+    fn retry_status_line_renders_error_notice() {
+        let mut pane = BottomPane::new();
+        pane.set_retry_notice("● Retrying request 2/5 in 1.5s (503 upstream)".to_string());
+
+        let area = Rect::new(0, 0, 80, pane.desired_height());
+        let mut buf = Buffer::empty(area);
+        let _ = pane.render(area, &mut buf);
+        let rendered = (0..area.height)
+            .map(|y| row_text(&buf, y, area.width))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Retrying request 2/5"));
+        assert!(rendered.contains("503 upstream"));
+    }
+
+    #[test]
     fn plan_and_intent_review_dialogs_use_phase_specific_labels() {
         let plan_area = Rect::new(0, 0, 80, 6);
 

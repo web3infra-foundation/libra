@@ -2197,7 +2197,7 @@ impl Default for ChatWidget {
 #[cfg(test)]
 mod tests {
     use git_internal::internal::object::{task::Task as GitTask, types::ActorRef};
-    use ratatui::{buffer::Buffer, layout::Rect};
+    use ratatui::{Terminal, backend::TestBackend, buffer::Buffer, layout::Rect};
     use serde_json::json;
 
     use super::{
@@ -2223,6 +2223,24 @@ mod tests {
         out
     }
 
+    fn render_widget_to_text(mut widget: ChatWidget, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test backend should initialize");
+
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                let _ = widget.render(area, frame.buffer_mut());
+            })
+            .expect("widget should render to test backend");
+
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| row_text(buffer, y, width))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
     fn initial_welcome_render_clamps_to_reported_release_buffer_size() {
         let buffer_area = Rect::new(0, 0, 122, 35);
@@ -2244,6 +2262,61 @@ mod tests {
 
         welcome_shader::render(chat_area, &mut buf, welcome);
         let _ = widget.render_bottom_pane_only(oversized_frame_area, &mut buf);
+    }
+
+    #[test]
+    fn test_backend_render_empty_transcript_keeps_prompt_and_status() {
+        let widget = ChatWidget::new();
+
+        let rendered = render_widget_to_text(widget, 80, 18);
+
+        assert!(rendered.contains("Type your message"));
+        assert!(rendered.contains("Ready"));
+        assert!(!rendered.contains("panic"));
+    }
+
+    #[test]
+    fn test_backend_render_streaming_assistant_delta() {
+        let mut widget = ChatWidget::new();
+        let mut cell = AssistantHistoryCell::streaming();
+        cell.content = "partial assistant delta".to_string();
+        widget.add_cell(Box::new(cell));
+
+        let rendered = render_widget_to_text(widget, 80, 18);
+
+        assert!(rendered.contains("partial assistant delta"));
+        assert!(rendered.contains("▌"));
+        assert!(rendered.contains("Ready"));
+    }
+
+    #[test]
+    fn chat_history_scroll_changes_visible_window() {
+        let mut widget = ChatWidget::new();
+        for idx in 0..20 {
+            widget.add_cell(Box::new(AssistantHistoryCell::new(format!(
+                "message {idx:02}"
+            ))));
+        }
+
+        let area = Rect::new(0, 0, 80, 8);
+        let mut bottom_buf = Buffer::empty(area);
+        widget.render_chat_area(area, &mut bottom_buf);
+        let bottom_rendered = (0..area.height)
+            .map(|y| row_text(&bottom_buf, y, area.width))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(bottom_rendered.contains("message 19"));
+        assert!(!bottom_rendered.contains("message 12"));
+
+        widget.scroll_up_lines(8);
+        let mut scrolled_buf = Buffer::empty(area);
+        widget.render_chat_area(area, &mut scrolled_buf);
+        let scrolled_rendered = (0..area.height)
+            .map(|y| row_text(&scrolled_buf, y, area.width))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(scrolled_rendered.contains("message 12"));
+        assert!(!scrolled_rendered.contains("message 19"));
     }
 
     fn make_task(title: &str, kind: TaskKind, dependencies: Vec<uuid::Uuid>) -> TaskSpec {

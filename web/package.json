@@ -1,6 +1,6 @@
 {
   "name": "libra",
-  "version": "0.17.17",
+  "version": "0.17.18",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -29,5 +29,12 @@
     "eslint-config-next": "16.1.6",
     "tailwindcss": "^4.2.2",
     "typescript": "^5.9.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "msw",
+      "sharp",
+      "unrs-resolver"
+    ]
   }
 }

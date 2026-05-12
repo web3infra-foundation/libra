@@ -211,13 +211,10 @@ CI 默认门：L0+L1 必跑；L2 在 `test-provider` 下必跑；L3 仅 nightly 
 
 ### 5.8 TUI 渲染快照
 
-- **现状 ✅⚠️**：除 `ai_usage_tui_test.rs` 外，`libra code` TUI 已落地 2 条 inline buffer smoke；复杂状态快照仍是 quick-follow。
-- **缺口**：
-  - 仍待：更复杂的 `ratatui::backend::TestBackend` 覆盖，包含初始空 transcript、收到 assistant delta、approval prompt 弹窗、错误 banner、controller reclaim 状态条。
-  - 关键键位：`Ctrl+C` 取消、`q` 退出、approval 选择 yes/no/always、滚动键。
-- **优先级**：P1。
-- **测试位置**：**L1 已新增** inline buffer render smoke；如果后续要引入快照，再新增 `tests/snapshots/`。
-- **AI 落地提示**：当前裁决是不引入 `insta`；quick-follow 优先沿用 inline `Buffer::cell` 断言，除非复杂状态明显需要快照。
+- **现状 ✅**：`libra code` TUI 已落地复杂状态的 inline render 覆盖；当前裁决仍是不引入 `insta` 快照。
+- **缺口**：无（5.8 已关闭）。单键 `q` 不作为聊天输入框退出键，避免与普通文本输入冲突；当前退出契约是 `Ctrl+C` 和 `/quit`。
+- **优先级**：已完成。
+- **测试位置**：**L1 已覆盖** `src/internal/tui/chatwidget.rs` 的 `ratatui::backend::TestBackend` 空 transcript / assistant delta、inline buffer 滚动窗口；`src/internal/tui/bottom_pane.rs` 的 approval prompt / retry error 状态行；`src/internal/tui/app.rs` 的滚动键解析、`/quit`、approval yes/no/always 映射；**L2 已覆盖** `/control reclaim` 控制权回收状态。
 
 ### 5.9 Tool ACL / context / approval policy
 
