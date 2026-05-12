@@ -27,6 +27,53 @@ impl SandboxPermissions {
     }
 }
 
+/// Controls how strongly Libra requires an OS sandbox backend to be active.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxEnforcement {
+    Required,
+    PreferStrict,
+    #[default]
+    BestEffort,
+}
+
+impl SandboxEnforcement {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Required => "required",
+            Self::PreferStrict => "prefer_strict",
+            Self::BestEffort => "best_effort",
+        }
+    }
+
+    pub fn requires_effective_sandbox(self) -> bool {
+        matches!(self, Self::Required)
+    }
+}
+
+impl std::str::FromStr for SandboxEnforcement {
+    type Err = SandboxEnforcementParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "required" => Ok(Self::Required),
+            "prefer_strict" | "prefer-strict" => Ok(Self::PreferStrict),
+            "best_effort" | "best-effort" => Ok(Self::BestEffort),
+            _ => Err(SandboxEnforcementParseError {
+                value: value.to_string(),
+            }),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error(
+    "invalid sandbox enforcement '{value}'; expected one of: required, prefer_strict, best_effort"
+)]
+pub struct SandboxEnforcementParseError {
+    value: String,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum NetworkAccess {
@@ -274,6 +321,34 @@ fn protected_subpaths(root: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sandbox_enforcement_accepts_stable_spellings() {
+        assert_eq!(
+            "required".parse::<SandboxEnforcement>(),
+            Ok(SandboxEnforcement::Required)
+        );
+        assert_eq!(
+            "prefer-strict".parse::<SandboxEnforcement>(),
+            Ok(SandboxEnforcement::PreferStrict)
+        );
+        assert_eq!(
+            "best_effort".parse::<SandboxEnforcement>(),
+            Ok(SandboxEnforcement::BestEffort)
+        );
+    }
+
+    #[test]
+    fn sandbox_enforcement_rejects_unknown_values() {
+        let error = "strict"
+            .parse::<SandboxEnforcement>()
+            .expect_err("unsupported enforcement names must be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "invalid sandbox enforcement 'strict'; expected one of: required, prefer_strict, best_effort"
+        );
+    }
 
     #[test]
     fn explicit_workspace_roots_do_not_expand_to_cwd() {

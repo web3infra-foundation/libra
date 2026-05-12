@@ -15,10 +15,11 @@ libra --json sandbox status
 execution diagnostics. It does not require a repository, so it can be used while
 debugging provider or CI hosts before running `libra code`.
 
-The current runtime is best-effort: Linux uses the external helper configured by
+The default runtime is best-effort: Linux uses the external helper configured by
 `LIBRA_LINUX_SANDBOX_EXE`, macOS uses Seatbelt when `/usr/bin/sandbox-exec` is
 available, and unsupported or unconfigured hosts report warnings instead of
-claiming isolation.
+claiming isolation. Set `LIBRA_SANDBOX_ENFORCEMENT=required` to fail commands
+that request Libra's internal sandbox when no supported backend can be applied.
 
 ## Human Output
 
@@ -37,7 +38,7 @@ Sandbox status
   writable_roots:
     - /path/to/workspace
   warnings:
-    - linux sandbox helper is not configured; AI shell commands currently fall back to no OS sandbox until enforcement hardening lands
+    - linux sandbox helper is not configured; AI shell commands currently fall back to no OS sandbox
 ```
 
 ## JSON Output
@@ -74,7 +75,7 @@ Sandbox status
 |-------|-------------|
 | `platform` | Rust target OS for the running Libra binary |
 | `sandbox_type` | Effective OS sandbox backend, or `none` when no backend is currently usable |
-| `enforcement` | Current enforcement policy; `best_effort` means diagnostics expose downgrade risk but do not fail the command |
+| `enforcement` | Current enforcement policy from `LIBRA_SANDBOX_ENFORCEMENT`; `required` rejects missing internal sandboxes, while `best_effort` reports downgrade risk without failing commands |
 | `writable_roots` | Default workspace-write roots after resolving the current directory and temporary directories |
 | `network.mode` | Current network policy summary; the default policy is `denied` |
 | `network.allowlist` | Reserved for the planned network allowlist model; currently empty |

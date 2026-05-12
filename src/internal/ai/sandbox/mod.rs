@@ -31,7 +31,8 @@ pub mod policy;
 pub mod runtime;
 
 pub use policy::{
-    NetworkAccess, SandboxPermissions, SandboxPolicy, SandboxPolicyError, WritableRoot,
+    NetworkAccess, SandboxEnforcement, SandboxPermissions, SandboxPolicy, SandboxPolicyError,
+    WritableRoot,
 };
 pub use runtime::{
     CommandSpec, ExecEnv, SandboxManager, SandboxTransformError, SandboxTransformRequest,
@@ -58,6 +59,7 @@ pub struct ToolRuntimeContext {
 pub struct SandboxRuntimeConfig {
     pub linux_sandbox_exe: Option<PathBuf>,
     pub use_linux_sandbox_bwrap: bool,
+    pub enforcement: SandboxEnforcement,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -824,6 +826,7 @@ const TIMEOUT_EXIT_CODE: i32 = 124;
 const STREAM_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 const COMMAND_TMPDIR_PREFIX: &str = "libra-sandbox-";
 const COMMAND_TMPDIR_CREATE_ATTEMPTS: usize = 8;
+const SANDBOX_ENFORCEMENT_ENV: &str = "LIBRA_SANDBOX_ENFORCEMENT";
 #[cfg(unix)]
 const COMMAND_TMPDIR_MODE: u32 = 0o700;
 const SANDBOX_DENIED_KEYWORDS: [&str; 7] = [
@@ -1182,6 +1185,7 @@ fn build_command_from_spec(
     let use_linux_sandbox_bwrap = sandbox_runtime
         .map(|config| config.use_linux_sandbox_bwrap)
         .unwrap_or_else(|| env_flag_enabled("LIBRA_USE_LINUX_SANDBOX_BWRAP"));
+    let enforcement = resolve_sandbox_enforcement(sandbox_runtime)?;
     let manager = SandboxManager::new();
     let exec_env = manager
         .transform(SandboxTransformRequest {
@@ -1190,9 +1194,31 @@ fn build_command_from_spec(
             sandbox_policy_cwd: &sandbox_policy_cwd,
             linux_sandbox_exe: linux_sandbox_exe.as_ref(),
             use_linux_sandbox_bwrap,
+            enforcement,
         })
         .map_err(|err| err.to_string())?;
     exec_env.into_command()
+}
+
+fn resolve_sandbox_enforcement(
+    sandbox_runtime: Option<&SandboxRuntimeConfig>,
+) -> Result<SandboxEnforcement, String> {
+    if let Some(config) = sandbox_runtime {
+        return Ok(config.enforcement);
+    }
+
+    parse_sandbox_enforcement_env(std::env::var(SANDBOX_ENFORCEMENT_ENV).ok().as_deref())
+}
+
+fn parse_sandbox_enforcement_env(value: Option<&str>) -> Result<SandboxEnforcement, String> {
+    value
+        .map(|value| {
+            value
+                .parse::<SandboxEnforcement>()
+                .map_err(|error| error.to_string())
+        })
+        .transpose()
+        .map(|value| value.unwrap_or_default())
 }
 
 fn env_flag_enabled(name: &str) -> bool {
@@ -1599,6 +1625,46 @@ mod tests {
     use tokio::sync::mpsc::error::TryRecvError;
 
     use super::*;
+
+    #[test]
+    fn sandbox_enforcement_env_defaults_to_best_effort() {
+        let enforcement =
+            parse_sandbox_enforcement_env(None).expect("missing env should use the default");
+
+        assert_eq!(enforcement, SandboxEnforcement::BestEffort);
+    }
+
+    #[test]
+    fn sandbox_enforcement_env_accepts_required() {
+        let enforcement =
+            parse_sandbox_enforcement_env(Some("required")).expect("required should parse");
+
+        assert_eq!(enforcement, SandboxEnforcement::Required);
+    }
+
+    #[test]
+    fn sandbox_enforcement_env_rejects_unknown_values() {
+        let error = parse_sandbox_enforcement_env(Some("strict"))
+            .expect_err("unknown enforcement values must fail command construction");
+
+        assert_eq!(
+            error,
+            "invalid sandbox enforcement 'strict'; expected one of: required, prefer_strict, best_effort"
+        );
+    }
+
+    #[test]
+    fn sandbox_runtime_config_overrides_enforcement_env_resolution() {
+        let config = SandboxRuntimeConfig {
+            enforcement: SandboxEnforcement::Required,
+            ..SandboxRuntimeConfig::default()
+        };
+
+        let enforcement = resolve_sandbox_enforcement(Some(&config))
+            .expect("runtime config enforcement should be accepted");
+
+        assert_eq!(enforcement, SandboxEnforcement::Required);
+    }
 
     #[test]
     fn on_request_requires_approval_in_workspace_write() {

@@ -12,7 +12,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
-use super::{SandboxPermissions, SandboxPolicy, SandboxPolicyError};
+use super::{SandboxEnforcement, SandboxPermissions, SandboxPolicy, SandboxPolicyError};
 #[cfg(unix)]
 use crate::utils::fuse;
 
@@ -156,6 +156,7 @@ pub struct SandboxTransformRequest<'a> {
     pub sandbox_policy_cwd: &'a Path,
     pub linux_sandbox_exe: Option<&'a PathBuf>,
     pub use_linux_sandbox_bwrap: bool,
+    pub enforcement: SandboxEnforcement,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -170,6 +171,8 @@ pub enum SandboxTransformError {
     WindowsSandboxNotImplemented,
     #[error("sandboxed command execution is not supported on this platform")]
     UnsupportedPlatform,
+    #[error("sandbox enforcement failed: {reason}")]
+    EnforcementFailed { reason: String },
     #[error(transparent)]
     InvalidPolicy(#[from] SandboxPolicyError),
 }
@@ -230,6 +233,7 @@ impl SandboxManager {
             sandbox_policy_cwd,
             linux_sandbox_exe,
             use_linux_sandbox_bwrap,
+            enforcement,
         } = request;
 
         #[cfg(not(target_os = "linux"))]
@@ -262,6 +266,15 @@ impl SandboxManager {
         command.extend(spec.args.clone());
 
         let sandbox = self.select_initial(policy, spec.sandbox_permissions);
+        if matches!(sandbox, SandboxType::None)
+            && enforcement.requires_effective_sandbox()
+            && internal_sandbox_required(policy, spec.sandbox_permissions)
+        {
+            return Err(SandboxTransformError::EnforcementFailed {
+                reason: "sandbox enforcement is required, but this platform has no supported internal sandbox backend for the selected policy".to_string(),
+            });
+        }
+
         let (command, arg0, effective_sandbox) = match sandbox {
             SandboxType::None => (command, None, SandboxType::None),
             SandboxType::MacosSeatbelt => {
@@ -300,6 +313,11 @@ impl SandboxManager {
                             SandboxType::LinuxSeccomp,
                         )
                     } else {
+                        if enforcement.requires_effective_sandbox() {
+                            return Err(SandboxTransformError::EnforcementFailed {
+                                reason: "Linux sandbox enforcement is required, but LIBRA_LINUX_SANDBOX_EXE is not configured and the built-in bwrap sandbox is not available yet".to_string(),
+                            });
+                        }
                         tracing::warn!(
                             "linux sandbox executable not configured; running command without linux sandbox"
                         );
@@ -334,6 +352,20 @@ impl SandboxManager {
             arg0,
         })
     }
+}
+
+fn internal_sandbox_required(
+    policy: Option<&SandboxPolicy>,
+    permissions: SandboxPermissions,
+) -> bool {
+    if permissions.requires_escalated_permissions() {
+        return false;
+    }
+
+    matches!(
+        policy,
+        Some(SandboxPolicy::ReadOnly | SandboxPolicy::WorkspaceWrite { .. })
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -538,6 +570,7 @@ mod tests {
             sandbox_policy_cwd: &cwd,
             linux_sandbox_exe: None,
             use_linux_sandbox_bwrap: false,
+            enforcement: SandboxEnforcement::BestEffort,
         };
 
         let transformed = manager
@@ -545,6 +578,42 @@ mod tests {
             .expect("transform should fallback");
         assert_eq!(transformed.sandbox, SandboxType::None);
         assert!(!transformed.command.is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn transform_linux_required_enforcement_rejects_missing_helper() {
+        let manager = SandboxManager::new();
+        let cwd = std::env::temp_dir();
+        let request = SandboxTransformRequest {
+            spec: CommandSpec::shell(
+                "echo ok",
+                cwd.clone(),
+                Some(1_000),
+                SandboxPermissions::UseDefault,
+                None,
+            ),
+            policy: Some(&SandboxPolicy::WorkspaceWrite {
+                writable_roots: vec![],
+                network_access: false,
+                exclude_tmpdir_env_var: false,
+                exclude_slash_tmp: false,
+            }),
+            sandbox_policy_cwd: &cwd,
+            linux_sandbox_exe: None,
+            use_linux_sandbox_bwrap: false,
+            enforcement: SandboxEnforcement::Required,
+        };
+
+        let error = manager
+            .transform(request)
+            .expect_err("required enforcement must not silently fall back");
+        assert!(
+            error
+                .to_string()
+                .contains("Linux sandbox enforcement is required"),
+            "unexpected error: {error}",
+        );
     }
 
     #[test]
@@ -569,6 +638,7 @@ mod tests {
             sandbox_policy_cwd: &cwd,
             linux_sandbox_exe: None,
             use_linux_sandbox_bwrap: false,
+            enforcement: SandboxEnforcement::BestEffort,
         };
 
         let error = manager
@@ -603,6 +673,7 @@ mod tests {
             sandbox_policy_cwd: &cwd,
             linux_sandbox_exe: None,
             use_linux_sandbox_bwrap: false,
+            enforcement: SandboxEnforcement::Required,
         };
 
         let transformed = manager

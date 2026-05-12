@@ -11,13 +11,14 @@ use serde::Serialize;
 
 use crate::{
     info_println,
-    internal::ai::sandbox::SandboxPolicy,
+    internal::ai::sandbox::{SandboxEnforcement, SandboxPolicy},
     utils::{
         error::{CliError, CliResult},
         output::{OutputConfig, emit_json_data},
     },
 };
 
+const SANDBOX_ENFORCEMENT_ENV: &str = "LIBRA_SANDBOX_ENFORCEMENT";
 const LINUX_SANDBOX_EXE_ENV: &str = "LIBRA_LINUX_SANDBOX_EXE";
 const LINUX_SANDBOX_BWRAP_ENV: &str = "LIBRA_USE_LINUX_SANDBOX_BWRAP";
 const MACOS_SEATBELT_EXECUTABLE: &str = "/usr/bin/sandbox-exec";
@@ -93,6 +94,7 @@ fn build_status_report() -> CliResult<SandboxStatusOutput> {
     let bwrap_requested = env_flag_enabled(LINUX_SANDBOX_BWRAP_ENV);
     let seatbelt_available = executable_file_exists(Path::new(MACOS_SEATBELT_EXECUTABLE));
     let mut warnings = Vec::new();
+    let enforcement = env_sandbox_enforcement(&mut warnings);
     let sandbox_type = match env::consts::OS {
         "macos" if seatbelt_available => "macos-seatbelt",
         "macos" => {
@@ -105,15 +107,29 @@ fn build_status_report() -> CliResult<SandboxStatusOutput> {
         "linux" if helper_exists => "linux-seccomp",
         "linux" => {
             if let Some(path) = &helper_path {
-                warnings.push(format!(
-                    "linux sandbox helper '{}' is not executable; AI shell commands cannot enter the configured helper sandbox",
-                    path.display()
-                ));
+                if enforcement.requires_effective_sandbox() {
+                    warnings.push(format!(
+                        "linux sandbox helper '{}' is not executable; AI shell commands that require Libra's internal sandbox will fail",
+                        path.display()
+                    ));
+                } else {
+                    warnings.push(format!(
+                        "linux sandbox helper '{}' is not executable; AI shell commands cannot enter the configured helper sandbox",
+                        path.display()
+                    ));
+                }
             } else {
-                warnings.push(
-                    "linux sandbox helper is not configured; AI shell commands currently fall back to no OS sandbox until enforcement hardening lands"
-                        .to_string(),
-                );
+                if enforcement.requires_effective_sandbox() {
+                    warnings.push(
+                        "linux sandbox helper is not configured; AI shell commands that require Libra's internal sandbox will fail"
+                            .to_string(),
+                    );
+                } else {
+                    warnings.push(
+                        "linux sandbox helper is not configured; AI shell commands currently fall back to no OS sandbox"
+                            .to_string(),
+                    );
+                }
             }
             "none"
         }
@@ -142,7 +158,7 @@ fn build_status_report() -> CliResult<SandboxStatusOutput> {
     Ok(SandboxStatusOutput {
         platform: env::consts::OS,
         sandbox_type,
-        enforcement: "best_effort",
+        enforcement: enforcement.as_str(),
         writable_roots,
         network: SandboxNetworkStatus {
             mode: if policy.has_full_network_access() {
@@ -220,6 +236,20 @@ fn env_flag_enabled(name: &str) -> bool {
         let value = value.to_string_lossy().to_ascii_lowercase();
         matches!(value.as_str(), "1" | "true" | "yes" | "on")
     })
+}
+
+fn env_sandbox_enforcement(warnings: &mut Vec<String>) -> SandboxEnforcement {
+    let Ok(value) = env::var(SANDBOX_ENFORCEMENT_ENV) else {
+        return SandboxEnforcement::default();
+    };
+
+    match value.parse::<SandboxEnforcement>() {
+        Ok(enforcement) => enforcement,
+        Err(error) => {
+            warnings.push(error.to_string());
+            SandboxEnforcement::default()
+        }
+    }
 }
 
 fn path_executable_available(binary: &str) -> bool {

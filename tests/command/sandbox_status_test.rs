@@ -1,4 +1,6 @@
-use super::{assert_cli_success, parse_json_stdout, run_libra_command};
+use super::{
+    assert_cli_success, parse_json_stdout, run_libra_command, run_libra_command_with_stdin_and_env,
+};
 
 #[test]
 fn sandbox_status_json_works_without_repo() {
@@ -23,6 +25,22 @@ fn sandbox_status_json_works_without_repo() {
     assert!(data["seatbelt_available"].is_boolean());
     assert!(data["helper_path"]["exists"].is_boolean());
     assert!(data["warnings"].as_array().is_some());
+}
+
+#[test]
+fn sandbox_status_reports_required_enforcement_from_env() {
+    let temp = tempfile::tempdir().expect("failed to create tempdir");
+
+    let output = run_libra_command_with_stdin_and_env(
+        &["--json", "sandbox", "status"],
+        temp.path(),
+        "",
+        &[("LIBRA_SANDBOX_ENFORCEMENT", "required")],
+    );
+
+    assert_cli_success(&output, "sandbox status should accept required enforcement");
+    let json = parse_json_stdout(&output);
+    assert_eq!(json["data"]["enforcement"], "required");
 }
 
 #[test]
