@@ -88,6 +88,27 @@ impl NetworkAccess {
     }
 }
 
+pub fn sensitive_read_paths(home: Option<&Path>) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    if let Some(home) = home {
+        for relative in [
+            ".ssh",
+            ".aws",
+            ".gnupg",
+            ".netrc",
+            ".config/gcloud",
+            ".kube",
+            ".config/libra/vault",
+        ] {
+            paths.push(home.join(relative));
+        }
+    }
+
+    paths.push(PathBuf::from("/etc/shadow"));
+    paths
+}
+
 /// Runtime sandbox policy for shell-like tools.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -348,6 +369,16 @@ mod tests {
             error.to_string(),
             "invalid sandbox enforcement 'strict'; expected one of: required, prefer_strict, best_effort"
         );
+    }
+
+    #[test]
+    fn sensitive_read_paths_include_home_credentials_and_system_shadow() {
+        let paths = sensitive_read_paths(Some(Path::new("/home/tester")));
+
+        assert!(paths.contains(&PathBuf::from("/home/tester/.ssh")));
+        assert!(paths.contains(&PathBuf::from("/home/tester/.aws")));
+        assert!(paths.contains(&PathBuf::from("/home/tester/.netrc")));
+        assert!(paths.contains(&PathBuf::from("/etc/shadow")));
     }
 
     #[test]

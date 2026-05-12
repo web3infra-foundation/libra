@@ -32,7 +32,7 @@ pub mod runtime;
 
 pub use policy::{
     NetworkAccess, SandboxEnforcement, SandboxPermissions, SandboxPolicy, SandboxPolicyError,
-    WritableRoot,
+    WritableRoot, sensitive_read_paths,
 };
 pub use runtime::{
     CommandSpec, ExecEnv, SandboxManager, SandboxTransformError, SandboxTransformRequest,

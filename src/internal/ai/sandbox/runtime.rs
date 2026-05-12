@@ -12,6 +12,8 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
+#[cfg(target_os = "macos")]
+use super::sensitive_read_paths;
 use super::{SandboxEnforcement, SandboxPermissions, SandboxPolicy, SandboxPolicyError};
 #[cfg(unix)]
 use crate::utils::fuse;
@@ -428,17 +430,20 @@ fn create_seatbelt_command_args(
     let (file_write_policy, file_write_params) =
         build_macos_file_write_policy(sandbox_policy, sandbox_policy_cwd);
     let file_read_policy = "; allow read-only file operations\n(allow file-read*)";
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let (sensitive_read_policy, sensitive_read_params) =
+        build_macos_sensitive_read_policy(home.as_deref());
     let network_policy = if sandbox_policy.has_full_network_access() {
         SEATBELT_NETWORK_POLICY
     } else {
         ""
     };
     let full_policy = format!(
-        "{SEATBELT_BASE_POLICY}\n{file_read_policy}\n{file_write_policy}\n{network_policy}"
+        "{SEATBELT_BASE_POLICY}\n{file_read_policy}\n{sensitive_read_policy}{file_write_policy}\n{network_policy}"
     );
 
     let mut seatbelt_args = vec!["-p".to_string(), full_policy];
-    let dir_params = [file_write_params, macos_dir_params()].concat();
+    let dir_params = [file_write_params, sensitive_read_params, macos_dir_params()].concat();
     seatbelt_args.extend(
         dir_params
             .into_iter()
@@ -447,6 +452,23 @@ fn create_seatbelt_command_args(
     seatbelt_args.push("--".to_string());
     seatbelt_args.extend(command);
     seatbelt_args
+}
+
+#[cfg(target_os = "macos")]
+fn build_macos_sensitive_read_policy(home: Option<&Path>) -> (String, Vec<(String, PathBuf)>) {
+    let paths = sensitive_read_paths(home);
+    let mut params = Vec::with_capacity(paths.len());
+    let mut policy = String::from("; deny sensitive host credential reads\n");
+
+    for (index, path) in paths.into_iter().enumerate() {
+        let param = format!("SENSITIVE_READ_{index}");
+        params.push((param.clone(), path));
+        policy.push_str(&format!(
+            "(deny file-read* (subpath (param \"{param}\")))\n"
+        ));
+    }
+
+    (policy, params)
 }
 
 #[cfg(target_os = "macos")]
@@ -870,6 +892,30 @@ mod tests {
         assert!(
             !spec.env.contains_key(CARGO_TARGET_DIR_ENV_VAR),
             "CommandSpec::shell must not redirect cargo target dir outside FUSE workspaces"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_sensitive_read_policy_denies_home_credentials() {
+        let (policy, params) = build_macos_sensitive_read_policy(Some(Path::new("/Users/tester")));
+
+        assert!(policy.contains("(deny file-read*"));
+        assert!(policy.contains("SENSITIVE_READ_0"));
+        assert!(
+            params
+                .iter()
+                .any(|(_, path)| path == Path::new("/Users/tester/.ssh"))
+        );
+        assert!(
+            params
+                .iter()
+                .any(|(_, path)| path == Path::new("/Users/tester/.aws"))
+        );
+        assert!(
+            params
+                .iter()
+                .any(|(_, path)| path == Path::new("/etc/shadow"))
         );
     }
 }
