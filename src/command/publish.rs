@@ -1676,7 +1676,7 @@ async fn run_publish_status_command_at_root(
     run_publish_status_command_at_root_with_loaders(
         repo_root,
         args,
-        || collect_publish_refs(),
+        collect_publish_refs,
         |site_id| async move {
             let d1_client = D1Client::from_env().await.map_err(|source| {
                 publish_status_d1_error(
