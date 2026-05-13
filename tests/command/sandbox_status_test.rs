@@ -16,6 +16,7 @@ fn sandbox_status_json_works_without_repo() {
     assert!(data["platform"].as_str().is_some());
     assert!(data["sandbox_type"].as_str().is_some());
     assert_eq!(data["enforcement"], "best_effort");
+    assert_eq!(data["effective_enforcement"], "best_effort");
     assert_eq!(data["network"]["mode"], "denied");
     assert!(data["network"]["allowlist"].as_array().is_some());
     assert_eq!(data["proxy_backend"], "none");
@@ -41,6 +42,7 @@ fn sandbox_status_reports_required_enforcement_from_env() {
     assert_cli_success(&output, "sandbox status should accept required enforcement");
     let json = parse_json_stdout(&output);
     assert_eq!(json["data"]["enforcement"], "required");
+    assert_eq!(json["data"]["effective_enforcement"], "required");
 }
 
 #[test]
@@ -53,5 +55,9 @@ fn sandbox_status_human_works_without_repo() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Sandbox status"), "stdout: {stdout}");
     assert!(stdout.contains("sandbox_type:"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("effective_enforcement:"),
+        "stdout: {stdout}"
+    );
     assert!(stdout.contains("writable_roots:"), "stdout: {stdout}");
 }

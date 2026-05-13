@@ -28,6 +28,7 @@ Sandbox status
   platform: linux
   sandbox_type: none
   enforcement: best_effort
+  effective_enforcement: best_effort
   network: denied
   proxy_backend: none
   bwrap_available: false
@@ -51,6 +52,7 @@ Sandbox status
     "platform": "linux",
     "sandbox_type": "none",
     "enforcement": "best_effort",
+    "effective_enforcement": "best_effort",
     "writable_roots": ["/path/to/workspace"],
     "network": {
       "mode": "denied",
@@ -76,6 +78,7 @@ Sandbox status
 | `platform` | Rust target OS for the running Libra binary |
 | `sandbox_type` | Effective OS sandbox backend, or `none` when no backend is currently usable |
 | `enforcement` | Current enforcement policy from `LIBRA_SANDBOX_ENFORCEMENT`; `required` rejects missing internal sandboxes, while `best_effort` reports downgrade risk without failing commands |
+| `effective_enforcement` | Enforcement mode after environment parsing and fallback warnings; currently matches `enforcement` until network allowlist/proxy fallback lands |
 | `writable_roots` | Default workspace-write roots after resolving the current directory and temporary directories |
 | `network.mode` | Current network policy summary; the default policy is `denied` |
 | `network.allowlist` | Reserved for the planned network allowlist model; currently empty |

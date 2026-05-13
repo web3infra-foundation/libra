@@ -40,6 +40,7 @@ struct SandboxStatusOutput {
     platform: &'static str,
     sandbox_type: &'static str,
     enforcement: &'static str,
+    effective_enforcement: &'static str,
     writable_roots: Vec<String>,
     network: SandboxNetworkStatus,
     proxy_backend: &'static str,
@@ -159,6 +160,7 @@ fn build_status_report() -> CliResult<SandboxStatusOutput> {
         platform: env::consts::OS,
         sandbox_type,
         enforcement: enforcement.as_str(),
+        effective_enforcement: enforcement.as_str(),
         writable_roots,
         network: SandboxNetworkStatus {
             mode: if policy.has_full_network_access() {
@@ -185,6 +187,11 @@ fn render_status_human(report: &SandboxStatusOutput, output: &OutputConfig) -> C
     info_println!(output, "  platform: {}", report.platform);
     info_println!(output, "  sandbox_type: {}", report.sandbox_type);
     info_println!(output, "  enforcement: {}", report.enforcement);
+    info_println!(
+        output,
+        "  effective_enforcement: {}",
+        report.effective_enforcement
+    );
     info_println!(output, "  network: {}", report.network.mode);
     info_println!(output, "  proxy_backend: {}", report.proxy_backend);
     info_println!(output, "  bwrap_available: {}", report.bwrap_available);
