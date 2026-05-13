@@ -982,7 +982,7 @@ v1 使用 gitignore 子集：
 ### Checkpoint E：页面可发布
 
 - [ ] `libra publish deploy` 输出可访问 URL。
-- [ ] 页面能按 branch/tag 浏览对应 revision 的目录、文件、AI versions 和 AI object model。
+- [x] (v0.17.87 fixture/local e2e) 页面能按 branch/tag 浏览对应 revision 的目录、文件、AI versions 和 AI object model。
 - [ ] public 页面不出现未 redacted 的敏感 AI 字段、secret-like 值或本机绝对路径。
 
 ## 风险与缓解
