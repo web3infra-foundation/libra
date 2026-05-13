@@ -846,7 +846,7 @@ v1 使用 gitignore 子集：
 - [ ] 恢复完整 AI object model 到本地 AI 版本索引和 projection/query indexes；不得从 redaction 后的 publish payload 反推被移除字段。
 - [x] (v0.17.56) `--branch`、`--depth`、`--single-branch`、`--bare` 与 `libra+cloud://` 的首版兼容策略按 [clone.md](clone.md) 执行：这些首版未支持组合在 clone-domain config 读取和目标目录创建前返回 `LBR-CLI-002`，不得静默降级。
 - [ ] `--json` / `--machine` 输出仍只有一个 clone envelope；Cloudflare 字段使用可选加法字段，不破坏普通 Git clone schema。
-- [ ] publish 实现完成前，Cloudflare clone source 的测试必须纳入同一交付检查，不能移出 v1 范围。
+- [x] (v0.17.112) publish 实现完成前，Cloudflare clone source 的测试必须纳入同一交付检查，不能移出 v1 范围。
 
 **Verification:**
 
@@ -983,7 +983,7 @@ v1 使用 gitignore 子集：
 
 ### Checkpoint E：页面可发布
 
-- [ ] `libra publish deploy` 输出可访问 URL。
+- [x] (v0.17.112) `libra publish deploy` 输出可访问 URL。
 - [x] (v0.17.87 fixture/local e2e) 页面能按 branch/tag 浏览对应 revision 的目录、文件、AI versions 和 AI object model。
 - [x] (v0.17.90 API + local e2e fixture) public 页面不出现未 redacted 的敏感 AI 字段、secret-like 值或本机绝对路径。
 
