@@ -36,12 +36,9 @@
 mod harness;
 mod helpers;
 
-use std::{
-    path::PathBuf,
-    process::Command,
-    thread,
-    time::{Duration, Instant},
-};
+use std::{path::PathBuf, process::Command, time::Duration};
+#[cfg(feature = "test-provider")]
+use std::{thread, time::Instant};
 
 use anyhow::{Context, Result, bail};
 use futures_util::{SinkExt, StreamExt};
