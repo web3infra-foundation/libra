@@ -36,6 +36,7 @@ use serde::Serialize;
 
 use crate::{
     command::status::{self, Changes},
+    internal::ai::automation::{VCS_EVENT_POST_ADD, dispatch_current_repo_vcs_event_to_history},
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         lfs,
@@ -257,6 +258,10 @@ impl AddOutput {
     fn is_empty(&self) -> bool {
         self.total_staged() == 0 && self.refreshed.is_empty()
     }
+
+    fn wrote_index(&self) -> bool {
+        !self.dry_run && !self.is_empty()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -343,6 +348,9 @@ pub async fn execute_safe(args: AddArgs, output: &OutputConfig) -> CliResult<()>
     // --- Warning tracking for ignored / partial failures ---
     if !result.ignored.is_empty() || !result.failed.is_empty() {
         output::record_warning();
+    }
+    if result.wrote_index() {
+        dispatch_current_repo_vcs_event_to_history(VCS_EVENT_POST_ADD).await;
     }
 
     Ok(())

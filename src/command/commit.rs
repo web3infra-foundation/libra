@@ -30,6 +30,7 @@ use crate::{
     command::{load_object, save_object_to_storage, status},
     common_utils::{check_conventional_commits_message, format_commit_msg},
     internal::{
+        ai::automation::{VCS_EVENT_POST_COMMIT, dispatch_current_repo_vcs_event_to_history},
         branch::Branch,
         config::{LocalIdentityTarget, read_cascaded_config_value, resolve_user_identity_sources},
         head::Head,
@@ -784,7 +785,9 @@ pub async fn execute(args: CommitArgs) {
 /// cannot be updated.
 pub async fn execute_safe(args: CommitArgs, output: &OutputConfig) -> CliResult<()> {
     let result = run_commit(args, output).await.map_err(CliError::from)?;
-    render_commit_output(&result, output)
+    render_commit_output(&result, output)?;
+    dispatch_current_repo_vcs_event_to_history(VCS_EVENT_POST_COMMIT).await;
+    Ok(())
 }
 
 /// If vault signing is enabled, sign the commit content and return the

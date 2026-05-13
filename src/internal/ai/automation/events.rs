@@ -6,6 +6,12 @@ use uuid::Uuid;
 
 use crate::internal::ai::{automation::config::AutomationTrigger, hooks::HookEvent};
 
+pub const VCS_EVENT_POST_ADD: &str = "post_add";
+pub const VCS_EVENT_POST_BRANCH: &str = "post_branch";
+pub const VCS_EVENT_POST_COMMIT: &str = "post_commit";
+pub const VCS_EVENT_POST_PUSH: &str = "post_push";
+pub const VCS_EVENT_POST_SWITCH: &str = "post_switch";
+
 #[derive(Debug, Error)]
 pub enum AutomationError {
     #[error("failed to parse automation config: {0}")]

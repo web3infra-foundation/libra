@@ -8,7 +8,8 @@ use libra::internal::{
         automation::{
             AutomationAction, AutomationConfig, AutomationExecutor, AutomationHistory,
             AutomationRunStatus, AutomationRuntimeEvent, AutomationScheduler, AutomationTrigger,
-            dispatch_hook_lifecycle_event_to_history,
+            VCS_EVENT_POST_COMMIT, dispatch_hook_lifecycle_event_to_history,
+            dispatch_vcs_event_to_history,
         },
         hooks::{HookEvent, LifecycleEventKind},
     },
@@ -243,6 +244,49 @@ async fn hook_lifecycle_event_dispatches_matching_rule_to_history() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].rule_id, "session_end_summary");
     assert_eq!(rows[0].details["prompt"], "summarize this session");
+}
+
+#[tokio::test]
+async fn vcs_event_dispatches_matching_rule_to_history() {
+    let tmp = tempfile::tempdir().expect("create tempdir");
+    let libra_dir = tmp.path().join(".libra");
+    fs::create_dir(&libra_dir).expect("create .libra dir");
+    fs::write(
+        libra_dir.join("automations.toml"),
+        r#"
+        [[rules]]
+        id = "commit_summary"
+        trigger = { kind = "vcs", event = "post_commit" }
+        action = { kind = "prompt", prompt = "summarize this commit" }
+
+        [[rules]]
+        id = "add_only"
+        trigger = { kind = "vcs", event = "post_add" }
+        action = { kind = "prompt", prompt = "not this event" }
+    "#,
+    )
+    .expect("write automations");
+
+    let conn = Database::connect("sqlite::memory:")
+        .await
+        .expect("connect sqlite");
+    run_builtin_migrations(&conn).await.expect("run migrations");
+
+    let results = dispatch_vcs_event_to_history(tmp.path(), &conn, VCS_EVENT_POST_COMMIT)
+        .await
+        .expect("dispatch vcs event");
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].rule_id, "commit_summary");
+    assert_eq!(results[0].trigger_kind, "vcs");
+    assert_eq!(results[0].status, AutomationRunStatus::Succeeded);
+
+    let rows = AutomationHistory::list_recent(&conn, 10)
+        .await
+        .expect("list automation log");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].rule_id, "commit_summary");
+    assert_eq!(rows[0].details["prompt"], "summarize this commit");
 }
 
 #[tokio::test]

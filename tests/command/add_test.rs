@@ -12,6 +12,8 @@
 
 use std::{fs, io::Write};
 
+use libra::internal::{ai::automation::AutomationHistory, db::get_db_conn_instance};
+
 use super::*;
 
 /// Scenario: smoke test for the simplest staging path — create one file,
@@ -46,6 +48,87 @@ async fn test_add_single_file() {
     let changes = changes_to_be_committed().await;
 
     assert!(changes.new.iter().any(|x| x.to_str().unwrap() == file_path));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_add_dispatches_vcs_automation_history() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+    fs::write(
+        test_dir.path().join(".libra").join("automations.toml"),
+        r#"
+        [[rules]]
+        id = "index_summary"
+        trigger = { kind = "vcs", event = "post_add" }
+        action = { kind = "prompt", prompt = "summarize staged changes" }
+    "#,
+    )
+    .unwrap();
+    fs::write("automated.txt", "content").unwrap();
+
+    add::execute_safe(
+        AddArgs {
+            pathspec: vec!["automated.txt".to_string()],
+            all: false,
+            update: false,
+            refresh: false,
+            force: false,
+            verbose: false,
+            dry_run: false,
+            ignore_errors: false,
+        },
+        &libra::utils::output::OutputConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    let db = get_db_conn_instance().await;
+    let rows = AutomationHistory::list_recent(&db, 10).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].rule_id, "index_summary");
+    assert_eq!(rows[0].trigger_kind, "vcs");
+    assert_eq!(rows[0].details["prompt"], "summarize staged changes");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_add_dry_run_does_not_dispatch_vcs_automation_history() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+    fs::write(
+        test_dir.path().join(".libra").join("automations.toml"),
+        r#"
+        [[rules]]
+        id = "index_summary"
+        trigger = { kind = "vcs", event = "post_add" }
+        action = { kind = "prompt", prompt = "summarize staged changes" }
+    "#,
+    )
+    .unwrap();
+    fs::write("dry-run.txt", "content").unwrap();
+
+    add::execute_safe(
+        AddArgs {
+            pathspec: vec!["dry-run.txt".to_string()],
+            all: false,
+            update: false,
+            refresh: false,
+            force: false,
+            verbose: false,
+            dry_run: true,
+            ignore_errors: false,
+        },
+        &libra::utils::output::OutputConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    let db = get_db_conn_instance().await;
+    let rows = AutomationHistory::list_recent(&db, 10).await.unwrap();
+    assert!(rows.is_empty());
 }
 
 /// Scenario: passing several pathspecs in one `add` call must stage every

@@ -28,6 +28,7 @@ use crate::{
     command::{get_target_commit, load_object, log::get_reachable_commits},
     info_println,
     internal::{
+        ai::automation::{VCS_EVENT_POST_BRANCH, dispatch_current_repo_vcs_event_to_history},
         branch::{self, Branch},
         config::ConfigKv,
         db::get_db_conn_instance,
@@ -113,6 +114,18 @@ pub enum BranchOutput {
         detached: bool,
         commit: Option<String>,
     },
+}
+
+impl BranchOutput {
+    fn mutated_repo_state(&self) -> bool {
+        matches!(
+            self,
+            Self::Create { .. }
+                | Self::Delete { .. }
+                | Self::Rename { .. }
+                | Self::SetUpstream { .. }
+        )
+    }
 }
 
 /// One row in [`BranchOutput::List`]. `display_name` carries the colorised
@@ -209,7 +222,11 @@ pub async fn execute(args: BranchArgs) {
 ///   `From` impl which sets stable codes and hints.
 pub async fn execute_safe(args: BranchArgs, output: &OutputConfig) -> CliResult<()> {
     let result = run_branch(&args).await.map_err(CliError::from)?;
-    render_branch_output(&result, output)
+    render_branch_output(&result, output)?;
+    if result.mutated_repo_state() {
+        dispatch_current_repo_vcs_event_to_history(VCS_EVENT_POST_BRANCH).await;
+    }
+    Ok(())
 }
 
 /// Domain error for `libra branch`.
