@@ -250,6 +250,8 @@ impl<M: CompletionModel> ToolLoopAction<M> {
                 context_frame_attachment_threshold_bytes: None,
                 usage_recorder: None,
                 usage_context: None,
+                source_pool: None,
+                source_session_id: None,
                 preserve_reasoning_content: false,
             },
         }

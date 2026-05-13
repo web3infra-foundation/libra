@@ -41,6 +41,7 @@ use crate::internal::ai::{
     },
     hooks::{HookAction, HookRunner},
     session::jsonl::{SessionEvent, SessionJsonlStore},
+    sources::{SourcePool, SourcePoolError, SourceToolNaming},
     tools::{
         FunctionParameters, ToolDefinition, ToolInvocation, ToolOutput, ToolPayload, ToolRegistry,
         ToolRuntimeContext,
@@ -148,6 +149,11 @@ pub struct ToolLoopConfig {
     pub usage_recorder: Option<UsageRecorder>,
     /// Provider/model/thread metadata attached to usage rows.
     pub usage_context: Option<UsageContext>,
+    /// Optional Source Pool whose enabled handlers are merged into the tool
+    /// registry at the start of each tool-loop run.
+    pub source_pool: Option<SourcePool>,
+    /// Session id used to build Source Pool state namespaces.
+    pub source_session_id: Option<String>,
     /// Whether assistant reasoning content should be retained in model history.
     pub preserve_reasoning_content: bool,
 }
@@ -174,6 +180,8 @@ impl Default for ToolLoopConfig {
             context_frame_attachment_threshold_bytes: None,
             usage_recorder: None,
             usage_context: None,
+            source_pool: None,
+            source_session_id: None,
             preserve_reasoning_content: false,
         }
     }
@@ -291,6 +299,10 @@ where
     let mut executed_tool_signatures: VecDeque<String> = VecDeque::new();
     let mut executed_tool_signature_counts: HashMap<String, usize> = HashMap::new();
 
+    let effective_registry = registry_with_source_tools(registry, &config).map_err(|error| {
+        CompletionError::ResponseError(format!("failed to load source tools: {error}"))
+    })?;
+    let registry = &effective_registry;
     let mut tools = registry_tool_definitions(registry);
 
     // Apply agent tool restriction at the *definition* level so the model never sees
@@ -919,6 +931,32 @@ fn registry_tool_definitions(registry: &ToolRegistry) -> Vec<ToolDefinition> {
         .collect()
 }
 
+fn registry_with_source_tools(
+    registry: &ToolRegistry,
+    config: &ToolLoopConfig,
+) -> Result<ToolRegistry, SourcePoolError> {
+    let mut effective = registry.clone();
+    let Some(source_pool) = config.source_pool.as_ref() else {
+        return Ok(effective);
+    };
+    let session_id = config
+        .source_session_id
+        .as_deref()
+        .or_else(|| {
+            config
+                .usage_context
+                .as_ref()
+                .and_then(|context| context.session_id.as_deref())
+        })
+        .unwrap_or("session");
+    for (name, handler) in
+        source_pool.tool_handlers_for_session(session_id, SourceToolNaming::Prefixed)?
+    {
+        effective.register(name, handler);
+    }
+    Ok(effective)
+}
+
 fn record_tool_loop_context_frame(
     config: &ToolLoopConfig,
     model_turn: usize,
@@ -1232,6 +1270,10 @@ mod tests {
             CompletionResponse,
             message::{Function, Text, ToolCall},
         },
+        sources::{
+            CapabilityManifest, Source, SourceCallContext, SourceKind, SourcePool,
+            SourceToolCapability, TrustTier,
+        },
         tools::{ToolHandler, ToolKind, ToolSpec},
     };
 
@@ -1295,6 +1337,41 @@ mod tests {
         fn schema(&self) -> ToolSpec {
             ToolSpec::new("mock_tool", "mock tool")
         }
+    }
+
+    #[derive(Clone)]
+    struct LoopFakeSource {
+        manifest: CapabilityManifest,
+    }
+
+    #[async_trait]
+    impl Source for LoopFakeSource {
+        fn manifest(&self) -> &CapabilityManifest {
+            &self.manifest
+        }
+
+        async fn call_tool(
+            &self,
+            context: SourceCallContext,
+            _invocation: ToolInvocation,
+        ) -> crate::internal::ai::tools::ToolResult<ToolOutput> {
+            Ok(ToolOutput::success(format!(
+                "{}:{}",
+                context.source_slug, context.tool_name
+            )))
+        }
+    }
+
+    fn source_manifest(tool_names: &[&str]) -> CapabilityManifest {
+        tool_names.iter().fold(
+            CapabilityManifest::new("project_docs", SourceKind::LocalDocs, TrustTier::Project),
+            |manifest, name| {
+                manifest.with_tool(SourceToolCapability::new(
+                    *name,
+                    ToolSpec::new(*name, "source tool"),
+                ))
+            },
+        )
     }
 
     struct LongOutputHandler;
@@ -1556,6 +1633,8 @@ mod tests {
                 context_frame_attachment_threshold_bytes: None,
                 usage_recorder: None,
                 usage_context: None,
+                source_pool: None,
+                source_session_id: None,
                 preserve_reasoning_content: false,
             },
             &mut observer,
@@ -2007,6 +2086,8 @@ mod tests {
                 context_frame_attachment_threshold_bytes: None,
                 usage_recorder: None,
                 usage_context: None,
+                source_pool: None,
+                source_session_id: None,
                 preserve_reasoning_content: false,
             },
             &mut observer,
@@ -2057,6 +2138,51 @@ mod tests {
         assert_eq!(filtered.len(), 1);
     }
 
+    /// Scenario: Source Pool reloads must take effect on the next tool-loop
+    /// setup, not require a TUI restart. The loop builds an effective registry
+    /// from the current SourcePool snapshot at run start, so a reloaded manifest
+    /// changes the next request's tool definitions.
+    #[tokio::test]
+    async fn source_pool_reload_updates_next_tool_loop_registry() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = ToolRegistry::with_working_dir(temp_dir.path().to_path_buf());
+        let pool = SourcePool::new();
+        pool.register_source(Arc::new(LoopFakeSource {
+            manifest: source_manifest(&["lookup"]),
+        }))
+        .expect("register initial source");
+
+        let config = ToolLoopConfig {
+            source_pool: Some(pool.clone()),
+            source_session_id: Some("session-a".to_string()),
+            ..Default::default()
+        };
+        let effective = registry_with_source_tools(&registry, &config)
+            .expect("source handlers should merge into registry");
+        let tool_names = registry_tool_definitions(&effective)
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        assert_eq!(tool_names, vec!["project_docs__lookup"]);
+
+        pool.reload_source(Arc::new(LoopFakeSource {
+            manifest: source_manifest(&["lookup", "search"]),
+        }))
+        .expect("reload source manifest");
+
+        let effective = registry_with_source_tools(&registry, &config)
+            .expect("reloaded source handlers should merge into registry");
+        let mut tool_names = registry_tool_definitions(&effective)
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        tool_names.sort();
+        assert_eq!(
+            tool_names,
+            vec!["project_docs__lookup", "project_docs__search"]
+        );
+    }
+
     /// Scenario: even if a model hallucinates a tool name outside `allowed_tools`,
     /// execution is rejected and the model receives a structured failure message.
     #[tokio::test]
@@ -2094,6 +2220,8 @@ mod tests {
                 context_frame_attachment_threshold_bytes: None,
                 usage_recorder: None,
                 usage_context: None,
+                source_pool: None,
+                source_session_id: None,
                 preserve_reasoning_content: false,
             },
             &mut observer,

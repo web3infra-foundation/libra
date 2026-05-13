@@ -631,6 +631,12 @@ pub struct SourcePool {
     call_log: SourceCallLog,
 }
 
+impl fmt::Debug for SourcePool {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SourcePool").finish_non_exhaustive()
+    }
+}
+
 impl SourcePool {
     pub fn new() -> Self {
         Self::default()

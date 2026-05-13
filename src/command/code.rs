@@ -2798,6 +2798,8 @@ where
     {
         tracing::warn!("failed to register built-in MCP source: {error}");
     }
+    config.source_pool = Some(source_pool.clone());
+    config.source_session_id = Some(session.id.clone());
     let managed_runtime_for_shutdown = managed_code_ui_runtime.clone();
     let auto_classify_first_user_message =
         params.auto_classify_first_user_message && managed_code_ui_runtime.is_none();
