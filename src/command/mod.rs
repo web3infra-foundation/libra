@@ -24,6 +24,7 @@ pub mod lfs;
 pub mod log;
 pub mod merge;
 pub mod mv;
+pub mod op;
 pub mod open;
 pub mod pull;
 pub mod push;

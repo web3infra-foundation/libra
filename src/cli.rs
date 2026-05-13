@@ -237,6 +237,8 @@ enum Commands {
     Config(command::config::ConfigArgs),
     #[command(about = "Manage the log of reference changes (e.g., HEAD, branches)")]
     Reflog(command::reflog::ReflogArgs),
+    #[command(about = "View and restore command-level operation history")]
+    Op(command::op::OpArgs),
     #[command(
         about = "Manage multiple working trees attached to this repository",
         alias = "wt"
@@ -737,6 +739,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Config(cmd_args) => command::config::execute_safe(cmd_args, &output).await?,
         Commands::Checkout(cmd_args) => command::checkout::execute_safe(cmd_args, &output).await?,
         Commands::Reflog(cmd_args) => command::reflog::execute_safe(cmd_args, &output).await?,
+        Commands::Op(cmd_args) => command::op::execute_safe(cmd_args, &output).await?,
         Commands::Worktree(cmd_args) => command::worktree::execute_safe(cmd_args, &output).await?,
         Commands::Cloud(cmd_args) => command::cloud::execute_safe(cmd_args, &output).await?,
         Commands::Bisect(bisect_cmd) => command::bisect::execute_safe(bisect_cmd, &output).await?,
