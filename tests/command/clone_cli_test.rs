@@ -2,10 +2,32 @@
 //!
 //! **Layer:** L1 — deterministic, no external dependencies.
 
-use std::{fs, path::Path, process::Command};
+use std::{
+    fs,
+    io::{Read, Write},
+    net::{TcpListener, TcpStream},
+    path::Path,
+    process::Command,
+    sync::Arc,
+    thread,
+};
 
+use git_internal::internal::object::{
+    ObjectTrait,
+    blob::Blob,
+    commit::Commit,
+    tree::{Tree, TreeItem, TreeItemMode},
+};
+use libra::{
+    internal::model::reference,
+    utils::{
+        pager::LIBRA_TEST_ENV,
+        storage::{Storage, remote::RemoteStorage},
+    },
+};
+use object_store::local::LocalFileSystem;
 use serde_json::Value;
-use tempfile::tempdir;
+use tempfile::{TempDir, tempdir};
 
 use super::parse_cli_error_stderr;
 
@@ -25,8 +47,37 @@ fn run_libra(args: &[&str], cwd: &Path) -> std::process::Output {
         .env("XDG_CONFIG_HOME", config_home)
         .env("LANG", "C")
         .env("LC_ALL", "C")
+        .env(LIBRA_TEST_ENV, "1")
         .output()
         .unwrap()
+}
+
+fn run_libra_with_env(
+    args: &[&str],
+    cwd: &Path,
+    extra_env: &[(&str, &str)],
+) -> std::process::Output {
+    let home = cwd.join(".home");
+    let config_home = home.join(".config");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&config_home).unwrap();
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_libra"));
+    command
+        .args(args)
+        .current_dir(cwd)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .env("HOME", home)
+        .env("USERPROFILE", cwd.join(".home"))
+        .env("XDG_CONFIG_HOME", config_home)
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
+        .env(LIBRA_TEST_ENV, "1");
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+    command.output().unwrap()
 }
 
 fn run_libra_with_home(args: &[&str], cwd: &Path, home: &Path) -> std::process::Output {
@@ -43,6 +94,7 @@ fn run_libra_with_home(args: &[&str], cwd: &Path, home: &Path) -> std::process::
         .env("XDG_CONFIG_HOME", config_home)
         .env("LANG", "C")
         .env("LC_ALL", "C")
+        .env(LIBRA_TEST_ENV, "1")
         .output()
         .unwrap()
 }
@@ -209,6 +261,510 @@ fn clone_cloud_configured_domain_requires_d1_api_token_before_site_lookup() {
         !dest.exists(),
         "cloud clone D1 credential preflight must not create the destination"
     );
+}
+
+#[test]
+fn clone_cloud_mock_d1_and_r2_restores_slug_tag_and_repo_id_sources() {
+    let cwd = tempdir().unwrap();
+    configure_cloud_clone_domain(cwd.path());
+    let fixture = create_cloud_clone_cli_fixture();
+    let r2_root = fixture.r2_root.path().to_str().unwrap();
+    let d1_base = fixture.d1.base_url.as_str();
+    let probe_home = cwd.path().join("probe-home");
+    fs::create_dir_all(&probe_home).unwrap();
+
+    let default_dest = cwd.path().join("restored-default");
+    let output = run_libra_with_env(
+        &[
+            "--json",
+            "clone",
+            "libra+cloud://code.example.com/kepler-ledger",
+            default_dest.to_str().unwrap(),
+        ],
+        cwd.path(),
+        &[
+            ("LIBRA_D1_API_TOKEN", "token_123"),
+            ("LIBRA_D1_API_BASE_URL", d1_base),
+            ("LIBRA_CLOUD_CLONE_TEST_R2_ROOT", r2_root),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "default cloud clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_cloud_clone_json(
+        &output.stdout,
+        "main",
+        "refs/heads/main",
+        "kepler-ledger",
+        &fixture.commit_oid,
+    );
+    assert_eq!(
+        fs::read_to_string(default_dest.join("README.md")).unwrap(),
+        "# cloud\n"
+    );
+    assert_rev_parse(&default_dest, &probe_home, "HEAD", &fixture.commit_oid);
+    assert_rev_parse(&default_dest, &probe_home, "--abbrev-ref", "main");
+
+    let tag_dest = cwd.path().join("restored-tag");
+    let output = run_libra_with_env(
+        &[
+            "--json",
+            "clone",
+            "libra+cloud://code.example.com/kepler-ledger?ref=refs/tags/v1.0.0",
+            tag_dest.to_str().unwrap(),
+        ],
+        cwd.path(),
+        &[
+            ("LIBRA_D1_API_TOKEN", "token_123"),
+            ("LIBRA_D1_API_BASE_URL", d1_base),
+            ("LIBRA_CLOUD_CLONE_TEST_R2_ROOT", r2_root),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "tag cloud clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_cloud_clone_json(
+        &output.stdout,
+        Value::Null,
+        "refs/tags/v1.0.0",
+        "kepler-ledger",
+        &fixture.commit_oid,
+    );
+    assert_eq!(
+        fs::read_to_string(tag_dest.join("README.md")).unwrap(),
+        "# cloud\n"
+    );
+    assert_rev_parse(&tag_dest, &probe_home, "HEAD", &fixture.commit_oid);
+    assert_rev_parse(&tag_dest, &probe_home, "--abbrev-ref", "HEAD");
+
+    let repo_dest = cwd.path().join("restored-repo-id");
+    let output = run_libra_with_env(
+        &[
+            "--json",
+            "clone",
+            "libra+cloud://code.example.com/repo/repo_456",
+            repo_dest.to_str().unwrap(),
+        ],
+        cwd.path(),
+        &[
+            ("LIBRA_D1_API_TOKEN", "token_123"),
+            ("LIBRA_D1_API_BASE_URL", d1_base),
+            ("LIBRA_CLOUD_CLONE_TEST_R2_ROOT", r2_root),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "repo id cloud clone failed after slug rename: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_cloud_clone_json(
+        &output.stdout,
+        "main",
+        "refs/heads/main",
+        "renamed-ledger",
+        &fixture.commit_oid,
+    );
+    assert_eq!(
+        fs::read_to_string(repo_dest.join("README.md")).unwrap(),
+        "# cloud\n"
+    );
+    assert_rev_parse(&repo_dest, &probe_home, "HEAD", &fixture.commit_oid);
+}
+
+fn configure_cloud_clone_domain(cwd: &Path) {
+    for (key, value) in [
+        (
+            "cloud.clone_domains.code.example.com.account_id",
+            "acct_123",
+        ),
+        (
+            "cloud.clone_domains.code.example.com.d1_database_id",
+            "d1_pub_456",
+        ),
+        (
+            "cloud.clone_domains.code.example.com.r2_bucket",
+            "publish-r2",
+        ),
+    ] {
+        let output = run_libra(&["config", "set", "--global", key, value], cwd);
+        assert!(
+            output.status.success(),
+            "config set should succeed for {key}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+fn assert_cloud_clone_json(
+    stdout: &[u8],
+    expected_branch: impl Into<Value>,
+    expected_ref: &str,
+    expected_slug: &str,
+    expected_revision: &str,
+) {
+    let stdout = String::from_utf8_lossy(stdout);
+    let json: Value = serde_json::from_str(stdout.trim()).expect("stdout should be JSON");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["command"], "clone");
+    let data = &json["data"];
+    assert_eq!(data["branch"], expected_branch.into());
+    assert_eq!(data["source_kind"], "cloudflare");
+    assert_eq!(data["cloud_site"]["clone_domain"], "code.example.com");
+    assert_eq!(data["cloud_site"]["site_id"], "site_123");
+    assert_eq!(data["cloud_site"]["slug"], expected_slug);
+    assert_eq!(data["cloud_site"]["repo_id"], "repo_456");
+    assert_eq!(data["cloud_site"]["ref"], expected_ref);
+    assert_eq!(data["cloud_site"]["revision"], expected_revision);
+}
+
+fn assert_rev_parse(repo: &Path, home: &Path, arg: &str, expected: &str) {
+    let args = if arg == "HEAD" {
+        vec!["rev-parse", "HEAD"]
+    } else {
+        vec!["rev-parse", arg, "HEAD"]
+    };
+    let output = run_libra_with_home(&args, repo, home);
+    assert!(
+        output.status.success(),
+        "rev-parse {arg} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), expected);
+}
+
+struct CloudCloneCliFixture {
+    r2_root: TempDir,
+    d1: MockD1Server,
+    commit_oid: String,
+}
+
+fn create_cloud_clone_cli_fixture() -> CloudCloneCliFixture {
+    let r2_root = tempdir().unwrap();
+    let blob = Blob::from_content("# cloud\n");
+    let tree = Tree::from_tree_items(vec![TreeItem::new(
+        TreeItemMode::Blob,
+        blob.id,
+        "README.md".to_string(),
+    )])
+    .expect("tree should build");
+    let commit = Commit::from_tree_id(tree.id, Vec::new(), "cloud clone cli fixture");
+
+    let local_store = LocalFileSystem::new_with_prefix(r2_root.path())
+        .expect("local mock R2 root should be valid");
+    let remote = RemoteStorage::new_with_prefix(Arc::new(local_store), "repo_456".to_string());
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        put_remote_object(&remote, &blob).await;
+        put_remote_object(&remote, &tree).await;
+        put_remote_object(&remote, &commit).await;
+        let refs = vec![
+            reference::Model {
+                id: 0,
+                name: Some("main".to_string()),
+                kind: reference::ConfigKind::Head,
+                commit: None,
+                remote: None,
+            },
+            reference::Model {
+                id: 0,
+                name: Some("main".to_string()),
+                kind: reference::ConfigKind::Branch,
+                commit: Some(commit.id.to_string()),
+                remote: None,
+            },
+            reference::Model {
+                id: 0,
+                name: Some("refs/tags/v1.0.0".to_string()),
+                kind: reference::ConfigKind::Tag,
+                commit: Some(commit.id.to_string()),
+                remote: None,
+            },
+        ];
+        let metadata = serde_json::to_vec(&refs).expect("refs metadata should serialize");
+        remote
+            .put_metadata(&metadata)
+            .await
+            .expect("metadata should write to mock R2");
+    });
+
+    let data = MockD1Data {
+        commit_oid: commit.id.to_string(),
+        objects: vec![
+            mock_object_row(&blob.id.to_string(), "blob", blob.to_data().unwrap().len()),
+            mock_object_row(&tree.id.to_string(), "tree", tree.to_data().unwrap().len()),
+            mock_object_row(
+                &commit.id.to_string(),
+                "commit",
+                commit.to_data().unwrap().len(),
+            ),
+        ],
+    };
+
+    CloudCloneCliFixture {
+        r2_root,
+        d1: MockD1Server::start(data),
+        commit_oid: commit.id.to_string(),
+    }
+}
+
+async fn put_remote_object<T>(remote: &RemoteStorage, object: &T)
+where
+    T: ObjectTrait,
+{
+    let data = object.to_data().expect("object data should serialize");
+    let hash = object.object_hash().expect("object hash should compute");
+    remote
+        .put(&hash, &data, object.get_type())
+        .await
+        .expect("object should write to mock R2");
+}
+
+fn mock_object_row(o_id: &str, o_type: &str, o_size: usize) -> Value {
+    serde_json::json!({
+        "o_id": o_id,
+        "o_type": o_type,
+        "o_size": o_size as i64,
+        "repo_id": "repo_456",
+        "created_at": 1778620800,
+        "is_synced": 1
+    })
+}
+
+#[derive(Clone)]
+struct MockD1Data {
+    commit_oid: String,
+    objects: Vec<Value>,
+}
+
+struct MockD1Server {
+    base_url: String,
+    _handle: thread::JoinHandle<()>,
+}
+
+impl MockD1Server {
+    fn start(data: MockD1Data) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("mock D1 should bind");
+        let addr = listener
+            .local_addr()
+            .expect("mock D1 address should resolve");
+        let base_url = format!("http://{addr}/client/v4");
+        let handle = thread::spawn(move || {
+            for stream in listener.incoming().take(24).flatten() {
+                handle_mock_d1_request(stream, &data);
+            }
+        });
+        Self {
+            base_url,
+            _handle: handle,
+        }
+    }
+}
+
+fn handle_mock_d1_request(mut stream: TcpStream, data: &MockD1Data) {
+    let request = read_http_request(&mut stream);
+    let body = request
+        .split("\r\n\r\n")
+        .nth(1)
+        .expect("request should contain a body");
+    let statement: Value = serde_json::from_str(body).expect("request body should be JSON");
+    let sql = statement["sql"]
+        .as_str()
+        .expect("D1 statement should include SQL");
+    let params = statement["params"].as_array().cloned().unwrap_or_default();
+
+    let response = match mock_d1_rows(sql, &params, data) {
+        Ok(rows) => serde_json::json!({
+            "success": true,
+            "errors": [],
+            "messages": [],
+            "result": [{ "results": rows, "success": true, "meta": {} }]
+        }),
+        Err(message) => serde_json::json!({
+            "success": false,
+            "errors": [{ "code": 3999, "message": message }],
+            "messages": [],
+            "result": []
+        }),
+    }
+    .to_string();
+
+    let http = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        response.len(),
+        response
+    );
+    stream
+        .write_all(http.as_bytes())
+        .expect("mock D1 response should write");
+}
+
+fn read_http_request(stream: &mut TcpStream) -> String {
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    loop {
+        let n = stream
+            .read(&mut chunk)
+            .expect("mock D1 request should read");
+        if n == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..n]);
+        if let Some(header_end) = find_header_end(&buffer) {
+            let headers = String::from_utf8_lossy(&buffer[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            if buffer.len() >= header_end + content_length {
+                break;
+            }
+        }
+    }
+    String::from_utf8(buffer).expect("mock D1 request should be UTF-8")
+}
+
+fn find_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| index + 4)
+}
+
+fn mock_d1_rows(sql: &str, params: &[Value], data: &MockD1Data) -> Result<Vec<Value>, String> {
+    if sql.contains("FROM publish_sites WHERE clone_domain = ?1 AND slug = ?2") {
+        return Ok(
+            if param_str(params, 0) == Some("code.example.com")
+                && param_str(params, 1) == Some("kepler-ledger")
+            {
+                vec![mock_publish_site_row("kepler-ledger", &data.commit_oid)]
+            } else {
+                Vec::new()
+            },
+        );
+    }
+    if sql.contains("FROM publish_sites WHERE clone_domain = ?1 AND repo_id = ?2") {
+        return Ok(
+            if param_str(params, 0) == Some("code.example.com")
+                && param_str(params, 1) == Some("repo_456")
+            {
+                vec![mock_publish_site_row("renamed-ledger", &data.commit_oid)]
+            } else {
+                Vec::new()
+            },
+        );
+    }
+    if sql.contains("FROM repositories WHERE repo_id = ?1") {
+        return Ok(if param_str(params, 0) == Some("repo_456") {
+            vec![serde_json::json!({
+                "repo_id": "repo_456",
+                "name": "Kepler Ledger",
+                "created_at": 1778620800,
+                "updated_at": 1778620800
+            })]
+        } else {
+            Vec::new()
+        });
+    }
+    if sql.contains("FROM publish_refs WHERE site_id = ?1") {
+        return Ok(if param_str(params, 0) == Some("site_123") {
+            vec![
+                mock_publish_ref_row("refs/heads/main", "branch", "main", 1, &data.commit_oid),
+                mock_publish_ref_row("refs/tags/v1.0.0", "tag", "v1.0.0", 0, &data.commit_oid),
+            ]
+        } else {
+            Vec::new()
+        });
+    }
+    if sql.contains("FROM publish_revisions")
+        && sql.contains("status = 'published'")
+        && param_str(params, 0) == Some("site_123")
+        && param_str(params, 1) == Some(data.commit_oid.as_str())
+    {
+        return Ok(vec![mock_publish_revision_row(&data.commit_oid)]);
+    }
+    if sql.contains("FROM object_index WHERE repo_id = ?1") {
+        return Ok(if param_str(params, 0) == Some("repo_456") {
+            data.objects.clone()
+        } else {
+            Vec::new()
+        });
+    }
+
+    Err(format!("unexpected D1 SQL: {sql}"))
+}
+
+fn param_str(params: &[Value], index: usize) -> Option<&str> {
+    params.get(index).and_then(Value::as_str)
+}
+
+fn mock_publish_site_row(slug: &str, revision_oid: &str) -> Value {
+    serde_json::json!({
+        "site_id": "site_123",
+        "repo_id": "repo_456",
+        "clone_domain": "code.example.com",
+        "slug": slug,
+        "display_origin": "https://code.example.com",
+        "name": "Kepler Ledger",
+        "visibility": "public",
+        "status": "active",
+        "worker_name": "libra-publish",
+        "default_ref": "refs/heads/main",
+        "latest_revision_oid": revision_oid,
+        "refs_generation": 7,
+        "max_preview_bytes": 1024,
+        "schema_version": 1,
+        "created_at": "2026-05-13T00:00:00Z",
+        "updated_at": "2026-05-13T00:00:00Z"
+    })
+}
+
+fn mock_publish_ref_row(
+    ref_name: &str,
+    ref_type: &str,
+    short_name: &str,
+    is_default: i64,
+    revision_oid: &str,
+) -> Value {
+    serde_json::json!({
+        "site_id": "site_123",
+        "ref_name": ref_name,
+        "ref_type": ref_type,
+        "short_name": short_name,
+        "target_oid": revision_oid,
+        "revision_oid": revision_oid,
+        "is_default": is_default,
+        "sync_run_id": "sync_123",
+        "schema_version": 1,
+        "updated_at": "2026-05-13T00:00:00Z"
+    })
+}
+
+fn mock_publish_revision_row(revision_oid: &str) -> Value {
+    serde_json::json!({
+        "site_id": "site_123",
+        "revision_oid": revision_oid,
+        "status": "published",
+        "code_manifest_key": null,
+        "ai_index_key": null,
+        "file_count": 1,
+        "ai_object_count": 0,
+        "ai_bundle_count": 0,
+        "redaction_mode": "default",
+        "redaction_rules_version": "1",
+        "sync_run_id": "sync_123",
+        "schema_version": 1,
+        "created_at": "2026-05-13T00:00:00Z",
+        "updated_at": "2026-05-13T00:00:00Z"
+    })
 }
 
 fn run_git(args: &[&str], cwd: &Path) -> std::process::Output {

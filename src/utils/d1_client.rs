@@ -7,8 +7,9 @@
 //! Authentication uses a Cloudflare account ID, API token, and D1 database ID,
 //! resolved through [`resolve_env`](crate::internal::config::resolve_env) so they
 //! can come from process env, local repo `vault.env.*` config, or global config.
-//! The client always speaks HTTPS to `api.cloudflare.com`; the constructor enforces
-//! `https_only(true)` and the URL builder rejects non-HTTPS schemes defensively.
+//! The default client speaks HTTPS to `api.cloudflare.com`; the constructor enforces
+//! `https_only(true)`. Tests can inject a different API base URL through
+//! [`D1Client::new_with_api_base_url`].
 //!
 //! Schema management is conservative: [`D1Client::ensure_object_index_table`]
 //! migrates an older single-column unique index into a composite `(repo_id, o_id)`
@@ -19,6 +20,8 @@ use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 
 use crate::internal::config::resolve_env;
+
+const DEFAULT_D1_API_BASE_URL: &str = "https://api.cloudflare.com/client/v4";
 
 /// Top-level wrapper for every Cloudflare D1 API response.
 ///
@@ -112,6 +115,7 @@ pub struct D1Client {
     account_id: String,
     api_token: String,
     database_id: String,
+    api_base_url: Url,
 }
 
 impl D1Client {
@@ -176,42 +180,78 @@ impl D1Client {
     ///   (extremely unlikely in production), falls back to a default `Client::new()`
     ///   so the constructor itself never fails.
     pub fn new(account_id: String, api_token: String, database_id: String) -> Self {
-        let client = Client::builder()
-            .https_only(true)
-            .build()
-            .unwrap_or_else(|_| Client::new());
+        // INVARIANT: the default Cloudflare API base URL is a checked-in constant.
+        let api_base_url = Url::parse(DEFAULT_D1_API_BASE_URL)
+            .expect("DEFAULT_D1_API_BASE_URL must be a valid URL");
+        Self::with_api_base_url(account_id, api_token, database_id, api_base_url, true)
+    }
+
+    /// Create a D1 client that targets a custom Cloudflare-compatible API base URL.
+    ///
+    /// This seam is intended for local tests that provide a mock D1 endpoint. The
+    /// supplied base URL should point at the Cloudflare API root, e.g.
+    /// `http://127.0.0.1:8787/client/v4`; the client appends
+    /// `/accounts/<account>/d1/database/<db>/query`.
+    pub fn new_with_api_base_url(
+        account_id: String,
+        api_token: String,
+        database_id: String,
+        api_base_url: &str,
+    ) -> Result<Self, D1Error> {
+        let api_base_url = Url::parse(api_base_url).map_err(|e| D1Error {
+            code: 2005,
+            message: format!("Invalid API base URL: {}", e),
+        })?;
+        Ok(Self::with_api_base_url(
+            account_id,
+            api_token,
+            database_id,
+            api_base_url,
+            false,
+        ))
+    }
+
+    fn with_api_base_url(
+        account_id: String,
+        api_token: String,
+        database_id: String,
+        api_base_url: Url,
+        https_only: bool,
+    ) -> Self {
+        let mut builder = Client::builder();
+        if https_only {
+            builder = builder.https_only(true);
+        }
+        let client = builder.build().unwrap_or_else(|_| Client::new());
         Self {
             client,
             account_id,
             api_token,
             database_id,
+            api_base_url,
         }
     }
 
     /// Build the per-request `/query` endpoint URL for this account/database.
     ///
     /// Boundary conditions:
-    /// - Returns a `D1Error` with code `2005` when the formatted URL fails to parse
-    ///   (would only happen if account_id/database_id contain invalid URL chars,
-    ///   which is checked indirectly by Cloudflare's own API).
-    /// - Returns a `D1Error` with code `2006` if the parsed scheme is not `https` —
-    ///   defensive belt-and-braces in addition to `https_only` on the client.
+    /// - Returns a `D1Error` with code `2005` when appending the account/database
+    ///   path to the configured API base URL fails.
     fn api_url(&self) -> Result<Url, D1Error> {
-        let url_str = format!(
-            "https://api.cloudflare.com/client/v4/accounts/{}/d1/database/{}/query",
-            self.account_id, self.database_id
-        );
-        let url = Url::parse(&url_str).map_err(|e| D1Error {
-            code: 2005,
-            message: format!("Invalid API URL: {}", e),
-        })?;
-
-        if url.scheme() != "https" {
-            return Err(D1Error {
-                code: 2006,
-                message: "API URL must use HTTPS".to_string(),
-            });
+        let mut url = self.api_base_url.clone();
+        if !url.path().ends_with('/') {
+            let path = format!("{}/", url.path());
+            url.set_path(&path);
         }
+        url = url
+            .join(&format!(
+                "accounts/{}/d1/database/{}/query",
+                self.account_id, self.database_id
+            ))
+            .map_err(|e| D1Error {
+                code: 2005,
+                message: format!("Invalid API URL: {}", e),
+            })?;
 
         Ok(url)
     }
@@ -1816,6 +1856,40 @@ mod tests {
         let json = serde_json::to_string(&stmt).unwrap();
         assert!(json.contains("SELECT"));
         assert!(!json.contains("params"));
+    }
+
+    #[test]
+    fn d1_client_default_api_url_uses_cloudflare_query_endpoint() {
+        let client = D1Client::new(
+            "account-123".to_string(),
+            "token-123".to_string(),
+            "database-123".to_string(),
+        );
+
+        let url = client.api_url().expect("default D1 API URL should parse");
+
+        assert_eq!(
+            url.as_str(),
+            "https://api.cloudflare.com/client/v4/accounts/account-123/d1/database/database-123/query"
+        );
+    }
+
+    #[test]
+    fn d1_client_custom_api_base_url_uses_query_endpoint() {
+        let client = D1Client::new_with_api_base_url(
+            "account-123".to_string(),
+            "token-123".to_string(),
+            "database-123".to_string(),
+            "http://127.0.0.1:8787/client/v4",
+        )
+        .expect("custom D1 API base URL should parse");
+
+        let url = client.api_url().expect("custom D1 API URL should parse");
+
+        assert_eq!(
+            url.as_str(),
+            "http://127.0.0.1:8787/client/v4/accounts/account-123/d1/database/database-123/query"
+        );
     }
 
     /// Scenario: with all three D1 env vars unset and the local repo config holding

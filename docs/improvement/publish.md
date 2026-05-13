@@ -856,6 +856,7 @@ v1 使用 gitignore 子集：
 - [x] (v0.17.130) Cloudflare clone 在 refs metadata 缺失时以硬错误失败，并复用 clone cleanup 事务删除本次创建的目标目录；R2 object 缺失继续由 preflight `RepoCorrupt` 阻断，checkout 失败走既有 `CheckoutFailed` cleanup。
 - [x] (v0.17.132) strict refs metadata restore 校验 metadata 至少包含本地 HEAD，缺失时 cloud clone 以 refs metadata restore error 失败并清理本次创建的目标目录，避免不完整 metadata 被当作成功 clone。
 - [x] (v0.17.133) Cloudflare clone resolved-plan restore 回归覆盖 local branch/tag refs metadata 一并恢复，并覆盖 `?ref=refs/tags/v1.0.0` 选择 tag revision 时 checkout 为 detached HEAD、worktree 与输出 revision 一致。
+- [x] (v0.17.134) Cloudflare clone CLI 级 mock D1/R2 闭环覆盖真实二进制入口的 slug default-ref restore、full tag ref detached checkout、`repo/<repo_id>` slug-rename restore，以及恢复后 HEAD/worktree/source revision 一致性。
 - [ ] 恢复完整 AI object model 到本地 AI 版本索引和 projection/query indexes；不得从 redaction 后的 publish payload 反推被移除字段。
 - [x] (v0.17.56) `--branch`、`--depth`、`--single-branch`、`--bare` 与 `libra+cloud://` 的首版兼容策略按 [clone.md](clone.md) 执行：这些首版未支持组合在 clone-domain config 读取和目标目录创建前返回 `LBR-CLI-002`，不得静默降级。
 - [x] (v0.17.131) `--json` / `--machine` 成功输出仍只有一个 clone envelope；Cloudflare clone 通过可选 `source_kind` / `cloud_site` 字段输出 clone domain、site、repo、ref 和 revision，普通 Git clone schema 继续省略这些字段。
@@ -866,6 +867,7 @@ v1 使用 gitignore 子集：
 - [x] (v0.17.102) `cargo test cloud_clone_source_parse_test`
 - [x] (v0.17.101) `cargo test cloud_clone_domain_resolve_test`
 - [x] (v0.17.132) `LIBRA_SKIP_WEB_BUILD=1 cargo test cloud_clone_restore_test`
+- [x] (v0.17.134) `LIBRA_SKIP_WEB_BUILD=1 cargo test clone_cloud_mock_d1_and_r2_restores_slug_tag_and_repo_id_sources --test command_test`
 - [x] (v0.17.102) `cargo test --test command_test clone_cloud`
 - [x] (v0.17.105) `cargo test --test command_test publish`
 
@@ -980,15 +982,15 @@ v1 使用 gitignore 子集：
 
 ### Checkpoint C：Cloudflare clone 可恢复
 
-- [ ] mock R2 + D1 下，`libra clone libra+cloud://code.example.com/kepler-ledger` 能恢复完整本地仓库。
-- [ ] 恢复后的所有 branch/tag refs、HEAD、checkout 文件和源 revision 一致。
-- [ ] `libra clone "libra+cloud://code.example.com/kepler-ledger?ref=refs/tags/v1.0.0"` 能 checkout 指定 tag 对应 revision；同名短 ref 必须要求完整 ref。
-- [ ] `libra clone libra+cloud://code.example.com/repo/<repo_id>` 在 slug rename 后仍能恢复同一 repo。
+- [x] (v0.17.134) mock R2 + D1 下，`libra clone libra+cloud://code.example.com/kepler-ledger` 能恢复完整本地仓库。
+- [x] (v0.17.134) 恢复后的所有 branch/tag refs、HEAD、checkout 文件和源 revision 一致。
+- [x] (v0.17.134) `libra clone "libra+cloud://code.example.com/kepler-ledger?ref=refs/tags/v1.0.0"` 能 checkout 指定 tag 对应 revision；同名短 ref 必须要求完整 ref。
+- [x] (v0.17.134) `libra clone libra+cloud://code.example.com/repo/<repo_id>` 在 slug rename 后仍能恢复同一 repo。
 - [x] (v0.17.55/v0.17.78, verified v0.17.91) 未配置 `clone_domains.code.example.com` 时 clone 失败并给出配置 hint，不尝试从 Worker 页面下载。
 - [ ] AI object model、关系图和 projection/query indexes 能从 cloud baseline 恢复，且不依赖 publish redacted 字段。
 - [x] (v0.17.132) 缺失 object 或 refs metadata 不完整时 clone 失败并清理目标目录：缺失 object 由 R2 preflight 在建目录前阻断，缺失/无 HEAD metadata 在 restore transaction 中硬失败并清理。
-- [x] (v0.17.131 resolved-plan test) `libra clone libra+cloud://code.example.com/kepler-ledger --json` 的输出 schema 已落地为单个 clone envelope 的可选 Cloudflare source 字段；完整 mock D1/R2 CLI 级 JSON 测试仍随后续 D1 注入点补齐。
-- [x] (v0.17.133 resolved-plan test) restore transaction 已覆盖 branch/tag refs、HEAD、checkout 文件和 full tag ref selector；完整 mock D1/R2 CLI 级恢复测试仍由本 checkpoint 的首项跟踪。
+- [x] (v0.17.134) `libra clone libra+cloud://code.example.com/kepler-ledger --json` 的输出 schema 已落地为单个 clone envelope 的可选 Cloudflare source 字段，并通过 mock D1/R2 CLI 级测试覆盖。
+- [x] (v0.17.134) restore transaction 和 CLI 级 mock D1/R2 测试已覆盖 branch/tag refs、HEAD、checkout 文件和 full tag ref selector。
 
 ### Checkpoint D：Worker 可读
 

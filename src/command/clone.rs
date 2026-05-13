@@ -17,7 +17,7 @@ use git_internal::{
     errors::GitError,
     hash::{ObjectHash, get_hash_kind},
 };
-use object_store::aws::AmazonS3Builder;
+use object_store::{aws::AmazonS3Builder, local::LocalFileSystem};
 use sea_orm::DatabaseTransaction;
 use serde::Serialize;
 use url::Url;
@@ -49,6 +49,7 @@ use crate::{
         error::{CliError, CliResult, StableErrorCode},
         ignore as ignore_utils,
         output::{OutputConfig, emit_json_data},
+        pager::LIBRA_TEST_ENV,
         path,
         storage::{Storage, local::LocalStorage, remote::RemoteStorage},
         util,
@@ -56,6 +57,8 @@ use crate::{
 };
 
 const ISSUE_URL: &str = "https://github.com/web3infra-foundation/libra/issues";
+const CLOUD_CLONE_TEST_R2_ROOT_ENV: &str = "LIBRA_CLOUD_CLONE_TEST_R2_ROOT";
+const CLOUD_CLONE_D1_API_BASE_URL_ENV: &str = "LIBRA_D1_API_BASE_URL";
 
 /// Clone a repository into a new directory.
 ///
@@ -198,6 +201,8 @@ pub enum CloneError {
     },
     #[error("D1 API token is not configured for clone domain '{domain}'")]
     CloudCloneD1ApiTokenNotConfigured { domain: String },
+    #[error("D1 API base URL is invalid for clone domain '{domain}': {message}")]
+    CloudCloneD1ApiBaseUrlInvalid { domain: String, message: String },
     #[error("R2 credentials are not configured for clone domain '{domain}'")]
     CloudCloneR2CredentialsNotConfigured {
         domain: String,
@@ -431,6 +436,16 @@ impl From<CloneError> for CliError {
                          the CLI can query the configured D1 database.",
                     )
             }
+            CloneError::CloudCloneD1ApiBaseUrlInvalid {
+                ref domain,
+                ref message,
+            } => CliError::command_usage(error.to_string())
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_detail("clone_domain", domain.clone())
+                .with_detail("d1_api_base_url_error", message.clone())
+                .with_hint(
+                    "unset LIBRA_D1_API_BASE_URL or set it to a valid Cloudflare-compatible API root.",
+                ),
             CloneError::CloudCloneR2CredentialsNotConfigured {
                 ref domain,
                 ref missing_keys,
@@ -1738,11 +1753,7 @@ async fn resolve_cloud_publish_restore_plan(
     source: &CloudPublishSource,
     config: &CloudCloneDomainConfig,
 ) -> Result<CloudPublishRestorePlan, CloneError> {
-    let d1_client = D1Client::new(
-        config.account_id.clone(),
-        config.api_token.clone(),
-        config.d1_database_id.clone(),
-    );
+    let d1_client = create_cloud_clone_d1_client(source, config)?;
     let site = resolve_cloud_publish_site(source, &d1_client).await?;
     let target = source.target_label();
 
@@ -1829,6 +1840,32 @@ async fn resolve_cloud_publish_restore_plan(
     })
 }
 
+fn create_cloud_clone_d1_client(
+    source: &CloudPublishSource,
+    config: &CloudCloneDomainConfig,
+) -> Result<D1Client, CloneError> {
+    match env::var(CLOUD_CLONE_D1_API_BASE_URL_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        Some(api_base_url) => D1Client::new_with_api_base_url(
+            config.account_id.clone(),
+            config.api_token.clone(),
+            config.d1_database_id.clone(),
+            &api_base_url,
+        )
+        .map_err(|source_error| CloneError::CloudCloneD1ApiBaseUrlInvalid {
+            domain: source.clone_domain.clone(),
+            message: source_error.message,
+        }),
+        None => Ok(D1Client::new(
+            config.account_id.clone(),
+            config.api_token.clone(),
+            config.d1_database_id.clone(),
+        )),
+    }
+}
+
 #[async_trait]
 trait CloudCloneObjectProbe {
     async fn exists(&self, hash: &ObjectHash) -> Result<bool, CloneError>;
@@ -1859,6 +1896,22 @@ async fn create_cloud_clone_remote_storage(
     config: &CloudCloneDomainConfig,
     repo_id: &str,
 ) -> Result<RemoteStorage, CloneError> {
+    if env::var_os(LIBRA_TEST_ENV).is_some()
+        && let Some(root) = env::var_os(CLOUD_CLONE_TEST_R2_ROOT_ENV)
+    {
+        let store =
+            LocalFileSystem::new_with_prefix(PathBuf::from(root)).map_err(|source_error| {
+                CloneError::CloudCloneR2ClientBuildFailed {
+                    domain: source.clone_domain.clone(),
+                    message: source_error.to_string(),
+                }
+            })?;
+        return Ok(RemoteStorage::new_with_prefix(
+            Arc::new(store),
+            repo_id.to_string(),
+        ));
+    }
+
     let endpoint = resolve_required_cloud_clone_r2_env(source, "LIBRA_STORAGE_ENDPOINT").await?;
     let access_key =
         resolve_required_cloud_clone_r2_env(source, "LIBRA_STORAGE_ACCESS_KEY").await?;
