@@ -29,7 +29,10 @@ use ring::digest::{SHA256, digest};
 use serde::{Deserialize, Serialize};
 
 use crate::internal::publish::{
-    contract::{FileDisplayMode, PUBLISH_SCHEMA_VERSION, PublishCodeManifest, PublishFile},
+    contract::{
+        FileDisplayMode, PUBLISH_SCHEMA_VERSION, PublishCodeManifest, PublishFile, PublishRefEntry,
+        RefType,
+    },
     preflight::{Preflight, PreflightDecision},
 };
 
@@ -226,6 +229,72 @@ pub fn publish_text_file_key(
     format!("{repo_id}/publish/sites/{site_id}/revisions/{revision_oid}/files/{content_sha256}.txt")
 }
 
+/// Build the publish refs/revision plan that the sync orchestrator
+/// persists to D1.
+///
+/// Every supplied ref is preserved as a `publish_refs` candidate, while
+/// `revisions` is reduced to the unique set referenced by those refs.
+/// If two refs point at the same `revision_oid`, they share one
+/// `RevisionPlan` and therefore one R2/D1 revision snapshot.
+pub fn build_snapshot_plan(
+    refs: &[RefInput],
+    revisions: Vec<RevisionPlan>,
+    default_ref: Option<&str>,
+) -> Result<SnapshotPlan, SnapshotBuildError> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    if let Some(default_ref) = default_ref {
+        validate_ref_name(default_ref)?;
+        if !refs
+            .iter()
+            .any(|publish_ref| publish_ref.ref_name == default_ref)
+        {
+            return Err(SnapshotBuildError::InvalidRef {
+                message: format!("default ref {default_ref:?} is not included in publish refs"),
+            });
+        }
+    }
+
+    let mut revision_by_oid = BTreeMap::new();
+    for revision in revisions {
+        validate_oid(&revision.revision_oid)?;
+        validate_oid(&revision.commit_oid)?;
+        validate_oid(&revision.tree_oid)?;
+        revision_by_oid
+            .entry(revision.revision_oid.clone())
+            .or_insert(revision);
+    }
+
+    let mut ref_plans = Vec::with_capacity(refs.len());
+    let mut used_revisions = BTreeSet::new();
+    let mut unique_revisions = Vec::new();
+    for publish_ref in refs {
+        validate_ref_name(&publish_ref.ref_name)?;
+        validate_oid(&publish_ref.target_oid)?;
+        validate_oid(&publish_ref.revision_oid)?;
+        let Some(revision) = revision_by_oid.get(&publish_ref.revision_oid) else {
+            return Err(SnapshotBuildError::MissingRevision {
+                revision_oid: publish_ref.revision_oid.clone(),
+            });
+        };
+        if used_revisions.insert(publish_ref.revision_oid.clone()) {
+            unique_revisions.push(revision.clone());
+        }
+        ref_plans.push(RefPlan {
+            ref_name: publish_ref.ref_name.clone(),
+            target_oid: publish_ref.target_oid.clone(),
+            revision_oid: publish_ref.revision_oid.clone(),
+            is_default: default_ref.is_some_and(|name| name == publish_ref.ref_name),
+        });
+    }
+
+    Ok(SnapshotPlan {
+        revisions: unique_revisions,
+        refs: ref_plans,
+        default_ref: default_ref.map(ToString::to_string),
+    })
+}
+
 /// Plan for one ref entry. Mirrors the `publish_refs` row shape +
 /// the `refs.json` index payload.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -234,6 +303,32 @@ pub struct RefPlan {
     pub target_oid: String,
     pub revision_oid: String,
     pub is_default: bool,
+}
+
+impl RefPlan {
+    pub fn ref_type(&self) -> RefType {
+        if self.ref_name.starts_with("refs/tags/") {
+            RefType::Tag
+        } else {
+            RefType::Branch
+        }
+    }
+
+    pub fn short_name(&self) -> &str {
+        short_ref_name(&self.ref_name).unwrap_or(self.ref_name.as_str())
+    }
+
+    pub fn to_publish_ref_entry(&self, updated_at: DateTime<Utc>) -> PublishRefEntry {
+        PublishRefEntry {
+            ref_name: self.ref_name.clone(),
+            ref_type: self.ref_type(),
+            short_name: self.short_name().to_string(),
+            target_oid: self.target_oid.clone(),
+            revision_oid: self.revision_oid.clone(),
+            is_default: self.is_default,
+            updated_at,
+        }
+    }
 }
 
 /// Full plan returned by [`build_snapshot_plan`]. The orchestrator
@@ -247,6 +342,21 @@ pub struct SnapshotPlan {
     pub default_ref: Option<String>,
 }
 
+impl SnapshotPlan {
+    /// Return the revision that may update `publish_sites.latest_revision_oid`.
+    ///
+    /// The latest pointer is intentionally derived only from the default
+    /// ref. Other branch/tag refs can be published in the same sync, but
+    /// must not move the site-level latest pointer.
+    pub fn default_latest_revision_oid(&self) -> Option<&str> {
+        let default_ref = self.default_ref.as_deref()?;
+        self.refs
+            .iter()
+            .find(|publish_ref| publish_ref.ref_name == default_ref)
+            .map(|publish_ref| publish_ref.revision_oid.as_str())
+    }
+}
+
 /// Errors surfaced by the snapshot builder.
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotBuildError {
@@ -254,6 +364,8 @@ pub enum SnapshotBuildError {
     InvalidRef { message: String },
     #[error("snapshot revision oid is invalid: {oid}")]
     InvalidOid { oid: String },
+    #[error("snapshot revision {revision_oid} is missing from the revision plan")]
+    MissingRevision { revision_oid: String },
     #[error("snapshot path {path:?} is not valid UTF-8")]
     NonUtf8Path { path: PathBuf },
     #[error("snapshot file {path:?} could not be hashed")]
@@ -420,6 +532,12 @@ pub fn validate_ref_name(value: &str) -> Result<(), SnapshotBuildError> {
             message: format!("ref name {value:?} must start with refs/heads/ or refs/tags/"),
         })
     }
+}
+
+pub fn short_ref_name(full_ref: &str) -> Option<&str> {
+    full_ref
+        .strip_prefix("refs/heads/")
+        .or_else(|| full_ref.strip_prefix("refs/tags/"))
 }
 
 /// Detect ambiguous short refs: a branch and a tag with the same
