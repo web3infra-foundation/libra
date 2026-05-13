@@ -31,7 +31,7 @@ use crate::{
         model::{object_index, reference},
     },
     utils::{
-        d1_client::{AgentCheckpointRow, AgentSessionRow, D1Client},
+        d1_client::{AgentCheckpointRow, AgentSessionRow, D1Client, ObjectIndexRow},
         error::{CliError, CliResult, emit_warning},
         output::OutputConfig,
         path,
@@ -155,6 +155,15 @@ pub struct CloudSyncReport {
     pub failed_count: usize,
     pub metadata: MetadataSyncOutcome,
     pub agent_capture: AgentCaptureSyncOutcome,
+}
+
+/// Summary returned after restoring Git objects listed in D1 `object_index`.
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+pub(crate) struct ObjectRestoreReport {
+    pub downloaded: usize,
+    pub skipped: usize,
+    pub failed: usize,
+    pub warnings: Vec<String>,
 }
 
 /// Progress callbacks fired during a `run_cloud_sync` call.
@@ -566,6 +575,70 @@ async fn sync_single_object(
     Ok(())
 }
 
+/// Restore the Git objects described by D1 `object_index` rows from R2
+/// into local object storage.
+///
+/// The helper preserves the legacy cloud-restore semantics: object-level
+/// transfer, hash, and local-write failures are accumulated in the report,
+/// while malformed hex in D1 remains a hard metadata error.
+pub(crate) async fn restore_indexed_objects_from_remote(
+    indexes: &[ObjectIndexRow],
+    r2_storage: &RemoteStorage,
+    local_storage: &LocalStorage,
+) -> Result<ObjectRestoreReport, String> {
+    let mut report = ObjectRestoreReport::default();
+
+    for idx in indexes {
+        let decoded = hex::decode(&idx.o_id).map_err(|e| format!("Invalid hash: {}", e))?;
+        let hash = match ObjectHash::from_bytes(&decoded) {
+            Ok(hash) => hash,
+            Err(e) => {
+                report
+                    .warnings
+                    .push(format!("error: invalid object hash '{}': {}", idx.o_id, e));
+                report.failed += 1;
+                continue;
+            }
+        };
+
+        if local_storage.exist(&hash).await {
+            report.skipped += 1;
+            continue;
+        }
+
+        match r2_storage.get(&hash).await {
+            Ok((data, obj_type)) => {
+                let computed = ObjectHash::from_type_and_data(obj_type, &data);
+                if computed != hash {
+                    report.warnings.push(format!(
+                        "warning: hash mismatch for {}: expected {}, got {}",
+                        idx.o_id, hash, computed
+                    ));
+                    report.failed += 1;
+                    continue;
+                }
+
+                if let Err(e) = local_storage.put(&hash, &data, obj_type).await {
+                    report
+                        .warnings
+                        .push(format!("error: failed to save object {}: {}", idx.o_id, e));
+                    report.failed += 1;
+                    continue;
+                }
+                report.downloaded += 1;
+            }
+            Err(e) => {
+                report
+                    .warnings
+                    .push(format!("error: failed to download {}: {}", idx.o_id, e));
+                report.failed += 1;
+            }
+        }
+    }
+
+    Ok(report)
+}
+
 /// Execute restore command - resolves project name (if provided) and restores from D1/R2
 async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
     validate_cloud_backup_env(args.metadata_only).await?;
@@ -662,64 +735,18 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
     let objects_path = path::objects();
     let local_storage = LocalStorage::new(objects_path);
 
-    let mut downloaded = 0;
-    let mut skipped = 0;
-    let mut failed = 0;
-
-    for idx in &indexes {
-        let hash = match ObjectHash::from_bytes(
-            &hex::decode(&idx.o_id).map_err(|e| format!("Invalid hash: {}", e))?,
-        ) {
-            Ok(h) => h,
-            Err(e) => {
-                cli_error!(e, "error: invalid object hash '{}'", idx.o_id);
-                failed += 1;
-                continue;
-            }
-        };
-
-        // Check if already exists locally
-        if local_storage.exist(&hash).await {
-            skipped += 1;
-            continue;
-        }
-
-        // Download from R2
-        match r2_storage.get(&hash).await {
-            Ok((data, obj_type)) => {
-                // Verify hash
-                let computed = ObjectHash::from_type_and_data(obj_type, &data);
-                if computed != hash {
-                    eprintln!(
-                        "warning: hash mismatch for {}: expected {}, got {}",
-                        idx.o_id, hash, computed
-                    );
-                    failed += 1;
-                    continue;
-                }
-
-                // Save to local storage
-                if let Err(e) = local_storage.put(&hash, &data, obj_type).await {
-                    cli_error!(e, "error: failed to save object {}", idx.o_id);
-                    failed += 1;
-                    continue;
-                }
-                downloaded += 1;
-            }
-            Err(e) => {
-                cli_error!(e, "error: failed to download {}", idx.o_id);
-                failed += 1;
-            }
-        }
+    let report = restore_indexed_objects_from_remote(&indexes, &r2_storage, &local_storage).await?;
+    for warning in &report.warnings {
+        eprintln!("{warning}");
     }
 
     println!(
         "Restore complete: {} downloaded, {} skipped (already exist), {} failed",
-        downloaded, skipped, failed
+        report.downloaded, report.skipped, report.failed
     );
 
-    if failed > 0 {
-        Err(format!("{} objects failed to restore", failed))
+    if report.failed > 0 {
+        Err(format!("{} objects failed to restore", report.failed))
     } else {
         // Restore metadata
         if let Err(e) = restore_metadata(&db_conn, &r2_storage).await {
@@ -1463,9 +1490,12 @@ async fn restore_metadata(
 /// [`restore_metadata`]. Cloud clone restore needs a stricter contract: without
 /// refs metadata it cannot set HEAD/branches safely, so the caller must fail and
 /// clean up the just-created destination.
-#[expect(
-    dead_code,
-    reason = "cloud clone restore will call this strict helper when the local restore path lands"
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "cloud clone restore will call this strict helper when the local restore path lands"
+    )
 )]
 pub(crate) async fn restore_metadata_strict(
     db_conn: &sea_orm::DatabaseConnection,
@@ -1544,6 +1574,7 @@ async fn restore_metadata_from_bytes(
 mod tests {
     use std::{env, ffi::OsString, fs, sync::Arc};
 
+    use git_internal::internal::object::types::ObjectType;
     use object_store::memory::InMemory;
     use serial_test::serial;
     use tempfile::tempdir;
@@ -1553,6 +1584,17 @@ mod tests {
         internal::config::ConfigKv,
         utils::test::{ChangeDirGuard, ScopedEnvVar, setup_with_new_libra_in},
     };
+
+    fn test_object_index_row(hash: ObjectHash, size: i64) -> ObjectIndexRow {
+        ObjectIndexRow {
+            o_id: hash.to_string(),
+            o_type: "blob".to_string(),
+            o_size: size,
+            repo_id: "test-repo".to_string(),
+            created_at: 0,
+            is_synced: 1,
+        }
+    }
 
     struct ClearedEnvVarGuard {
         key: String,
@@ -1694,6 +1736,72 @@ mod tests {
                 "error should explain metadata download failure: {error}",
             );
         });
+    }
+
+    #[tokio::test]
+    async fn cloud_restore_indexed_objects_downloads_skips_and_verifies_hash() {
+        let remote = RemoteStorage::new(Arc::new(InMemory::new()));
+        let local_dir = tempdir().unwrap();
+        let local = LocalStorage::new(local_dir.path().to_path_buf());
+        let data = b"hello\n";
+        let hash = ObjectHash::from_type_and_data(ObjectType::Blob, data);
+        let row = test_object_index_row(hash, data.len() as i64);
+
+        remote
+            .put(&hash, data, ObjectType::Blob)
+            .await
+            .expect("test object should upload to in-memory remote");
+
+        let report = restore_indexed_objects_from_remote(&[row], &remote, &local)
+            .await
+            .expect("restore should download a valid remote object");
+
+        assert_eq!(report.downloaded, 1);
+        assert_eq!(report.skipped, 0);
+        assert_eq!(report.failed, 0);
+        assert!(report.warnings.is_empty());
+        assert!(local.exist(&hash).await);
+
+        let row = test_object_index_row(hash, data.len() as i64);
+        let report = restore_indexed_objects_from_remote(&[row], &remote, &local)
+            .await
+            .expect("restore should skip an existing local object");
+
+        assert_eq!(report.downloaded, 0);
+        assert_eq!(report.skipped, 1);
+        assert_eq!(report.failed, 0);
+        assert!(report.warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cloud_restore_indexed_objects_reports_hash_mismatch() {
+        let remote = RemoteStorage::new(Arc::new(InMemory::new()));
+        let local_dir = tempdir().unwrap();
+        let local = LocalStorage::new(local_dir.path().to_path_buf());
+        let expected_data = b"expected\n";
+        let wrong_data = b"wrong\n";
+        let expected_hash = ObjectHash::from_type_and_data(ObjectType::Blob, expected_data);
+        let row = test_object_index_row(expected_hash, expected_data.len() as i64);
+
+        remote
+            .put(&expected_hash, wrong_data, ObjectType::Blob)
+            .await
+            .expect("test object should upload under the expected key");
+
+        let report = restore_indexed_objects_from_remote(&[row], &remote, &local)
+            .await
+            .expect("hash mismatch should be reported, not panic");
+
+        assert_eq!(report.downloaded, 0);
+        assert_eq!(report.skipped, 0);
+        assert_eq!(report.failed, 1);
+        assert_eq!(report.warnings.len(), 1);
+        assert!(
+            report.warnings[0].contains("hash mismatch"),
+            "warning should explain the hash mismatch: {:?}",
+            report.warnings
+        );
+        assert!(!local.exist(&expected_hash).await);
     }
 
     #[test]
